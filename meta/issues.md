@@ -2,7 +2,6 @@
 
 ## Milestone 1 — Lean core (usable for real work)
 
-- [ ] [Core tools: read, write, edit, bash, glob, grep](issues/core-tools.md)
 - [ ] [Concurrency-barrier tool executor](issues/tool-executor-barrier.md)
 - [ ] [Agent loop (turn state machine over event channel)](issues/agent-loop.md)
 - [ ] [Config: TOML + markdown agent definitions + AGENTS.md injection](issues/config-and-agents-md.md)

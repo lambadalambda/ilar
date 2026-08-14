@@ -158,3 +158,28 @@ any finish_reason), and chatty compat servers attaching usage to every
 chunk could double-fire TurnComplete (guarded). Also: anthropic
 truncation synthesis now emits in block order; mid-stream {"error":..}
 chunks surfaced.
+
+## 2026-08-14 — core-tools done; prompt caching live-verified
+
+Tools: trait with ToolKind (ReadOnly/Mutating) feeding the upcoming
+barrier executor; read/write/edit/bash/glob/grep with typed inputs
+(malformed model output = tool error, never a panic).
+
+Prompt caching (the "don't re-ingest the whole prompt" concern):
+- Anthropic flavor places ephemeral breakpoints on system block, last
+  tool, and a MOVING breakpoint on the last message's final block (the
+  canonical incremental pattern).
+- Live proof with a ~2000-token prompt on real GLM: turn 1 ingests
+  2006 tokens; turns 2-3 read 1920 from cache, only ~100 fresh. The
+  moving breakpoint works on z.ai — marker placement is not part of
+  their cache hash (earlier messages re-serialize marker-free across
+  turns and still hit).
+- z.ai accounting quirks: cache_creation_input_tokens is never
+  reported (the write shows as plain input_tokens on the writing turn);
+  reads reported at entry granularity. Don't assert on creation.
+- OpenAI coding endpoint: caching is automatic; we parse
+  prompt_tokens_details.cached_tokens.
+- Prefix stability is unit-tested: consecutive turns' wire messages
+  serialize identically after stripping cache_control markers.
+
+Remaining M1: barrier executor, agent loop, config/AGENTS.md, TUI.
