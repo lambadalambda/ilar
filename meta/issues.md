@@ -2,8 +2,6 @@
 
 ## Milestone 1 — Lean core (usable for real work)
 
-- [ ] [OpenAI Responses API provider (streaming)](issues/provider-openai-responses.md)
-- [ ] [z.ai GLM provider (Anthropic-compatible + OpenAI-compatible)](issues/provider-zai.md)
 - [ ] [Core tools: read, write, edit, bash, glob, grep](issues/core-tools.md)
 - [ ] [Concurrency-barrier tool executor](issues/tool-executor-barrier.md)
 - [ ] [Agent loop (turn state machine over event channel)](issues/agent-loop.md)

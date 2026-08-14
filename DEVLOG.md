@@ -132,3 +132,29 @@ Remaining for this issue: one live-API smoke test (needs OPENAI_API_KEY),
 incl. a reasoning model doing 2+ tool turns to validate that dropping
 thinking blocks from replay doesn't 400 (review flagged it; fixtures
 can't prove it).
+
+## 2026-08-14 — provider-zai done, live-verified
+
+API keys fished out of local installs: no OpenAI plain key exists (both
+opencode and codex use ChatGPT OAuth — the OpenAI smoke test stays
+open), but opencode's auth.json holds the zai-coding-plan key. Two
+findings from the live endpoint:
+- The coding-plan key only works on the Anthropic-compatible endpoint
+  and the OpenAI *coding* endpoint (api.z.ai/api/coding/paas/v4); plain
+  /api/paas/v4 rejects it with "insufficient balance". Default base
+  URLs set accordingly.
+- The coding endpoint streams reasoning_content (GLM thinking) — mapped
+  to ThinkingDelta with a synthesized ThinkingCompleted boundary since
+  chat-completions has no explicit reasoning-block close event.
+
+Live smoke tests (tests/smoke_zai.rs, #[ignore]d, ILAR_ZAI_API_KEY):
+anthropic text turn, anthropic two-turn tool round-trip (real GLM
+emitted get_weather, result returned, second turn answered), openai-
+flavor text turn. All passing.
+
+Review caught two contract violations in the OpenAI flavor: truncation
+didn't synthesize pending tool-call completions (now unconditional on
+any finish_reason), and chatty compat servers attaching usage to every
+chunk could double-fire TurnComplete (guarded). Also: anthropic
+truncation synthesis now emits in block order; mid-stream {"error":..}
+chunks surfaced.
