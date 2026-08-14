@@ -86,3 +86,20 @@ unrecoverable distinction on load, `session_id()` accessor.
 Known caveat (documented in event.rs): `kept_from` is a write-time event
 index; corrupt-line skips shift it on replay. Acceptable degradation —
 transcript stays coherent; anchor to event ids if it ever matters.
+
+## 2026-08-14 — provider-trait done
+
+Trait shape: sync `fn stream(&self, Request) -> Result<Pin<Box<dyn Stream>>>`.
+Dyn-compatible, no async_trait, Send-clean. Two hard-won doc contracts:
+- Network errors surface as ProviderEvent::Error *on the stream*, not as
+  Err from stream() (spawn+mpsc pattern makes pre-flight Err impossible
+  for HTTP failures).
+- Cancellation: wrapper struct whose Drop aborts the spawned pump task —
+  dropping a bare ReceiverStream is NOT enough (quiet connections linger).
+
+Review gate: added Thinking events + ContentBlock::Thinking before any
+real provider exists — Anthropic-style APIs require round-tripping
+thinking blocks with tool use, GLM emits them, retrofitting later would
+have touched every consumer simultaneously. Also added Refusal/Paused
+stop reasons, cache-token usage fields, and the null-input+MaxTokens
+convention for truncated tool args.
