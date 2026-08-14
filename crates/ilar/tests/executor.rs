@@ -1,0 +1,454 @@
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use ilar::tools::executor::{ToolCall, execute_calls};
+use ilar::tools::{Tool, ToolContext, ToolFuture, ToolKind, ToolOutput};
+use tokio_util::sync::CancellationToken;
+
+/// Recording probe tool: sleeps, logs "start:<name>" / "end:<name>" with
+/// timestamps into a shared log.
+struct ProbeTool {
+    name: &'static str,
+    kind: ToolKind,
+    sleep: Duration,
+    log: Arc<Mutex<Vec<(Instant, String)>>>,
+}
+
+impl Tool for ProbeTool {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+    fn description(&self) -> &'static str {
+        "probe"
+    }
+    fn kind(&self) -> ToolKind {
+        self.kind
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    fn run(&self, _input: serde_json::Value, _ctx: ToolContext) -> ToolFuture {
+        let log = self.log.clone();
+        let name = self.name.to_string();
+        let sleep = self.sleep;
+        Box::pin(async move {
+            log.lock()
+                .unwrap()
+                .push((Instant::now(), format!("start:{name}")));
+            tokio::time::sleep(sleep).await;
+            log.lock()
+                .unwrap()
+                .push((Instant::now(), format!("end:{name}")));
+            ToolOutput::text(format!("done:{name}"))
+        })
+    }
+}
+
+type ProbeLog = Arc<Mutex<Vec<(Instant, String)>>>;
+type ToolMap = HashMap<String, Arc<dyn Tool>>;
+
+fn harness() -> (ToolMap, ProbeLog) {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    (HashMap::new(), log)
+}
+
+fn add(
+    tools: &mut HashMap<String, Arc<dyn Tool>>,
+    log: &Arc<Mutex<Vec<(Instant, String)>>>,
+    name: &'static str,
+    kind: ToolKind,
+    sleep: Duration,
+) {
+    tools.insert(
+        name.into(),
+        Arc::new(ProbeTool {
+            name,
+            kind,
+            sleep,
+            log: log.clone(),
+        }),
+    );
+}
+
+fn call(id: &str, name: &str) -> ToolCall {
+    ToolCall {
+        id: id.into(),
+        name: name.into(),
+        input: serde_json::json!({}),
+    }
+}
+
+fn ctx() -> ToolContext {
+    ToolContext {
+        cwd: std::env::temp_dir(),
+    }
+}
+
+fn span(log: &[(Instant, String)], tag: &str) -> (Instant, Instant) {
+    let start = log
+        .iter()
+        .find(|(_, t)| t == &format!("start:{tag}"))
+        .map(|(t, _)| *t)
+        .expect("start logged");
+    let end = log
+        .iter()
+        .find(|(_, t)| t == &format!("end:{tag}"))
+        .map(|(t, _)| *t)
+        .expect("end logged");
+    (start, end)
+}
+
+#[tokio::test]
+async fn three_readonly_tools_overlap() {
+    let (mut tools, log) = harness();
+    add(
+        &mut tools,
+        &log,
+        "r1",
+        ToolKind::ReadOnly,
+        Duration::from_millis(120),
+    );
+    add(
+        &mut tools,
+        &log,
+        "r2",
+        ToolKind::ReadOnly,
+        Duration::from_millis(120),
+    );
+    add(
+        &mut tools,
+        &log,
+        "r3",
+        ToolKind::ReadOnly,
+        Duration::from_millis(120),
+    );
+
+    let start = Instant::now();
+    let outcomes = execute_calls(
+        vec![call("1", "r1"), call("2", "r2"), call("3", "r3")],
+        |n| tools.get(n).cloned(),
+        ctx(),
+        CancellationToken::new(),
+    )
+    .await;
+    let elapsed = start.elapsed();
+
+    assert_eq!(outcomes.len(), 3);
+    assert!(outcomes.iter().all(|o| !o.output.is_error));
+    // Deterministic overlap proof from the event log: every start happens
+    // before any end (no timing dependence).
+    let log = log.lock().unwrap();
+    let last_start = log
+        .iter()
+        .filter(|(_, t)| t.starts_with("start:"))
+        .map(|(t, _)| *t)
+        .max()
+        .expect("starts logged");
+    let first_end = log
+        .iter()
+        .filter(|(_, t)| t.starts_with("end:"))
+        .map(|(t, _)| *t)
+        .min()
+        .expect("ends logged");
+    assert!(
+        last_start < first_end,
+        "no overlap: last start {last_start:?} >= first end {first_end:?}"
+    );
+    drop(log);
+    // Wall-clock backup: 3x120ms serial would be 360ms; concurrent budget
+    // is generous to survive a loaded machine.
+    assert!(
+        elapsed < Duration::from_millis(320),
+        "execution looked serial: {elapsed:?}"
+    );
+}
+
+#[tokio::test]
+async fn mutating_tool_never_overlaps() {
+    let (mut tools, log) = harness();
+    add(
+        &mut tools,
+        &log,
+        "slow_read",
+        ToolKind::ReadOnly,
+        Duration::from_millis(150),
+    );
+    add(
+        &mut tools,
+        &log,
+        "edit",
+        ToolKind::Mutating,
+        Duration::from_millis(60),
+    );
+    add(
+        &mut tools,
+        &log,
+        "after_read",
+        ToolKind::ReadOnly,
+        Duration::from_millis(30),
+    );
+
+    let outcomes = execute_calls(
+        vec![
+            call("1", "slow_read"),
+            call("2", "edit"),
+            call("3", "after_read"),
+        ],
+        |n| tools.get(n).cloned(),
+        ctx(),
+        CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(outcomes.len(), 3);
+
+    let log = log.lock().unwrap();
+    let (_read_start, read_end) = span(&log, "slow_read");
+    let (edit_start, edit_end) = span(&log, "edit");
+    let (after_start, _after_end) = span(&log, "after_read");
+    // edit runs strictly after the read-only tool ahead of it.
+    assert!(
+        edit_start >= read_end,
+        "edit started before prior read finished"
+    );
+    // the read-only tool behind the edit waits for it.
+    assert!(
+        after_start >= edit_end,
+        "read behind edit overlapped the edit"
+    );
+    drop(log);
+}
+
+#[tokio::test]
+async fn results_in_call_order_despite_completion_order() {
+    let (mut tools, _log) = harness();
+    add(
+        &mut tools,
+        &_log,
+        "slow",
+        ToolKind::ReadOnly,
+        Duration::from_millis(150),
+    );
+    add(
+        &mut tools,
+        &_log,
+        "fast",
+        ToolKind::ReadOnly,
+        Duration::from_millis(5),
+    );
+
+    let outcomes = execute_calls(
+        vec![call("a", "slow"), call("b", "fast")],
+        |n| tools.get(n).cloned(),
+        ctx(),
+        CancellationToken::new(),
+    )
+    .await;
+
+    assert_eq!(outcomes[0].id, "a");
+    assert_eq!(outcomes[0].output.content, "done:slow");
+    assert_eq!(outcomes[1].id, "b");
+    assert_eq!(outcomes[1].output.content, "done:fast");
+}
+
+#[tokio::test]
+async fn mutating_runs_alone_even_between_readonly() {
+    // read(read-only) queued AFTER a mutating tool that is running must
+    // not start until the mutating tool finishes.
+    let (mut tools, log) = harness();
+    add(
+        &mut tools,
+        &log,
+        "bash_long",
+        ToolKind::Mutating,
+        Duration::from_millis(150),
+    );
+    add(
+        &mut tools,
+        &log,
+        "quick_read",
+        ToolKind::ReadOnly,
+        Duration::from_millis(10),
+    );
+
+    let outcomes = execute_calls(
+        vec![call("1", "bash_long"), call("2", "quick_read")],
+        |n| tools.get(n).cloned(),
+        ctx(),
+        CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(outcomes.len(), 2);
+
+    let log = log.lock().unwrap();
+    let (bash_start, bash_end) = span(&log, "bash_long");
+    let (read_start, _) = span(&log, "quick_read");
+    assert!(
+        bash_start < read_start,
+        "read overlapped running mutating tool"
+    );
+    assert!(
+        read_start >= bash_end,
+        "read started before mutating tool finished"
+    );
+    drop(log);
+}
+
+#[tokio::test]
+async fn cancellation_stops_running_and_pending() {
+    // Mutating tool runs first; the read-only tool behind it stays PENDING
+    // (barrier) until cancel fires.
+    let (mut tools, log) = harness();
+    add(
+        &mut tools,
+        &log,
+        "bash_long",
+        ToolKind::Mutating,
+        Duration::from_secs(10),
+    );
+    add(
+        &mut tools,
+        &log,
+        "never_read",
+        ToolKind::ReadOnly,
+        Duration::from_millis(5),
+    );
+
+    let cancel = CancellationToken::new();
+    let cancel_clone = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        cancel_clone.cancel();
+    });
+
+    let start = Instant::now();
+    let outcomes = execute_calls(
+        vec![call("1", "bash_long"), call("2", "never_read")],
+        |n| tools.get(n).cloned(),
+        ctx(),
+        cancel,
+    )
+    .await;
+
+    assert!(
+        start.elapsed() < Duration::from_secs(3),
+        "cancellation did not stop execution"
+    );
+    assert_eq!(outcomes.len(), 2);
+    // Pin the id/name mapping through the hole-filling path.
+    assert_eq!(outcomes[0].id, "1");
+    assert_eq!(outcomes[0].name, "bash_long");
+    assert!(outcomes[0].cancelled, "running tool not marked cancelled");
+    assert!(outcomes[0].output.is_error);
+    assert_eq!(outcomes[1].id, "2");
+    assert_eq!(outcomes[1].name, "never_read");
+    assert!(outcomes[1].cancelled, "pending tool not marked cancelled");
+    // The pending tool must never have started.
+    let log = log.lock().unwrap();
+    assert!(
+        !log.iter().any(|(_, t)| t == "start:never_read"),
+        "pending tool started despite cancellation"
+    );
+}
+
+#[tokio::test]
+async fn unknown_tool_is_error_not_crash() {
+    let (tools, _log) = harness();
+    let outcomes = execute_calls(
+        vec![call("1", "does_not_exist")],
+        |n| tools.get(n).cloned(),
+        ctx(),
+        CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(outcomes.len(), 1);
+    assert!(outcomes[0].output.is_error);
+    assert!(!outcomes[0].cancelled);
+    assert!(outcomes[0].output.content.contains("does_not_exist"));
+}
+
+#[tokio::test]
+async fn pre_cancelled_token_starts_nothing() {
+    let (mut tools, log) = harness();
+    add(
+        &mut tools,
+        &log,
+        "r1",
+        ToolKind::ReadOnly,
+        Duration::from_millis(5),
+    );
+    add(
+        &mut tools,
+        &log,
+        "m1",
+        ToolKind::Mutating,
+        Duration::from_millis(5),
+    );
+
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let outcomes = execute_calls(
+        vec![call("1", "r1"), call("2", "m1")],
+        |n| tools.get(n).cloned(),
+        ctx(),
+        cancel,
+    )
+    .await;
+
+    assert_eq!(outcomes.len(), 2);
+    assert!(outcomes.iter().all(|o| o.cancelled));
+    let log = log.lock().unwrap();
+    assert!(
+        log.is_empty(),
+        "tools started despite pre-cancelled token: {log:?}"
+    );
+}
+
+#[tokio::test]
+async fn unknown_tool_mid_queue_keeps_index_alignment() {
+    let (mut tools, log) = harness();
+    add(
+        &mut tools,
+        &log,
+        "r1",
+        ToolKind::ReadOnly,
+        Duration::from_millis(5),
+    );
+    add(
+        &mut tools,
+        &log,
+        "r2",
+        ToolKind::ReadOnly,
+        Duration::from_millis(5),
+    );
+
+    let outcomes = execute_calls(
+        vec![call("a", "r1"), call("b", "ghost"), call("c", "r2")],
+        |n| tools.get(n).cloned(),
+        ctx(),
+        CancellationToken::new(),
+    )
+    .await;
+
+    assert_eq!(outcomes.len(), 3);
+    assert_eq!(outcomes[0].id, "a");
+    assert_eq!(outcomes[0].output.content, "done:r1");
+    assert_eq!(outcomes[1].id, "b");
+    assert!(outcomes[1].output.is_error);
+    assert!(outcomes[1].output.content.contains("ghost"));
+    assert_eq!(outcomes[2].id, "c");
+    assert_eq!(outcomes[2].output.content, "done:r2");
+}
+
+#[tokio::test]
+async fn empty_calls_returns_empty() {
+    let (tools, _log) = harness();
+    let outcomes = execute_calls(
+        Vec::new(),
+        |n| tools.get(n).cloned(),
+        ctx(),
+        CancellationToken::new(),
+    )
+    .await;
+    assert!(outcomes.is_empty());
+}

@@ -2,6 +2,7 @@
 
 pub mod bash;
 pub mod edit;
+pub mod executor;
 pub mod glob;
 pub mod grep;
 pub mod read;

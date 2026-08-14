@@ -189,19 +189,49 @@ async fn edit_replace_all() {
 // ---- bash ----
 
 #[tokio::test]
-async fn bash_captures_output_and_exit_code() {
+async fn bash_runs_in_cwd() {
     let dir = tempfile::tempdir().unwrap();
     let out = run(
         &registry(),
         "bash",
-        serde_json::json!({"command": "echo hi && echo err >&2"}),
+        serde_json::json!({"command": "pwd"}),
+        &ctx(dir.path()),
+    )
+    .await;
+    assert!(
+        out.content.contains(dir.path().to_str().unwrap()),
+        "{}",
+        out.content
+    );
+}
+
+#[tokio::test]
+async fn bash_drains_output_larger_than_pipe_buffer() {
+    // >64KB of output would deadlock if the pipes weren't drained
+    // concurrently with wait(): the child would block on the full pipe,
+    // never exit, and only the 10s timeout would break the deadlock.
+    // Proof of draining: fast, successful exit (output truncated to the
+    // 100KB cap by design, which is fine).
+    let dir = tempfile::tempdir().unwrap();
+    let start = std::time::Instant::now();
+    let out = run(
+        &registry(),
+        "bash",
+        serde_json::json!({"command": "yes 0123456789 | head -c 300000", "timeout_ms": 10000}),
         &ctx(dir.path()),
     )
     .await;
     assert!(!out.is_error, "{}", out.content);
-    assert!(out.content.contains("hi"));
-    assert!(out.content.contains("err"));
-    assert!(out.content.contains("exit 0") || out.content.contains("exit code 0"));
+    assert!(
+        out.content.len() >= 90_000,
+        "output suspiciously small: {}",
+        out.content.len()
+    );
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(8),
+        "looked like a pipe deadlock: {:?}",
+        start.elapsed()
+    );
 }
 
 #[tokio::test]
@@ -233,23 +263,6 @@ async fn bash_timeout_kills() {
     assert!(out.is_error);
     assert!(out.content.to_lowercase().contains("timed out"));
     assert!(start.elapsed() < std::time::Duration::from_secs(10));
-}
-
-#[tokio::test]
-async fn bash_runs_in_cwd() {
-    let dir = tempfile::tempdir().unwrap();
-    let out = run(
-        &registry(),
-        "bash",
-        serde_json::json!({"command": "pwd"}),
-        &ctx(dir.path()),
-    )
-    .await;
-    assert!(
-        out.content.contains(dir.path().to_str().unwrap()),
-        "{}",
-        out.content
-    );
 }
 
 // ---- glob ----

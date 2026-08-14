@@ -64,6 +64,9 @@ impl Tool for BashTool {
             };
             let mut stdout = child.stdout.take().unwrap();
             let mut stderr = child.stderr.take().unwrap();
+            // Read pipes CONCURRENTLY with wait(): a child writing more
+            // than the pipe buffer (~64KB) blocks on a full pipe and
+            // never exits if nobody drains it.
             let collect = async {
                 use tokio::io::AsyncReadExt;
                 let (mut out, mut err) = (String::new(), String::new());
@@ -71,8 +74,9 @@ impl Tool for BashTool {
                 let _ = stderr.read_to_string(&mut err).await;
                 (out, err)
             };
-            let status = tokio::select! {
-                status = child.wait() => status,
+            let wait_and_collect = async { tokio::join!(child.wait(), collect) };
+            let (status, (out, err)) = tokio::select! {
+                r = wait_and_collect => r,
                 _ = tokio::time::sleep(timeout) => {
                     child.start_kill().ok();
                     let _ = child.wait().await;
@@ -83,7 +87,6 @@ impl Tool for BashTool {
                     ));
                 }
             };
-            let (out, err) = collect.await;
             let mut content = format!("{out}{err}");
             if content.len() > MAX_OUTPUT {
                 content = format!(
