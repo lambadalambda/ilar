@@ -1,0 +1,19 @@
+[package]
+name = "ilar-tui"
+description = "ilar TUI frontend (ratatui)"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "ilar"
+path = "src/main.rs"
+
+[dependencies]
+ilar = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+anyhow = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
