@@ -133,7 +133,7 @@ pub async fn run_turn(
         }
 
         let request = Request {
-            model: session.meta().map(|m| m.model.clone()).unwrap_or_default(),
+            model: session.effective_model(),
             system_prompt: system_prompt.map(String::from),
             messages: session.transcript(),
             tools: tools.clone(),
@@ -217,7 +217,7 @@ pub async fn run_turn(
             if !blocks.is_empty() {
                 session.append(SessionEvent::AssistantMessage {
                     id: new_id(),
-                    model: session.meta().map(|m| m.model.clone()).unwrap_or_default(),
+                    model: session.effective_model(),
                     content: blocks,
                     usage: acc.usage,
                     stop_reason: "error".into(),
@@ -234,7 +234,7 @@ pub async fn run_turn(
             if !blocks.is_empty() {
                 session.append(SessionEvent::AssistantMessage {
                     id: new_id(),
-                    model: session.meta().map(|m| m.model.clone()).unwrap_or_default(),
+                    model: session.effective_model(),
                     content: blocks,
                     usage: acc.usage,
                     stop_reason: "aborted".into(),
@@ -282,7 +282,7 @@ pub async fn run_turn(
         if !blocks.is_empty() {
             session.append(SessionEvent::AssistantMessage {
                 id: new_id(),
-                model: session.meta().map(|m| m.model.clone()).unwrap_or_default(),
+                model: session.effective_model(),
                 content: blocks,
                 usage: acc.usage,
                 stop_reason: stop_reason.clone(),

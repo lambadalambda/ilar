@@ -270,6 +270,30 @@ async fn main() -> Result<()> {
         .with_web_tools();
     let notifications = spawner.subscribe();
     let tool_ctx = ToolContext::root(cwd.clone()).with_subagents(spawner.clone());
+    let model_choices: Vec<String> = {
+        let mut choices = Vec::new();
+        if config
+            .providers
+            .get("zai")
+            .and_then(|p| p.api_key.as_ref())
+            .is_some()
+        {
+            choices.extend(["zai/glm-4.7".to_string(), "zai/glm-4.7-air".to_string()]);
+        }
+        if config
+            .providers
+            .get("openai")
+            .and_then(|p| p.api_key.as_ref())
+            .is_some()
+        {
+            choices.push("openai/gpt-5.2".to_string());
+        }
+        if !choices.contains(&model_for_session) {
+            choices.insert(0, model_for_session.clone());
+        }
+        choices
+    };
+
     let loop_config = {
         let threshold = config.compaction.threshold;
         // GLM context window ~200k; conservative default per provider.
@@ -299,6 +323,8 @@ async fn main() -> Result<()> {
         spawner,
         notifications,
         loop_config,
+        model_choices,
+        config,
     )
     .await;
     ratatui::restore();
@@ -318,8 +344,12 @@ async fn run_app(
     spawner: std::sync::Arc<ilar::subagent::SubagentSpawner>,
     mut notifications: tokio::sync::mpsc::UnboundedReceiver<ilar::subagent::Notification>,
     loop_config: impl Fn() -> LoopConfig + Clone,
+    model_choices: Vec<String>,
+    config: ilar::config::Config,
 ) -> Result<()> {
     let mut events_rx: Option<tokio::sync::mpsc::UnboundedReceiver<LoopEvent>> = None;
+    let mut provider = provider;
+    let mut model_index = 0usize;
     let mut cancel: Option<CancellationToken> = None;
     let mut turn_handle: Option<tokio::task::JoinHandle<Result<TurnOutcome>>> = None;
 
@@ -406,6 +436,29 @@ async fn run_app(
                     }
                     spawner.abort_all();
                     return Ok(());
+                }
+                (KeyCode::Char('m'), true) if !app.busy && model_choices.len() > 1 => {
+                    model_index = (model_index + 1) % model_choices.len();
+                    let new_model = model_choices[model_index].clone();
+                    match config.provider_for(&new_model) {
+                        Some(new_provider) => {
+                            provider = new_provider.into();
+                            if let Ok(mut session) = store.load(session_id) {
+                                let _ = session.append(ilar::session::SessionEvent::ModelChange {
+                                    id: ilar::session::new_id(),
+                                    model: new_model.clone(),
+                                    ts: chrono::Utc::now(),
+                                });
+                            }
+                            app.status = format!("model: {new_model}");
+                            app.lines
+                                .push(Line_::System(format!("switched to {new_model}")));
+                        }
+                        None => {
+                            app.lines
+                                .push(Line_::System(format!("no provider for {new_model}")));
+                        }
+                    }
                 }
                 (KeyCode::Esc, _) => {
                     if app.busy {

@@ -50,6 +50,12 @@ pub enum SessionEvent {
         is_error: bool,
         ts: DateTime<Utc>,
     },
+    /// Runtime model switch; effective from the next provider call.
+    ModelChange {
+        id: String,
+        model: String,
+        ts: DateTime<Utc>,
+    },
     /// Compaction boundary: everything before `kept_from` (exclusive) is
     /// replaced by `summary` in the rendered transcript.
     ///
@@ -74,6 +80,7 @@ impl SessionEvent {
             | SessionEvent::UserMessage { ts, .. }
             | SessionEvent::AssistantMessage { ts, .. }
             | SessionEvent::ToolResult { ts, .. }
+            | SessionEvent::ModelChange { ts, .. }
             | SessionEvent::Compaction { ts, .. } => *ts,
         }
     }

@@ -93,6 +93,20 @@ impl Session {
         })
     }
 
+    /// The model this session currently runs on: the last ModelChange
+    /// event, falling back to the session's meta model.
+    pub fn effective_model(&self) -> String {
+        self.events
+            .iter()
+            .rev()
+            .find_map(|e| match e {
+                SessionEvent::ModelChange { model, .. } => Some(model.clone()),
+                _ => None,
+            })
+            .or_else(|| self.meta().map(|m| m.model.clone()))
+            .unwrap_or_default()
+    }
+
     /// Session id (empty string only in a pathological no-meta session).
     pub fn session_id(&self) -> &str {
         self.meta()
@@ -220,7 +234,7 @@ fn transcript_of(events: &[SessionEvent]) -> Vec<ChatMessage> {
                     is_error: *is_error,
                 });
             }
-            SessionEvent::Compaction { .. } => {}
+            SessionEvent::ModelChange { .. } | SessionEvent::Compaction { .. } => {}
         }
     }
     if !pending_results.is_empty() {
