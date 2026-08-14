@@ -7,3 +7,4 @@
 - [x] [Concurrency-barrier tool executor](issues/tool-executor-barrier.md)
 - [x] [Agent loop (turn state machine over event channel)](issues/agent-loop.md)
 - [x] [Config: TOML + markdown agent definitions + AGENTS.md injection](issues/config-and-agents-md.md)
+- [x] [Minimal TUI: streaming, tool display, input, Esc full-abort](issues/minimal-tui.md)

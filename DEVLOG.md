@@ -225,3 +225,23 @@ construction); transcript() coalesces trailing tool results with the
 next user message (valid "please continue" shape on both wires).
 Known non-goal for now: concurrent run_turns on one session would
 double-open the JSONL — TUI is strictly one turn at a time.
+
+## 2026-08-14 — M1 complete: config, TUI, live capstone
+
+Config: hermetic Loader (edition 2024 made set_var unsafe — tests
+inject env explicitly instead of mutating process env), project >
+user precedence, MD agents overriding built-ins, AGENTS.md/CLAUDE.md
+nearest-wins discovery. provider_for() builds concrete providers from
+"provider/model-id".
+
+TUI: thin layer over run_turn (no tests by design). Two build
+lessons: pty harness needs TIOCSWINSZ or ratatui renders into 0x0
+(empty frames, looks broken); and `.clone()` on a &&SessionStore
+clones the REFERENCE when the type isn't Clone — the spawn silently
+captured a borrow and failed to compile. Both types are Clone now.
+
+M1 capstone (live, real GLM through the TUI over a pty): user asks
+for the workspace version -> model calls read -> tool runs -> final
+answer "0.1.0" streamed -> usage in status line -> session JSONL has
+the full exchange (meta, user, assistant+tool_call, tool_result,
+assistant). ILAR_STATE_DIR env override for sandboxed runs.

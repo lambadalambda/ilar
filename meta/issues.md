@@ -1,9 +1,5 @@
 # Open issues
 
-## Milestone 1 — Lean core (usable for real work)
-
-- [ ] [Minimal TUI: streaming, tool display, input, Esc full-abort](issues/minimal-tui.md)
-
 ## Milestone 2 — Multiply
 
 - [ ] [Task tool: parallel subagents with child sessions](issues/task-tool-subagents.md)
