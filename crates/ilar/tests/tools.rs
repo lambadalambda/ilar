@@ -35,7 +35,7 @@ fn tool_kinds_declared() {
 #[test]
 fn registry_exposes_provider_definitions() {
     let defs = registry().definitions();
-    assert_eq!(defs.len(), 6);
+    assert_eq!(defs.len(), 7);
     assert!(defs.iter().all(|d| d.input_schema.get("type").is_some()));
 }
 

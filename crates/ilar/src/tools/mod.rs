@@ -6,6 +6,7 @@ pub mod executor;
 pub mod glob;
 pub mod grep;
 pub mod read;
+pub mod web;
 pub mod write;
 
 use std::future::Future;
@@ -107,6 +108,7 @@ impl ToolRegistry {
                 Arc::new(bash::BashTool),
                 Arc::new(glob::GlobTool),
                 Arc::new(grep::GrepTool),
+                Arc::new(web::WebFetchTool::default()),
             ],
         }
     }
@@ -119,6 +121,20 @@ impl ToolRegistry {
     pub fn with_tool(mut self, tool: Arc<dyn Tool>) -> Self {
         self.tools.push(tool);
         self
+    }
+
+    /// Registry with a search backend attached.
+    pub fn with_search(self, backend: Box<dyn web::SearchBackend>) -> Self {
+        self.with_tool(std::sync::Arc::new(web::WebSearchTool::new(backend)))
+    }
+
+    /// Registry with webfetch + websearch (Tavily if key present).
+    pub fn with_web_tools(self) -> Self {
+        let with_fetch = self.with_tool(std::sync::Arc::new(web::WebFetchTool::default()));
+        match web::TavilyBackend::from_env() {
+            Some(backend) => with_fetch.with_search(Box::new(backend)),
+            None => with_fetch,
+        }
     }
 
     /// Registry with the todo tool attached (shared list for TUI display).

@@ -11,3 +11,4 @@
 - [x] [Task tool: parallel subagents with child sessions](issues/task-tool-subagents.md)
 - [x] [Background agents + completion notifications](issues/background-agents.md)
 - [x] [Auto-compaction](issues/auto-compaction.md)
+- [x] [Todo tool](issues/todo-tool.md)
