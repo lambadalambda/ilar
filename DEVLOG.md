@@ -245,3 +245,38 @@ for the workspace version -> model calls read -> tool runs -> final
 answer "0.1.0" streamed -> usage in status line -> session JSONL has
 the full exchange (meta, user, assistant+tool_call, tool_result,
 assistant). ILAR_STATE_DIR env override for sandboxed runs.
+
+## 2026-08-14 — M2 + M3 complete: full roadmap shipped
+
+M2 (multiply): task tool spawning parallel child agents (shared atomic
+slot counter, depth-capped child spawners, Claude Code do-not-retry
+cap errors); background=true tasks run detached with stall watchdogs
+(default 600s, activity tracked via the child event stream) and land
+as <task-notification> messages that re-invoke the idle parent loop —
+the convergent Claude Code/opencode pattern; auto-compaction with
+estimate_tokens = max(last usage, chars/4), summarizer call, cut at
+the current user message (once per turn, never mid-tool-loop).
+transcript rendering extracted to a pure function for the summarizer.
+
+M3 (polish): todo tool (todowrite-style, single in_progress enforced);
+webfetch (dependency-free HTML->text; test caught an off-by-15 slice
+bug that corrupted output after </script>) + websearch (pluggable
+SearchBackend, Tavily impl); runtime model switching (ModelChange
+session events audited in JSONL, effective_model resolved per provider
+call, Ctrl-M cycles + rebuilds the provider); skills (markdown +
+frontmatter, project-over-user, listing in system prompt, body loaded
+on demand, worktree-isolation builtin — the whole subsystem is ~200
+lines vs Claude Code's plugins/skills machinery).
+
+Final state: 113 unit tests + 4 live smoke tests, clippy/fmt clean,
+15/15 issues closed across 3 milestones. Two `futures`-in-Rust
+footguns worth remembering: tuple-of-futures doesn't implement Future
+(wrap in async move blocks), and async trait methods borrowing self
+need owned clones before Box::pin (todo tool). Also: edition 2024 made
+std::env::set_var unsafe — config tests inject env via the Loader
+instead.
+
+Known follow-ups (not blocking daily-driver use): OpenAI live smoke
+test needs a real API key; concurrent run_turns on one session would
+double-open the JSONL (TUI is one-at-a-time); bash timeout is the only
+guard against runaway interactive commands.
