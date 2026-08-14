@@ -73,3 +73,16 @@ type-safe channels.
 - AGENTS.md / CLAUDE.md detection + cwd as project root.
 - Per-agent model in config + runtime switching.
 - Testing: TDD for core (loop, tools, providers via mock SSE), skip TUI.
+
+## 2026-08-14 — session-jsonl done
+
+First issue implemented (TDD, red→green). Review (subagent) caught a real
+blocker: `transcript()` could emit consecutive user messages (compaction
+summary + first kept user message), which Anthropic-style APIs reject with
+400. Fix: coalesce adjacent user messages at flush time. Also added:
+orphaned-tool-result snapping at compaction boundaries, NotFound vs
+unrecoverable distinction on load, `session_id()` accessor.
+
+Known caveat (documented in event.rs): `kept_from` is a write-time event
+index; corrupt-line skips shift it on replay. Acceptable degradation —
+transcript stays coherent; anchor to event ids if it ever matters.

@@ -2,7 +2,6 @@
 
 ## Milestone 1 — Lean core (usable for real work)
 
-- [ ] [Session model + JSONL persistence + resume](issues/session-jsonl.md)
 - [ ] [Provider trait + event model](issues/provider-trait.md)
 - [ ] [OpenAI Responses API provider (streaming)](issues/provider-openai-responses.md)
 - [ ] [z.ai GLM provider (Anthropic-compatible + OpenAI-compatible)](issues/provider-zai.md)

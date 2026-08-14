@@ -1,3 +1,3 @@
 # Completed issues
 
-(none yet)
+- [x] [Session model + JSONL persistence + resume](issues/session-jsonl.md)
