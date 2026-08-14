@@ -2,7 +2,6 @@
 
 ## Milestone 1 — Lean core (usable for real work)
 
-- [ ] [Config: TOML + markdown agent definitions + AGENTS.md injection](issues/config-and-agents-md.md)
 - [ ] [Minimal TUI: streaming, tool display, input, Esc full-abort](issues/minimal-tui.md)
 
 ## Milestone 2 — Multiply

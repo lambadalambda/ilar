@@ -6,3 +6,4 @@
 - [x] [Core tools: read, write, edit, bash, glob, grep](issues/core-tools.md)
 - [x] [Concurrency-barrier tool executor](issues/tool-executor-barrier.md)
 - [x] [Agent loop (turn state machine over event channel)](issues/agent-loop.md)
+- [x] [Config: TOML + markdown agent definitions + AGENTS.md injection](issues/config-and-agents-md.md)
