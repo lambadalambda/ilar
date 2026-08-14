@@ -88,6 +88,12 @@ impl ToolRegistry {
         self.tools.iter().find(|t| t.name() == name).cloned()
     }
 
+    /// Registry with an extra tool (tests, future custom tools).
+    pub fn with_tool(mut self, tool: Arc<dyn Tool>) -> Self {
+        self.tools.push(tool);
+        self
+    }
+
     pub fn definitions(&self) -> Vec<ToolDefinition> {
         self.tools
             .iter()
