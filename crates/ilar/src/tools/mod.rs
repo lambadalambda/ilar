@@ -66,6 +66,7 @@ pub trait Tool: Send + Sync {
 }
 
 /// Named tool lookup + provider-facing definitions.
+#[derive(Clone)]
 pub struct ToolRegistry {
     tools: Vec<Arc<dyn Tool>>,
 }

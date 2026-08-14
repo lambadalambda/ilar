@@ -8,6 +8,7 @@ use super::event::{SessionEvent, SessionMeta};
 use super::model::{ChatMessage, ContentBlock, Role};
 
 /// Owns the session directory; creates/loads sessions.
+#[derive(Clone)]
 pub struct SessionStore {
     root: PathBuf,
 }
