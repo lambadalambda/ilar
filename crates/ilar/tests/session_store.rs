@@ -48,6 +48,7 @@ fn sample_log(meta: &SessionMeta) -> Vec<SessionEvent> {
             usage: Usage {
                 input_tokens: 100,
                 output_tokens: 20,
+                ..Default::default()
             },
             stop_reason: "tool_use".into(),
             ts,

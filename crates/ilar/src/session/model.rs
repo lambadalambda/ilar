@@ -18,6 +18,15 @@ pub enum ContentBlock {
     Text {
         text: String,
     },
+    /// Extended-thinking block. Anthropic-style APIs require passing these
+    /// back on the next request when thinking interleaves with tool use.
+    Thinking {
+        text: String,
+        /// Signature for verifiable thinking (Anthropic-style); providers
+        /// that don't sign leave it out.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
     ToolCall {
         id: String,
         name: String,
@@ -50,6 +59,11 @@ impl ChatMessage {
 pub struct Usage {
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// Prompt-caching accounting (Anthropic-style providers).
+    #[serde(default)]
+    pub cache_read_input_tokens: u64,
+    #[serde(default)]
+    pub cache_creation_input_tokens: u64,
 }
 
 impl Usage {
