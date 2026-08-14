@@ -183,3 +183,20 @@ Prompt caching (the "don't re-ingest the whole prompt" concern):
   serialize identically after stripping cache_control markers.
 
 Remaining M1: barrier executor, agent loop, config/AGENTS.md, TUI.
+
+## 2026-08-14 — tool-executor-barrier done
+
+The Claude Code scheduling model on tokio: FuturesUnordered for
+concurrent read-only runs, hole-filled outcomes Vec for call-order
+results, mutating tools as barriers. Review verdict "safe to build on"
+after verifying invariants (FIFO, no double-record, fill-order sound,
+drop chain intact). Fixes applied from review:
+- Cancel check at top of the scheduling loop (a cancel racing a
+  completion could otherwise start one more tool past an Esc).
+- Deterministic overlap proof from event logs instead of pure timing
+  (last start < first end), generous wall-clock margins.
+- Id/name pinning through the hole-fill path; pre-cancelled-token and
+  unknown-tool-mid-queue tests.
+- Bonus real bug: bash drained pipes only AFTER wait() — a child
+  writing >64KB blocked on the full pipe until timeout killed it.
+  Now joined concurrently; 300KB drain test proves fast clean exit.
