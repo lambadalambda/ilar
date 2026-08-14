@@ -17,6 +17,7 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+tokio-stream = { version = "0.1.19", features = ["sync"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"

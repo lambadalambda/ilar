@@ -3,7 +3,9 @@
 mod event;
 mod mock;
 mod request;
+mod sse;
 
+pub mod openai;
 pub use event::{ProviderEvent, StopReason};
 pub use mock::MockProvider;
 pub use request::{Request, ToolDefinition, resolve_model};

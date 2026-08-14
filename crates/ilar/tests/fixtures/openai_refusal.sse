@@ -1,0 +1,9 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_5"}}
+
+event: response.refusal.delta
+data: {"type":"response.refusal.delta","item_id":"msg_5","output_index":0,"content_index":0,"delta":"I can't help with that."}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_5","usage":{"input_tokens":12,"output_tokens":8,"total_tokens":20}}}
+
