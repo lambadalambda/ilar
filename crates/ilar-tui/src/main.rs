@@ -260,7 +260,8 @@ async fn main() -> Result<()> {
         config.subagents.max_depth,
     ));
     let registry = ToolRegistry::builtin().with_subagents(spawner.clone());
-    let tool_ctx = ToolContext::root(cwd.clone()).with_subagents(spawner);
+    let notifications = spawner.subscribe();
+    let tool_ctx = ToolContext::root(cwd.clone()).with_subagents(spawner.clone());
     let mut app = App::new();
     app.status = format!("{model_for_session} · {session_id}");
 
@@ -274,6 +275,8 @@ async fn main() -> Result<()> {
         &system_prompt,
         &registry,
         tool_ctx,
+        spawner,
+        notifications,
     )
     .await;
     ratatui::restore();
@@ -290,6 +293,8 @@ async fn run_app(
     system_prompt: &str,
     registry: &ToolRegistry,
     tool_ctx: ToolContext,
+    spawner: std::sync::Arc<ilar::subagent::SubagentSpawner>,
+    mut notifications: tokio::sync::mpsc::UnboundedReceiver<ilar::subagent::Notification>,
 ) -> Result<()> {
     let mut events_rx: Option<tokio::sync::mpsc::UnboundedReceiver<LoopEvent>> = None;
     let mut cancel: Option<CancellationToken> = None;
@@ -318,6 +323,44 @@ async fn run_app(
             app.busy = false;
         }
 
+        // Background completions re-invoke the loop while idle.
+        if !app.busy {
+            while let Ok(notification) = notifications.try_recv() {
+                app.lines.push(Line_::System(format!(
+                    "task notification: {}",
+                    notification.description
+                )));
+                let text = notification.text;
+                app.lines.push(Line_::User(text.clone()));
+                let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                events_rx = Some(rx);
+                let token = CancellationToken::new();
+                cancel = Some(token.clone());
+                app.busy = true;
+                let provider = provider.clone();
+                let store = store.clone();
+                let session_id = session_id.to_string();
+                let system_prompt = system_prompt.to_string();
+                let registry = registry.clone();
+                let turn_ctx = tool_ctx.clone();
+                turn_handle = Some(tokio::spawn(async move {
+                    run_turn(
+                        provider.as_ref(),
+                        &registry,
+                        &store,
+                        &session_id,
+                        &text,
+                        Some(&system_prompt),
+                        LoopConfig::default(),
+                        tx,
+                        token,
+                        turn_ctx,
+                    )
+                    .await
+                }));
+            }
+        }
+
         // Poll terminal input (fast while busy so streaming keeps rendering).
         let timeout = if app.busy {
             std::time::Duration::from_millis(50)
@@ -337,6 +380,7 @@ async fn run_app(
                     if let Some(cancel) = &cancel {
                         cancel.cancel();
                     }
+                    spawner.abort_all();
                     return Ok(());
                 }
                 (KeyCode::Esc, _) => {
