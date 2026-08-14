@@ -9,3 +9,4 @@
 - [x] [Config: TOML + markdown agent definitions + AGENTS.md injection](issues/config-and-agents-md.md)
 - [x] [Minimal TUI: streaming, tool display, input, Esc full-abort](issues/minimal-tui.md)
 - [x] [Task tool: parallel subagents with child sessions](issues/task-tool-subagents.md)
+- [x] [Background agents + completion notifications](issues/background-agents.md)

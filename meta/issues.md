@@ -2,7 +2,6 @@
 
 ## Milestone 2 — Multiply
 
-- [ ] [Background agents + completion notifications](issues/background-agents.md)
 - [ ] [Auto-compaction](issues/auto-compaction.md)
 
 ## Milestone 3 — Polish & extras
