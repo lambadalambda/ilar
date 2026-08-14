@@ -17,9 +17,21 @@ use super::sse::SseParser;
 use super::{EventStream, Provider};
 use crate::session::{ChatMessage, ContentBlock, Role, Usage};
 
+#[derive(Clone)]
+enum Auth {
+    ApiKey(String),
+    /// ChatGPT OAuth (Codex-style): bearer from the token store, one
+    /// refresh-and-retry on 401.
+    ChatGpt {
+        store: crate::auth::AuthStore,
+    },
+}
+
+#[derive(Clone)]
 pub struct OpenAIProvider {
-    api_key: String,
+    auth: Auth,
     base_url: String,
+    token_url: String,
     http: reqwest::Client,
 }
 
@@ -28,10 +40,27 @@ impl OpenAIProvider {
     /// (proxies, gateways).
     pub fn new(api_key: String, base_url: Option<String>) -> Self {
         Self {
-            api_key,
+            auth: Auth::ApiKey(api_key),
             base_url: base_url.unwrap_or_else(|| "https://api.openai.com/v1".into()),
+            token_url: format!("{}/oauth/token", crate::auth::AUTH_BASE),
             http: reqwest::Client::new(),
         }
+    }
+
+    /// ChatGPT-account auth: Responses API through the ChatGPT backend.
+    pub fn with_chatgpt_auth(store: crate::auth::AuthStore, base_url: Option<String>) -> Self {
+        Self {
+            auth: Auth::ChatGpt { store },
+            base_url: base_url.unwrap_or_else(|| "https://chatgpt.com/backend-api/codex".into()),
+            token_url: format!("{}/oauth/token", crate::auth::AUTH_BASE),
+            http: reqwest::Client::new(),
+        }
+    }
+
+    /// Test hook: point the refresh endpoint at a mock server.
+    pub fn with_token_url_for_test(mut self, url: impl Into<String>) -> Self {
+        self.token_url = url.into();
+        self
     }
 
     fn wire_body(&self, req: &Request) -> anyhow::Result<serde_json::Value> {
@@ -115,25 +144,92 @@ fn wire_tool(tool: &ToolDefinition) -> serde_json::Value {
 
 impl Provider for OpenAIProvider {
     fn stream(&self, req: Request) -> anyhow::Result<EventStream> {
-        let body = self.wire_body(&req)?;
+        let mut body = self.wire_body(&req)?;
+        let is_chatgpt = matches!(self.auth, Auth::ChatGpt { .. });
+        if is_chatgpt && let Some(object) = body.as_object_mut() {
+            // The ChatGPT backend rejects server-side state retention.
+            object.insert("store".into(), serde_json::json!(false));
+        }
 
         let url = format!("{}/responses", self.base_url);
-        let request = self
-            .http
-            .post(url)
-            .bearer_auth(&self.api_key)
-            .json(&body)
-            .timeout(std::time::Duration::from_secs(600))
-            .build()?;
+        let (token, account, auth_store) = match &self.auth {
+            Auth::ApiKey(key) => (key.clone(), None, None),
+            Auth::ChatGpt { store } => {
+                let tokens = store.load().ok_or_else(|| {
+                    anyhow::anyhow!("OpenAI ChatGPT auth: not logged in — run `ilar login`")
+                })?;
+                (tokens.access_token, tokens.account_id, Some(store.clone()))
+            }
+        };
 
         let (tx, rx) = mpsc::channel(64);
         let http = self.http.clone();
         let tx_panic = tx.clone();
+        let token_url = self.token_url.clone();
         let pump = async move {
             let mut mapper = EventMapper::default();
             let mut parser = SseParser::new();
-            match http.execute(request).await {
-                Ok(response) if response.status().is_success() => {
+            let mut current_token = token;
+            let mut current_account = account;
+            let mut refreshed = false;
+
+            let response = loop {
+                let mut builder = http
+                    .post(&url)
+                    .bearer_auth(&current_token)
+                    .json(&body)
+                    .timeout(std::time::Duration::from_secs(600));
+                if is_chatgpt {
+                    builder = builder
+                        .header("originator", "codex_cli_rs")
+                        .header("OpenAI-Beta", "responses=experimental");
+                    if let Some(account) = &current_account {
+                        builder = builder.header("chatgpt-account-id", account);
+                    }
+                }
+                let request = match builder.build() {
+                    Ok(request) => request,
+                    Err(e) => {
+                        let _ = tx.send(ProviderEvent::Error(e.to_string())).await;
+                        return;
+                    }
+                };
+                match http.execute(request).await {
+                    Ok(response) => {
+                        if response.status() == reqwest::StatusCode::UNAUTHORIZED
+                            && is_chatgpt
+                            && !refreshed
+                            && let Some(store) = &auth_store
+                        {
+                            refreshed = true;
+                            match crate::auth::refresh_tokens(store, &token_url, &http).await {
+                                Ok(tokens) => {
+                                    current_token = tokens.access_token;
+                                    if tokens.account_id.is_some() {
+                                        current_account = tokens.account_id;
+                                    }
+                                    continue;
+                                }
+                                Err(e) => {
+                                    let _ = tx
+                                        .send(ProviderEvent::Error(format!(
+                                            "token refresh failed: {e:#}"
+                                        )))
+                                        .await;
+                                    return;
+                                }
+                            }
+                        }
+                        break response;
+                    }
+                    Err(e) => {
+                        let _ = tx.send(ProviderEvent::Error(e.to_string())).await;
+                        return;
+                    }
+                }
+            };
+            match response {
+                response if response.status().is_success() => {
                     let mut stream = response.bytes_stream();
                     while let Some(chunk) = stream.next().await {
                         match chunk {
@@ -156,15 +252,12 @@ impl Provider for OpenAIProvider {
                         let _ = tx.send(event).await;
                     }
                 }
-                Ok(response) => {
+                response => {
                     let status = response.status();
                     let body = response.text().await.unwrap_or_default();
                     let _ = tx
                         .send(ProviderEvent::Error(format!("HTTP {status}: {body}")))
                         .await;
-                }
-                Err(e) => {
-                    let _ = tx.send(ProviderEvent::Error(e.to_string())).await;
                 }
             }
         };

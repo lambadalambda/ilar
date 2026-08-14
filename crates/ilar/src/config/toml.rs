@@ -19,6 +19,8 @@ pub struct ProviderConfig {
     pub base_url: Option<String>,
     pub api_key: Option<String>,
     pub flavor: Option<String>,
+    /// "chatgpt" -> OAuth mode (run `ilar login`).
+    pub auth: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -96,6 +98,7 @@ pub struct ProviderConfigResolved {
     pub base_url: Option<String>,
     pub api_key: Option<String>,
     pub flavor: Option<String>,
+    pub auth: Option<String>,
 }
 
 /// Loader with overridable directories and environment (tests pass env
@@ -218,6 +221,11 @@ impl Config {
                     .and_then(|c| c.api_key.clone())
                     .or_else(|| env.env_lookup("ILAR_OPENAI_API_KEY")),
                 flavor: None,
+                auth: merged
+                    .providers
+                    .as_ref()
+                    .and_then(|p| p.get("openai"))
+                    .and_then(|c| c.auth.clone()),
             },
         );
         providers.insert(
@@ -239,6 +247,7 @@ impl Config {
                     .as_ref()
                     .and_then(|p| p.get("zai"))
                     .and_then(|c| c.flavor.clone()),
+                auth: None,
             },
         );
 
@@ -291,6 +300,12 @@ impl Config {
         let settings = self.providers.get(provider_name)?;
         let api_key = settings.api_key.clone()?;
         let provider: Box<dyn crate::provider::Provider> = match provider_name {
+            "openai" if settings.auth.as_deref() == Some("chatgpt") => {
+                Box::new(crate::provider::openai::OpenAIProvider::with_chatgpt_auth(
+                    crate::auth::AuthStore::open(default_state_dir()),
+                    settings.base_url.clone(),
+                ))
+            }
             "openai" => Box::new(crate::provider::openai::OpenAIProvider::new(
                 api_key,
                 settings.base_url.clone(),
@@ -326,6 +341,7 @@ impl Config {
                 base_url: None,
                 api_key: Some("test-openai-key".into()),
                 flavor: None,
+                auth: None,
             },
         );
         providers.insert(
@@ -334,6 +350,7 @@ impl Config {
                 base_url: None,
                 api_key: Some("test-zai-key".into()),
                 flavor: None,
+                auth: None,
             },
         );
         Self {
@@ -398,4 +415,13 @@ fn parse_agent_md(name: &str, text: &str) -> Option<AgentDefinition> {
         model: fm.model,
         prompt: body.trim_start_matches('\n').trim().to_string(),
     })
+}
+
+/// State directory: ILAR_STATE_DIR override, else ~/.local/state/ilar.
+pub fn default_state_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("ILAR_STATE_DIR") {
+        return PathBuf::from(dir);
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    PathBuf::from(home).join(".local/state/ilar")
 }

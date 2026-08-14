@@ -28,9 +28,17 @@ enum Line_ {
     System(String),
 }
 
+#[derive(clap::Subcommand, Debug)]
+enum Command {
+    /// Log in to OpenAI with your ChatGPT account (OAuth in the browser)
+    Login,
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "ilar", version, about = "personal coding agent")]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
     /// Model to use (provider/model-id); overrides config.
     #[arg(long)]
     model: Option<String>,
@@ -199,6 +207,22 @@ impl App {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
+    if let Some(Command::Login) = args.command {
+        let store = ilar::auth::AuthStore::open(ilar::config::default_state_dir());
+        let tokens = ilar::auth::login_flow(&store, std::time::Duration::from_secs(300), true)
+            .await
+            .context("login failed")?;
+        println!(
+            "Logged in as ChatGPT account {}",
+            tokens
+                .account_id
+                .as_deref()
+                .unwrap_or("(account id unknown)")
+        );
+        println!("Tokens stored at {}", store.tokens_path().display());
+        return Ok(());
+    }
+
     let config = Loader::new().resolve().context("loading config")?;
     let model = args
         .model
@@ -238,12 +262,7 @@ async fn main() -> Result<()> {
         .with_context(|| format!("no provider configured for {model_for_session} (set ILAR_ZAI_API_KEY / ILAR_OPENAI_API_KEY)"))?
         .into();
 
-    let state_dir = std::env::var("ILAR_STATE_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-            std::path::PathBuf::from(home).join(".local/state/ilar")
-        });
+    let state_dir = ilar::config::default_state_dir();
     let store = SessionStore::new(state_dir.join("sessions"));
     let session_id = match &args.session {
         Some(id) => id.clone(),

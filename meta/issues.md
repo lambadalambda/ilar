@@ -10,4 +10,4 @@
 
 ## Milestone 3 — Polish & extras
 
-(all complete — see issues_archive.md)
+- [ ] [OpenAI ChatGPT OAuth login (PKCE)](issues/openai-oauth-login.md)

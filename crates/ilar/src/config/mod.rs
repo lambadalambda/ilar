@@ -5,7 +5,9 @@ mod agents_md;
 mod toml;
 
 pub use agents_md::system_prompt_for;
-pub use toml::{CompactionConfig, Config, Loader, ProviderConfig, SubagentConfig, load};
+pub use toml::{
+    CompactionConfig, Config, Loader, ProviderConfig, SubagentConfig, default_state_dir, load,
+};
 
 /// A usable agent: built-in or markdown-defined.
 #[derive(Debug, Clone, PartialEq)]
