@@ -2,7 +2,6 @@
 
 ## Milestone 2 — Multiply
 
-- [ ] [Task tool: parallel subagents with child sessions](issues/task-tool-subagents.md)
 - [ ] [Background agents + completion notifications](issues/background-agents.md)
 - [ ] [Auto-compaction](issues/auto-compaction.md)
 
