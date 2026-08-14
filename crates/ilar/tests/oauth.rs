@@ -243,3 +243,41 @@ async fn login_flow_times_out_without_callback() {
     let result = login_flow(&store, std::time::Duration::from_millis(300), false).await;
     assert!(result.is_err());
 }
+
+/// Live smoke: real ChatGPT backend through ilar's provider.
+/// Requires ILAR_LIVE_CHATGPT_STATE_DIR pointing at a state dir whose
+/// auth.json holds a valid ChatGPT OAuth TokenSet.
+///   cargo test -p ilar --test oauth live_chatgpt -- --ignored --nocapture
+#[tokio::test]
+#[ignore]
+async fn live_chatgpt_backend_text_turn() {
+    let state_dir = std::env::var("ILAR_LIVE_CHATGPT_STATE_DIR")
+        .expect("ILAR_LIVE_CHATGPT_STATE_DIR with seeded auth.json");
+    let store = AuthStore::open(state_dir.into());
+    let provider = OpenAIProvider::with_chatgpt_auth(store, None);
+
+    let mut stream = provider
+        .stream(Request {
+            messages: vec![ilar::session::ChatMessage::user_text(
+                "Reply with exactly: hello",
+            )],
+            ..Request::with_model("openai/gpt-5.6-sol")
+        })
+        .unwrap();
+    let mut text = String::new();
+    let mut terminal = None;
+    while let Some(event) = stream.next().await {
+        match event {
+            ProviderEvent::TextDelta(t) => text.push_str(&t),
+            ProviderEvent::TurnComplete { stop_reason, .. } => {
+                terminal = Some(stop_reason);
+                break;
+            }
+            ProviderEvent::Error(e) => panic!("provider error: {e}"),
+            _ => {}
+        }
+    }
+    println!("chatgpt-backend text: {text}");
+    assert!(!text.is_empty());
+    assert_eq!(terminal, Some(StopReason::EndTurn));
+}

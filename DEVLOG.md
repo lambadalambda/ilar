@@ -280,3 +280,31 @@ Known follow-ups (not blocking daily-driver use): OpenAI live smoke
 test needs a real API key; concurrent run_turns on one session would
 double-open the JSONL (TUI is one-at-a-time); bash timeout is the only
 guard against runaway interactive commands.
+
+## 2026-08-14 — OpenAI ChatGPT OAuth login
+
+Codex-style PKCE flow: authorize at auth.openai.com (public client id,
+offline_access scope), callback server on 127.0.0.1:1455, S256
+challenge (RFC 7636 vector tested), token exchange + rotation into
+<state dir>/auth.json — ilar's own file, never reads or writes
+~/.codex. Provider gains Auth::ChatGpt: chatgpt.com/backend-api/codex
+with originator: codex_cli_rs + OpenAI-Beta headers, store:false, and
+one refresh-and-retry on 401 inside the pump (mock-tested: rotated
+bearer observed on the wire).
+
+Live findings from probing the real backend (read-only, using codex's
+existing access token — usage can't rotate anything):
+- Bearer + chatgpt-account-id + originator headers are accepted as-is;
+  no mTLS/DPoP binding on this account's tokens.
+- API-catalog model names are rejected ("gpt-5.2" -> 400 model not
+  supported); ChatGPT accounts serve the codex model line. Current
+  slugs live in ~/.codex/models_cache.json — gpt-5.6-sol is the
+  default (also -terra/-luna variants, gpt-5.5, gpt-5.3-codex-spark).
+- stream:false is rejected ("Stream must be set to true") — fine, the
+  provider always streams.
+- Final proof: ilar's provider streamed a text turn through the real
+  ChatGPT backend (isolated seeded token copy, since deleted).
+
+For daily use: run `ilar login` so ilar holds its own token pair —
+refresh rotation would otherwise race codex's copy if you reuse the
+same refresh token in two stores.

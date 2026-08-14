@@ -5,6 +5,14 @@ model = "zai/glm-4.7"
 [providers.openai]
 # api_key from ILAR_OPENAI_API_KEY (env) by default; can be set here.
 # base_url = "https://api.openai.com/v1"
+#
+# ChatGPT-account OAuth instead of an API key (Codex-style): run
+#   ilar login
+# then set:
+#   auth = "chatgpt"
+# Models are the -codex/ChatGPT ones (e.g. gpt-5.6-sol), not the API
+# catalog names. Tokens live in <state dir>/auth.json and refresh
+# automatically.
 
 [providers.zai]
 # z.ai Anthropic-compatible endpoint (default):

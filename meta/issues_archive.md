@@ -28,3 +28,7 @@
 \* live smoke test still pending: no OpenAI API key available (both local
 installs use ChatGPT OAuth). Fixture tests pass; run
 `cargo test -p ilar --test smoke_zai` style live checks once a key exists.
+
+## Follow-ups
+
+- [x] [OpenAI ChatGPT OAuth login (PKCE)](issues/openai-oauth-login.md)
