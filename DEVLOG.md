@@ -103,3 +103,32 @@ thinking blocks with tool use, GLM emits them, retrofitting later would
 have touched every consumer simultaneously. Also added Refusal/Paused
 stop reasons, cache-token usage fields, and the null-input+MaxTokens
 convention for truncated tool args.
+
+## 2026-08-14 — provider-openai-responses done (smoke test pending)
+
+Review caught two real blockers:
+1. SSE parser did from_utf8_lossy per chunk — multi-byte UTF-8 split
+   across chunk boundaries corrupted (guaranteed noise on GLM Chinese
+   text). Rewrote parser over a byte buffer; blocks convert only when
+   complete.
+2. response.incomplete with a truncated tool call left a dangling
+   ToolCallStarted (violating our own event contract) and reported
+   ToolUse — the loop would have executed a tool whose args never
+   arrived. Now synthesizes null-input completions + MaxTokens.
+
+Also: refusal deltas surfaced as TextDelta with StopReason::Refusal,
+pump panic guard (catch_unwind -> Error event; a panic otherwise looks
+like a clean EOF), options-merge without the "extra" marker hack.
+
+Debug war story: test server originally used std TcpListener +
+read_to_end under a current-thread runtime — blocking accept() starved
+the reqwest task, and read_to_end waited for a half-close that never
+comes. Fix: async tokio I/O, read-until-content-length. Also: `let _ =
+provider.stream(...)` drops the stream instantly, which per our own
+cancellation contract aborts the pump before it connects. The contract
+works — against its author.
+
+Remaining for this issue: one live-API smoke test (needs OPENAI_API_KEY),
+incl. a reasoning model doing 2+ tool turns to validate that dropping
+thinking blocks from replay doesn't 400 (review flagged it; fixtures
+can't prove it).
