@@ -12,3 +12,4 @@
 - [x] [Background agents + completion notifications](issues/background-agents.md)
 - [x] [Auto-compaction](issues/auto-compaction.md)
 - [x] [Todo tool](issues/todo-tool.md)
+- [x] [Web fetch + web search tools](issues/web-tools.md)
