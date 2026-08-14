@@ -1,0 +1,26 @@
+# Open issues
+
+## Milestone 1 — Lean core (usable for real work)
+
+- [ ] [Session model + JSONL persistence + resume](issues/session-jsonl.md)
+- [ ] [Provider trait + event model](issues/provider-trait.md)
+- [ ] [OpenAI Responses API provider (streaming)](issues/provider-openai-responses.md)
+- [ ] [z.ai GLM provider (Anthropic-compatible + OpenAI-compatible)](issues/provider-zai.md)
+- [ ] [Core tools: read, write, edit, bash, glob, grep](issues/core-tools.md)
+- [ ] [Concurrency-barrier tool executor](issues/tool-executor-barrier.md)
+- [ ] [Agent loop (turn state machine over event channel)](issues/agent-loop.md)
+- [ ] [Config: TOML + markdown agent definitions + AGENTS.md injection](issues/config-and-agents-md.md)
+- [ ] [Minimal TUI: streaming, tool display, input, Esc full-abort](issues/minimal-tui.md)
+
+## Milestone 2 — Multiply
+
+- [ ] [Task tool: parallel subagents with child sessions](issues/task-tool-subagents.md)
+- [ ] [Background agents + completion notifications](issues/background-agents.md)
+- [ ] [Auto-compaction](issues/auto-compaction.md)
+
+## Milestone 3 — Polish & extras
+
+- [ ] [Todo tool](issues/todo-tool.md)
+- [ ] [Web fetch + web search tools](issues/web-tools.md)
+- [ ] [Runtime model switching](issues/model-switching.md)
+- [ ] [Skills (markdown, incl. git-worktree-isolation skill)](issues/skills.md)
