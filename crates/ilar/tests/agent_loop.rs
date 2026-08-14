@@ -307,7 +307,10 @@ async fn max_iterations_guard_stops_loop() {
     ]]);
 
     let (tx, _rx) = events_channel();
-    let config = LoopConfig { max_iterations: 5 };
+    let config = LoopConfig {
+        max_iterations: 5,
+        ..LoopConfig::default()
+    };
     let outcome = run_turn(
         &provider,
         &registry,

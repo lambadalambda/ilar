@@ -18,11 +18,19 @@ use chrono::Utc;
 pub struct LoopConfig {
     /// Max provider calls per user turn (tool-loop guard).
     pub max_iterations: usize,
+    /// Context window in tokens; compaction triggers above
+    /// `context_limit * compaction_threshold`. None disables compaction.
+    pub context_limit: Option<u64>,
+    pub compaction_threshold: f64,
 }
 
 impl Default for LoopConfig {
     fn default() -> Self {
-        Self { max_iterations: 50 }
+        Self {
+            max_iterations: 50,
+            context_limit: None,
+            compaction_threshold: 0.85,
+        }
     }
 }
 
@@ -99,6 +107,16 @@ pub async fn run_turn(
         ts: Utc::now(),
     })?;
     publish(&events, LoopEvent::TurnStarted);
+
+    // Compaction runs once per user turn, before the provider loop.
+    if let (Some(limit), threshold) = (config.context_limit, config.compaction_threshold)
+        && crate::compaction::compact_if_needed(provider, store, session_id, limit, threshold)
+            .await?
+    {
+        publish(&events, LoopEvent::Compacted);
+        // Reload with the compaction event applied.
+        session = store.load(session_id)?;
+    }
 
     let tools = registry.definitions();
     tool_ctx.session_id = session_id.to_string();

@@ -119,79 +119,7 @@ impl Session {
     /// alternation, and a compaction summary followed by a kept user
     /// message would otherwise violate it.
     pub fn transcript(&self) -> Vec<ChatMessage> {
-        let mut cut = 0usize;
-        let mut summary: Option<&str> = None;
-        for (i, event) in self.events.iter().enumerate() {
-            if let SessionEvent::Compaction {
-                kept_from,
-                summary: s,
-                ..
-            } = event
-            {
-                cut = (*kept_from).min(i).max(cut);
-                summary = Some(s);
-            }
-        }
-        // A cut landing mid-turn must not orphan tool results whose tool
-        // calls were compacted away — advance past any leading results.
-        while cut < self.events.len() && matches!(self.events[cut], SessionEvent::ToolResult { .. })
-        {
-            cut += 1;
-        }
-
-        let mut messages: Vec<ChatMessage> = Vec::new();
-        if let Some(summary) = summary {
-            messages.push(ChatMessage {
-                role: Role::User,
-                content: vec![ContentBlock::Text {
-                    text: format!("<compaction-summary>\n{summary}\n</compaction-summary>"),
-                }],
-            });
-        }
-
-        let mut pending_results: Vec<ContentBlock> = Vec::new();
-        let flush_results = |messages: &mut Vec<ChatMessage>, pending: &mut Vec<ContentBlock>| {
-            if !pending.is_empty() {
-                push_user_blocks(messages, std::mem::take(pending));
-            }
-        };
-
-        for event in &self.events[cut..] {
-            match event {
-                SessionEvent::Meta { .. } => {}
-                SessionEvent::UserMessage { text, .. } => {
-                    flush_results(&mut messages, &mut pending_results);
-                    push_user_blocks(
-                        &mut messages,
-                        vec![ContentBlock::Text { text: text.clone() }],
-                    );
-                }
-                SessionEvent::AssistantMessage { content, .. } => {
-                    flush_results(&mut messages, &mut pending_results);
-                    if !content.is_empty() {
-                        messages.push(ChatMessage {
-                            role: Role::Assistant,
-                            content: content.clone(),
-                        });
-                    }
-                }
-                SessionEvent::ToolResult {
-                    tool_use_id,
-                    content,
-                    is_error,
-                    ..
-                } => {
-                    pending_results.push(ContentBlock::ToolResult {
-                        tool_use_id: tool_use_id.clone(),
-                        content: content.clone(),
-                        is_error: *is_error,
-                    });
-                }
-                SessionEvent::Compaction { .. } => {}
-            }
-        }
-        flush_results(&mut messages, &mut pending_results);
-        messages
+        transcript_of(&self.events)
     }
 }
 
@@ -205,4 +133,98 @@ fn push_user_blocks(messages: &mut Vec<ChatMessage>, blocks: Vec<ContentBlock>) 
             content: blocks,
         }),
     }
+}
+
+impl Session {
+    /// In-memory view of `events[..cut]` for summarization (compaction).
+    pub fn from_events_for_compaction(events: &[SessionEvent], cut: usize) -> SessionReader {
+        SessionReader {
+            events: events[..cut.min(events.len())].to_vec(),
+        }
+    }
+}
+
+/// Read-only session view (compaction input).
+pub struct SessionReader {
+    events: Vec<SessionEvent>,
+}
+
+impl SessionReader {
+    pub fn transcript(&self) -> Vec<ChatMessage> {
+        transcript_of(&self.events)
+    }
+}
+
+/// Pure transcript rendering over an event slice.
+fn transcript_of(events: &[SessionEvent]) -> Vec<ChatMessage> {
+    let mut cut = 0usize;
+    let mut summary: Option<&str> = None;
+    for (i, event) in events.iter().enumerate() {
+        if let SessionEvent::Compaction {
+            kept_from,
+            summary: s,
+            ..
+        } = event
+        {
+            cut = (*kept_from).min(i).max(cut);
+            summary = Some(s);
+        }
+    }
+    while cut < events.len() && matches!(events[cut], SessionEvent::ToolResult { .. }) {
+        cut += 1;
+    }
+
+    let mut messages: Vec<ChatMessage> = Vec::new();
+    if let Some(summary) = summary {
+        messages.push(ChatMessage {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: format!("<compaction-summary>\n{summary}\n</compaction-summary>"),
+            }],
+        });
+    }
+
+    let mut pending_results: Vec<ContentBlock> = Vec::new();
+    for event in &events[cut..] {
+        match event {
+            SessionEvent::Meta { .. } => {}
+            SessionEvent::UserMessage { text, .. } => {
+                if !pending_results.is_empty() {
+                    push_user_blocks(&mut messages, std::mem::take(&mut pending_results));
+                }
+                push_user_blocks(
+                    &mut messages,
+                    vec![ContentBlock::Text { text: text.clone() }],
+                );
+            }
+            SessionEvent::AssistantMessage { content, .. } => {
+                if !pending_results.is_empty() {
+                    push_user_blocks(&mut messages, std::mem::take(&mut pending_results));
+                }
+                if !content.is_empty() {
+                    messages.push(ChatMessage {
+                        role: Role::Assistant,
+                        content: content.clone(),
+                    });
+                }
+            }
+            SessionEvent::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+                ..
+            } => {
+                pending_results.push(ContentBlock::ToolResult {
+                    tool_use_id: tool_use_id.clone(),
+                    content: content.clone(),
+                    is_error: *is_error,
+                });
+            }
+            SessionEvent::Compaction { .. } => {}
+        }
+    }
+    if !pending_results.is_empty() {
+        push_user_blocks(&mut messages, pending_results);
+    }
+    messages
 }

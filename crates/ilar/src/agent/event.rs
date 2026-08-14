@@ -19,6 +19,8 @@ pub enum LoopEvent {
         stop_reason: String,
         usage: crate::session::Usage,
     },
+    /// The transcript was compacted before this turn's provider call.
+    Compacted,
     TurnDone {
         outcome: crate::agent::TurnOutcome,
     },

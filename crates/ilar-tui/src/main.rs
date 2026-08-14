@@ -111,6 +111,10 @@ impl App {
                     usage.input_tokens, usage.output_tokens, usage.cache_read_input_tokens
                 );
             }
+            LoopEvent::Compacted => {
+                self.lines
+                    .push(Line_::System("transcript compacted".into()));
+            }
             LoopEvent::TurnDone { outcome } => {
                 self.busy = false;
                 self.status = match outcome {
@@ -262,6 +266,19 @@ async fn main() -> Result<()> {
     let registry = ToolRegistry::builtin().with_subagents(spawner.clone());
     let notifications = spawner.subscribe();
     let tool_ctx = ToolContext::root(cwd.clone()).with_subagents(spawner.clone());
+    let loop_config = {
+        let threshold = config.compaction.threshold;
+        // GLM context window ~200k; conservative default per provider.
+        let limit = model_for_session
+            .starts_with("zai/")
+            .then_some(200_000u64)
+            .or(Some(128_000));
+        move || LoopConfig {
+            context_limit: limit,
+            compaction_threshold: threshold,
+            ..LoopConfig::default()
+        }
+    };
     let mut app = App::new();
     app.status = format!("{model_for_session} · {session_id}");
 
@@ -277,6 +294,7 @@ async fn main() -> Result<()> {
         tool_ctx,
         spawner,
         notifications,
+        loop_config,
     )
     .await;
     ratatui::restore();
@@ -295,6 +313,7 @@ async fn run_app(
     tool_ctx: ToolContext,
     spawner: std::sync::Arc<ilar::subagent::SubagentSpawner>,
     mut notifications: tokio::sync::mpsc::UnboundedReceiver<ilar::subagent::Notification>,
+    loop_config: impl Fn() -> LoopConfig + Clone,
 ) -> Result<()> {
     let mut events_rx: Option<tokio::sync::mpsc::UnboundedReceiver<LoopEvent>> = None;
     let mut cancel: Option<CancellationToken> = None;
@@ -343,6 +362,7 @@ async fn run_app(
                 let system_prompt = system_prompt.to_string();
                 let registry = registry.clone();
                 let turn_ctx = tool_ctx.clone();
+                let loop_config = loop_config();
                 turn_handle = Some(tokio::spawn(async move {
                     run_turn(
                         provider.as_ref(),
@@ -351,7 +371,7 @@ async fn run_app(
                         &session_id,
                         &text,
                         Some(&system_prompt),
-                        LoopConfig::default(),
+                        loop_config,
                         tx,
                         token,
                         turn_ctx,
