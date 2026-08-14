@@ -1,9 +1,5 @@
 # Open issues
 
-## Milestone 2 — Multiply
-
-- [ ] [Auto-compaction](issues/auto-compaction.md)
-
 ## Milestone 3 — Polish & extras
 
 - [ ] [Todo tool](issues/todo-tool.md)
