@@ -121,6 +121,11 @@ impl ToolRegistry {
         self
     }
 
+    /// Registry with the todo tool attached (shared list for TUI display).
+    pub fn with_todos(self, list: std::sync::Arc<std::sync::Mutex<crate::todo::TodoList>>) -> Self {
+        self.with_tool(std::sync::Arc::new(crate::todo::TodoTool::new(list)))
+    }
+
     /// Registry with the task (subagent) tool attached.
     pub fn with_subagents(self, spawner: Arc<crate::subagent::SubagentSpawner>) -> Self {
         self.with_tool(Arc::new(crate::subagent::TaskTool::new(spawner)))

@@ -263,7 +263,10 @@ async fn main() -> Result<()> {
         config.subagents.max_concurrent,
         config.subagents.max_depth,
     ));
-    let registry = ToolRegistry::builtin().with_subagents(spawner.clone());
+    let todos = std::sync::Arc::new(std::sync::Mutex::new(ilar::todo::TodoList::default()));
+    let registry = ToolRegistry::builtin()
+        .with_subagents(spawner.clone())
+        .with_todos(todos);
     let notifications = spawner.subscribe();
     let tool_ctx = ToolContext::root(cwd.clone()).with_subagents(spawner.clone());
     let loop_config = {
