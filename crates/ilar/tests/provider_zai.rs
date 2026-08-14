@@ -1,0 +1,312 @@
+use futures::StreamExt;
+use ilar::provider::zai::{Flavor, ZaiProvider};
+use ilar::provider::{Provider, ProviderEvent, Request, StopReason, ToolDefinition};
+use ilar::session::{ChatMessage, ContentBlock, Role, Usage};
+
+fn fixture(name: &str) -> Vec<u8> {
+    std::fs::read(format!("tests/fixtures/{name}"))
+        .unwrap_or_else(|e| panic!("fixture {name}: {e}"))
+}
+
+fn request() -> Request {
+    Request {
+        tools: vec![ToolDefinition {
+            name: "read".into(),
+            description: "read a file".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }],
+        ..Request::with_model("zai/glm-4.7")
+    }
+}
+
+fn http_server(sse_body: Vec<u8>) -> (String, tokio::task::JoinHandle<String>) {
+    let listener = futures::executor::block_on(async {
+        tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap()
+    });
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut req = Vec::new();
+        loop {
+            let mut buf = [0u8; 65536];
+            let n = socket.read(&mut buf).await.expect("read request");
+            if n == 0 {
+                break;
+            }
+            req.extend_from_slice(&buf[..n]);
+            let text = String::from_utf8_lossy(&req);
+            if let Some(head_end) = text.find("\r\n\r\n") {
+                let content_length = text
+                    .lines()
+                    .find_map(|l| {
+                        let (k, v) = l.split_once(':')?;
+                        k.eq_ignore_ascii_case("content-length")
+                            .then(|| v.trim().parse::<usize>().ok())?
+                    })
+                    .unwrap_or(0);
+                if req.len() >= head_end + 4 + content_length {
+                    break;
+                }
+            }
+        }
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        for chunk in sse_body.chunks(37) {
+            socket.write_all(chunk).await.unwrap();
+            socket.flush().await.unwrap();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        String::from_utf8_lossy(&req).into_owned()
+    });
+    (format!("http://{addr}"), handle)
+}
+
+fn anthropic_provider(base_url: String) -> ZaiProvider {
+    ZaiProvider::new("test-key".into(), Some(base_url), Flavor::Anthropic)
+}
+
+async fn drain(mut stream: ilar::provider::EventStream) -> Vec<ProviderEvent> {
+    let mut events = Vec::new();
+    while let Some(event) = stream.next().await {
+        events.push(event);
+    }
+    events
+}
+
+fn ensure_terminated_blank(fixtures: &[&str]) {
+    for name in fixtures {
+        let path = format!("tests/fixtures/{name}");
+        let content = std::fs::read_to_string(&path).unwrap();
+        if !content.ends_with("\n\n") {
+            std::fs::write(&path, format!("{content}\n")).unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn text_fixture_maps_to_neutral_events() {
+    ensure_terminated_blank(&["zai_text.sse"]);
+    let (base, _server) = http_server(fixture("zai_text.sse"));
+    let events = drain(anthropic_provider(base).stream(request()).unwrap()).await;
+
+    assert_eq!(
+        events,
+        vec![
+            ProviderEvent::TextDelta("Hello".into()),
+            ProviderEvent::TextDelta(", world".into()),
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+                usage: Usage {
+                    input_tokens: 20,
+                    output_tokens: 6,
+                    ..Default::default()
+                },
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn tool_call_fixture_maps_thinking_and_tool_use() {
+    ensure_terminated_blank(&["zai_toolcall.sse"]);
+    let (base, _server) = http_server(fixture("zai_toolcall.sse"));
+    let events = drain(anthropic_provider(base).stream(request()).unwrap()).await;
+
+    assert!(matches!(
+        &events[0],
+        ProviderEvent::ThinkingDelta(t) if t == "User wants the config"
+    ));
+    assert_eq!(
+        events[1],
+        ProviderEvent::ThinkingCompleted {
+            signature: Some("sig_abc".into())
+        }
+    );
+    assert_eq!(
+        events[2],
+        ProviderEvent::ToolCallStarted {
+            id: "toolu_01".into(),
+            name: "read".into(),
+        }
+    );
+    assert_eq!(
+        events[3],
+        ProviderEvent::ToolCallInputDelta {
+            id: "toolu_01".into(),
+            delta: "{\"path\":".into(),
+        }
+    );
+    assert!(matches!(
+        &events[5],
+        ProviderEvent::ToolCallCompleted { id, name, input }
+            if id == "toolu_01" && name == "read" && input == &serde_json::json!({"path": "Cargo.toml"})
+    ));
+    assert_eq!(events[6], ProviderEvent::TextDelta("Reading it.".into()));
+    let complete = events.last().unwrap();
+    assert_eq!(complete.clone().stop_reason(), Some(StopReason::ToolUse));
+    assert!(matches!(
+        complete,
+        ProviderEvent::TurnComplete { usage, .. }
+            if usage.cache_read_input_tokens == 128 && usage.output_tokens == 30
+    ));
+}
+
+#[tokio::test]
+async fn error_fixture_maps_to_error_event() {
+    ensure_terminated_blank(&["zai_error.sse"]);
+    let (base, _server) = http_server(fixture("zai_error.sse"));
+    let events = drain(anthropic_provider(base).stream(request()).unwrap()).await;
+    assert_eq!(events.len(), 1);
+    assert!(matches!(&events[0], ProviderEvent::Error(m) if m.contains("Overloaded")));
+}
+
+#[tokio::test]
+async fn truncated_tool_call_synthesizes_null_completion() {
+    ensure_terminated_blank(&["zai_truncated.sse"]);
+    let (base, _server) = http_server(fixture("zai_truncated.sse"));
+    let events = drain(anthropic_provider(base).stream(request()).unwrap()).await;
+
+    assert!(matches!(
+        &events[0],
+        ProviderEvent::ToolCallStarted { id, name } if id == "toolu_02" && name == "edit"
+    ));
+    assert!(matches!(
+        &events[2],
+        ProviderEvent::ToolCallCompleted { id, input, .. }
+            if id == "toolu_02" && input == &serde_json::Value::Null
+    ));
+    assert_eq!(events[3].clone().stop_reason(), Some(StopReason::MaxTokens));
+}
+
+#[tokio::test]
+async fn wire_format_anthropic_flavor() {
+    ensure_terminated_blank(&["zai_text.sse"]);
+    let (base, server) = http_server(fixture("zai_text.sse"));
+    let mut req = request();
+    req.system_prompt = Some("be terse".into());
+    req.messages = vec![
+        ChatMessage {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "read it".into(),
+            }],
+        },
+        ChatMessage {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    text: "hmm".into(),
+                    signature: Some("sig".into()),
+                },
+                ContentBlock::ToolCall {
+                    id: "toolu_01".into(),
+                    name: "read".into(),
+                    input: serde_json::json!({"path": "Cargo.toml"}),
+                },
+            ],
+        },
+        ChatMessage {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "toolu_01".into(),
+                content: "1: model".into(),
+                is_error: false,
+            }],
+        },
+    ];
+    let stream = anthropic_provider(base).stream(req).unwrap();
+    let wire = server.await.unwrap();
+    drop(stream);
+
+    assert!(wire.starts_with("POST /v1/messages"));
+    assert!(wire.contains("x-api-key: test-key"));
+    assert!(wire.contains("anthropic-version:"));
+    let body_start = wire.find("\r\n\r\n").unwrap() + 4;
+    let body: serde_json::Value = serde_json::from_str(wire[body_start..].trim()).unwrap();
+    assert_eq!(body["model"], "glm-4.7");
+    assert_eq!(body["system"], "be terse");
+    assert_eq!(body["stream"], true);
+    assert!(body["max_tokens"].as_u64().unwrap() > 0);
+    assert_eq!(body["tools"][0]["name"], "read");
+    assert_eq!(body["tools"][0]["input_schema"]["type"], "object");
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(messages[0]["role"], "user");
+    // Thinking block round-trips (Anthropic requires it with tool use).
+    assert_eq!(messages[1]["content"][0]["type"], "thinking");
+    assert_eq!(messages[1]["content"][0]["signature"], "sig");
+    assert_eq!(messages[1]["content"][1]["type"], "tool_use");
+    assert_eq!(messages[2]["content"][0]["type"], "tool_result");
+    assert_eq!(messages[2]["content"][0]["tool_use_id"], "toolu_01");
+}
+
+#[tokio::test]
+async fn openai_flavor_uses_chat_completions_endpoint() {
+    let listener = futures::executor::block_on(async {
+        tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap()
+    });
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut req = Vec::new();
+        loop {
+            let mut buf = [0u8; 65536];
+            let n = socket.read(&mut buf).await.expect("read");
+            if n == 0 {
+                break;
+            }
+            req.extend_from_slice(&buf[..n]);
+            let text = String::from_utf8_lossy(&req);
+            if let Some(head_end) = text.find("\r\n\r\n") {
+                let content_length = text
+                    .lines()
+                    .find_map(|l| {
+                        let (k, v) = l.split_once(':')?;
+                        k.eq_ignore_ascii_case("content-length")
+                            .then(|| v.trim().parse::<usize>().ok())?
+                    })
+                    .unwrap_or(0);
+                if req.len() >= head_end + 4 + content_length {
+                    break;
+                }
+            }
+        }
+        let body = "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hi\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\n";
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        socket.write_all(body.as_bytes()).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        String::from_utf8_lossy(&req).into_owned()
+    });
+
+    let provider = ZaiProvider::new(
+        "test-key".into(),
+        Some(format!("http://{addr}")),
+        Flavor::OpenAI,
+    );
+    let stream = provider.stream(request()).unwrap();
+    let wire = handle.await.unwrap();
+    drop(stream);
+
+    assert!(wire.starts_with("POST /chat/completions"));
+    assert!(wire.contains("Bearer test-key"));
+    let body_start = wire.find("\r\n\r\n").unwrap() + 4;
+    let body: serde_json::Value = serde_json::from_str(wire[body_start..].trim()).unwrap();
+    assert_eq!(body["model"], "glm-4.7");
+    assert_eq!(body["stream"], true);
+}
+
+#[tokio::test]
+async fn invalid_model_id_is_preflight_error() {
+    let provider = ZaiProvider::new("k".into(), None, Flavor::Anthropic);
+    assert!(provider.stream(Request::with_model("glm-4.7")).is_err());
+}
