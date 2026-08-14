@@ -1,0 +1,33 @@
+[general]
+# Default model: provider/model-id
+model = "zai/glm-4.7"
+
+[providers.openai]
+# api_key from ILAR_OPENAI_API_KEY (env) by default; can be set here.
+# base_url = "https://api.openai.com/v1"
+
+[providers.zai]
+# z.ai Anthropic-compatible endpoint (default):
+base_url = "https://api.z.ai/api/anthropic"
+# For the OpenAI-compatible endpoint use:
+#   base_url = "https://api.z.ai/api/paas/v4"
+#   flavor = "openai"
+# api_key from ILAR_ZAI_API_KEY (env).
+
+[compaction]
+# Summarize when transcript exceeds this fraction of context window.
+threshold = 0.85
+
+[subagents]
+max_concurrent = 10
+max_depth = 3
+
+# Custom agents live in ~/.config/ilar/agents/*.md (markdown + frontmatter):
+#
+# ---
+# description = "Fast read-only code explorer"
+# model = "zai/glm-4.7-air"
+# [permission]
+# tools = { bash = false, write = false, edit = false }   # informational only, no enforcement
+# ---
+# You find code. You do not change code. ...
