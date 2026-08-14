@@ -1,9 +1,7 @@
 use ilar::tools::{ToolContext, ToolKind, ToolRegistry};
 
 fn ctx(dir: &std::path::Path) -> ToolContext {
-    ToolContext {
-        cwd: dir.to_path_buf(),
-    }
+    ToolContext::root(dir.to_path_buf())
 }
 
 fn registry() -> ToolRegistry {

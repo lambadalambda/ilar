@@ -111,6 +111,7 @@ async fn multi_turn_tool_conversation_end_to_end() {
         LoopConfig::default(),
         tx,
         cancel,
+        ToolContext::root(std::env::temp_dir()),
     )
     .await
     .unwrap();
@@ -197,6 +198,7 @@ async fn provider_error_surfaces_and_session_stays_resumable() {
         LoopConfig::default(),
         tx,
         CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
     )
     .await;
 
@@ -268,6 +270,7 @@ async fn abort_mid_stream_leaves_resumable_session() {
         LoopConfig::default(),
         tx,
         cancel,
+        ToolContext::root(std::env::temp_dir()),
     )
     .await
     .unwrap();
@@ -315,6 +318,7 @@ async fn max_iterations_guard_stops_loop() {
         config,
         tx,
         CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
     )
     .await
     .unwrap();
@@ -374,6 +378,7 @@ async fn abort_after_tool_call_keeps_transcript_valid() {
         LoopConfig::default(),
         tx,
         cancel,
+        ToolContext::root(std::env::temp_dir()),
     )
     .await
     .unwrap();
@@ -416,6 +421,7 @@ async fn provider_error_mid_stream_persists_partial_step() {
         LoopConfig::default(),
         tx,
         CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
     )
     .await;
 
@@ -456,6 +462,7 @@ async fn stream_ending_without_terminal_event_is_error() {
         LoopConfig::default(),
         tx,
         CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
     )
     .await;
 

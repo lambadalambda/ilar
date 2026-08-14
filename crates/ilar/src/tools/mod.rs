@@ -9,7 +9,6 @@ pub mod read;
 pub mod write;
 
 use std::future::Future;
-use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -26,9 +25,36 @@ pub enum ToolKind {
 
 /// Per-invocation context. No permission checks — the sandbox is the
 /// permission system.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ToolContext {
-    pub cwd: PathBuf,
+    pub cwd: std::path::PathBuf,
+    /// Session the tool call belongs to (parent link for subagents).
+    pub session_id: String,
+    /// Subagent nesting depth (0 = root session).
+    pub depth: usize,
+    /// Subagent spawner, when the task tool is available.
+    pub subagent: Option<std::sync::Arc<crate::subagent::SubagentSpawner>>,
+}
+
+impl ToolContext {
+    /// Context for a root (non-subagent) session.
+    pub fn root(cwd: std::path::PathBuf) -> Self {
+        Self {
+            cwd,
+            session_id: String::new(),
+            depth: 0,
+            subagent: None,
+        }
+    }
+
+    /// Context with a subagent spawner attached.
+    pub fn with_subagents(
+        mut self,
+        spawner: std::sync::Arc<crate::subagent::SubagentSpawner>,
+    ) -> Self {
+        self.subagent = Some(spawner);
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -93,6 +119,11 @@ impl ToolRegistry {
     pub fn with_tool(mut self, tool: Arc<dyn Tool>) -> Self {
         self.tools.push(tool);
         self
+    }
+
+    /// Registry with the task (subagent) tool attached.
+    pub fn with_subagents(self, spawner: Arc<crate::subagent::SubagentSpawner>) -> Self {
+        self.with_tool(Arc::new(crate::subagent::TaskTool::new(spawner)))
     }
 
     pub fn definitions(&self) -> Vec<ToolDefinition> {

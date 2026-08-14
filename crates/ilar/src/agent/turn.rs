@@ -90,6 +90,7 @@ pub async fn run_turn(
     config: LoopConfig,
     events: tokio::sync::mpsc::UnboundedSender<LoopEvent>,
     cancel: CancellationToken,
+    mut tool_ctx: crate::tools::ToolContext,
 ) -> Result<TurnOutcome> {
     let mut session = store.load(session_id)?;
     session.append(SessionEvent::UserMessage {
@@ -100,9 +101,7 @@ pub async fn run_turn(
     publish(&events, LoopEvent::TurnStarted);
 
     let tools = registry.definitions();
-    let tool_ctx = crate::tools::ToolContext {
-        cwd: std::env::current_dir().unwrap_or_default(),
-    };
+    tool_ctx.session_id = session_id.to_string();
 
     for _ in 0..config.max_iterations {
         if cancel.is_cancelled() {

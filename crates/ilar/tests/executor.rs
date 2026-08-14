@@ -80,9 +80,7 @@ fn call(id: &str, name: &str) -> ToolCall {
 }
 
 fn ctx() -> ToolContext {
-    ToolContext {
-        cwd: std::env::temp_dir(),
-    }
+    ToolContext::root(std::env::temp_dir())
 }
 
 fn span(log: &[(Instant, String)], tag: &str) -> (Instant, Instant) {

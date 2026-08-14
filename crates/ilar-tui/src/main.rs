@@ -16,7 +16,8 @@ use ilar::agent::{LoopConfig, LoopEvent, TurnOutcome, run_turn};
 use ilar::config::{Loader, system_prompt_for};
 use ilar::provider::Provider;
 use ilar::session::{SessionMeta, SessionStore, new_id};
-use ilar::tools::ToolRegistry;
+use ilar::subagent::SubagentSpawner;
+use ilar::tools::{ToolContext, ToolRegistry};
 
 /// A rendered line in the transcript.
 #[derive(Debug, Clone)]
@@ -248,7 +249,18 @@ async fn main() -> Result<()> {
         }
     };
 
-    let registry = ToolRegistry::builtin();
+    let agents = config.agents();
+    let spawner = std::sync::Arc::new(SubagentSpawner::new(
+        provider.clone(),
+        store.clone(),
+        agents,
+        cwd.clone(),
+        0,
+        config.subagents.max_concurrent,
+        config.subagents.max_depth,
+    ));
+    let registry = ToolRegistry::builtin().with_subagents(spawner.clone());
+    let tool_ctx = ToolContext::root(cwd.clone()).with_subagents(spawner);
     let mut app = App::new();
     app.status = format!("{model_for_session} · {session_id}");
 
@@ -261,12 +273,14 @@ async fn main() -> Result<()> {
         &session_id,
         &system_prompt,
         &registry,
+        tool_ctx,
     )
     .await;
     ratatui::restore();
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_app(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
@@ -275,6 +289,7 @@ async fn run_app(
     session_id: &str,
     system_prompt: &str,
     registry: &ToolRegistry,
+    tool_ctx: ToolContext,
 ) -> Result<()> {
     let mut events_rx: Option<tokio::sync::mpsc::UnboundedReceiver<LoopEvent>> = None;
     let mut cancel: Option<CancellationToken> = None;
@@ -348,6 +363,7 @@ async fn run_app(
                         let session_id = session_id.to_string();
                         let system_prompt = system_prompt.to_string();
                         let registry = registry.clone();
+                        let turn_ctx = tool_ctx.clone();
                         turn_handle = Some(tokio::spawn(async move {
                             run_turn(
                                 provider.as_ref(),
@@ -359,6 +375,7 @@ async fn run_app(
                                 LoopConfig::default(),
                                 tx,
                                 token,
+                                turn_ctx,
                             )
                             .await
                         }));
