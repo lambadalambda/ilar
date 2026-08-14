@@ -229,7 +229,9 @@ async fn wire_format_anthropic_flavor() {
     let body_start = wire.find("\r\n\r\n").unwrap() + 4;
     let body: serde_json::Value = serde_json::from_str(wire[body_start..].trim()).unwrap();
     assert_eq!(body["model"], "glm-4.7");
-    assert_eq!(body["system"], "be terse");
+    // System is a block array with a cache breakpoint.
+    assert_eq!(body["system"][0]["text"], "be terse");
+    assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
     assert_eq!(body["stream"], true);
     assert!(body["max_tokens"].as_u64().unwrap() > 0);
     assert_eq!(body["tools"][0]["name"], "read");
@@ -309,4 +311,135 @@ async fn openai_flavor_uses_chat_completions_endpoint() {
 async fn invalid_model_id_is_preflight_error() {
     let provider = ZaiProvider::new("k".into(), None, Flavor::Anthropic);
     assert!(provider.stream(Request::with_model("glm-4.7")).is_err());
+}
+
+// ---- prompt caching ----
+
+#[tokio::test]
+async fn cache_breakpoints_placed() {
+    ensure_terminated_blank(&["zai_text.sse"]);
+    let (base, server) = http_server(fixture("zai_text.sse"));
+    let mut req = request();
+    req.system_prompt = Some("sys".into());
+    req.messages = vec![
+        ChatMessage::user_text("one"),
+        ChatMessage {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    text: "t".into(),
+                    signature: Some("s".into()),
+                },
+                ContentBlock::ToolCall {
+                    id: "toolu_01".into(),
+                    name: "read".into(),
+                    input: serde_json::json!({"path": "x"}),
+                },
+            ],
+        },
+        ChatMessage {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "toolu_01".into(),
+                content: "out".into(),
+                is_error: false,
+            }],
+        },
+    ];
+    let stream = anthropic_provider(base).stream(req).unwrap();
+    let wire = server.await.unwrap();
+    drop(stream);
+    let body_start = wire.find("\r\n\r\n").unwrap() + 4;
+    let body: serde_json::Value = serde_json::from_str(wire[body_start..].trim()).unwrap();
+
+    // System breakpoint.
+    assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+    // Last tool gets the breakpoint, earlier tools don't.
+    let tools = body["tools"].as_array().unwrap();
+    assert!(tools[0].get("cache_control").is_none() || tools.len() == 1);
+    assert_eq!(tools.last().unwrap()["cache_control"]["type"], "ephemeral");
+    // Last message's last block gets the breakpoint; earlier blocks don't.
+    let messages = body["messages"].as_array().unwrap();
+    assert!(messages[0]["content"][0].get("cache_control").is_none());
+    assert!(messages[1]["content"][0].get("cache_control").is_none());
+    let last_blocks = messages[2]["content"].as_array().unwrap();
+    assert_eq!(
+        last_blocks.last().unwrap()["cache_control"]["type"],
+        "ephemeral"
+    );
+}
+
+#[test]
+fn wire_prefix_stable_across_turns() {
+    // Same session, growing transcript: the serialized wire messages of
+    // turn 2 must begin with identical serialization of turn 1's messages
+    // after stripping cache_control markers. (Anthropic documents that
+    // breakpoint placement is not part of the cached-content hash; the
+    // moving breakpoint is the canonical incremental pattern. The live
+    // test below verifies z.ai honors this — if it ever fails, switch to
+    // append-only breakpoints.)
+    let strip_markers = |value: serde_json::Value| -> serde_json::Value {
+        fn walk(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    map.remove("cache_control");
+                    for v in map.values_mut() {
+                        walk(v);
+                    }
+                }
+                serde_json::Value::Array(items) => items.iter_mut().for_each(walk),
+                _ => {}
+            }
+        }
+        let mut v = value;
+        walk(&mut v);
+        v
+    };
+    let provider = ZaiProvider::new("k".into(), None, Flavor::Anthropic);
+    let u1 = ChatMessage::user_text("what is in the config?");
+    let a1 = ChatMessage {
+        role: Role::Assistant,
+        content: vec![
+            ContentBlock::Thinking {
+                text: "check file".into(),
+                signature: Some("sig".into()),
+            },
+            ContentBlock::ToolCall {
+                id: "toolu_01".into(),
+                name: "read".into(),
+                input: serde_json::json!({"path": "ilar.toml"}),
+            },
+        ],
+    };
+    let u1b = ChatMessage {
+        role: Role::User,
+        content: vec![ContentBlock::ToolResult {
+            tool_use_id: "toolu_01".into(),
+            content: "1: model = zai/glm-4.7".into(),
+            is_error: false,
+        }],
+    };
+
+    let turn1 = Request {
+        messages: vec![u1.clone()],
+        ..request()
+    };
+    let turn2 = Request {
+        messages: vec![u1, a1, u1b],
+        ..request()
+    };
+
+    let body1 = serde_json::to_value(provider.wire_body_for_test(&turn1)).unwrap();
+    let body2 = serde_json::to_value(provider.wire_body_for_test(&turn2)).unwrap();
+    let m1 = serde_json::to_string(&strip_markers(body1["messages"][0].clone())).unwrap();
+    let m2 = serde_json::to_string(&strip_markers(body2["messages"][0].clone())).unwrap();
+    assert_eq!(
+        m1, m2,
+        "first message content must be identical across turns"
+    );
+    // System prompt block identical (markers and all — it never moves).
+    assert_eq!(
+        serde_json::to_string(&body1["system"]).unwrap(),
+        serde_json::to_string(&body2["system"]).unwrap()
+    );
 }

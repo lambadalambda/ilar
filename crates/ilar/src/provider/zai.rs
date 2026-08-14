@@ -22,6 +22,7 @@ pub enum Flavor {
     OpenAI,
 }
 
+#[derive(Clone)]
 pub struct ZaiProvider {
     api_key: String,
     base_url: String,
@@ -30,6 +31,11 @@ pub struct ZaiProvider {
 }
 
 impl ZaiProvider {
+    /// Test accessor for the wire body (prefix-stability checks).
+    pub fn wire_body_for_test(&self, req: &Request) -> serde_json::Value {
+        self.wire_body(req).expect("wire body")
+    }
+
     pub fn new(api_key: String, base_url: Option<String>, flavor: Flavor) -> Self {
         let default_base = match flavor {
             Flavor::Anthropic => "https://api.z.ai/api/anthropic",
@@ -51,21 +57,39 @@ impl ZaiProvider {
         match self.flavor {
             Flavor::Anthropic => {
                 body.insert("model".into(), serde_json::json!(model_id));
-                body.insert("system".into(), serde_json::json!(req.system_prompt));
+                // System as a block array with a cache breakpoint: the
+                // system prompt + tools are the stable prefix every turn
+                // reuses.
+                if let Some(system) = &req.system_prompt {
+                    body.insert(
+                        "system".into(),
+                        serde_json::json!([{
+                            "type": "text",
+                            "text": system,
+                            "cache_control": {"type": "ephemeral"},
+                        }]),
+                    );
+                }
                 body.insert("max_tokens".into(), serde_json::json!(16_384));
-                body.insert(
-                    "messages".into(),
-                    serde_json::json!(
-                        req.messages
-                            .iter()
-                            .map(anthropic_message)
-                            .collect::<Vec<_>>()
-                    ),
-                );
-                body.insert(
-                    "tools".into(),
-                    serde_json::json!(req.tools.iter().map(anthropic_tool).collect::<Vec<_>>()),
-                );
+                // Messages: moving cache breakpoint on the last block of the
+                // last message (the canonical incremental-caching pattern —
+                // each turn's entry covers everything up to that turn's end).
+                let mut wire_messages: Vec<serde_json::Value> =
+                    req.messages.iter().map(anthropic_message).collect();
+                if let Some(message) = wire_messages.last_mut()
+                    && let Some(content) = message["content"].as_array_mut()
+                    && let Some(last_block) = content.last_mut()
+                {
+                    last_block["cache_control"] = serde_json::json!({"type": "ephemeral"});
+                }
+                body.insert("messages".into(), serde_json::json!(wire_messages));
+                // Tools: breakpoint on the last tool definition.
+                let mut wire_tools: Vec<serde_json::Value> =
+                    req.tools.iter().map(anthropic_tool).collect();
+                if let Some(last_tool) = wire_tools.last_mut() {
+                    last_tool["cache_control"] = serde_json::json!({"type": "ephemeral"});
+                }
+                body.insert("tools".into(), serde_json::json!(wire_tools));
                 body.insert("stream".into(), serde_json::json!(true));
             }
             Flavor::OpenAI => {
@@ -682,6 +706,15 @@ impl OpenAiMapper {
 
 fn merge_usage(usage: &mut Usage, wire: &serde_json::Map<String, serde_json::Value>) {
     let get = |k: &str| wire.get(k).and_then(|v| v.as_u64()).unwrap_or_default();
+    // OpenAI-style nested cached tokens (z.ai openai flavor).
+    let cached = wire
+        .get("prompt_tokens_details")
+        .and_then(|d| d.get("cached_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or_default();
+    if cached > 0 {
+        usage.cache_read_input_tokens = cached;
+    }
     let input = get("input_tokens").max(get("prompt_tokens"));
     if input > 0 {
         usage.input_tokens = input;
