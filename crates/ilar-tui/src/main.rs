@@ -212,7 +212,15 @@ async fn main() -> Result<()> {
         .with_context(|| format!("unknown agent {:?}", args.agent))?;
 
     let cwd = std::env::current_dir().context("no cwd")?;
+    let skill_store = std::sync::Arc::new(ilar::skill::SkillStore::new(
+        config.dirs().0.to_path_buf(),
+        cwd.clone(),
+    ));
+    let skill_listing = skill_store.listing_prompt();
     let mut system_prompt = system_prompt_for(&cwd);
+    if !skill_listing.is_empty() {
+        system_prompt = format!("{system_prompt}\n\n{skill_listing}");
+    }
     if !agent.prompt.is_empty() {
         system_prompt = format!(
             "{system_prompt}\n\n# Agent: {}\n\n{}",
@@ -267,7 +275,8 @@ async fn main() -> Result<()> {
     let registry = ToolRegistry::builtin()
         .with_subagents(spawner.clone())
         .with_todos(todos)
-        .with_web_tools();
+        .with_web_tools()
+        .with_skills(skill_store);
     let notifications = spawner.subscribe();
     let tool_ctx = ToolContext::root(cwd.clone()).with_subagents(spawner.clone());
     let model_choices: Vec<String> = {

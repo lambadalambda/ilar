@@ -123,6 +123,11 @@ impl ToolRegistry {
         self
     }
 
+    /// Registry with the skill tool attached.
+    pub fn with_skills(self, store: std::sync::Arc<crate::skill::SkillStore>) -> Self {
+        self.with_tool(std::sync::Arc::new(crate::skill::SkillTool::new(store)))
+    }
+
     /// Registry with a search backend attached.
     pub fn with_search(self, backend: Box<dyn web::SearchBackend>) -> Self {
         self.with_tool(std::sync::Arc::new(web::WebSearchTool::new(backend)))
