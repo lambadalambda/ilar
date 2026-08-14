@@ -200,3 +200,28 @@ drop chain intact). Fixes applied from review:
 - Bonus real bug: bash drained pipes only AFTER wait() — a child
   writing >64KB blocked on the full pipe until timeout killed it.
   Now joined concurrently; 300KB drain test proves fast clean exit.
+
+## 2026-08-14 — agent-loop done
+
+The turn state machine. Review caught two blockers on the abort path
+(the one path the spec calls a hard requirement):
+1. Abort between ToolCallCompleted and TurnComplete persisted an
+   unanswered tool_use — every provider 400s on that shape, so one Esc
+   at the wrong moment permanently poisoned the session. Fix: abort
+   path synthesizes error tool results ("aborted before execution")
+   for every announced call; resume tells the model the truth.
+2. Abort between iterations (e.g. during tool execution) returned
+   without publishing TurnDone — a guaranteed TUI deadlock once Esc
+   is wired.
+
+Also: streams ending without TurnComplete/Error are now errors (a
+dying provider no longer gets its announced tools executed on its
+behalf), and provider errors persist the partial step (UI-shown
+deltas must not evaporate from the transcript).
+
+Invariants worth remembering: executor cancel already fills holes
+with cancelled outcomes (so abort-during-execution is safe by
+construction); transcript() coalesces trailing tool results with the
+next user message (valid "please continue" shape on both wires).
+Known non-goal for now: concurrent run_turns on one session would
+double-open the JSONL — TUI is strictly one turn at a time.

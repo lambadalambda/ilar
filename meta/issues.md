@@ -2,7 +2,6 @@
 
 ## Milestone 1 — Lean core (usable for real work)
 
-- [ ] [Agent loop (turn state machine over event channel)](issues/agent-loop.md)
 - [ ] [Config: TOML + markdown agent definitions + AGENTS.md injection](issues/config-and-agents-md.md)
 - [ ] [Minimal TUI: streaming, tool display, input, Esc full-abort](issues/minimal-tui.md)
 
