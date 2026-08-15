@@ -308,3 +308,34 @@ existing access token — usage can't rotate anything):
 For daily use: run `ilar login` so ilar holds its own token pair —
 refresh rotation would otherwise race codex's copy if you reuse the
 same refresh token in two stores.
+
+## 2026-08-15 — OpenAI tool-loop stall
+
+The first real OAuth coding turn exposed three interacting bugs after
+`todo`: Responses API `function_call_output` rejects the neutral model's
+`is_error` field, the TUI discarded `Ok(Err(...))` from the spawned turn,
+and streamed tool calls were announced twice. OpenAI now emits only
+`type`, `call_id`, and `output`; nested turn errors are displayed; starts
+are deduplicated; and tool lines are completed by call id rather than
+screen position. Final queued events are drained after joining the turn.
+
+Tool results are flushed to JSONL before `ToolFinished` is published. A
+regression test reloads the session while the next provider request is
+still pending and sees both the assistant tool call and its result.
+Provider errors after a completed call synthesize an error result so the
+session remains resumable.
+
+## 2026-08-15 — Readable Markdown and real transcript scrolling
+
+Assistant output is now rendered as terminal-native Markdown instead of
+putting an entire response (including newlines) into one Ratatui `Line`.
+Headings, lists, quotes, emphasis, inline code, links, rules, and fenced
+code get distinct styles; tabs use stable four-column stops, and partial
+streaming delimiters remain visible until they close.
+
+The transcript follows the wrapped visual tail by default and detaches
+when the user scrolls upward. Controls: arrows and mouse wheel for small
+steps, PgUp/PgDn for pages, Ctrl-U/Ctrl-D for half-pages, Ctrl-Home for
+the top, and Ctrl-End to resume tail following. Overflow adds a scrollbar
+and a `tail`/percentage title marker. Wrapped row counts are recalculated
+on resize without snapping a detached reader back to the tail.

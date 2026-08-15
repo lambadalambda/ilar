@@ -32,3 +32,6 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 ## Follow-ups
 
 - [x] [OpenAI ChatGPT OAuth login (PKCE)](issues/openai-oauth-login.md)
+- [x] [Tool call stalls after todo](issues/tool-call-stalls-after-todo.md)
+- [x] [Markdown transcript rendering](issues/markdown-transcript-rendering.md)
+- [x] [Transcript scrolling](issues/transcript-scrolling.md)

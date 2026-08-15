@@ -1,15 +1,22 @@
 //! ilar TUI: transcript, streaming, tool display, input. Esc aborts.
 
+mod markdown;
+
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+    MouseEventKind,
+};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, Borders, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
+};
 use tokio_util::sync::CancellationToken;
 
 use ilar::agent::{LoopConfig, LoopEvent, TurnOutcome, run_turn};
@@ -24,7 +31,11 @@ use ilar::tools::{ToolContext, ToolRegistry};
 enum Line_ {
     User(String),
     Assistant(String),
-    Tool(String, bool),
+    Tool {
+        id: String,
+        text: String,
+        done: bool,
+    },
     System(String),
 }
 
@@ -56,24 +67,50 @@ struct Args {
     print_prompt: bool,
 }
 
+struct TerminalSession;
+
+impl TerminalSession {
+    fn start() -> Result<(ratatui::DefaultTerminal, Self)> {
+        let terminal = ratatui::init();
+        if let Err(error) = crossterm::execute!(std::io::stdout(), EnableMouseCapture) {
+            ratatui::restore();
+            return Err(error.into());
+        }
+        Ok((terminal, Self))
+    }
+}
+
+impl Drop for TerminalSession {
+    fn drop(&mut self) {
+        let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture);
+        ratatui::restore();
+    }
+}
+
 struct App {
     lines: Vec<Line_>,
     input: String,
     busy: bool,
     status: String,
-    scroll: u16,
+    scroll_top: usize,
+    content_rows: usize,
+    viewport_rows: usize,
+    follow_tail: bool,
 }
 
 impl App {
     fn new() -> Self {
         Self {
             lines: vec![Line_::System(
-                "ilar — type a request, Esc aborts, Ctrl-C quits".into(),
+                "ilar — PgUp/PgDn scroll, Ctrl-End follows tail, Esc aborts, Ctrl-C quits".into(),
             )],
             input: String::new(),
             busy: false,
             status: String::new(),
-            scroll: 0,
+            scroll_top: 0,
+            content_rows: 0,
+            viewport_rows: 0,
+            follow_tail: true,
         }
     }
 
@@ -92,26 +129,51 @@ impl App {
             LoopEvent::ThinkingDelta(_) => {
                 self.status = "thinking".into();
             }
-            LoopEvent::ToolStarted { name, .. } => {
-                self.lines.push(Line_::Tool(format!("▶ {name} …"), false));
+            LoopEvent::ToolStarted { id, name } => {
+                self.lines.push(Line_::Tool {
+                    id: id.clone(),
+                    text: format!("▶ {name} …"),
+                    done: false,
+                });
                 self.status = format!("running {name}");
             }
-            LoopEvent::ToolFinished { name, is_error, .. } => {
-                if let Some(Line_::Tool(text, done)) = self.lines.last_mut()
-                    && !*done
+            LoopEvent::ToolFinished { id, name, is_error } => {
+                let mut matched = false;
+                if let Some((text, done)) =
+                    self.lines.iter_mut().rev().find_map(|line| match line {
+                        Line_::Tool {
+                            id: line_id,
+                            text,
+                            done,
+                        } if line_id == id && !*done => Some((text, done)),
+                        _ => None,
+                    })
                 {
                     *text = format!(
                         "{} {}",
-                        text.trim_end_matches("…"),
+                        text.trim_end_matches('…').trim_end(),
                         if *is_error { "✗" } else { "✓" }
                     );
                     *done = true;
-                    return;
+                    matched = true;
                 }
-                self.lines.push(Line_::Tool(
-                    format!("▪ {name} {}", if *is_error { "✗" } else { "✓" }),
-                    true,
-                ));
+                if !matched {
+                    self.lines.push(Line_::Tool {
+                        id: id.clone(),
+                        text: format!("▪ {name} {}", if *is_error { "✗" } else { "✓" }),
+                        done: true,
+                    });
+                }
+                let running = self
+                    .lines
+                    .iter()
+                    .filter(|line| matches!(line, Line_::Tool { done: false, .. }))
+                    .count();
+                self.status = match running {
+                    0 => "thinking".into(),
+                    1 => "running 1 tool".into(),
+                    count => format!("running {count} tools"),
+                };
             }
             LoopEvent::StepComplete { stop_reason, usage } => {
                 self.status = format!(
@@ -134,7 +196,105 @@ impl App {
         }
     }
 
-    fn render(&self, frame: &mut Frame) {
+    fn finish_turn(&mut self, result: anyhow::Result<TurnOutcome>) {
+        if let Err(error) = result {
+            self.lines.push(Line_::System(format!("error: {error:#}")));
+            self.status = "error".into();
+        }
+        self.busy = false;
+    }
+
+    fn max_scroll(&self) -> usize {
+        self.content_rows.saturating_sub(self.viewport_rows)
+    }
+
+    fn page_size(&self) -> usize {
+        self.viewport_rows.saturating_sub(2).max(1)
+    }
+
+    fn scroll_up(&mut self, rows: usize) {
+        self.follow_tail = false;
+        self.scroll_top = self.scroll_top.saturating_sub(rows);
+    }
+
+    fn scroll_down(&mut self, rows: usize) {
+        let max_scroll = self.max_scroll();
+        self.scroll_top = self.scroll_top.saturating_add(rows).min(max_scroll);
+        self.follow_tail = self.scroll_top == max_scroll;
+    }
+
+    fn scroll_to_top(&mut self) {
+        self.scroll_top = 0;
+        self.follow_tail = self.max_scroll() == 0;
+    }
+
+    fn scroll_to_tail(&mut self) {
+        self.scroll_top = self.max_scroll();
+        self.follow_tail = true;
+    }
+
+    fn update_scroll_metrics(&mut self, content_rows: usize, viewport_rows: usize) {
+        self.content_rows = content_rows;
+        self.viewport_rows = viewport_rows;
+        let max_scroll = self.max_scroll();
+        if self.follow_tail {
+            self.scroll_top = max_scroll;
+        } else {
+            self.scroll_top = self.scroll_top.min(max_scroll);
+        }
+    }
+
+    fn transcript_lines(&self) -> Vec<Line<'static>> {
+        let mut output = Vec::new();
+        for entry in &self.lines {
+            match entry {
+                Line_::Assistant(text) => {
+                    for (index, mut line) in markdown::render(text).into_iter().enumerate() {
+                        let label = if index == 0 { "ilar " } else { "     " };
+                        let mut spans = vec![Span::styled(
+                            label,
+                            Style::default()
+                                .fg(Color::Green)
+                                .add_modifier(Modifier::BOLD),
+                        )];
+                        spans.append(&mut line.spans);
+                        output.push(Line::from(spans));
+                    }
+                }
+                Line_::User(text) => {
+                    for (index, text) in safe_lines(text).into_iter().enumerate() {
+                        output.push(Line::from(vec![
+                            Span::styled(
+                                if index == 0 { "you  " } else { "     " },
+                                Style::default()
+                                    .fg(Color::Cyan)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::raw(text),
+                        ]));
+                    }
+                }
+                Line_::Tool { text, .. } => output.push(Line::from(vec![
+                    Span::styled("tool ", Style::default().fg(Color::Yellow)),
+                    Span::raw(safe_text(text)),
+                ])),
+                Line_::System(text) => {
+                    for (index, text) in safe_lines(text).into_iter().enumerate() {
+                        output.push(Line::from(vec![
+                            Span::styled(
+                                if index == 0 { "—    " } else { "     " },
+                                Style::default().fg(Color::DarkGray),
+                            ),
+                            Span::styled(text, Style::default().fg(Color::DarkGray)),
+                        ]));
+                    }
+                }
+            }
+        }
+        output
+    }
+
+    fn render(&mut self, frame: &mut Frame) {
         let chunks = Layout::vertical([
             Constraint::Min(3),
             Constraint::Length(1),
@@ -142,46 +302,50 @@ impl App {
         ])
         .split(frame.area());
 
-        let text: Vec<Line> = self
-            .lines
-            .iter()
-            .map(|line| match line {
-                Line_::User(t) => Line::from(vec![
-                    Span::styled(
-                        "you  ",
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(t.clone()),
-                ]),
-                Line_::Assistant(t) => Line::from(vec![
-                    Span::styled(
-                        "ilar ",
-                        Style::default()
-                            .fg(Color::Green)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(t.clone()),
-                ]),
-                Line_::Tool(t, _) => Line::from(vec![
-                    Span::styled("tool ", Style::default().fg(Color::Yellow)),
-                    Span::raw(t.clone()),
-                ]),
-                Line_::System(t) => Line::from(vec![
-                    Span::styled("—    ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(t.clone(), Style::default().fg(Color::DarkGray)),
-                ]),
-            })
-            .collect();
-
-        // Wrap assistant lines lazily via Paragraph's Wrap instead of manual
-        // splitting: we render one logical line per entry, wrapped.
-        let paragraph = Paragraph::new(text)
-            .block(Block::default().borders(Borders::ALL).title("ilar"))
+        let text = self.transcript_lines();
+        let transcript_area = chunks[0];
+        let text_width = transcript_area.width.saturating_sub(3);
+        let viewport_rows = transcript_area.height.saturating_sub(2) as usize;
+        let content_rows = Paragraph::new(text.clone())
             .wrap(Wrap { trim: false })
-            .scroll((self.scroll, 0));
-        frame.render_widget(paragraph, chunks[0]);
+            .line_count(text_width);
+        self.update_scroll_metrics(content_rows, viewport_rows);
+        let max_scroll = self.max_scroll();
+        let scroll_label = if max_scroll == 0 {
+            String::new()
+        } else if self.follow_tail {
+            " · tail".into()
+        } else {
+            format!(" · {}%", self.scroll_top.saturating_mul(100) / max_scroll)
+        };
+        let paragraph = Paragraph::new(text)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!("ilar{scroll_label}"))
+                    .padding(Padding::new(0, 1, 0, 0)),
+            )
+            .wrap(Wrap { trim: false })
+            .scroll((self.scroll_top.min(u16::MAX as usize) as u16, 0));
+        frame.render_widget(paragraph, transcript_area);
+
+        if max_scroll > 0 && transcript_area.height > 2 {
+            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .track_symbol(Some("│"))
+                .thumb_symbol("┃");
+            let mut state = ScrollbarState::new(max_scroll.saturating_add(1))
+                .position(self.scroll_top)
+                .viewport_content_length(self.viewport_rows);
+            let area = Rect::new(
+                transcript_area.right().saturating_sub(2),
+                transcript_area.y.saturating_add(1),
+                1,
+                transcript_area.height.saturating_sub(2),
+            );
+            frame.render_stateful_widget(scrollbar, area, &mut state);
+        }
 
         let busy = if self.busy {
             Span::styled(
@@ -200,6 +364,31 @@ impl App {
             .block(Block::default().borders(Borders::ALL).title("input"))
             .wrap(Wrap { trim: false });
         frame.render_widget(input, chunks[2]);
+    }
+}
+
+fn safe_text(text: &str) -> String {
+    let mut output = String::new();
+    let mut column = 0usize;
+    for character in text.chars().filter(|c| *c == '\t' || !c.is_control()) {
+        if character == '\t' {
+            let spaces = 4 - column % 4;
+            output.push_str(&" ".repeat(spaces));
+            column += spaces;
+        } else {
+            output.push(character);
+            column += 1;
+        }
+    }
+    output
+}
+
+fn safe_lines(text: &str) -> Vec<String> {
+    let lines: Vec<_> = text.lines().map(safe_text).collect();
+    if lines.is_empty() {
+        vec![String::new()]
+    } else {
+        lines
     }
 }
 
@@ -308,13 +497,12 @@ async fn main() -> Result<()> {
         {
             choices.extend(["zai/glm-4.7".to_string(), "zai/glm-4.7-air".to_string()]);
         }
-        if config
-            .providers
-            .get("openai")
-            .and_then(|p| p.api_key.as_ref())
-            .is_some()
-        {
-            choices.push("openai/gpt-5.2".to_string());
+        if let Some(openai) = config.providers.get("openai") {
+            if openai.auth.as_deref() == Some("chatgpt") {
+                choices.push("openai/gpt-5.6-sol".to_string());
+            } else if openai.api_key.is_some() {
+                choices.push("openai/gpt-5.2".to_string());
+            }
         }
         if !choices.contains(&model_for_session) {
             choices.insert(0, model_for_session.clone());
@@ -338,8 +526,8 @@ async fn main() -> Result<()> {
     let mut app = App::new();
     app.status = format!("{model_for_session} · {session_id}");
 
-    let mut terminal = ratatui::init();
-    let result = run_app(
+    let (mut terminal, _terminal_session) = TerminalSession::start()?;
+    run_app(
         &mut terminal,
         &mut app,
         provider,
@@ -354,9 +542,7 @@ async fn main() -> Result<()> {
         model_choices,
         config,
     )
-    .await;
-    ratatui::restore();
-    result
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -382,8 +568,6 @@ async fn run_app(
     let mut turn_handle: Option<tokio::task::JoinHandle<Result<TurnOutcome>>> = None;
 
     loop {
-        terminal.draw(|frame| app.render(frame))?;
-
         // Drain pending loop events.
         if let Some(rx) = events_rx.as_mut() {
             while let Ok(event) = rx.try_recv() {
@@ -395,13 +579,18 @@ async fn run_app(
             && handle.is_finished()
         {
             let handle = turn_handle.take().unwrap();
-            let result = handle.await;
-            if let Err(e) = result {
-                app.lines.push(Line_::System(format!("error: {e:#}")));
+            let result = match handle.await {
+                Ok(result) => result,
+                Err(error) => Err(error.into()),
+            };
+            if let Some(rx) = events_rx.as_mut() {
+                while let Ok(event) = rx.try_recv() {
+                    app.push_loop_event(&event);
+                }
             }
+            app.finish_turn(result);
             events_rx = None;
             cancel = None;
-            app.busy = false;
         }
 
         // Background completions re-invoke the loop while idle.
@@ -443,21 +632,24 @@ async fn run_app(
             }
         }
 
+        terminal.draw(|frame| app.render(frame))?;
+
         // Poll terminal input (fast while busy so streaming keeps rendering).
         let timeout = if app.busy {
             std::time::Duration::from_millis(50)
         } else {
             std::time::Duration::from_millis(250)
         };
-        if crossterm::event::poll(timeout)?
-            && let Ok(Event::Key(KeyEvent {
+        if !crossterm::event::poll(timeout)? {
+            continue;
+        }
+        match crossterm::event::read()? {
+            Event::Key(KeyEvent {
                 code,
-                kind: KeyEventKind::Press,
+                kind: KeyEventKind::Press | KeyEventKind::Repeat,
                 modifiers,
                 ..
-            })) = crossterm::event::read()
-        {
-            match (code, modifiers.contains(KeyModifiers::CONTROL)) {
+            }) => match (code, modifiers.contains(KeyModifiers::CONTROL)) {
                 (KeyCode::Char('c'), true) => {
                     if let Some(cancel) = &cancel {
                         cancel.cancel();
@@ -502,6 +694,7 @@ async fn run_app(
                     if !app.busy && !app.input.trim().is_empty() {
                         let text = std::mem::take(&mut app.input);
                         app.lines.push(Line_::User(text.clone()));
+                        app.follow_tail = true;
                         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
                         events_rx = Some(rx);
                         let token = CancellationToken::new();
@@ -533,17 +726,121 @@ async fn run_app(
                 (KeyCode::Backspace, _) => {
                     app.input.pop();
                 }
-                (KeyCode::Char(c), _) => {
+                (KeyCode::Char('u'), true) => {
+                    app.scroll_up(app.page_size().div_ceil(2));
+                }
+                (KeyCode::Char('d'), true) => {
+                    app.scroll_down(app.page_size().div_ceil(2));
+                }
+                (KeyCode::Home, true) => app.scroll_to_top(),
+                (KeyCode::End, true) => app.scroll_to_tail(),
+                (KeyCode::PageUp, _) => app.scroll_up(app.page_size()),
+                (KeyCode::PageDown, _) => app.scroll_down(app.page_size()),
+                (KeyCode::Up, _) => app.scroll_up(1),
+                (KeyCode::Down, _) => app.scroll_down(1),
+                (KeyCode::Char(c), false) => {
                     app.input.push(c);
                 }
-                (KeyCode::PageUp, _) => {
-                    app.scroll = app.scroll.saturating_add(5);
-                }
-                (KeyCode::PageDown, _) => {
-                    app.scroll = app.scroll.saturating_sub(5);
-                }
                 _ => {}
-            }
+            },
+            Event::Mouse(mouse) => match mouse.kind {
+                MouseEventKind::ScrollUp => app.scroll_up(3),
+                MouseEventKind::ScrollDown => app.scroll_down(3),
+                _ => {}
+            },
+            _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn turn_error_is_visible() {
+        let mut app = App::new();
+        app.busy = true;
+
+        app.finish_turn(Err(anyhow::anyhow!("provider rejected tool result")));
+
+        assert!(!app.busy);
+        assert_eq!(app.status, "error");
+        assert!(matches!(
+            app.lines.last(),
+            Some(Line_::System(message)) if message.contains("provider rejected tool result")
+        ));
+    }
+
+    #[test]
+    fn parallel_tool_completions_match_by_id() {
+        let mut app = App::new();
+        app.push_loop_event(&LoopEvent::ToolStarted {
+            id: "read-1".into(),
+            name: "read".into(),
+        });
+        app.push_loop_event(&LoopEvent::ToolStarted {
+            id: "todo-1".into(),
+            name: "todo".into(),
+        });
+        app.push_loop_event(&LoopEvent::ToolFinished {
+            id: "read-1".into(),
+            name: "read".into(),
+            is_error: false,
+        });
+
+        assert!(matches!(
+            &app.lines[1],
+            Line_::Tool { id, done: true, .. } if id == "read-1"
+        ));
+        assert!(matches!(
+            &app.lines[2],
+            Line_::Tool { id, done: false, .. } if id == "todo-1"
+        ));
+    }
+
+    #[test]
+    fn scrolling_detaches_and_resumes_tail_follow() {
+        let mut app = App::new();
+        app.content_rows = 100;
+        app.viewport_rows = 20;
+        app.scroll_top = 80;
+        app.follow_tail = true;
+
+        app.scroll_up(18);
+        assert_eq!(app.scroll_top, 62);
+        assert!(!app.follow_tail);
+
+        app.scroll_down(18);
+        assert_eq!(app.scroll_top, 80);
+        assert!(app.follow_tail);
+    }
+
+    #[test]
+    fn scrolling_clamps_at_top_and_bottom() {
+        let mut app = App::new();
+        app.content_rows = 30;
+        app.viewport_rows = 10;
+        app.scroll_top = 20;
+
+        app.scroll_up(100);
+        assert_eq!(app.scroll_top, 0);
+        app.scroll_down(100);
+        assert_eq!(app.scroll_top, 20);
+        assert!(app.follow_tail);
+    }
+
+    #[test]
+    fn resize_clamps_without_reattaching_detached_viewport() {
+        let mut app = App::new();
+        app.content_rows = 100;
+        app.viewport_rows = 20;
+        app.scroll_top = 70;
+        app.follow_tail = false;
+
+        app.update_scroll_metrics(30, 20);
+
+        assert_eq!(app.scroll_top, 10);
+        assert!(!app.follow_tail);
     }
 }
