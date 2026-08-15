@@ -24,14 +24,26 @@ impl SessionStore {
         Self { root }
     }
 
-    pub fn session_path(&self, id: &str) -> PathBuf {
-        self.root.join(format!("{id}.jsonl"))
+    pub fn session_path(&self, id: &str) -> std::io::Result<PathBuf> {
+        let parsed = uuid::Uuid::parse_str(id).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid session id: {id:?}"),
+            )
+        })?;
+        if parsed.hyphenated().to_string() != id {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("session id is not a canonical UUID: {id:?}"),
+            ));
+        }
+        Ok(self.root.join(format!("{id}.jsonl")))
     }
 
     /// Create a new session; writes the Meta event as the first line.
     pub fn create(&self, meta: SessionMeta) -> std::io::Result<Session> {
+        let path = self.session_path(&meta.session_id)?;
         std::fs::create_dir_all(&self.root)?;
-        let path = self.session_path(&meta.session_id);
         let file = OpenOptions::new()
             .create_new(true)
             .append(true)
@@ -50,7 +62,7 @@ impl SessionStore {
     /// Load and replay a session file. Malformed lines are skipped with a
     /// warning (torn trailing writes must not destroy a session).
     pub fn load(&self, id: &str) -> std::io::Result<Session> {
-        let path = self.session_path(id);
+        let path = self.session_path(id)?;
         if !path.exists() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,

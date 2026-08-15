@@ -159,8 +159,13 @@ impl SubagentSpawner {
 
         // Session: resume task_id if given and loadable, else a fresh child.
         let session_id = match &input.task_id {
-            Some(id) if self.store.load(id).is_ok() => id.clone(),
-            _ => {
+            Some(id) => match self.store.load(id) {
+                Ok(_) => id.clone(),
+                Err(error) => {
+                    return ToolOutput::error(format!("resuming task session {id:?}: {error}"));
+                }
+            },
+            None => {
                 let id = new_id();
                 let model = agent.model.clone().unwrap_or_else(|| "zai/glm-4.7".into());
                 if let Err(e) = self.store.create(SessionMeta {

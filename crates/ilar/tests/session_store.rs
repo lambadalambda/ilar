@@ -98,7 +98,7 @@ fn corrupt_trailing_line_tolerated() {
     }
 
     // Simulate a torn write: corrupt last line + a partial line.
-    let path = store.session_path(&meta.session_id);
+    let path = store.session_path(&meta.session_id).unwrap();
     let mut f = std::fs::OpenOptions::new()
         .append(true)
         .open(&path)
@@ -114,7 +114,45 @@ fn corrupt_trailing_line_tolerated() {
 #[test]
 fn missing_session_is_error() {
     let (store, _dir) = temp_store();
-    assert!(store.load("no-such-id").is_err());
+    let error = store.load(&new_id()).err().expect("missing session");
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+}
+
+#[test]
+fn session_ids_must_be_canonical_uuids() {
+    let (store, dir) = temp_store();
+    for id in [
+        "../escape",
+        "nested/id",
+        "",
+        "not-a-uuid",
+        "550E8400-E29B-41D4-A716-446655440000",
+        "550e8400e29b41d4a716446655440000",
+        "{550e8400-e29b-41d4-a716-446655440000}",
+    ] {
+        let error = store.load(id).err().expect("invalid load must fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "id: {id}");
+
+        let mut meta = sample_meta();
+        meta.session_id = id.into();
+        let error = store.create(meta).err().expect("invalid create must fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "id: {id}");
+    }
+    assert!(!dir.path().parent().unwrap().join("escape.jsonl").exists());
+}
+
+#[test]
+fn invalid_create_does_not_create_session_root() {
+    let outer = tempfile::tempdir().unwrap();
+    let root = outer.path().join("not-created");
+    let store = SessionStore::new(root.clone());
+    let mut meta = sample_meta();
+    meta.session_id = "../escape".into();
+
+    let error = store.create(meta).err().expect("invalid create must fail");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(!root.exists());
 }
 
 #[test]
@@ -205,7 +243,7 @@ fn transcript_matches_after_reload_with_corruption_and_compaction() {
         session.append(event).unwrap();
     }
     // Corrupt one line (the first assistant message) to force a skip.
-    let path = store.session_path(&meta.session_id);
+    let path = store.session_path(&meta.session_id).unwrap();
     let lines: Vec<String> = std::fs::read_to_string(&path)
         .unwrap()
         .lines()

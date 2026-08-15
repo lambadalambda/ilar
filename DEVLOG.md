@@ -375,3 +375,10 @@ decodes arbitrary output lossily, and truncates only at UTF-8 boundaries.
 On Unix each command runs in a dedicated process group; timeout or future
 cancellation terminates descendants. Timeout errors
 retain bounded partial output, and signal exits have explicit diagnostics.
+
+## 2026-08-15 — Stabilization: validated session identifiers
+
+Session file paths now derive only from canonical lowercase hyphenated
+UUIDs. Invalid CLI or model-supplied task IDs fail with `InvalidInput`
+before any filesystem lookup, closing the path-traversal route while the
+writer-lease issue remains open.

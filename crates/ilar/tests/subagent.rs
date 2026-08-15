@@ -311,6 +311,34 @@ async fn depth_cap_errors_with_guidance() {
 }
 
 #[tokio::test]
+async fn explicit_task_id_errors_instead_of_starting_a_replacement() {
+    let (store, _session_id) = temp_store();
+    let child: Arc<dyn Provider> = Arc::new(MockProvider::new(vec![vec![]]));
+    let spawner = spawner(child, &store, 10, 3);
+    let task = parent_registry(spawner).get("task").unwrap();
+
+    for task_id in ["../escape".to_string(), new_id()] {
+        let out = task
+            .run(
+                serde_json::json!({
+                    "description": "resume",
+                    "prompt": "continue",
+                    "subagent_type": "explore",
+                    "task_id": task_id,
+                }),
+                ToolContext::root(std::env::temp_dir()),
+            )
+            .await;
+        assert!(out.is_error);
+        assert!(
+            out.content.contains("resuming task session"),
+            "{}",
+            out.content
+        );
+    }
+}
+
+#[tokio::test]
 async fn child_session_created_with_parent_link() {
     let (store, session_id) = temp_store();
     let child: Arc<dyn Provider> = Arc::new(ScriptedDelayProvider {
@@ -353,6 +381,7 @@ async fn child_session_created_with_parent_link() {
     // Find the child session file and verify the parent link + prompt.
     let sessions_dir = store
         .session_path(&session_id)
+        .unwrap()
         .parent()
         .unwrap()
         .read_dir()
