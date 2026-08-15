@@ -306,6 +306,77 @@ async fn provider_error_surfaces_and_session_stays_resumable() {
 }
 
 #[tokio::test]
+async fn concurrent_turn_on_same_session_is_rejected_before_append() {
+    struct PendingProvider {
+        started: Arc<tokio::sync::Notify>,
+    }
+    impl Provider for PendingProvider {
+        fn stream(&self, _req: Request) -> anyhow::Result<EventStream> {
+            self.started.notify_one();
+            Ok(Box::pin(futures::stream::pending()))
+        }
+    }
+
+    let (store, session_id) = temp_session("build");
+    let provider = Arc::new(PendingProvider {
+        started: Arc::new(tokio::sync::Notify::new()),
+    });
+    let registry = ToolRegistry::builtin();
+    let cancel = CancellationToken::new();
+    let first = {
+        let store = store.clone();
+        let session_id = session_id.clone();
+        let provider = provider.clone();
+        let registry = registry.clone();
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            let (tx, _rx) = events_channel();
+            run_turn(
+                provider.as_ref(),
+                &registry,
+                &store,
+                &session_id,
+                "first",
+                None,
+                LoopConfig::default(),
+                tx,
+                cancel,
+                ToolContext::root(std::env::temp_dir()),
+            )
+            .await
+        })
+    };
+    provider.started.notified().await;
+
+    let (tx, _rx) = events_channel();
+    let error = run_turn(
+        provider.as_ref(),
+        &registry,
+        &store,
+        &session_id,
+        "second",
+        None,
+        LoopConfig::default(),
+        tx,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("already active"));
+
+    cancel.cancel();
+    assert_eq!(first.await.unwrap().unwrap(), TurnOutcome::Aborted);
+    store.acquire_writer(&session_id).unwrap();
+    let transcript = store.load(&session_id).unwrap().transcript();
+    assert_eq!(transcript.len(), 1);
+    assert!(matches!(
+        &transcript[0].content[0],
+        ContentBlock::Text { text } if text == "first"
+    ));
+}
+
+#[tokio::test]
 async fn provider_error_after_tool_call_closes_tool_in_session_and_ui() {
     let (store, session_id) = temp_session("build");
     let registry = ToolRegistry::builtin();

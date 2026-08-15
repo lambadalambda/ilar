@@ -61,7 +61,9 @@ async fn model_change_applies_from_next_provider_call() {
 
     // Switch mid-session (never mid-stream: between turns).
     store
-        .load(&session_id)
+        .acquire_writer(&session_id)
+        .unwrap()
+        .load()
         .unwrap()
         .append(SessionEvent::ModelChange {
             id: new_id(),

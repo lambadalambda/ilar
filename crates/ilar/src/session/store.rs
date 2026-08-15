@@ -4,6 +4,8 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 
+use fs2::FileExt;
+
 use super::event::{SessionEvent, SessionMeta};
 use super::model::{ChatMessage, ContentBlock, Role};
 
@@ -17,6 +19,14 @@ pub struct SessionStore {
 pub struct Session {
     events: Vec<SessionEvent>,
     file: File,
+    _writer: SessionWriter,
+}
+
+/// Exclusive OS-backed writer ownership for one session. The lock file is
+/// persistent, but the lock itself is released by the OS on drop or crash.
+pub struct SessionWriter {
+    _file: File,
+    session_path: PathBuf,
 }
 
 impl SessionStore {
@@ -40,10 +50,36 @@ impl SessionStore {
         Ok(self.root.join(format!("{id}.jsonl")))
     }
 
+    pub fn acquire_writer(&self, id: &str) -> std::io::Result<SessionWriter> {
+        // Validate before creating the root or deriving a lock path.
+        self.session_path(id)?;
+        std::fs::create_dir_all(&self.root)?;
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(self.root.join(format!("{id}.lock")))?;
+        if let Err(error) = FileExt::try_lock_exclusive(&file) {
+            return Err(if error.kind() == std::io::ErrorKind::WouldBlock {
+                std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    format!("session {id} already active in another turn"),
+                )
+            } else {
+                error
+            });
+        }
+        Ok(SessionWriter {
+            _file: file,
+            session_path: self.session_path(id)?,
+        })
+    }
+
     /// Create a new session; writes the Meta event as the first line.
     pub fn create(&self, meta: SessionMeta) -> std::io::Result<Session> {
         let path = self.session_path(&meta.session_id)?;
-        std::fs::create_dir_all(&self.root)?;
+        let writer = self.acquire_writer(&meta.session_id)?;
         let file = OpenOptions::new()
             .create_new(true)
             .append(true)
@@ -51,6 +87,7 @@ impl SessionStore {
         let mut session = Session {
             events: Vec::new(),
             file,
+            _writer: writer,
         };
         session.append(SessionEvent::Meta {
             meta,
@@ -61,7 +98,7 @@ impl SessionStore {
 
     /// Load and replay a session file. Malformed lines are skipped with a
     /// warning (torn trailing writes must not destroy a session).
-    pub fn load(&self, id: &str) -> std::io::Result<Session> {
+    pub fn load(&self, id: &str) -> std::io::Result<SessionReader> {
         let path = self.session_path(id)?;
         if !path.exists() {
             return Err(std::io::Error::new(
@@ -69,26 +106,47 @@ impl SessionStore {
                 format!("session not found: {id}"),
             ));
         }
-        let file = OpenOptions::new().append(true).open(&path)?;
-        let reader = BufReader::new(File::open(&path)?);
-        let mut events = Vec::new();
-        for (n, line) in reader.lines().enumerate() {
-            let line = line?;
-            if line.trim().is_empty() {
-                continue;
-            }
-            match serde_json::from_str::<SessionEvent>(&line) {
-                Ok(event) => events.push(event),
-                Err(e) => eprintln!("ilar: session {id}: skipping malformed line {}: {e}", n + 1),
-            }
-        }
-        if events.is_empty() {
-            return Err(std::io::Error::other(format!(
-                "session unrecoverable (no valid events): {id}"
-            )));
-        }
-        Ok(Session { events, file })
+        let events = read_events(&path, id)?;
+        Ok(SessionReader { events })
     }
+}
+
+impl SessionWriter {
+    pub fn load(self) -> std::io::Result<Session> {
+        let id = self
+            .session_path
+            .file_stem()
+            .and_then(|id| id.to_str())
+            .unwrap_or("unknown");
+        let events = read_events(&self.session_path, id)?;
+        let file = OpenOptions::new().append(true).open(&self.session_path)?;
+        Ok(Session {
+            events,
+            file,
+            _writer: self,
+        })
+    }
+}
+
+fn read_events(path: &std::path::Path, id: &str) -> std::io::Result<Vec<SessionEvent>> {
+    let reader = BufReader::new(File::open(path)?);
+    let mut events = Vec::new();
+    for (n, line) in reader.lines().enumerate() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<SessionEvent>(&line) {
+            Ok(event) => events.push(event),
+            Err(e) => eprintln!("ilar: session {id}: skipping malformed line {}: {e}", n + 1),
+        }
+    }
+    if events.is_empty() {
+        return Err(std::io::Error::other(format!(
+            "session unrecoverable (no valid events): {id}"
+        )));
+    }
+    Ok(events)
 }
 
 impl Session {
@@ -176,6 +234,35 @@ pub struct SessionReader {
 }
 
 impl SessionReader {
+    pub fn events(&self) -> &[SessionEvent] {
+        &self.events
+    }
+
+    pub fn meta(&self) -> Option<&SessionMeta> {
+        self.events.iter().find_map(|event| match event {
+            SessionEvent::Meta { meta, .. } => Some(meta),
+            _ => None,
+        })
+    }
+
+    pub fn effective_model(&self) -> String {
+        self.events
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                SessionEvent::ModelChange { model, .. } => Some(model.clone()),
+                _ => None,
+            })
+            .or_else(|| self.meta().map(|meta| meta.model.clone()))
+            .unwrap_or_default()
+    }
+
+    pub fn session_id(&self) -> &str {
+        self.meta()
+            .map(|meta| meta.session_id.as_str())
+            .unwrap_or_default()
+    }
+
     pub fn transcript(&self) -> Vec<ChatMessage> {
         transcript_of(&self.events)
     }

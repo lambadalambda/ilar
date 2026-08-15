@@ -156,6 +156,28 @@ fn invalid_create_does_not_create_session_root() {
 }
 
 #[test]
+fn writer_lease_rejects_contention_and_releases_on_drop() {
+    let (store, _dir) = temp_store();
+    let meta = sample_meta();
+    store.create(meta.clone()).unwrap();
+
+    let first = store.acquire_writer(&meta.session_id).unwrap();
+    assert!(
+        store.load(&meta.session_id).is_ok(),
+        "read-only load must remain available"
+    );
+    let error = store
+        .acquire_writer(&meta.session_id)
+        .err()
+        .expect("second writer must fail");
+    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    assert!(error.to_string().contains("already active"));
+
+    drop(first);
+    store.acquire_writer(&meta.session_id).unwrap();
+}
+
+#[test]
 fn transcript_groups_tool_results_into_user_message() {
     let (store, _dir) = temp_store();
     let meta = sample_meta();

@@ -100,7 +100,7 @@ pub async fn run_turn(
     cancel: CancellationToken,
     mut tool_ctx: crate::tools::ToolContext,
 ) -> Result<TurnOutcome> {
-    let mut session = store.load(session_id)?;
+    let mut session = store.acquire_writer(session_id)?.load()?;
     session.append(SessionEvent::UserMessage {
         id: new_id(),
         text: user_input.to_string(),
@@ -110,12 +110,10 @@ pub async fn run_turn(
 
     // Compaction runs once per user turn, before the provider loop.
     if let (Some(limit), threshold) = (config.context_limit, config.compaction_threshold)
-        && crate::compaction::compact_if_needed(provider, store, session_id, limit, threshold)
+        && crate::compaction::compact_if_needed_locked(provider, &mut session, limit, threshold)
             .await?
     {
         publish(&events, LoopEvent::Compacted);
-        // Reload with the compaction event applied.
-        session = store.load(session_id)?;
     }
 
     let tools = registry.definitions();

@@ -45,7 +45,7 @@ async fn oversize_transcript_triggers_compaction() {
     let (store, session_id) = temp_session();
     // Seed a long history: several user/assistant exchanges.
     {
-        let mut session = store.load(&session_id).unwrap();
+        let mut session = store.acquire_writer(&session_id).unwrap().load().unwrap();
         for i in 0..6 {
             session
                 .append(SessionEvent::UserMessage {
@@ -207,7 +207,7 @@ async fn compaction_falls_back_to_chars_estimate_without_usage() {
     // No prior usage on events; the estimator must still fire on raw size.
     let (store, session_id) = temp_session();
     {
-        let mut session = store.load(&session_id).unwrap();
+        let mut session = store.acquire_writer(&session_id).unwrap().load().unwrap();
         session
             .append(SessionEvent::UserMessage {
                 id: new_id(),

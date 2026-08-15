@@ -666,18 +666,26 @@ async fn run_app(
                     return Ok(());
                 }
                 (KeyCode::Char('m'), true) if !app.busy && model_choices.len() > 1 => {
-                    model_index = (model_index + 1) % model_choices.len();
-                    let new_model = model_choices[model_index].clone();
+                    let next_index = (model_index + 1) % model_choices.len();
+                    let new_model = model_choices[next_index].clone();
                     match config.provider_for(&new_model) {
                         Some(new_provider) => {
-                            provider = new_provider.into();
-                            if let Ok(mut session) = store.load(session_id) {
-                                let _ = session.append(ilar::session::SessionEvent::ModelChange {
+                            let persisted = store.acquire_writer(session_id).and_then(|writer| {
+                                let mut session = writer.load()?;
+                                session.append(ilar::session::SessionEvent::ModelChange {
                                     id: ilar::session::new_id(),
                                     model: new_model.clone(),
                                     ts: chrono::Utc::now(),
-                                });
+                                })
+                            });
+                            if let Err(error) = persisted {
+                                app.lines.push(Line_::System(format!(
+                                    "cannot switch to {new_model}: {error}"
+                                )));
+                                continue;
                             }
+                            model_index = next_index;
+                            provider = new_provider.into();
                             app.status = format!("model: {new_model}");
                             app.lines
                                 .push(Line_::System(format!("switched to {new_model}")));

@@ -382,3 +382,12 @@ Session file paths now derive only from canonical lowercase hyphenated
 UUIDs. Invalid CLI or model-supplied task IDs fail with `InvalidInput`
 before any filesystem lookup, closing the path-traversal route while the
 writer-lease issue remains open.
+
+## 2026-08-15 — Stabilization: session writer lease
+
+Every agent turn now holds a nonblocking OS-backed session writer lease
+from before the user append through provider/tool completion. Concurrent
+turns fail before mutation, cancellation releases ownership, and read-only
+loads remain available. Direct compaction acquires the same lease while
+turn-internal compaction reuses existing ownership. Tail-recovery behavior
+remains tracked before the lease issue can be archived.

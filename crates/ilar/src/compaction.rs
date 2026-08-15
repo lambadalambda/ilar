@@ -51,8 +51,17 @@ pub async fn compact_if_needed(
     context_limit: u64,
     threshold: f64,
 ) -> Result<bool> {
-    let mut session = store.load(session_id)?;
-    if estimate_tokens(&session) <= (context_limit as f64 * threshold) as u64 {
+    let mut session = store.acquire_writer(session_id)?.load()?;
+    compact_if_needed_locked(provider, &mut session, context_limit, threshold).await
+}
+
+pub(crate) async fn compact_if_needed_locked(
+    provider: &dyn Provider,
+    session: &mut Session,
+    context_limit: u64,
+    threshold: f64,
+) -> Result<bool> {
+    if estimate_tokens(session) <= (context_limit as f64 * threshold) as u64 {
         return Ok(false);
     }
 
