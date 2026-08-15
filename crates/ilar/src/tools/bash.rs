@@ -7,6 +7,130 @@ use super::{Tool, ToolContext, ToolFuture, ToolKind, ToolOutput, parse_input};
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MAX_OUTPUT: usize = 100 * 1024;
 
+#[derive(Clone, Default)]
+struct Captured {
+    retained: Vec<u8>,
+    total: usize,
+    error: Option<String>,
+}
+
+async fn drain<R: tokio::io::AsyncRead + Unpin>(
+    mut reader: R,
+    captured: std::sync::Arc<std::sync::Mutex<Captured>>,
+) {
+    use tokio::io::AsyncReadExt;
+
+    let mut buffer = [0u8; 8192];
+    loop {
+        match reader.read(&mut buffer).await {
+            Ok(0) => break,
+            Ok(read) => {
+                let mut state = captured.lock().unwrap();
+                state.total = state.total.saturating_add(read);
+                let keep = read.min(MAX_OUTPUT.saturating_sub(state.retained.len()));
+                state.retained.extend_from_slice(&buffer[..keep]);
+            }
+            Err(error) => {
+                captured.lock().unwrap().error = Some(error.to_string());
+                return;
+            }
+        }
+    }
+}
+
+struct DrainTask {
+    handle: tokio::task::JoinHandle<()>,
+    captured: std::sync::Arc<std::sync::Mutex<Captured>>,
+}
+
+impl DrainTask {
+    fn spawn<R: tokio::io::AsyncRead + Unpin + Send + 'static>(reader: R) -> Self {
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Captured::default()));
+        let handle = tokio::spawn(drain(reader, captured.clone()));
+        Self { handle, captured }
+    }
+
+    async fn finish(&mut self, grace: std::time::Duration) -> Captured {
+        if tokio::time::timeout(grace, &mut self.handle).await.is_err() {
+            self.handle.abort();
+            let _ = (&mut self.handle).await;
+        }
+        self.captured.lock().unwrap().clone()
+    }
+}
+
+impl Drop for DrainTask {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
+struct ProcessGroup(Option<u32>);
+
+impl ProcessGroup {
+    fn terminate(&self) {
+        #[cfg(unix)]
+        if let Some(pid) = self.0 {
+            // The child starts a fresh process group whose id equals its pid.
+            if let Ok(group) = i32::try_from(pid) {
+                // SAFETY: `group` is a checked positive child pid and this
+                // guard is armed only while that child still owns its group.
+                unsafe {
+                    libc::killpg(group, libc::SIGKILL);
+                }
+            }
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for ProcessGroup {
+    fn drop(&mut self) {
+        self.terminate();
+    }
+}
+
+fn render_output(out: Captured, err: Captured) -> String {
+    let total = out.total.saturating_add(err.total);
+    let mut retained = out.retained;
+    retained.extend_from_slice(&err.retained);
+    let mut content = String::from_utf8_lossy(&retained).into_owned();
+    if let Some(error) = out.error {
+        content.push_str(&format!("\n(stdout read error: {error})"));
+    }
+    if let Some(error) = err.error {
+        content.push_str(&format!("\n(stderr read error: {error})"));
+    }
+    if total > MAX_OUTPUT || content.len() > MAX_OUTPUT {
+        let mut end = MAX_OUTPUT.min(content.len());
+        while !content.is_char_boundary(end) {
+            end -= 1;
+        }
+        content.truncate(end);
+        content.push_str(&format!(
+            "\n…(output truncated at {end} rendered bytes from {total} raw bytes)"
+        ));
+    }
+    content
+}
+
+fn exit_description(status: std::process::ExitStatus) -> String {
+    if let Some(code) = status.code() {
+        return format!("exit code {code}");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            return format!("signal {signal}");
+        }
+    }
+    "unknown termination".into()
+}
+
 pub struct BashTool;
 
 #[derive(Deserialize)]
@@ -58,51 +182,44 @@ impl Tool for BashTool {
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .kill_on_drop(true);
+            #[cfg(unix)]
+            command.process_group(0);
             let mut child = match command.spawn() {
                 Ok(c) => c,
                 Err(e) => return ToolOutput::error(format!("bash: {e}")),
             };
-            let mut stdout = child.stdout.take().unwrap();
-            let mut stderr = child.stderr.take().unwrap();
-            // Read pipes CONCURRENTLY with wait(): a child writing more
-            // than the pipe buffer (~64KB) blocks on a full pipe and
-            // never exits if nobody drains it.
-            let collect = async {
-                use tokio::io::AsyncReadExt;
-                let (mut out, mut err) = (String::new(), String::new());
-                let _ = stdout.read_to_string(&mut out).await;
-                let _ = stderr.read_to_string(&mut err).await;
-                (out, err)
-            };
-            let wait_and_collect = async { tokio::join!(child.wait(), collect) };
-            let (status, (out, err)) = tokio::select! {
-                r = wait_and_collect => r,
+            let mut group = ProcessGroup(child.id());
+            let mut stdout = DrainTask::spawn(child.stdout.take().unwrap());
+            let mut stderr = DrainTask::spawn(child.stderr.take().unwrap());
+            let drain_grace = std::time::Duration::from_secs(1);
+            let status = tokio::select! {
+                status = child.wait() => status,
                 _ = tokio::time::sleep(timeout) => {
+                    group.terminate();
                     child.start_kill().ok();
                     let _ = child.wait().await;
+                    let out = stdout.finish(drain_grace).await;
+                    let err = stderr.finish(drain_grace).await;
+                    group.disarm();
                     return ToolOutput::error(format!(
-                        "bash: timed out after {}ms\ncommand: {}",
+                        "bash: timed out after {}ms\ncommand: {}\n{}",
                         timeout.as_millis(),
-                        input.command
+                        input.command,
+                        render_output(out, err),
                     ));
                 }
             };
-            let mut content = format!("{out}{err}");
-            if content.len() > MAX_OUTPUT {
-                content = format!(
-                    "{}\n…(output truncated, {} of {} bytes)",
-                    &content[..MAX_OUTPUT],
-                    MAX_OUTPUT,
-                    content.len()
-                );
-            }
+            group.disarm();
+            let out = stdout.finish(drain_grace).await;
+            let err = stderr.finish(drain_grace).await;
+            let mut content = render_output(out, err);
             match status {
                 Ok(status) if status.success() => {
                     content.push_str("\n(exit 0)");
                     ToolOutput::text(content)
                 }
                 Ok(status) => {
-                    content.push_str(&format!("\n(exit code {})", status.code().unwrap_or(-1)));
+                    content.push_str(&format!("\n({})", exit_description(status)));
                     ToolOutput::error(content)
                 }
                 Err(e) => ToolOutput::error(format!("bash: {e}\n{content}")),

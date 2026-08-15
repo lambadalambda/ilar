@@ -367,3 +367,11 @@ Concrete providers now reject models with a mismatched provider prefix
 before spawning network work. This converts stale routing mistakes into
 clear preflight errors while the broader provider-router issue remains
 open for resume, switching, subagents, and compaction.
+
+## 2026-08-15 — Stabilization: robust Bash execution
+
+Bash drains stdout and stderr concurrently into bounded byte buffers,
+decodes arbitrary output lossily, and truncates only at UTF-8 boundaries.
+On Unix each command runs in a dedicated process group; timeout or future
+cancellation terminates descendants. Timeout errors
+retain bounded partial output, and signal exits have explicit diagnostics.

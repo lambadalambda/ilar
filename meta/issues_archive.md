@@ -37,3 +37,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Transcript scrolling](issues/transcript-scrolling.md)
 - [x] [Tool registry uniqueness](issues/tool-registry-and-scheduling-invariants.md)
 - [x] [Fix z.ai OpenAI wire format](issues/fix-zai-openai-wire-format.md)
+- [x] [Robust bash execution](issues/robust-bash-execution.md)

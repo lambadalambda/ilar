@@ -24,7 +24,6 @@
 - [ ] [Secure atomic OAuth store](issues/secure-atomic-oauth-store.md)
 - [ ] [Compaction correctness and cancellation](issues/compaction-correctness-and-cancellation.md)
 - [ ] [Harden provider protocol handling](issues/harden-provider-protocol-handling.md)
-- [ ] [Robust bash execution](issues/robust-bash-execution.md)
 - [ ] [Bound and sanitize web tools](issues/bound-and-sanitize-web-tools.md)
 - [ ] [Atomic file tools and large reads](issues/atomic-file-tools-and-large-reads.md)
 - [ ] [Subagent safety and outcomes](issues/subagent-safety-and-outcomes.md)

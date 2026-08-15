@@ -25,5 +25,8 @@ tokio-util = "0.7.19"
 sha2 = "0.11.0"
 base64 = "0.23.1"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3.27.0"

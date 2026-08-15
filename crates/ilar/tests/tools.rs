@@ -245,11 +245,78 @@ async fn bash_drains_output_larger_than_pipe_buffer() {
         "output suspiciously small: {}",
         out.content.len()
     );
+    assert!(out.content.len() < 110_000, "output was not bounded");
     assert!(
         start.elapsed() < std::time::Duration::from_secs(8),
         "looked like a pipe deadlock: {:?}",
         start.elapsed()
     );
+}
+
+#[tokio::test]
+async fn bash_drains_stderr_while_stdout_remains_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = run(
+        &registry(),
+        "bash",
+        serde_json::json!({
+            "command": "yes stderr | head -c 200000 >&2; printf done",
+            "timeout_ms": 5000
+        }),
+        &ctx(dir.path()),
+    )
+    .await;
+    assert!(!out.is_error, "{}", out.content);
+    assert!(out.content.contains("done"), "{}", out.content);
+}
+
+#[tokio::test]
+async fn bash_drains_high_volume_stdout_and_stderr_together() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = run(
+        &registry(),
+        "bash",
+        serde_json::json!({
+            "command": "(yes out | head -c 200000) & (yes err | head -c 200000 >&2) & wait",
+            "timeout_ms": 5000
+        }),
+        &ctx(dir.path()),
+    )
+    .await;
+    assert!(!out.is_error, "{}", out.content);
+    assert!(out.content.len() < 110_000, "output was not bounded");
+}
+
+#[tokio::test]
+async fn bash_truncates_only_at_utf8_boundaries() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = run(
+        &registry(),
+        "bash",
+        serde_json::json!({
+            "command": "yes a | tr -d '\\n' | head -c 102399; printf 'é-tail'",
+            "timeout_ms": 5000
+        }),
+        &ctx(dir.path()),
+    )
+    .await;
+    assert!(!out.is_error, "{}", out.content);
+    assert!(out.content.contains("output truncated"));
+}
+
+#[tokio::test]
+async fn bash_preserves_invalid_utf8_lossily() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = run(
+        &registry(),
+        "bash",
+        serde_json::json!({"command": "printf '\\377ok'"}),
+        &ctx(dir.path()),
+    )
+    .await;
+    assert!(!out.is_error, "{}", out.content);
+    assert!(out.content.contains("ok"), "{}", out.content);
+    assert!(out.content.contains('�'), "{}", out.content);
 }
 
 #[tokio::test]
@@ -274,13 +341,95 @@ async fn bash_timeout_kills() {
     let out = run(
         &registry(),
         "bash",
-        serde_json::json!({"command": "sleep 30", "timeout_ms": 300}),
+        serde_json::json!({"command": "printf partial-output; sleep 30", "timeout_ms": 300}),
         &ctx(dir.path()),
     )
     .await;
     assert!(out.is_error);
     assert!(out.content.to_lowercase().contains("timed out"));
+    assert!(out.content.contains("partial-output"), "{}", out.content);
     assert!(start.elapsed() < std::time::Duration::from_secs(10));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn bash_reports_signal_termination() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = run(
+        &registry(),
+        "bash",
+        serde_json::json!({"command": "kill -TERM $$"}),
+        &ctx(dir.path()),
+    )
+    .await;
+    assert!(out.is_error);
+    assert!(out.content.contains("signal 15"), "{}", out.content);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn bash_timeout_kills_descendants() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = run(
+        &registry(),
+        "bash",
+        serde_json::json!({
+            "command": "sleep 30 & echo $! > child.pid; wait",
+            "timeout_ms": 300
+        }),
+        &ctx(dir.path()),
+    )
+    .await;
+    assert!(out.is_error);
+    let pid = std::fs::read_to_string(dir.path().join("child.pid"))
+        .unwrap()
+        .trim()
+        .to_string();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        !std::process::Command::new("kill")
+            .args(["-0", &pid])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success(),
+        "descendant process {pid} survived timeout"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn dropping_bash_future_kills_descendants() {
+    let dir = tempfile::tempdir().unwrap();
+    let tool = registry().get("bash").unwrap();
+    let cwd = dir.path().to_path_buf();
+    let handle = tokio::spawn(tool.run(
+        serde_json::json!({"command": "sleep 30 & echo $! > child.pid; wait"}),
+        ToolContext::root(cwd.clone()),
+    ));
+    let pid_path = cwd.join("child.pid");
+    for _ in 0..50 {
+        if pid_path.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let pid = std::fs::read_to_string(pid_path)
+        .unwrap()
+        .trim()
+        .to_string();
+    handle.abort();
+    let _ = handle.await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        !std::process::Command::new("kill")
+            .args(["-0", &pid])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success(),
+        "descendant process {pid} survived future drop"
+    );
 }
 
 // ---- glob ----

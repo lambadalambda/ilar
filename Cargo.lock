@@ -874,6 +874,7 @@ dependencies = [
  "futures",
  "glob",
  "ignore",
+ "libc",
  "regex",
  "reqwest",
  "serde",
