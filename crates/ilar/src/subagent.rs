@@ -21,6 +21,12 @@ pub struct Notification {
     pub is_error: bool,
 }
 
+pub enum RouteOutcome {
+    Complete,
+    Propagate(Notification),
+    Requeue(Notification),
+}
+
 /// Spawns child agent loops with their own sessions. Shared across a
 /// session's turns (concurrency slot counter) and cloned into children
 /// (depth+1) for nesting up to the depth cap.
@@ -39,7 +45,7 @@ pub struct SubagentSpawner {
     notify_rx: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<Notification>>>>,
     stall_timeout: std::time::Duration,
     /// Abort handles for detached background tasks.
-    background_tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    background_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 }
 
 impl SubagentSpawner {
@@ -66,7 +72,7 @@ impl SubagentSpawner {
             running: Arc::new(AtomicUsize::new(0)),
             notify_tx,
             stall_timeout: std::time::Duration::from_secs(600),
-            background_tasks: Mutex::new(Vec::new()),
+            background_tasks: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -124,7 +130,7 @@ impl SubagentSpawner {
             notify_tx: self.notify_tx.clone(),
             notify_rx: self.notify_rx.clone(),
             stall_timeout: self.stall_timeout,
-            background_tasks: Mutex::new(Vec::new()),
+            background_tasks: self.background_tasks.clone(),
         })
     }
 
@@ -136,13 +142,6 @@ impl SubagentSpawner {
                 self.depth, self.max_depth
             ));
         }
-        if input.background == Some(true) && self.depth > 0 {
-            return ToolOutput::error(
-                "Nested background tasks are not supported; run this nested task in the foreground."
-                    .to_string(),
-            );
-        }
-
         let Some(agent) = self.agents.iter().find(|a| a.name == input.subagent_type) else {
             let available: Vec<&str> = self.agents.iter().map(|a| a.name.as_str()).collect();
             return ToolOutput::error(format!(
@@ -326,7 +325,9 @@ impl SubagentSpawner {
                 };
                 let _ = spawner.notify_tx.send(notification);
             });
-            self.background_tasks.lock().unwrap().push(handle);
+            let mut tasks = self.background_tasks.lock().unwrap();
+            tasks.retain(|task| !task.is_finished());
+            tasks.push(handle);
             return ToolOutput::text(
                 "Task started in the background. You will be notified when it completes. \
 DO NOT sleep, poll, or check on it — work on something else or end your response."
@@ -369,6 +370,148 @@ DO NOT sleep, poll, or check on it — work on something else or end your respon
             }
             Err(e) => ToolOutput::error(format!("subagent failed: {e:#}")),
         }
+    }
+
+    /// Run a queued completion against its declared inactive parent. Child
+    /// parents propagate one synthesized completion to their own parent.
+    pub async fn route_notification(
+        self: &Arc<Self>,
+        notification: Notification,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> anyhow::Result<RouteOutcome> {
+        let parent = self.store.load(&notification.parent_session_id)?;
+        let meta = parent
+            .meta()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("notification parent has no metadata"))?;
+        let agent = self
+            .agents
+            .iter()
+            .find(|agent| agent.name == meta.agent)
+            .ok_or_else(|| anyhow::anyhow!("unknown persisted agent {:?}", meta.agent))?;
+        let depth = session_depth(&self.store, &notification.parent_session_id)?;
+        let runtime = Arc::new(Self {
+            resolver: self.resolver.clone(),
+            store: self.store.clone(),
+            agents: self.agents.clone(),
+            cwd: self.cwd.clone(),
+            depth,
+            max_concurrent: self.max_concurrent,
+            max_depth: self.max_depth,
+            running: self.running.clone(),
+            notify_tx: self.notify_tx.clone(),
+            notify_rx: self.notify_rx.clone(),
+            stall_timeout: self.stall_timeout,
+            background_tasks: self.background_tasks.clone(),
+        });
+        let registry = ToolRegistry::builtin().with_subagents(runtime.clone())?;
+        let mut system_prompt = system_prompt_for(&self.cwd);
+        if !agent.prompt.is_empty() {
+            system_prompt = format!(
+                "{system_prompt}\n\n# Agent: {}\n\n{}",
+                agent.name, agent.prompt
+            );
+        }
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let outcome = loop {
+            if cancel.is_cancelled() {
+                return Ok(RouteOutcome::Requeue(notification));
+            }
+            let result = run_turn(
+                self.resolver.as_ref(),
+                &registry,
+                &self.store,
+                &notification.parent_session_id,
+                &notification.text,
+                Some(&system_prompt),
+                LoopConfig::default(),
+                tx.clone(),
+                cancel.clone(),
+                ToolContext {
+                    cwd: self.cwd.clone(),
+                    session_id: notification.parent_session_id.clone(),
+                    depth,
+                    subagent: Some(runtime.clone()),
+                },
+            )
+            .await;
+            match result {
+                Err(error)
+                    if error
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|error| error.kind() == std::io::ErrorKind::WouldBlock) =>
+                {
+                    tokio::select! {
+                        () = cancel.cancelled() => return Ok(RouteOutcome::Requeue(notification)),
+                        () = tokio::time::sleep(std::time::Duration::from_millis(25)) => {}
+                    }
+                }
+                result => break result,
+            }
+        };
+        let Some(grandparent_id) = meta.parent_id else {
+            return outcome.map(|_| RouteOutcome::Complete);
+        };
+        let (text, is_error) = match outcome {
+            Ok(crate::agent::TurnOutcome::Aborted) => {
+                ("Nested parent turn was cancelled.".to_string(), true)
+            }
+            Ok(_) => (
+                final_text_after_last_user(&self.store, &notification.parent_session_id)
+                    .unwrap_or_else(|| "(finished with no text)".into()),
+                false,
+            ),
+            Err(error) => (format!("Nested parent turn failed: {error:#}"), true),
+        };
+        let status = if is_error { "failed" } else { "completed" };
+        Ok(RouteOutcome::Propagate(Notification {
+            parent_session_id: grandparent_id,
+            description: notification.description,
+            text: format!(
+                "<task-notification>\nNested task {status}.\n<result>\n{text}\n</result>\n</task-notification>"
+            ),
+            is_error,
+        }))
+    }
+}
+
+fn final_text_after_last_user(store: &SessionStore, session_id: &str) -> Option<String> {
+    store.load(session_id).ok().and_then(|session| {
+        let boundary = session
+            .events()
+            .iter()
+            .rposition(|event| matches!(event, crate::session::SessionEvent::UserMessage { .. }))?;
+        session
+            .events()
+            .iter()
+            .skip(boundary + 1)
+            .rev()
+            .find_map(|event| match event {
+                crate::session::SessionEvent::AssistantMessage { content, .. } => {
+                    content.iter().find_map(|block| match block {
+                        ContentBlock::Text { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                }
+                _ => None,
+            })
+    })
+}
+
+fn session_depth(store: &SessionStore, session_id: &str) -> anyhow::Result<usize> {
+    let mut depth = 0;
+    let mut current = session_id.to_string();
+    let mut visited = std::collections::HashSet::new();
+    loop {
+        if !visited.insert(current.clone()) {
+            anyhow::bail!("session parent cycle at {current}");
+        }
+        let session = store.load(&current)?;
+        let Some(parent) = session.meta().and_then(|meta| meta.parent_id.clone()) else {
+            return Ok(depth);
+        };
+        depth += 1;
+        current = parent;
     }
 }
 

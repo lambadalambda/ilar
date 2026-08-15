@@ -42,3 +42,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Session writer lease](issues/session-writer-lease.md)
 - [x] [Provider routing and model lifecycle](issues/provider-routing-and-model-lifecycle.md)
 - [x] [Preserve provider content order and reasoning](issues/preserve-provider-content-order-and-reasoning.md)
+- [x] [Serialize turns and route notifications](issues/serialize-turns-and-route-notifications.md)

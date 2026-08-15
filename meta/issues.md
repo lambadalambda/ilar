@@ -16,7 +16,6 @@
 
 - [ ] [Tool scheduling and workspace capabilities](issues/tool-scheduling-and-workspace-capabilities.md)
 - [ ] [Atomic file replacement](issues/atomic-file-replacement.md)
-- [ ] [Serialize turns and route notifications](issues/serialize-turns-and-route-notifications.md)
 - [ ] [Secure atomic OAuth store](issues/secure-atomic-oauth-store.md)
 - [ ] [Compaction correctness and cancellation](issues/compaction-correctness-and-cancellation.md)
 - [ ] [Harden provider protocol handling](issues/harden-provider-protocol-handling.md)

@@ -591,15 +591,28 @@ async fn main() -> Result<()> {
     .await
 }
 
-fn next_notification(
-    turn_active: bool,
+fn drain_notifications(
     notifications: &mut tokio::sync::mpsc::UnboundedReceiver<ilar::subagent::Notification>,
-) -> Option<ilar::subagent::Notification> {
-    if turn_active {
-        None
-    } else {
-        notifications.try_recv().ok()
+    queued: &mut std::collections::VecDeque<ilar::subagent::Notification>,
+) {
+    while let Ok(notification) = notifications.try_recv() {
+        queued.push_back(notification);
     }
+}
+
+fn next_queued_notification(
+    turn_active: bool,
+    paused: bool,
+    queued: &mut std::collections::VecDeque<ilar::subagent::Notification>,
+) -> Option<ilar::subagent::Notification> {
+    (!turn_active && !paused)
+        .then(|| queued.pop_front())
+        .flatten()
+}
+
+enum TurnCompletion {
+    Root(Result<TurnOutcome>),
+    Routed(Result<ilar::subagent::RouteOutcome>),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -618,15 +631,18 @@ async fn run_app(
     model_choices: Vec<String>,
 ) -> Result<()> {
     let mut events_rx: Option<tokio::sync::mpsc::UnboundedReceiver<LoopEvent>> = None;
+    let mut queued_notifications = std::collections::VecDeque::new();
+    let mut notifications_paused = false;
     let current_model = store.load(session_id)?.effective_model();
     let mut model_index = model_choices
         .iter()
         .position(|model| model == &current_model)
         .unwrap_or(0);
     let mut cancel: Option<CancellationToken> = None;
-    let mut turn_handle: Option<tokio::task::JoinHandle<Result<TurnOutcome>>> = None;
+    let mut turn_handle: Option<tokio::task::JoinHandle<TurnCompletion>> = None;
 
     loop {
+        drain_notifications(&mut notifications, &mut queued_notifications);
         // Drain pending loop events.
         if let Some(rx) = events_rx.as_mut() {
             while let Ok(event) = rx.try_recv() {
@@ -638,22 +654,71 @@ async fn run_app(
             && handle.is_finished()
         {
             let handle = turn_handle.take().unwrap();
-            let result = match handle.await {
-                Ok(result) => result,
-                Err(error) => Err(error.into()),
-            };
             if let Some(rx) = events_rx.as_mut() {
                 while let Ok(event) = rx.try_recv() {
                     app.push_loop_event(&event);
                 }
             }
-            app.finish_turn(result);
+            match handle.await {
+                Ok(TurnCompletion::Root(result)) => {
+                    app.finish_turn(result);
+                    notifications_paused = false;
+                }
+                Ok(TurnCompletion::Routed(Ok(ilar::subagent::RouteOutcome::Propagate(
+                    notification,
+                )))) => {
+                    app.busy = false;
+                    app.status = "idle".into();
+                    queued_notifications.push_back(notification);
+                }
+                Ok(TurnCompletion::Routed(Ok(ilar::subagent::RouteOutcome::Requeue(
+                    notification,
+                )))) => {
+                    app.busy = false;
+                    app.status = "notification paused; send a message to resume".into();
+                    queued_notifications.push_front(notification);
+                    notifications_paused = true;
+                }
+                Ok(TurnCompletion::Routed(Ok(ilar::subagent::RouteOutcome::Complete))) => {
+                    app.busy = false;
+                    app.status = "idle".into();
+                }
+                Ok(TurnCompletion::Routed(Err(error))) => {
+                    app.busy = false;
+                    app.status = "error".into();
+                    app.lines.push(Line_::System(format!(
+                        "notification routing failed: {error}"
+                    )));
+                }
+                Err(error) => {
+                    app.busy = false;
+                    app.status = "error".into();
+                    app.lines.push(Line_::System(format!(
+                        "notification routing failed: {error}"
+                    )));
+                }
+            }
             events_rx = None;
             cancel = None;
         }
 
-        // Background completions re-invoke the loop while idle.
-        if let Some(notification) = next_notification(turn_handle.is_some(), &mut notifications) {
+        // Background completions re-invoke their declared parent while idle.
+        if let Some(notification) = next_queued_notification(
+            turn_handle.is_some(),
+            notifications_paused,
+            &mut queued_notifications,
+        ) {
+            if notification.parent_session_id != session_id {
+                let token = CancellationToken::new();
+                cancel = Some(token.clone());
+                app.busy = true;
+                app.status = format!("routing task to {}", notification.parent_session_id);
+                let spawner = spawner.clone();
+                turn_handle = Some(tokio::spawn(async move {
+                    TurnCompletion::Routed(spawner.route_notification(notification, token).await)
+                }));
+                continue;
+            }
             app.lines.push(Line_::System(format!(
                 "task notification: {}",
                 notification.description
@@ -673,19 +738,21 @@ async fn run_app(
             let turn_ctx = tool_ctx.clone();
             let loop_config = loop_config();
             turn_handle = Some(tokio::spawn(async move {
-                run_turn(
-                    resolver.as_ref(),
-                    &registry,
-                    &store,
-                    &session_id,
-                    &text,
-                    Some(&system_prompt),
-                    loop_config,
-                    tx,
-                    token,
-                    turn_ctx,
+                TurnCompletion::Root(
+                    run_turn(
+                        resolver.as_ref(),
+                        &registry,
+                        &store,
+                        &session_id,
+                        &text,
+                        Some(&system_prompt),
+                        loop_config,
+                        tx,
+                        token,
+                        turn_ctx,
+                    )
+                    .await,
                 )
-                .await
             }));
         }
 
@@ -759,19 +826,21 @@ async fn run_app(
                         let turn_ctx = tool_ctx.clone();
                         let loop_config = loop_config();
                         turn_handle = Some(tokio::spawn(async move {
-                            run_turn(
-                                resolver.as_ref(),
-                                &registry,
-                                &store,
-                                &session_id,
-                                &text,
-                                Some(&system_prompt),
-                                loop_config,
-                                tx,
-                                token,
-                                turn_ctx,
+                            TurnCompletion::Root(
+                                run_turn(
+                                    resolver.as_ref(),
+                                    &registry,
+                                    &store,
+                                    &session_id,
+                                    &text,
+                                    Some(&system_prompt),
+                                    loop_config,
+                                    tx,
+                                    token,
+                                    turn_ctx,
+                                )
+                                .await,
                             )
-                            .await
                         }));
                     }
                 }
@@ -989,15 +1058,21 @@ mod tests {
             .unwrap();
         }
 
+        let mut queued = std::collections::VecDeque::new();
+        drain_notifications(&mut rx, &mut queued);
+        assert!(next_queued_notification(true, false, &mut queued).is_none());
+        assert!(next_queued_notification(false, true, &mut queued).is_none());
+        assert_eq!(queued.len(), 2);
         assert_eq!(
-            next_notification(false, &mut rx).unwrap().description,
+            next_queued_notification(false, false, &mut queued)
+                .unwrap()
+                .description,
             "first"
         );
-        // A terminal UI event may already have updated status, but the
-        // existing task handle remains the authoritative owner.
-        assert!(next_notification(true, &mut rx).is_none());
         assert_eq!(
-            next_notification(false, &mut rx).unwrap().description,
+            next_queued_notification(false, false, &mut queued)
+                .unwrap()
+                .description,
             "second"
         );
     }

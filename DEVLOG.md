@@ -434,3 +434,12 @@ unsigned or incomplete thinking is retained only as non-replayed diagnostics.
 Stateless OpenAI requests preserve encrypted reasoning items before function
 continuations. Incomplete tool calls are never executed, receive synthetic
 errors, and replay with protocol-valid placeholder arguments.
+
+## 2026-08-15 — Stabilization: notification routing
+
+Background completions now enter one FIFO and execute only when no foreground
+or routed turn owns the TUI lifecycle. Nested completions run their declared
+parent with its persisted agent, model, depth, and registry, then propagate one
+success or error upward. Busy parents wait without losing work; cancellation
+requeues undelivered notifications in a paused state, while delivered aborts
+propagate explicitly. Nested detached handles share root cancellation ownership.

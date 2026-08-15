@@ -235,38 +235,260 @@ async fn stall_watchdog_fires_on_silent_child() {
 }
 
 #[tokio::test]
-async fn nested_background_tasks_are_rejected() {
-    let (store, _session_id) = temp_store();
-    let root = spawner(Arc::new(Silent), &store);
-    let nested = Arc::new(SubagentSpawner::new(
-        root.resolver(),
-        store,
-        root.agents().to_vec(),
-        std::env::temp_dir(),
-        1,
-        10,
-        3,
-    ));
-    let task = ToolRegistry::builtin()
-        .with_subagents(nested.clone())
-        .unwrap()
-        .get("task")
-        .unwrap();
+async fn nested_notification_runs_declared_parent_and_propagates_once() {
+    let (store, root_id) = temp_store();
+    let child_id = new_id();
+    drop(
+        store
+            .create(SessionMeta {
+                session_id: child_id.clone(),
+                parent_id: Some(root_id.clone()),
+                agent: "explore".into(),
+                model: "zai/glm-4.7".into(),
+            })
+            .unwrap(),
+    );
+    let provider = MockProvider::new(vec![vec![
+        ProviderEvent::TextDelta("child parent acknowledged".into()),
+        ProviderEvent::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        },
+    ]]);
+    let root = spawner(Arc::new(provider.clone()), &store);
 
-    let output = task
-        .run(
-            serde_json::json!({
-                "description": "nested background",
-                "prompt": "work",
-                "subagent_type": "explore",
-                "background": true,
-            }),
-            ToolContext::root(std::env::temp_dir()).with_subagents(nested),
+    let outcome = root
+        .route_notification(
+            ilar::subagent::Notification {
+                parent_session_id: child_id.clone(),
+                description: "nested".into(),
+                text: "nested result".into(),
+                is_error: false,
+            },
+            tokio_util::sync::CancellationToken::new(),
         )
-        .await;
+        .await
+        .unwrap();
+    let ilar::subagent::RouteOutcome::Propagate(propagated) = outcome else {
+        panic!("expected propagated notification");
+    };
 
-    assert!(output.is_error);
-    assert!(output.content.contains("Nested background"));
+    assert_eq!(propagated.parent_session_id, root_id);
+    assert!(propagated.text.contains("child parent acknowledged"));
+    assert_eq!(provider.requests().len(), 1);
+    assert_eq!(provider.requests()[0].model, "zai/glm-4.7");
+    let child = store.load(&child_id).unwrap();
+    assert!(format!("{:?}", child.transcript()).contains("nested result"));
+}
+
+#[tokio::test]
+async fn notification_waits_for_busy_parent_without_being_lost() {
+    let (store, root_id) = temp_store();
+    let child_id = new_id();
+    drop(
+        store
+            .create(SessionMeta {
+                session_id: child_id.clone(),
+                parent_id: Some(root_id.clone()),
+                agent: "explore".into(),
+                model: "zai/glm-4.7".into(),
+            })
+            .unwrap(),
+    );
+    let provider = MockProvider::new(vec![vec![ProviderEvent::TurnComplete {
+        stop_reason: StopReason::EndTurn,
+        usage: Usage::default(),
+    }]]);
+    let router = spawner(Arc::new(provider.clone()), &store);
+    let mut active_parent = store.acquire_writer(&child_id).unwrap().load().unwrap();
+    let handle = {
+        let router = router.clone();
+        let child_id = child_id.clone();
+        tokio::spawn(async move {
+            router
+                .route_notification(
+                    ilar::subagent::Notification {
+                        parent_session_id: child_id,
+                        description: "queued".into(),
+                        text: "wait for parent".into(),
+                        is_error: false,
+                    },
+                    tokio_util::sync::CancellationToken::new(),
+                )
+                .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!handle.is_finished());
+    active_parent
+        .append(ilar::session::SessionEvent::UserMessage {
+            id: new_id(),
+            text: "active parent work".into(),
+            ts: chrono::Utc::now(),
+        })
+        .unwrap();
+    active_parent
+        .append(ilar::session::SessionEvent::AssistantMessage {
+            id: new_id(),
+            model: "zai/glm-4.7".into(),
+            content: vec![ContentBlock::Text {
+                text: "previous active answer".into(),
+            }],
+            usage: Usage::default(),
+            stop_reason: "end_turn".into(),
+            ts: chrono::Utc::now(),
+        })
+        .unwrap();
+    drop(active_parent);
+
+    let outcome = tokio::time::timeout(Duration::from_secs(2), handle)
+        .await
+        .expect("router resumed")
+        .unwrap()
+        .unwrap();
+    let ilar::subagent::RouteOutcome::Propagate(notification) = outcome else {
+        panic!("expected propagation");
+    };
+    assert_eq!(notification.parent_session_id, root_id);
+    assert!(notification.text.contains("finished with no text"));
+    assert!(!notification.text.contains("previous active answer"));
+    assert_eq!(provider.requests().len(), 1);
+    assert!(
+        format!("{:?}", store.load(&child_id).unwrap().transcript()).contains("wait for parent")
+    );
+}
+
+#[tokio::test]
+async fn cancelled_undelivered_notification_is_returned_for_requeue() {
+    let (store, root_id) = temp_store();
+    let child_id = new_id();
+    drop(
+        store
+            .create(SessionMeta {
+                session_id: child_id.clone(),
+                parent_id: Some(root_id),
+                agent: "explore".into(),
+                model: "zai/glm-4.7".into(),
+            })
+            .unwrap(),
+    );
+    let router = spawner(Arc::new(Silent), &store);
+    let _writer = store.acquire_writer(&child_id).unwrap();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let task = {
+        let router = router.clone();
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            router
+                .route_notification(
+                    ilar::subagent::Notification {
+                        parent_session_id: child_id,
+                        description: "keep me".into(),
+                        text: "queued".into(),
+                        is_error: false,
+                    },
+                    cancel,
+                )
+                .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    cancel.cancel();
+
+    let outcome = task.await.unwrap().unwrap();
+    assert!(matches!(
+        outcome,
+        ilar::subagent::RouteOutcome::Requeue(notification)
+            if notification.description == "keep me"
+    ));
+}
+
+#[tokio::test]
+async fn nested_parent_failure_propagates_one_error() {
+    let (store, root_id) = temp_store();
+    let child_id = new_id();
+    drop(
+        store
+            .create(SessionMeta {
+                session_id: child_id.clone(),
+                parent_id: Some(root_id.clone()),
+                agent: "explore".into(),
+                model: "zai/glm-4.7".into(),
+            })
+            .unwrap(),
+    );
+    let router = spawner(Arc::new(MockProvider::error("provider failed")), &store);
+
+    let outcome = router
+        .route_notification(
+            ilar::subagent::Notification {
+                parent_session_id: child_id,
+                description: "nested failure".into(),
+                text: "deliver me".into(),
+                is_error: false,
+            },
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let ilar::subagent::RouteOutcome::Propagate(notification) = outcome else {
+        panic!("expected propagated error");
+    };
+    assert_eq!(notification.parent_session_id, root_id);
+    assert!(notification.is_error);
+    assert!(notification.text.contains("provider failed"));
+}
+
+#[tokio::test]
+async fn nested_no_text_completion_does_not_reuse_stale_answer() {
+    let (store, root_id) = temp_store();
+    let child_id = new_id();
+    let mut child = store
+        .create(SessionMeta {
+            session_id: child_id.clone(),
+            parent_id: Some(root_id),
+            agent: "explore".into(),
+            model: "zai/glm-4.7".into(),
+        })
+        .unwrap();
+    child
+        .append(ilar::session::SessionEvent::AssistantMessage {
+            id: new_id(),
+            model: "zai/glm-4.7".into(),
+            content: vec![ContentBlock::Text {
+                text: "stale answer".into(),
+            }],
+            usage: Usage::default(),
+            stop_reason: "end_turn".into(),
+            ts: chrono::Utc::now(),
+        })
+        .unwrap();
+    drop(child);
+    let router = spawner(
+        Arc::new(MockProvider::new(vec![vec![ProviderEvent::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        }]])),
+        &store,
+    );
+
+    let outcome = router
+        .route_notification(
+            ilar::subagent::Notification {
+                parent_session_id: child_id,
+                description: "no text".into(),
+                text: "new notification".into(),
+                is_error: false,
+            },
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let ilar::subagent::RouteOutcome::Propagate(notification) = outcome else {
+        panic!("expected propagation");
+    };
+    assert!(notification.text.contains("finished with no text"));
+    assert!(!notification.text.contains("stale answer"));
 }
 
 #[tokio::test]
