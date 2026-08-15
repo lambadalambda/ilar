@@ -1,6 +1,8 @@
 use std::sync::{Arc, Mutex};
 
-use ilar::tools::{ToolContext, ToolKind, ToolRegistry};
+use ilar::tools::executor::{ToolCall, execute_calls};
+use ilar::tools::{ToolConcurrency, ToolContext, ToolRegistry, WorkspaceAccess};
+use tokio_util::sync::CancellationToken;
 
 fn registry() -> (ToolRegistry, Arc<Mutex<ilar::todo::TodoList>>) {
     let todos = Arc::new(Mutex::new(ilar::todo::TodoList::default()));
@@ -104,7 +106,33 @@ async fn todo_output_renders_checklist() {
 }
 
 #[test]
-fn todo_tool_is_read_only_for_scheduling() {
+fn todo_tool_is_an_ordered_barrier_without_workspace_access() {
     let (reg, _) = registry();
-    assert_eq!(reg.get("todo").unwrap().kind(), ToolKind::ReadOnly);
+    let tool = reg.get("todo").unwrap();
+    assert_eq!(tool.concurrency(), ToolConcurrency::Barrier);
+    assert_eq!(tool.workspace_access(), WorkspaceAccess::None);
+}
+
+#[tokio::test]
+async fn todo_replacements_apply_in_provider_call_order() {
+    let (reg, todos) = registry();
+    let calls = ["first", "second"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, content)| ToolCall {
+            id: index.to_string(),
+            name: "todo".into(),
+            input: serde_json::json!({"todos": [{"content": content, "status": "pending"}]}),
+        });
+
+    let outcomes = execute_calls(
+        calls.collect(),
+        |name| reg.get(name),
+        ToolContext::root(std::env::temp_dir()),
+        CancellationToken::new(),
+    )
+    .await;
+
+    assert!(outcomes.iter().all(|outcome| !outcome.output.is_error));
+    assert_eq!(todos.lock().unwrap().items[0].content, "second");
 }

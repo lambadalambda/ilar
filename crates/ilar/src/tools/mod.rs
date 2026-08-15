@@ -15,17 +15,17 @@ use std::sync::Arc;
 
 use crate::provider::ToolDefinition;
 
-/// Scheduling class used by the executor's concurrency barrier:
-/// read-only tools may run alongside each other; mutating tools form a
-/// barrier (the Claude Code `isConcurrencySafe` model).
+/// Scheduling behavior within one provider step. This is independent of
+/// whether a tool accesses or mutates the workspace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToolKind {
-    ReadOnly,
-    Mutating,
+pub enum ToolConcurrency {
+    Concurrent,
+    Barrier,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkspaceAccess {
+    None,
     ReadOnly,
     Mutating,
 }
@@ -36,6 +36,7 @@ pub struct WorkspaceScheduler {
 }
 
 pub enum WorkspacePermit {
+    None,
     ReadOnly {
         _guard: tokio::sync::OwnedRwLockReadGuard<()>,
     },
@@ -53,6 +54,7 @@ impl WorkspaceScheduler {
 
     pub async fn acquire(&self, access: WorkspaceAccess) -> WorkspacePermit {
         match access {
+            WorkspaceAccess::None => WorkspacePermit::None,
             WorkspaceAccess::ReadOnly => WorkspacePermit::ReadOnly {
                 _guard: self.lock.clone().read_owned().await,
             },
@@ -137,13 +139,8 @@ pub type ToolFuture = Pin<Box<dyn Future<Output = ToolOutput> + Send>>;
 pub trait Tool: Send + Sync {
     fn name(&self) -> &'static str;
     fn description(&self) -> &'static str;
-    fn kind(&self) -> ToolKind;
-    fn workspace_access(&self) -> WorkspaceAccess {
-        match self.kind() {
-            ToolKind::ReadOnly => WorkspaceAccess::ReadOnly,
-            ToolKind::Mutating => WorkspaceAccess::Mutating,
-        }
-    }
+    fn concurrency(&self) -> ToolConcurrency;
+    fn workspace_access(&self) -> WorkspaceAccess;
     fn supports_background(&self) -> bool {
         false
     }

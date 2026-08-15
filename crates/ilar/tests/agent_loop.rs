@@ -6,7 +6,9 @@ use futures::StreamExt;
 use ilar::agent::{LoopConfig, LoopEvent, TurnOutcome, run_turn};
 use ilar::provider::{EventStream, MockProvider, Provider, ProviderEvent, Request, StopReason};
 use ilar::session::{ContentBlock, SessionMeta, SessionStore, new_id};
-use ilar::tools::{Tool, ToolContext, ToolFuture, ToolKind, ToolOutput, ToolRegistry};
+use ilar::tools::{
+    Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, ToolRegistry, WorkspaceAccess,
+};
 use tokio_util::sync::CancellationToken;
 
 fn temp_session(agent: &str) -> (SessionStore, String) {
@@ -44,8 +46,11 @@ impl Tool for EchoTool {
     fn description(&self) -> &'static str {
         "echoes input"
     }
-    fn kind(&self) -> ToolKind {
-        ToolKind::ReadOnly
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::Concurrent
+    }
+    fn workspace_access(&self) -> WorkspaceAccess {
+        WorkspaceAccess::None
     }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({"type": "object"})

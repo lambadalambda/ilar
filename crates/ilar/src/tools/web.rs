@@ -2,7 +2,7 @@
 
 use serde::Deserialize;
 
-use crate::tools::{Tool, ToolContext, ToolFuture, ToolKind, ToolOutput};
+use crate::tools::{Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, WorkspaceAccess};
 
 const MAX_FETCH_BYTES: usize = 2 * 1024 * 1024;
 const MAX_TEXT_CHARS: usize = 60_000;
@@ -128,8 +128,12 @@ impl Tool for WebFetchTool {
     fn description(&self) -> &'static str {
         "Fetch a URL and return its content as plain text (HTML converted)."
     }
-    fn kind(&self) -> ToolKind {
-        ToolKind::ReadOnly
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::Concurrent
+    }
+
+    fn workspace_access(&self) -> WorkspaceAccess {
+        WorkspaceAccess::None
     }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
@@ -215,8 +219,12 @@ impl Tool for WebSearchTool {
     fn description(&self) -> &'static str {
         "Search the web. Returns titles, URLs and snippets."
     }
-    fn kind(&self) -> ToolKind {
-        ToolKind::ReadOnly
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::Concurrent
+    }
+
+    fn workspace_access(&self) -> WorkspaceAccess {
+        WorkspaceAccess::None
     }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({

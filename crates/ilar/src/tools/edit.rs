@@ -3,7 +3,9 @@
 
 use serde::Deserialize;
 
-use super::{Tool, ToolContext, ToolFuture, ToolKind, ToolOutput, parse_input};
+use super::{
+    Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, WorkspaceAccess, parse_input,
+};
 
 pub struct EditTool;
 
@@ -26,8 +28,11 @@ impl Tool for EditTool {
          replace_all is true. Include surrounding lines to disambiguate."
     }
 
-    fn kind(&self) -> ToolKind {
-        ToolKind::Mutating
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::Barrier
+    }
+    fn workspace_access(&self) -> WorkspaceAccess {
+        WorkspaceAccess::Mutating
     }
 
     fn input_schema(&self) -> serde_json::Value {

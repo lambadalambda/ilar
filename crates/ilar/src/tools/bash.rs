@@ -2,7 +2,9 @@
 
 use serde::Deserialize;
 
-use super::{Tool, ToolContext, ToolFuture, ToolKind, ToolOutput, parse_input};
+use super::{
+    Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, WorkspaceAccess, parse_input,
+};
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MAX_OUTPUT: usize = 100 * 1024;
@@ -152,8 +154,12 @@ impl Tool for BashTool {
          exit code. Runs in the project cwd."
     }
 
-    fn kind(&self) -> ToolKind {
-        ToolKind::Mutating
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::Barrier
+    }
+
+    fn workspace_access(&self) -> WorkspaceAccess {
+        WorkspaceAccess::Mutating
     }
 
     fn supports_background(&self) -> bool {

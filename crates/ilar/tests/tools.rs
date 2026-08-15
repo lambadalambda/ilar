@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use ilar::tools::web::WebFetchTool;
-use ilar::tools::{ToolContext, ToolKind, ToolRegistry};
+use ilar::tools::{ToolConcurrency, ToolContext, ToolRegistry, WorkspaceAccess};
 
 fn ctx(dir: &std::path::Path) -> ToolContext {
     ToolContext::root(dir.to_path_buf())
@@ -24,14 +24,37 @@ async fn run(
 // ---- kinds ----
 
 #[test]
-fn tool_kinds_declared() {
+fn tool_capabilities_separate_concurrency_from_workspace_access() {
     let reg = registry();
-    assert_eq!(reg.get("read").unwrap().kind(), ToolKind::ReadOnly);
-    assert_eq!(reg.get("glob").unwrap().kind(), ToolKind::ReadOnly);
-    assert_eq!(reg.get("grep").unwrap().kind(), ToolKind::ReadOnly);
-    assert_eq!(reg.get("write").unwrap().kind(), ToolKind::Mutating);
-    assert_eq!(reg.get("edit").unwrap().kind(), ToolKind::Mutating);
-    assert_eq!(reg.get("bash").unwrap().kind(), ToolKind::Mutating);
+    for (name, concurrency, access) in [
+        (
+            "read",
+            ToolConcurrency::Concurrent,
+            WorkspaceAccess::ReadOnly,
+        ),
+        (
+            "glob",
+            ToolConcurrency::Concurrent,
+            WorkspaceAccess::ReadOnly,
+        ),
+        (
+            "grep",
+            ToolConcurrency::Concurrent,
+            WorkspaceAccess::ReadOnly,
+        ),
+        ("write", ToolConcurrency::Barrier, WorkspaceAccess::Mutating),
+        ("edit", ToolConcurrency::Barrier, WorkspaceAccess::Mutating),
+        ("bash", ToolConcurrency::Barrier, WorkspaceAccess::Mutating),
+        (
+            "webfetch",
+            ToolConcurrency::Concurrent,
+            WorkspaceAccess::None,
+        ),
+    ] {
+        let tool = reg.get(name).unwrap();
+        assert_eq!(tool.concurrency(), concurrency, "{name}");
+        assert_eq!(tool.workspace_access(), access, "{name}");
+    }
     assert!(reg.get("nope").is_none());
 }
 

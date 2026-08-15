@@ -3,14 +3,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ilar::tools::executor::{ToolCall, execute_calls};
-use ilar::tools::{Tool, ToolContext, ToolFuture, ToolKind, ToolOutput, WorkspaceAccess};
+use ilar::tools::{Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, WorkspaceAccess};
 use tokio_util::sync::CancellationToken;
 
 /// Recording probe tool: sleeps, logs "start:<name>" / "end:<name>" with
 /// timestamps into a shared log.
 struct ProbeTool {
     name: &'static str,
-    kind: ToolKind,
+    concurrency: ToolConcurrency,
     sleep: Duration,
     log: Arc<Mutex<Vec<(Instant, String)>>>,
 }
@@ -24,8 +24,8 @@ impl Tool for ConcurrentMutator {
     fn description(&self) -> &'static str {
         "concurrency-safe workspace mutator"
     }
-    fn kind(&self) -> ToolKind {
-        ToolKind::ReadOnly
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::Concurrent
     }
     fn workspace_access(&self) -> WorkspaceAccess {
         WorkspaceAccess::Mutating
@@ -45,8 +45,14 @@ impl Tool for ProbeTool {
     fn description(&self) -> &'static str {
         "probe"
     }
-    fn kind(&self) -> ToolKind {
-        self.kind
+    fn concurrency(&self) -> ToolConcurrency {
+        self.concurrency
+    }
+    fn workspace_access(&self) -> WorkspaceAccess {
+        match self.concurrency {
+            ToolConcurrency::Concurrent => WorkspaceAccess::ReadOnly,
+            ToolConcurrency::Barrier => WorkspaceAccess::Mutating,
+        }
     }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({"type": "object"})
@@ -80,14 +86,14 @@ fn add(
     tools: &mut HashMap<String, Arc<dyn Tool>>,
     log: &Arc<Mutex<Vec<(Instant, String)>>>,
     name: &'static str,
-    kind: ToolKind,
+    concurrency: ToolConcurrency,
     sleep: Duration,
 ) {
     tools.insert(
         name.into(),
         Arc::new(ProbeTool {
             name,
-            kind,
+            concurrency,
             sleep,
             log: log.clone(),
         }),
@@ -127,21 +133,21 @@ async fn three_readonly_tools_overlap() {
         &mut tools,
         &log,
         "r1",
-        ToolKind::ReadOnly,
+        ToolConcurrency::Concurrent,
         Duration::from_millis(120),
     );
     add(
         &mut tools,
         &log,
         "r2",
-        ToolKind::ReadOnly,
+        ToolConcurrency::Concurrent,
         Duration::from_millis(120),
     );
     add(
         &mut tools,
         &log,
         "r3",
-        ToolKind::ReadOnly,
+        ToolConcurrency::Concurrent,
         Duration::from_millis(120),
     );
 
@@ -193,7 +199,7 @@ async fn concurrency_safe_workspace_mutators_are_serialized() {
             name.into(),
             Arc::new(ConcurrentMutator(ProbeTool {
                 name,
-                kind: ToolKind::ReadOnly,
+                concurrency: ToolConcurrency::Concurrent,
                 sleep: Duration::from_millis(80),
                 log: log.clone(),
             })),
@@ -223,21 +229,21 @@ async fn mutating_tool_never_overlaps() {
         &mut tools,
         &log,
         "slow_read",
-        ToolKind::ReadOnly,
+        ToolConcurrency::Concurrent,
         Duration::from_millis(150),
     );
     add(
         &mut tools,
         &log,
         "edit",
-        ToolKind::Mutating,
+        ToolConcurrency::Barrier,
         Duration::from_millis(60),
     );
     add(
         &mut tools,
         &log,
         "after_read",
-        ToolKind::ReadOnly,
+        ToolConcurrency::Concurrent,
         Duration::from_millis(30),
     );
 
@@ -278,14 +284,14 @@ async fn results_in_call_order_despite_completion_order() {
         &mut tools,
         &_log,
         "slow",
-        ToolKind::ReadOnly,
+        ToolConcurrency::Concurrent,
         Duration::from_millis(150),
     );
     add(
         &mut tools,
         &_log,
         "fast",
-        ToolKind::ReadOnly,
+        ToolConcurrency::Concurrent,
         Duration::from_millis(5),
     );
 
@@ -312,14 +318,14 @@ async fn mutating_runs_alone_even_between_readonly() {
         &mut tools,
         &log,
         "bash_long",
-        ToolKind::Mutating,
+        ToolConcurrency::Barrier,
         Duration::from_millis(150),
     );
     add(
         &mut tools,
         &log,
         "quick_read",
-        ToolKind::ReadOnly,
+        ToolConcurrency::Concurrent,
         Duration::from_millis(10),
     );
 
@@ -355,14 +361,14 @@ async fn cancellation_stops_running_and_pending() {
         &mut tools,
         &log,
         "bash_long",
-        ToolKind::Mutating,
+        ToolConcurrency::Barrier,
         Duration::from_secs(10),
     );
     add(
         &mut tools,
         &log,
         "never_read",
-        ToolKind::ReadOnly,
+        ToolConcurrency::Concurrent,
         Duration::from_millis(5),
     );
 
@@ -426,14 +432,14 @@ async fn pre_cancelled_token_starts_nothing() {
         &mut tools,
         &log,
         "r1",
-        ToolKind::ReadOnly,
+        ToolConcurrency::Concurrent,
         Duration::from_millis(5),
     );
     add(
         &mut tools,
         &log,
         "m1",
-        ToolKind::Mutating,
+        ToolConcurrency::Barrier,
         Duration::from_millis(5),
     );
 
@@ -463,14 +469,14 @@ async fn unknown_tool_mid_queue_keeps_index_alignment() {
         &mut tools,
         &log,
         "r1",
-        ToolKind::ReadOnly,
+        ToolConcurrency::Concurrent,
         Duration::from_millis(5),
     );
     add(
         &mut tools,
         &log,
         "r2",
-        ToolKind::ReadOnly,
+        ToolConcurrency::Concurrent,
         Duration::from_millis(5),
     );
 

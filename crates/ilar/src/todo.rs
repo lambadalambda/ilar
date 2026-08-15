@@ -1,12 +1,12 @@
 //! Session-scoped todo list tool — single `todo` write-tool rendering a
-//! checklist (Claude Code todowrite style). ReadOnly for scheduling:
-//! concurrent writes are last-write-wins on an Arc-shared list.
+//! checklist (Claude Code todowrite style). Calls form an executor barrier so
+//! replacements are deterministic in provider call order.
 
 use std::sync::{Arc, Mutex};
 
 use serde::Deserialize;
 
-use crate::tools::{Tool, ToolContext, ToolFuture, ToolKind, ToolOutput};
+use crate::tools::{Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, WorkspaceAccess};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Status {
@@ -68,8 +68,12 @@ impl Tool for TodoTool {
          list. Exactly one item may be in_progress."
     }
 
-    fn kind(&self) -> ToolKind {
-        ToolKind::ReadOnly
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::Barrier
+    }
+
+    fn workspace_access(&self) -> WorkspaceAccess {
+        WorkspaceAccess::None
     }
 
     fn input_schema(&self) -> serde_json::Value {

@@ -6,7 +6,9 @@ use std::fmt::Write as _;
 use std::io::BufRead;
 use std::sync::atomic::Ordering;
 
-use super::{Tool, ToolContext, ToolFuture, ToolKind, ToolOutput, parse_input};
+use super::{
+    Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, WorkspaceAccess, parse_input,
+};
 
 const MAX_LINES: usize = 2000;
 const MAX_OUTPUT_BYTES: usize = 256 * 1024;
@@ -32,8 +34,11 @@ impl Tool for ReadTool {
          for large files."
     }
 
-    fn kind(&self) -> ToolKind {
-        ToolKind::ReadOnly
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::Concurrent
+    }
+    fn workspace_access(&self) -> WorkspaceAccess {
+        WorkspaceAccess::ReadOnly
     }
 
     fn input_schema(&self) -> serde_json::Value {

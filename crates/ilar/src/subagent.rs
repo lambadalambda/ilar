@@ -9,7 +9,7 @@ use crate::config::system_prompt_for;
 use crate::provider::ProviderResolver;
 use crate::session::{ContentBlock, SessionMeta, SessionStore, new_id};
 use crate::tools::{
-    Tool, ToolContext, ToolFuture, ToolKind, ToolOutput, ToolRegistry, WorkspaceAccess,
+    Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, ToolRegistry, WorkspaceAccess,
 };
 use serde::Deserialize;
 
@@ -700,8 +700,8 @@ pub struct TaskInput {
     pub background: Option<bool>,
 }
 
-/// The task tool: spawns subagents. Read-only for scheduling so sibling
-/// tasks run concurrently (Claude Code semantics).
+/// The task tool is concurrency-safe within a provider step and manages a
+/// child-lifetime workspace claim itself.
 pub struct TaskTool {
     spawner: Arc<SubagentSpawner>,
 }
@@ -722,8 +722,8 @@ impl Tool for TaskTool {
         "Launch a subagent to do a unit of work. Returns its final answer."
     }
 
-    fn kind(&self) -> ToolKind {
-        ToolKind::ReadOnly
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::Concurrent
     }
 
     fn workspace_access(&self) -> WorkspaceAccess {

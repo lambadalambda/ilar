@@ -144,8 +144,12 @@ impl crate::tools::Tool for SkillTool {
         "Load a skill's full instructions by name. Use when a listed skill \
          matches the current task."
     }
-    fn kind(&self) -> crate::tools::ToolKind {
-        crate::tools::ToolKind::ReadOnly
+    fn concurrency(&self) -> crate::tools::ToolConcurrency {
+        crate::tools::ToolConcurrency::Concurrent
+    }
+
+    fn workspace_access(&self) -> crate::tools::WorkspaceAccess {
+        crate::tools::WorkspaceAccess::ReadOnly
     }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({

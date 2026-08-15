@@ -1,8 +1,7 @@
 //! Concurrency-barrier tool executor — see meta/issues/tool-executor-barrier.md.
 //!
-//! Port of Claude Code's `isConcurrencySafe` scheduling: read-only tools
-//! run concurrently; a mutating tool runs alone (barrier) — it waits for
-//! everything ahead of it and everything behind it waits for it.
+//! Concurrent tools may overlap within a provider step; a barrier tool runs
+//! alone. Workspace read/write exclusion is enforced independently.
 //! Execution is concurrent, results are returned in call order.
 
 use std::collections::VecDeque;
@@ -13,7 +12,7 @@ use std::sync::Arc;
 use futures::stream::{FuturesUnordered, StreamExt};
 use tokio_util::sync::CancellationToken;
 
-use super::{Tool, ToolContext, ToolKind, ToolOutput};
+use super::{Tool, ToolConcurrency, ToolContext, ToolOutput, WorkspaceAccess};
 
 /// One tool call from an assistant turn.
 #[derive(Debug, Clone)]
@@ -37,7 +36,7 @@ struct Running {
     idx: usize,
     id: String,
     name: String,
-    kind: ToolKind,
+    concurrency: ToolConcurrency,
 }
 
 /// Execute a turn's tool calls under the barrier discipline.
@@ -90,11 +89,14 @@ where
                 });
                 continue;
             };
-            let kind = tool.kind();
-            let all_readonly = running_meta.iter().all(|r| r.kind == ToolKind::ReadOnly);
-            let can_start = running_meta.is_empty() || (kind == ToolKind::ReadOnly && all_readonly);
+            let concurrency = tool.concurrency();
+            let all_concurrent = running_meta
+                .iter()
+                .all(|running| running.concurrency == ToolConcurrency::Concurrent);
+            let can_start = running_meta.is_empty()
+                || (concurrency == ToolConcurrency::Concurrent && all_concurrent);
             if !can_start {
-                break; // mutating barrier holds the queue behind it
+                break; // barrier holds the queue behind it
             }
             let call = pending.pop_front().unwrap();
             let idx = next_idx;
@@ -120,19 +122,20 @@ where
                 idx,
                 id: call.id.clone(),
                 name: call.name.clone(),
-                kind,
+                concurrency,
             });
             let manages_workspace_access = tool.manages_workspace_access();
             let access = tool.workspace_access();
             let call_ctx = ctx.clone();
             let input = call.input;
             running.push(Box::pin(async move {
-                let output = if background || manages_workspace_access {
-                    tool.run(input, call_ctx).await
-                } else {
-                    let _permit = call_ctx.workspace.acquire(access).await;
-                    tool.run(input, call_ctx).await
-                };
+                let output =
+                    if background || manages_workspace_access || access == WorkspaceAccess::None {
+                        tool.run(input, call_ctx).await
+                    } else {
+                        let _permit = call_ctx.workspace.acquire(access).await;
+                        tool.run(input, call_ctx).await
+                    };
                 (idx, output)
             }));
         }

@@ -4,7 +4,9 @@ use serde::Deserialize;
 use std::io::{BufRead, Read as _};
 use std::sync::atomic::Ordering;
 
-use super::{Tool, ToolContext, ToolFuture, ToolKind, ToolOutput, parse_input};
+use super::{
+    Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, WorkspaceAccess, parse_input,
+};
 
 const MAX_MATCHES: usize = 200;
 const MAX_MATCHES_PER_FILE: usize = 50;
@@ -31,8 +33,11 @@ impl Tool for GrepTool {
          Gitignored files are skipped. Returns file:line:match."
     }
 
-    fn kind(&self) -> ToolKind {
-        ToolKind::ReadOnly
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::Concurrent
+    }
+    fn workspace_access(&self) -> WorkspaceAccess {
+        WorkspaceAccess::ReadOnly
     }
 
     fn input_schema(&self) -> serde_json::Value {

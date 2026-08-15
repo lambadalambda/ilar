@@ -3,7 +3,9 @@
 use serde::Deserialize;
 use std::sync::atomic::Ordering;
 
-use super::{Tool, ToolContext, ToolFuture, ToolKind, ToolOutput, parse_input};
+use super::{
+    Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, WorkspaceAccess, parse_input,
+};
 
 const MAX_MATCHES: usize = 1000;
 
@@ -23,8 +25,11 @@ impl Tool for GlobTool {
         "Find files by glob pattern (e.g. src/**/*.rs), relative to cwd."
     }
 
-    fn kind(&self) -> ToolKind {
-        ToolKind::ReadOnly
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::Concurrent
+    }
+    fn workspace_access(&self) -> WorkspaceAccess {
+        WorkspaceAccess::ReadOnly
     }
 
     fn input_schema(&self) -> serde_json::Value {

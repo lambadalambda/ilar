@@ -1,5 +1,5 @@
 use ilar::tools::web::{SearchHit, SearchResults, html_to_text};
-use ilar::tools::{ToolContext, ToolKind, ToolRegistry};
+use ilar::tools::{ToolConcurrency, ToolContext, ToolRegistry, WorkspaceAccess};
 
 // ---- html_to_text ----
 
@@ -180,6 +180,9 @@ async fn websearch_empty_results_is_not_error() {
 #[test]
 fn web_tools_are_read_only() {
     let (reg, _) = registry();
-    assert_eq!(reg.get("webfetch").unwrap().kind(), ToolKind::ReadOnly);
-    assert_eq!(reg.get("websearch").unwrap().kind(), ToolKind::ReadOnly);
+    for name in ["webfetch", "websearch"] {
+        let tool = reg.get(name).unwrap();
+        assert_eq!(tool.concurrency(), ToolConcurrency::Concurrent);
+        assert_eq!(tool.workspace_access(), WorkspaceAccess::None);
+    }
 }
