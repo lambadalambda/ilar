@@ -326,6 +326,8 @@ pub async fn run_turn(
     })?;
     publish(&events, LoopEvent::TurnStarted);
 
+    let tools = registry.definitions();
+
     // Compaction runs once per user turn, before the provider loop.
     let context_limit = config
         .context_limit
@@ -335,20 +337,28 @@ pub async fn run_turn(
             provider.as_provider(),
             &model,
             &mut session,
-            limit,
-            threshold,
+            crate::compaction::CompactionOptions {
+                context_limit: limit,
+                threshold,
+                system_prompt,
+                tools: &tools,
+                cancel: &cancel,
+            },
         )
         .await?
     {
         publish(
             &events,
             LoopEvent::Compacted {
-                context_tokens: crate::compaction::estimate_tokens(&session),
+                context_tokens: crate::compaction::estimate_tokens_with_request(
+                    &session,
+                    system_prompt,
+                    &tools,
+                ),
             },
         );
     }
 
-    let tools = registry.definitions();
     tool_ctx.session_id = session_id.to_string();
 
     for _ in 0..config.max_iterations {

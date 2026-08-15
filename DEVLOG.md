@@ -537,3 +537,16 @@ explicit worktree when changing workspace and may inherit an immediate parent's
 validated location. Routed notifications restore each ancestry transition,
 and stale worktrees are rejected again after lease waits. Routing is
 cooperative scheduling, not a filesystem sandbox.
+
+## 2026-08-15 — Correct, cancellable compaction
+
+Every root, child, background, and routed turn now shares the configured loop
+settings. Compaction estimates only active post-boundary context while counting
+the system prompt and tool definitions used by the real request; startup and
+model-switch telemetry use the same estimator.
+
+Summaries are persisted only after an explicit `EndTurn`. Partial EOF, refusal,
+pause, truncation, tool-use, provider errors, and empty output leave no
+compaction marker. Cancellation is checked before the summary call, while its
+stream is pending, and immediately before persistence, allowing Escape to
+return the turn as aborted without committing a partial summary.

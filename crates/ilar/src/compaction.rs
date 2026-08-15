@@ -3,19 +3,65 @@
 use anyhow::Result;
 use futures::StreamExt;
 
-use crate::provider::{Provider, ProviderEvent, ProviderResolver, Request};
-use crate::session::{Session, SessionEvent, SessionStore, new_id};
+use crate::provider::{
+    Provider, ProviderEvent, ProviderResolver, Request, StopReason, ToolDefinition,
+};
+use crate::session::{ChatMessage, Session, SessionEvent, SessionReader, SessionStore, new_id};
 use chrono::Utc;
+use tokio_util::sync::CancellationToken;
 
 const SUMMARIZER_PROMPT: &str = "You summarize agent conversations. Produce a \
 dense summary preserving: tasks attempted and their outcomes, decisions made, \
 open questions, important file paths, and user preferences. Write it so work \
 can continue immediately.";
 
+#[derive(Clone, Copy)]
+pub struct CompactionOptions<'a> {
+    pub context_limit: u64,
+    pub threshold: f64,
+    pub system_prompt: Option<&'a str>,
+    pub tools: &'a [ToolDefinition],
+    pub cancel: &'a CancellationToken,
+}
+
 /// Rough active-context estimate: max(latest post-boundary provider usage,
 /// rendered transcript chars/4).
 pub fn estimate_tokens(session: &Session) -> u64 {
-    let events = session.events();
+    estimate_tokens_with_request(session, None, &[])
+}
+
+pub fn estimate_tokens_with_request(
+    session: &Session,
+    system_prompt: Option<&str>,
+    tools: &[ToolDefinition],
+) -> u64 {
+    estimate_tokens_from(
+        session.events(),
+        &session.transcript(),
+        system_prompt,
+        tools,
+    )
+}
+
+pub fn estimate_reader_tokens_with_request(
+    session: &SessionReader,
+    system_prompt: Option<&str>,
+    tools: &[ToolDefinition],
+) -> u64 {
+    estimate_tokens_from(
+        session.events(),
+        &session.transcript(),
+        system_prompt,
+        tools,
+    )
+}
+
+fn estimate_tokens_from(
+    events: &[SessionEvent],
+    transcript: &[ChatMessage],
+    system_prompt: Option<&str>,
+    tools: &[ToolDefinition],
+) -> u64 {
     let active_from = events
         .iter()
         .rev()
@@ -37,24 +83,36 @@ pub fn estimate_tokens(session: &Session) -> u64 {
         })
         .next_back()
         .unwrap_or(0);
-    let chars: usize = session
-        .transcript()
+    let chars: usize = transcript
         .iter()
         .map(|m| {
             m.content
                 .iter()
                 .map(|b| match b {
-                    crate::session::ContentBlock::Text { text } => text.len(),
-                    crate::session::ContentBlock::Thinking { text, .. } => text.len(),
-                    crate::session::ContentBlock::Reasoning { item } => item.to_string().len(),
+                    crate::session::ContentBlock::Text { text } => text.chars().count(),
+                    crate::session::ContentBlock::Thinking { text, .. } => text.chars().count(),
+                    crate::session::ContentBlock::Reasoning { item } => {
+                        item.to_string().chars().count()
+                    }
                     crate::session::ContentBlock::Diagnostic { .. } => 0,
-                    crate::session::ContentBlock::ToolCall { input, .. } => input.to_string().len(),
-                    crate::session::ContentBlock::ToolResult { content, .. } => content.len(),
+                    crate::session::ContentBlock::ToolCall { input, .. } => {
+                        input.to_string().chars().count()
+                    }
+                    crate::session::ContentBlock::ToolResult { content, .. } => {
+                        content.chars().count()
+                    }
                 })
                 .sum::<usize>()
                 + 8
         })
-        .sum();
+        .sum::<usize>()
+        + system_prompt
+            .map(str::chars)
+            .map(Iterator::count)
+            .unwrap_or(0)
+        + serde_json::to_string(tools)
+            .map(|tools| tools.chars().count())
+            .unwrap_or(0);
     let estimated = chars as u64 / 4;
     estimated.max(reported)
 }
@@ -67,30 +125,29 @@ pub async fn compact_if_needed(
     resolver: &dyn ProviderResolver,
     store: &SessionStore,
     session_id: &str,
-    context_limit: u64,
-    threshold: f64,
+    options: CompactionOptions<'_>,
 ) -> Result<bool> {
+    if options.cancel.is_cancelled() {
+        return Ok(false);
+    }
     let mut session = store.acquire_writer(session_id)?.load()?;
     let model = session.effective_model();
     let provider = resolver.resolve_provider(&model)?;
-    compact_if_needed_locked(
-        provider.as_provider(),
-        &model,
-        &mut session,
-        context_limit,
-        threshold,
-    )
-    .await
+    compact_if_needed_locked(provider.as_provider(), &model, &mut session, options).await
 }
 
 pub(crate) async fn compact_if_needed_locked(
     provider: &dyn Provider,
     model: &str,
     session: &mut Session,
-    context_limit: u64,
-    threshold: f64,
+    options: CompactionOptions<'_>,
 ) -> Result<bool> {
-    if estimate_tokens(session) <= (context_limit as f64 * threshold) as u64 {
+    if options.cancel.is_cancelled() {
+        return Ok(false);
+    }
+    if estimate_tokens_with_request(session, options.system_prompt, options.tools)
+        <= (options.context_limit as f64 * options.threshold) as u64
+    {
         return Ok(false);
     }
 
@@ -116,16 +173,33 @@ pub(crate) async fn compact_if_needed_locked(
     };
     let mut stream = provider.stream(request)?;
     let mut summary = String::new();
-    while let Some(event) = stream.next().await {
+    loop {
+        let next = tokio::select! {
+            biased;
+            _ = options.cancel.cancelled() => return Ok(false),
+            next = stream.next() => next,
+        };
+        let Some(event) = next else {
+            anyhow::bail!("compaction stream ended before completion");
+        };
         match event {
             ProviderEvent::TextDelta(t) => summary.push_str(&t),
-            ProviderEvent::TurnComplete { .. } => break,
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+                ..
+            } => break,
+            ProviderEvent::TurnComplete { stop_reason, .. } => {
+                anyhow::bail!("compaction ended with invalid stop reason {stop_reason:?}")
+            }
             ProviderEvent::Error(e) => anyhow::bail!("compaction call failed: {e}"),
             _ => {}
         }
     }
     if summary.trim().is_empty() {
         anyhow::bail!("compaction produced an empty summary");
+    }
+    if options.cancel.is_cancelled() {
+        return Ok(false);
     }
 
     session.append(SessionEvent::Compaction {

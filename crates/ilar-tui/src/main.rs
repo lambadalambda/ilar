@@ -1361,6 +1361,10 @@ async fn main() -> Result<()> {
         }
     };
 
+    let loop_config = LoopConfig {
+        compaction_threshold: config.compaction.threshold,
+        ..LoopConfig::default()
+    };
     let agents = config.agents();
     let spawner = std::sync::Arc::new(
         SubagentSpawner::new(
@@ -1374,7 +1378,8 @@ async fn main() -> Result<()> {
         )
         .with_background_tool_timeout(std::time::Duration::from_millis(
             config.subagents.background_tool_timeout_ms,
-        )),
+        ))
+        .with_loop_config(loop_config.clone()),
     );
     let todos = std::sync::Arc::new(std::sync::Mutex::new(ilar::todo::TodoList::default()));
     let registry = ToolRegistry::builtin()
@@ -1386,14 +1391,8 @@ async fn main() -> Result<()> {
     let tool_ctx = ToolContext::root(cwd.clone()).with_subagents(spawner.clone());
     let model_choices = config.available_models();
 
-    let loop_config = {
-        let threshold = config.compaction.threshold;
-        move || LoopConfig {
-            compaction_threshold: threshold,
-            ..LoopConfig::default()
-        }
-    };
-    let (context_used, context_estimated) = session_context_tokens(&store, &session_id)?;
+    let (context_used, context_estimated) =
+        session_context_tokens(&store, &session_id, &system_prompt, &registry)?;
     let context_limit = resolver.context_limit(&model_for_session);
     let mut app = App::new();
     app.configure_runtime(
@@ -1422,26 +1421,19 @@ async fn main() -> Result<()> {
     .await
 }
 
-fn session_context_tokens(store: &SessionStore, session_id: &str) -> Result<(u64, bool)> {
+fn session_context_tokens(
+    store: &SessionStore,
+    session_id: &str,
+    system_prompt: &str,
+    registry: &ToolRegistry,
+) -> Result<(u64, bool)> {
     let session = store.load(session_id)?;
-    let estimated = transcript_character_estimate(&session.transcript());
+    let estimated = ilar::compaction::estimate_reader_tokens_with_request(
+        &session,
+        Some(system_prompt),
+        &registry.definitions(),
+    );
     Ok((estimated, true))
-}
-
-fn transcript_character_estimate(transcript: &[ilar::session::ChatMessage]) -> u64 {
-    transcript
-        .iter()
-        .flat_map(|message| &message.content)
-        .map(|block| match block {
-            ilar::session::ContentBlock::Text { text }
-            | ilar::session::ContentBlock::Thinking { text, .. } => text.len(),
-            ilar::session::ContentBlock::Reasoning { item } => item.to_string().len(),
-            ilar::session::ContentBlock::Diagnostic { .. } => 0,
-            ilar::session::ContentBlock::ToolCall { input, .. } => input.to_string().len(),
-            ilar::session::ContentBlock::ToolResult { content, .. } => content.len(),
-        })
-        .sum::<usize>() as u64
-        / 4
 }
 
 fn drain_notifications(
@@ -1480,7 +1472,7 @@ async fn run_app(
     tool_ctx: ToolContext,
     spawner: std::sync::Arc<ilar::subagent::SubagentSpawner>,
     mut notifications: tokio::sync::mpsc::UnboundedReceiver<ilar::subagent::Notification>,
-    loop_config: impl Fn() -> LoopConfig + Clone,
+    loop_config: LoopConfig,
     model_choices: Vec<&'static ilar::model::ModelInfo>,
 ) -> Result<()> {
     let mut events_rx: Option<tokio::sync::mpsc::UnboundedReceiver<LoopEvent>> = None;
@@ -1595,7 +1587,7 @@ async fn run_app(
             let system_prompt = system_prompt.to_string();
             let registry = registry.clone();
             let turn_ctx = tool_ctx.clone();
-            let loop_config = loop_config();
+            let loop_config = loop_config.clone();
             turn_handle = Some(tokio::spawn(async move {
                 TurnCompletion::Root(
                     run_turn(
@@ -1658,9 +1650,12 @@ async fn run_app(
                                 Ok(()) => {
                                     app.current_model = new_model.clone();
                                     app.context_limit = resolver.context_limit(&new_model);
-                                    if let Ok((used, estimated)) =
-                                        session_context_tokens(store, session_id)
-                                    {
+                                    if let Ok((used, estimated)) = session_context_tokens(
+                                        store,
+                                        session_id,
+                                        system_prompt,
+                                        registry,
+                                    ) {
                                         app.context_used = used;
                                         app.context_estimated = estimated;
                                     }
@@ -1748,7 +1743,7 @@ async fn run_app(
                             let system_prompt = system_prompt.to_string();
                             let registry = registry.clone();
                             let turn_ctx = tool_ctx.clone();
-                            let loop_config = loop_config();
+                            let loop_config = loop_config.clone();
                             turn_handle = Some(tokio::spawn(async move {
                                 TurnCompletion::Root(
                                     run_turn(
@@ -1834,6 +1829,37 @@ mod tests {
             ),
             "openai/persisted"
         );
+    }
+
+    #[test]
+    fn startup_context_estimate_includes_prompt_and_tools() {
+        let root = std::env::temp_dir().join(format!("ilar-tui-context-{}", new_id()));
+        let store = SessionStore::new(root.clone());
+        let session_id = new_id();
+        drop(
+            store
+                .create(SessionMeta {
+                    session_id: session_id.clone(),
+                    parent_id: None,
+                    agent: "build".into(),
+                    model: "zai/glm-4.7".into(),
+                    workspace: None,
+                })
+                .unwrap(),
+        );
+        let system_prompt = "system context ".repeat(100);
+
+        let (tokens, estimated) = session_context_tokens(
+            &store,
+            &session_id,
+            &system_prompt,
+            &ToolRegistry::read_only(),
+        )
+        .unwrap();
+
+        assert!(estimated);
+        assert!(tokens >= system_prompt.chars().count() as u64 / 4);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

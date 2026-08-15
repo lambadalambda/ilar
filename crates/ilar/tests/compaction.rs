@@ -1,8 +1,12 @@
 use ilar::agent::{LoopConfig, TurnOutcome, run_turn};
+use std::sync::Arc;
+use std::time::Duration;
+
 use ilar::provider::{
-    MockProvider, ProviderEvent, ProviderHandle, ProviderResolver, StopReason, resolve_model,
+    EventStream, MockProvider, Provider, ProviderEvent, ProviderHandle, ProviderResolver, Request,
+    StopReason, ToolDefinition, resolve_model,
 };
-use ilar::session::{SessionEvent, SessionMeta, SessionStore, Usage, new_id};
+use ilar::session::{InputTokenAccounting, SessionEvent, SessionMeta, SessionStore, Usage, new_id};
 use ilar::tools::{ToolContext, ToolRegistry};
 
 fn temp_session() -> (SessionStore, String) {
@@ -43,8 +47,33 @@ fn tiny_config() -> LoopConfig {
     }
 }
 
-#[test]
-fn estimate_ignores_usage_before_latest_compaction_boundary() {
+fn seed_compactable_history(store: &SessionStore, session_id: &str) {
+    let mut session = store.acquire_writer(session_id).unwrap().load().unwrap();
+    for i in 0..6 {
+        session
+            .append(SessionEvent::UserMessage {
+                id: new_id(),
+                text: format!("old question {i} {}", "context ".repeat(20)),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        session
+            .append(SessionEvent::AssistantMessage {
+                id: new_id(),
+                model: "zai/glm-4.7".into(),
+                content: vec![ilar::session::ContentBlock::Text {
+                    text: format!("old answer {i} {}", "detail ".repeat(20)),
+                }],
+                usage: Usage::default(),
+                stop_reason: "end_turn".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn estimate_ignores_usage_before_latest_compaction_boundary() {
     let (store, session_id) = temp_session();
     let mut session = store.acquire_writer(&session_id).unwrap().load().unwrap();
     session
@@ -63,6 +92,7 @@ fn estimate_ignores_usage_before_latest_compaction_boundary() {
             }],
             usage: Usage {
                 input_tokens: 10_000,
+                input_token_accounting: Some(InputTokenAccounting::ExcludesCached),
                 ..Default::default()
             },
             stop_reason: "end_turn".into(),
@@ -87,6 +117,54 @@ fn estimate_ignores_usage_before_latest_compaction_boundary() {
         .unwrap();
 
     assert!(ilar::compaction::estimate_tokens(&session) < 100);
+    drop(session);
+
+    let provider = MockProvider::new(vec![text_turn("answer")]);
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    run_turn(
+        &provider,
+        &ToolRegistry::read_only(),
+        &store,
+        &session_id,
+        "follow-up",
+        None,
+        LoopConfig {
+            context_limit: Some(10_000),
+            compaction_threshold: 0.5,
+            ..LoopConfig::default()
+        },
+        tx,
+        tokio_util::sync::CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        provider.requests().len(),
+        1,
+        "pre-boundary usage retriggered compaction"
+    );
+}
+
+#[test]
+fn estimate_includes_system_prompt_and_tool_definitions() {
+    let (store, session_id) = temp_session();
+    let session = store.acquire_writer(&session_id).unwrap().load().unwrap();
+    let system_prompt = "s".repeat(400);
+    let tools = vec![ToolDefinition {
+        name: "large".into(),
+        description: "d".repeat(400),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {"payload": {"type": "string", "description": "x".repeat(400)}}
+        }),
+    }];
+
+    assert!(
+        ilar::compaction::estimate_tokens_with_request(&session, Some(&system_prompt), &tools)
+            >= 250
+    );
 }
 
 #[test]
@@ -241,6 +319,148 @@ async fn oversize_transcript_triggers_compaction() {
     for pair in transcript.windows(2) {
         assert_ne!(pair[0].role, pair[1].role);
     }
+}
+
+#[tokio::test]
+async fn compaction_rejects_partial_summary_at_eof() {
+    let (store, session_id) = temp_session();
+    seed_compactable_history(&store, &session_id);
+    let provider = MockProvider::new(vec![vec![ProviderEvent::TextDelta("partial".into())]]);
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+    let error = run_turn(
+        &provider,
+        &ToolRegistry::builtin(),
+        &store,
+        &session_id,
+        "new question",
+        None,
+        tiny_config(),
+        tx,
+        tokio_util::sync::CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("before completion"), "{error:#}");
+    assert!(
+        !store
+            .load(&session_id)
+            .unwrap()
+            .events()
+            .iter()
+            .any(|event| { matches!(event, SessionEvent::Compaction { .. }) })
+    );
+}
+
+#[tokio::test]
+async fn compaction_rejects_non_end_turn_terminal_states() {
+    for stop_reason in [
+        StopReason::ToolUse,
+        StopReason::MaxTokens,
+        StopReason::Refusal,
+        StopReason::Paused,
+        StopReason::Stopped,
+    ] {
+        let (store, session_id) = temp_session();
+        seed_compactable_history(&store, &session_id);
+        let provider = MockProvider::new(vec![vec![
+            ProviderEvent::TextDelta("partial".into()),
+            ProviderEvent::TurnComplete {
+                stop_reason: stop_reason.clone(),
+                usage: Usage::default(),
+            },
+        ]]);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let error = run_turn(
+            &provider,
+            &ToolRegistry::builtin(),
+            &store,
+            &session_id,
+            "new question",
+            None,
+            tiny_config(),
+            tx,
+            tokio_util::sync::CancellationToken::new(),
+            ToolContext::root(std::env::temp_dir()),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains("invalid stop reason"),
+            "{error:#}"
+        );
+        assert!(
+            !store
+                .load(&session_id)
+                .unwrap()
+                .events()
+                .iter()
+                .any(|event| { matches!(event, SessionEvent::Compaction { .. }) })
+        );
+    }
+}
+
+struct PendingCompactionProvider {
+    started: Arc<tokio::sync::Notify>,
+}
+
+impl Provider for PendingCompactionProvider {
+    fn stream(&self, _request: Request) -> anyhow::Result<EventStream> {
+        self.started.notify_one();
+        Ok(Box::pin(futures::stream::pending()))
+    }
+}
+
+#[tokio::test]
+async fn cancellation_stops_in_flight_compaction_without_persisting() {
+    let (store, session_id) = temp_session();
+    seed_compactable_history(&store, &session_id);
+    let started = Arc::new(tokio::sync::Notify::new());
+    let provider = PendingCompactionProvider {
+        started: started.clone(),
+    };
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let turn_cancel = cancel.clone();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let turn = tokio::spawn(async move {
+        let outcome = run_turn(
+            &provider,
+            &ToolRegistry::builtin(),
+            &store,
+            &session_id,
+            "new question",
+            None,
+            tiny_config(),
+            tx,
+            turn_cancel,
+            ToolContext::root(std::env::temp_dir()),
+        )
+        .await;
+        (outcome, store, session_id)
+    });
+    tokio::time::timeout(Duration::from_secs(1), started.notified())
+        .await
+        .expect("compaction did not start");
+
+    cancel.cancel();
+    let (outcome, store, session_id) = tokio::time::timeout(Duration::from_secs(1), turn)
+        .await
+        .expect("compaction ignored cancellation")
+        .unwrap();
+
+    assert_eq!(outcome.unwrap(), TurnOutcome::Aborted);
+    assert!(
+        !store
+            .load(&session_id)
+            .unwrap()
+            .events()
+            .iter()
+            .any(|event| { matches!(event, SessionEvent::Compaction { .. }) })
+    );
 }
 
 #[tokio::test]

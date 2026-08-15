@@ -50,6 +50,7 @@ pub struct SubagentSpawner {
     background_tasks: Arc<Mutex<BackgroundRegistry>>,
     workspace: crate::tools::WorkspaceScheduler,
     background_tool_timeout: std::time::Duration,
+    loop_config: LoopConfig,
 }
 
 struct BackgroundTask {
@@ -92,6 +93,7 @@ impl SubagentSpawner {
             background_tasks: Arc::new(Mutex::new(BackgroundRegistry::default())),
             workspace,
             background_tool_timeout: std::time::Duration::from_secs(600),
+            loop_config: LoopConfig::default(),
         }
     }
 
@@ -103,6 +105,11 @@ impl SubagentSpawner {
 
     pub fn with_background_tool_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.background_tool_timeout = timeout;
+        self
+    }
+
+    pub fn with_loop_config(mut self, config: LoopConfig) -> Self {
+        self.loop_config = config;
         self
     }
 
@@ -191,6 +198,7 @@ impl SubagentSpawner {
             background_tasks: self.background_tasks.clone(),
             workspace,
             background_tool_timeout: self.background_tool_timeout,
+            loop_config: self.loop_config.clone(),
         })
     }
 
@@ -535,7 +543,7 @@ impl SubagentSpawner {
                     &session_id,
                     &prompt,
                     Some(&system_prompt),
-                    LoopConfig::default(),
+                    spawner.loop_config.clone(),
                     tx,
                     cancel.clone(),
                     child_ctx,
@@ -658,7 +666,7 @@ DO NOT sleep, poll, or check on it — work on something else or end your respon
             &session_id,
             &input.prompt,
             Some(&system_prompt),
-            LoopConfig::default(),
+            self.loop_config.clone(),
             tx,
             ctx.cancel.clone(),
             child_ctx,
@@ -813,6 +821,7 @@ DO NOT sleep, poll, or check on it — work on something else or end your respon
             background_tasks: self.background_tasks.clone(),
             workspace: workspace.clone(),
             background_tool_timeout: self.background_tool_timeout,
+            loop_config: self.loop_config.clone(),
         });
         let workspace_access = match agent.workspace_mode {
             AgentWorkspaceMode::Mutable => WorkspaceAccess::Mutating,
@@ -864,7 +873,7 @@ DO NOT sleep, poll, or check on it — work on something else or end your respon
                 &notification.parent_session_id,
                 &notification.text,
                 Some(&system_prompt),
-                LoopConfig::default(),
+                self.loop_config.clone(),
                 tx.clone(),
                 cancel.clone(),
                 ToolContext {

@@ -14,7 +14,6 @@
 
 ## Stabilization
 
-- [ ] [Compaction correctness and cancellation](issues/compaction-correctness-and-cancellation.md)
 - [ ] [Harden provider protocol handling](issues/harden-provider-protocol-handling.md)
 - [ ] [Bound and sanitize web tools](issues/bound-and-sanitize-web-tools.md)
 - [ ] [Subagent safety and outcomes](issues/subagent-safety-and-outcomes.md)

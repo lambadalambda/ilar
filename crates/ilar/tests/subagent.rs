@@ -7,7 +7,9 @@ use ilar::provider::{
     EventStream, FixedProviderResolver, MockProvider, Provider, ProviderEvent, ProviderHandle,
     ProviderResolver, Request, StopReason, resolve_model,
 };
-use ilar::session::{ChatMessage, ContentBlock, SessionMeta, SessionStore, Usage, new_id};
+use ilar::session::{
+    ChatMessage, ContentBlock, SessionEvent, SessionMeta, SessionStore, Usage, new_id,
+};
 use ilar::subagent::SubagentSpawner;
 use ilar::tools::{ToolContext, ToolRegistry};
 
@@ -778,6 +780,98 @@ async fn resumed_subagent_rejects_persisted_agent_mismatch() {
 
     assert!(output.is_error);
     assert!(output.content.contains("persisted agent"));
+}
+
+#[tokio::test]
+async fn subagent_turns_use_the_configured_compaction_threshold() {
+    let (store, parent_id) = temp_store();
+    let child_id = new_id();
+    let mut child_session = store
+        .create(SessionMeta {
+            session_id: child_id.clone(),
+            parent_id: Some(parent_id.clone()),
+            agent: "explore".into(),
+            model: "zai/glm-4.7".into(),
+            workspace: None,
+        })
+        .unwrap();
+    child_session
+        .append(SessionEvent::UserMessage {
+            id: new_id(),
+            text: "old question ".repeat(40),
+            ts: chrono::Utc::now(),
+        })
+        .unwrap();
+    child_session
+        .append(SessionEvent::AssistantMessage {
+            id: new_id(),
+            model: "zai/glm-4.7".into(),
+            content: vec![ContentBlock::Text {
+                text: "old answer ".repeat(40),
+            }],
+            usage: Usage::default(),
+            stop_reason: "end_turn".into(),
+            ts: chrono::Utc::now(),
+        })
+        .unwrap();
+    drop(child_session);
+    let provider = MockProvider::new(vec![
+        vec![
+            ProviderEvent::TextDelta("summary".into()),
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            },
+        ],
+        vec![
+            ProviderEvent::TextDelta("fresh answer".into()),
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            },
+        ],
+    ]);
+    let spawner = Arc::new(
+        SubagentSpawner::new(
+            Arc::new(FixedProviderResolver::new(Arc::new(provider.clone()))),
+            store.clone(),
+            vec![AgentDefinition {
+                name: "explore".into(),
+                description: "explores".into(),
+                model: None,
+                prompt: String::new(),
+                workspace_mode: AgentWorkspaceMode::Mutable,
+            }],
+            std::env::temp_dir(),
+            0,
+            10,
+            3,
+        )
+        .with_loop_config(LoopConfig {
+            context_limit: Some(120),
+            compaction_threshold: 0.5,
+            ..LoopConfig::default()
+        }),
+    );
+    let task = parent_registry(spawner).get("task").unwrap();
+    let mut ctx = ToolContext::root(std::env::temp_dir());
+    ctx.session_id = parent_id;
+
+    let output = task
+        .run(
+            serde_json::json!({
+                "description": "resume compacted child",
+                "prompt": "continue",
+                "subagent_type": "explore",
+                "task_id": child_id,
+            }),
+            ctx,
+        )
+        .await;
+
+    assert!(!output.is_error, "{}", output.content);
+    assert_eq!(output.content, "fresh answer");
+    assert_eq!(provider.requests().len(), 2);
 }
 
 #[tokio::test]

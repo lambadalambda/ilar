@@ -53,3 +53,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [TUI cursor and markdown density](issues/tui-cursor-and-markdown-density.md)
 - [x] [Collapse Markdown separator rows](issues/collapse-markdown-separator-rows.md)
 - [x] [Tool scheduling and workspace capabilities](issues/tool-scheduling-and-workspace-capabilities.md)
+- [x] [Compaction correctness and cancellation](issues/compaction-correctness-and-cancellation.md)
