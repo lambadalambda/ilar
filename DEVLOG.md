@@ -352,3 +352,11 @@ The OpenAI-compatible flavor now sends instructions as a system-role
 message and places tool outputs directly after assistant tool calls,
 without inserting an empty user message. The example endpoint now points
 at z.ai's coding-plan OpenAI-compatible URL.
+
+## 2026-08-15 — Stabilization: serialized notification turns
+
+Notification bursts now stay queued and launch one turn at a time. The
+active JoinHandle, rather than an early UI `TurnDone` event, owns the turn
+until join cleanup, preventing event-channel, cancellation-token, and
+handle replacement races. Parent-session routing remains tracked in the
+open notification issue.

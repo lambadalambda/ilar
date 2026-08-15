@@ -186,7 +186,6 @@ impl App {
                     .push(Line_::System("transcript compacted".into()));
             }
             LoopEvent::TurnDone { outcome } => {
-                self.busy = false;
                 self.status = match outcome {
                     TurnOutcome::Completed => "ready".into(),
                     TurnOutcome::Aborted => "aborted".into(),
@@ -545,6 +544,17 @@ async fn main() -> Result<()> {
     .await
 }
 
+fn next_notification(
+    turn_active: bool,
+    notifications: &mut tokio::sync::mpsc::UnboundedReceiver<ilar::subagent::Notification>,
+) -> Option<ilar::subagent::Notification> {
+    if turn_active {
+        None
+    } else {
+        notifications.try_recv().ok()
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_app(
     terminal: &mut ratatui::DefaultTerminal,
@@ -594,42 +604,40 @@ async fn run_app(
         }
 
         // Background completions re-invoke the loop while idle.
-        if !app.busy {
-            while let Ok(notification) = notifications.try_recv() {
-                app.lines.push(Line_::System(format!(
-                    "task notification: {}",
-                    notification.description
-                )));
-                let text = notification.text;
-                app.lines.push(Line_::User(text.clone()));
-                let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-                events_rx = Some(rx);
-                let token = CancellationToken::new();
-                cancel = Some(token.clone());
-                app.busy = true;
-                let provider = provider.clone();
-                let store = store.clone();
-                let session_id = session_id.to_string();
-                let system_prompt = system_prompt.to_string();
-                let registry = registry.clone();
-                let turn_ctx = tool_ctx.clone();
-                let loop_config = loop_config();
-                turn_handle = Some(tokio::spawn(async move {
-                    run_turn(
-                        provider.as_ref(),
-                        &registry,
-                        &store,
-                        &session_id,
-                        &text,
-                        Some(&system_prompt),
-                        loop_config,
-                        tx,
-                        token,
-                        turn_ctx,
-                    )
-                    .await
-                }));
-            }
+        if let Some(notification) = next_notification(turn_handle.is_some(), &mut notifications) {
+            app.lines.push(Line_::System(format!(
+                "task notification: {}",
+                notification.description
+            )));
+            let text = notification.text;
+            app.lines.push(Line_::User(text.clone()));
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            events_rx = Some(rx);
+            let token = CancellationToken::new();
+            cancel = Some(token.clone());
+            app.busy = true;
+            let provider = provider.clone();
+            let store = store.clone();
+            let session_id = session_id.to_string();
+            let system_prompt = system_prompt.to_string();
+            let registry = registry.clone();
+            let turn_ctx = tool_ctx.clone();
+            let loop_config = loop_config();
+            turn_handle = Some(tokio::spawn(async move {
+                run_turn(
+                    provider.as_ref(),
+                    &registry,
+                    &store,
+                    &session_id,
+                    &text,
+                    Some(&system_prompt),
+                    loop_config,
+                    tx,
+                    token,
+                    turn_ctx,
+                )
+                .await
+            }));
         }
 
         terminal.draw(|frame| app.render(frame))?;
@@ -691,7 +699,7 @@ async fn run_app(
                     }
                 }
                 (KeyCode::Enter, _) => {
-                    if !app.busy && !app.input.trim().is_empty() {
+                    if turn_handle.is_none() && !app.busy && !app.input.trim().is_empty() {
                         let text = std::mem::take(&mut app.input);
                         app.lines.push(Line_::User(text.clone()));
                         app.follow_tail = true;
@@ -773,6 +781,20 @@ mod tests {
     }
 
     #[test]
+    fn turn_done_keeps_ownership_until_join_cleanup() {
+        let mut app = App::new();
+        app.busy = true;
+
+        app.push_loop_event(&LoopEvent::TurnDone {
+            outcome: TurnOutcome::Completed,
+        });
+        assert!(app.busy);
+
+        app.finish_turn(Ok(TurnOutcome::Completed));
+        assert!(!app.busy);
+    }
+
+    #[test]
     fn parallel_tool_completions_match_by_id() {
         let mut app = App::new();
         app.push_loop_event(&LoopEvent::ToolStarted {
@@ -842,5 +864,31 @@ mod tests {
 
         assert_eq!(app.scroll_top, 10);
         assert!(!app.follow_tail);
+    }
+
+    #[test]
+    fn notification_burst_stays_queued_while_a_turn_is_active() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        for description in ["first", "second"] {
+            tx.send(ilar::subagent::Notification {
+                parent_session_id: "parent".into(),
+                description: description.into(),
+                text: description.into(),
+                is_error: false,
+            })
+            .unwrap();
+        }
+
+        assert_eq!(
+            next_notification(false, &mut rx).unwrap().description,
+            "first"
+        );
+        // A terminal UI event may already have updated status, but the
+        // existing task handle remains the authoritative owner.
+        assert!(next_notification(true, &mut rx).is_none());
+        assert_eq!(
+            next_notification(false, &mut rx).unwrap().description,
+            "second"
+        );
     }
 }
