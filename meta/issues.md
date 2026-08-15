@@ -15,7 +15,6 @@
 ## Stabilization
 
 - [ ] [Tool scheduling and workspace capabilities](issues/tool-scheduling-and-workspace-capabilities.md)
-- [ ] [Secure atomic OAuth store](issues/secure-atomic-oauth-store.md)
 - [ ] [Compaction correctness and cancellation](issues/compaction-correctness-and-cancellation.md)
 - [ ] [Harden provider protocol handling](issues/harden-provider-protocol-handling.md)
 - [ ] [Bound and sanitize web tools](issues/bound-and-sanitize-web-tools.md)

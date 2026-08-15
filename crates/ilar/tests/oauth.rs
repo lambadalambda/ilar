@@ -1,10 +1,12 @@
 use base64::Engine;
 use futures::StreamExt;
 use ilar::auth::{
-    AuthStore, account_id_from_id_token, login_flow, parse_callback, pkce_from_verifier,
+    AuthStore, OAuthCallback, account_id_from_id_token, login_flow, parse_callback,
+    pkce_from_verifier, refresh_tokens,
 };
 use ilar::provider::openai::OpenAIProvider;
 use ilar::provider::{Provider, ProviderEvent, Request, StopReason};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 fn b64url(json: &str) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json.as_bytes())
@@ -37,17 +39,61 @@ fn account_id_extracted_from_id_token() {
 #[test]
 fn callback_request_parsed() {
     let head = b"GET /auth/callback?code=SplxlOBeZQQYbYS6WxSbIA&state=xyz HTTP/1.1\r\nHost: localhost:1455\r\n\r\n";
-    let (code, state) = parse_callback(head).expect("parses");
-    assert_eq!(code, "SplxlOBeZQQYbYS6WxSbIA");
-    assert_eq!(state, "xyz");
-    assert!(parse_callback(b"GET /nope HTTP/1.1\r\n\r\n").is_none());
+    assert_eq!(
+        parse_callback(head).expect("parses"),
+        OAuthCallback::Code {
+            code: "SplxlOBeZQQYbYS6WxSbIA".into(),
+            state: "xyz".into(),
+        }
+    );
+    assert!(parse_callback(b"GET /nope HTTP/1.1\r\n\r\n").is_err());
 }
 
 #[test]
-fn auth_store_round_trip() {
+fn callback_parameters_are_percent_decoded() {
+    let head = b"GET /auth/callback?code=a%2Bb%2Fc%3D&state=hello%20world HTTP/1.1\r\nHost: localhost:1455\r\n\r\n";
+    assert_eq!(
+        parse_callback(head).expect("parses encoded callback"),
+        OAuthCallback::Code {
+            code: "a+b/c=".into(),
+            state: "hello world".into(),
+        }
+    );
+}
+
+#[test]
+fn callback_denial_is_parsed_with_description() {
+    let head = b"GET /auth/callback?error=access_denied&error_description=No%20thanks&state=xyz HTTP/1.1\r\nHost: localhost:1455\r\n\r\n";
+    assert_eq!(
+        parse_callback(head).expect("parses denial callback"),
+        OAuthCallback::Error {
+            error: "access_denied".into(),
+            description: Some("No thanks".into()),
+            state: "xyz".into(),
+        }
+    );
+}
+
+#[test]
+fn callback_rejects_ambiguous_or_empty_parameters() {
+    for target in [
+        "/auth/callback?code=&state=xyz",
+        "/auth/callback?code=one&code=two&state=xyz",
+        "/auth/callback?code=one&error=access_denied&state=xyz",
+        "/auth/callback?code=one&error_description=denied&state=xyz",
+        "/auth/callback?code=one&state=",
+    ] {
+        let request = format!("GET {target} HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        assert!(parse_callback(request.as_bytes()).is_err(), "{target}");
+    }
+}
+
+#[tokio::test]
+async fn auth_store_round_trip() {
     let dir = tempfile::tempdir().unwrap();
-    let store = AuthStore::open(dir.path().to_path_buf());
-    assert!(store.load().is_none());
+    let state_dir = dir.path().join("new/state/directory");
+    let store = AuthStore::open(state_dir);
+    assert!(store.load().unwrap().is_none());
     store
         .save(&ilar::auth::TokenSet {
             access_token: "a1".into(),
@@ -56,8 +102,9 @@ fn auth_store_round_trip() {
             account_id: Some("acc".into()),
             expires_at: Some(4102444800),
         })
+        .await
         .unwrap();
-    let loaded = store.load().unwrap();
+    let loaded = store.load().unwrap().unwrap();
     assert_eq!(loaded.access_token, "a1");
     assert_eq!(loaded.refresh_token.as_deref(), Some("r1"));
     assert_eq!(loaded.account_id.as_deref(), Some("acc"));
@@ -69,6 +116,130 @@ fn auth_store_round_trip() {
             0o600
         );
     }
+}
+
+#[test]
+fn auth_store_distinguishes_missing_and_malformed_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = AuthStore::open(dir.path().to_path_buf());
+    assert!(store.load().unwrap().is_none());
+
+    std::fs::write(store.tokens_path(), "not-json").unwrap();
+    let error = store.load().expect_err("malformed store must be an error");
+    assert!(
+        error.to_string().contains("parsing OAuth store"),
+        "{error:#}"
+    );
+
+    std::fs::remove_file(store.tokens_path()).unwrap();
+    std::fs::create_dir(store.tokens_path()).unwrap();
+    let error = store.load().expect_err("unreadable store must be an error");
+    assert!(
+        error.to_string().contains("reading OAuth store"),
+        "{error:#}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn auth_store_rejects_symlinks_instead_of_treating_them_as_missing() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = AuthStore::open(dir.path().to_path_buf());
+    let target = dir.path().join("target.json");
+    std::fs::write(&target, r#"{"access_token":"secret"}"#).unwrap();
+    symlink(&target, store.tokens_path()).unwrap();
+    assert!(store.load().is_err());
+
+    std::fs::remove_file(store.tokens_path()).unwrap();
+    symlink(dir.path().join("missing.json"), store.tokens_path()).unwrap();
+    assert!(store.load().is_err());
+}
+
+#[tokio::test]
+async fn concurrent_refreshes_rotate_once_and_share_the_result() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let mut requests = 0;
+        loop {
+            let accepted = tokio::time::timeout(
+                if requests == 0 {
+                    std::time::Duration::from_secs(2)
+                } else {
+                    std::time::Duration::from_millis(200)
+                },
+                listener.accept(),
+            )
+            .await;
+            let Ok(Ok((mut socket, _))) = accepted else {
+                break;
+            };
+            requests += 1;
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            loop {
+                let n = socket.read(&mut chunk).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..n]);
+                let text = String::from_utf8_lossy(&request);
+                if let Some(head_end) = text.find("\r\n\r\n") {
+                    let content_length = text
+                        .lines()
+                        .find_map(|line| {
+                            let (key, value) = line.split_once(':')?;
+                            key.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())?
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= head_end + 4 + content_length {
+                        break;
+                    }
+                }
+            }
+            let token = format!("t{}", requests + 1);
+            let body = format!(
+                r#"{{"access_token":"{token}","refresh_token":"rotated","expires_in":3600}}"#
+            );
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        }
+        requests
+    });
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = AuthStore::open(dir.path().to_path_buf());
+    store
+        .save(&ilar::auth::TokenSet {
+            access_token: "stale".into(),
+            refresh_token: Some("r1".into()),
+            id_token: None,
+            account_id: Some("account".into()),
+            expires_at: Some(0),
+        })
+        .await
+        .unwrap();
+    let http = reqwest::Client::new();
+    let token_url = format!("http://{address}/oauth/token");
+    let (first, second) = tokio::join!(
+        refresh_tokens(&store, "stale", &token_url, &http),
+        refresh_tokens(&store, "stale", &token_url, &http),
+    );
+
+    assert_eq!(first.unwrap().access_token, "t2");
+    assert_eq!(second.unwrap().access_token, "t2");
+    assert_eq!(server.await.unwrap(), 1);
 }
 
 /// Mock token endpoint + mock responses endpoint; proves refresh-on-401.
@@ -195,6 +366,7 @@ async fn chatgpt_auth_refreshes_on_401_and_retries() {
             account_id: None,
             expires_at: Some(0),
         })
+        .await
         .unwrap();
     let provider =
         OpenAIProvider::with_chatgpt_auth(store.clone(), Some(format!("http://{resp_addr}")))
@@ -228,28 +400,66 @@ async fn chatgpt_auth_refreshes_on_401_and_retries() {
         "{seen:?}"
     );
     // Store now holds the refreshed tokens.
-    assert_eq!(store.load().unwrap().access_token, "t2");
-    assert_eq!(store.load().unwrap().account_id.as_deref(), Some("acc_99"));
+    assert_eq!(store.load().unwrap().unwrap().access_token, "t2");
+    assert_eq!(
+        store.load().unwrap().unwrap().account_id.as_deref(),
+        Some("acc_99")
+    );
 }
 
 #[tokio::test]
 async fn chatgpt_auth_without_tokens_is_preflight_error() {
     let dir = tempfile::tempdir().unwrap();
     let store = AuthStore::open(dir.path().to_path_buf());
-    let provider = OpenAIProvider::with_chatgpt_auth(store, Some("http://127.0.0.1:1".into()));
+    let provider =
+        OpenAIProvider::with_chatgpt_auth(store.clone(), Some("http://127.0.0.1:1".into()));
     let err = provider
         .stream(Request::with_model("openai/gpt-5.2"))
         .err()
         .expect("preflight error");
     assert!(err.to_string().contains("login"), "{err}");
+
+    std::fs::write(store.tokens_path(), "not-json").unwrap();
+    let provider = OpenAIProvider::with_chatgpt_auth(store, Some("http://127.0.0.1:1".into()));
+    let err = provider
+        .stream(Request::with_model("openai/gpt-5.2"))
+        .err()
+        .expect("malformed auth must fail preflight");
+    assert!(err.to_string().contains("auth store"), "{err:#}");
+    assert!(!err.to_string().contains("not logged in"), "{err:#}");
 }
 
 #[tokio::test]
 async fn login_flow_times_out_without_callback() {
     let dir = tempfile::tempdir().unwrap();
     let store = AuthStore::open(dir.path().to_path_buf());
-    let result = login_flow(&store, std::time::Duration::from_millis(300), false).await;
+    let started = std::time::Instant::now();
+    let login_store = store.clone();
+    let login = tokio::spawn(async move {
+        login_flow(&login_store, std::time::Duration::from_millis(500), false).await
+    });
+    let mut spurious = loop {
+        match tokio::net::TcpStream::connect("127.0.0.1:1455").await {
+            Ok(socket) => break socket,
+            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
+        }
+    };
+    spurious
+        .write_all(b"GET /not-the-callback HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .unwrap();
+    drop(spurious);
+    let mut slow = tokio::net::TcpStream::connect("127.0.0.1:1455")
+        .await
+        .unwrap();
+    slow.write_all(b"GET /auth/call").await.unwrap();
+    let result = login.await.unwrap();
     assert!(result.is_err());
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(400),
+        "spurious callback ended login early: {:?}",
+        started.elapsed()
+    );
 }
 
 /// Live smoke: real ChatGPT backend through ilar's provider.

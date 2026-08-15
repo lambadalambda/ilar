@@ -4,6 +4,7 @@
 
 use anyhow::{Context, Result};
 use base64::Engine;
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -83,11 +84,18 @@ impl AuthStore {
         &self.path
     }
 
-    pub fn load(&self) -> Option<TokenSet> {
-        serde_json::from_str(&std::fs::read_to_string(&self.path).ok()?).ok()
+    pub fn load(&self) -> Result<Option<TokenSet>> {
+        let Some(content) = read_store(&self.path)
+            .with_context(|| format!("reading OAuth store {}", self.path.display()))?
+        else {
+            return Ok(None);
+        };
+        serde_json::from_str(&content)
+            .with_context(|| format!("parsing OAuth store {}", self.path.display()))
+            .map(Some)
     }
 
-    pub fn save(&self, tokens: &TokenSet) -> Result<()> {
+    fn save_unlocked(&self, tokens: &TokenSet) -> Result<()> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -97,6 +105,92 @@ impl AuthStore {
             crate::atomic_file::Mode::Force(0o600),
         )?;
         Ok(())
+    }
+
+    async fn load_async(&self) -> Result<Option<TokenSet>> {
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || store.load())
+            .await
+            .context("OAuth store read task failed")?
+    }
+
+    async fn save_with_lock_async(&self, tokens: &TokenSet, lock: std::fs::File) -> Result<()> {
+        let store = self.clone();
+        let tokens = tokens.clone();
+        tokio::task::spawn_blocking(move || {
+            let _lock = lock;
+            store.save_unlocked(&tokens)
+        })
+        .await
+        .context("OAuth store write task failed")?
+    }
+
+    pub async fn save(&self, tokens: &TokenSet) -> Result<()> {
+        let store = self.clone();
+        let tokens = tokens.clone();
+        tokio::task::spawn_blocking(move || {
+            let _lock = store.acquire_refresh_lock_blocking()?;
+            store.save_unlocked(&tokens)
+        })
+        .await
+        .context("OAuth store write task failed")?
+    }
+
+    fn acquire_refresh_lock_blocking(&self) -> Result<std::fs::File> {
+        let path = self.path.with_extension("lock");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).truncate(false).read(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        let file = options.open(&path)?;
+        FileExt::lock_exclusive(&file)?;
+        Ok(file)
+    }
+
+    async fn acquire_refresh_lock(&self) -> Result<std::fs::File> {
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || store.acquire_refresh_lock_blocking())
+            .await
+            .context("OAuth refresh lock task failed")?
+            .with_context(|| format!("locking OAuth store {}", self.path.display()))
+    }
+}
+
+#[cfg(unix)]
+fn read_store(path: &std::path::Path) -> std::io::Result<Option<String>> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).custom_flags(libc::O_NOFOLLOW);
+    let mut file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return match std::fs::symlink_metadata(path) {
+                Err(metadata_error) if metadata_error.kind() == std::io::ErrorKind::NotFound => {
+                    Ok(None)
+                }
+                _ => Err(error),
+            };
+        }
+        Err(error) => return Err(error),
+    };
+    let mut content = String::new();
+    std::io::Read::read_to_string(&mut file, &mut content)?;
+    Ok(Some(content))
+}
+
+#[cfg(not(unix))]
+fn read_store(path: &std::path::Path) -> std::io::Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(content) => Ok(Some(content)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
     }
 }
 
@@ -111,19 +205,36 @@ struct TokenResponse {
     expires_in: Option<i64>,
 }
 
+const TOKEN_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const MAX_TOKEN_RESPONSE_BYTES: usize = 1024 * 1024;
+
 async fn token_post(
     http: &reqwest::Client,
     token_url: &str,
     form: &[(&str, &str)],
+    timeout: std::time::Duration,
 ) -> Result<TokenSet> {
-    let response = http
+    let mut response = http
         .post(token_url)
         .form(form)
+        .timeout(timeout)
         .send()
         .await
         .context("token endpoint request")?;
     let status = response.status();
-    let body = response.text().await.unwrap_or_default();
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .context("reading token endpoint response")?
+    {
+        anyhow::ensure!(
+            body.len().saturating_add(chunk.len()) <= MAX_TOKEN_RESPONSE_BYTES,
+            "token endpoint response exceeds {MAX_TOKEN_RESPONSE_BYTES} bytes"
+        );
+        body.extend_from_slice(&chunk);
+    }
+    let body = String::from_utf8_lossy(&body);
     if !status.is_success() {
         anyhow::bail!("token endpoint HTTP {status}: {body}");
     }
@@ -155,6 +266,7 @@ pub async fn exchange_code(code: &str, verifier: &str) -> Result<TokenSet> {
             ("client_id", CLIENT_ID),
             ("redirect_uri", REDIRECT_URI),
         ],
+        TOKEN_REQUEST_TIMEOUT,
     )
     .await
 }
@@ -162,12 +274,36 @@ pub async fn exchange_code(code: &str, verifier: &str) -> Result<TokenSet> {
 /// Refresh via the stored refresh token; persists the rotated set.
 pub async fn refresh_tokens(
     store: &AuthStore,
+    rejected_access_token: &str,
     token_url: &str,
     http: &reqwest::Client,
 ) -> Result<TokenSet> {
+    refresh_tokens_with_timeout(
+        store,
+        rejected_access_token,
+        token_url,
+        http,
+        TOKEN_REQUEST_TIMEOUT,
+    )
+    .await
+}
+
+async fn refresh_tokens_with_timeout(
+    store: &AuthStore,
+    rejected_access_token: &str,
+    token_url: &str,
+    http: &reqwest::Client,
+    request_timeout: std::time::Duration,
+) -> Result<TokenSet> {
+    let lock = store.acquire_refresh_lock().await?;
     let current = store
-        .load()
+        .load_async()
+        .await
+        .context("loading stored OAuth tokens")?
         .context("no stored tokens — run `ilar login`")?;
+    if current.access_token != rejected_access_token {
+        return Ok(current);
+    }
     let refresh_token = current
         .refresh_token
         .clone()
@@ -180,6 +316,7 @@ pub async fn refresh_tokens(
             ("refresh_token", &refresh_token),
             ("client_id", CLIENT_ID),
         ],
+        request_timeout,
     )
     .await?;
     if next.refresh_token.is_none() {
@@ -188,27 +325,184 @@ pub async fn refresh_tokens(
     if next.account_id.is_none() {
         next.account_id = current.account_id;
     }
-    store.save(&next)?;
+    store.save_with_lock_async(&next, lock).await?;
     Ok(next)
 }
 
-/// Parse `GET /auth/callback?code=..&state=..` from the request head.
-pub fn parse_callback(request_head: &[u8]) -> Option<(String, String)> {
-    let text = String::from_utf8_lossy(request_head);
-    let first = text.lines().next()?;
-    let target = first.split_whitespace().nth(1)?;
-    let query = target.split_once('?')?.1;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OAuthCallback {
+    Code {
+        code: String,
+        state: String,
+    },
+    Error {
+        error: String,
+        description: Option<String>,
+        state: String,
+    },
+}
+
+/// Parse and percent-decode an OAuth redirect request.
+pub fn parse_callback(request_head: &[u8]) -> Result<OAuthCallback> {
+    let text = std::str::from_utf8(request_head).context("callback request is not UTF-8")?;
+    let mut request = text
+        .lines()
+        .next()
+        .context("callback request is empty")?
+        .split_whitespace();
+    anyhow::ensure!(request.next() == Some("GET"), "callback method must be GET");
+    let target = request.next().context("callback target is missing")?;
+    let url =
+        url::Url::parse(&format!("http://localhost{target}")).context("invalid callback target")?;
+    anyhow::ensure!(url.path() == "/auth/callback", "invalid callback path");
     let mut code = None;
     let mut state = None;
-    for pair in query.split('&') {
-        let (k, v) = pair.split_once('=')?;
-        match k {
-            "code" => code = Some(v.to_string()),
-            "state" => state = Some(v.to_string()),
-            _ => {}
+    let mut error = None;
+    let mut description = None;
+    for (key, value) in url.query_pairs() {
+        let slot = match key.as_ref() {
+            "code" => &mut code,
+            "state" => &mut state,
+            "error" => &mut error,
+            "error_description" => &mut description,
+            _ => continue,
+        };
+        anyhow::ensure!(slot.is_none(), "duplicate callback parameter: {key}");
+        anyhow::ensure!(!value.is_empty(), "empty callback parameter: {key}");
+        *slot = Some(value.into_owned());
+    }
+    let state = state.context("callback state is missing")?;
+    anyhow::ensure!(
+        code.is_some() ^ error.is_some(),
+        "callback must contain exactly one of code or error"
+    );
+    anyhow::ensure!(
+        error.is_some() || description.is_none(),
+        "error_description requires error"
+    );
+    if let Some(error) = error {
+        return Ok(OAuthCallback::Error {
+            error,
+            description,
+            state,
+        });
+    }
+    Ok(OAuthCallback::Code {
+        code: code.expect("validated above"),
+        state,
+    })
+}
+
+const MAX_CALLBACK_HEAD: usize = 16 * 1024;
+const CALLBACK_CONNECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+async fn read_callback_head(
+    socket: &mut tokio::net::TcpStream,
+    overall_deadline: tokio::time::Instant,
+) -> Result<Vec<u8>> {
+    let deadline = std::cmp::min(
+        overall_deadline,
+        tokio::time::Instant::now() + CALLBACK_CONNECTION_TIMEOUT,
+    );
+    let mut buf = Vec::new();
+    let mut chunk = [0_u8; 4096];
+    loop {
+        anyhow::ensure!(
+            buf.len() < MAX_CALLBACK_HEAD,
+            "callback request head is too large"
+        );
+        let remaining = (MAX_CALLBACK_HEAD - buf.len()).min(chunk.len());
+        let n = tokio::time::timeout_at(deadline, socket.read(&mut chunk[..remaining]))
+            .await
+            .context("timed out reading callback request")?
+            .context("reading callback request")?;
+        anyhow::ensure!(
+            n != 0,
+            "callback connection closed before request completed"
+        );
+        buf.extend_from_slice(&chunk[..n]);
+        if buf.windows(4).any(|window| window == b"\r\n\r\n") {
+            return Ok(buf);
         }
     }
-    Some((code?, state?))
+}
+
+async fn callback_code(
+    listener: &tokio::net::TcpListener,
+    expected_state: &str,
+    timeout: std::time::Duration,
+) -> Result<String> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let (mut socket, _) = tokio::time::timeout_at(deadline, listener.accept())
+            .await
+            .context("timed out waiting for the browser callback")?
+            .context("accepting callback connection")?;
+        let callback = match read_callback_head(&mut socket, deadline)
+            .await
+            .and_then(|head| parse_callback(&head))
+        {
+            Ok(callback) => callback,
+            Err(error) => {
+                respond(
+                    &mut socket,
+                    b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    deadline,
+                )
+                .await;
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(error).context("callback deadline elapsed");
+                }
+                continue;
+            }
+        };
+        let returned_state = match &callback {
+            OAuthCallback::Code { state, .. } | OAuthCallback::Error { state, .. } => state,
+        };
+        if returned_state != expected_state {
+            respond(
+                &mut socket,
+                b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                deadline,
+            )
+            .await;
+            continue;
+        }
+        match callback {
+            OAuthCallback::Code { code, .. } => {
+                respond(
+                    &mut socket,
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n\
+<html><body><h2>ilar: logged in</h2>You can close this tab.</body></html>",
+                    deadline,
+                )
+                .await;
+                return Ok(code);
+            }
+            OAuthCallback::Error {
+                error, description, ..
+            } => {
+                respond(
+                    &mut socket,
+                    b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    deadline,
+                )
+                .await;
+                let description = description
+                    .map(|description| format!(": {description}"))
+                    .unwrap_or_default();
+                anyhow::bail!("OAuth authorization failed: {error}{description}");
+            }
+        }
+    }
+}
+
+async fn respond(
+    socket: &mut tokio::net::TcpStream,
+    response: &[u8],
+    deadline: tokio::time::Instant,
+) {
+    let _ = tokio::time::timeout_at(deadline, socket.write_all(response)).await;
 }
 
 /// The interactive login: browser -> localhost:1455 callback -> exchange
@@ -240,32 +534,7 @@ pub async fn login_flow(
     }
     println!("Log in with your ChatGPT account:\n\n{url}\n");
 
-    let (mut socket, _) = tokio::time::timeout(timeout, listener.accept())
-        .await
-        .context("timed out waiting for the browser callback")?
-        .context("accepting callback connection")?;
-
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; 4096];
-    loop {
-        let n = socket.read(&mut chunk).await.context("reading callback")?;
-        if n == 0 {
-            break;
-        }
-        buf.extend_from_slice(&chunk[..n]);
-        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
-            break;
-        }
-    }
-    let (code, returned_state) = parse_callback(&buf).context("callback missing code/state")?;
-    anyhow::ensure!(returned_state == state, "OAuth state mismatch");
-    socket
-        .write_all(
-            b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n\
-<html><body><h2>ilar: logged in</h2>You can close this tab.</body></html>",
-        )
-        .await
-        .ok();
+    let code = callback_code(&listener, &state, timeout).await?;
 
     let mut tokens = exchange_code(&code, &verifier).await?;
     if tokens.account_id.is_none() {
@@ -274,6 +543,77 @@ pub async fn login_flow(
             .as_deref()
             .and_then(account_id_from_id_token);
     }
-    store.save(&tokens)?;
+    store.save(&tokens).await?;
     Ok(tokens)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stalled_refresh_times_out_and_releases_store_lock() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (first, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            drop(first);
+
+            let (mut second, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = second.read(&mut request).await.unwrap();
+            let body = r#"{"access_token":"fresh","refresh_token":"rotated","expires_in":3600}"#;
+            second
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = AuthStore::open(dir.path().to_path_buf());
+        store
+            .save(&TokenSet {
+                access_token: "stale".into(),
+                refresh_token: Some("refresh".into()),
+                id_token: None,
+                account_id: None,
+                expires_at: Some(0),
+            })
+            .await
+            .unwrap();
+        let url = format!("http://{address}/token");
+        let http = reqwest::Client::new();
+        let error = refresh_tokens_with_timeout(
+            &store,
+            "stale",
+            &url,
+            &http,
+            std::time::Duration::from_millis(50),
+        )
+        .await
+        .expect_err("stalled refresh must time out");
+        assert!(
+            error.to_string().contains("token endpoint request"),
+            "{error:#}"
+        );
+
+        let tokens = refresh_tokens_with_timeout(
+            &store,
+            "stale",
+            &url,
+            &http,
+            std::time::Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(tokens.access_token, "fresh");
+        server.await.unwrap();
+    }
 }

@@ -5,6 +5,7 @@ use std::task::{Context, Poll};
 
 use std::panic::AssertUnwindSafe;
 
+use anyhow::Context as _;
 use futures::FutureExt;
 use futures::Stream;
 use futures::StreamExt;
@@ -185,9 +186,12 @@ impl Provider for OpenAIProvider {
         let (token, account, auth_store) = match &self.auth {
             Auth::ApiKey(key) => (key.clone(), None, None),
             Auth::ChatGpt { store } => {
-                let tokens = store.load().ok_or_else(|| {
-                    anyhow::anyhow!("OpenAI ChatGPT auth: not logged in — run `ilar login`")
-                })?;
+                let tokens = store
+                    .load()
+                    .context("OpenAI ChatGPT auth store")?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("OpenAI ChatGPT auth: not logged in — run `ilar login`")
+                    })?;
                 (tokens.access_token, tokens.account_id, Some(store.clone()))
             }
         };
@@ -232,7 +236,14 @@ impl Provider for OpenAIProvider {
                             && let Some(store) = &auth_store
                         {
                             refreshed = true;
-                            match crate::auth::refresh_tokens(store, &token_url, &http).await {
+                            match crate::auth::refresh_tokens(
+                                store,
+                                &current_token,
+                                &token_url,
+                                &http,
+                            )
+                            .await
+                            {
                                 Ok(tokens) => {
                                     current_token = tokens.access_token;
                                     if tokens.account_id.is_some() {

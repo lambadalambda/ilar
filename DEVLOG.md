@@ -453,3 +453,12 @@ no-follow directory descriptor. Temps are born `0600`, final modes are applied
 after writing, parent swaps and symlink destinations are rejected, and
 post-publication durability failures are reported without unsafe cleanup.
 Other platforms fail closed until equivalent handle-relative guarantees exist.
+
+## 2026-08-15 — Stabilization: secure OAuth storage
+
+OAuth store reads now distinguish absence from malformed, unreadable, or
+symlinked credentials. All token writes and refresh rotations share an
+OS-backed lock, recheck state after lock acquisition, and retain ownership
+through cancellation-safe blocking persistence. Token responses and localhost
+callback requests are bounded and timed; callback handling ignores spurious
+connections, percent-decodes values, and reports OAuth denial responses.

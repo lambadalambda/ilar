@@ -44,3 +44,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Preserve provider content order and reasoning](issues/preserve-provider-content-order-and-reasoning.md)
 - [x] [Serialize turns and route notifications](issues/serialize-turns-and-route-notifications.md)
 - [x] [Atomic file replacement](issues/atomic-file-replacement.md)
+- [x] [Secure atomic OAuth store](issues/secure-atomic-oauth-store.md)
