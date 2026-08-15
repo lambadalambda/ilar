@@ -150,6 +150,149 @@ impl StepAccumulator {
     }
 }
 
+const MAX_TOOL_ARGUMENT_SUMMARY_CHARS: usize = 512;
+
+fn summarize_tool_input(name: &str, input: &serde_json::Value) -> String {
+    let string = |key: &str| {
+        input
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(collapse_whitespace)
+    };
+    let summary = match name {
+        "bash" => string("command").map(|command| redact_command(&command)),
+        "read" => string("path").map(|path| {
+            let offset = input.get("offset").and_then(serde_json::Value::as_u64);
+            let limit = input.get("limit").and_then(serde_json::Value::as_u64);
+            match (offset, limit) {
+                (Some(offset), Some(limit)) => format!("{path}:{offset}+{limit}"),
+                (Some(offset), None) => format!("{path}:{offset}"),
+                _ => path,
+            }
+        }),
+        "write" | "edit" => string("path"),
+        "grep" => string("pattern").map(|pattern| match string("path") {
+            Some(path) => format!("/{pattern}/ · {path}"),
+            None => format!("/{pattern}/"),
+        }),
+        "glob" => string("pattern"),
+        "task" => string("description").map(|description| match string("subagent_type") {
+            Some(agent) => format!("{description} · {agent}"),
+            None => description,
+        }),
+        _ => input.as_object().map(|values| {
+            values
+                .iter()
+                .filter_map(|(key, value)| {
+                    if sensitive_key(key) {
+                        return Some(format!("{key}=<redacted>"));
+                    }
+                    match value {
+                        serde_json::Value::String(value) => {
+                            Some(format!("{key}={}", collapse_whitespace(value)))
+                        }
+                        serde_json::Value::Number(_) | serde_json::Value::Bool(_) => {
+                            Some(format!("{key}={value}"))
+                        }
+                        _ => None,
+                    }
+                })
+                .take(3)
+                .collect::<Vec<_>>()
+                .join(" · ")
+        }),
+    }
+    .unwrap_or_default();
+    summary
+        .chars()
+        .take(MAX_TOOL_ARGUMENT_SUMMARY_CHARS)
+        .collect()
+}
+
+fn collapse_whitespace(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn sensitive_key(key: &str) -> bool {
+    let normalized = key
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    [
+        "token",
+        "secret",
+        "password",
+        "authorization",
+        "apikey",
+        "privatekey",
+        "credential",
+        "cookie",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle))
+}
+
+fn redact_command(command: &str) -> String {
+    let mut redact_next = false;
+    let mut allow_authorization_scheme = false;
+    command
+        .split_whitespace()
+        .map(|token| {
+            if redact_next {
+                let normalized = token.trim_matches(['\'', '"', ',']);
+                if allow_authorization_scheme
+                    && (normalized.eq_ignore_ascii_case("bearer")
+                        || normalized.eq_ignore_ascii_case("basic"))
+                {
+                    allow_authorization_scheme = false;
+                    return token.to_string();
+                }
+                redact_next = false;
+                allow_authorization_scheme = false;
+                return "<redacted>".to_string();
+            }
+            let normalized = token.trim_matches(['\'', '"', ',']);
+            if normalized.starts_with("sk-")
+                || normalized.starts_with("ghp_")
+                || normalized.starts_with("github_pat_")
+            {
+                return "<redacted>".to_string();
+            }
+            let lower = normalized.to_ascii_lowercase();
+            if let Some(position) = lower.find("authorization:") {
+                let value = lower[position + "authorization:".len()..].trim();
+                if value.is_empty() {
+                    redact_next = true;
+                    allow_authorization_scheme = true;
+                    return token.to_string();
+                }
+                if value == "bearer" || value == "basic" {
+                    redact_next = true;
+                    return token.to_string();
+                }
+                return "Authorization:<redacted>".to_string();
+            }
+            let (key, value) = token.split_once('=').unwrap_or((token, ""));
+            let key_name = key.trim_start_matches('-');
+            let key_is_label = !value.is_empty() || key.starts_with('-') || key.ends_with(':');
+            if key_is_label && sensitive_key(key_name) {
+                if value.is_empty() {
+                    redact_next = true;
+                    return token.to_string();
+                }
+                return format!("{key}=<redacted>");
+            }
+            if normalized.eq_ignore_ascii_case("bearer") {
+                redact_next = true;
+                return token.to_string();
+            }
+            token.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Run one user turn to completion.
 ///
 /// Flow: append the user message, then repeat { call provider, stream
@@ -197,7 +340,12 @@ pub async fn run_turn(
         )
         .await?
     {
-        publish(&events, LoopEvent::Compacted);
+        publish(
+            &events,
+            LoopEvent::Compacted {
+                context_tokens: crate::compaction::estimate_tokens(&session),
+            },
+        );
     }
 
     let tools = registry.definitions();
@@ -272,6 +420,13 @@ pub async fn run_turn(
                             },
                         );
                     }
+                    publish(
+                        &events,
+                        LoopEvent::ToolArguments {
+                            id: id.clone(),
+                            arguments: summarize_tool_input(&name, &input),
+                        },
+                    );
                     acc.complete_tool_call(id, name, input);
                 }
                 ProviderEvent::TurnComplete { stop_reason, usage } => {
@@ -484,4 +639,37 @@ pub async fn run_turn(
         },
     );
     Ok(TurnOutcome::MaxIterations)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_argument_summaries_are_bounded_and_redacted() {
+        let write = summarize_tool_input(
+            "write",
+            &serde_json::json!({"path": "src/main.rs", "content": "x".repeat(50_000)}),
+        );
+        assert_eq!(write, "src/main.rs");
+
+        let bash = summarize_tool_input(
+            "bash",
+            &serde_json::json!({
+                "command": "curl -H 'Authorization: Bearer eyJhbGci.opaque.jwt' --header=Authorization:Basic opaque-basic --api-key=also-secret"
+            }),
+        );
+        assert!(!bash.contains("eyJhbGci"), "{bash}");
+        assert!(!bash.contains("opaque-basic"), "{bash}");
+        assert!(!bash.contains("also-secret"), "{bash}");
+        assert!(bash.contains("<redacted>"), "{bash}");
+
+        let custom = summarize_tool_input(
+            "custom",
+            &serde_json::json!({"apiKey": "secret", "cookie": "session", "query": "safe"}),
+        );
+        assert!(!custom.contains("secret"), "{custom}");
+        assert!(!custom.contains("session"), "{custom}");
+        assert!(custom.chars().count() <= MAX_TOOL_ARGUMENT_SUMMARY_CHARS);
+    }
 }

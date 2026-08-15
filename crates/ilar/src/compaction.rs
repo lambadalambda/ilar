@@ -12,14 +12,31 @@ dense summary preserving: tasks attempted and their outcomes, decisions made, \
 open questions, important file paths, and user preferences. Write it so work \
 can continue immediately.";
 
-/// Rough token estimate: max(last reported input tokens, chars/4).
+/// Rough active-context estimate: max(latest post-boundary provider usage,
+/// rendered transcript chars/4).
 pub fn estimate_tokens(session: &Session) -> u64 {
-    let mut last_input = 0u64;
-    for event in session.events() {
-        if let SessionEvent::AssistantMessage { usage, .. } = event {
-            last_input = last_input.max(usage.input_tokens);
-        }
-    }
+    let events = session.events();
+    let active_from = events
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            SessionEvent::Compaction { kept_from, .. } => Some(*kept_from),
+            _ => None,
+        })
+        .unwrap_or(0)
+        .min(events.len());
+    let reported = events[active_from..]
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::AssistantMessage { usage, .. }
+                if usage.input_token_accounting.is_some() =>
+            {
+                Some(usage.context_tokens())
+            }
+            _ => None,
+        })
+        .next_back()
+        .unwrap_or(0);
     let chars: usize = session
         .transcript()
         .iter()
@@ -39,7 +56,7 @@ pub fn estimate_tokens(session: &Session) -> u64 {
         })
         .sum();
     let estimated = chars as u64 / 4;
-    estimated.max(last_input)
+    estimated.max(reported)
 }
 
 /// Compact the session if the transcript exceeds

@@ -42,6 +42,79 @@ fn tiny_config() -> LoopConfig {
     }
 }
 
+#[test]
+fn estimate_ignores_usage_before_latest_compaction_boundary() {
+    let (store, session_id) = temp_session();
+    let mut session = store.acquire_writer(&session_id).unwrap().load().unwrap();
+    session
+        .append(SessionEvent::UserMessage {
+            id: new_id(),
+            text: "old context".repeat(20),
+            ts: chrono::Utc::now(),
+        })
+        .unwrap();
+    session
+        .append(SessionEvent::AssistantMessage {
+            id: new_id(),
+            model: "zai/glm-4.7".into(),
+            content: vec![ilar::session::ContentBlock::Text {
+                text: "old answer".into(),
+            }],
+            usage: Usage {
+                input_tokens: 10_000,
+                ..Default::default()
+            },
+            stop_reason: "end_turn".into(),
+            ts: chrono::Utc::now(),
+        })
+        .unwrap();
+    let kept_from = session.events().len();
+    session
+        .append(SessionEvent::UserMessage {
+            id: new_id(),
+            text: "current question".into(),
+            ts: chrono::Utc::now(),
+        })
+        .unwrap();
+    session
+        .append(SessionEvent::Compaction {
+            id: new_id(),
+            summary: "small summary".into(),
+            kept_from,
+            ts: chrono::Utc::now(),
+        })
+        .unwrap();
+
+    assert!(ilar::compaction::estimate_tokens(&session) < 100);
+}
+
+#[test]
+fn estimate_treats_unversioned_legacy_usage_as_ambiguous() {
+    let (store, session_id) = temp_session();
+    let mut session = store.acquire_writer(&session_id).unwrap().load().unwrap();
+    let legacy: Usage = serde_json::from_value(serde_json::json!({
+        "input_tokens": 10_000,
+        "output_tokens": 5,
+        "cache_read_input_tokens": 9_000
+    }))
+    .unwrap();
+    assert!(legacy.input_token_accounting.is_none());
+    session
+        .append(SessionEvent::AssistantMessage {
+            id: new_id(),
+            model: "openai/gpt-5.6-sol".into(),
+            content: vec![ilar::session::ContentBlock::Text {
+                text: "small legacy answer".into(),
+            }],
+            usage: legacy,
+            stop_reason: "end_turn".into(),
+            ts: chrono::Utc::now(),
+        })
+        .unwrap();
+
+    assert!(ilar::compaction::estimate_tokens(&session) < 100);
+}
+
 struct RoutingResolver {
     zai: MockProvider,
     openai: MockProvider,

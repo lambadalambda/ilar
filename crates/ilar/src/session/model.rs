@@ -63,8 +63,17 @@ impl ChatMessage {
 }
 
 /// Token usage as reported by the provider on a completed turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputTokenAccounting {
+    IncludesCached,
+    ExcludesCached,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
+    /// Uncached input tokens. Provider adapters normalize totals into this
+    /// field plus the cache fields below.
     pub input_tokens: u64,
     pub output_tokens: u64,
     /// Prompt-caching accounting (Anthropic-style providers).
@@ -72,10 +81,26 @@ pub struct Usage {
     pub cache_read_input_tokens: u64,
     #[serde(default)]
     pub cache_creation_input_tokens: u64,
+    /// Absent in legacy sessions, whose provider-specific cache semantics are
+    /// ambiguous and therefore unsuitable as an exact context estimate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_token_accounting: Option<InputTokenAccounting>,
 }
 
 impl Usage {
     pub fn total_tokens(&self) -> u64 {
         self.input_tokens + self.output_tokens
+    }
+
+    pub fn context_tokens(&self) -> u64 {
+        let cached = match self.input_token_accounting {
+            Some(InputTokenAccounting::IncludesCached) => 0,
+            Some(InputTokenAccounting::ExcludesCached) | None => self
+                .cache_read_input_tokens
+                .saturating_add(self.cache_creation_input_tokens),
+        };
+        self.input_tokens
+            .saturating_add(cached)
+            .saturating_add(self.output_tokens)
     }
 }

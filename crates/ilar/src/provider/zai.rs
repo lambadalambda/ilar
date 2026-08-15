@@ -13,7 +13,7 @@ use super::event::{ProviderEvent, StopReason};
 use super::request::{Request, ToolDefinition, resolve_model};
 use super::sse::SseParser;
 use super::{EventStream, Provider};
-use crate::session::{ChatMessage, ContentBlock, Role, Usage};
+use crate::session::{ChatMessage, ContentBlock, InputTokenAccounting, Role, Usage};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Flavor {
@@ -734,19 +734,20 @@ impl OpenAiMapper {
 }
 
 fn merge_usage(usage: &mut Usage, wire: &serde_json::Map<String, serde_json::Value>) {
+    usage.input_token_accounting = Some(InputTokenAccounting::ExcludesCached);
     let get = |k: &str| wire.get(k).and_then(|v| v.as_u64()).unwrap_or_default();
     // OpenAI-style nested cached tokens (z.ai openai flavor).
-    let cached = wire
+    let nested_cached = wire
         .get("prompt_tokens_details")
         .and_then(|d| d.get("cached_tokens"))
         .and_then(|v| v.as_u64())
         .unwrap_or_default();
-    if cached > 0 {
-        usage.cache_read_input_tokens = cached;
+    if nested_cached > 0 {
+        usage.cache_read_input_tokens = nested_cached;
     }
     let input = get("input_tokens").max(get("prompt_tokens"));
     if input > 0 {
-        usage.input_tokens = input;
+        usage.input_tokens = input.saturating_sub(nested_cached);
     }
     let output = get("output_tokens").max(get("completion_tokens"));
     if output > 0 {
@@ -759,5 +760,24 @@ fn merge_usage(usage: &mut Usage, wire: &serde_json::Map<String, serde_json::Val
     let cache_create = get("cache_creation_input_tokens");
     if cache_create > 0 {
         usage.cache_creation_input_tokens = cache_create;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn openai_flavor_cached_input_is_normalized_out_of_prompt_total() {
+        let mut usage = Usage::default();
+        let wire = serde_json::json!({
+            "prompt_tokens": 1_800,
+            "completion_tokens": 50,
+            "prompt_tokens_details": {"cached_tokens": 1_500}
+        });
+        merge_usage(&mut usage, wire.as_object().unwrap());
+        assert_eq!(usage.input_tokens, 300);
+        assert_eq!(usage.cache_read_input_tokens, 1_500);
+        assert_eq!(usage.context_tokens(), 1_850);
     }
 }

@@ -94,6 +94,9 @@ async fn text_fixture_maps_to_neutral_events() {
                 usage: ilar::session::Usage {
                     input_tokens: 18,
                     output_tokens: 5,
+                    input_token_accounting: Some(
+                        ilar::session::InputTokenAccounting::ExcludesCached,
+                    ),
                     ..Default::default()
                 },
             },

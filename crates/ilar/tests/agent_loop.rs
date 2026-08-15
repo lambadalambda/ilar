@@ -200,6 +200,32 @@ async fn multi_turn_tool_conversation_end_to_end() {
         2,
         "each tool call must be announced exactly once"
     );
+    assert_eq!(
+        published
+            .iter()
+            .filter(|event| matches!(event, LoopEvent::ToolArguments { .. }))
+            .count(),
+        2,
+        "each completed tool call must publish its arguments"
+    );
+    assert!(published.iter().any(|event| matches!(
+        event,
+        LoopEvent::ToolArguments { id, arguments }
+            if id == "t1" && arguments.contains("alpha")
+    )));
+    let position = |predicate: &dyn Fn(&LoopEvent) -> bool| {
+        published
+            .iter()
+            .position(predicate)
+            .expect("expected loop event")
+    };
+    let started =
+        position(&|event| matches!(event, LoopEvent::ToolStarted { id, .. } if id == "t1"));
+    let arguments =
+        position(&|event| matches!(event, LoopEvent::ToolArguments { id, .. } if id == "t1"));
+    let finished =
+        position(&|event| matches!(event, LoopEvent::ToolFinished { id, .. } if id == "t1"));
+    assert!(started < arguments && arguments < finished);
     assert!(
         published
             .iter()

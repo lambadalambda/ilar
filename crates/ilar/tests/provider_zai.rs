@@ -1,7 +1,7 @@
 use futures::StreamExt;
 use ilar::provider::zai::{Flavor, ZaiProvider};
 use ilar::provider::{Provider, ProviderEvent, Request, StopReason, ToolDefinition};
-use ilar::session::{ChatMessage, ContentBlock, Role, Usage};
+use ilar::session::{ChatMessage, ContentBlock, InputTokenAccounting, Role, Usage};
 
 fn fixture(name: &str) -> Vec<u8> {
     std::fs::read(format!("tests/fixtures/{name}"))
@@ -104,6 +104,7 @@ async fn text_fixture_maps_to_neutral_events() {
                 usage: Usage {
                     input_tokens: 20,
                     output_tokens: 6,
+                    input_token_accounting: Some(InputTokenAccounting::ExcludesCached),
                     ..Default::default()
                 },
             },

@@ -47,3 +47,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Secure atomic OAuth store](issues/secure-atomic-oauth-store.md)
 - [x] [Atomic file tools and large reads](issues/atomic-file-tools-and-large-reads.md)
 - [x] [Background tool calls](issues/background-tool-calls.md)
+- [x] [TUI tool details and telemetry](issues/tui-tool-details-and-telemetry.md)

@@ -16,7 +16,7 @@ use super::event::{ProviderEvent, StopReason};
 use super::request::{Request, ToolDefinition, resolve_model};
 use super::sse::SseParser;
 use super::{EventStream, Provider};
-use crate::session::{ChatMessage, ContentBlock, Role, Usage};
+use crate::session::{ChatMessage, ContentBlock, InputTokenAccounting, Role, Usage};
 
 #[derive(Clone)]
 enum Auth {
@@ -494,18 +494,38 @@ impl EventMapper {
 }
 
 fn wire_usage(usage: &serde_json::Value) -> Usage {
+    let cached = usage["input_tokens_details"]["cached_tokens"]
+        .as_u64()
+        .unwrap_or_default();
+    let input = usage["input_tokens"]
+        .as_u64()
+        .or_else(|| usage["prompt_tokens"].as_u64())
+        .unwrap_or_default();
     Usage {
-        input_tokens: usage["input_tokens"]
-            .as_u64()
-            .or_else(|| usage["prompt_tokens"].as_u64())
-            .unwrap_or_default(),
+        input_tokens: input.saturating_sub(cached),
         output_tokens: usage["output_tokens"]
             .as_u64()
             .or_else(|| usage["completion_tokens"].as_u64())
             .unwrap_or_default(),
-        cache_read_input_tokens: usage["input_tokens_details"]["cached_tokens"]
-            .as_u64()
-            .unwrap_or_default(),
+        cache_read_input_tokens: cached,
         cache_creation_input_tokens: 0,
+        input_token_accounting: Some(InputTokenAccounting::ExcludesCached),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cached_input_is_normalized_out_of_openai_input_total() {
+        let usage = wire_usage(&serde_json::json!({
+            "input_tokens": 1_800,
+            "output_tokens": 50,
+            "input_tokens_details": {"cached_tokens": 1_500}
+        }));
+        assert_eq!(usage.input_tokens, 300);
+        assert_eq!(usage.cache_read_input_tokens, 1_500);
+        assert_eq!(usage.context_tokens(), 1_850);
     }
 }

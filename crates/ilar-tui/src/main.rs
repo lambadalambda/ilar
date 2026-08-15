@@ -18,6 +18,8 @@ use ratatui::widgets::{
     Block, Borders, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
 };
 use tokio_util::sync::CancellationToken;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use ilar::agent::{LoopConfig, LoopEvent, TurnOutcome, run_turn};
 use ilar::config::{Loader, system_prompt_for};
@@ -33,11 +35,37 @@ enum Line_ {
     Assistant(String),
     Tool {
         id: String,
-        text: String,
-        done: bool,
+        name: String,
+        arguments: String,
+        state: ToolState,
     },
     System(String),
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolState {
+    Running,
+    Succeeded,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Activity {
+    Ready,
+    Thinking,
+    Responding,
+    Tools,
+    Aborting,
+    Aborted,
+    Stopped,
+    Paused,
+    Error,
+}
+
+const MUTED: Color = Color::DarkGray;
+const ASSISTANT: Color = Color::Green;
+const TOOL_ACTIVE: Color = Color::Yellow;
+const ERROR: Color = Color::Red;
 
 #[derive(clap::Subcommand, Debug)]
 enum Command {
@@ -92,6 +120,13 @@ struct App {
     input: String,
     busy: bool,
     status: String,
+    activity: Activity,
+    activity_started: std::time::Instant,
+    current_model: String,
+    cwd: std::path::PathBuf,
+    context_used: u64,
+    context_limit: Option<u64>,
+    context_estimated: bool,
     scroll_top: usize,
     content_rows: usize,
     viewport_rows: usize,
@@ -107,6 +142,13 @@ impl App {
             input: String::new(),
             busy: false,
             status: String::new(),
+            activity: Activity::Ready,
+            activity_started: std::time::Instant::now(),
+            current_model: "unknown".into(),
+            cwd: std::path::PathBuf::from("."),
+            context_used: 0,
+            context_limit: None,
+            context_estimated: true,
             scroll_top: 0,
             content_rows: 0,
             viewport_rows: 0,
@@ -114,13 +156,38 @@ impl App {
         }
     }
 
+    fn configure_runtime(
+        &mut self,
+        model: String,
+        cwd: std::path::PathBuf,
+        context_used: u64,
+        context_limit: Option<u64>,
+        context_estimated: bool,
+    ) {
+        self.current_model = model;
+        self.cwd = cwd;
+        self.context_used = context_used;
+        self.context_limit = context_limit;
+        self.context_estimated = context_estimated;
+        self.status = "ready".into();
+    }
+
+    fn set_activity(&mut self, activity: Activity) {
+        if self.activity != activity {
+            self.activity = activity;
+            self.activity_started = std::time::Instant::now();
+        }
+    }
+
     fn push_loop_event(&mut self, event: &LoopEvent) {
         match event {
             LoopEvent::TurnStarted => {
                 self.status = "thinking…".into();
+                self.set_activity(Activity::Thinking);
             }
             LoopEvent::TextDelta(t) => {
-                self.status = "streaming".into();
+                self.status = "responding".into();
+                self.set_activity(Activity::Responding);
                 match self.lines.last_mut() {
                     Some(Line_::Assistant(text)) => text.push_str(t),
                     _ => self.lines.push(Line_::Assistant(t.clone())),
@@ -128,60 +195,98 @@ impl App {
             }
             LoopEvent::ThinkingDelta(_) => {
                 self.status = "thinking".into();
+                self.set_activity(Activity::Thinking);
             }
             LoopEvent::ToolStarted { id, name } => {
                 self.lines.push(Line_::Tool {
                     id: id.clone(),
-                    text: format!("▶ {name} …"),
-                    done: false,
+                    name: name.clone(),
+                    arguments: String::new(),
+                    state: ToolState::Running,
                 });
                 self.status = format!("running {name}");
+                self.set_activity(Activity::Tools);
+            }
+            LoopEvent::ToolArguments {
+                id,
+                arguments: summary,
+            } => {
+                if let Some(arguments) = self.lines.iter_mut().rev().find_map(|line| match line {
+                    Line_::Tool {
+                        id: line_id,
+                        arguments,
+                        ..
+                    } if line_id == id => Some(arguments),
+                    _ => None,
+                }) {
+                    *arguments = summary.clone();
+                }
             }
             LoopEvent::ToolFinished { id, name, is_error } => {
                 let mut matched = false;
-                if let Some((text, done)) =
-                    self.lines.iter_mut().rev().find_map(|line| match line {
-                        Line_::Tool {
-                            id: line_id,
-                            text,
-                            done,
-                        } if line_id == id && !*done => Some((text, done)),
-                        _ => None,
-                    })
-                {
-                    *text = format!(
-                        "{} {}",
-                        text.trim_end_matches('…').trim_end(),
-                        if *is_error { "✗" } else { "✓" }
-                    );
-                    *done = true;
+                if let Some(state) = self.lines.iter_mut().rev().find_map(|line| match line {
+                    Line_::Tool {
+                        id: line_id, state, ..
+                    } if line_id == id && *state == ToolState::Running => Some(state),
+                    _ => None,
+                }) {
+                    *state = if *is_error {
+                        ToolState::Failed
+                    } else {
+                        ToolState::Succeeded
+                    };
                     matched = true;
                 }
                 if !matched {
                     self.lines.push(Line_::Tool {
                         id: id.clone(),
-                        text: format!("▪ {name} {}", if *is_error { "✗" } else { "✓" }),
-                        done: true,
+                        name: name.clone(),
+                        arguments: String::new(),
+                        state: if *is_error {
+                            ToolState::Failed
+                        } else {
+                            ToolState::Succeeded
+                        },
                     });
                 }
                 let running = self
                     .lines
                     .iter()
-                    .filter(|line| matches!(line, Line_::Tool { done: false, .. }))
+                    .filter(|line| {
+                        matches!(
+                            line,
+                            Line_::Tool {
+                                state: ToolState::Running,
+                                ..
+                            }
+                        )
+                    })
                     .count();
                 self.status = match running {
                     0 => "thinking".into(),
                     1 => "running 1 tool".into(),
                     count => format!("running {count} tools"),
                 };
+                if running == 0 {
+                    self.set_activity(Activity::Thinking);
+                }
             }
             LoopEvent::StepComplete { stop_reason, usage } => {
+                let reported = usage.context_tokens();
+                if reported > 0 {
+                    self.context_used = reported;
+                    self.context_estimated = false;
+                } else {
+                    self.context_estimated = true;
+                }
                 self.status = format!(
                     "{stop_reason} · in {} out {} (cache {})",
                     usage.input_tokens, usage.output_tokens, usage.cache_read_input_tokens
                 );
             }
-            LoopEvent::Compacted => {
+            LoopEvent::Compacted { context_tokens } => {
+                self.context_used = *context_tokens;
+                self.context_estimated = true;
                 self.lines
                     .push(Line_::System("transcript compacted".into()));
             }
@@ -191,14 +296,27 @@ impl App {
                     TurnOutcome::Aborted => "aborted".into(),
                     TurnOutcome::MaxIterations => "stopped: max iterations".into(),
                 };
+                self.set_activity(match outcome {
+                    TurnOutcome::Completed => Activity::Ready,
+                    TurnOutcome::Aborted => Activity::Aborted,
+                    TurnOutcome::MaxIterations => Activity::Stopped,
+                });
             }
         }
     }
 
     fn finish_turn(&mut self, result: anyhow::Result<TurnOutcome>) {
         if let Err(error) = result {
+            for line in &mut self.lines {
+                if let Line_::Tool { state, .. } = line
+                    && *state == ToolState::Running
+                {
+                    *state = ToolState::Failed;
+                }
+            }
             self.lines.push(Line_::System(format!("error: {error:#}")));
             self.status = "error".into();
+            self.set_activity(Activity::Error);
         }
         self.busy = false;
     }
@@ -243,7 +361,7 @@ impl App {
         }
     }
 
-    fn transcript_lines(&self) -> Vec<Line<'static>> {
+    fn transcript_lines(&self, width: u16, now: std::time::Instant) -> Vec<Line<'static>> {
         let mut output = Vec::new();
         for entry in &self.lines {
             match entry {
@@ -273,10 +391,18 @@ impl App {
                         ]));
                     }
                 }
-                Line_::Tool { text, .. } => output.push(Line::from(vec![
-                    Span::styled("tool ", Style::default().fg(Color::Yellow)),
-                    Span::raw(safe_text(text)),
-                ])),
+                Line_::Tool {
+                    name,
+                    arguments,
+                    state,
+                    ..
+                } => output.push(tool_line(
+                    name,
+                    arguments,
+                    *state,
+                    width,
+                    now.saturating_duration_since(self.activity_started),
+                )),
                 Line_::System(text) => {
                     for (index, text) in safe_lines(text).into_iter().enumerate() {
                         output.push(Line::from(vec![
@@ -290,7 +416,185 @@ impl App {
                 }
             }
         }
+        if self.busy
+            && matches!(
+                self.activity,
+                Activity::Thinking | Activity::Responding | Activity::Tools
+            )
+        {
+            let elapsed = now.saturating_duration_since(self.activity_started);
+            let (frame, label, color) = match self.activity {
+                Activity::Thinking => {
+                    let frames = ["◐", "◓", "◑", "◒"];
+                    (
+                        frames[(elapsed.as_millis() / 160) as usize % frames.len()],
+                        "thinking…",
+                        TOOL_ACTIVE,
+                    )
+                }
+                Activity::Responding => {
+                    let frames = ["▏", "▎", "▍", "▎"];
+                    (
+                        frames[(elapsed.as_millis() / 120) as usize % frames.len()],
+                        "responding…",
+                        ASSISTANT,
+                    )
+                }
+                Activity::Tools => {
+                    let frames = ["◐", "◓", "◑", "◒"];
+                    (
+                        frames[(elapsed.as_millis() / 160) as usize % frames.len()],
+                        "running tools…",
+                        TOOL_ACTIVE,
+                    )
+                }
+                _ => unreachable!(),
+            };
+            output.push(Line::from(vec![
+                Span::styled(
+                    "ilar ",
+                    Style::default().fg(ASSISTANT).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(format!("{frame} "), Style::default().fg(color)),
+                Span::styled(label, Style::default().fg(MUTED)),
+            ]));
+        }
         output
+    }
+
+    fn status_line(&self, width: u16) -> Line<'static> {
+        let width = width as usize;
+        let (icon, state, state_color) = match self.activity {
+            Activity::Ready => ("●", "ready", ASSISTANT),
+            Activity::Thinking => ("○", "thinking", TOOL_ACTIVE),
+            Activity::Responding => ("▸", "responding", ASSISTANT),
+            Activity::Tools => ("◆", "tools", TOOL_ACTIVE),
+            Activity::Aborting => ("■", "aborting", TOOL_ACTIVE),
+            Activity::Aborted => ("■", "aborted", TOOL_ACTIVE),
+            Activity::Stopped => ("■", "stopped", TOOL_ACTIVE),
+            Activity::Paused => ("Ⅱ", "paused", TOOL_ACTIVE),
+            Activity::Error => ("×", "error", ERROR),
+        };
+        let usage = context_usage(
+            self.context_used,
+            self.context_limit,
+            self.context_estimated,
+        );
+        let percent_color = match self
+            .context_limit
+            .filter(|limit| *limit > 0)
+            .map(|limit| self.context_used.saturating_mul(100) / limit)
+        {
+            Some(percent) if percent >= 85 => ERROR,
+            Some(percent) if percent >= 70 => TOOL_ACTIVE,
+            _ => MUTED,
+        };
+        if width < 64 {
+            let percent = self
+                .context_limit
+                .filter(|limit| *limit > 0)
+                .map(|limit| format!("{}%", self.context_used.saturating_mul(100) / limit))
+                .unwrap_or_else(|| "—%".into());
+            let usage = match self.context_limit {
+                Some(limit) => format!(
+                    "{}{}/{} {percent}",
+                    if self.context_estimated { "~" } else { "" },
+                    format_tokens_compact(self.context_used),
+                    format_tokens_compact(limit)
+                ),
+                None => format!(
+                    "{}{}/? {percent}",
+                    if self.context_estimated { "~" } else { "" },
+                    format_tokens_compact(self.context_used)
+                ),
+            };
+            let state_text = format!(" {icon} {state}");
+            if width
+                < UnicodeWidthStr::width(state_text.as_str())
+                    + UnicodeWidthStr::width(usage.as_str())
+                    + 5
+            {
+                return Line::from(Span::styled(
+                    truncate_display(&format!("{state_text} {usage}"), width, Truncation::Right),
+                    Style::default().fg(state_color),
+                ));
+            }
+            let available = width
+                .saturating_sub(UnicodeWidthStr::width(state_text.as_str()))
+                .saturating_sub(UnicodeWidthStr::width(usage.as_str()))
+                .saturating_sub(3);
+            let short_model = self
+                .current_model
+                .split_once('/')
+                .map(|(_, model)| model)
+                .unwrap_or(&self.current_model);
+            let model_budget = available.saturating_mul(3) / 5;
+            let model = truncate_display(short_model, model_budget.max(1), Truncation::Right);
+            let basename = self
+                .cwd
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("/");
+            let cwd = truncate_display(
+                basename,
+                available
+                    .saturating_sub(UnicodeWidthStr::width(model.as_str()))
+                    .max(1),
+                Truncation::Middle,
+            );
+            let used = UnicodeWidthStr::width(state_text.as_str())
+                + UnicodeWidthStr::width(model.as_str())
+                + UnicodeWidthStr::width(cwd.as_str())
+                + UnicodeWidthStr::width(usage.as_str())
+                + 2;
+            return Line::from(vec![
+                Span::styled(state_text, Style::default().fg(state_color)),
+                Span::styled(format!(" {model} {cwd}"), Style::default().fg(MUTED)),
+                Span::raw(" ".repeat(width.saturating_sub(used).max(1))),
+                Span::styled(usage, Style::default().fg(percent_color)),
+            ]);
+        }
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        let cwd = abbreviated_path(&self.cwd, home.as_deref());
+        let mut model = self.current_model.clone();
+
+        let state_width = UnicodeWidthStr::width(state) + 3;
+        let usage_width = UnicodeWidthStr::width(usage.as_str());
+        let separators = 7;
+        let available = width
+            .saturating_sub(state_width)
+            .saturating_sub(usage_width)
+            .saturating_sub(separators);
+        let model_budget = if width >= 80 {
+            available.saturating_mul(3) / 5
+        } else {
+            available / 2
+        };
+        if width < 80 {
+            model = model
+                .split_once('/')
+                .map(|(_, model)| model.to_string())
+                .unwrap_or(model);
+        }
+        let model = truncate_display(&model, model_budget.max(4), Truncation::Right);
+        let cwd = truncate_display(
+            &cwd,
+            available
+                .saturating_sub(UnicodeWidthStr::width(model.as_str()))
+                .max(4),
+            Truncation::Middle,
+        );
+        let left = format!(" {icon} {state} · {model} · {cwd}");
+        let gap = width
+            .saturating_sub(UnicodeWidthStr::width(left.as_str()))
+            .saturating_sub(usage_width)
+            .max(1);
+        Line::from(vec![
+            Span::styled(format!(" {icon} {state}"), Style::default().fg(state_color)),
+            Span::styled(format!(" · {model} · {cwd}"), Style::default().fg(MUTED)),
+            Span::raw(" ".repeat(gap)),
+            Span::styled(usage, Style::default().fg(percent_color)),
+        ])
     }
 
     fn render(&mut self, frame: &mut Frame) {
@@ -301,9 +605,9 @@ impl App {
         ])
         .split(frame.area());
 
-        let text = self.transcript_lines();
         let transcript_area = chunks[0];
         let text_width = transcript_area.width.saturating_sub(3);
+        let text = self.transcript_lines(text_width, std::time::Instant::now());
         let viewport_rows = transcript_area.height.saturating_sub(2) as usize;
         let content_rows = Paragraph::new(text.clone())
             .wrap(Wrap { trim: false })
@@ -334,7 +638,7 @@ impl App {
                 .end_symbol(None)
                 .track_symbol(Some("│"))
                 .thumb_symbol("┃");
-            let mut state = ScrollbarState::new(max_scroll.saturating_add(1))
+            let mut state = ScrollbarState::new(content_rows)
                 .position(self.scroll_top)
                 .viewport_content_length(self.viewport_rows);
             let area = Rect::new(
@@ -346,23 +650,166 @@ impl App {
             frame.render_stateful_widget(scrollbar, area, &mut state);
         }
 
-        let busy = if self.busy {
-            Span::styled(
-                format!(" {} ", self.status),
-                Style::default().fg(Color::Yellow),
-            )
-        } else {
-            Span::styled(
-                format!(" {} ", self.status),
-                Style::default().fg(Color::DarkGray),
-            )
-        };
-        frame.render_widget(Paragraph::new(Line::from(busy)), chunks[1]);
+        frame.render_widget(Paragraph::new(self.status_line(chunks[1].width)), chunks[1]);
 
         let input = Paragraph::new(self.input.as_str())
             .block(Block::default().borders(Borders::ALL).title("input"))
             .wrap(Wrap { trim: false });
         frame.render_widget(input, chunks[2]);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Truncation {
+    Right,
+    Middle,
+}
+
+fn tool_line(
+    name: &str,
+    arguments: &str,
+    state: ToolState,
+    width: u16,
+    elapsed: std::time::Duration,
+) -> Line<'static> {
+    let width = width as usize;
+    let (state_icon, state_color) = match state {
+        ToolState::Running => {
+            let frames = ["◐", "◓", "◑", "◒"];
+            (
+                frames[(elapsed.as_millis() / 160) as usize % frames.len()],
+                TOOL_ACTIVE,
+            )
+        }
+        ToolState::Succeeded => ("✓", ASSISTANT),
+        ToolState::Failed => ("×", ERROR),
+    };
+    let fixed = UnicodeWidthStr::width("tool ▶  ") + UnicodeWidthStr::width(state_icon);
+    if width <= fixed {
+        return Line::from(Span::styled(
+            truncate_display(
+                &format!("tool ▶ {name} {state_icon}"),
+                width,
+                Truncation::Right,
+            ),
+            Style::default().fg(TOOL_ACTIVE),
+        ));
+    }
+    let name_budget = width.saturating_sub(fixed).clamp(1, 20);
+    let name = truncate_display(name, name_budget, Truncation::Right);
+    let used = fixed + UnicodeWidthStr::width(name.as_str());
+    let arguments = truncate_display(
+        &safe_text(arguments)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" "),
+        width.saturating_sub(used).saturating_sub(1),
+        Truncation::Right,
+    );
+    let mut spans = vec![
+        Span::styled("tool ", Style::default().fg(Color::Yellow)),
+        Span::styled("▶ ", Style::default().fg(TOOL_ACTIVE)),
+        Span::styled(name, Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(format!(" {state_icon}"), Style::default().fg(state_color)),
+    ];
+    if !arguments.is_empty() {
+        spans.push(Span::styled(
+            format!(" {arguments}"),
+            Style::default().fg(MUTED),
+        ));
+    }
+    Line::from(spans)
+}
+
+fn truncate_display(value: &str, max_width: usize, mode: Truncation) -> String {
+    if UnicodeWidthStr::width(value) <= max_width {
+        return value.to_string();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    if max_width == 1 {
+        return "…".into();
+    }
+    let take_width = |text: &str, budget: usize, reverse: bool| {
+        let graphemes = UnicodeSegmentation::graphemes(text, true).collect::<Vec<_>>();
+        let iterator: Box<dyn Iterator<Item = &&str>> = if reverse {
+            Box::new(graphemes.iter().rev())
+        } else {
+            Box::new(graphemes.iter())
+        };
+        let mut width = 0;
+        let mut retained = Vec::new();
+        for grapheme in iterator {
+            let grapheme_width = UnicodeWidthStr::width(*grapheme);
+            if width + grapheme_width > budget {
+                break;
+            }
+            retained.push(*grapheme);
+            width += grapheme_width;
+        }
+        if reverse {
+            retained.reverse();
+        }
+        retained.concat()
+    };
+    match mode {
+        Truncation::Right => format!("{}…", take_width(value, max_width - 1, false)),
+        Truncation::Middle => {
+            let left = (max_width - 1) / 2;
+            let right = max_width - 1 - left;
+            format!(
+                "{}…{}",
+                take_width(value, left, false),
+                take_width(value, right, true)
+            )
+        }
+    }
+}
+
+fn abbreviated_path(path: &std::path::Path, home: Option<&std::path::Path>) -> String {
+    if let Some(home) = home
+        && let Ok(relative) = path.strip_prefix(home)
+    {
+        return if relative.as_os_str().is_empty() {
+            "~".into()
+        } else {
+            format!("~/{}", relative.display())
+        };
+    }
+    path.display().to_string()
+}
+
+fn format_tokens(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}m", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 1_000 {
+        format!("{:.1}k", tokens as f64 / 1_000.0)
+    } else {
+        tokens.to_string()
+    }
+}
+
+fn format_tokens_compact(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        format!("{}m", tokens / 1_000_000)
+    } else if tokens >= 1_000 {
+        format!("{}k", tokens / 1_000)
+    } else {
+        tokens.to_string()
+    }
+}
+
+fn context_usage(used: u64, limit: Option<u64>, estimated: bool) -> String {
+    let estimate = if estimated { "~" } else { "" };
+    match limit.filter(|limit| *limit > 0) {
+        Some(limit) => format!(
+            "ctx {estimate}{}/{} · {}%",
+            format_tokens(used),
+            format_tokens(limit),
+            used.saturating_mul(100) / limit
+        ),
+        None => format!("ctx {estimate}{}/? · —%", format_tokens(used)),
     }
 }
 
@@ -575,8 +1022,16 @@ async fn main() -> Result<()> {
             ..LoopConfig::default()
         }
     };
+    let (context_used, context_estimated) = session_context_tokens(&store, &session_id)?;
+    let context_limit = resolver.context_limit(&model_for_session);
     let mut app = App::new();
-    app.status = format!("{model_for_session} · {session_id}");
+    app.configure_runtime(
+        model_for_session.clone(),
+        cwd.clone(),
+        context_used,
+        context_limit,
+        context_estimated,
+    );
 
     let (mut terminal, _terminal_session) = TerminalSession::start()?;
     run_app(
@@ -594,6 +1049,28 @@ async fn main() -> Result<()> {
         model_choices,
     )
     .await
+}
+
+fn session_context_tokens(store: &SessionStore, session_id: &str) -> Result<(u64, bool)> {
+    let session = store.load(session_id)?;
+    let estimated = transcript_character_estimate(&session.transcript());
+    Ok((estimated, true))
+}
+
+fn transcript_character_estimate(transcript: &[ilar::session::ChatMessage]) -> u64 {
+    transcript
+        .iter()
+        .flat_map(|message| &message.content)
+        .map(|block| match block {
+            ilar::session::ContentBlock::Text { text }
+            | ilar::session::ContentBlock::Thinking { text, .. } => text.len(),
+            ilar::session::ContentBlock::Reasoning { item } => item.to_string().len(),
+            ilar::session::ContentBlock::Diagnostic { .. } => 0,
+            ilar::session::ContentBlock::ToolCall { input, .. } => input.to_string().len(),
+            ilar::session::ContentBlock::ToolResult { content, .. } => content.len(),
+        })
+        .sum::<usize>() as u64
+        / 4
 }
 
 fn drain_notifications(
@@ -676,7 +1153,8 @@ async fn run_app(
                     notification,
                 )))) => {
                     app.busy = false;
-                    app.status = "idle".into();
+                    app.status = "ready".into();
+                    app.set_activity(Activity::Ready);
                     queued_notifications.push_back(notification);
                 }
                 Ok(TurnCompletion::Routed(Ok(ilar::subagent::RouteOutcome::Requeue(
@@ -684,16 +1162,19 @@ async fn run_app(
                 )))) => {
                     app.busy = false;
                     app.status = "notification paused; send a message to resume".into();
+                    app.set_activity(Activity::Paused);
                     queued_notifications.push_front(notification);
                     notifications_paused = true;
                 }
                 Ok(TurnCompletion::Routed(Ok(ilar::subagent::RouteOutcome::Complete))) => {
                     app.busy = false;
-                    app.status = "idle".into();
+                    app.status = "ready".into();
+                    app.set_activity(Activity::Ready);
                 }
                 Ok(TurnCompletion::Routed(Err(error))) => {
                     app.busy = false;
                     app.status = "error".into();
+                    app.set_activity(Activity::Error);
                     app.lines.push(Line_::System(format!(
                         "notification routing failed: {error}"
                     )));
@@ -701,6 +1182,7 @@ async fn run_app(
                 Err(error) => {
                     app.busy = false;
                     app.status = "error".into();
+                    app.set_activity(Activity::Error);
                     app.lines.push(Line_::System(format!(
                         "notification routing failed: {error}"
                     )));
@@ -721,6 +1203,7 @@ async fn run_app(
                 cancel = Some(token.clone());
                 app.busy = true;
                 app.status = format!("routing task to {}", notification.parent_session_id);
+                app.set_activity(Activity::Thinking);
                 let spawner = spawner.clone();
                 turn_handle = Some(tokio::spawn(async move {
                     TurnCompletion::Routed(spawner.route_notification(notification, token).await)
@@ -738,6 +1221,8 @@ async fn run_app(
             let token = CancellationToken::new();
             cancel = Some(token.clone());
             app.busy = true;
+            app.status = "thinking".into();
+            app.set_activity(Activity::Thinking);
             let resolver = resolver.clone();
             let store = store.clone();
             let session_id = session_id.to_string();
@@ -795,7 +1280,14 @@ async fn run_app(
                     match persist_model_change(resolver.as_ref(), store, session_id, &new_model) {
                         Ok(()) => {
                             model_index = next_index;
-                            app.status = format!("model: {new_model}");
+                            app.current_model = new_model.clone();
+                            app.context_limit = resolver.context_limit(&new_model);
+                            if let Ok((used, estimated)) = session_context_tokens(store, session_id)
+                            {
+                                app.context_used = used;
+                                app.context_estimated = estimated;
+                            }
+                            app.status = "ready".into();
                             app.lines
                                 .push(Line_::System(format!("switched to {new_model}")));
                         }
@@ -812,11 +1304,17 @@ async fn run_app(
                         spawner.abort_all();
                         notifications_paused = true;
                         app.status = format!("cancelling {background} background job(s)…");
+                        app.set_activity(if app.busy {
+                            Activity::Aborting
+                        } else {
+                            Activity::Paused
+                        });
                     }
                     if app.busy {
                         if let Some(cancel) = &cancel {
                             cancel.cancel();
                             app.status = "aborting…".into();
+                            app.set_activity(Activity::Aborting);
                         }
                     } else if background == 0 {
                         app.input.clear();
@@ -832,6 +1330,8 @@ async fn run_app(
                         let token = CancellationToken::new();
                         cancel = Some(token.clone());
                         app.busy = true;
+                        app.status = "thinking".into();
+                        app.set_activity(Activity::Thinking);
                         let resolver = resolver.clone();
                         let store = store.clone();
                         let session_id = session_id.to_string();
@@ -1006,12 +1506,209 @@ mod tests {
 
         assert!(matches!(
             &app.lines[1],
-            Line_::Tool { id, done: true, .. } if id == "read-1"
+            Line_::Tool { id, state: ToolState::Succeeded, .. } if id == "read-1"
         ));
         assert!(matches!(
             &app.lines[2],
-            Line_::Tool { id, done: false, .. } if id == "todo-1"
+            Line_::Tool { id, state: ToolState::Running, .. } if id == "todo-1"
         ));
+    }
+
+    fn rendered_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn tool_arguments_are_muted_id_safe_and_single_line() {
+        let mut app = App::new();
+        app.push_loop_event(&LoopEvent::ToolStarted {
+            id: "bash-1".into(),
+            name: "bash".into(),
+        });
+        app.push_loop_event(&LoopEvent::ToolArguments {
+            id: "bash-1".into(),
+            arguments: "cargo test --workspace && cargo clippy --workspace".into(),
+        });
+        app.push_loop_event(&LoopEvent::ToolFinished {
+            id: "bash-1".into(),
+            name: "bash".into(),
+            is_error: false,
+        });
+
+        let lines = app.transcript_lines(36, std::time::Instant::now());
+        let tool = lines.last().unwrap();
+        assert!(UnicodeWidthStr::width(rendered_text(tool).as_str()) <= 36);
+        assert_eq!(tool.spans.last().unwrap().style.fg, Some(MUTED));
+        assert!(rendered_text(tool).contains("cargo test"));
+        assert!(!rendered_text(tool).contains('\n'));
+    }
+
+    #[test]
+    fn telemetry_always_contains_runtime_context() {
+        let mut app = App::new();
+        app.configure_runtime(
+            "openai/gpt-5.6-sol".into(),
+            std::path::PathBuf::from("/very/long/workspace/project"),
+            32_000,
+            Some(128_000),
+            false,
+        );
+        let wide = rendered_text(&app.status_line(100));
+        assert!(wide.contains("ready"));
+        assert!(wide.contains("openai/gpt-5.6-sol"));
+        assert!(wide.contains("project"));
+        assert!(wide.contains("32.0k/128.0k"));
+        assert!(wide.contains("25%"));
+
+        let narrow = rendered_text(&app.status_line(40));
+        assert!(UnicodeWidthStr::width(narrow.as_str()) <= 40, "{narrow}");
+        assert!(narrow.contains("ready"));
+        assert!(narrow.contains("25%"));
+
+        let boundary = rendered_text(&app.status_line(64));
+        assert!(
+            UnicodeWidthStr::width(boundary.as_str()) <= 64,
+            "{boundary}"
+        );
+        assert!(boundary.contains("25%"), "{boundary}");
+
+        for width in 0..=100 {
+            let line = rendered_text(&app.status_line(width));
+            assert!(
+                UnicodeWidthStr::width(line.as_str()) <= width as usize,
+                "width {width}: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn telemetry_counts_uncached_and_cached_context_categories() {
+        let mut app = App::new();
+        app.push_loop_event(&LoopEvent::StepComplete {
+            stop_reason: "end_turn".into(),
+            usage: ilar::session::Usage {
+                input_tokens: 300,
+                output_tokens: 50,
+                cache_read_input_tokens: 1_500,
+                cache_creation_input_tokens: 0,
+                input_token_accounting: Some(ilar::session::InputTokenAccounting::ExcludesCached),
+            },
+        });
+        assert_eq!(app.context_used, 1_850);
+        assert!(!app.context_estimated);
+    }
+
+    #[test]
+    fn activity_row_animates_and_clears_with_turn() {
+        let mut app = App::new();
+        app.busy = true;
+        app.push_loop_event(&LoopEvent::TurnStarted);
+        let thinking = app.transcript_lines(80, app.activity_started);
+        assert!(rendered_text(thinking.last().unwrap()).contains("thinking"));
+        let next_frame = app.transcript_lines(
+            80,
+            app.activity_started + std::time::Duration::from_millis(200),
+        );
+        assert_ne!(
+            rendered_text(thinking.last().unwrap()),
+            rendered_text(next_frame.last().unwrap())
+        );
+
+        app.push_loop_event(&LoopEvent::ToolStarted {
+            id: "tool-1".into(),
+            name: "read".into(),
+        });
+        let tools = app.transcript_lines(80, app.activity_started);
+        assert!(rendered_text(tools.last().unwrap()).contains("running tools"));
+        let first_tool = tool_line(
+            "read",
+            "src/main.rs",
+            ToolState::Running,
+            80,
+            std::time::Duration::ZERO,
+        );
+        let next_tool = tool_line(
+            "read",
+            "src/main.rs",
+            ToolState::Running,
+            80,
+            std::time::Duration::from_millis(200),
+        );
+        assert_ne!(rendered_text(&first_tool), rendered_text(&next_tool));
+
+        app.push_loop_event(&LoopEvent::TextDelta("hello".into()));
+        let responding = app.transcript_lines(80, app.activity_started);
+        assert!(rendered_text(responding.last().unwrap()).contains("responding"));
+
+        app.push_loop_event(&LoopEvent::TurnDone {
+            outcome: TurnOutcome::Completed,
+        });
+        app.finish_turn(Ok(TurnOutcome::Completed));
+        let complete = app.transcript_lines(80, std::time::Instant::now());
+        assert!(!rendered_text(complete.last().unwrap()).contains("responding"));
+    }
+
+    #[test]
+    fn tool_rows_never_exceed_their_width() {
+        for width in 0..=100 {
+            let line = tool_line(
+                "extremely-long-tool-name",
+                "👩‍💻 /very/long/path/to/a/file with arguments",
+                ToolState::Succeeded,
+                width,
+                std::time::Duration::ZERO,
+            );
+            let rendered = rendered_text(&line);
+            assert!(
+                UnicodeWidthStr::width(rendered.as_str()) <= width as usize,
+                "width {width}: {rendered:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn stopped_and_paused_states_remain_visible() {
+        let mut app = App::new();
+        app.push_loop_event(&LoopEvent::TurnDone {
+            outcome: TurnOutcome::MaxIterations,
+        });
+        assert!(rendered_text(&app.status_line(80)).contains("stopped"));
+        app.set_activity(Activity::Paused);
+        assert!(rendered_text(&app.status_line(80)).contains("paused"));
+    }
+
+    #[test]
+    fn narrow_terminal_keeps_transcript_status_and_input_visible() {
+        let backend = ratatui::backend::TestBackend::new(40, 9);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.configure_runtime(
+            "openai/gpt-5.6-sol".into(),
+            std::path::PathBuf::from("/workspace/very-long-project-name"),
+            96_000,
+            Some(128_000),
+            false,
+        );
+        app.busy = true;
+        app.push_loop_event(&LoopEvent::TurnStarted);
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let screen = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("ilar"), "{screen}");
+        assert!(screen.contains("thinking"), "{screen}");
+        assert!(screen.contains("75%"), "{screen}");
+        assert!(screen.contains("input"), "{screen}");
     }
 
     #[test]

@@ -9,6 +9,10 @@ pub enum LoopEvent {
         id: String,
         name: String,
     },
+    ToolArguments {
+        id: String,
+        arguments: String,
+    },
     ToolFinished {
         id: String,
         name: String,
@@ -20,7 +24,9 @@ pub enum LoopEvent {
         usage: crate::session::Usage,
     },
     /// The transcript was compacted before this turn's provider call.
-    Compacted,
+    Compacted {
+        context_tokens: u64,
+    },
     TurnDone {
         outcome: crate::agent::TurnOutcome,
     },

@@ -20,3 +20,5 @@ crossterm = { workspace = true }
 clap = { version = "4.6.6", features = ["derive"] }
 tokio-util = "0.7.19"
 chrono.workspace = true
+unicode-width = { workspace = true }
+unicode-segmentation = { workspace = true }

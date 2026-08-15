@@ -483,3 +483,14 @@ with per-call `timeout_ms` overrides, retain workspace exclusion for their full
 run, inherit root cancellation through nested agents, and are cancelled and
 joined during shutdown. Bash also terminates remaining process-group children
 when the shell exits.
+
+## 2026-08-15 — TUI tool details and telemetry
+
+Tool rows now receive bounded, secret-redacted argument summaries from the
+agent loop and render them as muted, grapheme-safe, single-line text. The
+always-visible status strip reports lifecycle state, effective model, working
+directory, normalized context usage/limit, and percentage with responsive
+layouts down to narrow terminals. Thinking, responding, and tool activity are
+animated in the transcript without persisting synthetic content. Provider
+usage now has versioned cache-accounting semantics; legacy sessions and resumed
+transcripts use visibly approximate estimates.
