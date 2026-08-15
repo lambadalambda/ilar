@@ -338,6 +338,32 @@ impl Config {
         Some(provider)
     }
 
+    /// Chat-capable catalog models exposed by currently configured providers.
+    pub fn available_models(&self) -> Vec<&'static crate::model::ModelInfo> {
+        use crate::model::ModelAccess;
+
+        crate::model::catalog()
+            .iter()
+            .filter(|model| {
+                let Some(provider) = self.providers.get(model.provider) else {
+                    return false;
+                };
+                let chatgpt = provider.auth.as_deref() == Some("chatgpt");
+                match model.access {
+                    ModelAccess::OpenAi => provider.api_key.is_some() && !chatgpt,
+                    ModelAccess::OpenAiBoth => chatgpt || provider.api_key.is_some(),
+                    ModelAccess::Zai => {
+                        provider.api_key.is_some() && provider.flavor.as_deref() != Some("openai")
+                    }
+                    ModelAccess::ZaiCodingPlan => {
+                        provider.api_key.is_some() && provider.flavor.as_deref() == Some("openai")
+                    }
+                    ModelAccess::ZaiBoth => provider.api_key.is_some(),
+                }
+            })
+            .collect()
+    }
+
     /// User + project config dirs (agents searched in both).
     pub fn dirs(&self) -> (&Path, &Path) {
         (&self.user_dir, &self.project_dir)
@@ -385,10 +411,37 @@ impl crate::provider::ProviderResolver for Config {
     }
 
     fn context_limit(&self, model: &str) -> Option<u64> {
-        crate::provider::resolve_model(model)
-            .ok()
-            .map(|(provider, _)| if provider == "zai" { 200_000 } else { 128_000 })
+        crate::model::find(model)
+            .map(|model| model.context_limit)
+            .or_else(|| fallback_context_limit(model))
     }
+
+    fn input_limit(&self, model: &str) -> Option<u64> {
+        crate::model::find(model)
+            .map(|model| {
+                let zai_anthropic = model.provider == "zai"
+                    && self
+                        .providers
+                        .get("zai")
+                        .is_some_and(|provider| provider.flavor.as_deref() != Some("openai"));
+                if zai_anthropic {
+                    model.context_limit.saturating_sub(16_384)
+                } else {
+                    model.input_limit
+                }
+            })
+            .or_else(|| fallback_context_limit(model))
+    }
+}
+
+fn fallback_context_limit(model: &str) -> Option<u64> {
+    crate::provider::resolve_model(model)
+        .ok()
+        .and_then(|(provider, _)| match provider {
+            "openai" => Some(128_000),
+            "zai" => Some(200_000),
+            _ => None,
+        })
 }
 
 fn read_config_file(path: &Path) -> Option<String> {

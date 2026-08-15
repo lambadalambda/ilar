@@ -8,6 +8,7 @@ mod atomic_file;
 pub mod auth;
 pub mod compaction;
 pub mod config;
+pub mod model;
 pub mod provider;
 pub mod session;
 pub mod skill;

@@ -1,6 +1,7 @@
 use std::fs;
 
 use ilar::config::{Config, Loader, system_prompt_for};
+use ilar::provider::ProviderResolver;
 
 fn tempdir() -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
@@ -193,5 +194,94 @@ fn chatgpt_auth_needs_no_api_key() {
     assert!(
         config.provider_for("openai/gpt-5.6-sol").is_some(),
         "chatgpt-auth provider without api_key must resolve"
+    );
+}
+
+#[test]
+fn model_catalog_drives_context_limits() {
+    let config = Config::default_for_tests();
+
+    for id in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
+        let full_id = format!("openai/{id}");
+        let model = ilar::model::find(&full_id).unwrap();
+        assert_eq!(model.context_limit, 272_000);
+        assert_eq!(model.max_context_limit, 1_050_000);
+        assert_eq!(config.context_limit(&full_id), Some(272_000));
+        assert_eq!(config.input_limit(&full_id), Some(272_000));
+    }
+    assert_eq!(config.context_limit("zai/glm-4.7"), Some(204_800));
+    assert_eq!(config.input_limit("zai/glm-4.7"), Some(188_416));
+    assert_eq!(config.context_limit("openai/not-in-catalog"), Some(128_000));
+}
+
+#[test]
+fn configured_providers_expose_their_supported_models() {
+    let config = Config::default_for_tests();
+    let models = config.available_models();
+
+    assert!(
+        models
+            .iter()
+            .any(|model| model.full_id() == "openai/gpt-5.6-sol")
+    );
+    assert!(models.iter().any(|model| model.full_id() == "zai/glm-4.7"));
+    assert!(!models.iter().any(|model| model.full_id() == "zai/glm-5.3"));
+}
+
+#[test]
+fn zai_openai_flavor_uses_coding_plan_catalog() {
+    let (_g, dir) = tempdir();
+    write(
+        &dir.join("ilar.toml"),
+        "[providers.zai]\napi_key = \"zk\"\nflavor = \"openai\"\n",
+    );
+    let config = Loader::no_env().config_dir(dir).resolve().unwrap();
+    let models = config.available_models();
+
+    assert!(models.iter().any(|model| model.full_id() == "zai/glm-5.3"));
+    assert!(!models.iter().any(|model| model.full_id() == "zai/glm-4.6"));
+}
+
+#[test]
+fn chatgpt_auth_only_exposes_backend_supported_models() {
+    let (_g, dir) = tempdir();
+    write(
+        &dir.join("ilar.toml"),
+        "[providers.openai]\nauth = \"chatgpt\"\n",
+    );
+    let config = Loader::no_env().config_dir(dir).resolve().unwrap();
+    let models = config.available_models();
+
+    assert!(
+        models
+            .iter()
+            .any(|model| model.full_id() == "openai/gpt-5.6-sol")
+    );
+    assert!(
+        models
+            .iter()
+            .any(|model| model.full_id() == "openai/gpt-5.5")
+    );
+    assert!(
+        !models
+            .iter()
+            .any(|model| model.full_id() == "openai/gpt-5.2")
+    );
+}
+
+#[test]
+fn chatgpt_auth_takes_catalog_precedence_over_an_api_key() {
+    let (_g, dir) = tempdir();
+    write(
+        &dir.join("ilar.toml"),
+        "[providers.openai]\nauth = \"chatgpt\"\napi_key = \"also-present\"\n",
+    );
+    let config = Loader::no_env().config_dir(dir).resolve().unwrap();
+    let models = config.available_models();
+
+    assert!(
+        !models
+            .iter()
+            .any(|model| model.full_id() == "openai/gpt-5.2")
     );
 }

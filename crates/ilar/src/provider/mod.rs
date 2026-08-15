@@ -67,6 +67,12 @@ pub trait ProviderResolver: Send + Sync {
     fn context_limit(&self, _model: &str) -> Option<u64> {
         None
     }
+
+    /// Maximum request input. Defaults to the total context limit when a
+    /// provider does not expose more precise model metadata.
+    fn input_limit(&self, model: &str) -> Option<u64> {
+        self.context_limit(model)
+    }
 }
 
 impl<T: Provider> ProviderResolver for T {
