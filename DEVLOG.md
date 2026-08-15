@@ -425,3 +425,12 @@ and model state, explicit CLI model selection wins and persists first, and
 subagents inherit the parent model unless their agent overrides it. Nested
 background tasks are rejected until parent-specific notification contexts are
 supported.
+
+## 2026-08-15 — Stabilization: ordered reasoning state
+
+Assistant content now persists in exact stream order across thinking, text,
+opaque reasoning, and tool calls. Signed thinking runs remain independent;
+unsigned or incomplete thinking is retained only as non-replayed diagnostics.
+Stateless OpenAI requests preserve encrypted reasoning items before function
+continuations. Incomplete tool calls are never executed, receive synthetic
+errors, and replay with protocol-valid placeholder arguments.

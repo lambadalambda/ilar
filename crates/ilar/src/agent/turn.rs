@@ -10,7 +10,7 @@ use crate::agent::event::{LoopEvent, publish};
 use crate::provider::{ProviderEvent, ProviderResolver, Request, StopReason};
 use crate::session::{ContentBlock, SessionEvent, SessionStore, Usage, new_id};
 use crate::tools::ToolRegistry;
-use crate::tools::executor::{ToolCall, execute_calls};
+use crate::tools::executor::{CallOutcome, ToolCall, execute_calls};
 use chrono::Utc;
 
 /// Loop tuning knobs.
@@ -50,9 +50,10 @@ pub enum TurnOutcome {
 /// Accumulated blocks from one provider call.
 #[derive(Default)]
 struct StepAccumulator {
-    text: String,
-    thinking: Option<(String, Option<String>)>, // text, signature
-    tool_calls: Vec<ContentBlock>,
+    content: Vec<ContentBlock>,
+    thinking_open: Option<usize>,
+    tool_indices: std::collections::HashMap<String, usize>,
+    completed_calls: std::collections::HashSet<String>,
     /// Tool-call ids that already got a ToolStarted announcement.
     announced_calls: std::collections::HashMap<String, String>,
     usage: Usage,
@@ -61,20 +62,91 @@ struct StepAccumulator {
 
 impl StepAccumulator {
     fn content_blocks(&self) -> Vec<ContentBlock> {
-        let mut blocks = Vec::new();
-        if let Some((text, signature)) = &self.thinking {
-            blocks.push(ContentBlock::Thinking {
-                text: text.clone(),
-                signature: signature.clone(),
-            });
+        self.content
+            .iter()
+            .map(|block| match block {
+                ContentBlock::Thinking {
+                    text,
+                    signature: None,
+                } => ContentBlock::Diagnostic { text: text.clone() },
+                block => block.clone(),
+            })
+            .collect()
+    }
+
+    fn push_text(&mut self, delta: String) {
+        self.thinking_open = None;
+        match self.content.last_mut() {
+            Some(ContentBlock::Text { text }) => text.push_str(&delta),
+            _ => self.content.push(ContentBlock::Text { text: delta }),
         }
-        if !self.text.is_empty() {
-            blocks.push(ContentBlock::Text {
-                text: self.text.clone(),
-            });
+    }
+
+    fn push_thinking(&mut self, delta: String) {
+        let index = match self.thinking_open {
+            Some(index) => index,
+            None => {
+                self.content.push(ContentBlock::Thinking {
+                    text: String::new(),
+                    signature: None,
+                });
+                let index = self.content.len() - 1;
+                self.thinking_open = Some(index);
+                index
+            }
+        };
+        if let ContentBlock::Thinking { text, .. } = &mut self.content[index] {
+            text.push_str(&delta);
         }
-        blocks.extend(self.tool_calls.iter().cloned());
-        blocks
+    }
+
+    fn complete_thinking(&mut self, signature: Option<String>) {
+        if let Some(index) = self.thinking_open.take()
+            && let ContentBlock::Thinking {
+                signature: stored, ..
+            } = &mut self.content[index]
+        {
+            *stored = signature;
+        }
+    }
+
+    fn push_reasoning(&mut self, item: serde_json::Value) {
+        self.thinking_open = None;
+        self.content.push(ContentBlock::Reasoning { item });
+    }
+
+    fn start_tool_call(&mut self, id: String, name: String) {
+        self.thinking_open = None;
+        if self.tool_indices.contains_key(&id) {
+            return;
+        }
+        self.content.push(ContentBlock::ToolCall {
+            id: id.clone(),
+            name,
+            input: serde_json::Value::Null,
+        });
+        self.tool_indices.insert(id, self.content.len() - 1);
+    }
+
+    fn complete_tool_call(&mut self, id: String, name: String, input: serde_json::Value) {
+        self.start_tool_call(id.clone(), name.clone());
+        if let Some(index) = self.tool_indices.get(&id).copied() {
+            let completed_id = id.clone();
+            self.content[index] = ContentBlock::ToolCall { id, name, input };
+            self.completed_calls.insert(completed_id);
+        }
+    }
+
+    fn tool_calls(&self) -> Vec<(&String, &String, &serde_json::Value, bool)> {
+        self.content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::ToolCall { id, name, input } => {
+                    Some((id, name, input, self.completed_calls.contains(id)))
+                }
+                _ => None,
+            })
+            .collect()
     }
 }
 
@@ -167,23 +239,22 @@ pub async fn run_turn(
             match event {
                 ProviderEvent::TextDelta(t) => {
                     publish(&events, LoopEvent::TextDelta(t.clone()));
-                    acc.text.push_str(&t);
+                    acc.push_text(t);
                 }
                 ProviderEvent::ThinkingDelta(t) => {
                     publish(&events, LoopEvent::ThinkingDelta(t.clone()));
-                    acc.thinking
-                        .get_or_insert_with(|| (String::new(), None))
-                        .0
-                        .push_str(&t);
+                    acc.push_thinking(t);
                 }
                 ProviderEvent::ThinkingCompleted { signature } => {
-                    if let Some(thinking) = acc.thinking.as_mut() {
-                        thinking.1 = signature;
-                    }
+                    acc.complete_thinking(signature);
+                }
+                ProviderEvent::ReasoningItem { item } => {
+                    acc.push_reasoning(item);
                 }
                 ProviderEvent::ToolCallStarted { id, name } => {
                     if !acc.announced_calls.contains_key(&id) {
                         acc.announced_calls.insert(id.clone(), name.clone());
+                        acc.start_tool_call(id.clone(), name.clone());
                         publish(&events, LoopEvent::ToolStarted { id, name });
                     }
                 }
@@ -201,8 +272,7 @@ pub async fn run_turn(
                             },
                         );
                     }
-                    acc.tool_calls
-                        .push(ContentBlock::ToolCall { id, name, input });
+                    acc.complete_tool_call(id, name, input);
                 }
                 ProviderEvent::TurnComplete { stop_reason, usage } => {
                     acc.stop_reason = Some(stop_reason.clone());
@@ -238,32 +308,25 @@ pub async fn run_turn(
                     ts: Utc::now(),
                 })?;
             }
-            let completed_ids: std::collections::HashSet<&str> = acc
-                .tool_calls
-                .iter()
-                .filter_map(|block| match block {
-                    ContentBlock::ToolCall { id, .. } => Some(id.as_str()),
-                    _ => None,
-                })
-                .collect();
-            for block in &acc.tool_calls {
-                if let ContentBlock::ToolCall { id, name, .. } = block {
-                    session.append(SessionEvent::ToolResult {
-                        id: new_id(),
-                        tool_use_id: id.clone(),
-                        content: format!("provider error before execution: {message}"),
+            let calls = acc.tool_calls();
+            let completed_ids: std::collections::HashSet<&str> =
+                calls.iter().map(|(id, _, _, _)| id.as_str()).collect();
+            for (id, name, _, _) in calls {
+                session.append(SessionEvent::ToolResult {
+                    id: new_id(),
+                    tool_use_id: id.clone(),
+                    content: format!("provider error before execution: {message}"),
+                    is_error: true,
+                    ts: Utc::now(),
+                })?;
+                publish(
+                    &events,
+                    LoopEvent::ToolFinished {
+                        id: id.clone(),
+                        name: name.clone(),
                         is_error: true,
-                        ts: Utc::now(),
-                    })?;
-                    publish(
-                        &events,
-                        LoopEvent::ToolFinished {
-                            id: id.clone(),
-                            name: name.clone(),
-                            is_error: true,
-                        },
-                    );
-                }
+                    },
+                );
             }
             for (id, name) in &acc.announced_calls {
                 if !completed_ids.contains(id.as_str()) {
@@ -297,16 +360,22 @@ pub async fn run_turn(
             // ...and answer every announced tool call with a synthetic
             // error result: an unanswered tool_use poisons the transcript
             // (providers 400 on tool_use without tool_result).
-            for block in &acc.tool_calls {
-                if let ContentBlock::ToolCall { id, .. } = block {
-                    session.append(SessionEvent::ToolResult {
-                        id: new_id(),
-                        tool_use_id: id.clone(),
-                        content: "aborted before execution".into(),
+            for (id, name, _, _) in acc.tool_calls() {
+                session.append(SessionEvent::ToolResult {
+                    id: new_id(),
+                    tool_use_id: id.clone(),
+                    content: "aborted before execution".into(),
+                    is_error: true,
+                    ts: Utc::now(),
+                })?;
+                publish(
+                    &events,
+                    LoopEvent::ToolFinished {
+                        id: id.clone(),
+                        name: name.clone(),
                         is_error: true,
-                        ts: Utc::now(),
-                    })?;
-                }
+                    },
+                );
             }
             publish(
                 &events,
@@ -319,7 +388,7 @@ pub async fn run_turn(
 
         // Persist the completed assistant message.
         let blocks = acc.content_blocks();
-        let had_tool_calls = !acc.tool_calls.is_empty();
+        let had_tool_calls = !acc.tool_indices.is_empty();
         let stop_reason = acc
             .stop_reason
             .clone()
@@ -360,17 +429,16 @@ pub async fn run_turn(
             return Ok(TurnOutcome::Completed);
         }
 
-        // Execute the turn's tool calls under the barrier, persist results.
-        let calls: Vec<ToolCall> = acc
-            .tool_calls
+        // Never execute incomplete or null-input calls. Keep result order
+        // aligned with the streamed call order.
+        let ordered_calls = acc.tool_calls();
+        let calls: Vec<ToolCall> = ordered_calls
             .iter()
-            .filter_map(|block| match block {
-                ContentBlock::ToolCall { id, name, input } => Some(ToolCall {
-                    id: id.clone(),
-                    name: name.clone(),
-                    input: input.clone(),
-                }),
-                _ => None,
+            .filter(|(_, _, input, completed)| *completed && !input.is_null())
+            .map(|(id, name, input, _)| ToolCall {
+                id: (*id).clone(),
+                name: (*name).clone(),
+                input: (*input).clone(),
             })
             .collect();
         let outcomes = execute_calls(
@@ -380,7 +448,20 @@ pub async fn run_turn(
             cancel.clone(),
         )
         .await;
-        for outcome in outcomes {
+        let mut outcomes = outcomes.into_iter();
+        for (id, name, input, completed) in ordered_calls {
+            let outcome = if completed && !input.is_null() {
+                outcomes.next().expect("one outcome per executable call")
+            } else {
+                CallOutcome {
+                    id: id.clone(),
+                    name: name.clone(),
+                    output: crate::tools::ToolOutput::error(
+                        "tool call was incomplete or had invalid arguments",
+                    ),
+                    cancelled: false,
+                }
+            };
             session.append(SessionEvent::ToolResult {
                 id: new_id(),
                 tool_use_id: outcome.id.clone(),

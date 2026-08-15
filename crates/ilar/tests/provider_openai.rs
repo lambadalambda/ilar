@@ -251,3 +251,75 @@ async fn neutral_request_serializes_to_wire_format() {
         "Responses API function_call_output rejects is_error"
     );
 }
+
+#[tokio::test]
+async fn stateless_tool_continuation_replays_opaque_reasoning_in_order() {
+    let first_sse = concat!(
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"summary\":[],\"encrypted_content\":\"encrypted-1\"}}\n\n",
+        "data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"read\"}}\n\n",
+        "data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_1\",\"arguments\":\"{\\\"path\\\":\\\"Cargo.toml\\\"}\"}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{}}}\n\n",
+    )
+    .as_bytes()
+    .to_vec();
+    let (first_base, first_server) = http_server(first_sse);
+    let mut first_request = request_with_tool();
+    first_request.options = serde_json::json!({"store": false});
+    let events = drain(provider(first_base).stream(first_request).unwrap()).await;
+    first_server.await.unwrap();
+
+    let reasoning = events
+        .iter()
+        .find_map(|event| match event {
+            ProviderEvent::ReasoningItem { item } => Some(item.clone()),
+            _ => None,
+        })
+        .expect("reasoning item");
+    let call = events
+        .iter()
+        .find_map(|event| match event {
+            ProviderEvent::ToolCallCompleted { id, name, input } => Some(ContentBlock::ToolCall {
+                id: id.clone(),
+                name: name.clone(),
+                input: input.clone(),
+            }),
+            _ => None,
+        })
+        .expect("tool call");
+
+    let (second_base, second_server) = http_server(fixture("openai_text.sse"));
+    let mut second_request = request_with_tool();
+    second_request.options = serde_json::json!({
+        "store": false,
+        "include": ["web_search_call.action.sources"]
+    });
+    second_request.messages = vec![
+        ilar::session::ChatMessage::user_text("read it"),
+        ilar::session::ChatMessage {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Reasoning { item: reasoning }, call],
+        },
+        ilar::session::ChatMessage {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_1".into(),
+                content: "contents".into(),
+                is_error: false,
+            }],
+        },
+    ];
+    let stream = provider(second_base).stream(second_request).unwrap();
+    let wire = second_server.await.unwrap();
+    drop(stream);
+    let body_start = wire.find("\r\n\r\n").unwrap() + 4;
+    let body: serde_json::Value = serde_json::from_str(wire[body_start..].trim()).unwrap();
+
+    assert_eq!(body["store"], false);
+    assert_eq!(body["include"][0], "web_search_call.action.sources");
+    assert_eq!(body["include"][1], "reasoning.encrypted_content");
+    let input = body["input"].as_array().unwrap();
+    assert_eq!(input[1]["type"], "reasoning");
+    assert_eq!(input[1]["encrypted_content"], "encrypted-1");
+    assert_eq!(input[2]["type"], "function_call");
+    assert_eq!(input[3]["type"], "function_call_output");
+}

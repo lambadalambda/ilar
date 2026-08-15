@@ -78,7 +78,7 @@ impl ZaiProvider {
                 // last message (the canonical incremental-caching pattern —
                 // each turn's entry covers everything up to that turn's end).
                 let mut wire_messages: Vec<serde_json::Value> =
-                    req.messages.iter().map(anthropic_message).collect();
+                    req.messages.iter().filter_map(anthropic_message).collect();
                 if let Some(message) = wire_messages.last_mut()
                     && let Some(content) = message["content"].as_array_mut()
                     && let Some(last_block) = content.last_mut()
@@ -138,7 +138,7 @@ impl ZaiProvider {
 
 /// Neutral -> Anthropic wire: content-block preserving (thinking blocks
 /// must round-trip when tool use interleaves with thinking).
-fn anthropic_message(msg: &ChatMessage) -> serde_json::Value {
+fn anthropic_message(msg: &ChatMessage) -> Option<serde_json::Value> {
     let role = match msg.role {
         Role::User => "user",
         Role::Assistant => "assistant",
@@ -146,32 +146,47 @@ fn anthropic_message(msg: &ChatMessage) -> serde_json::Value {
     let content: Vec<serde_json::Value> = msg
         .content
         .iter()
-        .map(|block| match block {
-            ContentBlock::Text { text } => serde_json::json!({"type": "text", "text": text}),
-            ContentBlock::Thinking { text, signature } => serde_json::json!({
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(serde_json::json!({"type": "text", "text": text})),
+            ContentBlock::Thinking {
+                text,
+                signature: Some(signature),
+            } => Some(serde_json::json!({
                 "type": "thinking",
                 "thinking": text,
                 "signature": signature,
-            }),
-            ContentBlock::ToolCall { id, name, input } => serde_json::json!({
-                "type": "tool_use",
-                "id": id,
-                "name": name,
-                "input": input,
-            }),
+            })),
+            ContentBlock::Thinking {
+                signature: None, ..
+            } => None,
+            ContentBlock::Reasoning { .. } => None,
+            ContentBlock::Diagnostic { .. } => None,
+            ContentBlock::ToolCall { id, name, input } => {
+                let input = input
+                    .is_object()
+                    .then_some(input)
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
+                Some(serde_json::json!({
+                    "type": "tool_use",
+                    "id": id,
+                    "name": name,
+                    "input": input,
+                }))
+            }
             ContentBlock::ToolResult {
                 tool_use_id,
                 content,
                 is_error,
-            } => serde_json::json!({
+            } => Some(serde_json::json!({
                 "type": "tool_result",
                 "tool_use_id": tool_use_id,
                 "content": content,
                 "is_error": is_error,
-            }),
+            })),
         })
         .collect();
-    serde_json::json!({"role": role, "content": content})
+    (!content.is_empty()).then(|| serde_json::json!({"role": role, "content": content}))
 }
 
 fn anthropic_tool(tool: &ToolDefinition) -> serde_json::Value {
@@ -195,12 +210,21 @@ fn openai_message(msg: &ChatMessage) -> Vec<serde_json::Value> {
     for block in &msg.content {
         match block {
             ContentBlock::Text { text } => content_text.push_str(text),
-            ContentBlock::Thinking { .. } => {}
-            ContentBlock::ToolCall { id, name, input } => tool_calls.push(serde_json::json!({
-                "id": id,
-                "type": "function",
-                "function": {"name": name, "arguments": input.to_string()},
-            })),
+            ContentBlock::Thinking { .. }
+            | ContentBlock::Reasoning { .. }
+            | ContentBlock::Diagnostic { .. } => {}
+            ContentBlock::ToolCall { id, name, input } => {
+                let input = if input.is_object() {
+                    input.to_string()
+                } else {
+                    "{}".to_string()
+                };
+                tool_calls.push(serde_json::json!({
+                    "id": id,
+                    "type": "function",
+                    "function": {"name": name, "arguments": input},
+                }));
+            }
             ContentBlock::ToolResult {
                 tool_use_id,
                 content,
@@ -229,6 +253,9 @@ fn openai_message(msg: &ChatMessage) -> Vec<serde_json::Value> {
             }));
         }
         return messages;
+    }
+    if content_text.is_empty() && tool_calls.is_empty() {
+        return Vec::new();
     }
     let mut value = serde_json::Map::new();
     value.insert("role".into(), serde_json::json!(role));
@@ -456,8 +483,9 @@ impl AnthropicMapper {
                     )],
                     "signature_delta" => {
                         if let Some(Block::Thinking { signature, .. }) = self.blocks.get_mut(&index)
+                            && let Some(delta) = delta["signature"].as_str()
                         {
-                            *signature = delta["signature"].as_str().map(String::from);
+                            signature.get_or_insert_with(String::new).push_str(delta);
                         }
                         Vec::new()
                     }
@@ -595,15 +623,17 @@ impl OpenAiMapper {
         let mut events = Vec::new();
         if let Some(choice) = value["choices"].get(0) {
             let delta = &choice["delta"];
-            if let Some(text) = delta["content"].as_str()
-                && !text.is_empty()
-            {
-                events.push(ProviderEvent::TextDelta(text.into()));
-            }
             if let Some(reasoning) = delta["reasoning_content"].as_str()
                 && !reasoning.is_empty()
             {
+                self.thinking_open = true;
                 events.push(ProviderEvent::ThinkingDelta(reasoning.into()));
+            }
+            if let Some(text) = delta["content"].as_str()
+                && !text.is_empty()
+            {
+                self.close_thinking(&mut events);
+                events.push(ProviderEvent::TextDelta(text.into()));
             }
             if let Some(calls) = delta["tool_calls"].as_array() {
                 self.close_thinking(&mut events);

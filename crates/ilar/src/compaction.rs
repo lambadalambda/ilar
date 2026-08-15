@@ -29,6 +29,8 @@ pub fn estimate_tokens(session: &Session) -> u64 {
                 .map(|b| match b {
                     crate::session::ContentBlock::Text { text } => text.len(),
                     crate::session::ContentBlock::Thinking { text, .. } => text.len(),
+                    crate::session::ContentBlock::Reasoning { item } => item.to_string().len(),
+                    crate::session::ContentBlock::Diagnostic { .. } => 0,
                     crate::session::ContentBlock::ToolCall { input, .. } => input.to_string().len(),
                     crate::session::ContentBlock::ToolResult { content, .. } => content.len(),
                 })

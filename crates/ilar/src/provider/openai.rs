@@ -108,8 +108,18 @@ fn wire_input_items(msg: &ChatMessage) -> Vec<serde_json::Value> {
         match block {
             ContentBlock::Text { text: t } => text.push_str(t),
             ContentBlock::Thinking { .. } => {} // reasoning items are server-managed
+            ContentBlock::Diagnostic { .. } => {}
+            ContentBlock::Reasoning { item } => {
+                flush_text(&mut text, &mut items);
+                items.push(item.clone());
+            }
             ContentBlock::ToolCall { id, name, input } => {
                 flush_text(&mut text, &mut items);
+                let input = input
+                    .is_object()
+                    .then_some(input)
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
                 items.push(serde_json::json!({
                     "type": "function_call",
                     "call_id": id,
@@ -155,6 +165,20 @@ impl Provider for OpenAIProvider {
         if is_chatgpt && let Some(object) = body.as_object_mut() {
             // The ChatGPT backend rejects server-side state retention.
             object.insert("store".into(), serde_json::json!(false));
+        }
+        if let Some(object) = body.as_object_mut()
+            && object.get("store") == Some(&serde_json::Value::Bool(false))
+        {
+            let include = object
+                .entry("include")
+                .or_insert_with(|| serde_json::json!([]));
+            if let Some(include) = include.as_array_mut()
+                && !include
+                    .iter()
+                    .any(|item| item == "reasoning.encrypted_content")
+            {
+                include.push(serde_json::json!("reasoning.encrypted_content"));
+            }
         }
 
         let url = format!("{}/responses", self.base_url);
@@ -358,6 +382,14 @@ impl EventMapper {
                     self.pending.push(call_id.clone());
                     self.tool_call_seen = true;
                     vec![ProviderEvent::ToolCallStarted { id: call_id, name }]
+                } else {
+                    Vec::new()
+                }
+            }
+            "response.output_item.done" => {
+                let item = &value["item"];
+                if item["type"] == "reasoning" {
+                    vec![ProviderEvent::ReasoningItem { item: item.clone() }]
                 } else {
                     Vec::new()
                 }

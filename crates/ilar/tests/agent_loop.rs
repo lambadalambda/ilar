@@ -83,12 +83,17 @@ async fn multi_turn_tool_conversation_end_to_end() {
     // Turn 1: two parallel tool calls. Turn 2: final text.
     let provider = MockProvider::new(vec![
         vec![
+            ProviderEvent::ThinkingDelta("plan".into()),
+            ProviderEvent::ThinkingCompleted {
+                signature: Some("sig-plan".into()),
+            },
             ProviderEvent::TextDelta("checking".into()),
             ProviderEvent::ToolCallStarted {
                 id: "t1".into(),
                 name: "echo".into(),
             },
             tool_call_event("t1", "alpha"),
+            ProviderEvent::TextDelta("after first".into()),
             ProviderEvent::ToolCallStarted {
                 id: "t2".into(),
                 name: "echo".into(),
@@ -143,10 +148,14 @@ async fn multi_turn_tool_conversation_end_to_end() {
         ContentBlock::Text { text } if text == "do the thing"
     ));
     let assistant1 = &transcript[1];
-    assert_eq!(assistant1.content.len(), 3); // text + 2 tool calls
-    assert!(matches!(&assistant1.content[0], ContentBlock::Text { text } if text == "checking"));
-    assert!(matches!(&assistant1.content[1], ContentBlock::ToolCall { id, .. } if id == "t1"));
-    assert!(matches!(&assistant1.content[2], ContentBlock::ToolCall { id, .. } if id == "t2"));
+    assert_eq!(assistant1.content.len(), 5);
+    assert!(
+        matches!(&assistant1.content[0], ContentBlock::Thinking { text, .. } if text == "plan")
+    );
+    assert!(matches!(&assistant1.content[1], ContentBlock::Text { text } if text == "checking"));
+    assert!(matches!(&assistant1.content[2], ContentBlock::ToolCall { id, .. } if id == "t1"));
+    assert!(matches!(&assistant1.content[3], ContentBlock::Text { text } if text == "after first"));
+    assert!(matches!(&assistant1.content[4], ContentBlock::ToolCall { id, .. } if id == "t2"));
     let results = &transcript[2];
     assert!(matches!(
         &results.content[0],
@@ -196,6 +205,203 @@ async fn multi_turn_tool_conversation_end_to_end() {
             .iter()
             .any(|e| matches!(e, LoopEvent::TurnDone { .. }))
     );
+}
+
+#[tokio::test]
+async fn multiple_thinking_runs_preserve_order_and_signatures() {
+    let (store, session_id) = temp_session("build");
+    let provider = MockProvider::new(vec![vec![
+        ProviderEvent::ThinkingDelta("first thought".into()),
+        ProviderEvent::ThinkingCompleted {
+            signature: Some("sig-1".into()),
+        },
+        ProviderEvent::TextDelta("between".into()),
+        ProviderEvent::ThinkingDelta("second thought".into()),
+        ProviderEvent::ThinkingCompleted {
+            signature: Some("sig-2".into()),
+        },
+        ProviderEvent::TextDelta("answer".into()),
+        ProviderEvent::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+            usage: Default::default(),
+        },
+    ]]);
+    let (tx, _rx) = events_channel();
+
+    run_turn(
+        &provider,
+        &ToolRegistry::builtin(),
+        &store,
+        &session_id,
+        "think",
+        None,
+        LoopConfig::default(),
+        tx,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+    )
+    .await
+    .unwrap();
+
+    let transcript = store.load(&session_id).unwrap().transcript();
+    let content = &transcript[1].content;
+    assert!(
+        matches!(&content[0], ContentBlock::Thinking { text, signature: Some(signature) }
+        if text == "first thought" && signature == "sig-1")
+    );
+    assert!(matches!(&content[1], ContentBlock::Text { text } if text == "between"));
+    assert!(
+        matches!(&content[2], ContentBlock::Thinking { text, signature: Some(signature) }
+        if text == "second thought" && signature == "sig-2")
+    );
+    assert!(matches!(&content[3], ContentBlock::Text { text } if text == "answer"));
+}
+
+#[tokio::test]
+async fn opaque_reasoning_is_persisted_and_replayed_with_tool_continuation() {
+    let (store, session_id) = temp_session("build");
+    let registry = registry_with(EchoTool {
+        calls: Arc::new(Mutex::new(Vec::new())),
+    });
+    let reasoning = serde_json::json!({
+        "id": "rs_1",
+        "type": "reasoning",
+        "encrypted_content": "encrypted"
+    });
+    let provider = MockProvider::new(vec![
+        vec![
+            ProviderEvent::ReasoningItem {
+                item: reasoning.clone(),
+            },
+            ProviderEvent::ToolCallStarted {
+                id: "t1".into(),
+                name: "echo".into(),
+            },
+            tool_call_event("t1", "continue"),
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+                usage: Default::default(),
+            },
+        ],
+        vec![
+            ProviderEvent::TextDelta("done".into()),
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+                usage: Default::default(),
+            },
+        ],
+    ]);
+    let (tx, _rx) = events_channel();
+
+    run_turn(
+        &provider,
+        &registry,
+        &store,
+        &session_id,
+        "go",
+        None,
+        LoopConfig::default(),
+        tx,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+    )
+    .await
+    .unwrap();
+
+    let session = store.load(&session_id).unwrap();
+    assert!(matches!(
+        &session.transcript()[1].content[0],
+        ContentBlock::Reasoning { item } if item == &reasoning
+    ));
+    let second = &provider.requests()[1];
+    assert!(matches!(
+        &second.messages[1].content[0],
+        ContentBlock::Reasoning { item } if item == &reasoning
+    ));
+}
+
+#[tokio::test]
+async fn unsigned_thinking_is_persisted_as_diagnostic_text() {
+    let (store, session_id) = temp_session("build");
+    let provider = MockProvider::new(vec![vec![
+        ProviderEvent::ThinkingDelta("unfinished".into()),
+        ProviderEvent::ThinkingCompleted { signature: None },
+        ProviderEvent::TextDelta("answer".into()),
+        ProviderEvent::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+            usage: Default::default(),
+        },
+    ]]);
+    let (tx, _rx) = events_channel();
+
+    run_turn(
+        &provider,
+        &ToolRegistry::builtin(),
+        &store,
+        &session_id,
+        "think",
+        None,
+        LoopConfig::default(),
+        tx,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+    )
+    .await
+    .unwrap();
+
+    let content = &store.load(&session_id).unwrap().transcript()[1].content;
+    assert!(matches!(&content[0], ContentBlock::Diagnostic { text }
+        if text == "unfinished"));
+    assert!(matches!(&content[1], ContentBlock::Text { text } if text == "answer"));
+}
+
+#[tokio::test]
+async fn incomplete_tool_call_is_failed_without_execution() {
+    let (store, session_id) = temp_session("build");
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let registry = registry_with(EchoTool {
+        calls: calls.clone(),
+    });
+    let provider = MockProvider::new(vec![
+        vec![
+            ProviderEvent::ToolCallStarted {
+                id: "incomplete".into(),
+                name: "echo".into(),
+            },
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+                usage: Default::default(),
+            },
+        ],
+        vec![ProviderEvent::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+            usage: Default::default(),
+        }],
+    ]);
+    let (tx, _rx) = events_channel();
+
+    run_turn(
+        &provider,
+        &registry,
+        &store,
+        &session_id,
+        "go",
+        None,
+        LoopConfig::default(),
+        tx,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+    )
+    .await
+    .unwrap();
+
+    assert!(calls.lock().unwrap().is_empty());
+    let transcript = store.load(&session_id).unwrap().transcript();
+    assert!(matches!(
+        &transcript[2].content[0],
+        ContentBlock::ToolResult { is_error: true, content, .. }
+            if content.contains("incomplete")
+    ));
 }
 
 #[tokio::test]

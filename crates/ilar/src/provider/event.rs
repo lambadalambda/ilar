@@ -42,6 +42,8 @@ pub enum ProviderEvent {
     ThinkingDelta(String),
     /// A thinking block completed; signature if the provider signs.
     ThinkingCompleted { signature: Option<String> },
+    /// Opaque provider reasoning item, preserved exactly for replay.
+    ReasoningItem { item: serde_json::Value },
     /// A tool call was announced (id + name known, args not yet).
     ToolCallStarted { id: String, name: String },
     /// Incremental tool-call argument JSON.

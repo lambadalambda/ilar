@@ -157,6 +157,92 @@ async fn tool_call_fixture_maps_thinking_and_tool_use() {
 }
 
 #[tokio::test]
+async fn anthropic_signature_deltas_concatenate() {
+    let sse = concat!(
+        "data: {\"type\":\"message_start\",\"message\":{\"usage\":{}}}\n\n",
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\"}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"thought\"}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig-\"}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"tail\"}}\n\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{}}\n\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    );
+    let (base, _server) = http_server(sse.as_bytes().to_vec());
+    let events = drain(anthropic_provider(base).stream(request()).unwrap()).await;
+
+    assert_eq!(
+        events[1],
+        ProviderEvent::ThinkingCompleted {
+            signature: Some("sig-tail".into())
+        }
+    );
+}
+
+#[test]
+fn unsigned_thinking_is_diagnostic_text_on_anthropic_wire() {
+    let provider = ZaiProvider::new("k".into(), None, Flavor::Anthropic);
+    let mut req = request();
+    req.messages = vec![ChatMessage {
+        role: Role::Assistant,
+        content: vec![ContentBlock::Thinking {
+            text: "unfinished".into(),
+            signature: None,
+        }],
+    }];
+
+    let body = provider.wire_body_for_test(&req);
+    assert!(body["messages"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn incomplete_tool_input_is_normalized_for_anthropic_replay() {
+    let provider = ZaiProvider::new("k".into(), None, Flavor::Anthropic);
+    let mut req = request();
+    req.messages = vec![ChatMessage {
+        role: Role::Assistant,
+        content: vec![ContentBlock::ToolCall {
+            id: "incomplete".into(),
+            name: "read".into(),
+            input: serde_json::Value::Null,
+        }],
+    }];
+
+    let body = provider.wire_body_for_test(&req);
+    assert_eq!(
+        body["messages"][0]["content"][0]["input"],
+        serde_json::json!({})
+    );
+}
+
+#[tokio::test]
+async fn openai_reasoning_runs_close_at_content_and_tool_boundaries() {
+    let sse = concat!(
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"think-1\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"text-1\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"think-2\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"read\",\"arguments\":\"{}\"}}]},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{}}\n\n",
+    );
+    let (base, _server) = http_server(sse.as_bytes().to_vec());
+    let provider = ZaiProvider::new("k".into(), Some(base), Flavor::OpenAI);
+    let events = drain(provider.stream(request()).unwrap()).await;
+
+    assert_eq!(events[0], ProviderEvent::ThinkingDelta("think-1".into()));
+    assert_eq!(
+        events[1],
+        ProviderEvent::ThinkingCompleted { signature: None }
+    );
+    assert_eq!(events[2], ProviderEvent::TextDelta("text-1".into()));
+    assert_eq!(events[3], ProviderEvent::ThinkingDelta("think-2".into()));
+    assert_eq!(
+        events[4],
+        ProviderEvent::ThinkingCompleted { signature: None }
+    );
+    assert!(matches!(events[5], ProviderEvent::ToolCallStarted { .. }));
+}
+
+#[tokio::test]
 async fn error_fixture_maps_to_error_event() {
     ensure_terminated_blank(&["zai_error.sse"]);
     let (base, _server) = http_server(fixture("zai_error.sse"));

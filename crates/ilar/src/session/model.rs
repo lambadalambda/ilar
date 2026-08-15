@@ -27,6 +27,14 @@ pub enum ContentBlock {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         signature: Option<String>,
     },
+    /// Opaque provider state required to continue stateless reasoning turns.
+    Reasoning {
+        item: serde_json::Value,
+    },
+    /// Locally visible provider diagnostics that must never be replayed.
+    Diagnostic {
+        text: String,
+    },
     ToolCall {
         id: String,
         name: String,
