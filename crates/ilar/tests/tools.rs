@@ -66,6 +66,20 @@ fn registry_exposes_provider_definitions() {
 }
 
 #[test]
+fn read_only_registry_excludes_mutating_and_delegating_tools() {
+    let registry = ToolRegistry::read_only();
+    for name in ["read", "glob", "grep", "webfetch"] {
+        assert!(registry.get(name).is_some(), "missing {name}");
+    }
+    for name in ["write", "edit", "bash", "task"] {
+        assert!(
+            registry.get(name).is_none(),
+            "read-only registry exposed {name}"
+        );
+    }
+}
+
+#[test]
 fn registry_rejects_duplicate_tool_names() {
     let error = ToolRegistry::builtin()
         .with_tool(Arc::new(WebFetchTool::default()))

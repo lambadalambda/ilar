@@ -4,8 +4,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::agent::{LoopConfig, run_turn};
-use crate::config::AgentDefinition;
 use crate::config::system_prompt_for;
+use crate::config::{AgentDefinition, AgentWorkspaceMode};
 use crate::provider::ProviderResolver;
 use crate::session::{ContentBlock, SessionMeta, SessionStore, new_id};
 use crate::tools::{
@@ -200,6 +200,29 @@ impl SubagentSpawner {
                 available.join(", ")
             ));
         };
+        let workspace_access = match agent.workspace_mode {
+            AgentWorkspaceMode::Mutable => WorkspaceAccess::Mutating,
+            AgentWorkspaceMode::ReadOnly => WorkspaceAccess::ReadOnly,
+        };
+        if input.background == Some(true) && ctx.has_workspace_lease() {
+            return ToolOutput::error(
+                "background tasks cannot outlive a parent workspace lease; use a foreground task or validated worktree",
+            );
+        }
+        if workspace_access == WorkspaceAccess::Mutating && ctx.has_workspace_lease() {
+            return ToolOutput::error(
+                "nested mutable tasks cannot reuse their parent checkout; use a validated worktree",
+            );
+        }
+        let inherited_lease = match ctx.workspace_coverage(workspace_access) {
+            crate::tools::WorkspaceCoverage::Covered => ctx.workspace_lease.clone(),
+            crate::tools::WorkspaceCoverage::Absent => None,
+            crate::tools::WorkspaceCoverage::Incompatible => {
+                return ToolOutput::error(
+                    "mutable task cannot run inside a read-only child workspace",
+                );
+            }
+        };
 
         // Concurrency slot: Claude Code semantics — over cap is a soft
         // error the model must not retry.
@@ -269,20 +292,25 @@ impl SubagentSpawner {
             );
         }
 
-        // Child registry: builtins + task tool with the deeper spawner.
         let child_spawner = self.child_spawner();
-        let registry = match ToolRegistry::builtin().with_subagents(child_spawner.clone()) {
-            Ok(registry) => registry,
-            Err(error) => {
-                return ToolOutput::error(format!("building child tool registry: {error}"));
+        let registry = match agent.workspace_mode {
+            AgentWorkspaceMode::ReadOnly => ToolRegistry::read_only(),
+            AgentWorkspaceMode::Mutable => {
+                match ToolRegistry::builtin().with_subagents(child_spawner.clone()) {
+                    Ok(registry) => registry,
+                    Err(error) => {
+                        return ToolOutput::error(format!("building child tool registry: {error}"));
+                    }
+                }
             }
         };
-        let child_ctx = ToolContext {
+        let mut child_ctx = ToolContext {
             cwd: self.cwd.clone(),
             session_id: session_id.clone(),
             depth: self.depth + 1,
             subagent: Some(child_spawner),
             workspace: ctx.workspace.clone(),
+            workspace_lease: None,
             cancel: ctx.cancel.clone(),
         };
 
@@ -298,6 +326,7 @@ impl SubagentSpawner {
             let background_cancel = tokio_util::sync::CancellationToken::new();
             let task_cancel = background_cancel.clone();
             let root_cancel = ctx.cancel.clone();
+            let workspace = ctx.workspace.clone();
             let mut background_registry = self.background_tasks.lock().unwrap();
             if background_registry.closed {
                 return ToolOutput::error("background runtime is shutting down");
@@ -307,6 +336,33 @@ impl SubagentSpawner {
                 .retain(|task| !task.handle.is_finished());
             let handle = tokio::spawn(async move {
                 let _slot = _guard; // hold the concurrency slot for the run
+                let lease = match inherited_lease {
+                    Some(lease) => lease,
+                    None => {
+                        tokio::select! {
+                            lease = workspace.acquire_lease(workspace_access) => lease,
+                            () = task_cancel.cancelled() => {
+                                let _ = spawner.notify_tx.send(Notification {
+                                    parent_session_id,
+                                    description: description.clone(),
+                                    text: format!("<task-notification>\nTask \"{description}\" was cancelled.\n</task-notification>"),
+                                    is_error: true,
+                                });
+                                return;
+                            }
+                            () = root_cancel.cancelled() => {
+                                let _ = spawner.notify_tx.send(Notification {
+                                    parent_session_id,
+                                    description: description.clone(),
+                                    text: format!("<task-notification>\nTask \"{description}\" was cancelled.\n</task-notification>"),
+                                    is_error: true,
+                                });
+                                return;
+                            }
+                        }
+                    }
+                };
+                child_ctx.workspace_lease = Some(lease);
                 let cancel = tokio_util::sync::CancellationToken::new();
                 let (tx, mut rx_evt) = tokio::sync::mpsc::unbounded_channel();
                 // Activity tracker: any child event counts as progress.
@@ -418,6 +474,18 @@ DO NOT sleep, poll, or check on it — work on something else or end your respon
             );
         }
 
+        let lease = match inherited_lease {
+            Some(lease) => lease,
+            None => {
+                tokio::select! {
+                    lease = ctx.workspace.acquire_lease(workspace_access) => lease,
+                    () = ctx.cancel.cancelled() => {
+                        return ToolOutput::error("subagent cancelled while waiting for workspace");
+                    }
+                }
+            }
+        };
+        child_ctx.workspace_lease = Some(lease);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let outcome = run_turn(
             self.resolver.as_ref(),
@@ -567,7 +635,16 @@ DO NOT sleep, poll, or check on it — work on something else or end your respon
             workspace: self.workspace.clone(),
             background_tool_timeout: self.background_tool_timeout,
         });
-        let registry = ToolRegistry::builtin().with_subagents(runtime.clone())?;
+        let workspace_access = match agent.workspace_mode {
+            AgentWorkspaceMode::Mutable => WorkspaceAccess::Mutating,
+            AgentWorkspaceMode::ReadOnly => WorkspaceAccess::ReadOnly,
+        };
+        let registry = match agent.workspace_mode {
+            AgentWorkspaceMode::ReadOnly => ToolRegistry::read_only(),
+            AgentWorkspaceMode::Mutable => {
+                ToolRegistry::builtin().with_subagents(runtime.clone())?
+            }
+        };
         let mut system_prompt = system_prompt_for(&self.cwd);
         if !agent.prompt.is_empty() {
             system_prompt = format!(
@@ -576,6 +653,10 @@ DO NOT sleep, poll, or check on it — work on something else or end your respon
             );
         }
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let lease = tokio::select! {
+            lease = self.workspace.acquire_lease(workspace_access) => lease,
+            () = cancel.cancelled() => return Ok(RouteOutcome::Requeue(notification)),
+        };
         let outcome = loop {
             if cancel.is_cancelled() {
                 return Ok(RouteOutcome::Requeue(notification));
@@ -596,6 +677,7 @@ DO NOT sleep, poll, or check on it — work on something else or end your respon
                     depth,
                     subagent: Some(runtime.clone()),
                     workspace: self.workspace.clone(),
+                    workspace_lease: Some(lease.clone()),
                     cancel: cancel.clone(),
                 },
             )

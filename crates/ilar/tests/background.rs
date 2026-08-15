@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use futures::stream;
 use ilar::agent::{LoopConfig, TurnOutcome, run_turn};
-use ilar::config::AgentDefinition;
+use ilar::config::{AgentDefinition, AgentWorkspaceMode};
 use ilar::provider::{
     EventStream, FixedProviderResolver, MockProvider, Provider, ProviderEvent, Request, StopReason,
 };
@@ -69,6 +69,20 @@ impl Provider for Silent {
 }
 
 fn spawner(provider: Arc<dyn Provider>, store: &SessionStore) -> Arc<SubagentSpawner> {
+    spawner_for_workspace(
+        provider,
+        store,
+        AgentWorkspaceMode::Mutable,
+        std::env::temp_dir(),
+    )
+}
+
+fn spawner_for_workspace(
+    provider: Arc<dyn Provider>,
+    store: &SessionStore,
+    workspace_mode: AgentWorkspaceMode,
+    cwd: std::path::PathBuf,
+) -> Arc<SubagentSpawner> {
     Arc::new(
         SubagentSpawner::new(
             Arc::new(FixedProviderResolver::new(provider)),
@@ -78,14 +92,52 @@ fn spawner(provider: Arc<dyn Provider>, store: &SessionStore) -> Arc<SubagentSpa
                 description: "explores".into(),
                 model: None,
                 prompt: "".into(),
+                workspace_mode,
             }],
-            std::env::temp_dir(),
+            cwd,
             0,
             10,
             3,
         )
         .with_stall_timeout(Duration::from_millis(400)),
     )
+}
+
+#[tokio::test]
+async fn leased_child_rejects_background_task() {
+    let (store, session_id) = temp_store();
+    let spawner = spawner(Arc::new(MockProvider::new(vec![])), &store);
+    let task = ToolRegistry::builtin()
+        .with_subagents(spawner.clone())
+        .unwrap()
+        .get("task")
+        .unwrap();
+    let mut ctx = background_tool_context(session_id, spawner.clone(), &std::env::temp_dir());
+    ctx.workspace_lease = Some(
+        spawner
+            .workspace()
+            .acquire_lease(ilar::tools::WorkspaceAccess::Mutating)
+            .await,
+    );
+
+    let output = task
+        .run(
+            serde_json::json!({
+                "description": "nested detached",
+                "prompt": "work",
+                "subagent_type": "explore",
+                "background": true,
+            }),
+            ctx,
+        )
+        .await;
+
+    assert!(output.is_error);
+    assert!(
+        output.content.contains("cannot outlive"),
+        "{}",
+        output.content
+    );
 }
 
 fn bg_call(id: &str) -> ProviderEvent {
@@ -266,7 +318,7 @@ async fn root_cancellation_stops_background_bash() {
 }
 
 #[tokio::test]
-async fn root_cancellation_reaches_background_bash_from_foreground_child() {
+async fn foreground_child_rejects_detached_workspace_mutation() {
     let (store, session_id) = temp_store();
     let dir = tempfile::tempdir().unwrap();
     let marker = dir.path().join("nested-root-cancelled");
@@ -298,9 +350,8 @@ async fn root_cancellation_reaches_background_bash_from_foreground_child() {
     let registry = ToolRegistry::builtin()
         .with_subagents(spawner.clone())
         .unwrap();
-    let root_cancel = tokio_util::sync::CancellationToken::new();
     let mut ctx = background_tool_context(session_id, spawner, dir.path());
-    ctx.cancel = root_cancel.clone();
+    ctx.cancel = tokio_util::sync::CancellationToken::new();
     let output = registry
         .get("task")
         .unwrap()
@@ -314,15 +365,11 @@ async fn root_cancellation_reaches_background_bash_from_foreground_child() {
         )
         .await;
     assert!(!output.is_error, "{}", output.content);
-    root_cancel.cancel();
-    let notification = tokio::time::timeout(Duration::from_secs(2), notifications.recv())
-        .await
-        .unwrap()
-        .unwrap();
     assert!(
-        notification.text.contains("cancelled"),
-        "{}",
-        notification.text
+        tokio::time::timeout(Duration::from_millis(100), notifications.recv())
+            .await
+            .is_err(),
+        "detached Bash unexpectedly started"
     );
     tokio::time::sleep(Duration::from_millis(1100)).await;
     assert!(!marker.exists());
@@ -596,6 +643,7 @@ async fn stall_watchdog_fires_on_silent_child() {
                 depth: 0,
                 subagent: Some(spawner),
                 workspace: ilar::tools::WorkspaceScheduler::new(),
+                workspace_lease: None,
                 cancel: tokio_util::sync::CancellationToken::new(),
             },
         )
@@ -667,6 +715,117 @@ async fn nested_notification_runs_declared_parent_and_propagates_once() {
     assert_eq!(provider.requests()[0].model, "zai/glm-4.7");
     let child = store.load(&child_id).unwrap();
     assert!(format!("{:?}", child.transcript()).contains("nested result"));
+}
+
+#[tokio::test]
+async fn routed_read_only_agent_keeps_mutating_tools_unavailable() {
+    let (store, root_id) = temp_store();
+    let child_id = new_id();
+    drop(
+        store
+            .create(SessionMeta {
+                session_id: child_id.clone(),
+                parent_id: Some(root_id),
+                agent: "explore".into(),
+                model: "zai/glm-4.7".into(),
+            })
+            .unwrap(),
+    );
+    let workspace = tempfile::tempdir().unwrap();
+    let marker = workspace.path().join("must-not-exist");
+    let provider = MockProvider::new(vec![
+        vec![
+            ProviderEvent::ToolCallCompleted {
+                id: "write-1".into(),
+                name: "write".into(),
+                input: serde_json::json!({"path": marker, "content": "unsafe"}),
+            },
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+                usage: Usage::default(),
+            },
+        ],
+        vec![
+            ProviderEvent::TextDelta("handled".into()),
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            },
+        ],
+    ]);
+    let router = spawner_for_workspace(
+        Arc::new(provider),
+        &store,
+        AgentWorkspaceMode::ReadOnly,
+        workspace.path().to_path_buf(),
+    );
+
+    router
+        .route_notification(
+            ilar::subagent::Notification {
+                parent_session_id: child_id,
+                description: "read-only route".into(),
+                text: "deliver".into(),
+                is_error: false,
+            },
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+    assert!(!marker.exists());
+}
+
+#[tokio::test]
+async fn routed_mutable_agent_waits_for_workspace_and_requeues_if_cancelled() {
+    let (store, root_id) = temp_store();
+    let child_id = new_id();
+    drop(
+        store
+            .create(SessionMeta {
+                session_id: child_id.clone(),
+                parent_id: Some(root_id),
+                agent: "explore".into(),
+                model: "zai/glm-4.7".into(),
+            })
+            .unwrap(),
+    );
+    let provider = MockProvider::new(vec![vec![ProviderEvent::TurnComplete {
+        stop_reason: StopReason::EndTurn,
+        usage: Usage::default(),
+    }]]);
+    let router = spawner(Arc::new(provider.clone()), &store);
+    let _busy = router
+        .workspace()
+        .acquire(ilar::tools::WorkspaceAccess::Mutating)
+        .await;
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let handle = {
+        let router = router.clone();
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            router
+                .route_notification(
+                    ilar::subagent::Notification {
+                        parent_session_id: child_id,
+                        description: "blocked route".into(),
+                        text: "deliver".into(),
+                        is_error: false,
+                    },
+                    cancel,
+                )
+                .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(provider.requests().is_empty());
+    cancel.cancel();
+
+    assert!(matches!(
+        handle.await.unwrap().unwrap(),
+        ilar::subagent::RouteOutcome::Requeue(notification)
+            if notification.description == "blocked route"
+    ));
 }
 
 #[tokio::test]

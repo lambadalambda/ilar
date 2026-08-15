@@ -482,6 +482,7 @@ fn parse_agent_md(name: &str, text: &str) -> Option<AgentDefinition> {
         description: Option<String>,
         model: Option<String>,
         disabled: Option<bool>,
+        read_only: Option<bool>,
     }
     let fm: Frontmatter = toml::from_str(frontmatter).ok()?;
     if fm.disabled == Some(true) {
@@ -492,6 +493,11 @@ fn parse_agent_md(name: &str, text: &str) -> Option<AgentDefinition> {
         description: fm.description.unwrap_or_else(|| name.into()),
         model: fm.model,
         prompt: body.trim_start_matches('\n').trim().to_string(),
+        workspace_mode: if fm.read_only == Some(true) {
+            super::AgentWorkspaceMode::ReadOnly
+        } else {
+            super::AgentWorkspaceMode::Mutable
+        },
     })
 }
 

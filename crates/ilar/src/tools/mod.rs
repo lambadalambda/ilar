@@ -45,6 +45,19 @@ pub enum WorkspacePermit {
     },
 }
 
+pub struct WorkspaceLease {
+    scheduler: Arc<tokio::sync::RwLock<()>>,
+    access: WorkspaceAccess,
+    _permit: WorkspacePermit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceCoverage {
+    Absent,
+    Covered,
+    Incompatible,
+}
+
 impl WorkspaceScheduler {
     pub fn new() -> Self {
         Self {
@@ -62,6 +75,14 @@ impl WorkspaceScheduler {
                 _guard: self.lock.clone().write_owned().await,
             },
         }
+    }
+
+    pub async fn acquire_lease(&self, access: WorkspaceAccess) -> Arc<WorkspaceLease> {
+        Arc::new(WorkspaceLease {
+            scheduler: self.lock.clone(),
+            access,
+            _permit: self.acquire(access).await,
+        })
     }
 }
 
@@ -83,6 +104,7 @@ pub struct ToolContext {
     /// Subagent spawner, when the task tool is available.
     pub subagent: Option<std::sync::Arc<crate::subagent::SubagentSpawner>>,
     pub workspace: WorkspaceScheduler,
+    pub workspace_lease: Option<Arc<WorkspaceLease>>,
     pub cancel: tokio_util::sync::CancellationToken,
 }
 
@@ -95,6 +117,7 @@ impl ToolContext {
             depth: 0,
             subagent: None,
             workspace: WorkspaceScheduler::new(),
+            workspace_lease: None,
             cancel: tokio_util::sync::CancellationToken::new(),
         }
     }
@@ -107,6 +130,28 @@ impl ToolContext {
         self.workspace = spawner.workspace();
         self.subagent = Some(spawner);
         self
+    }
+
+    pub fn workspace_coverage(&self, requested: WorkspaceAccess) -> WorkspaceCoverage {
+        let Some(lease) = &self.workspace_lease else {
+            return WorkspaceCoverage::Absent;
+        };
+        if !Arc::ptr_eq(&lease.scheduler, &self.workspace.lock) {
+            return WorkspaceCoverage::Incompatible;
+        }
+        match (lease.access, requested) {
+            (_, WorkspaceAccess::None)
+            | (WorkspaceAccess::Mutating, _)
+            | (WorkspaceAccess::ReadOnly, WorkspaceAccess::ReadOnly) => WorkspaceCoverage::Covered,
+            (WorkspaceAccess::ReadOnly, WorkspaceAccess::Mutating)
+            | (WorkspaceAccess::None, WorkspaceAccess::ReadOnly | WorkspaceAccess::Mutating) => {
+                WorkspaceCoverage::Incompatible
+            }
+        }
+    }
+
+    pub fn has_workspace_lease(&self) -> bool {
+        self.workspace_lease.is_some()
     }
 }
 
@@ -175,6 +220,19 @@ impl ToolRegistry {
                 Arc::new(write::WriteTool),
                 Arc::new(edit::EditTool),
                 Arc::new(bash::BashTool),
+                Arc::new(glob::GlobTool),
+                Arc::new(grep::GrepTool),
+                Arc::new(web::WebFetchTool::default()),
+            ],
+        }
+    }
+
+    /// Enforced read-only child registry. Delegation and shell access are
+    /// omitted because prompts alone are not a capability boundary.
+    pub fn read_only() -> Self {
+        Self {
+            tools: vec![
+                Arc::new(read::ReadTool),
                 Arc::new(glob::GlobTool),
                 Arc::new(grep::GrepTool),
                 Arc::new(web::WebFetchTool::default()),

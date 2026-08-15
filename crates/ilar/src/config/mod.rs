@@ -16,6 +16,14 @@ pub struct AgentDefinition {
     pub description: String,
     pub model: Option<String>,
     pub prompt: String,
+    pub workspace_mode: AgentWorkspaceMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AgentWorkspaceMode {
+    #[default]
+    Mutable,
+    ReadOnly,
 }
 
 impl AgentDefinition {
@@ -26,6 +34,7 @@ impl AgentDefinition {
             description: "General-purpose coding agent with all tools".into(),
             model: None,
             prompt: String::new(), // base prompt; TUI supplies the core text
+            workspace_mode: AgentWorkspaceMode::Mutable,
         }]
     }
 }

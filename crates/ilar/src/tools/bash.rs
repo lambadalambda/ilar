@@ -185,6 +185,11 @@ impl Tool for BashTool {
                 Err(e) => return e,
             };
             if input.run_in_background {
+                if ctx.has_workspace_lease() {
+                    return ToolOutput::error(
+                        "bash: background mutation is unavailable inside a leased child workspace",
+                    );
+                }
                 let Some(spawner) = ctx.subagent.clone() else {
                     return ToolOutput::error("bash: background runtime is unavailable");
                 };

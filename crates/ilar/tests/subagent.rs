@@ -2,12 +2,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ilar::agent::{LoopConfig, TurnOutcome, run_turn};
-use ilar::config::AgentDefinition;
+use ilar::config::{AgentDefinition, AgentWorkspaceMode};
 use ilar::provider::{
     EventStream, FixedProviderResolver, MockProvider, Provider, ProviderEvent, ProviderHandle,
     ProviderResolver, Request, StopReason, resolve_model,
 };
-use ilar::session::{ContentBlock, SessionMeta, SessionStore, Usage, new_id};
+use ilar::session::{ChatMessage, ContentBlock, SessionMeta, SessionStore, Usage, new_id};
 use ilar::subagent::SubagentSpawner;
 use ilar::tools::{ToolContext, ToolRegistry};
 
@@ -64,6 +64,22 @@ fn spawner(
     max_concurrent: usize,
     max_depth: usize,
 ) -> Arc<SubagentSpawner> {
+    spawner_with_mode(
+        provider,
+        store,
+        max_concurrent,
+        max_depth,
+        AgentWorkspaceMode::Mutable,
+    )
+}
+
+fn spawner_with_mode(
+    provider: Arc<dyn Provider>,
+    store: &SessionStore,
+    max_concurrent: usize,
+    max_depth: usize,
+    workspace_mode: AgentWorkspaceMode,
+) -> Arc<SubagentSpawner> {
     Arc::new(SubagentSpawner::new(
         Arc::new(FixedProviderResolver::new(provider)),
         store.clone(),
@@ -72,6 +88,7 @@ fn spawner(
             description: "explores things".into(),
             model: None,
             prompt: "You are an explorer.".into(),
+            workspace_mode,
         }],
         std::env::temp_dir(),
         0,
@@ -96,8 +113,7 @@ fn task_call(id: &str, prompt: &str) -> ProviderEvent {
     }
 }
 
-#[tokio::test]
-async fn two_tasks_run_concurrently_and_merge_in_order() {
+async fn run_two_tasks(workspace_mode: AgentWorkspaceMode) -> (Duration, Vec<ChatMessage>) {
     let (store, session_id) = temp_store();
     // Children answer after 250ms; serial execution would take 500ms.
     let child = Arc::new(ScriptedDelayProvider {
@@ -110,7 +126,7 @@ async fn two_tasks_run_concurrently_and_merge_in_order() {
     };
     // One shared provider instance answering both tasks:
     let shared: Arc<dyn Provider> = Arc::new(SharedProvider::new(vec![child, Arc::new(child2)]));
-    let spawner = spawner(shared.clone(), &store, 10, 3);
+    let spawner = spawner_with_mode(shared.clone(), &store, 10, 3, workspace_mode);
     let registry = parent_registry(spawner);
 
     // Parent: two task calls, then a final text turn.
@@ -151,13 +167,18 @@ async fn two_tasks_run_concurrently_and_merge_in_order() {
     let elapsed = start.elapsed();
 
     assert_eq!(outcome, TurnOutcome::Completed);
-    assert!(
-        elapsed < Duration::from_millis(450),
-        "tasks looked serial: {elapsed:?}"
-    );
 
     let session = store.load(&session_id).unwrap();
-    let transcript = session.transcript();
+    (elapsed, session.transcript())
+}
+
+#[tokio::test]
+async fn mutable_tasks_sharing_a_checkout_are_serialized_and_merge_in_order() {
+    let (elapsed, transcript) = run_two_tasks(AgentWorkspaceMode::Mutable).await;
+    assert!(
+        elapsed >= Duration::from_millis(450),
+        "mutable tasks overlapped: {elapsed:?}"
+    );
     // user, assistant(2 tool calls), user(2 tool results), assistant(done)
     assert_eq!(transcript.len(), 4, "{transcript:?}");
     let results = &transcript[2].content;
@@ -171,6 +192,15 @@ async fn two_tasks_run_concurrently_and_merge_in_order() {
         ContentBlock::ToolResult { tool_use_id, content, is_error: false }
             if tool_use_id == "t2" && content.contains("beta")
     ));
+}
+
+#[tokio::test]
+async fn enforced_read_only_tasks_may_overlap() {
+    let (elapsed, _) = run_two_tasks(AgentWorkspaceMode::ReadOnly).await;
+    assert!(
+        elapsed < Duration::from_millis(450),
+        "read-only tasks looked serial: {elapsed:?}"
+    );
 }
 
 /// Serves each stream() call from the next inner provider once, then
@@ -509,6 +539,7 @@ async fn subagent_model_override_resolves_its_own_provider() {
             description: "explores".into(),
             model: Some("openai/gpt-5.2".into()),
             prompt: String::new(),
+            workspace_mode: AgentWorkspaceMode::Mutable,
         }],
         std::env::temp_dir(),
         0,
@@ -573,6 +604,7 @@ async fn resumed_subagent_uses_its_persisted_model() {
             description: "explores".into(),
             model: Some("zai/current-default".into()),
             prompt: String::new(),
+            workspace_mode: AgentWorkspaceMode::Mutable,
         }],
         std::env::temp_dir(),
         0,

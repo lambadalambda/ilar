@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use ilar::tools::WorkspaceScheduler;
 use ilar::tools::executor::{ToolCall, execute_calls};
 use ilar::tools::{Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, WorkspaceAccess};
 use tokio_util::sync::CancellationToken;
@@ -220,6 +221,32 @@ async fn concurrency_safe_workspace_mutators_are_serialized() {
         first_end <= second_start || second_end <= first_start,
         "workspace mutations overlapped"
     );
+}
+
+#[tokio::test]
+async fn inherited_lease_from_another_scheduler_is_rejected() {
+    let (mut tools, log) = harness();
+    add(
+        &mut tools,
+        &log,
+        "read",
+        ToolConcurrency::Concurrent,
+        Duration::from_millis(1),
+    );
+    let issuer = WorkspaceScheduler::new();
+    let mut context = ctx();
+    context.workspace_lease = Some(issuer.acquire_lease(WorkspaceAccess::ReadOnly).await);
+
+    let outcomes = execute_calls(
+        vec![call("1", "read")],
+        |name| tools.get(name).cloned(),
+        context,
+        CancellationToken::new(),
+    )
+    .await;
+
+    assert!(outcomes[0].output.is_error);
+    assert!(log.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

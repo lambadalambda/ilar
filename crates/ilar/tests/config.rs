@@ -1,6 +1,6 @@
 use std::fs;
 
-use ilar::config::{Config, Loader, system_prompt_for};
+use ilar::config::{AgentWorkspaceMode, Config, Loader, system_prompt_for};
 use ilar::provider::ProviderResolver;
 
 fn tempdir() -> (tempfile::TempDir, std::path::PathBuf) {
@@ -105,7 +105,7 @@ fn markdown_agents_parsed_and_merged() {
     fs::create_dir_all(dir.join("agents")).unwrap();
     write(
         &dir.join("agents/reviewer.md"),
-        "---\ndescription = \"Reviews code for bugs\"\nmodel = \"zai/glm-4.7-air\"\n---\nYou are a code reviewer. Be harsh.\n",
+        "---\ndescription = \"Reviews code for bugs\"\nmodel = \"zai/glm-4.7-air\"\nread_only = true\n---\nYou are a code reviewer. Be harsh.\n",
     );
     write(
         &dir.join("agents/disabled.md"),
@@ -120,6 +120,7 @@ fn markdown_agents_parsed_and_merged() {
         .expect("reviewer agent present");
     assert_eq!(reviewer.description, "Reviews code for bugs");
     assert_eq!(reviewer.model.as_deref(), Some("zai/glm-4.7-air"));
+    assert_eq!(reviewer.workspace_mode, AgentWorkspaceMode::ReadOnly);
     assert!(reviewer.prompt.contains("Be harsh."));
     assert!(
         !agents.iter().any(|a| a.name == "disabled"),
