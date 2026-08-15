@@ -391,3 +391,11 @@ turns fail before mutation, cancellation releases ownership, and read-only
 loads remain available. Direct compaction acquires the same lease while
 turn-internal compaction reuses existing ownership. Tail-recovery behavior
 remains tracked before the lease issue can be archived.
+
+## 2026-08-15 — Stabilization: torn-tail recovery
+
+Read-only session inspection parses only newline-terminated records and
+never repairs a file. A leased writer truncates an unterminated or invalid
+UTF-8 final tail to the last complete record before appending. Malformed
+newline-terminated records now reject the session as middle corruption
+instead of being silently skipped.

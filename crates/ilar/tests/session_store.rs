@@ -89,7 +89,7 @@ fn round_trip_append_load() {
 }
 
 #[test]
-fn corrupt_trailing_line_tolerated() {
+fn torn_final_record_is_ignored_by_readers_and_repaired_before_append() {
     let (store, _dir) = temp_store();
     let meta = sample_meta();
     let mut session = store.create(meta.clone()).unwrap();
@@ -97,18 +97,126 @@ fn corrupt_trailing_line_tolerated() {
         session.append(event).unwrap();
     }
 
-    // Simulate a torn write: corrupt last line + a partial line.
+    drop(session);
     let path = store.session_path(&meta.session_id).unwrap();
+    let valid_len = std::fs::metadata(&path).unwrap().len();
     let mut f = std::fs::OpenOptions::new()
         .append(true)
         .open(&path)
         .unwrap();
-    writeln!(f, "{{not json at all").unwrap();
-    writeln!(f, "{{\"type\":\"user_message\"").unwrap();
+    f.write_all(b"{\"type\":\"user_message\"").unwrap();
+    drop(f);
 
     let reloaded = store.load(&meta.session_id).unwrap();
-    // All pre-corruption events survived; corrupt lines skipped.
     assert_eq!(reloaded.events().len(), sample_log(&meta).len());
+    assert!(std::fs::metadata(&path).unwrap().len() > valid_len);
+
+    let mut writable = store
+        .acquire_writer(&meta.session_id)
+        .unwrap()
+        .load()
+        .unwrap();
+    writable
+        .append(SessionEvent::UserMessage {
+            id: new_id(),
+            text: "after recovery".into(),
+            ts: Utc::now(),
+        })
+        .unwrap();
+    drop(writable);
+
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(!String::from_utf8_lossy(&bytes).contains("{\"type\":\"user_message\"{"));
+    assert_eq!(
+        store.load(&meta.session_id).unwrap().events().len(),
+        sample_log(&meta).len() + 1
+    );
+}
+
+#[test]
+fn valid_final_record_without_newline_is_uncommitted() {
+    let (store, _dir) = temp_store();
+    let meta = sample_meta();
+    drop(store.create(meta.clone()).unwrap());
+    let path = store.session_path(&meta.session_id).unwrap();
+    let committed = std::fs::read(&path).unwrap();
+    let event = SessionEvent::UserMessage {
+        id: new_id(),
+        text: "not committed".into(),
+        ts: Utc::now(),
+    };
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    file.write_all(&serde_json::to_vec(&event).unwrap())
+        .unwrap();
+    drop(file);
+
+    assert_eq!(store.load(&meta.session_id).unwrap().events().len(), 1);
+    drop(
+        store
+            .acquire_writer(&meta.session_id)
+            .unwrap()
+            .load()
+            .unwrap(),
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), committed);
+    assert_eq!(store.load(&meta.session_id).unwrap().events().len(), 1);
+}
+
+#[test]
+fn invalid_utf8_final_tail_is_repaired_by_writer() {
+    let (store, _dir) = temp_store();
+    let meta = sample_meta();
+    drop(store.create(meta.clone()).unwrap());
+    let path = store.session_path(&meta.session_id).unwrap();
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    file.write_all(&[0xff, 0xfe]).unwrap();
+    drop(file);
+
+    assert_eq!(store.load(&meta.session_id).unwrap().events().len(), 1);
+    drop(
+        store
+            .acquire_writer(&meta.session_id)
+            .unwrap()
+            .load()
+            .unwrap(),
+    );
+    assert!(std::str::from_utf8(&std::fs::read(path).unwrap()).is_ok());
+}
+
+#[test]
+fn files_without_committed_events_are_rejected_without_mutation() {
+    let (store, _dir) = temp_store();
+    let meta = sample_meta();
+    drop(store.create(meta.clone()).unwrap());
+    let path = store.session_path(&meta.session_id).unwrap();
+    let uncommitted_meta = serde_json::to_vec(&SessionEvent::Meta {
+        meta: meta.clone(),
+        ts: Utc::now(),
+    })
+    .unwrap();
+
+    for contents in [Vec::new(), uncommitted_meta, vec![0xff, b'\n']] {
+        std::fs::write(&path, &contents).unwrap();
+        let read_error = store
+            .load(&meta.session_id)
+            .err()
+            .expect("reader must reject unrecoverable log");
+        assert_eq!(read_error.kind(), std::io::ErrorKind::InvalidData);
+        let write_error = store
+            .acquire_writer(&meta.session_id)
+            .unwrap()
+            .load()
+            .err()
+            .expect("writer must reject unrecoverable log");
+        assert_eq!(write_error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(std::fs::read(&path).unwrap(), contents);
+    }
 }
 
 #[test]
@@ -239,7 +347,7 @@ fn transcript_honors_compaction_boundary() {
 }
 
 #[test]
-fn transcript_matches_after_reload_with_corruption_and_compaction() {
+fn middle_corruption_with_torn_tail_is_rejected_without_mutating_log() {
     let (store, _dir) = temp_store();
     let meta = sample_meta();
     let mut session = store.create(meta.clone()).unwrap();
@@ -264,6 +372,7 @@ fn transcript_matches_after_reload_with_corruption_and_compaction() {
     for event in events.into_iter().skip(1) {
         session.append(event).unwrap();
     }
+    drop(session);
     // Corrupt one line (the first assistant message) to force a skip.
     let path = store.session_path(&meta.session_id).unwrap();
     let lines: Vec<String> = std::fs::read_to_string(&path)
@@ -273,21 +382,24 @@ fn transcript_matches_after_reload_with_corruption_and_compaction() {
         .collect();
     let mut rewritten = lines.clone();
     rewritten[2] = "{\"type\":\"assistant_message\"".into(); // was assistant #1
-    std::fs::write(&path, rewritten.join("\n") + "\n").unwrap();
+    std::fs::write(&path, rewritten.join("\n") + "\nunterminated tail").unwrap();
 
-    let reloaded = store.load(&meta.session_id).unwrap();
-    let transcript = reloaded.transcript();
-    // Alternation invariant holds on the resume path.
-    for pair in transcript.windows(2) {
-        assert_ne!(pair[0].role, pair[1].role, "adjacent same-role messages");
-    }
-    let last = transcript.last().unwrap();
-    // Summary block coalesced with the post-compaction user text.
-    assert_eq!(last.role, Role::User);
-    assert!(matches!(&last.content[0],
-        ContentBlock::Text { text } if text.contains("sum")));
-    assert!(matches!(&last.content[1],
-        ContentBlock::Text { text } if text == "after compaction"));
+    let before = std::fs::read(&path).unwrap();
+    let error = store
+        .load(&meta.session_id)
+        .err()
+        .expect("middle corruption");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+
+    let error = store
+        .acquire_writer(&meta.session_id)
+        .unwrap()
+        .load()
+        .err()
+        .expect("writer must reject middle corruption");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(std::fs::read(path).unwrap(), before);
 }
 
 #[test]

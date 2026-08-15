@@ -1,7 +1,7 @@
 //! Append-only JSONL session store.
 
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::path::PathBuf;
 
 use fs2::FileExt;
@@ -96,8 +96,8 @@ impl SessionStore {
         Ok(session)
     }
 
-    /// Load and replay a session file. Malformed lines are skipped with a
-    /// warning (torn trailing writes must not destroy a session).
+    /// Read a session snapshot. Only newline-committed records are parsed;
+    /// committed corruption is rejected and an in-progress tail is ignored.
     pub fn load(&self, id: &str) -> std::io::Result<SessionReader> {
         let path = self.session_path(id)?;
         if !path.exists() {
@@ -106,7 +106,7 @@ impl SessionStore {
                 format!("session not found: {id}"),
             ));
         }
-        let events = read_events(&path, id)?;
+        let events = read_events(&path, id, false)?;
         Ok(SessionReader { events })
     }
 }
@@ -118,7 +118,7 @@ impl SessionWriter {
             .file_stem()
             .and_then(|id| id.to_str())
             .unwrap_or("unknown");
-        let events = read_events(&self.session_path, id)?;
+        let events = read_events(&self.session_path, id, true)?;
         let file = OpenOptions::new().append(true).open(&self.session_path)?;
         Ok(Session {
             events,
@@ -128,23 +128,52 @@ impl SessionWriter {
     }
 }
 
-fn read_events(path: &std::path::Path, id: &str) -> std::io::Result<Vec<SessionEvent>> {
-    let reader = BufReader::new(File::open(path)?);
+fn read_events(
+    path: &std::path::Path,
+    id: &str,
+    repair_tail: bool,
+) -> std::io::Result<Vec<SessionEvent>> {
+    let bytes = std::fs::read(path)?;
+    let complete_len = bytes
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |position| position + 1);
     let mut events = Vec::new();
-    for (n, line) in reader.lines().enumerate() {
-        let line = line?;
-        if line.trim().is_empty() {
+    for (n, line) in bytes[..complete_len]
+        .split(|byte| *byte == b'\n')
+        .enumerate()
+    {
+        if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        match serde_json::from_str::<SessionEvent>(&line) {
+        let line = std::str::from_utf8(line).map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("session {id}: invalid UTF-8 on line {}: {error}", n + 1),
+            )
+        })?;
+        match serde_json::from_str::<SessionEvent>(line) {
             Ok(event) => events.push(event),
-            Err(e) => eprintln!("ilar: session {id}: skipping malformed line {}: {e}", n + 1),
+            Err(error) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("session {id}: malformed line {}: {error}", n + 1),
+                ));
+            }
         }
     }
     if events.is_empty() {
-        return Err(std::io::Error::other(format!(
-            "session unrecoverable (no valid events): {id}"
-        )));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("session unrecoverable (no committed events): {id}"),
+        ));
+    }
+    // Mutation happens only after every committed record validates.
+    if repair_tail && complete_len < bytes.len() {
+        OpenOptions::new()
+            .write(true)
+            .open(path)?
+            .set_len(complete_len as u64)?;
     }
     Ok(events)
 }
