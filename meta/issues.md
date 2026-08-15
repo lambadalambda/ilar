@@ -15,7 +15,6 @@
 ## Stabilization
 
 - [ ] [Tool scheduling and workspace capabilities](issues/tool-scheduling-and-workspace-capabilities.md)
-- [ ] [Session writer lease](issues/session-writer-lease.md)
 - [ ] [Atomic file replacement](issues/atomic-file-replacement.md)
 - [ ] [Provider routing and model lifecycle](issues/provider-routing-and-model-lifecycle.md)
 - [ ] [Serialize turns and route notifications](issues/serialize-turns-and-route-notifications.md)

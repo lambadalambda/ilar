@@ -407,3 +407,11 @@ the filename, unique event and tool-call IDs, and exact tool-call/result
 pairing. Read-only inspection leaves trailing unanswered calls untouched;
 leased writer recovery persists synthetic error results for them exactly once.
 Invalid semantic state is rejected before any torn-tail repair mutates the log.
+
+## 2026-08-15 — Stabilization: typed session identity
+
+All session and lock paths are now derived internally from a canonical,
+validated `SessionId`. Cross-process tests prove actionable nonblocking
+contention and OS lock release after forced process exit; the test helper is
+isolated and reaped on timeout or panic. Platform-specific `fs2` contention
+errors are normalized to `WouldBlock`.

@@ -16,26 +16,12 @@ pub struct SessionStore {
     root: PathBuf,
 }
 
-/// In-memory replay of one session's event log, plus the append handle.
-pub struct Session {
-    events: Vec<SessionEvent>,
-    file: File,
-    _writer: SessionWriter,
-}
+/// Canonical UUID used for all session and lock path derivation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SessionId(String);
 
-/// Exclusive OS-backed writer ownership for one session. The lock file is
-/// persistent, but the lock itself is released by the OS on drop or crash.
-pub struct SessionWriter {
-    _file: File,
-    session_path: PathBuf,
-}
-
-impl SessionStore {
-    pub fn new(root: PathBuf) -> Self {
-        Self { root }
-    }
-
-    pub fn session_path(&self, id: &str) -> std::io::Result<PathBuf> {
+impl SessionId {
+    pub fn parse(id: &str) -> std::io::Result<Self> {
         let parsed = uuid::Uuid::parse_str(id).map_err(|_| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -48,12 +34,54 @@ impl SessionStore {
                 format!("session id is not a canonical UUID: {id:?}"),
             ));
         }
-        Ok(self.root.join(format!("{id}.jsonl")))
+        Ok(Self(id.into()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for SessionId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// In-memory replay of one session's event log, plus the append handle.
+pub struct Session {
+    events: Vec<SessionEvent>,
+    file: File,
+    _writer: SessionWriter,
+}
+
+/// Exclusive OS-backed writer ownership for one session. The lock file is
+/// persistent, but the lock itself is released by the OS on drop or crash.
+pub struct SessionWriter {
+    _file: File,
+    id: SessionId,
+    session_path: PathBuf,
+}
+
+impl SessionStore {
+    pub fn new(root: PathBuf) -> Self {
+        Self { root }
+    }
+
+    pub fn session_path(&self, id: &str) -> std::io::Result<PathBuf> {
+        let id = SessionId::parse(id)?;
+        Ok(self.session_path_for(&id))
     }
 
     pub fn acquire_writer(&self, id: &str) -> std::io::Result<SessionWriter> {
-        // Validate before creating the root or deriving a lock path.
-        self.session_path(id)?;
+        self.acquire_writer_id(SessionId::parse(id)?)
+    }
+
+    fn session_path_for(&self, id: &SessionId) -> PathBuf {
+        self.root.join(format!("{id}.jsonl"))
+    }
+
+    fn acquire_writer_id(&self, id: SessionId) -> std::io::Result<SessionWriter> {
         std::fs::create_dir_all(&self.root)?;
         let file = OpenOptions::new()
             .create(true)
@@ -62,25 +90,33 @@ impl SessionStore {
             .write(true)
             .open(self.root.join(format!("{id}.lock")))?;
         if let Err(error) = FileExt::try_lock_exclusive(&file) {
-            return Err(if error.kind() == std::io::ErrorKind::WouldBlock {
-                std::io::Error::new(
-                    std::io::ErrorKind::WouldBlock,
-                    format!("session {id} already active in another turn"),
-                )
-            } else {
-                error
-            });
+            let contended = fs2::lock_contended_error();
+            return Err(
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || contended.raw_os_error().is_some()
+                        && error.raw_os_error() == contended.raw_os_error()
+                {
+                    std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        format!("session {id} already active in another turn"),
+                    )
+                } else {
+                    error
+                },
+            );
         }
         Ok(SessionWriter {
             _file: file,
-            session_path: self.session_path(id)?,
+            session_path: self.session_path_for(&id),
+            id,
         })
     }
 
     /// Create a new session; writes the Meta event as the first line.
     pub fn create(&self, meta: SessionMeta) -> std::io::Result<Session> {
-        let path = self.session_path(&meta.session_id)?;
-        let writer = self.acquire_writer(&meta.session_id)?;
+        let id = SessionId::parse(&meta.session_id)?;
+        let path = self.session_path_for(&id);
+        let writer = self.acquire_writer_id(id)?;
         let file = OpenOptions::new()
             .create_new(true)
             .append(true)
@@ -100,26 +136,22 @@ impl SessionStore {
     /// Read a session snapshot. Only newline-committed records are parsed;
     /// committed corruption is rejected and an in-progress tail is ignored.
     pub fn load(&self, id: &str) -> std::io::Result<SessionReader> {
-        let path = self.session_path(id)?;
+        let id = SessionId::parse(id)?;
+        let path = self.session_path_for(&id);
         if !path.exists() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!("session not found: {id}"),
             ));
         }
-        let (events, _) = read_events(&path, id, false)?;
+        let (events, _) = read_events(&path, id.as_str(), false)?;
         Ok(SessionReader { events })
     }
 }
 
 impl SessionWriter {
     pub fn load(self) -> std::io::Result<Session> {
-        let id = self
-            .session_path
-            .file_stem()
-            .and_then(|id| id.to_str())
-            .unwrap_or("unknown");
-        let (events, unanswered_calls) = read_events(&self.session_path, id, true)?;
+        let (events, unanswered_calls) = read_events(&self.session_path, self.id.as_str(), true)?;
         let file = OpenOptions::new().append(true).open(&self.session_path)?;
         let mut session = Session {
             events,

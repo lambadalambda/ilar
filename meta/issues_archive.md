@@ -39,3 +39,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Fix z.ai OpenAI wire format](issues/fix-zai-openai-wire-format.md)
 - [x] [Robust bash execution](issues/robust-bash-execution.md)
 - [x] [Crash-safe session recovery](issues/crash-safe-session-recovery.md)
+- [x] [Session writer lease](issues/session-writer-lease.md)

@@ -2,7 +2,8 @@ use chrono::Utc;
 use std::io::Write;
 
 use ilar::session::{
-    ChatMessage, ContentBlock, Role, SessionEvent, SessionMeta, SessionStore, Usage, new_id,
+    ChatMessage, ContentBlock, Role, SessionEvent, SessionId, SessionMeta, SessionStore, Usage,
+    new_id,
 };
 
 fn temp_store() -> (SessionStore, tempfile::TempDir) {
@@ -283,6 +284,21 @@ fn session_ids_must_be_canonical_uuids() {
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "id: {id}");
     }
     assert!(!dir.path().parent().unwrap().join("escape.jsonl").exists());
+}
+
+#[test]
+fn session_id_is_validated_before_use() {
+    let raw = new_id();
+    let id = SessionId::parse(&raw).unwrap();
+    assert_eq!(id.as_str(), raw);
+
+    for invalid in [
+        "../escape",
+        "not-a-uuid",
+        "550E8400-E29B-41D4-A716-446655440000",
+    ] {
+        assert!(SessionId::parse(invalid).is_err(), "id: {invalid}");
+    }
 }
 
 #[test]
