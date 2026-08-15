@@ -339,3 +339,9 @@ steps, PgUp/PgDn for pages, Ctrl-U/Ctrl-D for half-pages, Ctrl-Home for
 the top, and Ctrl-End to resume tail following. Overflow adds a scrollbar
 and a `tail`/percentage title marker. Wrapped row counts are recalculated
 on resize without snapping a detached reader back to the tail.
+
+## 2026-08-15 — Stabilization: unique tool registry
+
+Tool registry composition now rejects duplicate names with a typed error.
+`webfetch` remains a builtin and `with_web_tools` only adds optional
+search, so provider requests cannot contain duplicate function schemas.

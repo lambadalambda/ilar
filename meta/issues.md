@@ -14,7 +14,6 @@
 
 ## Stabilization
 
-- [ ] [Tool registry uniqueness](issues/tool-registry-and-scheduling-invariants.md)
 - [ ] [Tool scheduling and workspace capabilities](issues/tool-scheduling-and-workspace-capabilities.md)
 - [ ] [Session writer lease](issues/session-writer-lease.md)
 - [ ] [Atomic file replacement](issues/atomic-file-replacement.md)

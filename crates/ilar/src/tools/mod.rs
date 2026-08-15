@@ -98,6 +98,16 @@ pub struct ToolRegistry {
     tools: Vec<Arc<dyn Tool>>,
 }
 
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+#[error("duplicate tool name: {0}")]
+pub struct DuplicateToolError(&'static str);
+
+impl DuplicateToolError {
+    pub fn tool_name(&self) -> &'static str {
+        self.0
+    }
+}
+
 impl ToolRegistry {
     pub fn builtin() -> Self {
         Self {
@@ -118,37 +128,55 @@ impl ToolRegistry {
     }
 
     /// Registry with an extra tool (tests, future custom tools).
-    pub fn with_tool(mut self, tool: Arc<dyn Tool>) -> Self {
+    pub fn with_tool(mut self, tool: Arc<dyn Tool>) -> Result<Self, DuplicateToolError> {
+        if self
+            .tools
+            .iter()
+            .any(|existing| existing.name() == tool.name())
+        {
+            return Err(DuplicateToolError(tool.name()));
+        }
         self.tools.push(tool);
-        self
+        Ok(self)
     }
 
     /// Registry with the skill tool attached.
-    pub fn with_skills(self, store: std::sync::Arc<crate::skill::SkillStore>) -> Self {
+    pub fn with_skills(
+        self,
+        store: std::sync::Arc<crate::skill::SkillStore>,
+    ) -> Result<Self, DuplicateToolError> {
         self.with_tool(std::sync::Arc::new(crate::skill::SkillTool::new(store)))
     }
 
     /// Registry with a search backend attached.
-    pub fn with_search(self, backend: Box<dyn web::SearchBackend>) -> Self {
+    pub fn with_search(
+        self,
+        backend: Box<dyn web::SearchBackend>,
+    ) -> Result<Self, DuplicateToolError> {
         self.with_tool(std::sync::Arc::new(web::WebSearchTool::new(backend)))
     }
 
-    /// Registry with webfetch + websearch (Tavily if key present).
-    pub fn with_web_tools(self) -> Self {
-        let with_fetch = self.with_tool(std::sync::Arc::new(web::WebFetchTool::default()));
+    /// Registry with optional Tavily websearch. Webfetch is already builtin.
+    pub fn with_web_tools(self) -> Result<Self, DuplicateToolError> {
         match web::TavilyBackend::from_env() {
-            Some(backend) => with_fetch.with_search(Box::new(backend)),
-            None => with_fetch,
+            Some(backend) => self.with_search(Box::new(backend)),
+            None => Ok(self),
         }
     }
 
     /// Registry with the todo tool attached (shared list for TUI display).
-    pub fn with_todos(self, list: std::sync::Arc<std::sync::Mutex<crate::todo::TodoList>>) -> Self {
+    pub fn with_todos(
+        self,
+        list: std::sync::Arc<std::sync::Mutex<crate::todo::TodoList>>,
+    ) -> Result<Self, DuplicateToolError> {
         self.with_tool(std::sync::Arc::new(crate::todo::TodoTool::new(list)))
     }
 
     /// Registry with the task (subagent) tool attached.
-    pub fn with_subagents(self, spawner: Arc<crate::subagent::SubagentSpawner>) -> Self {
+    pub fn with_subagents(
+        self,
+        spawner: Arc<crate::subagent::SubagentSpawner>,
+    ) -> Result<Self, DuplicateToolError> {
         self.with_tool(Arc::new(crate::subagent::TaskTool::new(spawner)))
     }
 

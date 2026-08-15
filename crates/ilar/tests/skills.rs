@@ -117,7 +117,9 @@ async fn skill_tool_loads_body_on_invocation() {
         "---\ndescription = \"How we deploy\"\n---\nCanary steps here.\n",
     );
     let store = std::sync::Arc::new(store(user.path(), project.path()));
-    let reg = ilar::tools::ToolRegistry::builtin().with_skills(store);
+    let reg = ilar::tools::ToolRegistry::builtin()
+        .with_skills(store)
+        .unwrap();
     let tool = reg.get("skill").expect("skill tool registered");
     let out = tool
         .run(

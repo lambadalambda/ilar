@@ -4,7 +4,10 @@ use ilar::tools::{ToolContext, ToolKind, ToolRegistry};
 
 fn registry() -> (ToolRegistry, Arc<Mutex<ilar::todo::TodoList>>) {
     let todos = Arc::new(Mutex::new(ilar::todo::TodoList::default()));
-    (ToolRegistry::builtin().with_todos(todos.clone()), todos)
+    (
+        ToolRegistry::builtin().with_todos(todos.clone()).unwrap(),
+        todos,
+    )
 }
 
 async fn run(reg: &ToolRegistry, input: serde_json::Value) -> ilar::tools::ToolOutput {

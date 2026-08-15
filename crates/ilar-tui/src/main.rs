@@ -481,10 +481,10 @@ async fn main() -> Result<()> {
     ));
     let todos = std::sync::Arc::new(std::sync::Mutex::new(ilar::todo::TodoList::default()));
     let registry = ToolRegistry::builtin()
-        .with_subagents(spawner.clone())
-        .with_todos(todos)
-        .with_web_tools()
-        .with_skills(skill_store);
+        .with_subagents(spawner.clone())?
+        .with_todos(todos)?
+        .with_web_tools()?
+        .with_skills(skill_store)?;
     let notifications = spawner.subscribe();
     let tool_ctx = ToolContext::root(cwd.clone()).with_subagents(spawner.clone());
     let model_choices: Vec<String> = {

@@ -1,3 +1,6 @@
+use std::sync::Arc;
+
+use ilar::tools::web::WebFetchTool;
 use ilar::tools::{ToolContext, ToolKind, ToolRegistry};
 
 fn ctx(dir: &std::path::Path) -> ToolContext {
@@ -37,6 +40,23 @@ fn registry_exposes_provider_definitions() {
     let defs = registry().definitions();
     assert_eq!(defs.len(), 7);
     assert!(defs.iter().all(|d| d.input_schema.get("type").is_some()));
+}
+
+#[test]
+fn registry_rejects_duplicate_tool_names() {
+    let error = ToolRegistry::builtin()
+        .with_tool(Arc::new(WebFetchTool::default()))
+        .err()
+        .expect("duplicate webfetch must fail");
+    assert_eq!(error.tool_name(), "webfetch");
+}
+
+#[test]
+fn composed_web_registry_has_unique_definitions() {
+    let registry = ToolRegistry::builtin().with_web_tools().unwrap();
+    let definitions = registry.definitions();
+    let names: std::collections::HashSet<_> = definitions.iter().map(|tool| &tool.name).collect();
+    assert_eq!(names.len(), definitions.len());
 }
 
 // ---- read ----

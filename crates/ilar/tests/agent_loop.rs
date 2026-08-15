@@ -61,7 +61,7 @@ impl Tool for EchoTool {
 
 fn registry_with(tool: EchoTool) -> ToolRegistry {
     // ToolRegistry with a custom tool injected alongside builtins.
-    ToolRegistry::builtin().with_tool(Arc::new(tool))
+    ToolRegistry::builtin().with_tool(Arc::new(tool)).unwrap()
 }
 
 fn tool_call_event(id: &str, msg: &str) -> ProviderEvent {

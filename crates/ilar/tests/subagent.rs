@@ -78,7 +78,7 @@ fn spawner(
 }
 
 fn parent_registry(spawner: Arc<SubagentSpawner>) -> ToolRegistry {
-    ToolRegistry::builtin().with_subagents(spawner)
+    ToolRegistry::builtin().with_subagents(spawner).unwrap()
 }
 
 fn task_call(id: &str, prompt: &str) -> ProviderEvent {
@@ -279,7 +279,9 @@ async fn depth_cap_errors_with_guidance() {
         10,
         2,
     );
-    let registry = ToolRegistry::builtin().with_subagents(Arc::new(deep));
+    let registry = ToolRegistry::builtin()
+        .with_subagents(Arc::new(deep))
+        .unwrap();
     let task = registry.get("task").unwrap();
 
     let out = task

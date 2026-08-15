@@ -111,7 +111,9 @@ async fn background_task_returns_immediately_and_notifies_once() {
         &store,
     );
     let mut notifications = spawner.subscribe();
-    let registry = ToolRegistry::builtin().with_subagents(spawner.clone());
+    let registry = ToolRegistry::builtin()
+        .with_subagents(spawner.clone())
+        .unwrap();
 
     let parent = MockProvider::new(vec![
         vec![
@@ -186,7 +188,9 @@ async fn stall_watchdog_fires_on_silent_child() {
     let (store, _session_id) = temp_store();
     let spawner = spawner(Arc::new(Silent), &store);
     let mut notifications = spawner.subscribe();
-    let registry = ToolRegistry::builtin().with_subagents(spawner.clone());
+    let registry = ToolRegistry::builtin()
+        .with_subagents(spawner.clone())
+        .unwrap();
     let task = registry.get("task").unwrap();
 
     let start = std::time::Instant::now();
@@ -234,7 +238,9 @@ async fn notification_reinvokes_parent_loop_as_synthetic_user_turn() {
         &store,
     );
     let mut notifications = spawner.subscribe();
-    let registry = ToolRegistry::builtin().with_subagents(spawner.clone());
+    let registry = ToolRegistry::builtin()
+        .with_subagents(spawner.clone())
+        .unwrap();
 
     // Kick off the background task directly (unit-level).
     let task = registry.get("task").unwrap();
@@ -302,7 +308,9 @@ async fn abort_all_kills_running_children() {
         &store,
     );
     let _notifications = spawner.subscribe();
-    let registry = ToolRegistry::builtin().with_subagents(spawner.clone());
+    let registry = ToolRegistry::builtin()
+        .with_subagents(spawner.clone())
+        .unwrap();
     let task = registry.get("task").unwrap();
 
     task.run(

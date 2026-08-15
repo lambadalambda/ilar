@@ -123,7 +123,9 @@ fn registry() -> (
     (
         ToolRegistry::builtin()
             .with_todos(todos.clone())
-            .with_search(Box::new(MockBackend)),
+            .unwrap()
+            .with_search(Box::new(MockBackend))
+            .unwrap(),
         todos,
     )
 }
@@ -160,7 +162,9 @@ async fn websearch_empty_results_is_not_error() {
             Box::pin(async { Ok(SearchResults { hits: vec![] }) })
         }
     }
-    let reg = ToolRegistry::builtin().with_search(Box::new(Empty));
+    let reg = ToolRegistry::builtin()
+        .with_search(Box::new(Empty))
+        .unwrap();
     let out = reg
         .get("websearch")
         .unwrap()

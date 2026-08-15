@@ -185,7 +185,12 @@ impl SubagentSpawner {
 
         // Child registry: builtins + task tool with the deeper spawner.
         let child_spawner = self.child_spawner();
-        let registry = ToolRegistry::builtin().with_subagents(child_spawner.clone());
+        let registry = match ToolRegistry::builtin().with_subagents(child_spawner.clone()) {
+            Ok(registry) => registry,
+            Err(error) => {
+                return ToolOutput::error(format!("building child tool registry: {error}"));
+            }
+        };
         let child_ctx = ToolContext {
             cwd: self.cwd.clone(),
             session_id: session_id.clone(),

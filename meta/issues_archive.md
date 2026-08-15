@@ -35,3 +35,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Tool call stalls after todo](issues/tool-call-stalls-after-todo.md)
 - [x] [Markdown transcript rendering](issues/markdown-transcript-rendering.md)
 - [x] [Transcript scrolling](issues/transcript-scrolling.md)
+- [x] [Tool registry uniqueness](issues/tool-registry-and-scheduling-invariants.md)
