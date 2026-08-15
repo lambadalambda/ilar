@@ -399,3 +399,11 @@ never repairs a file. A leased writer truncates an unterminated or invalid
 UTF-8 final tail to the last complete record before appending. Malformed
 newline-terminated records now reject the session as middle corruption
 instead of being silently skipped.
+
+## 2026-08-15 — Stabilization: crash-safe replay
+
+Session replay now requires one leading metadata event whose identity matches
+the filename, unique event and tool-call IDs, and exact tool-call/result
+pairing. Read-only inspection leaves trailing unanswered calls untouched;
+leased writer recovery persists synthetic error results for them exactly once.
+Invalid semantic state is rejected before any torn-tail repair mutates the log.

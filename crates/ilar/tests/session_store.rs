@@ -73,6 +73,42 @@ fn sample_log(meta: &SessionMeta) -> Vec<SessionEvent> {
     ]
 }
 
+fn assistant_with_calls(event_id: &str, call_ids: &[&str]) -> SessionEvent {
+    SessionEvent::AssistantMessage {
+        id: event_id.into(),
+        model: "zai/glm-4.7".into(),
+        content: call_ids
+            .iter()
+            .map(|id| ContentBlock::ToolCall {
+                id: (*id).into(),
+                name: "read".into(),
+                input: serde_json::json!({"path": "ilar.toml"}),
+            })
+            .collect(),
+        usage: Usage::default(),
+        stop_reason: "tool_use".into(),
+        ts: Utc::now(),
+    }
+}
+
+fn assert_replay_invalid(store: &SessionStore, id: &str) {
+    let path = store.session_path(id).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let read_error = store
+        .load(id)
+        .err()
+        .expect("reader must reject invalid replay");
+    assert_eq!(read_error.kind(), std::io::ErrorKind::InvalidData);
+    let write_error = store
+        .acquire_writer(id)
+        .unwrap()
+        .load()
+        .err()
+        .expect("writer must reject invalid replay");
+    assert_eq!(write_error.kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(std::fs::read(path).unwrap(), before);
+}
+
 #[test]
 fn round_trip_append_load() {
     let (store, _dir) = temp_store();
@@ -400,6 +436,131 @@ fn middle_corruption_with_torn_tail_is_rejected_without_mutating_log() {
         .expect("writer must reject middle corruption");
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     assert_eq!(std::fs::read(path).unwrap(), before);
+}
+
+#[test]
+fn unanswered_tool_calls_are_repaired_once_by_writer() {
+    let (store, _dir) = temp_store();
+    let meta = sample_meta();
+    let mut session = store.create(meta.clone()).unwrap();
+    session
+        .append(assistant_with_calls(
+            &new_id(),
+            &["answered", "interrupted"],
+        ))
+        .unwrap();
+    session
+        .append(SessionEvent::ToolResult {
+            id: new_id(),
+            tool_use_id: "answered".into(),
+            content: "ok".into(),
+            is_error: false,
+            ts: Utc::now(),
+        })
+        .unwrap();
+    drop(session);
+
+    assert_eq!(store.load(&meta.session_id).unwrap().events().len(), 3);
+    let repaired = store
+        .acquire_writer(&meta.session_id)
+        .unwrap()
+        .load()
+        .unwrap();
+    assert_eq!(repaired.events().len(), 4);
+    assert!(matches!(
+        repaired.events().last(),
+        Some(SessionEvent::ToolResult {
+            tool_use_id,
+            is_error: true,
+            ..
+        }) if tool_use_id == "interrupted"
+    ));
+    drop(repaired);
+
+    let reloaded = store
+        .acquire_writer(&meta.session_id)
+        .unwrap()
+        .load()
+        .unwrap();
+    assert_eq!(reloaded.events().len(), 4);
+}
+
+#[test]
+fn orphan_tool_results_are_rejected_without_mutation() {
+    let (store, _dir) = temp_store();
+    let meta = sample_meta();
+    let mut session = store.create(meta.clone()).unwrap();
+    session
+        .append(SessionEvent::ToolResult {
+            id: new_id(),
+            tool_use_id: "missing-call".into(),
+            content: "impossible".into(),
+            is_error: false,
+            ts: Utc::now(),
+        })
+        .unwrap();
+    drop(session);
+
+    assert_replay_invalid(&store, &meta.session_id);
+}
+
+#[test]
+fn duplicate_event_and_tool_call_ids_are_rejected() {
+    let (event_store, _event_dir) = temp_store();
+    let event_meta = sample_meta();
+    let mut event_session = event_store.create(event_meta.clone()).unwrap();
+    let duplicate_id = new_id();
+    for text in ["one", "two"] {
+        event_session
+            .append(SessionEvent::UserMessage {
+                id: duplicate_id.clone(),
+                text: text.into(),
+                ts: Utc::now(),
+            })
+            .unwrap();
+    }
+    drop(event_session);
+    assert_replay_invalid(&event_store, &event_meta.session_id);
+
+    let (call_store, _call_dir) = temp_store();
+    let call_meta = sample_meta();
+    let mut call_session = call_store.create(call_meta.clone()).unwrap();
+    call_session
+        .append(assistant_with_calls(&new_id(), &["same-call", "same-call"]))
+        .unwrap();
+    drop(call_session);
+    assert_replay_invalid(&call_store, &call_meta.session_id);
+}
+
+#[test]
+fn metadata_must_be_unique_first_and_match_the_filename() {
+    let (duplicate_store, _duplicate_dir) = temp_store();
+    let duplicate_meta = sample_meta();
+    let mut duplicate_session = duplicate_store.create(duplicate_meta.clone()).unwrap();
+    duplicate_session
+        .append(SessionEvent::Meta {
+            meta: duplicate_meta.clone(),
+            ts: Utc::now(),
+        })
+        .unwrap();
+    drop(duplicate_session);
+    assert_replay_invalid(&duplicate_store, &duplicate_meta.session_id);
+
+    let (mismatch_store, _mismatch_dir) = temp_store();
+    let mismatch_meta = sample_meta();
+    drop(mismatch_store.create(mismatch_meta.clone()).unwrap());
+    let path = mismatch_store
+        .session_path(&mismatch_meta.session_id)
+        .unwrap();
+    let mut event: serde_json::Value =
+        serde_json::from_str(std::fs::read_to_string(&path).unwrap().trim_end()).unwrap();
+    event["session_id"] = new_id().into();
+    std::fs::write(
+        &path,
+        format!("{}\n", serde_json::to_string(&event).unwrap()),
+    )
+    .unwrap();
+    assert_replay_invalid(&mismatch_store, &mismatch_meta.session_id);
 }
 
 #[test]

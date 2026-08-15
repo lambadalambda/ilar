@@ -20,7 +20,6 @@
 - [ ] [Provider routing and model lifecycle](issues/provider-routing-and-model-lifecycle.md)
 - [ ] [Serialize turns and route notifications](issues/serialize-turns-and-route-notifications.md)
 - [ ] [Preserve provider content order and reasoning](issues/preserve-provider-content-order-and-reasoning.md)
-- [ ] [Crash-safe session recovery](issues/crash-safe-session-recovery.md)
 - [ ] [Secure atomic OAuth store](issues/secure-atomic-oauth-store.md)
 - [ ] [Compaction correctness and cancellation](issues/compaction-correctness-and-cancellation.md)
 - [ ] [Harden provider protocol handling](issues/harden-provider-protocol-handling.md)

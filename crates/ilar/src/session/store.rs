@@ -1,12 +1,13 @@
 //! Append-only JSONL session store.
 
+use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
 
 use fs2::FileExt;
 
-use super::event::{SessionEvent, SessionMeta};
+use super::event::{SessionEvent, SessionMeta, new_id};
 use super::model::{ChatMessage, ContentBlock, Role};
 
 /// Owns the session directory; creates/loads sessions.
@@ -106,7 +107,7 @@ impl SessionStore {
                 format!("session not found: {id}"),
             ));
         }
-        let events = read_events(&path, id, false)?;
+        let (events, _) = read_events(&path, id, false)?;
         Ok(SessionReader { events })
     }
 }
@@ -118,13 +119,23 @@ impl SessionWriter {
             .file_stem()
             .and_then(|id| id.to_str())
             .unwrap_or("unknown");
-        let events = read_events(&self.session_path, id, true)?;
+        let (events, unanswered_calls) = read_events(&self.session_path, id, true)?;
         let file = OpenOptions::new().append(true).open(&self.session_path)?;
-        Ok(Session {
+        let mut session = Session {
             events,
             file,
             _writer: self,
-        })
+        };
+        for tool_use_id in unanswered_calls {
+            session.append(SessionEvent::ToolResult {
+                id: new_id(),
+                tool_use_id,
+                content: "Tool call interrupted before completion.".into(),
+                is_error: true,
+                ts: chrono::Utc::now(),
+            })?;
+        }
+        Ok(session)
     }
 }
 
@@ -132,7 +143,7 @@ fn read_events(
     path: &std::path::Path,
     id: &str,
     repair_tail: bool,
-) -> std::io::Result<Vec<SessionEvent>> {
+) -> std::io::Result<(Vec<SessionEvent>, Vec<String>)> {
     let bytes = std::fs::read(path)?;
     let complete_len = bytes
         .iter()
@@ -168,6 +179,7 @@ fn read_events(
             format!("session unrecoverable (no committed events): {id}"),
         ));
     }
+    let unanswered_calls = validate_replay(&events, id)?;
     // Mutation happens only after every committed record validates.
     if repair_tail && complete_len < bytes.len() {
         OpenOptions::new()
@@ -175,7 +187,86 @@ fn read_events(
             .open(path)?
             .set_len(complete_len as u64)?;
     }
-    Ok(events)
+    Ok((events, unanswered_calls))
+}
+
+fn validate_replay(events: &[SessionEvent], id: &str) -> std::io::Result<Vec<String>> {
+    let Some(SessionEvent::Meta { meta, .. }) = events.first() else {
+        return invalid_replay(id, "metadata must be the first event");
+    };
+    if meta.session_id != id {
+        return invalid_replay(
+            id,
+            format!(
+                "metadata session id {:?} does not match filename",
+                meta.session_id
+            ),
+        );
+    }
+
+    let mut event_ids = HashSet::new();
+    let mut tool_call_ids = HashSet::new();
+    let mut unanswered_calls: Vec<String> = Vec::new();
+    for (index, event) in events.iter().enumerate() {
+        if index > 0 && matches!(event, SessionEvent::Meta { .. }) {
+            return invalid_replay(id, "duplicate metadata event");
+        }
+
+        let event_id = match event {
+            SessionEvent::Meta { .. } => None,
+            SessionEvent::UserMessage { id, .. }
+            | SessionEvent::AssistantMessage { id, .. }
+            | SessionEvent::ToolResult { id, .. }
+            | SessionEvent::ModelChange { id, .. }
+            | SessionEvent::Compaction { id, .. } => Some(id),
+        };
+        if let Some(event_id) = event_id
+            && !event_ids.insert(event_id)
+        {
+            return invalid_replay(id, format!("duplicate event id {event_id:?}"));
+        }
+
+        match event {
+            SessionEvent::AssistantMessage { content, .. } => {
+                if !unanswered_calls.is_empty() {
+                    return invalid_replay(id, "new event before tool calls received results");
+                }
+                for block in content {
+                    if let ContentBlock::ToolCall { id: call_id, .. } = block {
+                        if !tool_call_ids.insert(call_id) {
+                            return invalid_replay(
+                                id,
+                                format!("duplicate tool call id {call_id:?}"),
+                            );
+                        }
+                        unanswered_calls.push(call_id.clone());
+                    }
+                }
+            }
+            SessionEvent::ToolResult { tool_use_id, .. } => {
+                let Some(position) = unanswered_calls
+                    .iter()
+                    .position(|call_id| call_id == tool_use_id)
+                else {
+                    return invalid_replay(id, format!("orphan tool result for {tool_use_id:?}"));
+                };
+                unanswered_calls.remove(position);
+            }
+            SessionEvent::Meta { .. } => {}
+            _ if !unanswered_calls.is_empty() => {
+                return invalid_replay(id, "new event before tool calls received results");
+            }
+            _ => {}
+        }
+    }
+    Ok(unanswered_calls)
+}
+
+fn invalid_replay<T>(id: &str, message: impl std::fmt::Display) -> std::io::Result<T> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("session {id}: {message}"),
+    ))
 }
 
 impl Session {
