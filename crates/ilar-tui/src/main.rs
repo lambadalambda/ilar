@@ -523,15 +523,20 @@ async fn main() -> Result<()> {
     };
 
     let agents = config.agents();
-    let spawner = std::sync::Arc::new(SubagentSpawner::new(
-        resolver.clone(),
-        store.clone(),
-        agents,
-        cwd.clone(),
-        0,
-        config.subagents.max_concurrent,
-        config.subagents.max_depth,
-    ));
+    let spawner = std::sync::Arc::new(
+        SubagentSpawner::new(
+            resolver.clone(),
+            store.clone(),
+            agents,
+            cwd.clone(),
+            0,
+            config.subagents.max_concurrent,
+            config.subagents.max_depth,
+        )
+        .with_background_tool_timeout(std::time::Duration::from_millis(
+            config.subagents.background_tool_timeout_ms,
+        )),
+    );
     let todos = std::sync::Arc::new(std::sync::Mutex::new(ilar::todo::TodoList::default()));
     let registry = ToolRegistry::builtin()
         .with_subagents(spawner.clone())?
@@ -661,8 +666,11 @@ async fn run_app(
             }
             match handle.await {
                 Ok(TurnCompletion::Root(result)) => {
+                    let aborted = matches!(result, Ok(TurnOutcome::Aborted));
                     app.finish_turn(result);
-                    notifications_paused = false;
+                    if !aborted {
+                        notifications_paused = false;
+                    }
                 }
                 Ok(TurnCompletion::Routed(Ok(ilar::subagent::RouteOutcome::Propagate(
                     notification,
@@ -778,7 +786,7 @@ async fn run_app(
                     if let Some(cancel) = &cancel {
                         cancel.cancel();
                     }
-                    spawner.abort_all();
+                    spawner.shutdown().await;
                     return Ok(());
                 }
                 (KeyCode::Char('m'), true) if !app.busy && model_choices.len() > 1 => {
@@ -799,12 +807,18 @@ async fn run_app(
                     }
                 }
                 (KeyCode::Esc, _) => {
+                    let background = spawner.running_background();
+                    if background > 0 {
+                        spawner.abort_all();
+                        notifications_paused = true;
+                        app.status = format!("cancelling {background} background job(s)…");
+                    }
                     if app.busy {
                         if let Some(cancel) = &cancel {
                             cancel.cancel();
                             app.status = "aborting…".into();
                         }
-                    } else {
+                    } else if background == 0 {
                         app.input.clear();
                     }
                 }

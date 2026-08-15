@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ilar::tools::executor::{ToolCall, execute_calls};
-use ilar::tools::{Tool, ToolContext, ToolFuture, ToolKind, ToolOutput};
+use ilar::tools::{Tool, ToolContext, ToolFuture, ToolKind, ToolOutput, WorkspaceAccess};
 use tokio_util::sync::CancellationToken;
 
 /// Recording probe tool: sleeps, logs "start:<name>" / "end:<name>" with
@@ -13,6 +13,29 @@ struct ProbeTool {
     kind: ToolKind,
     sleep: Duration,
     log: Arc<Mutex<Vec<(Instant, String)>>>,
+}
+
+struct ConcurrentMutator(ProbeTool);
+
+impl Tool for ConcurrentMutator {
+    fn name(&self) -> &'static str {
+        self.0.name
+    }
+    fn description(&self) -> &'static str {
+        "concurrency-safe workspace mutator"
+    }
+    fn kind(&self) -> ToolKind {
+        ToolKind::ReadOnly
+    }
+    fn workspace_access(&self) -> WorkspaceAccess {
+        WorkspaceAccess::Mutating
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    fn run(&self, input: serde_json::Value, ctx: ToolContext) -> ToolFuture {
+        self.0.run(input, ctx)
+    }
 }
 
 impl Tool for ProbeTool {
@@ -159,6 +182,37 @@ async fn three_readonly_tools_overlap() {
     assert!(
         elapsed < Duration::from_millis(320),
         "execution looked serial: {elapsed:?}"
+    );
+}
+
+#[tokio::test]
+async fn concurrency_safe_workspace_mutators_are_serialized() {
+    let (mut tools, log) = harness();
+    for name in ["task_one", "task_two"] {
+        tools.insert(
+            name.into(),
+            Arc::new(ConcurrentMutator(ProbeTool {
+                name,
+                kind: ToolKind::ReadOnly,
+                sleep: Duration::from_millis(80),
+                log: log.clone(),
+            })),
+        );
+    }
+    let outcomes = execute_calls(
+        vec![call("1", "task_one"), call("2", "task_two")],
+        |name| tools.get(name).cloned(),
+        ctx(),
+        CancellationToken::new(),
+    )
+    .await;
+    assert!(outcomes.iter().all(|outcome| !outcome.output.is_error));
+    let log = log.lock().unwrap();
+    let (first_start, first_end) = span(&log, "task_one");
+    let (second_start, second_end) = span(&log, "task_two");
+    assert!(
+        first_end <= second_start || second_end <= first_start,
+        "workspace mutations overlapped"
     );
 }
 

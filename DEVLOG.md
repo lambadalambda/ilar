@@ -472,3 +472,14 @@ drop. Grep bounds each file prefix, rendered line, match count, and total
 output; glob checks cancellation per traversed entry and stops collecting at
 its cap. Atomic write/edit publication and mode preservation are shared with
 the previously landed replacement primitive.
+
+## 2026-08-15 — Background Bash jobs
+
+Bash can now opt into detached execution with `run_in_background`, returning a
+stable job ID immediately and delivering one completion, failure, timeout, or
+cancellation notification through the existing parent-turn queue. Background
+jobs use a configurable 10-minute default (`subagents.background_tool_timeout_ms`)
+with per-call `timeout_ms` overrides, retain workspace exclusion for their full
+run, inherit root cancellation through nested agents, and are cancelled and
+joined during shutdown. Bash also terminates remaining process-group children
+when the shell exits.

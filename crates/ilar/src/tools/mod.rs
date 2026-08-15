@@ -24,6 +24,51 @@ pub enum ToolKind {
     Mutating,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceAccess {
+    ReadOnly,
+    Mutating,
+}
+
+#[derive(Clone)]
+pub struct WorkspaceScheduler {
+    lock: Arc<tokio::sync::RwLock<()>>,
+}
+
+pub enum WorkspacePermit {
+    ReadOnly {
+        _guard: tokio::sync::OwnedRwLockReadGuard<()>,
+    },
+    Mutating {
+        _guard: tokio::sync::OwnedRwLockWriteGuard<()>,
+    },
+}
+
+impl WorkspaceScheduler {
+    pub fn new() -> Self {
+        Self {
+            lock: Arc::new(tokio::sync::RwLock::new(())),
+        }
+    }
+
+    pub async fn acquire(&self, access: WorkspaceAccess) -> WorkspacePermit {
+        match access {
+            WorkspaceAccess::ReadOnly => WorkspacePermit::ReadOnly {
+                _guard: self.lock.clone().read_owned().await,
+            },
+            WorkspaceAccess::Mutating => WorkspacePermit::Mutating {
+                _guard: self.lock.clone().write_owned().await,
+            },
+        }
+    }
+}
+
+impl Default for WorkspaceScheduler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Per-invocation context. No permission checks — the sandbox is the
 /// permission system.
 #[derive(Clone)]
@@ -35,6 +80,8 @@ pub struct ToolContext {
     pub depth: usize,
     /// Subagent spawner, when the task tool is available.
     pub subagent: Option<std::sync::Arc<crate::subagent::SubagentSpawner>>,
+    pub workspace: WorkspaceScheduler,
+    pub cancel: tokio_util::sync::CancellationToken,
 }
 
 impl ToolContext {
@@ -45,6 +92,8 @@ impl ToolContext {
             session_id: String::new(),
             depth: 0,
             subagent: None,
+            workspace: WorkspaceScheduler::new(),
+            cancel: tokio_util::sync::CancellationToken::new(),
         }
     }
 
@@ -53,6 +102,7 @@ impl ToolContext {
         mut self,
         spawner: std::sync::Arc<crate::subagent::SubagentSpawner>,
     ) -> Self {
+        self.workspace = spawner.workspace();
         self.subagent = Some(spawner);
         self
     }
@@ -88,6 +138,18 @@ pub trait Tool: Send + Sync {
     fn name(&self) -> &'static str;
     fn description(&self) -> &'static str;
     fn kind(&self) -> ToolKind;
+    fn workspace_access(&self) -> WorkspaceAccess {
+        match self.kind() {
+            ToolKind::ReadOnly => WorkspaceAccess::ReadOnly,
+            ToolKind::Mutating => WorkspaceAccess::Mutating,
+        }
+    }
+    fn supports_background(&self) -> bool {
+        false
+    }
+    fn manages_workspace_access(&self) -> bool {
+        false
+    }
     fn input_schema(&self) -> serde_json::Value;
     fn run(&self, input: serde_json::Value, ctx: ToolContext) -> ToolFuture;
 }

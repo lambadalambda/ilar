@@ -30,6 +30,18 @@ fn defaults_when_no_config_exists() {
     assert_eq!(config.compaction.threshold, 0.85);
     assert_eq!(config.subagents.max_concurrent, 10);
     assert_eq!(config.subagents.max_depth, 3);
+    assert_eq!(config.subagents.background_tool_timeout_ms, 600_000);
+}
+
+#[test]
+fn background_tool_timeout_is_configurable() {
+    let (_g, dir) = tempdir();
+    write(
+        &dir.join("ilar.toml"),
+        "[subagents]\nbackground_tool_timeout_ms = 42000\n",
+    );
+    let config = Loader::no_env().config_dir(dir).resolve().unwrap();
+    assert_eq!(config.subagents.background_tool_timeout_ms, 42_000);
 }
 
 #[test]

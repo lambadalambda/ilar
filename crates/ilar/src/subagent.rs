@@ -8,7 +8,9 @@ use crate::config::AgentDefinition;
 use crate::config::system_prompt_for;
 use crate::provider::ProviderResolver;
 use crate::session::{ContentBlock, SessionMeta, SessionStore, new_id};
-use crate::tools::{Tool, ToolContext, ToolFuture, ToolKind, ToolOutput, ToolRegistry};
+use crate::tools::{
+    Tool, ToolContext, ToolFuture, ToolKind, ToolOutput, ToolRegistry, WorkspaceAccess,
+};
 use serde::Deserialize;
 
 /// A completed background task's notification — the synthetic user
@@ -45,7 +47,20 @@ pub struct SubagentSpawner {
     notify_rx: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<Notification>>>>,
     stall_timeout: std::time::Duration,
     /// Abort handles for detached background tasks.
-    background_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    background_tasks: Arc<Mutex<BackgroundRegistry>>,
+    workspace: crate::tools::WorkspaceScheduler,
+    background_tool_timeout: std::time::Duration,
+}
+
+struct BackgroundTask {
+    handle: tokio::task::JoinHandle<()>,
+    cancel: tokio_util::sync::CancellationToken,
+}
+
+#[derive(Default)]
+struct BackgroundRegistry {
+    tasks: Vec<BackgroundTask>,
+    closed: bool,
 }
 
 impl SubagentSpawner {
@@ -72,7 +87,9 @@ impl SubagentSpawner {
             running: Arc::new(AtomicUsize::new(0)),
             notify_tx,
             stall_timeout: std::time::Duration::from_secs(600),
-            background_tasks: Arc::new(Mutex::new(Vec::new())),
+            background_tasks: Arc::new(Mutex::new(BackgroundRegistry::default())),
+            workspace: crate::tools::WorkspaceScheduler::new(),
+            background_tool_timeout: std::time::Duration::from_secs(600),
         }
     }
 
@@ -80,6 +97,19 @@ impl SubagentSpawner {
     pub fn with_stall_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.stall_timeout = timeout;
         self
+    }
+
+    pub fn with_background_tool_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.background_tool_timeout = timeout;
+        self
+    }
+
+    pub fn background_tool_timeout(&self) -> std::time::Duration {
+        self.background_tool_timeout
+    }
+
+    pub fn workspace(&self) -> crate::tools::WorkspaceScheduler {
+        self.workspace.clone()
     }
 
     /// Receiver for background-task notifications (single consumer;
@@ -94,17 +124,35 @@ impl SubagentSpawner {
 
     /// Abort every detached background task (Ctrl-C path).
     pub fn abort_all(&self) {
-        let mut tasks = self.background_tasks.lock().unwrap();
-        for task in tasks.drain(..) {
-            task.abort();
+        let tasks = self.background_tasks.lock().unwrap();
+        for task in &tasks.tasks {
+            task.cancel.cancel();
+        }
+    }
+
+    pub async fn shutdown(&self) {
+        let tasks = {
+            let mut registry = self.background_tasks.lock().unwrap();
+            registry.closed = true;
+            for task in &registry.tasks {
+                task.cancel.cancel();
+            }
+            registry
+                .tasks
+                .drain(..)
+                .map(|task| task.handle)
+                .collect::<Vec<_>>()
+        };
+        for task in tasks {
+            let _ = task.await;
         }
     }
 
     /// Number of live detached background tasks.
     pub fn running_background(&self) -> usize {
-        let mut tasks = self.background_tasks.lock().unwrap();
-        tasks.retain(|t| !t.is_finished());
-        tasks.len()
+        let mut registry = self.background_tasks.lock().unwrap();
+        registry.tasks.retain(|task| !task.handle.is_finished());
+        registry.tasks.len()
     }
 
     pub fn resolver(&self) -> Arc<dyn ProviderResolver> {
@@ -131,6 +179,8 @@ impl SubagentSpawner {
             notify_rx: self.notify_rx.clone(),
             stall_timeout: self.stall_timeout,
             background_tasks: self.background_tasks.clone(),
+            workspace: self.workspace.clone(),
+            background_tool_timeout: self.background_tool_timeout,
         })
     }
 
@@ -195,14 +245,18 @@ impl SubagentSpawner {
                         }
                     },
                 };
-                if let Err(e) = self.store.create(SessionMeta {
+                let created = self.store.create(SessionMeta {
                     session_id: id.clone(),
                     parent_id: Some(ctx.session_id.clone()),
                     agent: input.subagent_type.clone(),
                     model,
-                }) {
-                    return ToolOutput::error(format!("creating subagent session: {e}"));
-                }
+                });
+                match created {
+                    Ok(session) => drop(session),
+                    Err(error) => {
+                        return ToolOutput::error(format!("creating subagent session: {error}"));
+                    }
+                };
                 id
             }
         };
@@ -228,6 +282,8 @@ impl SubagentSpawner {
             session_id: session_id.clone(),
             depth: self.depth + 1,
             subagent: Some(child_spawner),
+            workspace: ctx.workspace.clone(),
+            cancel: ctx.cancel.clone(),
         };
 
         if input.background == Some(true) {
@@ -239,6 +295,16 @@ impl SubagentSpawner {
             let prompt = input.prompt.clone();
             let parent_session_id = ctx.session_id.clone();
             let stall_timeout = self.stall_timeout;
+            let background_cancel = tokio_util::sync::CancellationToken::new();
+            let task_cancel = background_cancel.clone();
+            let root_cancel = ctx.cancel.clone();
+            let mut background_registry = self.background_tasks.lock().unwrap();
+            if background_registry.closed {
+                return ToolOutput::error("background runtime is shutting down");
+            }
+            background_registry
+                .tasks
+                .retain(|task| !task.handle.is_finished());
             let handle = tokio::spawn(async move {
                 let _slot = _guard; // hold the concurrency slot for the run
                 let cancel = tokio_util::sync::CancellationToken::new();
@@ -271,11 +337,19 @@ impl SubagentSpawner {
                     cancel.clone(),
                     child_ctx,
                 );
-                let outcome = tokio::select! {
-                    outcome = turn => Some(outcome),
+                let (outcome, was_cancelled) = tokio::select! {
+                    outcome = turn => (Some(outcome), false),
                     () = stall_watch => {
                         cancel.cancel();
-                        None // stalled
+                        (None, false)
+                    }
+                    () = task_cancel.cancelled() => {
+                        cancel.cancel();
+                        (None, true)
+                    }
+                    () = root_cancel.cancelled() => {
+                        cancel.cancel();
+                        (None, true)
                     }
                 };
                 watcher.abort();
@@ -313,6 +387,14 @@ impl SubagentSpawner {
                         ),
                         is_error: true,
                     },
+                    None if was_cancelled => Notification {
+                        parent_session_id,
+                        description: description.clone(),
+                        text: format!(
+                            "<task-notification>\nTask \"{description}\" was cancelled.\n</task-notification>"
+                        ),
+                        is_error: true,
+                    },
                     None => Notification {
                         parent_session_id,
                         description: description.clone(),
@@ -325,9 +407,10 @@ impl SubagentSpawner {
                 };
                 let _ = spawner.notify_tx.send(notification);
             });
-            let mut tasks = self.background_tasks.lock().unwrap();
-            tasks.retain(|task| !task.is_finished());
-            tasks.push(handle);
+            background_registry.tasks.push(BackgroundTask {
+                handle,
+                cancel: background_cancel,
+            });
             return ToolOutput::text(
                 "Task started in the background. You will be notified when it completes. \
 DO NOT sleep, poll, or check on it — work on something else or end your response."
@@ -345,7 +428,7 @@ DO NOT sleep, poll, or check on it — work on something else or end your respon
             Some(&system_prompt),
             LoopConfig::default(),
             tx,
-            tokio_util::sync::CancellationToken::new(),
+            ctx.cancel.clone(),
             child_ctx,
         )
         .await;
@@ -370,6 +453,84 @@ DO NOT sleep, poll, or check on it — work on something else or end your respon
             }
             Err(e) => ToolOutput::error(format!("subagent failed: {e:#}")),
         }
+    }
+
+    pub async fn spawn_background_tool(
+        self: &Arc<Self>,
+        parent_session_id: String,
+        description: String,
+        timeout: std::time::Duration,
+        future: ToolFuture,
+        access: WorkspaceAccess,
+        root_cancel: tokio_util::sync::CancellationToken,
+    ) -> ToolOutput {
+        let job_id = new_id();
+        let notification_id = job_id.clone();
+        let spawner = self.clone();
+        let background_cancel = tokio_util::sync::CancellationToken::new();
+        let task_cancel = background_cancel.clone();
+        let workspace = self.workspace.clone();
+        {
+            let mut background_registry = self.background_tasks.lock().unwrap();
+            if background_registry.closed {
+                return ToolOutput::error("background runtime is shutting down");
+            }
+            background_registry
+                .tasks
+                .retain(|task| !task.handle.is_finished());
+            let handle = tokio::spawn(async move {
+                let outcome = tokio::select! {
+                    outcome = tokio::time::timeout(timeout, async move {
+                        let _permit = workspace.acquire(access).await;
+                        future.await
+                    }) => Some(outcome),
+                    () = task_cancel.cancelled() => None,
+                    () = root_cancel.cancelled() => None,
+                };
+                let (text, is_error) = match outcome {
+                    Some(Ok(output)) if output.is_error => (
+                        format!(
+                            "<tool-notification>\nBackground job {notification_id} (\"{description}\") failed.\n<result>\n{}\n</result>\n</tool-notification>",
+                            output.content
+                        ),
+                        true,
+                    ),
+                    Some(Ok(output)) => (
+                        format!(
+                            "<tool-notification>\nBackground job {notification_id} (\"{description}\") completed.\n<result>\n{}\n</result>\n</tool-notification>",
+                            output.content
+                        ),
+                        false,
+                    ),
+                    Some(Err(_)) => (
+                        format!(
+                            "<tool-notification>\nBackground job {notification_id} (\"{description}\") timed out after {}ms and was stopped.\n</tool-notification>",
+                            timeout.as_millis()
+                        ),
+                        true,
+                    ),
+                    None => (
+                        format!(
+                            "<tool-notification>\nBackground job {notification_id} (\"{description}\") was cancelled.\n</tool-notification>"
+                        ),
+                        true,
+                    ),
+                };
+                let _ = spawner.notify_tx.send(Notification {
+                    parent_session_id,
+                    description,
+                    text,
+                    is_error,
+                });
+            });
+            background_registry.tasks.push(BackgroundTask {
+                handle,
+                cancel: background_cancel,
+            });
+        }
+        ToolOutput::text(format!(
+            "Background job {job_id} started. You will be notified when it completes. Do not poll or sleep; continue other work or end your response."
+        ))
     }
 
     /// Run a queued completion against its declared inactive parent. Child
@@ -403,6 +564,8 @@ DO NOT sleep, poll, or check on it — work on something else or end your respon
             notify_rx: self.notify_rx.clone(),
             stall_timeout: self.stall_timeout,
             background_tasks: self.background_tasks.clone(),
+            workspace: self.workspace.clone(),
+            background_tool_timeout: self.background_tool_timeout,
         });
         let registry = ToolRegistry::builtin().with_subagents(runtime.clone())?;
         let mut system_prompt = system_prompt_for(&self.cwd);
@@ -432,6 +595,8 @@ DO NOT sleep, poll, or check on it — work on something else or end your respon
                     session_id: notification.parent_session_id.clone(),
                     depth,
                     subagent: Some(runtime.clone()),
+                    workspace: self.workspace.clone(),
+                    cancel: cancel.clone(),
                 },
             )
             .await;
@@ -559,6 +724,14 @@ impl Tool for TaskTool {
 
     fn kind(&self) -> ToolKind {
         ToolKind::ReadOnly
+    }
+
+    fn workspace_access(&self) -> WorkspaceAccess {
+        WorkspaceAccess::Mutating
+    }
+
+    fn manages_workspace_access(&self) -> bool {
+        true
     }
 
     fn input_schema(&self) -> serde_json::Value {

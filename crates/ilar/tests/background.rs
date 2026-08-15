@@ -101,6 +101,392 @@ fn bg_call(id: &str) -> ProviderEvent {
     }
 }
 
+fn background_tool_context(
+    session_id: String,
+    spawner: Arc<SubagentSpawner>,
+    cwd: &std::path::Path,
+) -> ToolContext {
+    let mut ctx = ToolContext::root(cwd.to_path_buf()).with_subagents(spawner);
+    ctx.session_id = session_id;
+    ctx
+}
+
+#[tokio::test]
+async fn background_bash_returns_job_id_and_notifies_once() {
+    let (store, session_id) = temp_store();
+    let spawner = spawner(Arc::new(MockProvider::new(vec![])), &store);
+    let mut notifications = spawner.subscribe();
+    let registry = ToolRegistry::builtin()
+        .with_subagents(spawner.clone())
+        .unwrap();
+    let ctx = background_tool_context(session_id.clone(), spawner, std::env::temp_dir().as_ref());
+
+    let started = std::time::Instant::now();
+    let outcomes = ilar::tools::executor::execute_calls(
+        vec![ilar::tools::executor::ToolCall {
+            id: "background-bash".into(),
+            name: "bash".into(),
+            input: serde_json::json!({
+                "command": "sleep 0.2; printf benchmark-done",
+                "run_in_background": true
+            }),
+        }],
+        |name| registry.get(name),
+        ctx,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    let output = &outcomes[0].output;
+    assert!(!output.is_error, "{}", output.content);
+    assert!(
+        output.content.contains("Background job"),
+        "{}",
+        output.content
+    );
+    let job_id = output
+        .content
+        .split_whitespace()
+        .nth(2)
+        .expect("job ID in launch output");
+    assert!(started.elapsed() < Duration::from_millis(150));
+
+    let notification = tokio::time::timeout(Duration::from_secs(2), notifications.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(notification.parent_session_id, session_id);
+    assert!(
+        notification.text.contains("benchmark-done"),
+        "{}",
+        notification.text
+    );
+    assert!(notification.text.contains(job_id), "{}", notification.text);
+    assert!(!notification.is_error);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), notifications.recv())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn contended_background_bash_still_returns_immediately() {
+    let (store, session_id) = temp_store();
+    let spawner = spawner(Arc::new(MockProvider::new(vec![])), &store);
+    let mut notifications = spawner.subscribe();
+    let registry = ToolRegistry::builtin()
+        .with_subagents(spawner.clone())
+        .unwrap();
+    let ctx = background_tool_context(session_id, spawner, std::env::temp_dir().as_ref());
+    let permit = ctx
+        .workspace
+        .acquire(ilar::tools::WorkspaceAccess::Mutating)
+        .await;
+    let started = std::time::Instant::now();
+    let output = registry
+        .get("bash")
+        .unwrap()
+        .run(
+            serde_json::json!({"command": "printf queued", "run_in_background": true}),
+            ctx,
+        )
+        .await;
+    assert!(!output.is_error);
+    assert!(started.elapsed() < Duration::from_millis(100));
+    drop(permit);
+    let notification = notifications.recv().await.unwrap();
+    assert!(notification.text.contains("queued"));
+}
+
+#[tokio::test]
+async fn background_tool_must_be_the_only_call_in_a_step() {
+    let (store, session_id) = temp_store();
+    let spawner = spawner(Arc::new(MockProvider::new(vec![])), &store);
+    let mut notifications = spawner.subscribe();
+    let registry = ToolRegistry::builtin()
+        .with_subagents(spawner.clone())
+        .unwrap();
+    let ctx = background_tool_context(session_id, spawner, std::env::temp_dir().as_ref());
+    let outcomes = ilar::tools::executor::execute_calls(
+        vec![
+            ilar::tools::executor::ToolCall {
+                id: "background".into(),
+                name: "bash".into(),
+                input: serde_json::json!({"command": "printf nope", "run_in_background": true}),
+            },
+            ilar::tools::executor::ToolCall {
+                id: "read".into(),
+                name: "read".into(),
+                input: serde_json::json!({"path": "missing"}),
+            },
+        ],
+        |name| registry.get(name),
+        ctx,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    assert!(outcomes[0].output.is_error);
+    assert!(outcomes[0].output.content.contains("only tool call"));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), notifications.recv())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn root_cancellation_stops_background_bash() {
+    let (store, session_id) = temp_store();
+    let spawner = spawner(Arc::new(MockProvider::new(vec![])), &store);
+    let mut notifications = spawner.subscribe();
+    let registry = ToolRegistry::builtin()
+        .with_subagents(spawner.clone())
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("root-cancelled");
+    let root_cancel = tokio_util::sync::CancellationToken::new();
+    let mut ctx = background_tool_context(session_id, spawner, dir.path());
+    ctx.cancel = root_cancel.clone();
+    registry
+        .get("bash")
+        .unwrap()
+        .run(
+            serde_json::json!({
+                "command": format!("sleep 1; touch {}", marker.display()),
+                "run_in_background": true
+            }),
+            ctx,
+        )
+        .await;
+    root_cancel.cancel();
+    let notification = notifications.recv().await.unwrap();
+    assert!(notification.text.contains("cancelled"));
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert!(!marker.exists());
+}
+
+#[tokio::test]
+async fn root_cancellation_reaches_background_bash_from_foreground_child() {
+    let (store, session_id) = temp_store();
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("nested-root-cancelled");
+    let child = MockProvider::new(vec![
+        vec![
+            ProviderEvent::ToolCallCompleted {
+                id: "nested-bash".into(),
+                name: "bash".into(),
+                input: serde_json::json!({
+                    "command": format!("sleep 1; touch {}", marker.display()),
+                    "run_in_background": true
+                }),
+            },
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+                usage: Default::default(),
+            },
+        ],
+        vec![
+            ProviderEvent::TextDelta("child continues".into()),
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+                usage: Default::default(),
+            },
+        ],
+    ]);
+    let spawner = spawner(Arc::new(child), &store);
+    let mut notifications = spawner.subscribe();
+    let registry = ToolRegistry::builtin()
+        .with_subagents(spawner.clone())
+        .unwrap();
+    let root_cancel = tokio_util::sync::CancellationToken::new();
+    let mut ctx = background_tool_context(session_id, spawner, dir.path());
+    ctx.cancel = root_cancel.clone();
+    let output = registry
+        .get("task")
+        .unwrap()
+        .run(
+            serde_json::json!({
+                "description": "nested background Bash",
+                "prompt": "launch benchmark",
+                "subagent_type": "explore"
+            }),
+            ctx,
+        )
+        .await;
+    assert!(!output.is_error, "{}", output.content);
+    root_cancel.cancel();
+    let notification = tokio::time::timeout(Duration::from_secs(2), notifications.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        notification.text.contains("cancelled"),
+        "{}",
+        notification.text
+    );
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert!(!marker.exists());
+}
+
+#[tokio::test]
+async fn shutdown_seals_background_registry() {
+    let (store, session_id) = temp_store();
+    let spawner = spawner(Arc::new(MockProvider::new(vec![])), &store);
+    let registry = ToolRegistry::builtin()
+        .with_subagents(spawner.clone())
+        .unwrap();
+    spawner.shutdown().await;
+    let output = registry
+        .get("bash")
+        .unwrap()
+        .run(
+            serde_json::json!({"command": "printf nope", "run_in_background": true}),
+            background_tool_context(session_id, spawner.clone(), std::env::temp_dir().as_ref()),
+        )
+        .await;
+    assert!(output.is_error);
+    assert!(
+        output.content.contains("shutting down"),
+        "{}",
+        output.content
+    );
+    assert_eq!(spawner.running_background(), 0);
+}
+
+#[tokio::test]
+async fn background_bash_timeout_is_overridable() {
+    let (store, session_id) = temp_store();
+    let spawner = spawner(Arc::new(MockProvider::new(vec![])), &store);
+    let mut notifications = spawner.subscribe();
+    let registry = ToolRegistry::builtin()
+        .with_subagents(spawner.clone())
+        .unwrap();
+    let ctx = background_tool_context(session_id, spawner, std::env::temp_dir().as_ref());
+    let output = registry
+        .get("bash")
+        .unwrap()
+        .run(
+            serde_json::json!({
+                "command": "sleep 10",
+                "run_in_background": true,
+                "timeout_ms": 100
+            }),
+            ctx,
+        )
+        .await;
+    assert!(!output.is_error);
+
+    let notification = tokio::time::timeout(Duration::from_secs(2), notifications.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(notification.is_error);
+    assert!(
+        notification.text.contains("timed out after 100ms"),
+        "{}",
+        notification.text
+    );
+}
+
+#[tokio::test]
+async fn cancelling_background_bash_kills_work_and_notifies() {
+    let (store, session_id) = temp_store();
+    let spawner = spawner(Arc::new(MockProvider::new(vec![])), &store);
+    let mut notifications = spawner.subscribe();
+    let registry = ToolRegistry::builtin()
+        .with_subagents(spawner.clone())
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("should-not-exist");
+    let command = format!("sleep 1; touch {}", marker.display());
+    let ctx = background_tool_context(session_id, spawner.clone(), dir.path());
+    registry
+        .get("bash")
+        .unwrap()
+        .run(
+            serde_json::json!({"command": command, "run_in_background": true}),
+            ctx,
+        )
+        .await;
+    spawner.abort_all();
+
+    let notification = tokio::time::timeout(Duration::from_secs(2), notifications.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(notification.is_error);
+    assert!(
+        notification.text.contains("cancelled"),
+        "{}",
+        notification.text
+    );
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while spawner.running_background() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cancelled job handle was not cleaned up");
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert!(!marker.exists(), "cancelled process continued running");
+}
+
+#[tokio::test]
+async fn background_bash_holds_workspace_until_completion() {
+    let (store, session_id) = temp_store();
+    let spawner = spawner(Arc::new(MockProvider::new(vec![])), &store);
+    let mut notifications = spawner.subscribe();
+    let registry = ToolRegistry::builtin()
+        .with_subagents(spawner.clone())
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let background_started = dir.path().join("background-started");
+    let ctx = background_tool_context(session_id, spawner, dir.path());
+    registry
+        .get("bash")
+        .unwrap()
+        .run(
+            serde_json::json!({
+                "command": format!("touch {}; sleep 0.2; printf background-finished", background_started.display()),
+                "run_in_background": true
+            }),
+            ctx.clone(),
+        )
+        .await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !background_started.exists() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("background Bash did not acquire the workspace");
+
+    let started = std::time::Instant::now();
+    let outcomes = ilar::tools::executor::execute_calls(
+        vec![ilar::tools::executor::ToolCall {
+            id: "write-after-background".into(),
+            name: "write".into(),
+            input: serde_json::json!({"path": "after.txt", "content": "foreground"}),
+        }],
+        |name| registry.get(name),
+        ctx,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    assert!(
+        !outcomes[0].output.is_error,
+        "{}",
+        outcomes[0].output.content
+    );
+    assert!(
+        started.elapsed() >= Duration::from_millis(150),
+        "foreground mutation overlapped background Bash: {:?}",
+        started.elapsed()
+    );
+    let notification = notifications.recv().await.unwrap();
+    assert!(notification.text.contains("background-finished"));
+}
+
 #[tokio::test]
 async fn background_task_returns_immediately_and_notifies_once() {
     let (store, session_id) = temp_store();
@@ -209,6 +595,8 @@ async fn stall_watchdog_fires_on_silent_child() {
                 session_id,
                 depth: 0,
                 subagent: Some(spawner),
+                workspace: ilar::tools::WorkspaceScheduler::new(),
+                cancel: tokio_util::sync::CancellationToken::new(),
             },
         )
         .await;

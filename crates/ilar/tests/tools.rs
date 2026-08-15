@@ -492,6 +492,27 @@ async fn dropping_bash_future_kills_descendants() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn successful_bash_kills_daemonized_process_group_children() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("daemon-marker");
+    let command = format!("(sleep 1; touch {}) >/dev/null 2>&1 &", marker.display());
+    let out = run(
+        &registry(),
+        "bash",
+        serde_json::json!({"command": command}),
+        &ctx(dir.path()),
+    )
+    .await;
+    assert!(!out.is_error, "{}", out.content);
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    assert!(
+        !marker.exists(),
+        "background descendant survived Bash completion"
+    );
+}
+
 // ---- glob ----
 
 #[tokio::test]

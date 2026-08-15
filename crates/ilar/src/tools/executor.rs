@@ -59,6 +59,7 @@ pub async fn execute_calls<F>(
 where
     F: Fn(&str) -> Option<Arc<dyn Tool>>,
 {
+    let call_count = calls.len();
     let mut outcomes: Vec<Option<CallOutcome>> = calls.iter().map(|_| None).collect();
     let mut pending: VecDeque<ToolCall> = calls.into_iter().collect();
     let mut running_meta: Vec<Running> = Vec::new();
@@ -98,14 +99,42 @@ where
             let call = pending.pop_front().unwrap();
             let idx = next_idx;
             next_idx += 1;
+            let background = tool.supports_background()
+                && call
+                    .input
+                    .get("run_in_background")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true);
+            if background && call_count != 1 {
+                outcomes[idx] = Some(CallOutcome {
+                    id: call.id,
+                    name: call.name,
+                    output: ToolOutput::error(
+                        "background tool calls must be the only tool call in a provider step",
+                    ),
+                    cancelled: false,
+                });
+                continue;
+            }
             running_meta.push(Running {
                 idx,
                 id: call.id.clone(),
                 name: call.name.clone(),
                 kind,
             });
-            let fut = tool.run(call.input, ctx.clone());
-            running.push(Box::pin(async move { (idx, fut.await) }));
+            let manages_workspace_access = tool.manages_workspace_access();
+            let access = tool.workspace_access();
+            let call_ctx = ctx.clone();
+            let input = call.input;
+            running.push(Box::pin(async move {
+                let output = if background || manages_workspace_access {
+                    tool.run(input, call_ctx).await
+                } else {
+                    let _permit = call_ctx.workspace.acquire(access).await;
+                    tool.run(input, call_ctx).await
+                };
+                (idx, output)
+            }));
         }
 
         if running.is_empty() {

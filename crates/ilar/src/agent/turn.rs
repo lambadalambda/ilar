@@ -441,13 +441,10 @@ pub async fn run_turn(
                 input: (*input).clone(),
             })
             .collect();
-        let outcomes = execute_calls(
-            calls,
-            |name| registry.get(name),
-            tool_ctx.clone(),
-            cancel.clone(),
-        )
-        .await;
+        let mut call_ctx = tool_ctx.clone();
+        call_ctx.cancel = cancel.clone();
+        let outcomes =
+            execute_calls(calls, |name| registry.get(name), call_ctx, cancel.clone()).await;
         let mut outcomes = outcomes.into_iter();
         for (id, name, input, completed) in ordered_calls {
             let outcome = if completed && !input.is_null() {

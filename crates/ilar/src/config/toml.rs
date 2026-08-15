@@ -49,6 +49,8 @@ pub struct SubagentConfig {
     pub max_concurrent: usize,
     #[serde(default = "default_max_depth")]
     pub max_depth: usize,
+    #[serde(default = "default_background_tool_timeout_ms")]
+    pub background_tool_timeout_ms: u64,
 }
 
 impl Default for SubagentConfig {
@@ -56,6 +58,7 @@ impl Default for SubagentConfig {
         Self {
             max_concurrent: default_max_concurrent(),
             max_depth: default_max_depth(),
+            background_tool_timeout_ms: default_background_tool_timeout_ms(),
         }
     }
 }
@@ -66,6 +69,10 @@ fn default_max_concurrent() -> usize {
 
 fn default_max_depth() -> usize {
     3
+}
+
+fn default_background_tool_timeout_ms() -> u64 {
+    600_000
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
