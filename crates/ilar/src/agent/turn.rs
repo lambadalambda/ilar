@@ -7,7 +7,7 @@ use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::event::{LoopEvent, publish};
-use crate::provider::{Provider, ProviderEvent, Request, StopReason};
+use crate::provider::{ProviderEvent, ProviderResolver, Request, StopReason};
 use crate::session::{ContentBlock, SessionEvent, SessionStore, Usage, new_id};
 use crate::tools::ToolRegistry;
 use crate::tools::executor::{ToolCall, execute_calls};
@@ -19,7 +19,8 @@ pub struct LoopConfig {
     /// Max provider calls per user turn (tool-loop guard).
     pub max_iterations: usize,
     /// Context window in tokens; compaction triggers above
-    /// `context_limit * compaction_threshold`. None disables compaction.
+    /// `context_limit * compaction_threshold`. None uses the resolver's
+    /// model-specific default, or disables compaction if it has none.
     pub context_limit: Option<u64>,
     pub compaction_threshold: f64,
 }
@@ -89,7 +90,7 @@ impl StepAccumulator {
 /// session.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_turn(
-    provider: &dyn Provider,
+    resolver: &dyn ProviderResolver,
     registry: &ToolRegistry,
     store: &SessionStore,
     session_id: &str,
@@ -101,6 +102,8 @@ pub async fn run_turn(
     mut tool_ctx: crate::tools::ToolContext,
 ) -> Result<TurnOutcome> {
     let mut session = store.acquire_writer(session_id)?.load()?;
+    let model = session.effective_model();
+    let provider = resolver.resolve_provider(&model)?;
     session.append(SessionEvent::UserMessage {
         id: new_id(),
         text: user_input.to_string(),
@@ -109,9 +112,18 @@ pub async fn run_turn(
     publish(&events, LoopEvent::TurnStarted);
 
     // Compaction runs once per user turn, before the provider loop.
-    if let (Some(limit), threshold) = (config.context_limit, config.compaction_threshold)
-        && crate::compaction::compact_if_needed_locked(provider, &mut session, limit, threshold)
-            .await?
+    let context_limit = config
+        .context_limit
+        .or_else(|| resolver.context_limit(&model));
+    if let (Some(limit), threshold) = (context_limit, config.compaction_threshold)
+        && crate::compaction::compact_if_needed_locked(
+            provider.as_provider(),
+            &model,
+            &mut session,
+            limit,
+            threshold,
+        )
+        .await?
     {
         publish(&events, LoopEvent::Compacted);
     }
@@ -131,14 +143,14 @@ pub async fn run_turn(
         }
 
         let request = Request {
-            model: session.effective_model(),
+            model: model.clone(),
             system_prompt: system_prompt.map(String::from),
             messages: session.transcript(),
             tools: tools.clone(),
             options: serde_json::Value::Null,
         };
 
-        let mut stream = provider.stream(request)?;
+        let mut stream = provider.as_provider().stream(request)?;
         let mut acc = StepAccumulator::default();
         let mut aborted = false;
         let mut errored: Option<String> = None;
@@ -219,7 +231,7 @@ pub async fn run_turn(
             if !blocks.is_empty() {
                 session.append(SessionEvent::AssistantMessage {
                     id: new_id(),
-                    model: session.effective_model(),
+                    model: model.clone(),
                     content: blocks,
                     usage: acc.usage,
                     stop_reason: "error".into(),
@@ -275,7 +287,7 @@ pub async fn run_turn(
             if !blocks.is_empty() {
                 session.append(SessionEvent::AssistantMessage {
                     id: new_id(),
-                    model: session.effective_model(),
+                    model: model.clone(),
                     content: blocks,
                     usage: acc.usage,
                     stop_reason: "aborted".into(),
@@ -323,7 +335,7 @@ pub async fn run_turn(
         if !blocks.is_empty() {
             session.append(SessionEvent::AssistantMessage {
                 id: new_id(),
-                model: session.effective_model(),
+                model: model.clone(),
                 content: blocks,
                 usage: acc.usage,
                 stop_reason: stop_reason.clone(),

@@ -415,3 +415,13 @@ validated `SessionId`. Cross-process tests prove actionable nonblocking
 contention and OS lock release after forced process exit; the test helper is
 isolated and reaped on timeout or panic. Platform-specific `fs2` contention
 errors are normalized to `WouldBlock`.
+
+## 2026-08-15 — Stabilization: provider/model lifecycle
+
+Each writer-owned turn now captures the persisted effective model and resolves
+its matching provider exactly once before appending user input. The same pair
+drives compaction and every tool-loop step. Resume defaults to persisted agent
+and model state, explicit CLI model selection wins and persists first, and
+subagents inherit the parent model unless their agent overrides it. Nested
+background tasks are rejected until parent-specific notification contexts are
+supported.

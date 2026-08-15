@@ -4,7 +4,9 @@ use std::time::Duration;
 use futures::stream;
 use ilar::agent::{LoopConfig, TurnOutcome, run_turn};
 use ilar::config::AgentDefinition;
-use ilar::provider::{EventStream, MockProvider, Provider, ProviderEvent, Request, StopReason};
+use ilar::provider::{
+    EventStream, FixedProviderResolver, MockProvider, Provider, ProviderEvent, Request, StopReason,
+};
 use ilar::session::{ContentBlock, SessionMeta, SessionStore, Usage, new_id};
 use ilar::subagent::SubagentSpawner;
 use ilar::tools::{ToolContext, ToolRegistry};
@@ -69,7 +71,7 @@ impl Provider for Silent {
 fn spawner(provider: Arc<dyn Provider>, store: &SessionStore) -> Arc<SubagentSpawner> {
     Arc::new(
         SubagentSpawner::new(
-            provider,
+            Arc::new(FixedProviderResolver::new(provider)),
             store.clone(),
             vec![AgentDefinition {
                 name: "explore".into(),
@@ -185,7 +187,7 @@ async fn background_task_returns_immediately_and_notifies_once() {
 
 #[tokio::test]
 async fn stall_watchdog_fires_on_silent_child() {
-    let (store, _session_id) = temp_store();
+    let (store, session_id) = temp_store();
     let spawner = spawner(Arc::new(Silent), &store);
     let mut notifications = spawner.subscribe();
     let registry = ToolRegistry::builtin()
@@ -202,7 +204,12 @@ async fn stall_watchdog_fires_on_silent_child() {
                 "subagent_type": "explore",
                 "background": true,
             }),
-            ToolContext::root(std::env::temp_dir()).with_subagents(spawner),
+            ToolContext {
+                cwd: std::env::temp_dir(),
+                session_id,
+                depth: 0,
+                subagent: Some(spawner),
+            },
         )
         .await;
     assert!(!out.is_error);
@@ -225,6 +232,41 @@ async fn stall_watchdog_fires_on_silent_child() {
         start.elapsed() < Duration::from_secs(3),
         "watchdog took too long"
     );
+}
+
+#[tokio::test]
+async fn nested_background_tasks_are_rejected() {
+    let (store, _session_id) = temp_store();
+    let root = spawner(Arc::new(Silent), &store);
+    let nested = Arc::new(SubagentSpawner::new(
+        root.resolver(),
+        store,
+        root.agents().to_vec(),
+        std::env::temp_dir(),
+        1,
+        10,
+        3,
+    ));
+    let task = ToolRegistry::builtin()
+        .with_subagents(nested.clone())
+        .unwrap()
+        .get("task")
+        .unwrap();
+
+    let output = task
+        .run(
+            serde_json::json!({
+                "description": "nested background",
+                "prompt": "work",
+                "subagent_type": "explore",
+                "background": true,
+            }),
+            ToolContext::root(std::env::temp_dir()).with_subagents(nested),
+        )
+        .await;
+
+    assert!(output.is_error);
+    assert!(output.content.contains("Nested background"));
 }
 
 #[tokio::test]

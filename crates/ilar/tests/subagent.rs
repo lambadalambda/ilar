@@ -3,7 +3,10 @@ use std::time::{Duration, Instant};
 
 use ilar::agent::{LoopConfig, TurnOutcome, run_turn};
 use ilar::config::AgentDefinition;
-use ilar::provider::{EventStream, MockProvider, Provider, ProviderEvent, Request, StopReason};
+use ilar::provider::{
+    EventStream, FixedProviderResolver, MockProvider, Provider, ProviderEvent, ProviderHandle,
+    ProviderResolver, Request, StopReason, resolve_model,
+};
 use ilar::session::{ContentBlock, SessionMeta, SessionStore, Usage, new_id};
 use ilar::subagent::SubagentSpawner;
 use ilar::tools::{ToolContext, ToolRegistry};
@@ -62,7 +65,7 @@ fn spawner(
     max_depth: usize,
 ) -> Arc<SubagentSpawner> {
     Arc::new(SubagentSpawner::new(
-        provider,
+        Arc::new(FixedProviderResolver::new(provider)),
         store.clone(),
         vec![AgentDefinition {
             name: "explore".into(),
@@ -199,6 +202,21 @@ impl Provider for SharedProvider {
     }
 }
 
+struct ModelResolver {
+    zai: MockProvider,
+    openai: MockProvider,
+}
+
+impl ProviderResolver for ModelResolver {
+    fn resolve_provider(&self, model: &str) -> anyhow::Result<ProviderHandle<'_>> {
+        match resolve_model(model)?.0 {
+            "zai" => Ok(ProviderHandle::Borrowed(&self.zai)),
+            "openai" => Ok(ProviderHandle::Borrowed(&self.openai)),
+            provider => anyhow::bail!("unknown provider {provider}"),
+        }
+    }
+}
+
 #[tokio::test]
 async fn concurrency_cap_errors_with_guidance() {
     let (store, session_id) = temp_store();
@@ -271,7 +289,7 @@ async fn depth_cap_errors_with_guidance() {
     let spawner = spawner(Arc::new(MockProvider::new(vec![vec![]])), &store, 10, 2);
     // A spawner already at max depth.
     let deep = SubagentSpawner::new(
-        spawner.provider(),
+        spawner.resolver(),
         store.clone(),
         spawner.agents().to_vec(),
         std::env::temp_dir(),
@@ -292,7 +310,7 @@ async fn depth_cap_errors_with_guidance() {
                 "subagent_type": "explore",
             }),
             ToolContext::root(std::env::temp_dir()).with_subagents(Arc::new(SubagentSpawner::new(
-                spawner.provider(),
+                spawner.resolver(),
                 store.clone(),
                 spawner.agents().to_vec(),
                 std::env::temp_dir(),
@@ -339,8 +357,58 @@ async fn explicit_task_id_errors_instead_of_starting_a_replacement() {
 }
 
 #[tokio::test]
+async fn resumed_subagent_rejects_persisted_agent_mismatch() {
+    let (store, _parent_id) = temp_store();
+    let child_id = new_id();
+    drop(
+        store
+            .create(SessionMeta {
+                session_id: child_id.clone(),
+                parent_id: None,
+                agent: "other".into(),
+                model: "zai/glm-4.7".into(),
+            })
+            .unwrap(),
+    );
+    let task = parent_registry(spawner(
+        Arc::new(MockProvider::new(vec![vec![]])),
+        &store,
+        10,
+        3,
+    ))
+    .get("task")
+    .unwrap();
+
+    let output = task
+        .run(
+            serde_json::json!({
+                "description": "resume",
+                "prompt": "continue",
+                "subagent_type": "explore",
+                "task_id": child_id,
+            }),
+            ToolContext::root(std::env::temp_dir()),
+        )
+        .await;
+
+    assert!(output.is_error);
+    assert!(output.content.contains("persisted agent"));
+}
+
+#[tokio::test]
 async fn child_session_created_with_parent_link() {
     let (store, session_id) = temp_store();
+    store
+        .acquire_writer(&session_id)
+        .unwrap()
+        .load()
+        .unwrap()
+        .append(ilar::session::SessionEvent::ModelChange {
+            id: new_id(),
+            model: "openai/gpt-5.2".into(),
+            ts: chrono::Utc::now(),
+        })
+        .unwrap();
     let child: Arc<dyn Provider> = Arc::new(ScriptedDelayProvider {
         text: "found it",
         delay_ms: 10,
@@ -409,11 +477,127 @@ async fn child_session_created_with_parent_link() {
         Some(session_id.clone())
     );
     assert_eq!(child_session.meta().unwrap().agent, "explore");
+    assert_eq!(child_session.meta().unwrap().model, "openai/gpt-5.2");
     let child_transcript = child_session.transcript();
     assert!(matches!(
         &child_transcript[0].content[0],
         ContentBlock::Text { text } if text == "look"
     ));
+}
+
+#[tokio::test]
+async fn subagent_model_override_resolves_its_own_provider() {
+    let (store, session_id) = temp_store();
+    let resolver = Arc::new(ModelResolver {
+        zai: MockProvider::new(vec![vec![ProviderEvent::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        }]]),
+        openai: MockProvider::new(vec![vec![
+            ProviderEvent::TextDelta("openai child".into()),
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            },
+        ]]),
+    });
+    let spawner = Arc::new(SubagentSpawner::new(
+        resolver.clone(),
+        store.clone(),
+        vec![AgentDefinition {
+            name: "explore".into(),
+            description: "explores".into(),
+            model: Some("openai/gpt-5.2".into()),
+            prompt: String::new(),
+        }],
+        std::env::temp_dir(),
+        0,
+        10,
+        3,
+    ));
+    let task = parent_registry(spawner).get("task").unwrap();
+    let mut ctx = ToolContext::root(std::env::temp_dir());
+    ctx.session_id = session_id;
+
+    let output = task
+        .run(
+            serde_json::json!({
+                "description": "route",
+                "prompt": "use your model",
+                "subagent_type": "explore",
+            }),
+            ctx,
+        )
+        .await;
+
+    assert!(!output.is_error, "{}", output.content);
+    assert!(resolver.zai.requests().is_empty());
+    assert_eq!(resolver.openai.requests()[0].model, "openai/gpt-5.2");
+}
+
+#[tokio::test]
+async fn resumed_subagent_uses_its_persisted_model() {
+    let (store, parent_id) = temp_store();
+    let child_id = new_id();
+    let mut child = store
+        .create(SessionMeta {
+            session_id: child_id.clone(),
+            parent_id: Some(parent_id.clone()),
+            agent: "explore".into(),
+            model: "zai/original".into(),
+        })
+        .unwrap();
+    child
+        .append(ilar::session::SessionEvent::ModelChange {
+            id: new_id(),
+            model: "openai/gpt-5.2".into(),
+            ts: chrono::Utc::now(),
+        })
+        .unwrap();
+    drop(child);
+    let resolver = Arc::new(ModelResolver {
+        zai: MockProvider::new(vec![vec![ProviderEvent::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        }]]),
+        openai: MockProvider::new(vec![vec![ProviderEvent::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        }]]),
+    });
+    let spawner = Arc::new(SubagentSpawner::new(
+        resolver.clone(),
+        store,
+        vec![AgentDefinition {
+            name: "explore".into(),
+            description: "explores".into(),
+            model: Some("zai/current-default".into()),
+            prompt: String::new(),
+        }],
+        std::env::temp_dir(),
+        0,
+        10,
+        3,
+    ));
+    let task = parent_registry(spawner).get("task").unwrap();
+    let mut ctx = ToolContext::root(std::env::temp_dir());
+    ctx.session_id = parent_id;
+
+    let output = task
+        .run(
+            serde_json::json!({
+                "description": "resume",
+                "prompt": "continue",
+                "subagent_type": "explore",
+                "task_id": child_id,
+            }),
+            ctx,
+        )
+        .await;
+
+    assert!(!output.is_error, "{}", output.content);
+    assert!(resolver.zai.requests().is_empty());
+    assert_eq!(resolver.openai.requests()[0].model, "openai/gpt-5.2");
 }
 
 #[tokio::test]

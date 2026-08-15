@@ -247,6 +247,10 @@ fn openai_message(msg: &ChatMessage) -> Vec<serde_json::Value> {
 }
 
 impl Provider for ZaiProvider {
+    fn provider_prefix(&self) -> Option<&'static str> {
+        Some("zai")
+    }
+
     fn stream(&self, req: Request) -> anyhow::Result<EventStream> {
         let body = self.wire_body(&req)?;
         let url = match self.flavor {

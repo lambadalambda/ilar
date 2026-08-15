@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use crate::agent::{LoopConfig, run_turn};
 use crate::config::AgentDefinition;
 use crate::config::system_prompt_for;
-use crate::provider::Provider;
+use crate::provider::ProviderResolver;
 use crate::session::{ContentBlock, SessionMeta, SessionStore, new_id};
 use crate::tools::{Tool, ToolContext, ToolFuture, ToolKind, ToolOutput, ToolRegistry};
 use serde::Deserialize;
@@ -25,7 +25,7 @@ pub struct Notification {
 /// session's turns (concurrency slot counter) and cloned into children
 /// (depth+1) for nesting up to the depth cap.
 pub struct SubagentSpawner {
-    provider: Arc<dyn Provider>,
+    resolver: Arc<dyn ProviderResolver>,
     store: SessionStore,
     agents: Vec<AgentDefinition>,
     cwd: std::path::PathBuf,
@@ -45,7 +45,7 @@ pub struct SubagentSpawner {
 impl SubagentSpawner {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        provider: Arc<dyn Provider>,
+        resolver: Arc<dyn ProviderResolver>,
         store: SessionStore,
         agents: Vec<AgentDefinition>,
         cwd: std::path::PathBuf,
@@ -56,7 +56,7 @@ impl SubagentSpawner {
         let (notify_tx, notify_rx) = tokio::sync::mpsc::unbounded_channel();
         Self {
             notify_rx: Arc::new(Mutex::new(Some(notify_rx))),
-            provider,
+            resolver,
             store,
             agents,
             cwd,
@@ -101,8 +101,8 @@ impl SubagentSpawner {
         tasks.len()
     }
 
-    pub fn provider(&self) -> Arc<dyn Provider> {
-        self.provider.clone()
+    pub fn resolver(&self) -> Arc<dyn ProviderResolver> {
+        self.resolver.clone()
     }
 
     pub fn agents(&self) -> &[AgentDefinition] {
@@ -113,7 +113,7 @@ impl SubagentSpawner {
     /// counter and notification channel.
     fn child_spawner(self: &Arc<Self>) -> Arc<Self> {
         Arc::new(Self {
-            provider: self.provider.clone(),
+            resolver: self.resolver.clone(),
             store: self.store.clone(),
             agents: self.agents.clone(),
             cwd: self.cwd.clone(),
@@ -135,6 +135,12 @@ impl SubagentSpawner {
                 "Subagent nesting limit reached (depth {} of {}). Complete this task directly with your tools instead of spawning another agent.",
                 self.depth, self.max_depth
             ));
+        }
+        if input.background == Some(true) && self.depth > 0 {
+            return ToolOutput::error(
+                "Nested background tasks are not supported; run this nested task in the foreground."
+                    .to_string(),
+            );
         }
 
         let Some(agent) = self.agents.iter().find(|a| a.name == input.subagent_type) else {
@@ -160,14 +166,36 @@ impl SubagentSpawner {
         // Session: resume task_id if given and loadable, else a fresh child.
         let session_id = match &input.task_id {
             Some(id) => match self.store.load(id) {
-                Ok(_) => id.clone(),
+                Ok(session) => {
+                    if session
+                        .meta()
+                        .is_none_or(|meta| meta.agent != input.subagent_type)
+                    {
+                        return ToolOutput::error(format!(
+                            "resuming task session {id:?}: persisted agent does not match {:?}",
+                            input.subagent_type
+                        ));
+                    }
+                    id.clone()
+                }
                 Err(error) => {
                     return ToolOutput::error(format!("resuming task session {id:?}: {error}"));
                 }
             },
             None => {
                 let id = new_id();
-                let model = agent.model.clone().unwrap_or_else(|| "zai/glm-4.7".into());
+                let model = match &agent.model {
+                    Some(model) => model.clone(),
+                    None => match self.store.load(&ctx.session_id) {
+                        Ok(parent) => parent.effective_model(),
+                        Err(error) => {
+                            return ToolOutput::error(format!(
+                                "loading parent session {:?}: {error}",
+                                ctx.session_id
+                            ));
+                        }
+                    },
+                };
                 if let Err(e) = self.store.create(SessionMeta {
                     session_id: id.clone(),
                     parent_id: Some(ctx.session_id.clone()),
@@ -233,7 +261,7 @@ impl SubagentSpawner {
                     }
                 };
                 let turn = run_turn(
-                    spawner.provider.as_ref(),
+                    spawner.resolver.as_ref(),
                     &registry,
                     &spawner.store,
                     &session_id,
@@ -308,7 +336,7 @@ DO NOT sleep, poll, or check on it — work on something else or end your respon
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let outcome = run_turn(
-            self.provider.as_ref(),
+            self.resolver.as_ref(),
             &registry,
             &self.store,
             &session_id,

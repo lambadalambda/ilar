@@ -1,5 +1,7 @@
 use ilar::agent::{LoopConfig, TurnOutcome, run_turn};
-use ilar::provider::{MockProvider, ProviderEvent, StopReason};
+use ilar::provider::{
+    MockProvider, ProviderEvent, ProviderHandle, ProviderResolver, StopReason, resolve_model,
+};
 use ilar::session::{SessionEvent, SessionMeta, SessionStore, Usage, new_id};
 use ilar::tools::{ToolContext, ToolRegistry};
 
@@ -40,6 +42,21 @@ fn tiny_config() -> LoopConfig {
     }
 }
 
+struct RoutingResolver {
+    zai: MockProvider,
+    openai: MockProvider,
+}
+
+impl ProviderResolver for RoutingResolver {
+    fn resolve_provider(&self, model: &str) -> anyhow::Result<ProviderHandle<'_>> {
+        match resolve_model(model)?.0 {
+            "zai" => Ok(ProviderHandle::Borrowed(&self.zai)),
+            "openai" => Ok(ProviderHandle::Borrowed(&self.openai)),
+            provider => anyhow::bail!("unknown provider {provider}"),
+        }
+    }
+}
+
 #[tokio::test]
 async fn oversize_transcript_triggers_compaction() {
     let (store, session_id) = temp_session();
@@ -69,18 +86,28 @@ async fn oversize_transcript_triggers_compaction() {
                 })
                 .unwrap();
         }
+        session
+            .append(SessionEvent::ModelChange {
+                id: new_id(),
+                model: "openai/gpt-5.2".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
     }
 
     // Script: turn 1 = the compaction summary, turn 2 = the real answer.
-    let provider = MockProvider::new(vec![
-        text_turn("SUMMARY: user asked about frobnicator; answered 6 times."),
-        text_turn("fresh answer"),
-    ]);
+    let resolver = RoutingResolver {
+        zai: MockProvider::error("wrong provider"),
+        openai: MockProvider::new(vec![
+            text_turn("SUMMARY: user asked about frobnicator; answered 6 times."),
+            text_turn("fresh answer"),
+        ]),
+    };
     let registry = ToolRegistry::builtin();
 
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let outcome = run_turn(
-        &provider,
+        &resolver,
         &registry,
         &store,
         &session_id,
@@ -96,9 +123,12 @@ async fn oversize_transcript_triggers_compaction() {
 
     assert_eq!(outcome, TurnOutcome::Completed);
     // Two provider calls: compaction + real.
-    assert_eq!(provider.requests().len(), 2);
+    assert!(resolver.zai.requests().is_empty());
+    assert_eq!(resolver.openai.requests().len(), 2);
     // The compaction request carried the old transcript + summarizer prompt.
-    let first = &provider.requests()[0];
+    let requests = resolver.openai.requests();
+    let first = &requests[0];
+    assert_eq!(first.model, "openai/gpt-5.2");
     assert!(
         first
             .system_prompt
@@ -113,6 +143,7 @@ async fn oversize_transcript_triggers_compaction() {
         first.tools.is_empty(),
         "compaction call must not carry tools"
     );
+    assert_eq!(requests[1].model, "openai/gpt-5.2");
 
     // Session contains a compaction event before the new exchange.
     let session = store.load(&session_id).unwrap();

@@ -1,5 +1,8 @@
 use ilar::agent::{LoopConfig, run_turn};
-use ilar::provider::{MockProvider, ProviderEvent, StopReason};
+use ilar::provider::openai::OpenAIProvider;
+use ilar::provider::{
+    MockProvider, ProviderEvent, ProviderHandle, ProviderResolver, StopReason, resolve_model,
+};
 use ilar::session::{SessionEvent, SessionMeta, SessionStore, Usage, new_id};
 use ilar::tools::{ToolContext, ToolRegistry};
 
@@ -26,6 +29,22 @@ fn text_turn() -> Vec<ProviderEvent> {
             usage: Usage::default(),
         },
     ]
+}
+
+struct RoutingResolver {
+    zai: MockProvider,
+    openai: MockProvider,
+}
+
+impl ProviderResolver for RoutingResolver {
+    fn resolve_provider(&self, model: &str) -> anyhow::Result<ProviderHandle<'_>> {
+        let (provider, _) = resolve_model(model)?;
+        match provider {
+            "zai" => Ok(ProviderHandle::Borrowed(&self.zai)),
+            "openai" => Ok(ProviderHandle::Borrowed(&self.openai)),
+            _ => anyhow::bail!("unknown provider {provider}"),
+        }
+    }
 }
 
 #[test]
@@ -107,4 +126,100 @@ async fn model_change_applies_from_next_provider_call() {
         })
         .collect();
     assert_eq!(assistant_models, vec!["zai/glm-4.7", "zai/glm-4.7-air"]);
+}
+
+#[tokio::test]
+async fn turn_resolves_provider_from_persisted_effective_model() {
+    let (store, session_id) = temp_session("zai/glm-4.7");
+    store
+        .acquire_writer(&session_id)
+        .unwrap()
+        .load()
+        .unwrap()
+        .append(SessionEvent::ModelChange {
+            id: new_id(),
+            model: "openai/gpt-5.2".into(),
+            ts: chrono::Utc::now(),
+        })
+        .unwrap();
+    let resolver = RoutingResolver {
+        zai: MockProvider::new(vec![text_turn()]),
+        openai: MockProvider::new(vec![text_turn()]),
+    };
+
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    run_turn(
+        &resolver,
+        &ToolRegistry::builtin(),
+        &store,
+        &session_id,
+        "continue",
+        None,
+        LoopConfig::default(),
+        tx,
+        tokio_util::sync::CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+    )
+    .await
+    .unwrap();
+
+    assert!(resolver.zai.requests().is_empty());
+    assert_eq!(resolver.openai.requests()[0].model, "openai/gpt-5.2");
+}
+
+#[tokio::test]
+async fn provider_resolution_failure_does_not_append_user_message() {
+    struct RejectingResolver;
+    impl ProviderResolver for RejectingResolver {
+        fn resolve_provider(&self, model: &str) -> anyhow::Result<ProviderHandle<'_>> {
+            anyhow::bail!("no credentials for {model}")
+        }
+    }
+
+    let (store, session_id) = temp_session("openai/gpt-5.2");
+    let before = store.load(&session_id).unwrap().events().len();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let error = run_turn(
+        &RejectingResolver,
+        &ToolRegistry::builtin(),
+        &store,
+        &session_id,
+        "must not persist",
+        None,
+        LoopConfig::default(),
+        tx,
+        tokio_util::sync::CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("no credentials"));
+    assert_eq!(store.load(&session_id).unwrap().events().len(), before);
+}
+
+#[tokio::test]
+async fn concrete_provider_prefix_mismatch_fails_before_user_append() {
+    let (store, session_id) = temp_session("zai/glm-4.7");
+    let provider = OpenAIProvider::new("test-key".into(), None);
+    let before = store.load(&session_id).unwrap().events().len();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+    let error = run_turn(
+        &provider,
+        &ToolRegistry::builtin(),
+        &store,
+        &session_id,
+        "must not persist",
+        None,
+        LoopConfig::default(),
+        tx,
+        tokio_util::sync::CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("cannot serve"));
+    assert_eq!(store.load(&session_id).unwrap().events().len(), before);
 }

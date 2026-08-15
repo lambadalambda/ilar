@@ -40,3 +40,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Robust bash execution](issues/robust-bash-execution.md)
 - [x] [Crash-safe session recovery](issues/crash-safe-session-recovery.md)
 - [x] [Session writer lease](issues/session-writer-lease.md)
+- [x] [Provider routing and model lifecycle](issues/provider-routing-and-model-lifecycle.md)

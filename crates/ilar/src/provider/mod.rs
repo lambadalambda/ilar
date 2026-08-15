@@ -12,6 +12,7 @@ pub use mock::MockProvider;
 pub use request::{Request, ToolDefinition, resolve_model};
 
 use std::pin::Pin;
+use std::sync::Arc;
 
 use futures::stream::Stream;
 
@@ -36,4 +37,69 @@ pub type EventStream = Pin<Box<dyn Stream<Item = ProviderEvent> + Send>>;
 /// enough — a quiet connection can linger).
 pub trait Provider: Send + Sync {
     fn stream(&self, req: Request) -> anyhow::Result<EventStream>;
+
+    /// Wire-protocol prefix accepted by this provider. Prefix-neutral test
+    /// and adapter providers may leave this unspecified.
+    fn provider_prefix(&self) -> Option<&'static str> {
+        None
+    }
+}
+
+/// Provider selected for one writer-owned turn.
+pub enum ProviderHandle<'a> {
+    Borrowed(&'a dyn Provider),
+    Owned(Box<dyn Provider>),
+}
+
+impl ProviderHandle<'_> {
+    pub fn as_provider(&self) -> &dyn Provider {
+        match self {
+            Self::Borrowed(provider) => *provider,
+            Self::Owned(provider) => provider.as_ref(),
+        }
+    }
+}
+
+/// Resolves the concrete provider matching a persisted effective model.
+pub trait ProviderResolver: Send + Sync {
+    fn resolve_provider(&self, model: &str) -> anyhow::Result<ProviderHandle<'_>>;
+
+    fn context_limit(&self, _model: &str) -> Option<u64> {
+        None
+    }
+}
+
+impl<T: Provider> ProviderResolver for T {
+    fn resolve_provider(&self, model: &str) -> anyhow::Result<ProviderHandle<'_>> {
+        ensure_provider_matches(self, model)?;
+        Ok(ProviderHandle::Borrowed(self))
+    }
+}
+
+/// Adapter for callers that intentionally use one shared provider.
+pub struct FixedProviderResolver {
+    provider: Arc<dyn Provider>,
+}
+
+impl FixedProviderResolver {
+    pub fn new(provider: Arc<dyn Provider>) -> Self {
+        Self { provider }
+    }
+}
+
+impl ProviderResolver for FixedProviderResolver {
+    fn resolve_provider(&self, model: &str) -> anyhow::Result<ProviderHandle<'_>> {
+        ensure_provider_matches(self.provider.as_ref(), model)?;
+        Ok(ProviderHandle::Borrowed(self.provider.as_ref()))
+    }
+}
+
+fn ensure_provider_matches(provider: &dyn Provider, model: &str) -> anyhow::Result<()> {
+    let (requested, _) = resolve_model(model)?;
+    if let Some(actual) = provider.provider_prefix()
+        && actual != requested
+    {
+        anyhow::bail!("provider {actual:?} cannot serve model {model:?}");
+    }
+    Ok(())
 }

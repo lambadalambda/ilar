@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 
 use ilar::agent::{LoopConfig, LoopEvent, TurnOutcome, run_turn};
 use ilar::config::{Loader, system_prompt_for};
-use ilar::provider::Provider;
+use ilar::provider::ProviderResolver;
 use ilar::session::{SessionMeta, SessionStore, new_id};
 use ilar::subagent::SubagentSpawner;
 use ilar::tools::{ToolContext, ToolRegistry};
@@ -59,8 +59,8 @@ struct Args {
     session: Option<String>,
 
     /// Agent name from config (markdown agents).
-    #[arg(long, default_value = "build")]
-    agent: String,
+    #[arg(long)]
+    agent: Option<String>,
 
     /// Print the resolved system prompt and exit (debugging).
     #[arg(long)]
@@ -391,6 +391,35 @@ fn safe_lines(text: &str) -> Vec<String> {
     }
 }
 
+fn selected_agent_name(cli: Option<&str>, persisted: Option<&str>) -> String {
+    cli.or(persisted).unwrap_or("build").to_string()
+}
+
+fn selected_model(
+    cli: Option<&str>,
+    persisted: Option<&str>,
+    agent: Option<&str>,
+    general: &str,
+) -> String {
+    cli.or(persisted).or(agent).unwrap_or(general).to_string()
+}
+
+fn persist_model_change(
+    resolver: &dyn ProviderResolver,
+    store: &SessionStore,
+    session_id: &str,
+    model: &str,
+) -> Result<()> {
+    drop(resolver.resolve_provider(model)?);
+    let mut session = store.acquire_writer(session_id)?.load()?;
+    session.append(ilar::session::SessionEvent::ModelChange {
+        id: ilar::session::new_id(),
+        model: model.to_string(),
+        ts: chrono::Utc::now(),
+    })?;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -412,16 +441,34 @@ async fn main() -> Result<()> {
     }
 
     let config = Loader::new().resolve().context("loading config")?;
-    let model = args
-        .model
-        .clone()
-        .or_else(|| Some(config.general.model.clone()))
-        .unwrap();
+    let state_dir = ilar::config::default_state_dir();
+    let store = SessionStore::new(state_dir.join("sessions"));
+    let resumed = args
+        .session
+        .as_deref()
+        .map(|id| {
+            store
+                .load(id)
+                .with_context(|| format!("resuming session {id}"))
+        })
+        .transpose()?;
+    let persisted_agent = resumed
+        .as_ref()
+        .and_then(|session| session.meta())
+        .map(|meta| meta.agent.clone());
+    let agent_name = selected_agent_name(args.agent.as_deref(), persisted_agent.as_deref());
     let agent = config
         .agents()
         .into_iter()
-        .find(|a| a.name == args.agent)
-        .with_context(|| format!("unknown agent {:?}", args.agent))?;
+        .find(|a| a.name == agent_name)
+        .with_context(|| format!("unknown agent {agent_name:?}"))?;
+    let persisted_model = resumed.as_ref().map(|session| session.effective_model());
+    let model_for_session = selected_model(
+        args.model.as_deref(),
+        persisted_model.as_deref(),
+        agent.model.as_deref(),
+        &config.general.model,
+    );
 
     let cwd = std::env::current_dir().context("no cwd")?;
     let skill_store = std::sync::Arc::new(ilar::skill::SkillStore::new(
@@ -444,16 +491,23 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let model_for_session = agent.model.clone().unwrap_or_else(|| model.clone());
-    let provider: Arc<dyn Provider> = config
-        .provider_for(&model_for_session)
-        .with_context(|| format!("no provider configured for {model_for_session} (set ILAR_ZAI_API_KEY / ILAR_OPENAI_API_KEY)"))?
-        .into();
+    let resolver: Arc<dyn ProviderResolver> = Arc::new(config.clone());
+    drop(
+        resolver
+            .resolve_provider(&model_for_session)
+            .with_context(|| format!("no provider configured for {model_for_session} (set ILAR_ZAI_API_KEY / ILAR_OPENAI_API_KEY)"))?,
+    );
 
-    let state_dir = ilar::config::default_state_dir();
-    let store = SessionStore::new(state_dir.join("sessions"));
     let session_id = match &args.session {
-        Some(id) => id.clone(),
+        Some(id) => {
+            if args.model.is_some()
+                && persisted_model.as_deref() != Some(model_for_session.as_str())
+            {
+                persist_model_change(resolver.as_ref(), &store, id, &model_for_session)
+                    .with_context(|| format!("persisting model override {model_for_session}"))?;
+            }
+            id.clone()
+        }
         None => {
             let id = new_id();
             store
@@ -470,7 +524,7 @@ async fn main() -> Result<()> {
 
     let agents = config.agents();
     let spawner = std::sync::Arc::new(SubagentSpawner::new(
-        provider.clone(),
+        resolver.clone(),
         store.clone(),
         agents,
         cwd.clone(),
@@ -511,13 +565,7 @@ async fn main() -> Result<()> {
 
     let loop_config = {
         let threshold = config.compaction.threshold;
-        // GLM context window ~200k; conservative default per provider.
-        let limit = model_for_session
-            .starts_with("zai/")
-            .then_some(200_000u64)
-            .or(Some(128_000));
         move || LoopConfig {
-            context_limit: limit,
             compaction_threshold: threshold,
             ..LoopConfig::default()
         }
@@ -529,7 +577,7 @@ async fn main() -> Result<()> {
     run_app(
         &mut terminal,
         &mut app,
-        provider,
+        resolver,
         &store,
         &session_id,
         &system_prompt,
@@ -539,7 +587,6 @@ async fn main() -> Result<()> {
         notifications,
         loop_config,
         model_choices,
-        config,
     )
     .await
 }
@@ -559,7 +606,7 @@ fn next_notification(
 async fn run_app(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
-    provider: Arc<dyn Provider>,
+    resolver: Arc<dyn ProviderResolver>,
     store: &SessionStore,
     session_id: &str,
     system_prompt: &str,
@@ -569,11 +616,13 @@ async fn run_app(
     mut notifications: tokio::sync::mpsc::UnboundedReceiver<ilar::subagent::Notification>,
     loop_config: impl Fn() -> LoopConfig + Clone,
     model_choices: Vec<String>,
-    config: ilar::config::Config,
 ) -> Result<()> {
     let mut events_rx: Option<tokio::sync::mpsc::UnboundedReceiver<LoopEvent>> = None;
-    let mut provider = provider;
-    let mut model_index = 0usize;
+    let current_model = store.load(session_id)?.effective_model();
+    let mut model_index = model_choices
+        .iter()
+        .position(|model| model == &current_model)
+        .unwrap_or(0);
     let mut cancel: Option<CancellationToken> = None;
     let mut turn_handle: Option<tokio::task::JoinHandle<Result<TurnOutcome>>> = None;
 
@@ -616,7 +665,7 @@ async fn run_app(
             let token = CancellationToken::new();
             cancel = Some(token.clone());
             app.busy = true;
-            let provider = provider.clone();
+            let resolver = resolver.clone();
             let store = store.clone();
             let session_id = session_id.to_string();
             let system_prompt = system_prompt.to_string();
@@ -625,7 +674,7 @@ async fn run_app(
             let loop_config = loop_config();
             turn_handle = Some(tokio::spawn(async move {
                 run_turn(
-                    provider.as_ref(),
+                    resolver.as_ref(),
                     &registry,
                     &store,
                     &session_id,
@@ -668,31 +717,17 @@ async fn run_app(
                 (KeyCode::Char('m'), true) if !app.busy && model_choices.len() > 1 => {
                     let next_index = (model_index + 1) % model_choices.len();
                     let new_model = model_choices[next_index].clone();
-                    match config.provider_for(&new_model) {
-                        Some(new_provider) => {
-                            let persisted = store.acquire_writer(session_id).and_then(|writer| {
-                                let mut session = writer.load()?;
-                                session.append(ilar::session::SessionEvent::ModelChange {
-                                    id: ilar::session::new_id(),
-                                    model: new_model.clone(),
-                                    ts: chrono::Utc::now(),
-                                })
-                            });
-                            if let Err(error) = persisted {
-                                app.lines.push(Line_::System(format!(
-                                    "cannot switch to {new_model}: {error}"
-                                )));
-                                continue;
-                            }
+                    match persist_model_change(resolver.as_ref(), store, session_id, &new_model) {
+                        Ok(()) => {
                             model_index = next_index;
-                            provider = new_provider.into();
                             app.status = format!("model: {new_model}");
                             app.lines
                                 .push(Line_::System(format!("switched to {new_model}")));
                         }
-                        None => {
-                            app.lines
-                                .push(Line_::System(format!("no provider for {new_model}")));
+                        Err(error) => {
+                            app.lines.push(Line_::System(format!(
+                                "cannot switch to {new_model}: {error}"
+                            )));
                         }
                     }
                 }
@@ -716,21 +751,22 @@ async fn run_app(
                         let token = CancellationToken::new();
                         cancel = Some(token.clone());
                         app.busy = true;
-                        let provider = provider.clone();
+                        let resolver = resolver.clone();
                         let store = store.clone();
                         let session_id = session_id.to_string();
                         let system_prompt = system_prompt.to_string();
                         let registry = registry.clone();
                         let turn_ctx = tool_ctx.clone();
+                        let loop_config = loop_config();
                         turn_handle = Some(tokio::spawn(async move {
                             run_turn(
-                                provider.as_ref(),
+                                resolver.as_ref(),
                                 &registry,
                                 &store,
                                 &session_id,
                                 &text,
                                 Some(&system_prompt),
-                                LoopConfig::default(),
+                                loop_config,
                                 tx,
                                 token,
                                 turn_ctx,
@@ -772,6 +808,72 @@ async fn run_app(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_selection_respects_cli_and_persisted_precedence() {
+        assert_eq!(selected_agent_name(None, None), "build");
+        assert_eq!(selected_agent_name(None, Some("explore")), "explore");
+        assert_eq!(
+            selected_agent_name(Some("review"), Some("explore")),
+            "review"
+        );
+
+        assert_eq!(
+            selected_model(None, None, Some("zai/agent-model"), "zai/general"),
+            "zai/agent-model"
+        );
+        assert_eq!(
+            selected_model(
+                Some("openai/cli"),
+                None,
+                Some("zai/agent-model"),
+                "zai/general"
+            ),
+            "openai/cli"
+        );
+        assert_eq!(
+            selected_model(
+                None,
+                Some("openai/persisted"),
+                Some("zai/agent-model"),
+                "zai/general"
+            ),
+            "openai/persisted"
+        );
+    }
+
+    #[test]
+    fn model_change_is_adopted_only_after_persistence() {
+        let root = std::env::temp_dir().join(format!("ilar-tui-model-{}", new_id()));
+        let store = SessionStore::new(root.clone());
+        let session_id = new_id();
+        drop(
+            store
+                .create(SessionMeta {
+                    session_id: session_id.clone(),
+                    parent_id: None,
+                    agent: "build".into(),
+                    model: "zai/glm-4.7".into(),
+                })
+                .unwrap(),
+        );
+        let resolver = ilar::provider::MockProvider::default();
+
+        let writer = store.acquire_writer(&session_id).unwrap();
+        assert!(persist_model_change(&resolver, &store, &session_id, "openai/gpt-5.2").is_err());
+        assert_eq!(
+            store.load(&session_id).unwrap().effective_model(),
+            "zai/glm-4.7"
+        );
+        drop(writer);
+
+        persist_model_change(&resolver, &store, &session_id, "openai/gpt-5.2").unwrap();
+        assert_eq!(
+            store.load(&session_id).unwrap().effective_model(),
+            "openai/gpt-5.2"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn turn_error_is_visible() {

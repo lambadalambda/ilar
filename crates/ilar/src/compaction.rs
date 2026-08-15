@@ -3,7 +3,7 @@
 use anyhow::Result;
 use futures::StreamExt;
 
-use crate::provider::{Provider, ProviderEvent, Request};
+use crate::provider::{Provider, ProviderEvent, ProviderResolver, Request};
 use crate::session::{Session, SessionEvent, SessionStore, new_id};
 use chrono::Utc;
 
@@ -45,18 +45,28 @@ pub fn estimate_tokens(session: &Session) -> u64 {
 /// provider loop); the cut keeps the current user message and everything
 /// after it.
 pub async fn compact_if_needed(
-    provider: &dyn Provider,
+    resolver: &dyn ProviderResolver,
     store: &SessionStore,
     session_id: &str,
     context_limit: u64,
     threshold: f64,
 ) -> Result<bool> {
     let mut session = store.acquire_writer(session_id)?.load()?;
-    compact_if_needed_locked(provider, &mut session, context_limit, threshold).await
+    let model = session.effective_model();
+    let provider = resolver.resolve_provider(&model)?;
+    compact_if_needed_locked(
+        provider.as_provider(),
+        &model,
+        &mut session,
+        context_limit,
+        threshold,
+    )
+    .await
 }
 
 pub(crate) async fn compact_if_needed_locked(
     provider: &dyn Provider,
+    model: &str,
     session: &mut Session,
     context_limit: u64,
     threshold: f64,
@@ -79,7 +89,7 @@ pub(crate) async fn compact_if_needed_locked(
     }
 
     let request = Request {
-        model: session.meta().map(|m| m.model.clone()).unwrap_or_default(),
+        model: model.to_string(),
         system_prompt: Some(SUMMARIZER_PROMPT.into()),
         messages: older.transcript(),
         tools: Vec::new(),

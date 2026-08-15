@@ -16,7 +16,6 @@
 
 - [ ] [Tool scheduling and workspace capabilities](issues/tool-scheduling-and-workspace-capabilities.md)
 - [ ] [Atomic file replacement](issues/atomic-file-replacement.md)
-- [ ] [Provider routing and model lifecycle](issues/provider-routing-and-model-lifecycle.md)
 - [ ] [Serialize turns and route notifications](issues/serialize-turns-and-route-notifications.md)
 - [ ] [Preserve provider content order and reasoning](issues/preserve-provider-content-order-and-reasoning.md)
 - [ ] [Secure atomic OAuth store](issues/secure-atomic-oauth-store.md)

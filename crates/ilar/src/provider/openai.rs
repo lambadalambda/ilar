@@ -145,6 +145,10 @@ fn wire_tool(tool: &ToolDefinition) -> serde_json::Value {
 }
 
 impl Provider for OpenAIProvider {
+    fn provider_prefix(&self) -> Option<&'static str> {
+        Some("openai")
+    }
+
     fn stream(&self, req: Request) -> anyhow::Result<EventStream> {
         let mut body = self.wire_body(&req)?;
         let is_chatgpt = matches!(self.auth, Auth::ChatGpt { .. });

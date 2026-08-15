@@ -370,6 +370,20 @@ impl Config {
     }
 }
 
+impl crate::provider::ProviderResolver for Config {
+    fn resolve_provider(&self, model: &str) -> anyhow::Result<crate::provider::ProviderHandle<'_>> {
+        self.provider_for(model)
+            .map(crate::provider::ProviderHandle::Owned)
+            .ok_or_else(|| anyhow::anyhow!("no configured provider for model {model:?}"))
+    }
+
+    fn context_limit(&self, model: &str) -> Option<u64> {
+        crate::provider::resolve_model(model)
+            .ok()
+            .map(|(provider, _)| if provider == "zai" { 200_000 } else { 128_000 })
+    }
+}
+
 fn read_config_file(path: &Path) -> Option<String> {
     std::fs::read_to_string(path).ok()
 }
