@@ -49,7 +49,11 @@ impl Tool for WriteTool {
             {
                 return ToolOutput::error(format!("write {}: {e}", input.path));
             }
-            match std::fs::write(&path, &input.content) {
+            match crate::atomic_file::replace(
+                &path,
+                input.content.as_bytes(),
+                crate::atomic_file::Mode::Preserve,
+            ) {
                 Ok(()) => ToolOutput::text(format!(
                     "wrote {} ({} bytes)",
                     input.path,

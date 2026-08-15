@@ -91,7 +91,11 @@ impl AuthStore {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&self.path, serde_json::to_string_pretty(tokens)?)?;
+        crate::atomic_file::replace(
+            &self.path,
+            serde_json::to_string_pretty(tokens)?.as_bytes(),
+            crate::atomic_file::Mode::Force(0o600),
+        )?;
         Ok(())
     }
 }

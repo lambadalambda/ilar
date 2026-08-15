@@ -12,6 +12,8 @@ Credential and source-file updates need one tested same-directory replacement pr
 - Refuse symlink destinations, create temporary files exclusively with no-follow semantics, and verify the destination parent is unchanged before rename.
 - Define durability as process-crash safety, with data and directory syncing where supported.
 - Surface sync and cleanup errors without hiding the primary replacement failure.
+- Bind security-sensitive operations to one directory descriptor on Unix;
+  fail closed on other platforms until equivalent handle-relative guarantees exist.
 
 ## Acceptance Criteria
 

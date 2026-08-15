@@ -61,6 +61,14 @@ fn auth_store_round_trip() {
     assert_eq!(loaded.access_token, "a1");
     assert_eq!(loaded.refresh_token.as_deref(), Some("r1"));
     assert_eq!(loaded.account_id.as_deref(), Some("acc"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(
+            std::fs::metadata(store.tokens_path()).unwrap().mode() & 0o777,
+            0o600
+        );
+    }
 }
 
 /// Mock token endpoint + mock responses endpoint; proves refresh-on-401.

@@ -133,7 +133,13 @@ async fn write_creates_file_and_parent_dirs() {
 #[tokio::test]
 async fn edit_replaces_unique_match() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("a.txt"), "alpha beta gamma\n").unwrap();
+    let path = dir.path().join("a.txt");
+    std::fs::write(&path, "alpha beta gamma\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+    }
     let out = run(
         &registry(),
         "edit",
@@ -143,9 +149,14 @@ async fn edit_replaces_unique_match() {
     .await;
     assert!(!out.is_error, "{}", out.content);
     assert_eq!(
-        std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+        std::fs::read_to_string(&path).unwrap(),
         "alpha BETA gamma\n"
     );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(std::fs::metadata(path).unwrap().mode() & 0o777, 0o640);
+    }
 }
 
 #[tokio::test]

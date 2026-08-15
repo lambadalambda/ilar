@@ -71,7 +71,11 @@ impl Tool for EditTool {
                     ));
                 }
             };
-            match std::fs::write(&path, &new_content) {
+            match crate::atomic_file::replace(
+                &path,
+                new_content.as_bytes(),
+                crate::atomic_file::Mode::Preserve,
+            ) {
                 Ok(()) => ToolOutput::text(format!(
                     "edited {}: {} replacement{}",
                     input.path,

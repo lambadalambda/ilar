@@ -443,3 +443,13 @@ parent with its persisted agent, model, depth, and registry, then propagate one
 success or error upward. Busy parents wait without losing work; cancellation
 requeues undelivered notifications in a paused state, while delivered aborts
 propagate explicitly. Nested detached handles share root cancellation ownership.
+
+## 2026-08-15 — Stabilization: atomic replacement
+
+OAuth credentials and source-file write/edit operations now share one
+crash-durable replacement primitive. On Unix, temporary creation, destination
+inspection, publication, cleanup, and directory sync are bound to one
+no-follow directory descriptor. Temps are born `0600`, final modes are applied
+after writing, parent swaps and symlink destinations are rejected, and
+post-publication durability failures are reported without unsafe cleanup.
+Other platforms fail closed until equivalent handle-relative guarantees exist.
