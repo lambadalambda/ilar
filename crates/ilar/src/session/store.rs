@@ -63,6 +63,12 @@ pub struct SessionWriter {
     session_path: PathBuf,
 }
 
+impl Drop for SessionWriter {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self._file);
+    }
+}
+
 impl SessionStore {
     pub fn new(root: PathBuf) -> Self {
         Self { root }
