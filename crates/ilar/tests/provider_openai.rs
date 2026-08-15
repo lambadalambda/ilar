@@ -188,6 +188,16 @@ async fn invalid_model_id_is_preflight_error() {
 }
 
 #[tokio::test]
+async fn rejects_model_for_another_provider() {
+    let provider = ilar::provider::openai::OpenAIProvider::new("k".into(), None);
+    let error = provider
+        .stream(Request::with_model("zai/glm-4.7"))
+        .err()
+        .expect("provider mismatch must fail preflight");
+    assert!(error.to_string().contains("expected openai"));
+}
+
+#[tokio::test]
 async fn neutral_request_serializes_to_wire_format() {
     let (base, server) = http_server(fixture("openai_text.sse"));
     let mut request = request_with_tool();

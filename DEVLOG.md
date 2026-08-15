@@ -360,3 +360,10 @@ active JoinHandle, rather than an early UI `TurnDone` event, owns the turn
 until join cleanup, preventing event-channel, cancellation-token, and
 handle replacement races. Parent-session routing remains tracked in the
 open notification issue.
+
+## 2026-08-15 — Stabilization: provider/model boundary
+
+Concrete providers now reject models with a mismatched provider prefix
+before spawning network work. This converts stale routing mistakes into
+clear preflight errors while the broader provider-router issue remains
+open for resume, switching, subagents, and compaction.

@@ -64,7 +64,10 @@ impl OpenAIProvider {
     }
 
     fn wire_body(&self, req: &Request) -> anyhow::Result<serde_json::Value> {
-        let (_provider, model_id) = resolve_model(&req.model)?;
+        let (provider, model_id) = resolve_model(&req.model)?;
+        if provider != "openai" {
+            anyhow::bail!("model provider mismatch: expected openai, got {provider}");
+        }
         let input = req
             .messages
             .iter()

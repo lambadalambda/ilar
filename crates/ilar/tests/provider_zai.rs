@@ -373,6 +373,16 @@ async fn invalid_model_id_is_preflight_error() {
     assert!(provider.stream(Request::with_model("glm-4.7")).is_err());
 }
 
+#[tokio::test]
+async fn rejects_model_for_another_provider() {
+    let provider = ZaiProvider::new("k".into(), None, Flavor::Anthropic);
+    let error = provider
+        .stream(Request::with_model("openai/gpt-5.2"))
+        .err()
+        .expect("provider mismatch must fail preflight");
+    assert!(error.to_string().contains("expected zai"));
+}
+
 // ---- prompt caching ----
 
 #[tokio::test]

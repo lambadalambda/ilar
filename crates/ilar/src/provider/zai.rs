@@ -52,7 +52,10 @@ impl ZaiProvider {
     }
 
     fn wire_body(&self, req: &Request) -> anyhow::Result<serde_json::Value> {
-        let (_provider, model_id) = resolve_model(&req.model)?;
+        let (provider, model_id) = resolve_model(&req.model)?;
+        if provider != "zai" {
+            anyhow::bail!("model provider mismatch: expected zai, got {provider}");
+        }
         let mut body = serde_json::Map::new();
         match self.flavor {
             Flavor::Anthropic => {
