@@ -298,19 +298,23 @@ impl Config {
     pub fn provider_for(&self, model: &str) -> Option<Box<dyn crate::provider::Provider>> {
         let (provider_name, _model_id) = crate::provider::resolve_model(model).ok()?;
         let settings = self.providers.get(provider_name)?;
-        let api_key = settings.api_key.clone()?;
         let provider: Box<dyn crate::provider::Provider> = match provider_name {
             "openai" if settings.auth.as_deref() == Some("chatgpt") => {
+                // OAuth mode needs no api_key — tokens come from the store.
                 Box::new(crate::provider::openai::OpenAIProvider::with_chatgpt_auth(
                     crate::auth::AuthStore::open(default_state_dir()),
                     settings.base_url.clone(),
                 ))
             }
-            "openai" => Box::new(crate::provider::openai::OpenAIProvider::new(
-                api_key,
-                settings.base_url.clone(),
-            )),
+            "openai" => {
+                let api_key = settings.api_key.clone()?;
+                Box::new(crate::provider::openai::OpenAIProvider::new(
+                    api_key,
+                    settings.base_url.clone(),
+                ))
+            }
             "zai" => {
+                let api_key = settings.api_key.clone()?;
                 use crate::provider::zai::Flavor;
                 let flavor = match settings.flavor.as_deref() {
                     Some("openai") => Flavor::OpenAI,

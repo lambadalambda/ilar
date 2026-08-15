@@ -167,3 +167,19 @@ fn provider_for_builds_concrete_providers() {
     assert!(config.provider_for("openai/gpt-5.2").is_some());
     assert!(config.provider_for("unknown/model").is_none());
 }
+
+#[test]
+fn chatgpt_auth_needs_no_api_key() {
+    // Regression: provider_for bailed on the missing api_key before
+    // reaching the chatgpt branch.
+    let (_g, dir) = tempdir();
+    write(
+        &dir.join("ilar.toml"),
+        "[providers.openai]\nauth = \"chatgpt\"\n",
+    );
+    let config = Loader::no_env().config_dir(dir).resolve().unwrap();
+    assert!(
+        config.provider_for("openai/gpt-5.6-sol").is_some(),
+        "chatgpt-auth provider without api_key must resolve"
+    );
+}
