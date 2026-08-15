@@ -45,3 +45,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Serialize turns and route notifications](issues/serialize-turns-and-route-notifications.md)
 - [x] [Atomic file replacement](issues/atomic-file-replacement.md)
 - [x] [Secure atomic OAuth store](issues/secure-atomic-oauth-store.md)
+- [x] [Atomic file tools and large reads](issues/atomic-file-tools-and-large-reads.md)

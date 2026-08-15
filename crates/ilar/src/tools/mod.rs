@@ -201,3 +201,49 @@ pub fn parse_input<T: serde::de::DeserializeOwned>(
     serde_json::from_value(input)
         .map_err(|e| ToolOutput::error(format!("invalid input for {tool_name}: {e}")))
 }
+
+struct CancelBlockingScan(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for CancelBlockingScan {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+pub(crate) async fn blocking_scan<T, F>(scan: F) -> Result<T, tokio::task::JoinError>
+where
+    T: Send + 'static,
+    F: FnOnce(std::sync::Arc<std::sync::atomic::AtomicBool>) -> T + Send + 'static,
+{
+    let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cancel_on_drop = CancelBlockingScan(cancelled.clone());
+    let result = tokio::task::spawn_blocking(move || scan(cancelled)).await;
+    drop(cancel_on_drop);
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    async fn dropping_blocking_scan_signals_worker() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let stopped = std::sync::Arc::new(AtomicBool::new(false));
+        let worker_stopped = stopped.clone();
+        let task = tokio::spawn(super::blocking_scan(move |cancelled| {
+            while !cancelled.load(Ordering::Acquire) {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            worker_stopped.store(true, Ordering::Release);
+        }));
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        task.abort();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !stopped.load(Ordering::Acquire) {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("blocking worker did not observe cancellation");
+    }
+}

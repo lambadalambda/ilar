@@ -18,7 +18,6 @@
 - [ ] [Compaction correctness and cancellation](issues/compaction-correctness-and-cancellation.md)
 - [ ] [Harden provider protocol handling](issues/harden-provider-protocol-handling.md)
 - [ ] [Bound and sanitize web tools](issues/bound-and-sanitize-web-tools.md)
-- [ ] [Atomic file tools and large reads](issues/atomic-file-tools-and-large-reads.md)
 - [ ] [Subagent safety and outcomes](issues/subagent-safety-and-outcomes.md)
 - [ ] [Persist and render todos](issues/persist-and-render-todos.md)
 - [ ] [Config loading and frontmatter diagnostics](issues/config-loading-and-frontmatter-diagnostics.md)

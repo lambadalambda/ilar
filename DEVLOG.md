@@ -462,3 +462,13 @@ OS-backed lock, recheck state after lock acquisition, and retain ownership
 through cancellation-safe blocking persistence. Token responses and localhost
 callback requests are bounded and timed; callback handling ignores spurious
 connections, percent-decodes values, and reports OAuth denial responses.
+
+## 2026-08-15 — Stabilization: bounded file tools
+
+Read now streams requested line windows from files larger than the output cap
+and distinguishes empty files from offsets beyond EOF. Read, grep, and glob
+filesystem work runs off async workers with cooperative cancellation on future
+drop. Grep bounds each file prefix, rendered line, match count, and total
+output; glob checks cancellation per traversed entry and stops collecting at
+its cap. Atomic write/edit publication and mode preservation are shared with
+the previously landed replacement primitive.

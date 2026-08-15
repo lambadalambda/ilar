@@ -109,6 +109,55 @@ async fn read_honors_offset_and_limit() {
     assert!(!out.content.contains("9→9"));
 }
 
+#[tokio::test]
+async fn read_windows_files_larger_than_output_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut content = "padding\n".repeat(40_000);
+    content.push_str("wanted-one\nwanted-two\n");
+    std::fs::write(dir.path().join("large.txt"), content).unwrap();
+    let out = run(
+        &registry(),
+        "read",
+        serde_json::json!({"path": "large.txt", "offset": 40001, "limit": 2}),
+        &ctx(dir.path()),
+    )
+    .await;
+    assert!(!out.is_error, "{}", out.content);
+    assert!(out.content.contains("40001→wanted-one"), "{}", out.content);
+    assert!(out.content.contains("40002→wanted-two"), "{}", out.content);
+}
+
+#[tokio::test]
+async fn read_distinguishes_empty_file_from_offset_past_end() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("empty.txt"), "").unwrap();
+    std::fs::write(dir.path().join("short.txt"), "one\ntwo\n").unwrap();
+
+    let empty = run(
+        &registry(),
+        "read",
+        serde_json::json!({"path": "empty.txt", "offset": 10}),
+        &ctx(dir.path()),
+    )
+    .await;
+    assert!(!empty.is_error);
+    assert!(empty.content.contains("empty file"), "{}", empty.content);
+
+    let past_end = run(
+        &registry(),
+        "read",
+        serde_json::json!({"path": "short.txt", "offset": 10}),
+        &ctx(dir.path()),
+    )
+    .await;
+    assert!(past_end.is_error);
+    assert!(
+        past_end.content.contains("beyond end of file (2 lines)"),
+        "{}",
+        past_end.content
+    );
+}
+
 // ---- write ----
 
 #[tokio::test]
@@ -516,4 +565,93 @@ async fn grep_respects_path_filter() {
     .await;
     assert!(out.content.contains("include/x.txt"), "{}", out.content);
     assert!(!out.content.contains("exclude"));
+}
+
+#[tokio::test]
+async fn grep_bounds_long_lines_and_total_output() {
+    let dir = tempfile::tempdir().unwrap();
+    for index in 0..80 {
+        std::fs::write(
+            dir.path().join(format!("match-{index}.txt")),
+            format!("{} needle\n", "x".repeat(20_000)),
+        )
+        .unwrap();
+    }
+    let out = run(
+        &registry(),
+        "grep",
+        serde_json::json!({"pattern": "needle"}),
+        &ctx(dir.path()),
+    )
+    .await;
+    assert!(!out.is_error, "{}", out.content);
+    assert!(out.content.len() <= 256 * 1024, "{}", out.content.len());
+    assert!(
+        out.content.lines().all(|line| line.len() <= 8 * 1024 + 3),
+        "grep retained an unbounded line"
+    );
+
+    std::fs::write(
+        dir.path().join("over-file-cap.txt"),
+        format!("needle {}", "x".repeat(2 * 1024 * 1024)),
+    )
+    .unwrap();
+    let out = run(
+        &registry(),
+        "grep",
+        serde_json::json!({"pattern": "needle", "path": "over-file-cap.txt"}),
+        &ctx(dir.path()),
+    )
+    .await;
+    assert!(
+        out.content.contains("over-file-cap.txt:1:needle"),
+        "{}",
+        out.content
+    );
+    assert!(out.content.contains("truncated"), "{}", out.content);
+}
+
+#[tokio::test]
+async fn grep_matches_anchors_without_line_terminators_or_cap_sentinels() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("endings.txt"), "foo\nfoo\r\nbar\n").unwrap();
+    let anchored = run(
+        &registry(),
+        "grep",
+        serde_json::json!({"pattern": "foo$", "path": "endings.txt"}),
+        &ctx(dir.path()),
+    )
+    .await;
+    assert_eq!(anchored.content.lines().count(), 2, "{}", anchored.content);
+
+    let mut capped = vec![b'x'; 2 * 1024 * 1024 - 1];
+    capped.extend_from_slice(b"\nbeyond\n");
+    std::fs::write(dir.path().join("capped.txt"), capped).unwrap();
+    let empty = run(
+        &registry(),
+        "grep",
+        serde_json::json!({"pattern": "^$", "path": "capped.txt"}),
+        &ctx(dir.path()),
+    )
+    .await;
+    assert!(!empty.content.contains("capped.txt:"), "{}", empty.content);
+    assert!(empty.content.contains("truncated"), "{}", empty.content);
+}
+
+#[tokio::test]
+async fn glob_stops_at_its_match_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    for index in 0..1005 {
+        std::fs::write(dir.path().join(format!("file-{index:04}.txt")), "").unwrap();
+    }
+    let out = run(
+        &registry(),
+        "glob",
+        serde_json::json!({"pattern": "*.txt"}),
+        &ctx(dir.path()),
+    )
+    .await;
+    assert!(!out.is_error, "{}", out.content);
+    assert_eq!(out.content.lines().count(), 1001);
+    assert!(out.content.contains("truncated at 1000 matches"));
 }
