@@ -117,14 +117,13 @@ fn wire_input_items(msg: &ChatMessage) -> Vec<serde_json::Value> {
             ContentBlock::ToolResult {
                 tool_use_id,
                 content,
-                is_error,
+                is_error: _,
             } => {
                 flush_text(&mut text, &mut items);
                 items.push(serde_json::json!({
                     "type": "function_call_output",
                     "call_id": tool_use_id,
                     "output": content,
-                    "is_error": *is_error,
                 }));
             }
         }

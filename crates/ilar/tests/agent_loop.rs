@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -83,7 +84,15 @@ async fn multi_turn_tool_conversation_end_to_end() {
     let provider = MockProvider::new(vec![
         vec![
             ProviderEvent::TextDelta("checking".into()),
+            ProviderEvent::ToolCallStarted {
+                id: "t1".into(),
+                name: "echo".into(),
+            },
             tool_call_event("t1", "alpha"),
+            ProviderEvent::ToolCallStarted {
+                id: "t2".into(),
+                name: "echo".into(),
+            },
             tool_call_event("t2", "beta"),
             ProviderEvent::TurnComplete {
                 stop_reason: StopReason::ToolUse,
@@ -174,11 +183,94 @@ async fn multi_turn_tool_conversation_end_to_end() {
             .iter()
             .any(|e| matches!(e, LoopEvent::ToolFinished { .. }))
     );
+    assert_eq!(
+        published
+            .iter()
+            .filter(|e| matches!(e, LoopEvent::ToolStarted { .. }))
+            .count(),
+        2,
+        "each tool call must be announced exactly once"
+    );
     assert!(
         published
             .iter()
             .any(|e| matches!(e, LoopEvent::TurnDone { .. }))
     );
+}
+
+#[tokio::test]
+async fn tool_finished_means_call_and_result_are_already_on_disk() {
+    struct ToolThenWait {
+        calls: AtomicUsize,
+    }
+
+    impl Provider for ToolThenWait {
+        fn stream(&self, _req: Request) -> anyhow::Result<EventStream> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                Ok(Box::pin(futures::stream::iter(vec![
+                    ProviderEvent::ToolCallStarted {
+                        id: "t1".into(),
+                        name: "echo".into(),
+                    },
+                    tool_call_event("t1", "persist me"),
+                    ProviderEvent::TurnComplete {
+                        stop_reason: StopReason::ToolUse,
+                        usage: Default::default(),
+                    },
+                ])))
+            } else {
+                Ok(Box::pin(futures::stream::pending()))
+            }
+        }
+    }
+
+    let (store, session_id) = temp_session("build");
+    let registry = registry_with(EchoTool {
+        calls: Arc::new(Mutex::new(Vec::new())),
+    });
+    let provider = ToolThenWait {
+        calls: AtomicUsize::new(0),
+    };
+    let (tx, mut rx) = events_channel();
+    let cancel = CancellationToken::new();
+    let turn = run_turn(
+        &provider,
+        &registry,
+        &store,
+        &session_id,
+        "use echo",
+        None,
+        LoopConfig::default(),
+        tx,
+        cancel.clone(),
+        ToolContext::root(std::env::temp_dir()),
+    );
+    tokio::pin!(turn);
+
+    loop {
+        tokio::select! {
+            event = rx.recv() => {
+                if matches!(event, Some(LoopEvent::ToolFinished { id, .. }) if id == "t1") {
+                    break;
+                }
+            }
+            result = &mut turn => panic!("turn ended before persistence check: {result:?}"),
+        }
+    }
+
+    let transcript = store.load(&session_id).unwrap().transcript();
+    assert_eq!(transcript.len(), 3, "transcript: {transcript:?}");
+    assert!(matches!(
+        &transcript[1].content[0],
+        ContentBlock::ToolCall { id, .. } if id == "t1"
+    ));
+    assert!(matches!(
+        &transcript[2].content[0],
+        ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "t1"
+    ));
+
+    cancel.cancel();
+    assert_eq!(turn.await.unwrap(), TurnOutcome::Aborted);
 }
 
 #[tokio::test]
@@ -211,6 +303,58 @@ async fn provider_error_surfaces_and_session_stays_resumable() {
         &transcript[0].content[0],
         ContentBlock::Text { text } if text == "hello"
     ));
+}
+
+#[tokio::test]
+async fn provider_error_after_tool_call_closes_tool_in_session_and_ui() {
+    let (store, session_id) = temp_session("build");
+    let registry = ToolRegistry::builtin();
+    let provider = MockProvider::new(vec![vec![
+        ProviderEvent::ToolCallStarted {
+            id: "t1".into(),
+            name: "read".into(),
+        },
+        ProviderEvent::ToolCallCompleted {
+            id: "t1".into(),
+            name: "read".into(),
+            input: serde_json::json!({"path": "Cargo.toml"}),
+        },
+        ProviderEvent::Error("connection reset".into()),
+    ]]);
+
+    let (tx, mut rx) = events_channel();
+    let result = run_turn(
+        &provider,
+        &registry,
+        &store,
+        &session_id,
+        "read it",
+        None,
+        LoopConfig::default(),
+        tx,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+    )
+    .await;
+
+    assert!(result.is_err());
+    let transcript = store.load(&session_id).unwrap().transcript();
+    assert_eq!(transcript.len(), 3, "transcript: {transcript:?}");
+    assert!(matches!(
+        &transcript[2].content[0],
+        ContentBlock::ToolResult { tool_use_id, is_error: true, .. } if tool_use_id == "t1"
+    ));
+    let mut finished = false;
+    while let Ok(event) = rx.try_recv() {
+        finished |= matches!(
+            event,
+            LoopEvent::ToolFinished { id, is_error: true, .. } if id == "t1"
+        );
+    }
+    assert!(
+        finished,
+        "failed provider step must close the TUI tool line"
+    );
 }
 
 /// Streams slowly: one delta, long pause, then more.

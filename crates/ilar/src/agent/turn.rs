@@ -53,7 +53,7 @@ struct StepAccumulator {
     thinking: Option<(String, Option<String>)>, // text, signature
     tool_calls: Vec<ContentBlock>,
     /// Tool-call ids that already got a ToolStarted announcement.
-    announced_calls: std::collections::HashSet<String>,
+    announced_calls: std::collections::HashMap<String, String>,
     usage: Usage,
     stop_reason: Option<StopReason>,
 }
@@ -172,13 +172,17 @@ pub async fn run_turn(
                     }
                 }
                 ProviderEvent::ToolCallStarted { id, name } => {
-                    publish(&events, LoopEvent::ToolStarted { id, name });
+                    if !acc.announced_calls.contains_key(&id) {
+                        acc.announced_calls.insert(id.clone(), name.clone());
+                        publish(&events, LoopEvent::ToolStarted { id, name });
+                    }
                 }
                 ProviderEvent::ToolCallInputDelta { .. } => {}
                 ProviderEvent::ToolCallCompleted { id, name, input } => {
                     // Some streams (and test scripts) skip Started; announce
                     // lazily so the UI always sees the pair.
-                    if acc.announced_calls.insert(id.clone()) {
+                    if !acc.announced_calls.contains_key(&id) {
+                        acc.announced_calls.insert(id.clone(), name.clone());
                         publish(
                             &events,
                             LoopEvent::ToolStarted {
@@ -223,6 +227,45 @@ pub async fn run_turn(
                     stop_reason: "error".into(),
                     ts: Utc::now(),
                 })?;
+            }
+            let completed_ids: std::collections::HashSet<&str> = acc
+                .tool_calls
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::ToolCall { id, .. } => Some(id.as_str()),
+                    _ => None,
+                })
+                .collect();
+            for block in &acc.tool_calls {
+                if let ContentBlock::ToolCall { id, name, .. } = block {
+                    session.append(SessionEvent::ToolResult {
+                        id: new_id(),
+                        tool_use_id: id.clone(),
+                        content: format!("provider error before execution: {message}"),
+                        is_error: true,
+                        ts: Utc::now(),
+                    })?;
+                    publish(
+                        &events,
+                        LoopEvent::ToolFinished {
+                            id: id.clone(),
+                            name: name.clone(),
+                            is_error: true,
+                        },
+                    );
+                }
+            }
+            for (id, name) in &acc.announced_calls {
+                if !completed_ids.contains(id.as_str()) {
+                    publish(
+                        &events,
+                        LoopEvent::ToolFinished {
+                            id: id.clone(),
+                            name: name.clone(),
+                            is_error: true,
+                        },
+                    );
+                }
             }
             anyhow::bail!(message);
         }
@@ -328,21 +371,21 @@ pub async fn run_turn(
         )
         .await;
         for outcome in outcomes {
-            publish(
-                &events,
-                LoopEvent::ToolFinished {
-                    id: outcome.id.clone(),
-                    name: outcome.name.clone(),
-                    is_error: outcome.output.is_error,
-                },
-            );
             session.append(SessionEvent::ToolResult {
                 id: new_id(),
-                tool_use_id: outcome.id,
+                tool_use_id: outcome.id.clone(),
                 content: outcome.output.content,
                 is_error: outcome.output.is_error,
                 ts: Utc::now(),
             })?;
+            publish(
+                &events,
+                LoopEvent::ToolFinished {
+                    id: outcome.id,
+                    name: outcome.name,
+                    is_error: outcome.output.is_error,
+                },
+            );
         }
     }
 

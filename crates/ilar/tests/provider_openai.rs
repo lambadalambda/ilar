@@ -236,4 +236,8 @@ async fn neutral_request_serializes_to_wire_format() {
     assert_eq!(input[1]["call_id"], "call_1");
     assert_eq!(input[2]["type"], "function_call_output");
     assert_eq!(input[2]["call_id"], "call_1");
+    assert!(
+        input[2].get("is_error").is_none(),
+        "Responses API function_call_output rejects is_error"
+    );
 }
