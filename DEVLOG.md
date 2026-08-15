@@ -494,3 +494,30 @@ layouts down to narrow terminals. Thinking, responding, and tool activity are
 animated in the transcript without persisting synthetic content. Provider
 usage now has versioned cache-accounting semantics; legacy sessions and resumed
 transcripts use visibly approximate estimates.
+
+## 2026-08-15 — Model catalog and picker
+
+Provider discovery now uses a maintained models.dev snapshot for active
+tool-capable OpenAI and z.ai models, including model-specific context, input,
+and output limits. ChatGPT OAuth remains restricted to model slugs verified on
+the Codex backend, while API-key and z.ai Coding Plan inventories follow their
+effective transport configuration. The TUI replaces model cycling with a
+searchable keyboard modal opened by Ctrl-X M or F2; selection is persisted
+before adoption, background notifications wait behind the modal, and narrow
+layouts retain selectable rows and inline errors.
+
+## 2026-08-15 — Conservative GPT-5.6 context defaults
+
+GPT-5.6 Sol, Terra, and Luna now use Codex's 272,000-token working context for
+telemetry and compaction while retaining the models.dev 1,050,000-token value
+as explicit maximum metadata. This separates safe runtime defaults from
+provider capability and leaves a clean bound for future context configuration.
+
+## 2026-08-15 — Denser Markdown and visible input cursor
+
+The TUI now exposes the terminal's native blinking cursor at the prompt and
+model search, with grapheme-safe tail views for long values. Markdown blank-line
+runs collapse to one interior separator row without adding leading or trailing
+space, and assistant content is style-preserving hard-wrapped inside its label
+margin so every visual line stays aligned without changing fenced-code
+whitespace.

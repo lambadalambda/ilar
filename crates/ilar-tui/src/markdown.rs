@@ -8,6 +8,7 @@ pub fn render(source: &str) -> Vec<Line<'static>> {
     let source = sanitize(source);
     let mut lines = Vec::new();
     let mut code_fence: Option<(char, usize)> = None;
+    let mut pending_separator = false;
 
     for raw in source.lines() {
         let trimmed = raw.trim_start();
@@ -19,6 +20,7 @@ pub fn render(source: &str) -> Vec<Line<'static>> {
                 }
             } else {
                 code_fence = Some((fence, length));
+                flush_separator(&mut lines, &mut pending_separator);
                 let language = suffix.trim();
                 if !language.is_empty() {
                     lines.push(Line::from(Span::styled(
@@ -39,9 +41,11 @@ pub fn render(source: &str) -> Vec<Line<'static>> {
         }
 
         if trimmed.is_empty() {
-            lines.push(Line::default());
+            pending_separator = true;
             continue;
         }
+
+        flush_separator(&mut lines, &mut pending_separator);
 
         if let Some((level, text)) = heading(trimmed) {
             let (prefix, color) = match level {
@@ -90,10 +94,14 @@ pub fn render(source: &str) -> Vec<Line<'static>> {
         )));
     }
 
-    if lines.is_empty() {
+    lines
+}
+
+fn flush_separator(lines: &mut Vec<Line<'static>>, pending: &mut bool) {
+    if *pending && !lines.is_empty() {
         lines.push(Line::default());
     }
-    lines
+    *pending = false;
 }
 
 fn sanitize(source: &str) -> String {
@@ -268,6 +276,14 @@ mod tests {
     }
 
     #[test]
+    fn paragraph_separators_collapse_to_one_interior_blank_row() {
+        let lines = render("\n\nFirst paragraph.\n\n\nSecond paragraph.\n\n");
+        let rendered: Vec<String> = lines.iter().map(text).collect();
+
+        assert_eq!(rendered, ["First paragraph.", "", "Second paragraph."]);
+    }
+
+    #[test]
     fn styles_inline_markdown() {
         let lines =
             render("Use **bold**, *care*, `cargo test`, and [Ratatui](https://ratatui.rs).");
@@ -292,12 +308,13 @@ mod tests {
 
     #[test]
     fn fenced_code_preserves_lines_and_has_a_gutter() {
-        let lines = render("```rust\nfn main() {\n    println!(\"hi\");\n}\n```");
+        let lines = render("```rust\nfn main() {\n\n    println!(\"hi\");\n}\n```");
         let rendered: Vec<String> = lines.iter().map(text).collect();
 
         assert_eq!(rendered[0], "  rust");
         assert_eq!(rendered[1], "│ fn main() {");
-        assert_eq!(rendered[2], "│     println!(\"hi\");");
+        assert_eq!(rendered[2], "│ ");
+        assert_eq!(rendered[3], "│     println!(\"hi\");");
         assert!(
             lines[1]
                 .spans

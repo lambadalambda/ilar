@@ -48,3 +48,7 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Atomic file tools and large reads](issues/atomic-file-tools-and-large-reads.md)
 - [x] [Background tool calls](issues/background-tool-calls.md)
 - [x] [TUI tool details and telemetry](issues/tui-tool-details-and-telemetry.md)
+- [x] [Model catalog and picker](issues/model-catalog-and-picker.md)
+- [x] [Default and maximum context windows](issues/default-and-maximum-context-windows.md)
+- [x] [TUI cursor and markdown density](issues/tui-cursor-and-markdown-density.md)
+- [x] [Collapse Markdown separator rows](issues/collapse-markdown-separator-rows.md)

@@ -15,7 +15,8 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Borders, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
+    Block, Borders, Clear, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+    Wrap,
 };
 use tokio_util::sync::CancellationToken;
 use unicode_segmentation::UnicodeSegmentation;
@@ -131,13 +132,15 @@ struct App {
     content_rows: usize,
     viewport_rows: usize,
     follow_tail: bool,
+    model_picker: Option<ModelPicker>,
+    model_key_pending: bool,
 }
 
 impl App {
     fn new() -> Self {
         Self {
             lines: vec![Line_::System(
-                "ilar — PgUp/PgDn scroll, Ctrl-End follows tail, Esc aborts, Ctrl-C quits".into(),
+                "ilar — Ctrl-X M or F2 models, PgUp/PgDn scroll, Esc aborts, Ctrl-C quits".into(),
             )],
             input: String::new(),
             busy: false,
@@ -153,6 +156,8 @@ impl App {
             content_rows: 0,
             viewport_rows: 0,
             follow_tail: true,
+            model_picker: None,
+            model_key_pending: false,
         }
     }
 
@@ -366,16 +371,31 @@ impl App {
         for entry in &self.lines {
             match entry {
                 Line_::Assistant(text) => {
-                    for (index, mut line) in markdown::render(text).into_iter().enumerate() {
-                        let label = if index == 0 { "ilar " } else { "     " };
-                        let mut spans = vec![Span::styled(
-                            label,
-                            Style::default()
-                                .fg(Color::Green)
-                                .add_modifier(Modifier::BOLD),
-                        )];
-                        spans.append(&mut line.spans);
-                        output.push(Line::from(spans));
+                    let mut first = true;
+                    let label_width = 5usize.min(width.saturating_sub(2) as usize);
+                    for line in markdown::render(text) {
+                        if line.spans.is_empty() {
+                            output.push(Line::default());
+                            continue;
+                        }
+                        for mut line in
+                            wrap_styled_line(line, (width as usize).saturating_sub(label_width))
+                        {
+                            let label = if first {
+                                truncate_display("ilar ", label_width, Truncation::Right)
+                            } else {
+                                " ".repeat(label_width)
+                            };
+                            first = false;
+                            let mut spans = vec![Span::styled(
+                                label,
+                                Style::default()
+                                    .fg(Color::Green)
+                                    .add_modifier(Modifier::BOLD),
+                            )];
+                            spans.append(&mut line.spans);
+                            output.push(Line::from(spans));
+                        }
                     }
                 }
                 Line_::User(text) => {
@@ -652,11 +672,374 @@ impl App {
 
         frame.render_widget(Paragraph::new(self.status_line(chunks[1].width)), chunks[1]);
 
-        let input = Paragraph::new(self.input.as_str())
-            .block(Block::default().borders(Borders::ALL).title("input"))
-            .wrap(Wrap { trim: false });
+        let input_block = Block::default().borders(Borders::ALL).title("input");
+        let input_area = input_block.inner(chunks[2]);
+        let (visible_input, cursor_offset) = text_field_view(&self.input, input_area.width);
+        let input = Paragraph::new(visible_input).block(input_block);
         frame.render_widget(input, chunks[2]);
+
+        if !self.busy
+            && self.model_picker.is_none()
+            && input_area.width > 0
+            && input_area.height > 0
+        {
+            frame.set_cursor_position((input_area.x.saturating_add(cursor_offset), input_area.y));
+        }
+
+        if let Some(picker) = &self.model_picker {
+            render_model_picker(frame, picker);
+        }
     }
+}
+
+#[derive(Clone)]
+struct StyledGrapheme {
+    text: String,
+    style: Style,
+    width: usize,
+}
+
+fn wrap_styled_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
+    if width == 0 {
+        return vec![Line::default()];
+    }
+
+    let cells: Vec<_> = line
+        .spans
+        .into_iter()
+        .flat_map(|span| {
+            let style = span.style;
+            UnicodeSegmentation::graphemes(span.content.as_ref(), true)
+                .map(move |text| StyledGrapheme {
+                    text: text.to_string(),
+                    style,
+                    width: UnicodeWidthStr::width(text),
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    if cells.is_empty() {
+        return vec![Line::default()];
+    }
+
+    let mut output = Vec::new();
+    let mut current = Vec::new();
+    let mut current_width = 0usize;
+    for cell in cells {
+        if !current.is_empty() && current_width.saturating_add(cell.width) > width {
+            output.push(styled_line(&current));
+            current.clear();
+            current_width = 0;
+        }
+        current_width = current_width.saturating_add(cell.width);
+        current.push(cell);
+    }
+    if !current.is_empty() {
+        output.push(styled_line(&current));
+    }
+    output
+}
+
+fn styled_line(cells: &[StyledGrapheme]) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for cell in cells {
+        if let Some(last) = spans.last_mut()
+            && last.style == cell.style
+        {
+            last.content.to_mut().push_str(&cell.text);
+        } else {
+            spans.push(Span::styled(cell.text.clone(), cell.style));
+        }
+    }
+    Line::from(spans)
+}
+
+fn text_field_view(value: &str, width: u16) -> (String, u16) {
+    let max_text_width = width.saturating_sub(1) as usize;
+    let mut graphemes = Vec::new();
+    let mut used = 0usize;
+    for grapheme in UnicodeSegmentation::graphemes(value, true).rev() {
+        let grapheme_width = UnicodeWidthStr::width(grapheme);
+        if used.saturating_add(grapheme_width) > max_text_width {
+            break;
+        }
+        used = used.saturating_add(grapheme_width);
+        graphemes.push(grapheme);
+    }
+    graphemes.reverse();
+    (graphemes.concat(), used as u16)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PickerAction {
+    Stay,
+    Dismiss,
+    Choose(String),
+}
+
+struct ModelPicker {
+    models: Vec<&'static ilar::model::ModelInfo>,
+    active_model: String,
+    query: String,
+    selected: usize,
+    error: Option<String>,
+}
+
+impl ModelPicker {
+    fn new(models: Vec<&'static ilar::model::ModelInfo>, active_model: &str) -> Self {
+        let selected = models
+            .iter()
+            .position(|model| model.full_id() == active_model)
+            .unwrap_or(0);
+        Self {
+            models,
+            active_model: active_model.to_string(),
+            query: String::new(),
+            selected,
+            error: None,
+        }
+    }
+
+    fn filtered_models(&self) -> Vec<&'static ilar::model::ModelInfo> {
+        let query = self.query.to_lowercase();
+        let terms: Vec<_> = query.split_whitespace().collect();
+        self.models
+            .iter()
+            .copied()
+            .filter(|model| {
+                let haystack =
+                    format!("{} {} {}", model.provider, model.id, model.name).to_lowercase();
+                terms.iter().all(|term| haystack.contains(term))
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
+    fn set_query(&mut self, query: &str) {
+        self.query = query.to_string();
+        self.selected = 0;
+    }
+
+    #[cfg(test)]
+    fn selected_index(&self) -> usize {
+        self.selected
+    }
+
+    fn move_selection(&mut self, delta: isize) {
+        let count = self.filtered_models().len();
+        if count == 0 {
+            self.selected = 0;
+        } else {
+            self.selected = (self.selected as isize + delta).rem_euclid(count as isize) as usize;
+        }
+    }
+
+    fn select_boundary(&mut self, end: bool) {
+        self.selected = if end {
+            self.filtered_models().len().saturating_sub(1)
+        } else {
+            0
+        };
+    }
+
+    fn handle_key(&mut self, code: KeyCode, control: bool) -> PickerAction {
+        match (code, control) {
+            (KeyCode::Esc, _) => PickerAction::Dismiss,
+            (KeyCode::Enter, _) => self
+                .filtered_models()
+                .get(self.selected)
+                .map(|model| model.full_id())
+                .map(|model| {
+                    if model == self.active_model {
+                        PickerAction::Dismiss
+                    } else {
+                        PickerAction::Choose(model)
+                    }
+                })
+                .unwrap_or(PickerAction::Stay),
+            (KeyCode::Up, _) | (KeyCode::Char('p'), true) => {
+                self.move_selection(-1);
+                PickerAction::Stay
+            }
+            (KeyCode::Down, _) | (KeyCode::Char('n'), true) => {
+                self.move_selection(1);
+                PickerAction::Stay
+            }
+            (KeyCode::PageUp, _) => {
+                self.move_selection(-10);
+                PickerAction::Stay
+            }
+            (KeyCode::PageDown, _) => {
+                self.move_selection(10);
+                PickerAction::Stay
+            }
+            (KeyCode::Home, _) => {
+                self.select_boundary(false);
+                PickerAction::Stay
+            }
+            (KeyCode::End, _) => {
+                self.select_boundary(true);
+                PickerAction::Stay
+            }
+            (KeyCode::Backspace, _) => {
+                if let Some((index, _)) = self.query.grapheme_indices(true).next_back() {
+                    self.query.truncate(index);
+                }
+                self.selected = 0;
+                self.error = None;
+                PickerAction::Stay
+            }
+            (KeyCode::Char(character), false) => {
+                self.query.push(character);
+                self.selected = 0;
+                self.error = None;
+                PickerAction::Stay
+            }
+            _ => PickerAction::Stay,
+        }
+    }
+}
+
+fn centered_rect(area: Rect, max_width: u16, max_height: u16) -> Rect {
+    let width = max_width.min(area.width.saturating_sub(2).max(1));
+    let height = max_height.min(area.height.saturating_sub(2).max(1));
+    Rect::new(
+        area.x.saturating_add(area.width.saturating_sub(width) / 2),
+        area.y
+            .saturating_add(area.height.saturating_sub(height) / 2),
+        width,
+        height,
+    )
+}
+
+fn render_model_picker(frame: &mut Frame, picker: &ModelPicker) {
+    let area = centered_rect(frame.area(), 78, 20);
+    frame.render_widget(Clear, area);
+
+    let footer = if area.width < 44 {
+        " Enter select · Esc close "
+    } else {
+        " ↑↓ move · Enter select · Esc close "
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" models ")
+        .title_bottom(Line::from(footer).right_aligned());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let models = picker.filtered_models();
+    let count = format!(
+        "{}/{}",
+        picker.selected.saturating_add(1).min(models.len()),
+        models.len()
+    );
+    let fixed_width = 7usize
+        .saturating_add(UnicodeWidthStr::width(count.as_str()))
+        .saturating_add(1);
+    let query_area_width = (inner.width as usize).saturating_sub(fixed_width) as u16;
+    let (visible_query, query_cursor_offset) = text_field_view(&picker.query, query_area_width);
+    let query = if picker.query.is_empty() {
+        Span::styled(
+            truncate_display(
+                "type to filter",
+                query_area_width as usize,
+                Truncation::Right,
+            ),
+            Style::default().fg(MUTED),
+        )
+    } else {
+        Span::raw(visible_query.clone())
+    };
+    let gap = (inner.width as usize)
+        .saturating_sub(7)
+        .saturating_sub(UnicodeWidthStr::width(query.content.as_ref()))
+        .saturating_sub(UnicodeWidthStr::width(count.as_str()));
+    let mut lines = vec![Line::from(vec![
+        Span::styled("search ", Style::default().fg(MUTED)),
+        query,
+        Span::raw(" ".repeat(gap)),
+        Span::styled(count, Style::default().fg(MUTED)),
+    ])];
+    if let Some(error) = &picker.error {
+        let error = Line::styled(
+            truncate_display(error, inner.width as usize, Truncation::Right),
+            Style::default().fg(ERROR),
+        );
+        if inner.height >= 3 {
+            lines.push(error);
+        } else {
+            lines[0] = error;
+        }
+    } else if inner.height >= 6 {
+        lines.push(Line::styled(
+            truncate_display(
+                &format!("current {}", picker.active_model),
+                inner.width as usize,
+                Truncation::Middle,
+            ),
+            Style::default().fg(MUTED),
+        ));
+    }
+    let row_count = inner.height.saturating_sub(lines.len() as u16) as usize;
+    if models.is_empty() && row_count > 0 {
+        lines.push(Line::styled(
+            " no matching models",
+            Style::default().fg(MUTED),
+        ));
+    } else if row_count > 0 {
+        let selected = picker.selected.min(models.len().saturating_sub(1));
+        let start = selected
+            .saturating_add(1)
+            .saturating_sub(row_count)
+            .min(models.len().saturating_sub(row_count));
+        for (index, model) in models.iter().enumerate().skip(start).take(row_count) {
+            let full_id = model.full_id();
+            let active = full_id == picker.active_model;
+            let marker = if index == selected && active {
+                ">●"
+            } else if index == selected {
+                "> "
+            } else if active {
+                " ●"
+            } else {
+                "  "
+            };
+            let context = format_tokens_compact(model.context_limit);
+            let text = if inner.width >= 50 {
+                let suffix = format!("  {full_id}  {context}");
+                let name_width = (inner.width as usize)
+                    .saturating_sub(UnicodeWidthStr::width(marker))
+                    .saturating_sub(UnicodeWidthStr::width(suffix.as_str()))
+                    .saturating_sub(2);
+                format!(
+                    "{marker} {}{suffix}",
+                    truncate_display(model.name, name_width, Truncation::Right)
+                )
+            } else {
+                format!("{marker} {full_id}")
+            };
+            let text = truncate_display(&text, inner.width as usize, Truncation::Right);
+            let text = format!("{text:<width$}", width = inner.width as usize);
+            let style = if index == selected {
+                Style::default().fg(Color::Black).bg(Color::Cyan)
+            } else if active {
+                Style::default().fg(ASSISTANT)
+            } else {
+                Style::default()
+            };
+            lines.push(Line::styled(text, style));
+        }
+    }
+
+    frame.render_widget(Paragraph::new(lines), inner);
+    let offset = 7usize
+        .saturating_add(query_cursor_offset as usize)
+        .min(inner.width.saturating_sub(1) as usize) as u16;
+    frame.set_cursor_position((inner.x.saturating_add(offset), inner.y));
 }
 
 #[derive(Clone, Copy)]
@@ -992,28 +1375,7 @@ async fn main() -> Result<()> {
         .with_skills(skill_store)?;
     let notifications = spawner.subscribe();
     let tool_ctx = ToolContext::root(cwd.clone()).with_subagents(spawner.clone());
-    let model_choices: Vec<String> = {
-        let mut choices = Vec::new();
-        if config
-            .providers
-            .get("zai")
-            .and_then(|p| p.api_key.as_ref())
-            .is_some()
-        {
-            choices.extend(["zai/glm-4.7".to_string(), "zai/glm-4.7-air".to_string()]);
-        }
-        if let Some(openai) = config.providers.get("openai") {
-            if openai.auth.as_deref() == Some("chatgpt") {
-                choices.push("openai/gpt-5.6-sol".to_string());
-            } else if openai.api_key.is_some() {
-                choices.push("openai/gpt-5.2".to_string());
-            }
-        }
-        if !choices.contains(&model_for_session) {
-            choices.insert(0, model_for_session.clone());
-        }
-        choices
-    };
+    let model_choices = config.available_models();
 
     let loop_config = {
         let threshold = config.compaction.threshold;
@@ -1110,16 +1472,11 @@ async fn run_app(
     spawner: std::sync::Arc<ilar::subagent::SubagentSpawner>,
     mut notifications: tokio::sync::mpsc::UnboundedReceiver<ilar::subagent::Notification>,
     loop_config: impl Fn() -> LoopConfig + Clone,
-    model_choices: Vec<String>,
+    model_choices: Vec<&'static ilar::model::ModelInfo>,
 ) -> Result<()> {
     let mut events_rx: Option<tokio::sync::mpsc::UnboundedReceiver<LoopEvent>> = None;
     let mut queued_notifications = std::collections::VecDeque::new();
     let mut notifications_paused = false;
-    let current_model = store.load(session_id)?.effective_model();
-    let mut model_index = model_choices
-        .iter()
-        .position(|model| model == &current_model)
-        .unwrap_or(0);
     let mut cancel: Option<CancellationToken> = None;
     let mut turn_handle: Option<tokio::task::JoinHandle<TurnCompletion>> = None;
 
@@ -1195,7 +1552,7 @@ async fn run_app(
         // Background completions re-invoke their declared parent while idle.
         if let Some(notification) = next_queued_notification(
             turn_handle.is_some(),
-            notifications_paused,
+            notifications_paused || app.model_picker.is_some(),
             &mut queued_notifications,
         ) {
             if notification.parent_session_id != session_id {
@@ -1266,119 +1623,164 @@ async fn run_app(
                 kind: KeyEventKind::Press | KeyEventKind::Repeat,
                 modifiers,
                 ..
-            }) => match (code, modifiers.contains(KeyModifiers::CONTROL)) {
-                (KeyCode::Char('c'), true) => {
+            }) => {
+                let control = modifiers.contains(KeyModifiers::CONTROL);
+                if matches!((code, control), (KeyCode::Char('c'), true)) {
                     if let Some(cancel) = &cancel {
                         cancel.cancel();
                     }
                     spawner.shutdown().await;
                     return Ok(());
                 }
-                (KeyCode::Char('m'), true) if !app.busy && model_choices.len() > 1 => {
-                    let next_index = (model_index + 1) % model_choices.len();
-                    let new_model = model_choices[next_index].clone();
-                    match persist_model_change(resolver.as_ref(), store, session_id, &new_model) {
-                        Ok(()) => {
-                            model_index = next_index;
-                            app.current_model = new_model.clone();
-                            app.context_limit = resolver.context_limit(&new_model);
-                            if let Ok((used, estimated)) = session_context_tokens(store, session_id)
-                            {
-                                app.context_used = used;
-                                app.context_estimated = estimated;
-                            }
+                if let Some(picker) = app.model_picker.as_mut() {
+                    match picker.handle_key(code, control) {
+                        PickerAction::Stay => {}
+                        PickerAction::Dismiss => {
+                            app.model_picker = None;
                             app.status = "ready".into();
-                            app.lines
-                                .push(Line_::System(format!("switched to {new_model}")));
                         }
-                        Err(error) => {
-                            app.lines.push(Line_::System(format!(
-                                "cannot switch to {new_model}: {error}"
-                            )));
+                        PickerAction::Choose(new_model) => {
+                            match persist_model_change(
+                                resolver.as_ref(),
+                                store,
+                                session_id,
+                                &new_model,
+                            ) {
+                                Ok(()) => {
+                                    app.current_model = new_model.clone();
+                                    app.context_limit = resolver.context_limit(&new_model);
+                                    if let Ok((used, estimated)) =
+                                        session_context_tokens(store, session_id)
+                                    {
+                                        app.context_used = used;
+                                        app.context_estimated = estimated;
+                                    }
+                                    app.status = "ready".into();
+                                    app.lines
+                                        .push(Line_::System(format!("switched to {new_model}")));
+                                    app.model_picker = None;
+                                }
+                                Err(error) => {
+                                    if let Some(picker) = app.model_picker.as_mut() {
+                                        picker.error =
+                                            Some(format!("cannot switch to {new_model}: {error}"));
+                                    }
+                                }
+                            }
                         }
                     }
+                    continue;
                 }
-                (KeyCode::Esc, _) => {
-                    let background = spawner.running_background();
-                    if background > 0 {
-                        spawner.abort_all();
-                        notifications_paused = true;
-                        app.status = format!("cancelling {background} background job(s)…");
-                        app.set_activity(if app.busy {
-                            Activity::Aborting
-                        } else {
-                            Activity::Paused
-                        });
+                if app.model_key_pending {
+                    app.model_key_pending = false;
+                    if code == KeyCode::Esc {
+                        app.status = "ready".into();
+                        continue;
                     }
-                    if app.busy {
-                        if let Some(cancel) = &cancel {
-                            cancel.cancel();
-                            app.status = "aborting…".into();
-                            app.set_activity(Activity::Aborting);
-                        }
-                    } else if background == 0 {
-                        app.input.clear();
+                    if matches!(code, KeyCode::Char('m' | 'M'))
+                        && !app.busy
+                        && !model_choices.is_empty()
+                    {
+                        app.model_picker =
+                            Some(ModelPicker::new(model_choices.clone(), &app.current_model));
+                        continue;
                     }
+                    app.status = "ready".into();
                 }
-                (KeyCode::Enter, _) => {
-                    if turn_handle.is_none() && !app.busy && !app.input.trim().is_empty() {
-                        let text = std::mem::take(&mut app.input);
-                        app.lines.push(Line_::User(text.clone()));
-                        app.follow_tail = true;
-                        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-                        events_rx = Some(rx);
-                        let token = CancellationToken::new();
-                        cancel = Some(token.clone());
-                        app.busy = true;
-                        app.status = "thinking".into();
-                        app.set_activity(Activity::Thinking);
-                        let resolver = resolver.clone();
-                        let store = store.clone();
-                        let session_id = session_id.to_string();
-                        let system_prompt = system_prompt.to_string();
-                        let registry = registry.clone();
-                        let turn_ctx = tool_ctx.clone();
-                        let loop_config = loop_config();
-                        turn_handle = Some(tokio::spawn(async move {
-                            TurnCompletion::Root(
-                                run_turn(
-                                    resolver.as_ref(),
-                                    &registry,
-                                    &store,
-                                    &session_id,
-                                    &text,
-                                    Some(&system_prompt),
-                                    loop_config,
-                                    tx,
-                                    token,
-                                    turn_ctx,
+                if matches!((code, control), (KeyCode::Char('x'), true)) && !app.busy {
+                    app.model_key_pending = true;
+                    app.status = "Ctrl-X: press M for models".into();
+                    continue;
+                }
+                match (code, control) {
+                    (KeyCode::Char('m'), true) | (KeyCode::F(2), false)
+                        if !app.busy && !model_choices.is_empty() =>
+                    {
+                        app.model_picker =
+                            Some(ModelPicker::new(model_choices.clone(), &app.current_model));
+                    }
+                    (KeyCode::Esc, _) => {
+                        let background = spawner.running_background();
+                        if background > 0 {
+                            spawner.abort_all();
+                            notifications_paused = true;
+                            app.status = format!("cancelling {background} background job(s)…");
+                            app.set_activity(if app.busy {
+                                Activity::Aborting
+                            } else {
+                                Activity::Paused
+                            });
+                        }
+                        if app.busy {
+                            if let Some(cancel) = &cancel {
+                                cancel.cancel();
+                                app.status = "aborting…".into();
+                                app.set_activity(Activity::Aborting);
+                            }
+                        } else if background == 0 {
+                            app.input.clear();
+                        }
+                    }
+                    (KeyCode::Enter, _) => {
+                        if turn_handle.is_none() && !app.busy && !app.input.trim().is_empty() {
+                            let text = std::mem::take(&mut app.input);
+                            app.lines.push(Line_::User(text.clone()));
+                            app.follow_tail = true;
+                            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                            events_rx = Some(rx);
+                            let token = CancellationToken::new();
+                            cancel = Some(token.clone());
+                            app.busy = true;
+                            app.status = "thinking".into();
+                            app.set_activity(Activity::Thinking);
+                            let resolver = resolver.clone();
+                            let store = store.clone();
+                            let session_id = session_id.to_string();
+                            let system_prompt = system_prompt.to_string();
+                            let registry = registry.clone();
+                            let turn_ctx = tool_ctx.clone();
+                            let loop_config = loop_config();
+                            turn_handle = Some(tokio::spawn(async move {
+                                TurnCompletion::Root(
+                                    run_turn(
+                                        resolver.as_ref(),
+                                        &registry,
+                                        &store,
+                                        &session_id,
+                                        &text,
+                                        Some(&system_prompt),
+                                        loop_config,
+                                        tx,
+                                        token,
+                                        turn_ctx,
+                                    )
+                                    .await,
                                 )
-                                .await,
-                            )
-                        }));
+                            }));
+                        }
                     }
+                    (KeyCode::Backspace, _) => {
+                        app.input.pop();
+                    }
+                    (KeyCode::Char('u'), true) => {
+                        app.scroll_up(app.page_size().div_ceil(2));
+                    }
+                    (KeyCode::Char('d'), true) => {
+                        app.scroll_down(app.page_size().div_ceil(2));
+                    }
+                    (KeyCode::Home, true) => app.scroll_to_top(),
+                    (KeyCode::End, true) => app.scroll_to_tail(),
+                    (KeyCode::PageUp, _) => app.scroll_up(app.page_size()),
+                    (KeyCode::PageDown, _) => app.scroll_down(app.page_size()),
+                    (KeyCode::Up, _) => app.scroll_up(1),
+                    (KeyCode::Down, _) => app.scroll_down(1),
+                    (KeyCode::Char(c), false) => {
+                        app.input.push(c);
+                    }
+                    _ => {}
                 }
-                (KeyCode::Backspace, _) => {
-                    app.input.pop();
-                }
-                (KeyCode::Char('u'), true) => {
-                    app.scroll_up(app.page_size().div_ceil(2));
-                }
-                (KeyCode::Char('d'), true) => {
-                    app.scroll_down(app.page_size().div_ceil(2));
-                }
-                (KeyCode::Home, true) => app.scroll_to_top(),
-                (KeyCode::End, true) => app.scroll_to_tail(),
-                (KeyCode::PageUp, _) => app.scroll_up(app.page_size()),
-                (KeyCode::PageDown, _) => app.scroll_down(app.page_size()),
-                (KeyCode::Up, _) => app.scroll_up(1),
-                (KeyCode::Down, _) => app.scroll_down(1),
-                (KeyCode::Char(c), false) => {
-                    app.input.push(c);
-                }
-                _ => {}
-            },
-            Event::Mouse(mouse) => match mouse.kind {
+            }
+            Event::Mouse(mouse) if app.model_picker.is_none() => match mouse.kind {
                 MouseEventKind::ScrollUp => app.scroll_up(3),
                 MouseEventKind::ScrollDown => app.scroll_down(3),
                 _ => {}
@@ -1456,6 +1858,197 @@ mod tests {
             "openai/gpt-5.2"
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn model_picker_searches_provider_id_and_display_name() {
+        let models = ilar::model::catalog().iter().collect();
+        let mut picker = ModelPicker::new(models, "openai/gpt-5.6-sol");
+
+        picker.set_query("zai");
+        assert!(
+            picker
+                .filtered_models()
+                .iter()
+                .all(|model| model.provider == "zai")
+        );
+
+        picker.set_query("glm-4.7");
+        assert!(
+            picker
+                .filtered_models()
+                .iter()
+                .any(|model| model.full_id() == "zai/glm-4.7")
+        );
+
+        picker.set_query("GPT-5.6 Sol");
+        assert_eq!(picker.filtered_models()[0].full_id(), "openai/gpt-5.6-sol");
+    }
+
+    #[test]
+    fn model_picker_navigation_confirmation_and_escape_are_explicit() {
+        let models = ilar::model::catalog().iter().take(3).collect();
+        let mut picker = ModelPicker::new(models, "missing/model");
+
+        assert_eq!(picker.selected_index(), 0);
+        assert_eq!(picker.handle_key(KeyCode::Up, false), PickerAction::Stay);
+        assert_eq!(picker.selected_index(), 2);
+        assert!(matches!(
+            picker.handle_key(KeyCode::Enter, false),
+            PickerAction::Choose(_)
+        ));
+        assert_eq!(
+            picker.handle_key(KeyCode::Esc, false),
+            PickerAction::Dismiss
+        );
+
+        let active = ilar::model::catalog()[0].full_id();
+        let mut picker = ModelPicker::new(vec![&ilar::model::catalog()[0]], &active);
+        assert_eq!(
+            picker.handle_key(KeyCode::Enter, false),
+            PickerAction::Dismiss,
+            "confirming the active model is a no-op"
+        );
+    }
+
+    #[test]
+    fn model_picker_renders_on_narrow_terminals() {
+        let backend = ratatui::backend::TestBackend::new(30, 6);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.model_picker = Some(ModelPicker::new(
+            ilar::model::catalog().iter().collect(),
+            "openai/gpt-5.6-sol",
+        ));
+
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let screen = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("models"), "{screen}");
+        assert!(screen.contains("search"), "{screen}");
+        assert!(
+            screen.contains("openai"),
+            "a selectable row must remain visible: {screen}"
+        );
+
+        app.model_picker.as_mut().unwrap().error = Some("switch failed".into());
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("switch failed"), "{screen}");
+    }
+
+    #[test]
+    fn prompt_and_picker_render_visible_cursor_positions() {
+        let backend = ratatui::backend::TestBackend::new(40, 10);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.input = "abc".into();
+
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert_eq!(
+            terminal.get_cursor_position().unwrap(),
+            ratatui::layout::Position::new(4, 8)
+        );
+
+        let mut picker = ModelPicker::new(
+            ilar::model::catalog().iter().collect(),
+            "openai/gpt-5.6-sol",
+        );
+        picker.set_query("glm");
+        app.model_picker = Some(picker);
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert_eq!(
+            terminal.get_cursor_position().unwrap(),
+            ratatui::layout::Position::new(12, 2)
+        );
+    }
+
+    #[test]
+    fn wrapped_assistant_lines_keep_content_indent() {
+        let backend = ratatui::backend::TestBackend::new(32, 10);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.lines = vec![Line_::Assistant(
+            "abcdefghijklmnopqrstuvwxyz0123456789".into(),
+        )];
+
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let continuation_start = (1..buffer.area.width.saturating_sub(1))
+            .find(|x| buffer[(*x, 2)].symbol() != " ")
+            .unwrap();
+        assert_eq!(continuation_start, 6);
+    }
+
+    #[test]
+    fn markdown_separator_occupies_one_final_terminal_row() {
+        let backend = ratatui::backend::TestBackend::new(48, 12);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.lines = vec![Line_::Assistant(
+            "- final list item\n\n## Section\n\nParagraph text.".into(),
+        )];
+
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let rows = (0..terminal.backend().buffer().area.height)
+            .map(|y| {
+                (0..terminal.backend().buffer().area.width)
+                    .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        let list = rows
+            .iter()
+            .position(|row| row.contains("final list item"))
+            .unwrap();
+        let heading = rows.iter().position(|row| row.contains("Section")).unwrap();
+        let paragraph = rows
+            .iter()
+            .position(|row| row.contains("Paragraph text"))
+            .unwrap();
+        assert_eq!(heading - list, 2, "rows: {rows:#?}");
+        assert_eq!(paragraph - heading, 2, "rows: {rows:#?}");
+    }
+
+    #[test]
+    fn styled_hard_wrap_preserves_code_and_never_adds_blank_rows() {
+        let code = markdown::render("```\n    hello world\n```").remove(0);
+        let original = rendered_text(&code);
+        let wrapped = wrap_styled_line(code, 5);
+
+        assert!(wrapped.iter().all(|line| !rendered_text(line).is_empty()));
+        assert_eq!(
+            wrapped.iter().map(rendered_text).collect::<String>(),
+            original
+        );
+        assert!(
+            wrapped
+                .iter()
+                .flat_map(|line| &line.spans)
+                .all(|span| { span.style.fg == Some(Color::Cyan) })
+        );
+
+        let wide = wrap_styled_line(Line::raw("界界"), 2);
+        assert_eq!(wide.len(), 2);
+        assert!(wide.iter().all(|line| line.width() == 2));
     }
 
     #[test]
@@ -1552,15 +2145,15 @@ mod tests {
         app.configure_runtime(
             "openai/gpt-5.6-sol".into(),
             std::path::PathBuf::from("/very/long/workspace/project"),
-            32_000,
-            Some(128_000),
+            68_000,
+            Some(272_000),
             false,
         );
         let wide = rendered_text(&app.status_line(100));
         assert!(wide.contains("ready"));
         assert!(wide.contains("openai/gpt-5.6-sol"));
         assert!(wide.contains("project"));
-        assert!(wide.contains("32.0k/128.0k"));
+        assert!(wide.contains("68.0k/272.0k"));
         assert!(wide.contains("25%"));
 
         let narrow = rendered_text(&app.status_line(40));
@@ -1688,8 +2281,8 @@ mod tests {
         app.configure_runtime(
             "openai/gpt-5.6-sol".into(),
             std::path::PathBuf::from("/workspace/very-long-project-name"),
-            96_000,
-            Some(128_000),
+            204_000,
+            Some(272_000),
             false,
         );
         app.busy = true;
