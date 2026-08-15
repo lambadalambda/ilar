@@ -1250,6 +1250,13 @@ fn persist_model_change(
     Ok(())
 }
 
+fn ensure_direct_resume_allowed(meta: Option<&SessionMeta>) -> Result<()> {
+    if meta.is_some_and(|meta| meta.workspace.is_some()) {
+        anyhow::bail!("workspace-bound child sessions must be resumed through Task");
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -1282,6 +1289,7 @@ async fn main() -> Result<()> {
                 .with_context(|| format!("resuming session {id}"))
         })
         .transpose()?;
+    ensure_direct_resume_allowed(resumed.as_ref().and_then(|session| session.meta()))?;
     let persisted_agent = resumed
         .as_ref()
         .and_then(|session| session.meta())
@@ -1346,6 +1354,7 @@ async fn main() -> Result<()> {
                     parent_id: None,
                     agent: agent.name.clone(),
                     model: model_for_session.clone(),
+                    workspace: None,
                 })
                 .context("creating session")?;
             id
@@ -1828,6 +1837,22 @@ mod tests {
     }
 
     #[test]
+    fn direct_resume_rejects_workspace_bound_child_sessions() {
+        let meta = SessionMeta {
+            session_id: new_id(),
+            parent_id: Some(new_id()),
+            agent: "explore".into(),
+            model: "zai/glm-4.7".into(),
+            workspace: Some(ilar::tools::WorkspaceLocation::shared(std::env::temp_dir())),
+        };
+
+        let error = ensure_direct_resume_allowed(Some(&meta)).unwrap_err();
+
+        assert!(error.to_string().contains("through Task"), "{error:#}");
+        assert!(ensure_direct_resume_allowed(None).is_ok());
+    }
+
+    #[test]
     fn model_change_is_adopted_only_after_persistence() {
         let root = std::env::temp_dir().join(format!("ilar-tui-model-{}", new_id()));
         let store = SessionStore::new(root.clone());
@@ -1839,6 +1864,7 @@ mod tests {
                     parent_id: None,
                     agent: "build".into(),
                     model: "zai/glm-4.7".into(),
+                    workspace: None,
                 })
                 .unwrap(),
         );

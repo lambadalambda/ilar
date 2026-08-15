@@ -21,6 +21,7 @@ fn temp_session(agent: &str) -> (SessionStore, String) {
             parent_id: None,
             agent: agent.into(),
             model: "zai/glm-4.7".into(),
+            workspace: None,
         })
         .unwrap();
     (store, id)

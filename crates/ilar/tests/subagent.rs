@@ -21,6 +21,7 @@ fn temp_store() -> (SessionStore, String) {
             parent_id: None,
             agent: "build".into(),
             model: "zai/glm-4.7".into(),
+            workspace: None,
         })
         .unwrap();
     (store, id)
@@ -55,6 +56,36 @@ impl Provider for ScriptedDelayProvider {
                 }
             },
         )))
+    }
+}
+
+#[derive(Clone)]
+struct SynchronizingProvider {
+    barrier: Arc<tokio::sync::Barrier>,
+}
+
+impl Provider for SynchronizingProvider {
+    fn stream(&self, _req: Request) -> anyhow::Result<EventStream> {
+        let barrier = self.barrier.clone();
+        Ok(Box::pin(futures::stream::unfold(0, move |state| {
+            let barrier = barrier.clone();
+            async move {
+                match state {
+                    0 => {
+                        barrier.wait().await;
+                        Some((ProviderEvent::TextDelta("isolated child".into()), 1))
+                    }
+                    1 => Some((
+                        ProviderEvent::TurnComplete {
+                            stop_reason: StopReason::EndTurn,
+                            usage: Usage::default(),
+                        },
+                        2,
+                    )),
+                    _ => None,
+                }
+            }
+        })))
     }
 }
 
@@ -201,6 +232,329 @@ async fn enforced_read_only_tasks_may_overlap() {
         elapsed < Duration::from_millis(450),
         "read-only tasks looked serial: {elapsed:?}"
     );
+}
+
+fn git(cwd: &std::path::Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn repository_with_worktree() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    std::fs::create_dir(&root).unwrap();
+    git(&root, &["init", "-q"]);
+    git(&root, &["config", "user.name", "ilar tests"]);
+    git(&root, &["config", "user.email", "ilar@example.invalid"]);
+    std::fs::write(root.join("README.md"), "test\n").unwrap();
+    git(&root, &["add", "README.md"]);
+    git(&root, &["commit", "-qm", "initial"]);
+    let worktree = temp.path().join("isolated-worktree");
+    git(
+        &root,
+        &[
+            "worktree",
+            "add",
+            "-qb",
+            "resume-test",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    (temp, root, worktree)
+}
+
+#[tokio::test]
+async fn mutable_tasks_in_distinct_validated_worktrees_may_overlap() {
+    let repo_temp = tempfile::tempdir().unwrap();
+    let root = repo_temp.path().join("root");
+    std::fs::create_dir(&root).unwrap();
+    git(&root, &["init", "-q"]);
+    git(&root, &["config", "user.name", "ilar tests"]);
+    git(&root, &["config", "user.email", "ilar@example.invalid"]);
+    std::fs::write(root.join("README.md"), "test\n").unwrap();
+    git(&root, &["add", "README.md"]);
+    git(&root, &["commit", "-qm", "initial"]);
+    let first = repo_temp.path().join("first-worktree");
+    let second = repo_temp.path().join("second-worktree");
+    git(
+        &root,
+        &[
+            "worktree",
+            "add",
+            "-qb",
+            "first-test",
+            first.to_str().unwrap(),
+        ],
+    );
+    git(
+        &root,
+        &[
+            "worktree",
+            "add",
+            "-qb",
+            "second-test",
+            second.to_str().unwrap(),
+        ],
+    );
+
+    let (store, session_id) = temp_store();
+    let child: Arc<dyn Provider> = Arc::new(SynchronizingProvider {
+        barrier: Arc::new(tokio::sync::Barrier::new(2)),
+    });
+    let spawner = Arc::new(SubagentSpawner::new(
+        Arc::new(FixedProviderResolver::new(child)),
+        store.clone(),
+        vec![AgentDefinition {
+            name: "explore".into(),
+            description: "explores".into(),
+            model: None,
+            prompt: String::new(),
+            workspace_mode: AgentWorkspaceMode::Mutable,
+        }],
+        root.clone(),
+        0,
+        10,
+        3,
+    ));
+    let workspace_call = |id: &str, cwd: &std::path::Path| ProviderEvent::ToolCallCompleted {
+        id: id.into(),
+        name: "task".into(),
+        input: serde_json::json!({
+            "description": "isolated task",
+            "prompt": "work",
+            "subagent_type": "explore",
+            "workspace": {"cwd": cwd, "isolation": "git_worktree"}
+        }),
+    };
+    let parent = MockProvider::new(vec![
+        vec![
+            workspace_call("first", &first),
+            workspace_call("second", &second),
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+                usage: Usage::default(),
+            },
+        ],
+        vec![ProviderEvent::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        }],
+    ]);
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        run_turn(
+            &parent,
+            &parent_registry(spawner.clone()),
+            &store,
+            &session_id,
+            "go",
+            None,
+            LoopConfig::default(),
+            tx,
+            tokio_util::sync::CancellationToken::new(),
+            ToolContext::root(root).with_subagents(spawner),
+        ),
+    )
+    .await
+    .expect("distinct worktree tasks did not overlap")
+    .unwrap();
+
+    let transcript = store.load(&session_id).unwrap().transcript();
+    let results = &transcript[2].content;
+    assert_eq!(results.len(), 2, "{results:?}");
+    assert!(results.iter().all(|result| matches!(
+        result,
+        ContentBlock::ToolResult { content, is_error: false, .. }
+            if content.contains("isolated child")
+    )));
+}
+
+#[tokio::test]
+async fn nested_task_rejects_an_ancestor_workspace_lock_cycle() {
+    let (repo, root, first) = repository_with_worktree();
+    let second = repo.path().join("second-worktree");
+    git(
+        &root,
+        &[
+            "worktree",
+            "add",
+            "-qb",
+            "second-resume-test",
+            second.to_str().unwrap(),
+        ],
+    );
+    let root_location = ilar::tools::WorkspaceLocation::shared(root);
+    let first_location =
+        ilar::tools::WorkspaceLocation::validated_git_worktree(&root_location, first.clone())
+            .await
+            .unwrap();
+    let second_location =
+        ilar::tools::WorkspaceLocation::validated_git_worktree(&root_location, second)
+            .await
+            .unwrap();
+    let scheduler = ilar::tools::WorkspaceScheduler::for_location(&root_location);
+    let first_scheduler = scheduler.scoped(&first_location);
+    let second_scheduler = scheduler.scoped(&second_location);
+    let _ancestor = first_scheduler
+        .acquire_lease(ilar::tools::WorkspaceAccess::Mutating)
+        .await;
+    let current = second_scheduler
+        .acquire_lease(ilar::tools::WorkspaceAccess::Mutating)
+        .await;
+    let (store, session_id) = temp_store();
+    let task = parent_registry(spawner(
+        Arc::new(MockProvider::new(vec![vec![]])),
+        &store,
+        10,
+        3,
+    ))
+    .get("task")
+    .unwrap();
+    let mut ctx = ToolContext::root(second_location.cwd().to_path_buf());
+    ctx.session_id = session_id;
+    ctx.cwd = second_location.cwd().to_path_buf();
+    ctx.location = second_location;
+    ctx.workspace = second_scheduler;
+    ctx.workspace_lease = Some(current);
+    ctx.workspace_ancestry = vec![first_location.id().clone(), ctx.location.id().clone()];
+
+    let output = tokio::time::timeout(
+        Duration::from_secs(1),
+        task.run(
+            serde_json::json!({
+                "description": "cycle",
+                "prompt": "return to first",
+                "subagent_type": "explore",
+                "workspace": {"cwd": first, "isolation": "git_worktree"},
+            }),
+            ctx,
+        ),
+    )
+    .await
+    .expect("ancestor workspace cycle deadlocked");
+
+    assert!(output.is_error);
+    assert!(
+        output.content.contains("held by an ancestor"),
+        "{}",
+        output.content
+    );
+}
+
+#[tokio::test]
+async fn nested_tasks_do_not_wait_on_busy_sibling_workspaces() {
+    let (repo, root, first) = repository_with_worktree();
+    let second = repo.path().join("second-worktree");
+    git(
+        &root,
+        &[
+            "worktree",
+            "add",
+            "-qb",
+            "second-inversion-test",
+            second.to_str().unwrap(),
+        ],
+    );
+    let root_location = ilar::tools::WorkspaceLocation::shared(root);
+    let first_location =
+        ilar::tools::WorkspaceLocation::validated_git_worktree(&root_location, first.clone())
+            .await
+            .unwrap();
+    let second_location =
+        ilar::tools::WorkspaceLocation::validated_git_worktree(&root_location, second.clone())
+            .await
+            .unwrap();
+    let scheduler = ilar::tools::WorkspaceScheduler::for_location(&root_location);
+    let first_scheduler = scheduler.scoped(&first_location);
+    let second_scheduler = scheduler.scoped(&second_location);
+    let first_lease = first_scheduler
+        .acquire_lease(ilar::tools::WorkspaceAccess::Mutating)
+        .await;
+    let second_lease = second_scheduler
+        .acquire_lease(ilar::tools::WorkspaceAccess::Mutating)
+        .await;
+    let _first_hold = first_lease.clone();
+    let _second_hold = second_lease.clone();
+    let (store, first_session) = temp_store();
+    let second_session = new_id();
+    drop(
+        store
+            .create(SessionMeta {
+                session_id: second_session.clone(),
+                parent_id: None,
+                agent: "build".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+            })
+            .unwrap(),
+    );
+    let task = parent_registry(spawner(
+        Arc::new(MockProvider::new(vec![vec![]])),
+        &store,
+        10,
+        3,
+    ))
+    .get("task")
+    .unwrap();
+    let mut first_ctx = ToolContext::root(first_location.cwd().to_path_buf());
+    first_ctx.session_id = first_session;
+    first_ctx.cwd = first_location.cwd().to_path_buf();
+    first_ctx.location = first_location.clone();
+    first_ctx.workspace = first_scheduler;
+    first_ctx.workspace_lease = Some(first_lease);
+    first_ctx.workspace_ancestry = vec![first_location.id().clone()];
+    let mut second_ctx = ToolContext::root(second_location.cwd().to_path_buf());
+    second_ctx.session_id = second_session;
+    second_ctx.cwd = second_location.cwd().to_path_buf();
+    second_ctx.location = second_location.clone();
+    second_ctx.workspace = second_scheduler;
+    second_ctx.workspace_lease = Some(second_lease);
+    second_ctx.workspace_ancestry = vec![second_location.id().clone()];
+    let reverse_task = task.clone();
+
+    let (first_output, second_output) = tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::join!(
+            task.run(
+                serde_json::json!({
+                    "description": "first to second",
+                    "prompt": "cross over",
+                    "subagent_type": "explore",
+                    "workspace": {"cwd": second, "isolation": "git_worktree"},
+                }),
+                first_ctx,
+            ),
+            reverse_task.run(
+                serde_json::json!({
+                    "description": "second to first",
+                    "prompt": "cross over",
+                    "subagent_type": "explore",
+                    "workspace": {"cwd": first, "isolation": "git_worktree"},
+                }),
+                second_ctx,
+            )
+        )
+    })
+    .await
+    .expect("sibling workspace inversion deadlocked");
+
+    for output in [first_output, second_output] {
+        assert!(output.is_error);
+        assert!(
+            output.content.contains("workspace is busy"),
+            "{}",
+            output.content
+        );
+    }
 }
 
 /// Serves each stream() call from the next inner provider once, then
@@ -397,6 +751,7 @@ async fn resumed_subagent_rejects_persisted_agent_mismatch() {
                 parent_id: None,
                 agent: "other".into(),
                 model: "zai/glm-4.7".into(),
+                workspace: None,
             })
             .unwrap(),
     );
@@ -423,6 +778,376 @@ async fn resumed_subagent_rejects_persisted_agent_mismatch() {
 
     assert!(output.is_error);
     assert!(output.content.contains("persisted agent"));
+}
+
+#[tokio::test]
+async fn isolated_resume_requires_an_explicit_workspace() {
+    let (_repo, root, worktree) = repository_with_worktree();
+    let (store, parent_id) = temp_store();
+    let persisted = ilar::tools::WorkspaceLocation::validated_git_worktree(
+        &ilar::tools::WorkspaceLocation::shared(root.clone()),
+        worktree.clone(),
+    )
+    .await
+    .unwrap();
+    let child_id = new_id();
+    drop(
+        store
+            .create(SessionMeta {
+                session_id: child_id.clone(),
+                parent_id: Some(parent_id.clone()),
+                agent: "explore".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: Some(persisted),
+            })
+            .unwrap(),
+    );
+    let task = parent_registry(spawner(
+        Arc::new(MockProvider::new(vec![vec![ProviderEvent::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        }]])),
+        &store,
+        10,
+        3,
+    ))
+    .get("task")
+    .unwrap();
+    let mut ctx = ToolContext::root(root);
+    ctx.session_id = parent_id;
+
+    let output = task
+        .run(
+            serde_json::json!({
+                "description": "resume",
+                "prompt": "continue",
+                "subagent_type": "explore",
+                "task_id": child_id,
+            }),
+            ctx,
+        )
+        .await;
+
+    assert!(output.is_error);
+    assert!(
+        output.content.contains("explicit workspace"),
+        "{}",
+        output.content
+    );
+}
+
+#[tokio::test]
+async fn nested_resume_may_inherit_its_parents_validated_worktree() {
+    let (_repo, root, worktree) = repository_with_worktree();
+    let (store, root_id) = temp_store();
+    let location = ilar::tools::WorkspaceLocation::validated_git_worktree(
+        &ilar::tools::WorkspaceLocation::shared(root),
+        worktree.clone(),
+    )
+    .await
+    .unwrap();
+    let parent_id = new_id();
+    drop(
+        store
+            .create(SessionMeta {
+                session_id: parent_id.clone(),
+                parent_id: Some(root_id),
+                agent: "explore".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: Some(location.clone()),
+            })
+            .unwrap(),
+    );
+    let child_id = new_id();
+    drop(
+        store
+            .create(SessionMeta {
+                session_id: child_id.clone(),
+                parent_id: Some(parent_id.clone()),
+                agent: "explore".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: Some(location.clone()),
+            })
+            .unwrap(),
+    );
+    let task = parent_registry(spawner(
+        Arc::new(MockProvider::new(vec![vec![ProviderEvent::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        }]])),
+        &store,
+        10,
+        3,
+    ))
+    .get("task")
+    .unwrap();
+    let mut ctx = ToolContext::root(worktree);
+    ctx.session_id = parent_id;
+    ctx.cwd = location.cwd().to_path_buf();
+    ctx.workspace = ilar::tools::WorkspaceScheduler::for_location(&location);
+    ctx.location = location;
+
+    let output = task
+        .run(
+            serde_json::json!({
+                "description": "resume inherited",
+                "prompt": "continue",
+                "subagent_type": "explore",
+                "task_id": child_id,
+            }),
+            ctx,
+        )
+        .await;
+
+    assert!(!output.is_error, "{}", output.content);
+}
+
+#[tokio::test]
+async fn resumed_subagent_rejects_a_different_parent_session() {
+    let (store, parent_id) = temp_store();
+    let other_parent_id = new_id();
+    drop(
+        store
+            .create(SessionMeta {
+                session_id: other_parent_id.clone(),
+                parent_id: None,
+                agent: "build".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+            })
+            .unwrap(),
+    );
+    let child_id = new_id();
+    drop(
+        store
+            .create(SessionMeta {
+                session_id: child_id.clone(),
+                parent_id: Some(other_parent_id),
+                agent: "explore".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+            })
+            .unwrap(),
+    );
+    let task = parent_registry(spawner(
+        Arc::new(MockProvider::new(vec![vec![]])),
+        &store,
+        10,
+        3,
+    ))
+    .get("task")
+    .unwrap();
+    let mut ctx = ToolContext::root(std::env::temp_dir());
+    ctx.session_id = parent_id;
+
+    let output = task
+        .run(
+            serde_json::json!({
+                "description": "resume",
+                "prompt": "continue",
+                "subagent_type": "explore",
+                "task_id": child_id,
+            }),
+            ctx,
+        )
+        .await;
+
+    assert!(output.is_error);
+    assert!(
+        output.content.contains("persisted parent"),
+        "{}",
+        output.content
+    );
+}
+
+#[tokio::test]
+async fn isolated_resume_rejects_a_different_cwd_in_the_same_worktree() {
+    let (_repo, root, worktree) = repository_with_worktree();
+    let nested = worktree.join("nested");
+    std::fs::create_dir(&nested).unwrap();
+    let (store, parent_id) = temp_store();
+    let persisted = ilar::tools::WorkspaceLocation::validated_git_worktree(
+        &ilar::tools::WorkspaceLocation::shared(root.clone()),
+        worktree,
+    )
+    .await
+    .unwrap();
+    let child_id = new_id();
+    drop(
+        store
+            .create(SessionMeta {
+                session_id: child_id.clone(),
+                parent_id: Some(parent_id.clone()),
+                agent: "explore".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: Some(persisted),
+            })
+            .unwrap(),
+    );
+    let spawner = Arc::new(SubagentSpawner::new(
+        Arc::new(FixedProviderResolver::new(Arc::new(MockProvider::new(
+            vec![vec![ProviderEvent::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            }]],
+        )))),
+        store.clone(),
+        vec![AgentDefinition {
+            name: "explore".into(),
+            description: "explores".into(),
+            model: None,
+            prompt: String::new(),
+            workspace_mode: AgentWorkspaceMode::Mutable,
+        }],
+        root.clone(),
+        0,
+        10,
+        3,
+    ));
+    let task = parent_registry(spawner).get("task").unwrap();
+    let mut ctx = ToolContext::root(root);
+    ctx.session_id = parent_id;
+
+    let output = task
+        .run(
+            serde_json::json!({
+                "description": "resume",
+                "prompt": "continue",
+                "subagent_type": "explore",
+                "task_id": child_id,
+                "workspace": {"cwd": nested, "isolation": "git_worktree"},
+            }),
+            ctx,
+        )
+        .await;
+
+    assert!(output.is_error);
+    assert!(
+        output.content.contains("workspace does not match"),
+        "{}",
+        output.content
+    );
+}
+
+#[tokio::test]
+async fn isolated_resume_rejects_tampered_persisted_workspace_metadata() {
+    let (_repo, root, worktree) = repository_with_worktree();
+    let (store, parent_id) = temp_store();
+    let location = ilar::tools::WorkspaceLocation::validated_git_worktree(
+        &ilar::tools::WorkspaceLocation::shared(root.clone()),
+        worktree.clone(),
+    )
+    .await
+    .unwrap();
+    let mut serialized = serde_json::to_value(&location).unwrap();
+    serialized["root"] = serde_json::json!(root.clone());
+    let tampered = serde_json::from_value(serialized).unwrap();
+    let child_id = new_id();
+    drop(
+        store
+            .create(SessionMeta {
+                session_id: child_id.clone(),
+                parent_id: Some(parent_id.clone()),
+                agent: "explore".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: Some(tampered),
+            })
+            .unwrap(),
+    );
+    let task = parent_registry(spawner(
+        Arc::new(MockProvider::new(vec![vec![ProviderEvent::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        }]])),
+        &store,
+        10,
+        3,
+    ))
+    .get("task")
+    .unwrap();
+    let mut ctx = ToolContext::root(root);
+    ctx.session_id = parent_id;
+
+    let output = task
+        .run(
+            serde_json::json!({
+                "description": "resume",
+                "prompt": "continue",
+                "subagent_type": "explore",
+                "task_id": child_id,
+                "workspace": {"cwd": worktree, "isolation": "git_worktree"},
+            }),
+            ctx,
+        )
+        .await;
+
+    assert!(output.is_error);
+    assert!(
+        output.content.contains("persisted workspace metadata"),
+        "{}",
+        output.content
+    );
+}
+
+#[tokio::test]
+async fn legacy_resume_cannot_adopt_an_isolated_workspace() {
+    let (_repo, root, worktree) = repository_with_worktree();
+    let (store, parent_id) = temp_store();
+    let child_id = new_id();
+    drop(
+        store
+            .create(SessionMeta {
+                session_id: child_id.clone(),
+                parent_id: Some(parent_id.clone()),
+                agent: "explore".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+            })
+            .unwrap(),
+    );
+    let spawner = Arc::new(SubagentSpawner::new(
+        Arc::new(FixedProviderResolver::new(Arc::new(MockProvider::new(
+            vec![vec![ProviderEvent::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            }]],
+        )))),
+        store.clone(),
+        vec![AgentDefinition {
+            name: "explore".into(),
+            description: "explores".into(),
+            model: None,
+            prompt: String::new(),
+            workspace_mode: AgentWorkspaceMode::Mutable,
+        }],
+        root.clone(),
+        0,
+        10,
+        3,
+    ));
+    let task = parent_registry(spawner).get("task").unwrap();
+    let mut ctx = ToolContext::root(root);
+    ctx.session_id = parent_id;
+
+    let output = task
+        .run(
+            serde_json::json!({
+                "description": "resume",
+                "prompt": "continue",
+                "subagent_type": "explore",
+                "task_id": child_id,
+                "workspace": {"cwd": worktree, "isolation": "git_worktree"},
+            }),
+            ctx,
+        )
+        .await;
+
+    assert!(output.is_error);
+    assert!(
+        output.content.contains("no workspace metadata"),
+        "{}",
+        output.content
+    );
 }
 
 #[tokio::test]
@@ -576,6 +1301,7 @@ async fn resumed_subagent_uses_its_persisted_model() {
             parent_id: Some(parent_id.clone()),
             agent: "explore".into(),
             model: "zai/original".into(),
+            workspace: None,
         })
         .unwrap();
     child

@@ -36,7 +36,7 @@ pub struct SubagentSpawner {
     resolver: Arc<dyn ProviderResolver>,
     store: SessionStore,
     agents: Vec<AgentDefinition>,
-    cwd: std::path::PathBuf,
+    workspace_location: crate::tools::WorkspaceLocation,
     depth: usize,
     max_concurrent: usize,
     max_depth: usize,
@@ -75,12 +75,14 @@ impl SubagentSpawner {
         max_depth: usize,
     ) -> Self {
         let (notify_tx, notify_rx) = tokio::sync::mpsc::unbounded_channel();
+        let workspace_location = crate::tools::WorkspaceLocation::shared(cwd);
+        let workspace = crate::tools::WorkspaceScheduler::for_location(&workspace_location);
         Self {
             notify_rx: Arc::new(Mutex::new(Some(notify_rx))),
             resolver,
             store,
             agents,
-            cwd,
+            workspace_location,
             depth,
             max_concurrent,
             max_depth,
@@ -88,7 +90,7 @@ impl SubagentSpawner {
             notify_tx,
             stall_timeout: std::time::Duration::from_secs(600),
             background_tasks: Arc::new(Mutex::new(BackgroundRegistry::default())),
-            workspace: crate::tools::WorkspaceScheduler::new(),
+            workspace,
             background_tool_timeout: std::time::Duration::from_secs(600),
         }
     }
@@ -110,6 +112,10 @@ impl SubagentSpawner {
 
     pub fn workspace(&self) -> crate::tools::WorkspaceScheduler {
         self.workspace.clone()
+    }
+
+    pub fn workspace_location(&self) -> crate::tools::WorkspaceLocation {
+        self.workspace_location.clone()
     }
 
     /// Receiver for background-task notifications (single consumer;
@@ -165,12 +171,16 @@ impl SubagentSpawner {
 
     /// Spawner for children of this spawner: one level deeper, shared slot
     /// counter and notification channel.
-    fn child_spawner(self: &Arc<Self>) -> Arc<Self> {
+    fn child_spawner(
+        self: &Arc<Self>,
+        workspace_location: crate::tools::WorkspaceLocation,
+        workspace: crate::tools::WorkspaceScheduler,
+    ) -> Arc<Self> {
         Arc::new(Self {
             resolver: self.resolver.clone(),
             store: self.store.clone(),
             agents: self.agents.clone(),
-            cwd: self.cwd.clone(),
+            workspace_location,
             depth: self.depth + 1,
             max_concurrent: self.max_concurrent,
             max_depth: self.max_depth,
@@ -179,7 +189,7 @@ impl SubagentSpawner {
             notify_rx: self.notify_rx.clone(),
             stall_timeout: self.stall_timeout,
             background_tasks: self.background_tasks.clone(),
-            workspace: self.workspace.clone(),
+            workspace,
             background_tool_timeout: self.background_tool_timeout,
         })
     }
@@ -204,25 +214,62 @@ impl SubagentSpawner {
             AgentWorkspaceMode::Mutable => WorkspaceAccess::Mutating,
             AgentWorkspaceMode::ReadOnly => WorkspaceAccess::ReadOnly,
         };
-        if input.background == Some(true) && ctx.has_workspace_lease() {
+        let child_location = match &input.workspace {
+            Some(workspace) => {
+                let TaskWorkspaceIsolation::GitWorktree = workspace.isolation;
+                match crate::tools::WorkspaceLocation::validated_git_worktree(
+                    &ctx.location,
+                    workspace.cwd.clone(),
+                )
+                .await
+                {
+                    Ok(location) => location,
+                    Err(error) => {
+                        return ToolOutput::error(format!("invalid task workspace: {error:#}"));
+                    }
+                }
+            }
+            None => ctx.location.clone(),
+        };
+        let same_workspace = child_location.id() == ctx.location.id();
+        let cross_workspace_nested = !same_workspace && ctx.has_workspace_lease();
+        if !same_workspace
+            && ctx
+                .workspace_ancestry
+                .iter()
+                .any(|id| id == child_location.id())
+        {
+            return ToolOutput::error(
+                "task workspace is already held by an ancestor; finish the intervening task before returning to it",
+            );
+        }
+        if input.background == Some(true) && same_workspace && ctx.has_workspace_lease() {
             return ToolOutput::error(
                 "background tasks cannot outlive a parent workspace lease; use a foreground task or validated worktree",
             );
         }
-        if workspace_access == WorkspaceAccess::Mutating && ctx.has_workspace_lease() {
+        if workspace_access == WorkspaceAccess::Mutating
+            && same_workspace
+            && ctx.has_workspace_lease()
+        {
             return ToolOutput::error(
                 "nested mutable tasks cannot reuse their parent checkout; use a validated worktree",
             );
         }
-        let inherited_lease = match ctx.workspace_coverage(workspace_access) {
-            crate::tools::WorkspaceCoverage::Covered => ctx.workspace_lease.clone(),
-            crate::tools::WorkspaceCoverage::Absent => None,
-            crate::tools::WorkspaceCoverage::Incompatible => {
-                return ToolOutput::error(
-                    "mutable task cannot run inside a read-only child workspace",
-                );
+        let inherited_lease = if same_workspace {
+            match ctx.workspace_coverage(workspace_access) {
+                crate::tools::WorkspaceCoverage::Covered => ctx.workspace_lease.clone(),
+                crate::tools::WorkspaceCoverage::Absent => None,
+                crate::tools::WorkspaceCoverage::Incompatible => {
+                    return ToolOutput::error(
+                        "mutable task cannot run inside a read-only child workspace",
+                    );
+                }
             }
+        } else {
+            None
         };
+        let child_workspace = ctx.workspace.scoped(&child_location);
 
         // Concurrency slot: Claude Code semantics — over cap is a soft
         // error the model must not retry.
@@ -239,14 +286,62 @@ impl SubagentSpawner {
         let session_id = match &input.task_id {
             Some(id) => match self.store.load(id) {
                 Ok(session) => {
-                    if session
-                        .meta()
-                        .is_none_or(|meta| meta.agent != input.subagent_type)
-                    {
+                    let Some(meta) = session.meta() else {
+                        return ToolOutput::error(format!(
+                            "resuming task session {id:?}: session has no metadata"
+                        ));
+                    };
+                    if meta.agent != input.subagent_type {
                         return ToolOutput::error(format!(
                             "resuming task session {id:?}: persisted agent does not match {:?}",
                             input.subagent_type
                         ));
+                    }
+                    if meta.parent_id.as_deref() != Some(ctx.session_id.as_str()) {
+                        return ToolOutput::error(format!(
+                            "resuming task session {id:?}: persisted parent does not match the invoking session"
+                        ));
+                    }
+                    match &meta.workspace {
+                        Some(persisted) => {
+                            let restored = if persisted == &ctx.location {
+                                ctx.location.clone()
+                            } else if input.workspace.is_none() {
+                                return ToolOutput::error(format!(
+                                    "resuming task session {id:?}: workspace differs from its parent; provide its explicit workspace"
+                                ));
+                            } else {
+                                match crate::tools::WorkspaceLocation::revalidate(
+                                    &ctx.location,
+                                    persisted,
+                                )
+                                .await
+                                {
+                                    Ok(location) => location,
+                                    Err(error) => {
+                                        return ToolOutput::error(format!(
+                                            "resuming task session {id:?}: persisted workspace is invalid: {error:#}"
+                                        ));
+                                    }
+                                }
+                            };
+                            if restored != *persisted {
+                                return ToolOutput::error(format!(
+                                    "resuming task session {id:?}: persisted workspace metadata does not match its canonical location"
+                                ));
+                            }
+                            if restored != child_location {
+                                return ToolOutput::error(format!(
+                                    "resuming task session {id:?}: workspace does not match; provide its validated worktree"
+                                ));
+                            }
+                        }
+                        None if input.workspace.is_some() => {
+                            return ToolOutput::error(format!(
+                                "resuming task session {id:?}: session has no workspace metadata and cannot adopt an isolated workspace"
+                            ));
+                        }
+                        None => {}
                     }
                     id.clone()
                 }
@@ -273,6 +368,7 @@ impl SubagentSpawner {
                     parent_id: Some(ctx.session_id.clone()),
                     agent: input.subagent_type.clone(),
                     model,
+                    workspace: Some(child_location.clone()),
                 });
                 match created {
                     Ok(session) => drop(session),
@@ -284,7 +380,7 @@ impl SubagentSpawner {
             }
         };
 
-        let mut system_prompt = system_prompt_for(&self.cwd);
+        let mut system_prompt = system_prompt_for(child_location.cwd());
         if !agent.prompt.is_empty() {
             system_prompt = format!(
                 "{system_prompt}\n\n# Agent: {}\n\n{}",
@@ -292,7 +388,7 @@ impl SubagentSpawner {
             );
         }
 
-        let child_spawner = self.child_spawner();
+        let child_spawner = self.child_spawner(child_location.clone(), child_workspace.clone());
         let registry = match agent.workspace_mode {
             AgentWorkspaceMode::ReadOnly => ToolRegistry::read_only(),
             AgentWorkspaceMode::Mutable => {
@@ -304,13 +400,22 @@ impl SubagentSpawner {
                 }
             }
         };
+        let mut workspace_ancestry = ctx.workspace_ancestry.clone();
+        if !workspace_ancestry
+            .iter()
+            .any(|id| id == child_location.id())
+        {
+            workspace_ancestry.push(child_location.id().clone());
+        }
         let mut child_ctx = ToolContext {
-            cwd: self.cwd.clone(),
+            cwd: child_location.cwd().to_path_buf(),
             session_id: session_id.clone(),
             depth: self.depth + 1,
             subagent: Some(child_spawner),
-            workspace: ctx.workspace.clone(),
+            workspace: child_workspace.clone(),
+            location: child_location.clone(),
             workspace_lease: None,
+            workspace_ancestry,
             cancel: ctx.cancel.clone(),
         };
 
@@ -326,7 +431,9 @@ impl SubagentSpawner {
             let background_cancel = tokio_util::sync::CancellationToken::new();
             let task_cancel = background_cancel.clone();
             let root_cancel = ctx.cancel.clone();
-            let workspace = ctx.workspace.clone();
+            let workspace = child_workspace.clone();
+            let parent_location = ctx.location.clone();
+            let leased_location = child_location.clone();
             let mut background_registry = self.background_tasks.lock().unwrap();
             if background_registry.closed {
                 return ToolOutput::error("background runtime is shutting down");
@@ -338,6 +445,20 @@ impl SubagentSpawner {
                 let _slot = _guard; // hold the concurrency slot for the run
                 let lease = match inherited_lease {
                     Some(lease) => lease,
+                    None if cross_workspace_nested => {
+                        let Some(lease) = workspace.try_acquire_lease(workspace_access) else {
+                            let _ = spawner.notify_tx.send(Notification {
+                                parent_session_id,
+                                description: description.clone(),
+                                text: format!(
+                                    "<task-notification>\nTask \"{description}\" failed: target workspace is busy; retry after the current task finishes\n</task-notification>"
+                                ),
+                                is_error: true,
+                            });
+                            return;
+                        };
+                        lease
+                    }
                     None => {
                         tokio::select! {
                             lease = workspace.acquire_lease(workspace_access) => lease,
@@ -362,6 +483,32 @@ impl SubagentSpawner {
                         }
                     }
                 };
+                let revalidated = revalidate_after_lease(&parent_location, &leased_location).await;
+                if let Err(error) = revalidated.as_ref() {
+                    let _ = spawner.notify_tx.send(Notification {
+                        parent_session_id,
+                        description: description.clone(),
+                        text: format!(
+                            "<task-notification>\nTask \"{description}\" failed: workspace changed while waiting for its lease: {error:#}\n</task-notification>"
+                        ),
+                        is_error: true,
+                    });
+                    return;
+                }
+                if revalidated
+                    .as_ref()
+                    .is_ok_and(|location| location != &leased_location)
+                {
+                    let _ = spawner.notify_tx.send(Notification {
+                        parent_session_id,
+                        description: description.clone(),
+                        text: format!(
+                            "<task-notification>\nTask \"{description}\" failed: workspace changed while waiting for its lease\n</task-notification>"
+                        ),
+                        is_error: true,
+                    });
+                    return;
+                }
                 child_ctx.workspace_lease = Some(lease);
                 let cancel = tokio_util::sync::CancellationToken::new();
                 let (tx, mut rx_evt) = tokio::sync::mpsc::unbounded_channel();
@@ -476,15 +623,32 @@ DO NOT sleep, poll, or check on it — work on something else or end your respon
 
         let lease = match inherited_lease {
             Some(lease) => lease,
+            None if cross_workspace_nested => {
+                let Some(lease) = child_workspace.try_acquire_lease(workspace_access) else {
+                    return ToolOutput::error(
+                        "target workspace is busy; retry after the current task finishes",
+                    );
+                };
+                lease
+            }
             None => {
                 tokio::select! {
-                    lease = ctx.workspace.acquire_lease(workspace_access) => lease,
+                    lease = child_workspace.acquire_lease(workspace_access) => lease,
                     () = ctx.cancel.cancelled() => {
                         return ToolOutput::error("subagent cancelled while waiting for workspace");
                     }
                 }
             }
         };
+        match revalidate_after_lease(&ctx.location, &child_location).await {
+            Ok(location) if location == child_location => {}
+            Ok(_) => return ToolOutput::error("workspace changed while waiting for its lease"),
+            Err(error) => {
+                return ToolOutput::error(format!(
+                    "workspace changed while waiting for its lease: {error:#}"
+                ));
+            }
+        }
         child_ctx.workspace_lease = Some(lease);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let outcome = run_turn(
@@ -608,7 +772,10 @@ DO NOT sleep, poll, or check on it — work on something else or end your respon
         notification: Notification,
         cancel: tokio_util::sync::CancellationToken,
     ) -> anyhow::Result<RouteOutcome> {
-        let parent = self.store.load(&notification.parent_session_id)?;
+        let parent = match self.store.load(&notification.parent_session_id) {
+            Ok(parent) => parent,
+            Err(_) => return Ok(RouteOutcome::Requeue(notification)),
+        };
         let meta = parent
             .meta()
             .cloned()
@@ -618,12 +785,24 @@ DO NOT sleep, poll, or check on it — work on something else or end your respon
             .iter()
             .find(|agent| agent.name == meta.agent)
             .ok_or_else(|| anyhow::anyhow!("unknown persisted agent {:?}", meta.agent))?;
-        let depth = session_depth(&self.store, &notification.parent_session_id)?;
+        let (workspace_location, depth) = match session_workspace_location(
+            &self.store,
+            &notification.parent_session_id,
+            &self.workspace_location,
+        )
+        .await
+        {
+            Ok(location) => location,
+            Err(error) => {
+                return workspace_route_failure(&meta, notification, error);
+            }
+        };
+        let workspace = self.workspace.scoped(&workspace_location);
         let runtime = Arc::new(Self {
             resolver: self.resolver.clone(),
             store: self.store.clone(),
             agents: self.agents.clone(),
-            cwd: self.cwd.clone(),
+            workspace_location: workspace_location.clone(),
             depth,
             max_concurrent: self.max_concurrent,
             max_depth: self.max_depth,
@@ -632,7 +811,7 @@ DO NOT sleep, poll, or check on it — work on something else or end your respon
             notify_rx: self.notify_rx.clone(),
             stall_timeout: self.stall_timeout,
             background_tasks: self.background_tasks.clone(),
-            workspace: self.workspace.clone(),
+            workspace: workspace.clone(),
             background_tool_timeout: self.background_tool_timeout,
         });
         let workspace_access = match agent.workspace_mode {
@@ -645,7 +824,7 @@ DO NOT sleep, poll, or check on it — work on something else or end your respon
                 ToolRegistry::builtin().with_subagents(runtime.clone())?
             }
         };
-        let mut system_prompt = system_prompt_for(&self.cwd);
+        let mut system_prompt = system_prompt_for(workspace_location.cwd());
         if !agent.prompt.is_empty() {
             system_prompt = format!(
                 "{system_prompt}\n\n# Agent: {}\n\n{}",
@@ -654,9 +833,26 @@ DO NOT sleep, poll, or check on it — work on something else or end your respon
         }
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let lease = tokio::select! {
-            lease = self.workspace.acquire_lease(workspace_access) => lease,
+            lease = workspace.acquire_lease(workspace_access) => lease,
             () = cancel.cancelled() => return Ok(RouteOutcome::Requeue(notification)),
         };
+        let (leased_location, leased_depth) = match revalidate_after_lease_for_session(
+            &self.store,
+            &notification.parent_session_id,
+            &self.workspace_location,
+        )
+        .await
+        {
+            Ok(location) => location,
+            Err(error) => return workspace_route_failure(&meta, notification, error),
+        };
+        if leased_location != workspace_location || leased_depth != depth {
+            return workspace_route_failure(
+                &meta,
+                notification,
+                anyhow::anyhow!("workspace changed while waiting for its lease"),
+            );
+        }
         let outcome = loop {
             if cancel.is_cancelled() {
                 return Ok(RouteOutcome::Requeue(notification));
@@ -672,12 +868,14 @@ DO NOT sleep, poll, or check on it — work on something else or end your respon
                 tx.clone(),
                 cancel.clone(),
                 ToolContext {
-                    cwd: self.cwd.clone(),
+                    cwd: workspace_location.cwd().to_path_buf(),
                     session_id: notification.parent_session_id.clone(),
                     depth,
                     subagent: Some(runtime.clone()),
-                    workspace: self.workspace.clone(),
+                    workspace: workspace.clone(),
+                    location: workspace_location.clone(),
                     workspace_lease: Some(lease.clone()),
+                    workspace_ancestry: vec![workspace_location.id().clone()],
                     cancel: cancel.clone(),
                 },
             )
@@ -722,6 +920,109 @@ DO NOT sleep, poll, or check on it — work on something else or end your respon
     }
 }
 
+async fn session_workspace_location(
+    store: &SessionStore,
+    session_id: &str,
+    root: &crate::tools::WorkspaceLocation,
+) -> anyhow::Result<(crate::tools::WorkspaceLocation, usize)> {
+    let mut chain = Vec::new();
+    let mut current = session_id.to_string();
+    let mut visited = std::collections::HashSet::new();
+    loop {
+        if !visited.insert(current.clone()) {
+            return Err(SessionAncestryError(format!("session parent cycle at {current}")).into());
+        }
+        let session = store.load(&current).map_err(|error| {
+            SessionAncestryError(format!("loading session {current:?}: {error}"))
+        })?;
+        let meta = session
+            .meta()
+            .cloned()
+            .ok_or_else(|| SessionAncestryError(format!("session {current} has no metadata")))?;
+        let parent = meta.parent_id.clone();
+        chain.push(meta);
+        let Some(parent) = parent else {
+            break;
+        };
+        current = parent;
+    }
+
+    let mut location = root.clone();
+    for meta in chain.iter().rev() {
+        let Some(persisted) = &meta.workspace else {
+            continue;
+        };
+        if persisted == &location {
+            continue;
+        }
+        if persisted.id() == location.id() {
+            anyhow::bail!(
+                "session {:?} workspace does not match its parent's cwd and isolation",
+                meta.session_id
+            );
+        }
+        let restored = crate::tools::WorkspaceLocation::revalidate(&location, persisted).await?;
+        if restored != *persisted {
+            anyhow::bail!(
+                "session {:?} workspace metadata does not match its canonical location",
+                meta.session_id
+            );
+        }
+        location = restored;
+    }
+    Ok((location, chain.len().saturating_sub(1)))
+}
+
+async fn revalidate_after_lease_for_session(
+    store: &SessionStore,
+    session_id: &str,
+    root: &crate::tools::WorkspaceLocation,
+) -> anyhow::Result<(crate::tools::WorkspaceLocation, usize)> {
+    session_workspace_location(store, session_id, root).await
+}
+
+fn workspace_route_failure(
+    meta: &SessionMeta,
+    notification: Notification,
+    error: anyhow::Error,
+) -> anyhow::Result<RouteOutcome> {
+    if error.downcast_ref::<SessionAncestryError>().is_some() {
+        return Ok(RouteOutcome::Requeue(notification));
+    }
+    let Some(grandparent_id) = &meta.parent_id else {
+        return Err(anyhow::anyhow!(
+            "notification workspace routing failed: {error:#}"
+        ));
+    };
+    Ok(RouteOutcome::Propagate(Notification {
+        parent_session_id: grandparent_id.clone(),
+        description: notification.description,
+        text: format!(
+            "<task-notification>\nNested task failed because its workspace could not be restored.\n<result>\n{error:#}\n</result>\n</task-notification>"
+        ),
+        is_error: true,
+    }))
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("invalid session ancestry: {0}")]
+struct SessionAncestryError(String);
+
+async fn revalidate_after_lease(
+    parent: &crate::tools::WorkspaceLocation,
+    location: &crate::tools::WorkspaceLocation,
+) -> anyhow::Result<crate::tools::WorkspaceLocation> {
+    if location == parent {
+        return Ok(location.clone());
+    }
+    match location.isolation() {
+        crate::tools::WorkspaceIsolation::Shared => Ok(location.clone()),
+        crate::tools::WorkspaceIsolation::GitWorktree { .. } => {
+            crate::tools::WorkspaceLocation::revalidate(parent, location).await
+        }
+    }
+}
+
 fn final_text_after_last_user(store: &SessionStore, session_id: &str) -> Option<String> {
     store.load(session_id).ok().and_then(|session| {
         let boundary = session
@@ -745,23 +1046,6 @@ fn final_text_after_last_user(store: &SessionStore, session_id: &str) -> Option<
     })
 }
 
-fn session_depth(store: &SessionStore, session_id: &str) -> anyhow::Result<usize> {
-    let mut depth = 0;
-    let mut current = session_id.to_string();
-    let mut visited = std::collections::HashSet::new();
-    loop {
-        if !visited.insert(current.clone()) {
-            anyhow::bail!("session parent cycle at {current}");
-        }
-        let session = store.load(&current)?;
-        let Some(parent) = session.meta().and_then(|meta| meta.parent_id.clone()) else {
-            return Ok(depth);
-        };
-        depth += 1;
-        current = parent;
-    }
-}
-
 struct SlotGuard(Arc<AtomicUsize>);
 
 impl Drop for SlotGuard {
@@ -780,6 +1064,21 @@ pub struct TaskInput {
     /// Run detached; completion arrives as a notification.
     #[serde(default)]
     pub background: Option<bool>,
+    #[serde(default)]
+    pub workspace: Option<TaskWorkspaceInput>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskWorkspaceInput {
+    pub cwd: std::path::PathBuf,
+    pub isolation: TaskWorkspaceIsolation,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskWorkspaceIsolation {
+    GitWorktree,
 }
 
 /// The task tool is concurrency-safe within a provider step and manages a
@@ -825,6 +1124,16 @@ impl Tool for TaskTool {
                 "subagent_type": {"type": "string", "description": "Agent name"},
                 "task_id": {"type": "string", "description": "Resume a previous task's session"},
                 "background": {"type": "boolean", "description": "Run detached; you will be notified on completion. DO NOT poll."}
+                ,"workspace": {
+                    "type": "object",
+                    "description": "Optional validated sibling Git worktree used as a cooperative scheduling domain, not a sandbox.",
+                    "properties": {
+                        "cwd": {"type": "string"},
+                        "isolation": {"type": "string", "enum": ["git_worktree"]}
+                    },
+                    "required": ["cwd", "isolation"],
+                    "additionalProperties": false
+                }
             },
             "required": ["description", "prompt", "subagent_type"]
         })

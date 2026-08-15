@@ -52,3 +52,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Default and maximum context windows](issues/default-and-maximum-context-windows.md)
 - [x] [TUI cursor and markdown density](issues/tui-cursor-and-markdown-density.md)
 - [x] [Collapse Markdown separator rows](issues/collapse-markdown-separator-rows.md)
+- [x] [Tool scheduling and workspace capabilities](issues/tool-scheduling-and-workspace-capabilities.md)

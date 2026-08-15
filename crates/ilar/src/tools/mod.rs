@@ -12,6 +12,9 @@ pub mod write;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::{collections::HashMap, path::PathBuf};
+
+use anyhow::Context as _;
 
 use crate::provider::ToolDefinition;
 
@@ -30,9 +33,167 @@ pub enum WorkspaceAccess {
     Mutating,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct WorkspaceId(PathBuf);
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WorkspaceIsolation {
+    Shared,
+    GitWorktree { common_dir: PathBuf },
+}
+
+/// Canonical checkout identity and cwd used for cooperative scheduling. A
+/// validated worktree is not a filesystem sandbox; tools can still escape it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WorkspaceLocation {
+    cwd: PathBuf,
+    root: PathBuf,
+    id: WorkspaceId,
+    isolation: WorkspaceIsolation,
+}
+
+impl WorkspaceLocation {
+    pub fn shared(cwd: PathBuf) -> Self {
+        Self::try_shared(cwd).unwrap_or_else(|error| panic!("{error:#}"))
+    }
+
+    pub fn try_shared(cwd: PathBuf) -> anyhow::Result<Self> {
+        let cwd = std::fs::canonicalize(&cwd).map_err(|error| {
+            anyhow::anyhow!("workspace cwd {cwd:?} cannot be resolved: {error}")
+        })?;
+        let root = checkout_root(&cwd).unwrap_or_else(|| cwd.clone());
+        Ok(Self {
+            cwd,
+            id: WorkspaceId(root.clone()),
+            root,
+            isolation: WorkspaceIsolation::Shared,
+        })
+    }
+
+    pub fn cwd(&self) -> &std::path::Path {
+        &self.cwd
+    }
+
+    pub fn root(&self) -> &std::path::Path {
+        &self.root
+    }
+
+    pub fn id(&self) -> &WorkspaceId {
+        &self.id
+    }
+
+    pub fn isolation(&self) -> &WorkspaceIsolation {
+        &self.isolation
+    }
+
+    pub async fn validated_git_worktree(
+        parent: &WorkspaceLocation,
+        requested_cwd: PathBuf,
+    ) -> anyhow::Result<Self> {
+        let requested_cwd = std::fs::canonicalize(&requested_cwd)
+            .map_err(|error| anyhow::anyhow!("workspace cwd {:?}: {error}", requested_cwd))?;
+        let (parent_root, parent_common) = git_paths(parent.cwd()).await?;
+        let (root, common_dir) = git_paths(&requested_cwd).await?;
+        if root == parent_root {
+            anyhow::bail!("isolated workspace must use a different Git worktree");
+        }
+        if common_dir != parent_common {
+            anyhow::bail!("isolated workspace must belong to the parent Git repository");
+        }
+        if !requested_cwd.starts_with(&root) {
+            anyhow::bail!("workspace cwd is outside its Git worktree root");
+        }
+
+        let output = git_output(parent.root(), &["worktree", "list", "--porcelain", "-z"]).await?;
+        let listed = output.split(|byte| *byte == 0).any(|field| {
+            field
+                .strip_prefix(b"worktree ")
+                .and_then(|path| std::str::from_utf8(path).ok())
+                .and_then(|path| std::fs::canonicalize(path).ok())
+                .is_some_and(|path| path == root)
+        });
+        if !listed {
+            anyhow::bail!("workspace is not a registered Git worktree");
+        }
+
+        Ok(Self {
+            cwd: requested_cwd,
+            id: WorkspaceId(root.clone()),
+            root,
+            isolation: WorkspaceIsolation::GitWorktree { common_dir },
+        })
+    }
+
+    pub async fn revalidate(
+        parent: &WorkspaceLocation,
+        persisted: &WorkspaceLocation,
+    ) -> anyhow::Result<Self> {
+        match persisted.isolation() {
+            WorkspaceIsolation::Shared => {
+                let restored = WorkspaceLocation::try_shared(persisted.cwd.clone())?;
+                if restored.id != persisted.id || restored.id != parent.id {
+                    anyhow::bail!(
+                        "persisted shared workspace no longer matches its parent checkout"
+                    );
+                }
+                Ok(restored)
+            }
+            WorkspaceIsolation::GitWorktree { .. } => {
+                WorkspaceLocation::validated_git_worktree(parent, persisted.cwd.clone()).await
+            }
+        }
+    }
+}
+
+fn checkout_root(cwd: &std::path::Path) -> Option<PathBuf> {
+    cwd.ancestors()
+        .find(|path| path.join(".git").exists())
+        .and_then(|path| std::fs::canonicalize(path).ok())
+}
+
+async fn git_paths(cwd: &std::path::Path) -> anyhow::Result<(PathBuf, PathBuf)> {
+    let root = git_path(cwd, "--show-toplevel").await?;
+    let common = git_path(cwd, "--git-common-dir").await?;
+    Ok((root, common))
+}
+
+async fn git_path(cwd: &std::path::Path, selector: &str) -> anyhow::Result<PathBuf> {
+    let output = git_output(cwd, &["rev-parse", "--path-format=absolute", selector]).await?;
+    let output = output.strip_suffix(b"\n").unwrap_or(&output);
+    let path = std::str::from_utf8(output).context("Git returned a non-UTF-8 path")?;
+    if path.is_empty() {
+        anyhow::bail!("Git did not return a path for {selector}");
+    }
+    Ok(std::fs::canonicalize(path)?)
+}
+
+fn is_git_environment_variable(key: &std::ffi::OsStr) -> bool {
+    key.to_string_lossy().starts_with("GIT_")
+}
+
+async fn git_output(cwd: &std::path::Path, args: &[&str]) -> anyhow::Result<Vec<u8>> {
+    let mut command = tokio::process::Command::new("git");
+    command.arg("-C").arg(cwd).args(args).kill_on_drop(true);
+    for (key, _) in std::env::vars_os().filter(|(key, _)| is_git_environment_variable(key)) {
+        command.env_remove(key);
+    }
+    let output = tokio::time::timeout(std::time::Duration::from_secs(10), command.output())
+        .await
+        .map_err(|_| anyhow::anyhow!("Git workspace validation timed out"))??;
+    if !output.status.success() {
+        anyhow::bail!(
+            "Git workspace validation failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(output.stdout)
+}
+
 #[derive(Clone)]
 pub struct WorkspaceScheduler {
-    lock: Arc<tokio::sync::RwLock<()>>,
+    locks: Arc<std::sync::Mutex<HashMap<WorkspaceId, Arc<tokio::sync::RwLock<()>>>>>,
+    id: WorkspaceId,
 }
 
 pub enum WorkspacePermit {
@@ -46,7 +207,8 @@ pub enum WorkspacePermit {
 }
 
 pub struct WorkspaceLease {
-    scheduler: Arc<tokio::sync::RwLock<()>>,
+    scheduler: Arc<std::sync::Mutex<HashMap<WorkspaceId, Arc<tokio::sync::RwLock<()>>>>>,
+    id: WorkspaceId,
     access: WorkspaceAccess,
     _permit: WorkspacePermit,
 }
@@ -60,29 +222,76 @@ pub enum WorkspaceCoverage {
 
 impl WorkspaceScheduler {
     pub fn new() -> Self {
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Self {
-            lock: Arc::new(tokio::sync::RwLock::new(())),
+            locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            id: WorkspaceId(PathBuf::from(format!("<ephemeral-{id}>"))),
         }
     }
 
+    pub fn for_location(location: &WorkspaceLocation) -> Self {
+        Self {
+            locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            id: location.id.clone(),
+        }
+    }
+
+    pub fn scoped(&self, location: &WorkspaceLocation) -> Self {
+        Self {
+            locks: self.locks.clone(),
+            id: location.id.clone(),
+        }
+    }
+
+    fn lock(&self) -> Arc<tokio::sync::RwLock<()>> {
+        self.locks
+            .lock()
+            .unwrap()
+            .entry(self.id.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::RwLock::new(())))
+            .clone()
+    }
+
     pub async fn acquire(&self, access: WorkspaceAccess) -> WorkspacePermit {
+        let lock = self.lock();
         match access {
             WorkspaceAccess::None => WorkspacePermit::None,
             WorkspaceAccess::ReadOnly => WorkspacePermit::ReadOnly {
-                _guard: self.lock.clone().read_owned().await,
+                _guard: lock.read_owned().await,
             },
             WorkspaceAccess::Mutating => WorkspacePermit::Mutating {
-                _guard: self.lock.clone().write_owned().await,
+                _guard: lock.write_owned().await,
             },
         }
     }
 
     pub async fn acquire_lease(&self, access: WorkspaceAccess) -> Arc<WorkspaceLease> {
         Arc::new(WorkspaceLease {
-            scheduler: self.lock.clone(),
+            scheduler: self.locks.clone(),
+            id: self.id.clone(),
             access,
             _permit: self.acquire(access).await,
         })
+    }
+
+    pub fn try_acquire_lease(&self, access: WorkspaceAccess) -> Option<Arc<WorkspaceLease>> {
+        let lock = self.lock();
+        let permit = match access {
+            WorkspaceAccess::None => WorkspacePermit::None,
+            WorkspaceAccess::ReadOnly => WorkspacePermit::ReadOnly {
+                _guard: lock.try_read_owned().ok()?,
+            },
+            WorkspaceAccess::Mutating => WorkspacePermit::Mutating {
+                _guard: lock.try_write_owned().ok()?,
+            },
+        };
+        Some(Arc::new(WorkspaceLease {
+            scheduler: self.locks.clone(),
+            id: self.id.clone(),
+            access,
+            _permit: permit,
+        }))
     }
 }
 
@@ -97,6 +306,7 @@ impl Default for WorkspaceScheduler {
 #[derive(Clone)]
 pub struct ToolContext {
     pub cwd: std::path::PathBuf,
+    pub location: WorkspaceLocation,
     /// Session the tool call belongs to (parent link for subagents).
     pub session_id: String,
     /// Subagent nesting depth (0 = root session).
@@ -105,19 +315,24 @@ pub struct ToolContext {
     pub subagent: Option<std::sync::Arc<crate::subagent::SubagentSpawner>>,
     pub workspace: WorkspaceScheduler,
     pub workspace_lease: Option<Arc<WorkspaceLease>>,
+    /// Workspace IDs whose leases are held by this child call stack.
+    pub workspace_ancestry: Vec<WorkspaceId>,
     pub cancel: tokio_util::sync::CancellationToken,
 }
 
 impl ToolContext {
     /// Context for a root (non-subagent) session.
     pub fn root(cwd: std::path::PathBuf) -> Self {
+        let location = WorkspaceLocation::shared(cwd);
         Self {
-            cwd,
+            cwd: location.cwd.clone(),
             session_id: String::new(),
             depth: 0,
             subagent: None,
-            workspace: WorkspaceScheduler::new(),
+            workspace: WorkspaceScheduler::for_location(&location),
+            location,
             workspace_lease: None,
+            workspace_ancestry: Vec::new(),
             cancel: tokio_util::sync::CancellationToken::new(),
         }
     }
@@ -128,6 +343,8 @@ impl ToolContext {
         spawner: std::sync::Arc<crate::subagent::SubagentSpawner>,
     ) -> Self {
         self.workspace = spawner.workspace();
+        self.location = spawner.workspace_location();
+        self.cwd = self.location.cwd.clone();
         self.subagent = Some(spawner);
         self
     }
@@ -136,7 +353,7 @@ impl ToolContext {
         let Some(lease) = &self.workspace_lease else {
             return WorkspaceCoverage::Absent;
         };
-        if !Arc::ptr_eq(&lease.scheduler, &self.workspace.lock) {
+        if !Arc::ptr_eq(&lease.scheduler, &self.workspace.locks) || lease.id != self.workspace.id {
             return WorkspaceCoverage::Incompatible;
         }
         match (lease.access, requested) {
@@ -341,6 +558,18 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn identifies_every_git_environment_variable() {
+        assert!(super::is_git_environment_variable("GIT_DIR".as_ref()));
+        assert!(super::is_git_environment_variable(
+            "GIT_CONFIG_COUNT".as_ref()
+        ));
+        assert!(super::is_git_environment_variable(
+            "GIT_CONFIG_KEY_0".as_ref()
+        ));
+        assert!(!super::is_git_environment_variable("PATH".as_ref()));
+    }
+
     #[tokio::test]
     async fn dropping_blocking_scan_signals_worker() {
         use std::sync::atomic::{AtomicBool, Ordering};

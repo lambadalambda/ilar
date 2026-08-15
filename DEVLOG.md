@@ -521,3 +521,19 @@ runs collapse to one interior separator row without adding leading or trailing
 space, and assistant content is style-preserving hard-wrapped inside its label
 margin so every visual line stays aligned without changing fenced-code
 whitespace.
+
+## 2026-08-15 — Workspace-aware tool scheduling
+
+Tool ordering and workspace effects are now independent capabilities. Mutable
+child turns hold a checkout-wide lease for their full lifetime, enforced
+read-only agents receive no shell, edit, write, or delegation tools, and todo
+updates remain ordered barriers without pretending to read the workspace.
+
+Task calls may route to a registered sibling Git worktree with structured
+`workspace` metadata. Canonical checkout IDs key a shared lock registry, so
+same-checkout mutations serialize while distinct worktrees overlap. Child
+sessions persist their validated cwd and isolation; resumes require the same
+explicit worktree when changing workspace and may inherit an immediate parent's
+validated location. Routed notifications restore each ancestry transition,
+and stale worktrees are rejected again after lease waits. Routing is
+cooperative scheduling, not a filesystem sandbox.

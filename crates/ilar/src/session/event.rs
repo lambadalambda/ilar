@@ -17,6 +17,10 @@ pub struct SessionMeta {
     pub agent: String,
     /// Model the session started with ("provider/model-id").
     pub model: String,
+    /// Workspace routing metadata for child sessions. Older/root sessions use
+    /// the runtime workspace when this is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<crate::tools::WorkspaceLocation>,
 }
 
 /// One JSONL line. Self-describing via the `type` tag.

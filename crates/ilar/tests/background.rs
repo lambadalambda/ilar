@@ -21,6 +21,7 @@ fn temp_store() -> (SessionStore, String) {
             parent_id: None,
             agent: "build".into(),
             model: "zai/glm-4.7".into(),
+            workspace: None,
         })
         .unwrap();
     (store, id)
@@ -101,6 +102,59 @@ fn spawner_for_workspace(
         )
         .with_stall_timeout(Duration::from_millis(400)),
     )
+}
+
+fn repository_with_worktree() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    fn git(cwd: &std::path::Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    std::fs::create_dir(&root).unwrap();
+    git(&root, &["init", "-q"]);
+    git(&root, &["config", "user.name", "ilar tests"]);
+    git(&root, &["config", "user.email", "ilar@example.invalid"]);
+    std::fs::write(root.join("README.md"), "test\n").unwrap();
+    git(&root, &["add", "README.md"]);
+    git(&root, &["commit", "-qm", "initial"]);
+    let worktree = temp.path().join("isolated-worktree");
+    git(
+        &root,
+        &[
+            "worktree",
+            "add",
+            "-qb",
+            "notification-test",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    (temp, root, worktree)
+}
+
+fn remove_worktree(root: &std::path::Path, worktree: &std::path::Path) {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["worktree", "remove", "--force"])
+        .arg(worktree)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git worktree remove: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[tokio::test]
@@ -639,11 +693,13 @@ async fn stall_watchdog_fires_on_silent_child() {
             }),
             ToolContext {
                 cwd: std::env::temp_dir(),
+                location: ilar::tools::WorkspaceLocation::shared(std::env::temp_dir()),
                 session_id,
                 depth: 0,
                 subagent: Some(spawner),
                 workspace: ilar::tools::WorkspaceScheduler::new(),
                 workspace_lease: None,
+                workspace_ancestry: Vec::new(),
                 cancel: tokio_util::sync::CancellationToken::new(),
             },
         )
@@ -681,6 +737,7 @@ async fn nested_notification_runs_declared_parent_and_propagates_once() {
                 parent_id: Some(root_id.clone()),
                 agent: "explore".into(),
                 model: "zai/glm-4.7".into(),
+                workspace: None,
             })
             .unwrap(),
     );
@@ -718,6 +775,301 @@ async fn nested_notification_runs_declared_parent_and_propagates_once() {
 }
 
 #[tokio::test]
+async fn isolated_notification_uses_persisted_cwd_and_independent_lock() {
+    let (_repo, root, worktree) = repository_with_worktree();
+    let (store, root_id) = temp_store();
+    let location = ilar::tools::WorkspaceLocation::validated_git_worktree(
+        &ilar::tools::WorkspaceLocation::shared(root.clone()),
+        worktree.clone(),
+    )
+    .await
+    .unwrap();
+    let child_id = new_id();
+    drop(
+        store
+            .create(SessionMeta {
+                session_id: child_id.clone(),
+                parent_id: Some(root_id.clone()),
+                agent: "explore".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: Some(location),
+            })
+            .unwrap(),
+    );
+    let provider = MockProvider::new(vec![
+        vec![
+            ProviderEvent::ToolCallCompleted {
+                id: "write-cwd".into(),
+                name: "bash".into(),
+                input: serde_json::json!({"command": "pwd > routed-cwd.txt"}),
+            },
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+                usage: Usage::default(),
+            },
+        ],
+        vec![ProviderEvent::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        }],
+    ]);
+    let router = spawner_for_workspace(
+        Arc::new(provider),
+        &store,
+        AgentWorkspaceMode::Mutable,
+        root.clone(),
+    );
+    let _root_busy = router
+        .workspace()
+        .acquire(ilar::tools::WorkspaceAccess::Mutating)
+        .await;
+
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        router.route_notification(
+            ilar::subagent::Notification {
+                parent_session_id: child_id,
+                description: "isolated route".into(),
+                text: "deliver".into(),
+                is_error: false,
+            },
+            tokio_util::sync::CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("isolated route should not wait for the root checkout")
+    .unwrap();
+
+    assert!(worktree.join("routed-cwd.txt").exists());
+    assert!(!root.join("routed-cwd.txt").exists());
+}
+
+#[tokio::test]
+async fn nested_notification_resolves_each_workspace_against_its_parent() {
+    let (_repo, root, worktree) = repository_with_worktree();
+    let (store, root_id) = temp_store();
+    let root_location = ilar::tools::WorkspaceLocation::shared(root.clone());
+    let isolated = ilar::tools::WorkspaceLocation::validated_git_worktree(&root_location, worktree)
+        .await
+        .unwrap();
+    let back_to_root =
+        ilar::tools::WorkspaceLocation::validated_git_worktree(&isolated, root.clone())
+            .await
+            .unwrap();
+    let isolated_parent_id = new_id();
+    drop(
+        store
+            .create(SessionMeta {
+                session_id: isolated_parent_id.clone(),
+                parent_id: Some(root_id),
+                agent: "explore".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: Some(isolated),
+            })
+            .unwrap(),
+    );
+    let nested_root_id = new_id();
+    drop(
+        store
+            .create(SessionMeta {
+                session_id: nested_root_id.clone(),
+                parent_id: Some(isolated_parent_id.clone()),
+                agent: "explore".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: Some(back_to_root),
+            })
+            .unwrap(),
+    );
+    let provider = MockProvider::new(vec![vec![ProviderEvent::TurnComplete {
+        stop_reason: StopReason::EndTurn,
+        usage: Usage::default(),
+    }]]);
+    let router = spawner_for_workspace(
+        Arc::new(provider.clone()),
+        &store,
+        AgentWorkspaceMode::Mutable,
+        root,
+    );
+
+    let outcome = router
+        .route_notification(
+            ilar::subagent::Notification {
+                parent_session_id: nested_root_id,
+                description: "nested root route".into(),
+                text: "deliver".into(),
+                is_error: false,
+            },
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        outcome,
+        ilar::subagent::RouteOutcome::Propagate(notification)
+            if notification.parent_session_id == isolated_parent_id
+    ));
+    assert_eq!(provider.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn notification_with_cyclic_ancestry_is_preserved_without_propagating() {
+    let (store, _root_id) = temp_store();
+    let first_id = new_id();
+    let second_id = new_id();
+    drop(
+        store
+            .create(SessionMeta {
+                session_id: first_id.clone(),
+                parent_id: Some(second_id.clone()),
+                agent: "explore".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+            })
+            .unwrap(),
+    );
+    drop(
+        store
+            .create(SessionMeta {
+                session_id: second_id,
+                parent_id: Some(first_id.clone()),
+                agent: "explore".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+            })
+            .unwrap(),
+    );
+    let provider = MockProvider::new(vec![vec![ProviderEvent::TurnComplete {
+        stop_reason: StopReason::EndTurn,
+        usage: Usage::default(),
+    }]]);
+    let router = spawner(Arc::new(provider.clone()), &store);
+
+    let outcome = router
+        .route_notification(
+            ilar::subagent::Notification {
+                parent_session_id: first_id,
+                description: "cyclic route".into(),
+                text: "deliver".into(),
+                is_error: false,
+            },
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        outcome,
+        ilar::subagent::RouteOutcome::Requeue(notification)
+            if notification.description == "cyclic route"
+    ));
+    assert!(provider.requests().is_empty());
+}
+
+#[tokio::test]
+async fn notification_with_missing_parent_session_is_preserved() {
+    let (store, _root_id) = temp_store();
+    let provider = MockProvider::new(vec![vec![ProviderEvent::TurnComplete {
+        stop_reason: StopReason::EndTurn,
+        usage: Usage::default(),
+    }]]);
+    let router = spawner(Arc::new(provider.clone()), &store);
+    let missing_id = new_id();
+
+    let outcome = router
+        .route_notification(
+            ilar::subagent::Notification {
+                parent_session_id: missing_id.clone(),
+                description: "missing route".into(),
+                text: "deliver".into(),
+                is_error: false,
+            },
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        outcome,
+        ilar::subagent::RouteOutcome::Requeue(notification)
+            if notification.parent_session_id == missing_id
+    ));
+    assert!(provider.requests().is_empty());
+}
+
+#[tokio::test]
+async fn isolated_notification_revalidates_after_waiting_for_lease() {
+    let (_repo, root, worktree) = repository_with_worktree();
+    let (store, root_id) = temp_store();
+    let location = ilar::tools::WorkspaceLocation::validated_git_worktree(
+        &ilar::tools::WorkspaceLocation::shared(root.clone()),
+        worktree.clone(),
+    )
+    .await
+    .unwrap();
+    let child_id = new_id();
+    drop(
+        store
+            .create(SessionMeta {
+                session_id: child_id.clone(),
+                parent_id: Some(root_id.clone()),
+                agent: "explore".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: Some(location.clone()),
+            })
+            .unwrap(),
+    );
+    let provider = MockProvider::new(vec![vec![ProviderEvent::TurnComplete {
+        stop_reason: StopReason::EndTurn,
+        usage: Usage::default(),
+    }]]);
+    let router = spawner_for_workspace(
+        Arc::new(provider.clone()),
+        &store,
+        AgentWorkspaceMode::Mutable,
+        root.clone(),
+    );
+    let isolated = router.workspace().scoped(&location);
+    let busy = isolated
+        .acquire(ilar::tools::WorkspaceAccess::Mutating)
+        .await;
+    let route = {
+        let router = router.clone();
+        tokio::spawn(async move {
+            router
+                .route_notification(
+                    ilar::subagent::Notification {
+                        parent_session_id: child_id,
+                        description: "stale isolated route".into(),
+                        text: "deliver".into(),
+                        is_error: false,
+                    },
+                    tokio_util::sync::CancellationToken::new(),
+                )
+                .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!route.is_finished());
+
+    remove_worktree(&root, &worktree);
+    drop(busy);
+    let outcome = route.await.unwrap().unwrap();
+    let ilar::subagent::RouteOutcome::Propagate(failure) = outcome else {
+        panic!("stale worktree route did not propagate its failure");
+    };
+
+    assert!(failure.is_error);
+    assert_eq!(failure.parent_session_id, root_id);
+    assert!(
+        failure.text.contains("workspace could not be restored"),
+        "{}",
+        failure.text
+    );
+    assert!(provider.requests().is_empty());
+}
+
+#[tokio::test]
 async fn routed_read_only_agent_keeps_mutating_tools_unavailable() {
     let (store, root_id) = temp_store();
     let child_id = new_id();
@@ -728,6 +1080,7 @@ async fn routed_read_only_agent_keeps_mutating_tools_unavailable() {
                 parent_id: Some(root_id),
                 agent: "explore".into(),
                 model: "zai/glm-4.7".into(),
+                workspace: None,
             })
             .unwrap(),
     );
@@ -787,6 +1140,7 @@ async fn routed_mutable_agent_waits_for_workspace_and_requeues_if_cancelled() {
                 parent_id: Some(root_id),
                 agent: "explore".into(),
                 model: "zai/glm-4.7".into(),
+                workspace: None,
             })
             .unwrap(),
     );
@@ -839,6 +1193,7 @@ async fn notification_waits_for_busy_parent_without_being_lost() {
                 parent_id: Some(root_id.clone()),
                 agent: "explore".into(),
                 model: "zai/glm-4.7".into(),
+                workspace: None,
             })
             .unwrap(),
     );
@@ -916,6 +1271,7 @@ async fn cancelled_undelivered_notification_is_returned_for_requeue() {
                 parent_id: Some(root_id),
                 agent: "explore".into(),
                 model: "zai/glm-4.7".into(),
+                workspace: None,
             })
             .unwrap(),
     );
@@ -961,6 +1317,7 @@ async fn nested_parent_failure_propagates_one_error() {
                 parent_id: Some(root_id.clone()),
                 agent: "explore".into(),
                 model: "zai/glm-4.7".into(),
+                workspace: None,
             })
             .unwrap(),
     );
@@ -996,6 +1353,7 @@ async fn nested_no_text_completion_does_not_reuse_stale_answer() {
             parent_id: Some(root_id),
             agent: "explore".into(),
             model: "zai/glm-4.7".into(),
+            workspace: None,
         })
         .unwrap();
     child

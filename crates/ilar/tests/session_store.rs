@@ -18,6 +18,7 @@ fn sample_meta() -> SessionMeta {
         parent_id: None,
         agent: "build".into(),
         model: "zai/glm-4.7".into(),
+        workspace: None,
     }
 }
 
@@ -589,6 +590,7 @@ fn child_session_references_parent() {
         parent_id: Some(parent_meta.session_id.clone()),
         agent: "explore".into(),
         model: "zai/glm-4.7-air".into(),
+        workspace: None,
     };
     store.create(child_meta.clone()).unwrap();
 
@@ -597,4 +599,22 @@ fn child_session_references_parent() {
         child.meta().unwrap().parent_id,
         Some(parent_meta.session_id)
     );
+}
+
+#[test]
+fn older_metadata_without_workspace_still_deserializes() {
+    let (store, _dir) = temp_store();
+    let id = new_id();
+    let path = store.session_path(&id).unwrap();
+    std::fs::write(
+        &path,
+        format!(
+            "{{\"type\":\"meta\",\"session_id\":\"{id}\",\"agent\":\"build\",\"model\":\"zai/glm-4.7\",\"ts\":\"2026-08-15T00:00:00Z\"}}\n"
+        ),
+    )
+    .unwrap();
+
+    let session = store.load(&id).unwrap();
+
+    assert_eq!(session.meta().unwrap().workspace, None);
 }

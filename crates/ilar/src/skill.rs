@@ -15,23 +15,25 @@ pub struct Skill {
 
 /// The built-in worktree-isolation skill: run a subagent in a git worktree.
 const WORKTREE_ISOLATION: &str = r#"---
-description = "Run a subagent in an isolated git worktree so it can't touch the working tree"
+description = "Run a subagent in a separately scheduled git worktree"
 ---
 # Worktree isolation
 
-To run a task without touching the current working tree:
+To run a task in a separately scheduled Git worktree:
 
 1. Create a worktree: `git worktree add ../ilar-task-<name> -b task/<name>`
-2. Invoke the `task` tool with the subagent prompt, and prepend to the
-   prompt: "You are working in the git worktree at ../ilar-task-<name>.
-   Run all commands and edits there; never touch the main checkout."
+2. Invoke the `task` tool with structured workspace routing:
+   `{"workspace":{"cwd":"../ilar-task-<name>","isolation":"git_worktree"}}`.
+   Include the same field when resuming from a different parent workspace.
+   Omit it when a nested task simply inherited its immediate parent's worktree.
 3. When the subagent finishes, review the diff in the worktree
    (`git -C ../ilar-task-<name> diff`), merge or cherry-pick if good.
 4. Clean up: `git worktree remove ../ilar-task-<name>` and delete the
    branch if abandoned.
 
 Use for risky refactors or experiments that should not race concurrent
-edits in the main checkout.
+edits in the main checkout. This is cooperative scheduling, not a sandbox:
+tools can still access paths outside the worktree.
 "#;
 
 #[derive(Deserialize)]

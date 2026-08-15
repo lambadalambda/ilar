@@ -106,6 +106,8 @@ fn builtin_worktree_isolation_skill_present() {
         .expect("builtin worktree-isolation skill");
     assert!(wt.body.contains("git worktree"), "{}", wt.body);
     assert!(wt.body.contains("task"), "should reference the task tool");
+    assert!(wt.body.contains("\"workspace\""), "{}", wt.body);
+    assert!(wt.body.contains("git_worktree"), "{}", wt.body);
 }
 
 #[tokio::test]
