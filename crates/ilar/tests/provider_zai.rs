@@ -307,6 +307,66 @@ async fn openai_flavor_uses_chat_completions_endpoint() {
     assert_eq!(body["stream"], true);
 }
 
+#[test]
+fn openai_flavor_serializes_system_and_tool_results_in_protocol_order() {
+    let provider = ZaiProvider::new("k".into(), None, Flavor::OpenAI);
+    let mut req = request();
+    req.system_prompt = Some("follow instructions".into());
+    req.messages = vec![
+        ChatMessage::user_text("read both"),
+        ChatMessage {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::ToolCall {
+                    id: "call_1".into(),
+                    name: "read".into(),
+                    input: serde_json::json!({"path": "one"}),
+                },
+                ContentBlock::ToolCall {
+                    id: "call_2".into(),
+                    name: "read".into(),
+                    input: serde_json::json!({"path": "two"}),
+                },
+            ],
+        },
+        ChatMessage {
+            role: Role::User,
+            content: vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "call_1".into(),
+                    content: "one result".into(),
+                    is_error: false,
+                },
+                ContentBlock::Text {
+                    text: "continue with this context".into(),
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: "call_2".into(),
+                    content: "two result".into(),
+                    is_error: false,
+                },
+            ],
+        },
+    ];
+
+    let body = serde_json::to_value(provider.wire_body_for_test(&req)).unwrap();
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 6, "messages: {messages:?}");
+    assert_eq!(messages[0]["role"], "system");
+    assert_eq!(messages[0]["content"], "follow instructions");
+    assert_eq!(messages[1]["role"], "user");
+    assert_eq!(messages[2]["role"], "assistant");
+    assert_eq!(messages[2]["tool_calls"].as_array().unwrap().len(), 2);
+    assert_eq!(messages[3]["role"], "tool");
+    assert_eq!(messages[3]["tool_call_id"], "call_1");
+    assert_eq!(messages[4]["role"], "tool");
+    assert_eq!(messages[4]["tool_call_id"], "call_2");
+    assert_eq!(messages[5]["role"], "user");
+    assert_eq!(messages[5]["content"], "continue with this context");
+    assert_eq!(body["stream_options"]["include_usage"], true);
+    assert!(body.get("system").is_none());
+}
+
 #[tokio::test]
 async fn invalid_model_id_is_preflight_error() {
     let provider = ZaiProvider::new("k".into(), None, Flavor::Anthropic);

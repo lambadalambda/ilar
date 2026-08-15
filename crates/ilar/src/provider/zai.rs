@@ -94,18 +94,15 @@ impl ZaiProvider {
             }
             Flavor::OpenAI => {
                 body.insert("model".into(), serde_json::json!(model_id));
+                let mut messages = Vec::new();
                 if let Some(system) = &req.system_prompt {
-                    body.insert("system".into(), serde_json::json!(system));
+                    messages.push(serde_json::json!({
+                        "role": "system",
+                        "content": system,
+                    }));
                 }
-                body.insert(
-                    "messages".into(),
-                    serde_json::json!(
-                        req.messages
-                            .iter()
-                            .flat_map(openai_message)
-                            .collect::<Vec<_>>()
-                    ),
-                );
+                messages.extend(req.messages.iter().flat_map(openai_message));
+                body.insert("messages".into(), serde_json::json!(messages));
                 body.insert(
                     "tools".into(),
                     serde_json::json!(
@@ -213,19 +210,8 @@ fn openai_message(msg: &ChatMessage) -> Vec<serde_json::Value> {
         }
     }
     if !tool_results.is_empty() {
-        // A tool-result user message becomes: optional user text, then one
-        // message per result. An assistant message with tool calls keeps
-        // its own message (content may be null).
         let mut messages = Vec::new();
-        if !content_text.is_empty() || tool_calls.is_empty() {
-            let mut value = serde_json::Map::new();
-            value.insert("role".into(), serde_json::json!(role));
-            value.insert("content".into(), serde_json::json!(content_text));
-            if !tool_calls.is_empty() {
-                value.insert("tool_calls".into(), serde_json::json!(tool_calls));
-            }
-            messages.push(serde_json::Value::Object(value));
-        } else {
+        if !tool_calls.is_empty() {
             let mut value = serde_json::Map::new();
             value.insert("role".into(), serde_json::json!(role));
             value.insert("content".into(), serde_json::Value::Null);
@@ -233,6 +219,12 @@ fn openai_message(msg: &ChatMessage) -> Vec<serde_json::Value> {
             messages.push(serde_json::Value::Object(value));
         }
         messages.extend(tool_results);
+        if !content_text.is_empty() {
+            messages.push(serde_json::json!({
+                "role": role,
+                "content": content_text,
+            }));
+        }
         return messages;
     }
     let mut value = serde_json::Map::new();

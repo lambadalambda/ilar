@@ -18,7 +18,7 @@ model = "zai/glm-4.7"
 # z.ai Anthropic-compatible endpoint (default):
 base_url = "https://api.z.ai/api/anthropic"
 # For the OpenAI-compatible endpoint use:
-#   base_url = "https://api.z.ai/api/paas/v4"
+#   base_url = "https://api.z.ai/api/coding/paas/v4"
 #   flavor = "openai"
 # api_key from ILAR_ZAI_API_KEY (env).
 

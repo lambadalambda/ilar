@@ -345,3 +345,10 @@ on resize without snapping a detached reader back to the tail.
 Tool registry composition now rejects duplicate names with a typed error.
 `webfetch` remains a builtin and `with_web_tools` only adds optional
 search, so provider requests cannot contain duplicate function schemas.
+
+## 2026-08-15 — Stabilization: z.ai OpenAI wire format
+
+The OpenAI-compatible flavor now sends instructions as a system-role
+message and places tool outputs directly after assistant tool calls,
+without inserting an empty user message. The example endpoint now points
+at z.ai's coding-plan OpenAI-compatible URL.
