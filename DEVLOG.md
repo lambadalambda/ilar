@@ -566,3 +566,19 @@ of normal tool iterations; exact streamed assistant content is replayed for
 continuation and persisted in provider-specific replay blocks once the resumed
 turn completes. This preserves server-tool ordering through later client tool
 results without duplicating visible neutral content.
+
+## 2026-08-16 — Bounded, SSRF-safe web tools
+
+Web fetch and Tavily search now use explicit connect and total timeouts, disable
+environment proxies, and stream response bodies under hard byte ceilings.
+Fetch validates literal and every DNS-resolved address, rejects private,
+loopback, link-local, metadata, and known IP translation ranges, and applies the
+same policy to redirects. Tavily redirects are disabled so its body-carried API
+key cannot be replayed to another origin.
+
+The HTML converter now scans Unicode safely, handles quoted attributes and raw
+script/style content, and preserves block boundaries with single-buffer text
+normalization. Search queries, backend duration, result count, JSON size, hit
+fields, errors, and final output are bounded; the public limit is documented
+and clamped to 1–20 results. Fetch errors strip reqwest URLs and retain only a
+bounded origin label so signed paths and queries are not persisted.

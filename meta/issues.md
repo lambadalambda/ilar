@@ -14,7 +14,6 @@
 
 ## Stabilization
 
-- [ ] [Bound and sanitize web tools](issues/bound-and-sanitize-web-tools.md)
 - [ ] [Subagent safety and outcomes](issues/subagent-safety-and-outcomes.md)
 - [ ] [Persist and render todos](issues/persist-and-render-todos.md)
 - [ ] [Config loading and frontmatter diagnostics](issues/config-loading-and-frontmatter-diagnostics.md)

@@ -55,3 +55,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Tool scheduling and workspace capabilities](issues/tool-scheduling-and-workspace-capabilities.md)
 - [x] [Compaction correctness and cancellation](issues/compaction-correctness-and-cancellation.md)
 - [x] [Harden provider protocol handling](issues/harden-provider-protocol-handling.md)
+- [x] [Bound and sanitize web tools](issues/bound-and-sanitize-web-tools.md)
