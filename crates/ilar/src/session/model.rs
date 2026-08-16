@@ -31,6 +31,12 @@ pub enum ContentBlock {
     Reasoning {
         item: serde_json::Value,
     },
+    /// Exact provider assistant content retained alongside neutral display
+    /// blocks when a paused response had to be resumed.
+    ProviderReplay {
+        provider: String,
+        content: serde_json::Value,
+    },
     /// Locally visible provider diagnostics that must never be replayed.
     Diagnostic {
         text: String,

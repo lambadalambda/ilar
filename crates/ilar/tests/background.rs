@@ -378,6 +378,10 @@ async fn foreground_child_rejects_detached_workspace_mutation() {
     let marker = dir.path().join("nested-root-cancelled");
     let child = MockProvider::new(vec![
         vec![
+            ProviderEvent::ToolCallStarted {
+                id: "nested-bash".into(),
+                name: "bash".into(),
+            },
             ProviderEvent::ToolCallCompleted {
                 id: "nested-bash".into(),
                 name: "bash".into(),
@@ -606,6 +610,10 @@ async fn background_task_returns_immediately_and_notifies_once() {
 
     let parent = MockProvider::new(vec![
         vec![
+            ProviderEvent::ToolCallStarted {
+                id: "t1".into(),
+                name: "task".into(),
+            },
             bg_call("t1"),
             ProviderEvent::TurnComplete {
                 stop_reason: StopReason::ToolUse,
@@ -798,6 +806,10 @@ async fn isolated_notification_uses_persisted_cwd_and_independent_lock() {
     );
     let provider = MockProvider::new(vec![
         vec![
+            ProviderEvent::ToolCallStarted {
+                id: "write-cwd".into(),
+                name: "bash".into(),
+            },
             ProviderEvent::ToolCallCompleted {
                 id: "write-cwd".into(),
                 name: "bash".into(),
@@ -1088,6 +1100,10 @@ async fn routed_read_only_agent_keeps_mutating_tools_unavailable() {
     let marker = workspace.path().join("must-not-exist");
     let provider = MockProvider::new(vec![
         vec![
+            ProviderEvent::ToolCallStarted {
+                id: "write-1".into(),
+                name: "write".into(),
+            },
             ProviderEvent::ToolCallCompleted {
                 id: "write-1".into(),
                 name: "write".into(),

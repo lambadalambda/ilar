@@ -18,6 +18,8 @@ use chrono::Utc;
 pub struct LoopConfig {
     /// Max provider calls per user turn (tool-loop guard).
     pub max_iterations: usize,
+    /// Number of server-side paused responses that may be reissued.
+    pub max_pause_retries: usize,
     /// Context window in tokens; compaction triggers above
     /// `context_limit * compaction_threshold`. None uses the resolver's
     /// model-specific default, or disables compaction if it has none.
@@ -29,6 +31,7 @@ impl Default for LoopConfig {
     fn default() -> Self {
         Self {
             max_iterations: 50,
+            max_pause_retries: 3,
             context_limit: None,
             compaction_threshold: 0.85,
         }
@@ -58,6 +61,7 @@ struct StepAccumulator {
     announced_calls: std::collections::HashMap<String, String>,
     usage: Usage,
     stop_reason: Option<StopReason>,
+    response_content: Option<(String, serde_json::Value)>,
 }
 
 impl StepAccumulator {
@@ -115,10 +119,13 @@ impl StepAccumulator {
         self.content.push(ContentBlock::Reasoning { item });
     }
 
-    fn start_tool_call(&mut self, id: String, name: String) {
+    fn start_tool_call(&mut self, id: String, name: String) -> Result<(), String> {
         self.thinking_open = None;
+        if id.is_empty() || name.is_empty() {
+            return Err("tool call id and name must not be empty".into());
+        }
         if self.tool_indices.contains_key(&id) {
-            return;
+            return Err(format!("duplicate tool call id {id:?}"));
         }
         self.content.push(ContentBlock::ToolCall {
             id: id.clone(),
@@ -126,14 +133,80 @@ impl StepAccumulator {
             input: serde_json::Value::Null,
         });
         self.tool_indices.insert(id, self.content.len() - 1);
+        Ok(())
     }
 
-    fn complete_tool_call(&mut self, id: String, name: String, input: serde_json::Value) {
-        self.start_tool_call(id.clone(), name.clone());
+    fn complete_tool_call(
+        &mut self,
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    ) -> Result<(), String> {
+        if self.completed_calls.contains(&id) {
+            return Err(format!("duplicate completion for tool call {id:?}"));
+        }
+        if !input.is_null() && !input.is_object() {
+            return Err(format!(
+                "tool call {id:?} arguments must be an object or null"
+            ));
+        }
+        if let Some(index) = self.tool_indices.get(&id).copied() {
+            if let ContentBlock::ToolCall {
+                name: started_name, ..
+            } = &self.content[index]
+                && started_name != &name
+            {
+                return Err(format!("tool call {id:?} changed name before completion"));
+            }
+        } else {
+            return Err(format!("completion references unknown tool call {id:?}"));
+        }
         if let Some(index) = self.tool_indices.get(&id).copied() {
             let completed_id = id.clone();
             self.content[index] = ContentBlock::ToolCall { id, name, input };
             self.completed_calls.insert(completed_id);
+        }
+        Ok(())
+    }
+
+    fn validate_terminal(&self, stop_reason: &StopReason) -> Result<(), String> {
+        let has_calls = !self.tool_indices.is_empty();
+        let calls = self.tool_calls();
+        if calls.iter().any(|(_, _, _, completed)| !*completed) {
+            return Err("terminal response contains uncompleted tool calls".into());
+        }
+        if stop_reason != &StopReason::MaxTokens
+            && calls.iter().any(|(_, _, input, _)| input.is_null())
+        {
+            return Err("null tool arguments require a max_tokens stop reason".into());
+        }
+        match stop_reason {
+            StopReason::ToolUse if !has_calls => {
+                Err("tool_use stop reason requires at least one tool call".into())
+            }
+            StopReason::ToolUse
+                if self.completed_calls.len() != self.tool_indices.len()
+                    || self
+                        .tool_calls()
+                        .iter()
+                        .any(|(_, _, input, _)| !input.is_object()) =>
+            {
+                Err("tool_use stop reason requires completed object arguments".into())
+            }
+            StopReason::EndTurn
+            | StopReason::Refusal
+            | StopReason::Paused
+            | StopReason::Stopped
+                if has_calls =>
+            {
+                Err(format!(
+                    "{stop_reason:?} stop reason contradicts streamed tool calls"
+                ))
+            }
+            StopReason::Paused if self.response_content.is_none() => {
+                Err("paused response is missing continuation content".into())
+            }
+            _ => Ok(()),
         }
     }
 
@@ -361,8 +434,23 @@ pub async fn run_turn(
 
     tool_ctx.session_id = session_id.to_string();
 
-    for _ in 0..config.max_iterations {
+    let mut pause_retries = 0;
+    let mut iterations = 0;
+    let mut continuations = Vec::new();
+    let mut continuation_provider: Option<String> = None;
+    let mut paused_content = Vec::new();
+    while iterations < config.max_iterations {
         if cancel.is_cancelled() {
+            if !paused_content.is_empty() {
+                session.append(SessionEvent::AssistantMessage {
+                    id: new_id(),
+                    model: model.clone(),
+                    content: std::mem::take(&mut paused_content),
+                    usage: Usage::default(),
+                    stop_reason: "aborted".into(),
+                    ts: Utc::now(),
+                })?;
+            }
             publish(
                 &events,
                 LoopEvent::TurnDone {
@@ -377,6 +465,7 @@ pub async fn run_turn(
             system_prompt: system_prompt.map(String::from),
             messages: session.transcript(),
             tools: tools.clone(),
+            continuations: continuations.clone(),
             options: serde_json::Value::Null,
         };
 
@@ -410,25 +499,30 @@ pub async fn run_turn(
                     acc.push_reasoning(item);
                 }
                 ProviderEvent::ToolCallStarted { id, name } => {
-                    if !acc.announced_calls.contains_key(&id) {
-                        acc.announced_calls.insert(id.clone(), name.clone());
-                        acc.start_tool_call(id.clone(), name.clone());
-                        publish(&events, LoopEvent::ToolStarted { id, name });
+                    if let Err(error) = acc.start_tool_call(id.clone(), name.clone()) {
+                        errored = Some(error);
+                        break;
+                    }
+                    acc.announced_calls.insert(id.clone(), name.clone());
+                    publish(&events, LoopEvent::ToolStarted { id, name });
+                }
+                ProviderEvent::ToolCallInputDelta { id, .. } => {
+                    if id.is_empty()
+                        || !acc.tool_indices.contains_key(&id)
+                        || acc.completed_calls.contains(&id)
+                    {
+                        errored = Some(format!(
+                            "tool argument delta references unknown call {id:?}"
+                        ));
+                        break;
                     }
                 }
-                ProviderEvent::ToolCallInputDelta { .. } => {}
                 ProviderEvent::ToolCallCompleted { id, name, input } => {
-                    // Some streams (and test scripts) skip Started; announce
-                    // lazily so the UI always sees the pair.
-                    if !acc.announced_calls.contains_key(&id) {
-                        acc.announced_calls.insert(id.clone(), name.clone());
-                        publish(
-                            &events,
-                            LoopEvent::ToolStarted {
-                                id: id.clone(),
-                                name: name.clone(),
-                            },
-                        );
+                    if let Err(error) =
+                        acc.complete_tool_call(id.clone(), name.clone(), input.clone())
+                    {
+                        errored = Some(error);
+                        break;
                     }
                     publish(
                         &events,
@@ -437,7 +531,14 @@ pub async fn run_turn(
                             arguments: summarize_tool_input(&name, &input),
                         },
                     );
-                    acc.complete_tool_call(id, name, input);
+                }
+                ProviderEvent::ResponseContent { provider, content } => {
+                    if provider.is_empty() || acc.response_content.is_some() || !content.is_array()
+                    {
+                        errored = Some("invalid or duplicate provider response content".into());
+                        break;
+                    }
+                    acc.response_content = Some((provider, content));
                 }
                 ProviderEvent::TurnComplete { stop_reason, usage } => {
                     acc.stop_reason = Some(stop_reason.clone());
@@ -454,15 +555,22 @@ pub async fn run_turn(
 
         // A stream that ended without TurnComplete or Error is a broken
         // provider/connection — treat it as an error, not a clean step.
-        let errored = errored.or_else(|| {
-            (acc.stop_reason.is_none() && !aborted)
-                .then(|| "stream ended before completion".to_string())
-        });
+        let errored = errored
+            .or_else(|| {
+                (acc.stop_reason.is_none() && !aborted)
+                    .then(|| "stream ended before completion".to_string())
+            })
+            .or_else(|| {
+                acc.stop_reason
+                    .as_ref()
+                    .and_then(|stop_reason| acc.validate_terminal(stop_reason).err())
+            });
 
         if let Some(message) = errored {
             // Persist the partial step so the UI's already-shown deltas
             // don't evaporate from the transcript.
-            let blocks = acc.content_blocks();
+            let mut blocks = paused_content.clone();
+            blocks.extend(acc.content_blocks());
             if !blocks.is_empty() {
                 session.append(SessionEvent::AssistantMessage {
                     id: new_id(),
@@ -511,7 +619,8 @@ pub async fn run_turn(
         if aborted {
             // Persist the partial assistant message so the session is
             // resumable...
-            let blocks = acc.content_blocks();
+            let mut blocks = paused_content.clone();
+            blocks.extend(acc.content_blocks());
             if !blocks.is_empty() {
                 session.append(SessionEvent::AssistantMessage {
                     id: new_id(),
@@ -551,8 +660,57 @@ pub async fn run_turn(
             return Ok(TurnOutcome::Aborted);
         }
 
+        if acc.stop_reason == Some(StopReason::Paused) {
+            if pause_retries >= config.max_pause_retries {
+                anyhow::bail!(
+                    "provider pause retry limit reached ({})",
+                    config.max_pause_retries
+                );
+            }
+            pause_retries += 1;
+            let (provider, content) = acc
+                .response_content
+                .take()
+                .expect("validated paused continuation");
+            if continuation_provider
+                .as_ref()
+                .is_some_and(|existing| existing != &provider)
+            {
+                anyhow::bail!("paused continuation changed provider");
+            }
+            continuation_provider.get_or_insert(provider);
+            continuations.push(content);
+            paused_content.extend(acc.content_blocks());
+            continue;
+        }
+        iterations += 1;
+
         // Persist the completed assistant message.
-        let blocks = acc.content_blocks();
+        let mut blocks = paused_content.clone();
+        blocks.extend(acc.content_blocks());
+        if !continuations.is_empty() {
+            if let Some((provider, current)) = acc.response_content.take() {
+                if continuation_provider.as_ref() != Some(&provider) {
+                    anyhow::bail!("continued response changed provider");
+                }
+                let mut content = Vec::new();
+                for response in continuations.iter().chain(std::iter::once(&current)) {
+                    content.extend(
+                        response
+                            .as_array()
+                            .expect("validated provider response content")
+                            .iter()
+                            .cloned(),
+                    );
+                }
+                blocks.push(ContentBlock::ProviderReplay {
+                    provider,
+                    content: serde_json::Value::Array(content),
+                });
+            } else if acc.stop_reason != Some(StopReason::MaxTokens) {
+                anyhow::bail!("continued response omitted replay content");
+            }
+        }
         let had_tool_calls = !acc.tool_indices.is_empty();
         let stop_reason = acc
             .stop_reason
@@ -583,6 +741,9 @@ pub async fn run_turn(
                 usage: acc.usage,
             },
         );
+        continuations.clear();
+        continuation_provider = None;
+        paused_content.clear();
 
         if !had_tool_calls {
             publish(
@@ -681,5 +842,53 @@ mod tests {
         assert!(!custom.contains("secret"), "{custom}");
         assert!(!custom.contains("session"), "{custom}");
         assert!(custom.chars().count() <= MAX_TOOL_ARGUMENT_SUMMARY_CHARS);
+    }
+
+    #[test]
+    fn tool_call_terminal_validation_is_strict() {
+        let mut missing_completion = StepAccumulator::default();
+        missing_completion
+            .start_tool_call("call".into(), "read".into())
+            .unwrap();
+        assert!(
+            missing_completion
+                .validate_terminal(&StopReason::MaxTokens)
+                .unwrap_err()
+                .contains("uncompleted")
+        );
+
+        let mut null_input = StepAccumulator::default();
+        null_input
+            .start_tool_call("call".into(), "read".into())
+            .unwrap();
+        null_input
+            .complete_tool_call("call".into(), "read".into(), serde_json::Value::Null)
+            .unwrap();
+        assert!(null_input.validate_terminal(&StopReason::MaxTokens).is_ok());
+        assert!(
+            null_input
+                .validate_terminal(&StopReason::Stopped)
+                .unwrap_err()
+                .contains("max_tokens")
+        );
+
+        let mut complete_input = StepAccumulator::default();
+        complete_input
+            .start_tool_call("call".into(), "read".into())
+            .unwrap();
+        complete_input
+            .complete_tool_call("call".into(), "read".into(), serde_json::json!({}))
+            .unwrap();
+        assert!(
+            complete_input
+                .validate_terminal(&StopReason::MaxTokens)
+                .is_ok()
+        );
+        assert!(
+            complete_input
+                .validate_terminal(&StopReason::Stopped)
+                .unwrap_err()
+                .contains("contradicts")
+        );
     }
 }

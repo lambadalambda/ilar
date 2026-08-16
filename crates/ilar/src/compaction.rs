@@ -86,14 +86,27 @@ fn estimate_tokens_from(
     let chars: usize = transcript
         .iter()
         .map(|m| {
-            m.content
+            let replay = m
+                .content
                 .iter()
-                .map(|b| match b {
+                .filter_map(|block| match block {
+                    crate::session::ContentBlock::ProviderReplay { content, .. } => {
+                        Some(content.to_string().chars().count())
+                    }
+                    _ => None,
+                })
+                .max()
+                .unwrap_or(0);
+            let neutral = m
+                .content
+                .iter()
+                .map(|block| match block {
                     crate::session::ContentBlock::Text { text } => text.chars().count(),
                     crate::session::ContentBlock::Thinking { text, .. } => text.chars().count(),
                     crate::session::ContentBlock::Reasoning { item } => {
                         item.to_string().chars().count()
                     }
+                    crate::session::ContentBlock::ProviderReplay { .. } => 0,
                     crate::session::ContentBlock::Diagnostic { .. } => 0,
                     crate::session::ContentBlock::ToolCall { input, .. } => {
                         input.to_string().chars().count()
@@ -102,8 +115,8 @@ fn estimate_tokens_from(
                         content.chars().count()
                     }
                 })
-                .sum::<usize>()
-                + 8
+                .sum::<usize>();
+            replay.max(neutral) + 8
         })
         .sum::<usize>()
         + system_prompt
@@ -169,6 +182,7 @@ pub(crate) async fn compact_if_needed_locked(
         system_prompt: Some(SUMMARIZER_PROMPT.into()),
         messages: older.transcript(),
         tools: Vec::new(),
+        continuations: Vec::new(),
         options: serde_json::Value::Null,
     };
     let mut stream = provider.stream(request)?;

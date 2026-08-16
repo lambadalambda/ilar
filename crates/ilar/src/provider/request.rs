@@ -20,6 +20,9 @@ pub struct Request {
     pub system_prompt: Option<String>,
     pub messages: Vec<ChatMessage>,
     pub tools: Vec<ToolDefinition>,
+    /// Opaque assistant content from provider-paused responses. Providers
+    /// that emit continuations must replay them without persistence.
+    pub continuations: Vec<serde_json::Value>,
     /// Provider passthrough options (temperature, etc.).
     pub options: serde_json::Value,
 }
@@ -31,6 +34,30 @@ impl Request {
             ..Default::default()
         }
     }
+}
+
+pub(super) fn merge_options(
+    body: &mut serde_json::Map<String, serde_json::Value>,
+    options: &serde_json::Value,
+    reserved: &[&str],
+) -> anyhow::Result<()> {
+    let Some(options) = options.as_object() else {
+        if options.is_null() {
+            return Ok(());
+        }
+        anyhow::bail!("provider options must be an object or null");
+    };
+    let mut conflicts = options
+        .keys()
+        .filter(|key| reserved.contains(&key.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    conflicts.sort();
+    if !conflicts.is_empty() {
+        anyhow::bail!("provider options cannot override: {}", conflicts.join(", "));
+    }
+    body.extend(options.clone());
+    Ok(())
 }
 
 /// Split "provider/model-id" into its parts.

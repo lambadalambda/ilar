@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use ilar::agent::{LoopConfig, LoopEvent, TurnOutcome, run_turn};
+use ilar::provider::zai::{Flavor, ZaiProvider};
 use ilar::provider::{EventStream, MockProvider, Provider, ProviderEvent, Request, StopReason};
 use ilar::session::{ContentBlock, SessionMeta, SessionStore, new_id};
 use ilar::tools::{
@@ -76,6 +77,347 @@ fn tool_call_event(id: &str, msg: &str) -> ProviderEvent {
         name: "echo".into(),
         input: serde_json::json!({"msg": msg}),
     }
+}
+
+#[tokio::test]
+async fn truncated_null_input_never_invokes_custom_tool() {
+    let (store, session_id) = temp_session("build");
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let registry = registry_with(EchoTool {
+        calls: calls.clone(),
+    });
+    let provider = MockProvider::new(vec![
+        vec![
+            ProviderEvent::ToolCallStarted {
+                id: "truncated".into(),
+                name: "echo".into(),
+            },
+            ProviderEvent::ToolCallCompleted {
+                id: "truncated".into(),
+                name: "echo".into(),
+                input: serde_json::Value::Null,
+            },
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::MaxTokens,
+                usage: Default::default(),
+            },
+        ],
+        vec![
+            ProviderEvent::TextDelta("recovered".into()),
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+                usage: Default::default(),
+            },
+        ],
+    ]);
+    let (tx, _rx) = events_channel();
+
+    let outcome = run_turn(
+        &provider,
+        &registry,
+        &store,
+        &session_id,
+        "go",
+        None,
+        LoopConfig::default(),
+        tx,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, TurnOutcome::Completed);
+    assert!(calls.lock().unwrap().is_empty());
+    assert!(
+        format!("{:?}", store.load(&session_id).unwrap().transcript())
+            .contains("incomplete or had invalid arguments")
+    );
+}
+
+#[tokio::test]
+async fn paused_turn_is_reissued_without_persisting_an_assistant_step() {
+    let (store, session_id) = temp_session("build");
+    let provider = MockProvider::new(vec![
+        vec![
+            ProviderEvent::TextDelta("before pause".into()),
+            ProviderEvent::ResponseContent {
+                provider: "zai-anthropic".into(),
+                content: serde_json::json!([{
+                    "type": "server_tool_use",
+                    "id": "srv_1",
+                    "name": "web_search",
+                    "input": {"query": "news"}
+                }]),
+            },
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::Paused,
+                usage: Default::default(),
+            },
+        ],
+        vec![
+            ProviderEvent::TextDelta("after pause".into()),
+            ProviderEvent::ResponseContent {
+                provider: "zai-anthropic".into(),
+                content: serde_json::json!([{"type": "text", "text": "after pause"}]),
+            },
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+                usage: Default::default(),
+            },
+        ],
+    ]);
+    let (tx, _rx) = events_channel();
+
+    let outcome = run_turn(
+        &provider,
+        &ToolRegistry::read_only(),
+        &store,
+        &session_id,
+        "go",
+        None,
+        LoopConfig {
+            max_iterations: 1,
+            ..LoopConfig::default()
+        },
+        tx,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, TurnOutcome::Completed);
+    assert_eq!(provider.requests().len(), 2);
+    assert_eq!(provider.requests()[1].continuations.len(), 1);
+    let transcript = store.load(&session_id).unwrap().transcript();
+    assert_eq!(transcript.len(), 2, "{transcript:?}");
+    assert!(format!("{transcript:?}").contains("before pause"));
+}
+
+#[tokio::test]
+async fn paused_turn_retry_cap_is_finite() {
+    let (store, session_id) = temp_session("build");
+    let provider = MockProvider::new(vec![vec![
+        ProviderEvent::ResponseContent {
+            provider: "zai-anthropic".into(),
+            content: serde_json::json!([{
+                "type": "server_tool_use",
+                "id": "srv_1",
+                "name": "web_search",
+                "input": {"query": "news"}
+            }]),
+        },
+        ProviderEvent::TurnComplete {
+            stop_reason: StopReason::Paused,
+            usage: Default::default(),
+        },
+    ]]);
+    let (tx, _rx) = events_channel();
+
+    let error = run_turn(
+        &provider,
+        &ToolRegistry::read_only(),
+        &store,
+        &session_id,
+        "go",
+        None,
+        LoopConfig {
+            max_pause_retries: 2,
+            ..LoopConfig::default()
+        },
+        tx,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("pause retry limit"), "{error:#}");
+    assert_eq!(provider.requests().len(), 3);
+}
+
+#[tokio::test]
+async fn resumed_max_tokens_does_not_require_complete_replay_content() {
+    let (store, session_id) = temp_session("build");
+    let provider = MockProvider::new(vec![
+        vec![
+            ProviderEvent::TextDelta("before pause".into()),
+            ProviderEvent::ResponseContent {
+                provider: "zai-anthropic".into(),
+                content: serde_json::json!([{
+                    "type": "server_tool_use",
+                    "id": "srv_1",
+                    "name": "web_search",
+                    "input": {"query": "news"}
+                }]),
+            },
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::Paused,
+                usage: Default::default(),
+            },
+        ],
+        vec![
+            ProviderEvent::TextDelta("truncated".into()),
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::MaxTokens,
+                usage: Default::default(),
+            },
+        ],
+    ]);
+    let (tx, _rx) = events_channel();
+
+    let outcome = run_turn(
+        &provider,
+        &ToolRegistry::read_only(),
+        &store,
+        &session_id,
+        "go",
+        None,
+        LoopConfig::default(),
+        tx,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, TurnOutcome::Completed);
+    let transcript = store.load(&session_id).unwrap().transcript();
+    assert!(format!("{transcript:?}").contains("truncated"));
+}
+
+#[tokio::test]
+async fn resumed_tool_use_persists_replay_before_tool_results() {
+    let (store, session_id) = temp_session("build");
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let registry = registry_with(EchoTool {
+        calls: calls.clone(),
+    });
+    let first = serde_json::json!([{
+        "type": "server_tool_use",
+        "id": "srv_1",
+        "name": "web_search",
+        "input": {"query": "news"}
+    }]);
+    let resumed = serde_json::json!([
+        {
+            "type": "web_search_tool_result",
+            "tool_use_id": "srv_1",
+            "content": []
+        },
+        {
+            "type": "tool_use",
+            "id": "client_1",
+            "name": "echo",
+            "input": {"msg": "result"}
+        }
+    ]);
+    let provider = MockProvider::new(vec![
+        vec![
+            ProviderEvent::ResponseContent {
+                provider: "zai-anthropic".into(),
+                content: first.clone(),
+            },
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::Paused,
+                usage: Default::default(),
+            },
+        ],
+        vec![
+            ProviderEvent::ToolCallStarted {
+                id: "client_1".into(),
+                name: "echo".into(),
+            },
+            tool_call_event("client_1", "result"),
+            ProviderEvent::ResponseContent {
+                provider: "zai-anthropic".into(),
+                content: resumed.clone(),
+            },
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+                usage: Default::default(),
+            },
+        ],
+        vec![
+            ProviderEvent::TextDelta("done".into()),
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+                usage: Default::default(),
+            },
+        ],
+    ]);
+    let (tx, _rx) = events_channel();
+
+    let outcome = run_turn(
+        &provider,
+        &registry,
+        &store,
+        &session_id,
+        "go",
+        None,
+        LoopConfig::default(),
+        tx,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, TurnOutcome::Completed);
+    assert_eq!(calls.lock().unwrap().len(), 1);
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[2].continuations.is_empty());
+    let body =
+        ZaiProvider::new("k".into(), None, Flavor::Anthropic).wire_body_for_test(&requests[2]);
+    assert_eq!(body["messages"][0]["role"], "user");
+    assert_eq!(body["messages"][1]["role"], "assistant");
+    assert_eq!(body["messages"][1]["content"][0], first[0]);
+    assert_eq!(body["messages"][1]["content"][1], resumed[0]);
+    assert_eq!(body["messages"][1]["content"][2], resumed[1]);
+    assert_eq!(body["messages"][2]["role"], "user");
+    assert_eq!(body["messages"][2]["content"][0]["type"], "tool_result");
+}
+
+#[tokio::test]
+async fn duplicate_tool_completion_is_rejected_before_execution() {
+    let (store, session_id) = temp_session("build");
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let registry = registry_with(EchoTool {
+        calls: calls.clone(),
+    });
+    let provider = MockProvider::new(vec![vec![
+        ProviderEvent::ToolCallStarted {
+            id: "duplicate".into(),
+            name: "echo".into(),
+        },
+        tool_call_event("duplicate", "one"),
+        tool_call_event("duplicate", "two"),
+        ProviderEvent::TurnComplete {
+            stop_reason: StopReason::ToolUse,
+            usage: Default::default(),
+        },
+    ]]);
+    let (tx, _rx) = events_channel();
+
+    let error = run_turn(
+        &provider,
+        &registry,
+        &store,
+        &session_id,
+        "go",
+        None,
+        LoopConfig::default(),
+        tx,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("duplicate"), "{error:#}");
+    assert!(calls.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -388,31 +730,25 @@ async fn unsigned_thinking_is_persisted_as_diagnostic_text() {
 }
 
 #[tokio::test]
-async fn incomplete_tool_call_is_failed_without_execution() {
+async fn started_tool_call_without_completion_is_rejected() {
     let (store, session_id) = temp_session("build");
     let calls = Arc::new(Mutex::new(Vec::new()));
     let registry = registry_with(EchoTool {
         calls: calls.clone(),
     });
-    let provider = MockProvider::new(vec![
-        vec![
-            ProviderEvent::ToolCallStarted {
-                id: "incomplete".into(),
-                name: "echo".into(),
-            },
-            ProviderEvent::TurnComplete {
-                stop_reason: StopReason::ToolUse,
-                usage: Default::default(),
-            },
-        ],
-        vec![ProviderEvent::TurnComplete {
-            stop_reason: StopReason::EndTurn,
+    let provider = MockProvider::new(vec![vec![
+        ProviderEvent::ToolCallStarted {
+            id: "incomplete".into(),
+            name: "echo".into(),
+        },
+        ProviderEvent::TurnComplete {
+            stop_reason: StopReason::MaxTokens,
             usage: Default::default(),
-        }],
-    ]);
+        },
+    ]]);
     let (tx, _rx) = events_channel();
 
-    run_turn(
+    let error = run_turn(
         &provider,
         &registry,
         &store,
@@ -425,15 +761,13 @@ async fn incomplete_tool_call_is_failed_without_execution() {
         ToolContext::root(std::env::temp_dir()),
     )
     .await
-    .unwrap();
+    .unwrap_err();
 
     assert!(calls.lock().unwrap().is_empty());
-    let transcript = store.load(&session_id).unwrap().transcript();
-    assert!(matches!(
-        &transcript[2].content[0],
-        ContentBlock::ToolResult { is_error: true, content, .. }
-            if content.contains("incomplete")
-    ));
+    assert!(
+        error.to_string().contains("uncompleted tool calls"),
+        "{error:#}"
+    );
 }
 
 #[tokio::test]
@@ -752,6 +1086,10 @@ async fn max_iterations_guard_stops_loop() {
     let registry = ToolRegistry::builtin();
     // Always ends with a tool call -> would loop forever without the guard.
     let provider = MockProvider::new(vec![vec![
+        ProviderEvent::ToolCallStarted {
+            id: "t".into(),
+            name: "echo".into(),
+        },
         tool_call_event("t", "again"),
         ProviderEvent::TurnComplete {
             stop_reason: StopReason::ToolUse,
@@ -793,11 +1131,17 @@ async fn abort_after_tool_call_keeps_transcript_valid() {
     impl Provider for ToolThenHang {
         fn stream(&self, _req: Request) -> anyhow::Result<EventStream> {
             Ok(Box::pin(
-                futures::stream::iter(vec![ProviderEvent::ToolCallCompleted {
-                    id: "t1".into(),
-                    name: "echo".into(),
-                    input: serde_json::json!({"msg": "x"}),
-                }])
+                futures::stream::iter(vec![
+                    ProviderEvent::ToolCallStarted {
+                        id: "t1".into(),
+                        name: "echo".into(),
+                    },
+                    ProviderEvent::ToolCallCompleted {
+                        id: "t1".into(),
+                        name: "echo".into(),
+                        input: serde_json::json!({"msg": "x"}),
+                    },
+                ])
                 .chain(futures::stream::unfold((), |()| async move {
                     tokio::time::sleep(Duration::from_secs(10)).await;
                     Some((

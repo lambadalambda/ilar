@@ -66,6 +66,26 @@ fn http_server(sse_body: Vec<u8>) -> (String, tokio::task::JoinHandle<String>) {
     (format!("http://{addr}"), handle)
 }
 
+fn http_error_server(body: String) -> String {
+    let listener = futures::executor::block_on(async {
+        tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap()
+    });
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = vec![0; 8192];
+        let _ = socket.read(&mut request).await;
+        let response = format!(
+            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    });
+    format!("http://{addr}")
+}
+
 fn provider(base_url: String) -> ilar::provider::openai::OpenAIProvider {
     // base_url convention includes the version segment (like the default).
     ilar::provider::openai::OpenAIProvider::new("test-key".into(), Some(format!("{base_url}/v1")))
@@ -143,6 +163,32 @@ async fn error_fixture_maps_to_error_event() {
 }
 
 #[tokio::test]
+async fn http_error_body_is_bounded_and_redacted() {
+    let body = format!(
+        "Authorization: Bearer super-secret {}",
+        "padding".repeat(20_000)
+    );
+    let base = http_error_server(body);
+    let provider = ilar::provider::openai::OpenAIProvider::new(
+        "super-secret".into(),
+        Some(format!("{base}/v1")),
+    );
+
+    let events = drain(provider.stream(request_with_tool()).unwrap()).await;
+
+    let ProviderEvent::Error(error) = &events[0] else {
+        panic!("expected HTTP error: {events:?}");
+    };
+    assert!(
+        error.len() < 66_000,
+        "error was not bounded: {}",
+        error.len()
+    );
+    assert!(!error.contains("super-secret"), "{error}");
+    assert!(error.contains("[truncated]"), "{error}");
+}
+
+#[tokio::test]
 async fn truncated_tool_call_synthesizes_null_completion() {
     let base = http_server(fixture("openai_truncated.sse")).0;
     let events = drain(provider(base).stream(request_with_tool()).unwrap()).await;
@@ -166,6 +212,202 @@ async fn truncated_tool_call_synthesizes_null_completion() {
             if id == "call_9" && input == &serde_json::Value::Null
     ));
     assert_eq!(events[3].clone().stop_reason(), Some(StopReason::MaxTokens));
+}
+
+#[tokio::test]
+async fn malformed_payload_cannot_be_followed_by_successful_truncation() {
+    let mut body = b"data: {not-json}\n\n".to_vec();
+    body.extend(fixture("openai_truncated.sse"));
+    let base = http_server(body).0;
+
+    let events = drain(provider(base).stream(request_with_tool()).unwrap()).await;
+
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert!(matches!(&events[0], ProviderEvent::Error(error) if error.contains("JSON")));
+}
+
+#[tokio::test]
+async fn malformed_completed_arguments_are_terminal() {
+    let body = concat!(
+        "data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"read\"}}\n\n",
+        "data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_1\",\"arguments\":\"{bad\"}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{}}}\n\n",
+    );
+    let base = http_server(body.as_bytes().to_vec()).0;
+
+    let events = drain(provider(base).stream(request_with_tool()).unwrap()).await;
+
+    assert!(
+        matches!(events.last(), Some(ProviderEvent::Error(error)) if error.contains("arguments"))
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, ProviderEvent::TurnComplete { .. }))
+    );
+}
+
+#[tokio::test]
+async fn argument_delta_after_completion_is_terminal() {
+    let body = concat!(
+        "data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"read\"}}\n\n",
+        "data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_1\",\"arguments\":\"{}\"}\n\n",
+        "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"delta\":\"{}\"}\n\n",
+    );
+    let events = drain(
+        provider(http_server(body.as_bytes().to_vec()).0)
+            .stream(request_with_tool())
+            .unwrap(),
+    )
+    .await;
+
+    assert!(
+        matches!(events.last(), Some(ProviderEvent::Error(error)) if error.contains("after completion")),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
+async fn completed_function_item_must_match_started_call() {
+    let body = concat!(
+        "data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"read\"}}\n\n",
+        "data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_1\",\"arguments\":\"{}\"}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"changed\",\"name\":\"read\",\"arguments\":\"{}\"}}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{}}}\n\n",
+    );
+    let events = drain(
+        provider(http_server(body.as_bytes().to_vec()).0)
+            .stream(request_with_tool())
+            .unwrap(),
+    )
+    .await;
+
+    assert!(
+        matches!(events.last(), Some(ProviderEvent::Error(error)) if error.contains("contradicts")),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
+async fn duplicate_completed_function_item_is_terminal() {
+    let body = concat!(
+        "data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"read\"}}\n\n",
+        "data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_1\",\"arguments\":\"{}\"}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"read\",\"arguments\":\"{}\"}}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"read\",\"arguments\":\"{}\"}}\n\n",
+    );
+    let events = drain(
+        provider(http_server(body.as_bytes().to_vec()).0)
+            .stream(request_with_tool())
+            .unwrap(),
+    )
+    .await;
+
+    assert!(
+        matches!(events.last(), Some(ProviderEvent::Error(error)) if error.contains("duplicate completed")),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
+async fn missing_and_duplicate_openai_tool_fields_are_terminal() {
+    let missing = concat!(
+        "data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"name\":\"read\"}}\n\n",
+        "data: {\"type\":\"response.incomplete\",\"response\":{\"usage\":{}}}\n\n",
+    );
+    let events = drain(
+        provider(http_server(missing.as_bytes().to_vec()).0)
+            .stream(request_with_tool())
+            .unwrap(),
+    )
+    .await;
+    assert!(
+        matches!(events.last(), Some(ProviderEvent::Error(error)) if error.contains("tool call id"))
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, ProviderEvent::TurnComplete { .. }))
+    );
+
+    let duplicate = concat!(
+        "data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"read\"}}\n\n",
+        "data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_1\",\"arguments\":\"{}\"}\n\n",
+        "data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_1\",\"arguments\":\"{}\"}\n\n",
+    );
+    let events = drain(
+        provider(http_server(duplicate.as_bytes().to_vec()).0)
+            .stream(request_with_tool())
+            .unwrap(),
+    )
+    .await;
+    assert!(
+        matches!(events.last(), Some(ProviderEvent::Error(error)) if error.contains("duplicate completion"))
+    );
+}
+
+#[tokio::test]
+async fn incomplete_reason_must_explicitly_mean_token_truncation() {
+    for response in [
+        r#"{"usage":{}}"#,
+        r#"{"incomplete_details":{"reason":"content_filter"},"usage":{}}"#,
+    ] {
+        let body =
+            format!("data: {{\"type\":\"response.incomplete\",\"response\":{response}}}\n\n");
+        let events = drain(
+            provider(http_server(body.into_bytes()).0)
+                .stream(request_with_tool())
+                .unwrap(),
+        )
+        .await;
+
+        assert!(
+            matches!(events.last(), Some(ProviderEvent::Error(_))),
+            "{events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ProviderEvent::TurnComplete { .. })),
+            "{events:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn incomplete_refusal_remains_token_truncation() {
+    let body = concat!(
+        "data: {\"type\":\"response.refusal.delta\",\"delta\":\"I cannot\"}\n\n",
+        "data: {\"type\":\"response.incomplete\",\"response\":{\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"usage\":{}}}\n\n",
+    );
+    let events = drain(
+        provider(http_server(body.as_bytes().to_vec()).0)
+            .stream(request_with_tool())
+            .unwrap(),
+    )
+    .await;
+
+    assert_eq!(
+        events.last().and_then(ProviderEvent::stop_reason),
+        Some(StopReason::MaxTokens)
+    );
+}
+
+#[tokio::test]
+async fn terminal_event_stops_pump_before_trailing_payloads() {
+    let body = concat!(
+        "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{}}}\n\n",
+        "data: {not-json}\n\n",
+    );
+    let events = drain(
+        provider(http_server(body.as_bytes().to_vec()).0)
+            .stream(request_with_tool())
+            .unwrap(),
+    )
+    .await;
+
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert!(matches!(events[0], ProviderEvent::TurnComplete { .. }));
 }
 
 #[tokio::test]
@@ -198,6 +440,27 @@ async fn rejects_model_for_another_provider() {
         .err()
         .expect("provider mismatch must fail preflight");
     assert!(error.to_string().contains("expected openai"));
+}
+
+#[tokio::test]
+async fn reserved_options_are_rejected_before_openai_network_io() {
+    let provider = ilar::provider::openai::OpenAIProvider::new(
+        "k".into(),
+        Some("http://127.0.0.1:1/v1".into()),
+    );
+    for key in ["model", "input", "tools", "stream"] {
+        let mut request = request_with_tool();
+        request.options = serde_json::Value::Object(
+            [(key.to_string(), serde_json::json!("override"))]
+                .into_iter()
+                .collect(),
+        );
+        let error = provider.stream(request).err().expect("reserved option");
+        assert!(error.to_string().contains(key), "{error:#}");
+    }
+    let mut request = request_with_tool();
+    request.options = serde_json::json!(["not", "an", "object"]);
+    assert!(provider.stream(request).is_err());
 }
 
 #[tokio::test]

@@ -14,7 +14,6 @@
 
 ## Stabilization
 
-- [ ] [Harden provider protocol handling](issues/harden-provider-protocol-handling.md)
 - [ ] [Bound and sanitize web tools](issues/bound-and-sanitize-web-tools.md)
 - [ ] [Subagent safety and outcomes](issues/subagent-safety-and-outcomes.md)
 - [ ] [Persist and render todos](issues/persist-and-render-todos.md)

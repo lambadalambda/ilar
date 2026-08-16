@@ -550,3 +550,19 @@ pause, truncation, tool-use, provider errors, and empty output leave no
 compaction marker. Cancellation is checked before the summary call, while its
 stream is pending, and immediately before persistence, allowing Escape to
 return the turn as aborted without committing a partial summary.
+
+## 2026-08-16 — Hardened provider protocol handling
+
+Provider streams now fail closed on malformed JSON, missing identifiers,
+duplicate or contradictory lifecycle events, invalid tool arguments, and
+unterminated or oversized SSE events. Reserved request fields are rejected
+before network I/O, and bounded HTTP error bodies redact structured,
+plaintext, configured, and truncation-boundary credentials.
+
+The agent loop enforces explicit tool start/completion ordering, permits null
+arguments only for explicit token truncation, and never invokes custom tools
+with incomplete input. Anthropic pauses have a finite retry budget independent
+of normal tool iterations; exact streamed assistant content is replayed for
+continuation and persisted in provider-specific replay blocks once the resumed
+turn completes. This preserves server-tool ordering through later client tool
+results without duplicating visible neutral content.

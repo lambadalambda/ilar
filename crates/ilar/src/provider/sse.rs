@@ -9,6 +9,8 @@ pub struct SseParser {
     buffer: Vec<u8>,
 }
 
+pub(crate) const MAX_SSE_EVENT_BYTES: usize = 1024 * 1024;
+
 impl Default for SseParser {
     fn default() -> Self {
         Self::new()
@@ -21,58 +23,59 @@ impl SseParser {
     }
 
     /// Feed raw bytes; returns data payloads of complete events.
-    pub fn feed(&mut self, bytes: &[u8]) -> Vec<String> {
-        self.buffer.extend_from_slice(bytes);
+    pub fn feed(&mut self, bytes: &[u8]) -> anyhow::Result<Vec<String>> {
         let mut out = Vec::new();
-        while let Some(pos) = self.next_event_boundary() {
-            let block: Vec<u8> = self.buffer.drain(..pos).collect();
-            self.trim_boundary();
-            if let Some(data) = parse_block(&block) {
-                out.push(data);
+        for byte in bytes {
+            self.buffer.push(*byte);
+            if self.buffer.len() > MAX_SSE_EVENT_BYTES {
+                anyhow::bail!("SSE event exceeds {MAX_SSE_EVENT_BYTES} bytes");
+            }
+            let boundary = if self.buffer.ends_with(b"\r\n\r\n") {
+                Some(4)
+            } else if self.buffer.ends_with(b"\r\n\n") || self.buffer.ends_with(b"\n\r\n") {
+                Some(3)
+            } else if self.buffer.ends_with(b"\n\n") || self.buffer.ends_with(b"\r\r") {
+                Some(2)
+            } else {
+                None
+            };
+            if let Some(boundary) = boundary {
+                self.buffer.truncate(self.buffer.len() - boundary);
+                if let Some(data) = parse_block(&self.buffer)? {
+                    out.push(data);
+                }
+                self.buffer.clear();
             }
         }
-        out
+        Ok(out)
     }
 
-    fn next_event_boundary(&self) -> Option<usize> {
-        let lf = find_subslice(&self.buffer, b"\n\n").map(|i| i + 1);
-        let crlf = find_subslice(&self.buffer, b"\r\n\r\n").map(|i| i + 2);
-        match (lf, crlf) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
+    pub fn finish(&mut self) -> anyhow::Result<()> {
+        if self.buffer.is_empty() {
+            self.buffer.clear();
+            Ok(())
+        } else {
+            anyhow::bail!("SSE stream ended with an unterminated event")
         }
     }
-
-    fn trim_boundary(&mut self) {
-        if self.buffer.starts_with(b"\r\n") {
-            self.buffer.drain(..2);
-        } else if self.buffer.starts_with(b"\n") {
-            self.buffer.drain(..1);
-        }
-    }
-}
-
-fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
 }
 
 /// Extract the joined `data:` lines of one event block; None for blocks
 /// with no data (comments, bare event: lines).
-fn parse_block(block: &[u8]) -> Option<String> {
-    let text = String::from_utf8_lossy(block);
+fn parse_block(block: &[u8]) -> anyhow::Result<Option<String>> {
+    let text =
+        std::str::from_utf8(block).map_err(|_| anyhow::anyhow!("invalid UTF-8 in SSE event"))?;
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
     let mut data: Vec<&str> = Vec::new();
-    for line in text.lines() {
-        let line = line.strip_suffix('\r').unwrap_or(line);
+    for line in normalized.lines() {
         if let Some(rest) = line.strip_prefix("data:") {
             data.push(rest.strip_prefix(' ').unwrap_or(rest));
         }
     }
     if data.is_empty() {
-        None
+        Ok(None)
     } else {
-        Some(data.join("\n"))
+        Ok(Some(data.join("\n")))
     }
 }
 
@@ -88,7 +91,7 @@ mod tests {
         // Feed byte-by-byte to prove boundary handling.
         let mut events = Vec::new();
         for b in raw.bytes() {
-            events.extend(parser.feed(&[b]));
+            events.extend(parser.feed(&[b]).unwrap());
         }
         assert_eq!(events, vec!["{\"a\":1}", "{\"b\":\n2}"]);
     }
@@ -97,15 +100,30 @@ mod tests {
     fn handles_crlf_and_comments() {
         let mut parser = SseParser::new();
         let raw = ": keepalive\r\n\r\ndata: hi\r\n\r\n";
-        let events = parser.feed(raw.as_bytes());
+        let events = parser.feed(raw.as_bytes()).unwrap();
         assert_eq!(events, vec!["hi"]);
+    }
+
+    #[test]
+    fn handles_mixed_and_cr_event_boundaries() {
+        let mut parser = SseParser::new();
+        let events = parser
+            .feed(b"data: one\r\ndata: two\r\rdata: three\n\r\n")
+            .unwrap();
+        assert_eq!(events, vec!["one\ntwo", "three"]);
+
+        let mut bare_cr = SseParser::new();
+        assert_eq!(
+            bare_cr.feed(b"data: one\rdata: two\r\r").unwrap(),
+            vec!["one\ntwo"]
+        );
     }
 
     #[test]
     fn incomplete_tail_is_buffered() {
         let mut parser = SseParser::new();
-        assert!(parser.feed(b"data: {\"x\"").is_empty());
-        assert_eq!(parser.feed(b":1}\n\n"), vec!["{\"x\":1}"]);
+        assert!(parser.feed(b"data: {\"x\"").unwrap().is_empty());
+        assert_eq!(parser.feed(b":1}\n\n").unwrap(), vec!["{\"x\":1}"]);
     }
 
     #[test]
@@ -116,9 +134,42 @@ mod tests {
         // Split at every byte offset inside the multibyte chars.
         for split in [4usize, 13, 14, 15, 16] {
             let mut parser = SseParser::new();
-            let mut events = parser.feed(&bytes[..split]);
-            events.extend(parser.feed(&bytes[split..]));
+            let mut events = parser.feed(&bytes[..split]).unwrap();
+            events.extend(parser.feed(&bytes[split..]).unwrap());
             assert_eq!(events, vec!["{\"delta\":\"日本語\"}"], "split at {split}");
         }
+    }
+
+    #[test]
+    fn rejects_invalid_utf8() {
+        let mut parser = SseParser::new();
+        assert!(parser.feed(b"data: \xff\n\n").is_err());
+    }
+
+    #[test]
+    fn rejects_oversized_complete_and_incomplete_events() {
+        let mut incomplete = SseParser::new();
+        assert!(
+            incomplete
+                .feed(&vec![b'x'; MAX_SSE_EVENT_BYTES + 1])
+                .is_err()
+        );
+
+        let mut complete = SseParser::new();
+        let mut event = b"data: ".to_vec();
+        event.extend(vec![b'x'; MAX_SSE_EVENT_BYTES]);
+        event.extend_from_slice(b"\n\n");
+        assert!(complete.feed(&event).is_err());
+    }
+
+    #[test]
+    fn finish_rejects_unterminated_data() {
+        let mut parser = SseParser::new();
+        parser.feed(b"data: partial").unwrap();
+        assert!(parser.finish().is_err());
+
+        let mut whitespace = SseParser::new();
+        whitespace.feed(b" \t").unwrap();
+        assert!(whitespace.finish().is_err());
     }
 }

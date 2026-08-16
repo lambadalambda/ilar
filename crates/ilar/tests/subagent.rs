@@ -165,7 +165,15 @@ async fn run_two_tasks(workspace_mode: AgentWorkspaceMode) -> (Duration, Vec<Cha
     // Parent: two task calls, then a final text turn.
     let parent = MockProvider::new(vec![
         vec![
+            ProviderEvent::ToolCallStarted {
+                id: "t1".into(),
+                name: "task".into(),
+            },
             task_call("t1", "find alpha"),
+            ProviderEvent::ToolCallStarted {
+                id: "t2".into(),
+                name: "task".into(),
+            },
             task_call("t2", "find beta"),
             ProviderEvent::TurnComplete {
                 stop_reason: StopReason::ToolUse,
@@ -339,7 +347,15 @@ async fn mutable_tasks_in_distinct_validated_worktrees_may_overlap() {
     };
     let parent = MockProvider::new(vec![
         vec![
+            ProviderEvent::ToolCallStarted {
+                id: "first".into(),
+                name: "task".into(),
+            },
             workspace_call("first", &first),
+            ProviderEvent::ToolCallStarted {
+                id: "second".into(),
+                name: "task".into(),
+            },
             workspace_call("second", &second),
             ProviderEvent::TurnComplete {
                 stop_reason: StopReason::ToolUse,
@@ -621,7 +637,15 @@ async fn concurrency_cap_errors_with_guidance() {
 
     let parent = MockProvider::new(vec![
         vec![
+            ProviderEvent::ToolCallStarted {
+                id: "t1".into(),
+                name: "task".into(),
+            },
             task_call("t1", "a"),
+            ProviderEvent::ToolCallStarted {
+                id: "t2".into(),
+                name: "task".into(),
+            },
             task_call("t2", "b"),
             ProviderEvent::TurnComplete {
                 stop_reason: StopReason::ToolUse,
@@ -1267,6 +1291,10 @@ async fn child_session_created_with_parent_link() {
 
     let parent = MockProvider::new(vec![
         vec![
+            ProviderEvent::ToolCallStarted {
+                id: "t1".into(),
+                name: "task".into(),
+            },
             task_call("t1", "look"),
             ProviderEvent::TurnComplete {
                 stop_reason: StopReason::ToolUse,

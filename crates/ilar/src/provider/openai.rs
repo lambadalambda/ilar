@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use super::event::{ProviderEvent, StopReason};
-use super::request::{Request, ToolDefinition, resolve_model};
+use super::request::{Request, ToolDefinition, merge_options, resolve_model};
 use super::sse::SseParser;
 use super::{EventStream, Provider};
 use crate::session::{ChatMessage, ContentBlock, InputTokenAccounting, Role, Usage};
@@ -69,6 +69,9 @@ impl OpenAIProvider {
         if provider != "openai" {
             anyhow::bail!("model provider mismatch: expected openai, got {provider}");
         }
+        if !req.continuations.is_empty() {
+            anyhow::bail!("OpenAI does not support opaque paused continuations");
+        }
         let input = req
             .messages
             .iter()
@@ -83,11 +86,11 @@ impl OpenAIProvider {
             serde_json::json!(req.tools.iter().map(wire_tool).collect::<Vec<_>>()),
         );
         body.insert("stream".into(), serde_json::json!(true));
-        // Passthrough options (temperature etc.) merged at top level; a
-        // user-specified key overrides the default.
-        if let Some(options) = req.options.as_object() {
-            body.extend(options.clone());
-        }
+        merge_options(
+            &mut body,
+            &req.options,
+            &["model", "instructions", "input", "tools", "stream"],
+        )?;
         Ok(serde_json::Value::Object(body))
     }
 }
@@ -110,6 +113,7 @@ fn wire_input_items(msg: &ChatMessage) -> Vec<serde_json::Value> {
             ContentBlock::Text { text: t } => text.push_str(t),
             ContentBlock::Thinking { .. } => {} // reasoning items are server-managed
             ContentBlock::Diagnostic { .. } => {}
+            ContentBlock::ProviderReplay { .. } => {}
             ContentBlock::Reasoning { item } => {
                 flush_text(&mut text, &mut items);
                 items.push(item.clone());
@@ -275,10 +279,33 @@ impl Provider for OpenAIProvider {
                     while let Some(chunk) = stream.next().await {
                         match chunk {
                             Ok(bytes) => {
-                                for data in parser.feed(&bytes) {
-                                    for event in mapper.map(&data) {
+                                let data = match parser.feed(&bytes) {
+                                    Ok(data) => data,
+                                    Err(error) => {
+                                        let _ =
+                                            tx.send(ProviderEvent::Error(error.to_string())).await;
+                                        return;
+                                    }
+                                };
+                                for data in data {
+                                    let events = match mapper.map(&data) {
+                                        Ok(events) => events,
+                                        Err(error) => {
+                                            let _ = tx.send(ProviderEvent::Error(error)).await;
+                                            return;
+                                        }
+                                    };
+                                    for event in events {
+                                        let terminal = matches!(
+                                            event,
+                                            ProviderEvent::TurnComplete { .. }
+                                                | ProviderEvent::Error(_)
+                                        );
                                         if tx.send(event).await.is_err() {
                                             return; // consumer dropped
+                                        }
+                                        if terminal {
+                                            return;
                                         }
                                     }
                                 }
@@ -289,13 +316,19 @@ impl Provider for OpenAIProvider {
                             }
                         }
                     }
+                    if let Err(error) = parser.finish() {
+                        let _ = tx.send(ProviderEvent::Error(error.to_string())).await;
+                        return;
+                    }
                     if let Some(event) = mapper.finish() {
                         let _ = tx.send(event).await;
                     }
                 }
                 response => {
                     let status = response.status();
-                    let body = response.text().await.unwrap_or_default();
+                    let body =
+                        super::error_body::bounded_error_body(response, &[current_token.as_str()])
+                            .await;
                     let _ = tx
                         .send(ProviderEvent::Error(format!("HTTP {status}: {body}")))
                         .await;
@@ -356,6 +389,8 @@ struct EventMapper {
     /// item_id (fc_...) -> (call_id, name): deltas carry item_id,
     /// neutral tool events carry call_id.
     calls: HashMap<String, (String, String)>,
+    completed_inputs: HashMap<String, serde_json::Value>,
+    completed_items: std::collections::HashSet<String>,
     /// Calls announced but not completed (arguments.done pending).
     pending: Vec<String>,
     tool_call_seen: bool,
@@ -364,15 +399,17 @@ struct EventMapper {
 }
 
 impl EventMapper {
-    fn map(&mut self, data: &str) -> Vec<ProviderEvent> {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else {
-            return Vec::new();
-        };
-        let kind = value["type"].as_str().unwrap_or_default();
-        match kind {
+    fn map(&mut self, data: &str) -> Result<Vec<ProviderEvent>, String> {
+        if self.completed {
+            return Err("OpenAI event arrived after terminal completion".into());
+        }
+        let value = serde_json::from_str::<serde_json::Value>(data)
+            .map_err(|error| format!("invalid OpenAI event JSON: {error}"))?;
+        let kind = required_str(&value, "type", "OpenAI event type")?;
+        let events = match kind {
             "response.output_text.delta" => {
                 vec![ProviderEvent::TextDelta(
-                    value["delta"].as_str().unwrap_or_default().into(),
+                    required_str(&value, "delta", "OpenAI text delta")?.into(),
                 )]
             }
             "response.refusal.delta" => {
@@ -380,15 +417,24 @@ impl EventMapper {
                 // stop reason marks the turn as refused.
                 self.refusal_seen = true;
                 vec![ProviderEvent::TextDelta(
-                    value["delta"].as_str().unwrap_or_default().into(),
+                    required_str(&value, "delta", "OpenAI refusal delta")?.into(),
                 )]
             }
             "response.output_item.added" => {
-                let item = &value["item"];
-                if item["type"] == "function_call" {
-                    let call_id = item["call_id"].as_str().unwrap_or_default().to_string();
-                    let name = item["name"].as_str().unwrap_or_default().to_string();
-                    let item_id = item["id"].as_str().unwrap_or_default().to_string();
+                let item = value
+                    .get("item")
+                    .filter(|item| item.is_object())
+                    .ok_or_else(|| "missing OpenAI output item".to_string())?;
+                let item_type = required_str(item, "type", "OpenAI output item type")?;
+                if item_type == "function_call" {
+                    let call_id = required_str(item, "call_id", "OpenAI tool call id")?.to_string();
+                    let name = required_str(item, "name", "OpenAI tool name")?.to_string();
+                    let item_id = required_str(item, "id", "OpenAI tool item id")?.to_string();
+                    if self.calls.contains_key(&item_id)
+                        || self.calls.values().any(|(id, _)| id == &call_id)
+                    {
+                        return Err(format!("duplicate OpenAI tool call id {call_id:?}"));
+                    }
                     self.calls.insert(item_id, (call_id.clone(), name.clone()));
                     self.pending.push(call_id.clone());
                     self.tool_call_seen = true;
@@ -398,42 +444,109 @@ impl EventMapper {
                 }
             }
             "response.output_item.done" => {
-                let item = &value["item"];
-                if item["type"] == "reasoning" {
+                let item = value
+                    .get("item")
+                    .filter(|item| item.is_object())
+                    .ok_or_else(|| "missing OpenAI completed output item".to_string())?;
+                let item_type = required_str(item, "type", "OpenAI completed item type")?;
+                if item_type == "reasoning" {
                     vec![ProviderEvent::ReasoningItem { item: item.clone() }]
+                } else if item_type == "function_call" {
+                    let item_id = required_str(item, "id", "OpenAI completed tool item id")?;
+                    if !self.completed_items.insert(item_id.into()) {
+                        return Err(format!("duplicate completed OpenAI tool item {item_id:?}"));
+                    }
+                    let call_id = required_str(item, "call_id", "OpenAI completed tool call id")?;
+                    let name = required_str(item, "name", "OpenAI completed tool name")?;
+                    let arguments =
+                        required_str(item, "arguments", "OpenAI completed tool arguments")?;
+                    let Some((started_id, started_name)) = self.calls.get(item_id) else {
+                        return Err(format!(
+                            "completed OpenAI item references unknown tool {item_id:?}"
+                        ));
+                    };
+                    if started_id != call_id || started_name != name {
+                        return Err(format!(
+                            "completed OpenAI item {item_id:?} contradicts its start"
+                        ));
+                    }
+                    let completed = self.completed_inputs.get(item_id).ok_or_else(|| {
+                        format!("OpenAI item {item_id:?} completed before its arguments")
+                    })?;
+                    let item_input: serde_json::Value =
+                        serde_json::from_str(arguments).map_err(|error| {
+                            format!("invalid OpenAI completed item arguments: {error}")
+                        })?;
+                    if &item_input != completed {
+                        return Err(format!(
+                            "completed OpenAI item {item_id:?} changed its arguments"
+                        ));
+                    }
+                    Vec::new()
                 } else {
                     Vec::new()
                 }
             }
             "response.function_call_arguments.delta" => {
-                let item_id = value["item_id"].as_str().unwrap_or_default();
+                let item_id = required_str(&value, "item_id", "OpenAI argument item id")?;
                 let id = self
                     .calls
                     .get(item_id)
                     .map(|(id, _)| id.clone())
-                    .unwrap_or_else(|| item_id.into());
+                    .ok_or_else(|| {
+                        format!("arguments reference unknown OpenAI item {item_id:?}")
+                    })?;
+                if !self.pending.iter().any(|pending| pending == &id) {
+                    return Err(format!(
+                        "arguments arrived after completion for OpenAI tool call {id:?}"
+                    ));
+                }
                 vec![ProviderEvent::ToolCallInputDelta {
                     id,
-                    delta: value["delta"].as_str().unwrap_or_default().into(),
+                    delta: required_str(&value, "delta", "OpenAI argument delta")?.into(),
                 }]
             }
             "response.function_call_arguments.done" => {
-                let item_id = value["item_id"].as_str().unwrap_or_default();
-                let (id, name) = self
-                    .calls
-                    .get(item_id)
-                    .cloned()
-                    .unwrap_or_else(|| (item_id.into(), String::new()));
+                let item_id = required_str(&value, "item_id", "OpenAI argument item id")?;
+                let (id, name) = self.calls.get(item_id).cloned().ok_or_else(|| {
+                    format!("arguments reference unknown OpenAI item {item_id:?}")
+                })?;
+                if !self.pending.iter().any(|pending| pending == &id) {
+                    return Err(format!("duplicate completion for OpenAI tool call {id:?}"));
+                }
                 self.pending.retain(|p| p != &id);
-                let args = value["arguments"].as_str().unwrap_or_default();
-                let input = serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
+                let args = required_str(&value, "arguments", "OpenAI completed arguments")?;
+                let input: serde_json::Value = serde_json::from_str(args)
+                    .map_err(|error| format!("invalid OpenAI tool arguments: {error}"))?;
+                if !input.is_object() {
+                    return Err("OpenAI tool arguments must be a JSON object".into());
+                }
+                self.completed_inputs.insert(item_id.into(), input.clone());
                 vec![ProviderEvent::ToolCallCompleted { id, name, input }]
             }
             "response.completed" | "response.incomplete" => {
+                let response = value
+                    .get("response")
+                    .and_then(serde_json::Value::as_object)
+                    .ok_or_else(|| "missing OpenAI response object".to_string())?;
+                if self.refusal_seen && self.tool_call_seen {
+                    return Err("OpenAI response combined refusal and tool calls".into());
+                }
+                if kind == "response.completed" && !self.pending.is_empty() {
+                    return Err("OpenAI response completed with unfinished tool calls".into());
+                }
                 self.completed = true;
                 let mut events = Vec::new();
                 let mut truncated = false;
                 if kind == "response.incomplete" {
+                    let reason = response
+                        .get("incomplete_details")
+                        .and_then(|details| details.get("reason"))
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| "missing OpenAI incomplete reason".to_string())?;
+                    if reason != "max_output_tokens" {
+                        return Err(format!("unsupported OpenAI incomplete reason {reason:?}"));
+                    }
                     // Truncated mid-arguments: synthesize null-input
                     // completions so every Started call is Completed
                     // (event contract).
@@ -453,10 +566,10 @@ impl EventMapper {
                         });
                     }
                 }
-                let stop_reason = if self.refusal_seen {
-                    StopReason::Refusal
-                } else if truncated {
+                let stop_reason = if truncated {
                     StopReason::MaxTokens
+                } else if self.refusal_seen {
+                    StopReason::Refusal
                 } else if self.tool_call_seen {
                     StopReason::ToolUse
                 } else {
@@ -464,7 +577,7 @@ impl EventMapper {
                 };
                 events.push(ProviderEvent::TurnComplete {
                     stop_reason,
-                    usage: wire_usage(&value["response"]["usage"]),
+                    usage: wire_usage(response.get("usage").unwrap_or(&serde_json::Value::Null)),
                 });
                 events
             }
@@ -477,7 +590,8 @@ impl EventMapper {
                 vec![ProviderEvent::Error(message.into())]
             }
             _ => Vec::new(),
-        }
+        };
+        Ok(events)
     }
 
     /// Stream ended without TurnComplete/Error: synthesize an error rather
@@ -491,6 +605,18 @@ impl EventMapper {
             ))
         }
     }
+}
+
+fn required_str<'a>(
+    value: &'a serde_json::Value,
+    key: &str,
+    label: &str,
+) -> Result<&'a str, String> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("missing or empty {label}"))
 }
 
 fn wire_usage(usage: &serde_json::Value) -> Usage {

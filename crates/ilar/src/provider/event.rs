@@ -54,6 +54,12 @@ pub enum ProviderEvent {
         name: String,
         input: serde_json::Value,
     },
+    /// Exact provider assistant content for replaying a continued response.
+    /// Emitted immediately before the terminal event when available.
+    ResponseContent {
+        provider: String,
+        content: serde_json::Value,
+    },
     /// The API call finished. Always terminal (on success).
     TurnComplete {
         stop_reason: StopReason,

@@ -1,5 +1,6 @@
 //! Provider abstraction — see meta/issues/provider-trait.md.
 
+mod error_body;
 mod event;
 mod mock;
 mod request;
