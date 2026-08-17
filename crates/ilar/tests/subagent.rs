@@ -767,6 +767,203 @@ async fn explicit_task_id_errors_instead_of_starting_a_replacement() {
     }
 }
 
+#[tokio::test]
+async fn blank_task_id_starts_a_new_session() {
+    let (store, parent_id) = temp_store();
+    let task = parent_registry(spawner(
+        Arc::new(MockProvider::new(vec![vec![
+            ProviderEvent::TextDelta("fresh child".into()),
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            },
+        ]])),
+        &store,
+        10,
+        3,
+    ))
+    .get("task")
+    .unwrap();
+
+    for task_id in ["", " "] {
+        let output = task
+            .run(
+                serde_json::json!({
+                    "description": "new child",
+                    "prompt": "work",
+                    "subagent_type": "explore",
+                    "task_id": task_id,
+                }),
+                task_context(&parent_id),
+            )
+            .await;
+        assert!(!output.is_error, "{}", output.content);
+        assert_eq!(output.content, "fresh child");
+    }
+
+    let output = task
+        .run(
+            serde_json::json!({
+                "description": "new child",
+                "prompt": "work",
+                "subagent_type": "explore",
+                "task_id": null,
+                "workspace": null,
+            }),
+            task_context(&parent_id),
+        )
+        .await;
+    assert!(!output.is_error, "{}", output.content);
+    assert_eq!(output.content, "fresh child");
+}
+
+#[tokio::test]
+async fn null_task_id_starts_a_new_session_in_a_validated_worktree() {
+    let (_repo, root, worktree) = repository_with_worktree();
+    let (store, parent_id) = temp_store();
+    let spawner = Arc::new(SubagentSpawner::new(
+        Arc::new(FixedProviderResolver::new(Arc::new(MockProvider::new(
+            vec![vec![
+                ProviderEvent::TextDelta("isolated child".into()),
+                ProviderEvent::TurnComplete {
+                    stop_reason: StopReason::EndTurn,
+                    usage: Usage::default(),
+                },
+            ]],
+        )))),
+        store,
+        vec![AgentDefinition {
+            name: "explore".into(),
+            description: "explores".into(),
+            model: None,
+            prompt: String::new(),
+            workspace_mode: AgentWorkspaceMode::Mutable,
+        }],
+        root.clone(),
+        0,
+        10,
+        3,
+    ));
+    let task = parent_registry(spawner.clone()).get("task").unwrap();
+    let mut context = ToolContext::root(root).with_subagents(spawner);
+    context.session_id = parent_id;
+
+    let output = task
+        .run(
+            serde_json::json!({
+                "description": "isolated child",
+                "prompt": "work",
+                "subagent_type": "explore",
+                "task_id": null,
+                "workspace": {
+                    "cwd": worktree,
+                    "isolation": "git_worktree"
+                }
+            }),
+            context,
+        )
+        .await;
+
+    assert!(!output.is_error, "{}", output.content);
+    assert_eq!(output.content, "isolated child");
+}
+
+#[test]
+fn task_schema_guides_new_calls_without_placeholder_routing_values() {
+    let (store, _) = temp_store();
+    let task = parent_registry(spawner(Arc::new(MockProvider::new(vec![])), &store, 10, 3))
+        .get("task")
+        .unwrap();
+    let schema = task.input_schema();
+    let properties = schema["properties"].as_object().unwrap();
+
+    assert_eq!(
+        properties["subagent_type"]["enum"],
+        serde_json::json!(["explore"])
+    );
+    assert_eq!(
+        properties["task_id"]["type"],
+        serde_json::json!(["string", "null"])
+    );
+    assert!(
+        properties["task_id"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("never invent")
+    );
+    assert_eq!(
+        properties["workspace"]["type"],
+        serde_json::json!(["object", "null"])
+    );
+}
+
+/// Live smoke for the provider behavior that triggered the launch regression.
+/// Requires ILAR_LIVE_CHATGPT_STATE_DIR pointing at a state dir with auth.json.
+#[tokio::test]
+#[ignore]
+async fn live_chatgpt_generates_a_new_task_call_without_placeholders() {
+    let state_dir = std::env::var("ILAR_LIVE_CHATGPT_STATE_DIR")
+        .expect("ILAR_LIVE_CHATGPT_STATE_DIR with seeded auth.json");
+    let provider = ilar::provider::openai::OpenAIProvider::with_chatgpt_auth(
+        ilar::auth::AuthStore::open(state_dir.into()),
+        None,
+    );
+    let (store, _) = temp_store();
+    let spawner = Arc::new(SubagentSpawner::new(
+        Arc::new(FixedProviderResolver::new(Arc::new(MockProvider::new(
+            vec![],
+        )))),
+        store,
+        vec![AgentDefinition {
+            name: "build".into(),
+            description: "builds".into(),
+            model: None,
+            prompt: String::new(),
+            workspace_mode: AgentWorkspaceMode::Mutable,
+        }],
+        std::env::temp_dir(),
+        0,
+        10,
+        3,
+    ));
+    let tools = parent_registry(spawner)
+        .definitions()
+        .into_iter()
+        .filter(|tool| tool.name == "task")
+        .collect();
+    let mut stream = provider
+        .stream(Request {
+            messages: vec![ChatMessage::user_text(
+                "Call the task tool exactly once to inspect this repository. Start a new foreground task in the current workspace using the configured agent. Do not answer in text.",
+            )],
+            tools,
+            ..Request::with_model("openai/gpt-5.6-sol")
+        })
+        .unwrap();
+    let mut task_input = None;
+    while let Some(event) = stream.next().await {
+        match event {
+            ProviderEvent::ToolCallCompleted { name, input, .. } if name == "task" => {
+                task_input = Some(input);
+            }
+            ProviderEvent::TurnComplete { .. } => break,
+            ProviderEvent::Error(error) => panic!("provider error: {error}"),
+            _ => {}
+        }
+    }
+
+    let input = task_input.expect("model should call task");
+    assert_eq!(input["subagent_type"], "build", "{input}");
+    assert!(
+        input.get("task_id").is_none() || input["task_id"].is_null(),
+        "{input}"
+    );
+    assert!(
+        input.get("workspace").is_none() || input["workspace"].is_null(),
+        "{input}"
+    );
+}
+
 fn task_context(parent_id: &str) -> ToolContext {
     let mut context = ToolContext::root(std::env::temp_dir());
     context.session_id = parent_id.to_string();

@@ -1207,13 +1207,20 @@ pub struct TaskInput {
     pub description: String,
     pub prompt: String,
     pub subagent_type: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_task_id")]
     pub task_id: Option<String>,
     /// Run detached; completion arrives as a notification.
     #[serde(default)]
     pub background: Option<bool>,
     #[serde(default)]
     pub workspace: Option<TaskWorkspaceInput>,
+}
+
+fn deserialize_task_id<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.filter(|task_id| !task_id.trim().is_empty()))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1264,17 +1271,30 @@ impl Tool for TaskTool {
     }
 
     fn input_schema(&self) -> serde_json::Value {
+        let agents = self
+            .spawner
+            .agents()
+            .iter()
+            .map(|agent| agent.name.as_str())
+            .collect::<Vec<_>>();
         serde_json::json!({
             "type": "object",
             "properties": {
                 "description": {"type": "string", "description": "Short task description (3-5 words)"},
                 "prompt": {"type": "string", "description": "Full instructions for the subagent"},
-                "subagent_type": {"type": "string", "description": "Agent name"},
-                "task_id": {"type": "string", "description": "Resume a previous task's session"},
+                "subagent_type": {
+                    "type": "string",
+                    "enum": agents,
+                    "description": "Configured agent to run"
+                },
+                "task_id": {
+                    "type": ["string", "null"],
+                    "description": "Existing task session UUID to resume. Set null or omit when starting a new task; never invent a value."
+                },
                 "background": {"type": "boolean", "description": "Run detached; you will be notified on completion. DO NOT poll."}
                 ,"workspace": {
-                    "type": "object",
-                    "description": "Optional validated sibling Git worktree used as a cooperative scheduling domain, not a sandbox.",
+                    "type": ["object", "null"],
+                    "description": "Validated sibling Git worktree for isolation. Set null or omit to use the current workspace. This is a cooperative scheduling domain, not a sandbox.",
                     "properties": {
                         "cwd": {"type": "string"},
                         "isolation": {"type": "string", "enum": ["git_worktree"]}
