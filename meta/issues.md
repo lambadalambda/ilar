@@ -14,6 +14,5 @@
 
 ## Stabilization
 
-- [ ] [Index session replay](issues/index-session-replay.md)
 - [ ] [Extract provider transport](issues/extract-provider-transport.md)
 - [ ] [Deterministic test harness](issues/deterministic-test-harness.md)

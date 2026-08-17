@@ -510,6 +510,495 @@ fn transcript_honors_compaction_boundary() {
 }
 
 #[test]
+fn fallback_window_clamps_compaction_boundary_to_its_event() {
+    let (store, _dir) = temp_store();
+    let meta = sample_meta();
+    let mut session = store.create(meta.clone()).unwrap();
+    session
+        .append(SessionEvent::UserMessage {
+            id: new_id(),
+            text: "old".into(),
+            ts: Utc::now(),
+        })
+        .unwrap();
+    session
+        .append(SessionEvent::Compaction {
+            id: new_id(),
+            summary: "clamped summary".into(),
+            kept_from: usize::MAX,
+            ts: Utc::now(),
+        })
+        .unwrap();
+    drop(session);
+
+    let loaded = store.load(&meta.session_id).unwrap();
+    let transcript = loaded.transcript();
+
+    assert!(
+        loaded
+            .events()
+            .iter()
+            .any(|event| matches!(event, SessionEvent::Compaction { .. }))
+    );
+    assert!(format!("{transcript:?}").contains("clamped summary"));
+}
+
+#[test]
+fn compacted_session_loads_only_the_active_replay_window() {
+    let (store, _dir) = temp_store();
+    let meta = sample_meta();
+    let mut session = store.create(meta.clone()).unwrap();
+    for index in 0..200 {
+        session
+            .append(SessionEvent::UserMessage {
+                id: new_id(),
+                text: format!("old question {index}"),
+                ts: Utc::now(),
+            })
+            .unwrap();
+        session
+            .append(SessionEvent::AssistantMessage {
+                id: new_id(),
+                model: "zai/glm-4.7".into(),
+                content: vec![ContentBlock::Text {
+                    text: format!("old answer {index}"),
+                }],
+                usage: Usage::default(),
+                stop_reason: "end_turn".into(),
+                ts: Utc::now(),
+            })
+            .unwrap();
+    }
+    let kept_from = session.events().len();
+    session
+        .append(SessionEvent::UserMessage {
+            id: new_id(),
+            text: "active question".into(),
+            ts: Utc::now(),
+        })
+        .unwrap();
+    session
+        .append(SessionEvent::Compaction {
+            id: new_id(),
+            summary: "old conversation".into(),
+            kept_from,
+            ts: Utc::now(),
+        })
+        .unwrap();
+    let expected = session.transcript();
+    drop(session);
+
+    let indexed = store.load(&meta.session_id).unwrap();
+
+    assert!(store.replay_index_path(&meta.session_id).unwrap().exists());
+    assert!(indexed.events().len() <= 3, "{:?}", indexed.events());
+    assert_eq!(indexed.transcript(), expected);
+    assert_eq!(store.audit_events(&meta.session_id).unwrap().len(), 403);
+}
+
+#[test]
+fn corrupt_replay_index_falls_back_to_identical_canonical_replay() {
+    let (store, _dir) = temp_store();
+    let meta = sample_meta();
+    let mut session = store.create(meta.clone()).unwrap();
+    for event in sample_log(&meta).into_iter().skip(1) {
+        session.append(event).unwrap();
+    }
+    let kept_from = session.events().len();
+    session
+        .append(SessionEvent::UserMessage {
+            id: new_id(),
+            text: "active".into(),
+            ts: Utc::now(),
+        })
+        .unwrap();
+    session
+        .append(SessionEvent::Compaction {
+            id: new_id(),
+            summary: "summary".into(),
+            kept_from,
+            ts: Utc::now(),
+        })
+        .unwrap();
+    let expected_transcript = session.transcript();
+    let canonical_event_count = session.events().len();
+    drop(session);
+    std::fs::write(
+        store.replay_index_path(&meta.session_id).unwrap(),
+        b"not an index",
+    )
+    .unwrap();
+
+    let fallback = store.load(&meta.session_id).unwrap();
+
+    assert!(fallback.events().len() <= 3, "{:?}", fallback.events());
+    assert_eq!(
+        store.audit_events(&meta.session_id).unwrap().len(),
+        canonical_event_count
+    );
+    assert_eq!(fallback.transcript(), expected_transcript);
+}
+
+#[test]
+fn writer_rebuilds_a_corrupt_replay_index_after_canonical_fallback() {
+    let (store, _dir) = temp_store();
+    let meta = sample_meta();
+    let mut session = store.create(meta.clone()).unwrap();
+    for event in sample_log(&meta).into_iter().skip(1) {
+        session.append(event).unwrap();
+    }
+    let kept_from = session.events().len();
+    session
+        .append(SessionEvent::UserMessage {
+            id: new_id(),
+            text: "active".into(),
+            ts: Utc::now(),
+        })
+        .unwrap();
+    session
+        .append(SessionEvent::Compaction {
+            id: new_id(),
+            summary: "summary".into(),
+            kept_from,
+            ts: Utc::now(),
+        })
+        .unwrap();
+    session
+        .append(SessionEvent::AssistantMessage {
+            id: new_id(),
+            model: meta.model.clone(),
+            content: vec![ContentBlock::Text {
+                text: "post-compaction answer".into(),
+            }],
+            usage: Usage::default(),
+            stop_reason: "end_turn".into(),
+            ts: Utc::now(),
+        })
+        .unwrap();
+    drop(session);
+    std::fs::write(
+        store.replay_index_path(&meta.session_id).unwrap(),
+        b"corrupt",
+    )
+    .unwrap();
+
+    drop(
+        store
+            .acquire_writer(&meta.session_id)
+            .unwrap()
+            .load()
+            .unwrap(),
+    );
+    let indexed = store.load(&meta.session_id).unwrap();
+
+    assert!(indexed.events().len() <= 4, "{:?}", indexed.events());
+    assert!(format!("{:?}", indexed.transcript()).contains("post-compaction answer"));
+}
+
+#[test]
+fn replay_index_preserves_folded_model_and_todo_state() {
+    let (store, _dir) = temp_store();
+    let meta = sample_meta();
+    let mut session = store.create(meta.clone()).unwrap();
+    session
+        .append(SessionEvent::ModelChange {
+            id: new_id(),
+            model: "openai/gpt-5.1".into(),
+            ts: Utc::now(),
+        })
+        .unwrap();
+    session
+        .append(SessionEvent::AssistantMessage {
+            id: new_id(),
+            model: "openai/gpt-5.1".into(),
+            content: vec![ContentBlock::ToolCall {
+                id: "todo-before-cut".into(),
+                name: "todo".into(),
+                input: serde_json::json!({}),
+            }],
+            usage: Usage::default(),
+            stop_reason: "tool_use".into(),
+            ts: Utc::now(),
+        })
+        .unwrap();
+    let expected_todos = TodoList {
+        items: vec![TodoItem {
+            content: "survive compaction".into(),
+            status: TodoStatus::InProgress,
+        }],
+    };
+    session
+        .append(SessionEvent::ToolResult {
+            id: new_id(),
+            tool_use_id: "todo-before-cut".into(),
+            content: "updated".into(),
+            is_error: false,
+            state: Some(SessionState::TodoList {
+                list: expected_todos.clone(),
+            }),
+            ts: Utc::now(),
+        })
+        .unwrap();
+    let kept_from = session.events().len();
+    session
+        .append(SessionEvent::UserMessage {
+            id: new_id(),
+            text: "active".into(),
+            ts: Utc::now(),
+        })
+        .unwrap();
+    session
+        .append(SessionEvent::Compaction {
+            id: new_id(),
+            summary: "folded state".into(),
+            kept_from,
+            ts: Utc::now(),
+        })
+        .unwrap();
+    drop(session);
+
+    let indexed = store.load(&meta.session_id).unwrap();
+
+    assert_eq!(indexed.effective_model(), "openai/gpt-5.1");
+    assert_eq!(indexed.todo_list(), Some(&expected_todos));
+}
+
+#[test]
+fn compaction_after_indexed_load_writes_an_absolute_boundary() {
+    let (store, _dir) = temp_store();
+    let meta = sample_meta();
+    let mut session = store.create(meta.clone()).unwrap();
+    for index in 0..20 {
+        session
+            .append(SessionEvent::UserMessage {
+                id: new_id(),
+                text: format!("old {index}"),
+                ts: Utc::now(),
+            })
+            .unwrap();
+        session
+            .append(SessionEvent::AssistantMessage {
+                id: new_id(),
+                model: meta.model.clone(),
+                content: vec![ContentBlock::Text {
+                    text: format!("answer {index}"),
+                }],
+                usage: Usage::default(),
+                stop_reason: "end_turn".into(),
+                ts: Utc::now(),
+            })
+            .unwrap();
+    }
+    let first_cut = session.events().len();
+    session
+        .append(SessionEvent::UserMessage {
+            id: new_id(),
+            text: "first active".into(),
+            ts: Utc::now(),
+        })
+        .unwrap();
+    session
+        .append(SessionEvent::Compaction {
+            id: new_id(),
+            summary: "first summary".into(),
+            kept_from: first_cut,
+            ts: Utc::now(),
+        })
+        .unwrap();
+    drop(session);
+
+    let mut indexed = store
+        .acquire_writer(&meta.session_id)
+        .unwrap()
+        .load()
+        .unwrap();
+    indexed
+        .append(SessionEvent::AssistantMessage {
+            id: new_id(),
+            model: meta.model.clone(),
+            content: vec![ContentBlock::Text {
+                text: "first answer".into(),
+            }],
+            usage: Usage::default(),
+            stop_reason: "end_turn".into(),
+            ts: Utc::now(),
+        })
+        .unwrap();
+    let second_cut = indexed.events().len();
+    indexed
+        .append(SessionEvent::UserMessage {
+            id: new_id(),
+            text: "second active".into(),
+            ts: Utc::now(),
+        })
+        .unwrap();
+    indexed
+        .append(SessionEvent::Compaction {
+            id: new_id(),
+            summary: "second summary".into(),
+            kept_from: second_cut,
+            ts: Utc::now(),
+        })
+        .unwrap();
+    let indexed_transcript = indexed.transcript();
+    drop(indexed);
+
+    let canonical = std::fs::read_to_string(store.session_path(&meta.session_id).unwrap()).unwrap();
+    let final_event: SessionEvent =
+        serde_json::from_str(canonical.lines().last().unwrap()).unwrap();
+    assert!(matches!(
+        final_event,
+        SessionEvent::Compaction { kept_from, .. } if kept_from > second_cut
+    ));
+    std::fs::remove_file(store.replay_index_path(&meta.session_id).unwrap()).unwrap();
+    assert_eq!(
+        store.load(&meta.session_id).unwrap().transcript(),
+        indexed_transcript
+    );
+}
+
+#[test]
+fn active_writer_rejects_atomic_replacement_of_canonical_log() {
+    let (store, dir) = temp_store();
+    let meta = sample_meta();
+    let mut session = store.create(meta.clone()).unwrap();
+    let path = store.session_path(&meta.session_id).unwrap();
+    let replacement = dir.path().join("replacement.jsonl");
+    std::fs::write(&replacement, std::fs::read(&path).unwrap()).unwrap();
+    std::fs::rename(&replacement, &path).unwrap();
+
+    let error = session
+        .append(SessionEvent::UserMessage {
+            id: new_id(),
+            text: "must not disappear".into(),
+            ts: Utc::now(),
+        })
+        .expect_err("replaced canonical path must invalidate the writer");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(
+        !std::fs::read_to_string(path)
+            .unwrap()
+            .contains("must not disappear")
+    );
+}
+
+#[test]
+fn invalid_history_is_never_hidden_by_checkpoint_creation() {
+    let (store, _dir) = temp_store();
+    let meta = sample_meta();
+    let mut session = store.create(meta.clone()).unwrap();
+    session
+        .append(SessionEvent::UserMessage {
+            id: "duplicate-event".into(),
+            text: "first".into(),
+            ts: Utc::now(),
+        })
+        .unwrap();
+    session
+        .append(SessionEvent::AssistantMessage {
+            id: new_id(),
+            model: meta.model.clone(),
+            content: vec![ContentBlock::Text {
+                text: "answer".into(),
+            }],
+            usage: Usage::default(),
+            stop_reason: "end_turn".into(),
+            ts: Utc::now(),
+        })
+        .unwrap();
+    session
+        .append(SessionEvent::UserMessage {
+            id: "duplicate-event".into(),
+            text: "duplicate".into(),
+            ts: Utc::now(),
+        })
+        .unwrap();
+    let kept_from = session.events().len() - 1;
+    session
+        .append(SessionEvent::Compaction {
+            id: new_id(),
+            summary: "must not hide invalid history".into(),
+            kept_from,
+            ts: Utc::now(),
+        })
+        .unwrap();
+    drop(session);
+
+    assert!(!store.replay_index_path(&meta.session_id).unwrap().exists());
+    let error = store
+        .load(&meta.session_id)
+        .err()
+        .expect("canonical duplicate must remain visible");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+}
+
+#[test]
+fn corrupted_historical_id_page_falls_back_to_canonical_validation() {
+    let (store, dir) = temp_store();
+    let meta = sample_meta();
+    let mut session = store.create(meta.clone()).unwrap();
+    session
+        .append(SessionEvent::UserMessage {
+            id: "historical-id".into(),
+            text: "old".into(),
+            ts: Utc::now(),
+        })
+        .unwrap();
+    session
+        .append(SessionEvent::AssistantMessage {
+            id: new_id(),
+            model: meta.model.clone(),
+            content: vec![ContentBlock::Text { text: "old".into() }],
+            usage: Usage::default(),
+            stop_reason: "end_turn".into(),
+            ts: Utc::now(),
+        })
+        .unwrap();
+    let kept_from = session.events().len();
+    session
+        .append(SessionEvent::UserMessage {
+            id: new_id(),
+            text: "active".into(),
+            ts: Utc::now(),
+        })
+        .unwrap();
+    session
+        .append(SessionEvent::Compaction {
+            id: new_id(),
+            summary: "old".into(),
+            kept_from,
+            ts: Utc::now(),
+        })
+        .unwrap();
+    session
+        .append(SessionEvent::UserMessage {
+            id: "historical-id".into(),
+            text: "duplicate tail".into(),
+            ts: Utc::now(),
+        })
+        .unwrap();
+    drop(session);
+    let checkpoint: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(store.replay_index_path(&meta.session_id).unwrap()).unwrap(),
+    )
+    .unwrap();
+    let generation = checkpoint["generation"].as_str().unwrap();
+    let ids_path = dir
+        .path()
+        .join(format!("{}.replay.{generation}.ids", meta.session_id));
+    let mut ids = std::fs::read(&ids_path).unwrap();
+    *ids.last_mut().unwrap() ^= 0xff;
+    std::fs::write(ids_path, ids).unwrap();
+
+    let error = store
+        .load(&meta.session_id)
+        .err()
+        .expect("corrupt id index must not hide canonical duplicates");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+}
+
+#[test]
 fn middle_corruption_with_torn_tail_is_rejected_without_mutating_log() {
     let (store, _dir) = temp_store();
     let meta = sample_meta();

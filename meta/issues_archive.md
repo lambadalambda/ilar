@@ -66,3 +66,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Shift-Enter inserts a newline](issues/shift-enter-newline.md)
 - [x] [Bounded event channels](issues/bounded-event-channels.md)
 - [x] [Cache transcript rendering](issues/cache-transcript-rendering.md)
+- [x] [Index session replay](issues/index-session-replay.md)
