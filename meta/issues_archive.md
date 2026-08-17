@@ -56,3 +56,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Compaction correctness and cancellation](issues/compaction-correctness-and-cancellation.md)
 - [x] [Harden provider protocol handling](issues/harden-provider-protocol-handling.md)
 - [x] [Bound and sanitize web tools](issues/bound-and-sanitize-web-tools.md)
+- [x] [Subagent safety and outcomes](issues/subagent-safety-and-outcomes.md)

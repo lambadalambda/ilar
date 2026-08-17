@@ -1,13 +1,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::stream;
+use futures::{StreamExt, stream};
 use ilar::agent::{LoopConfig, TurnOutcome, run_turn};
 use ilar::config::{AgentDefinition, AgentWorkspaceMode};
 use ilar::provider::{
     EventStream, FixedProviderResolver, MockProvider, Provider, ProviderEvent, Request, StopReason,
 };
-use ilar::session::{ContentBlock, SessionMeta, SessionStore, Usage, new_id};
+use ilar::session::{ContentBlock, SessionEvent, SessionMeta, SessionStore, Usage, new_id};
 use ilar::subagent::SubagentSpawner;
 use ilar::tools::{ToolContext, ToolRegistry};
 
@@ -66,6 +66,101 @@ struct Silent;
 impl Provider for Silent {
     fn stream(&self, _req: Request) -> anyhow::Result<EventStream> {
         Ok(Box::pin(stream::pending()))
+    }
+}
+
+#[derive(Clone)]
+struct NotifyingPending {
+    started: Arc<tokio::sync::Notify>,
+}
+
+impl Provider for NotifyingPending {
+    fn stream(&self, _req: Request) -> anyhow::Result<EventStream> {
+        self.started.notify_one();
+        Ok(Box::pin(stream::pending()))
+    }
+}
+
+#[derive(Clone)]
+struct NotifyingDelayedText {
+    started: Arc<tokio::sync::Notify>,
+}
+
+impl Provider for NotifyingDelayedText {
+    fn stream(&self, _req: Request) -> anyhow::Result<EventStream> {
+        self.started.notify_one();
+        Ok(Box::pin(
+            stream::once(async {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                ProviderEvent::TextDelta("finished".into())
+            })
+            .chain(stream::once(async {
+                ProviderEvent::TurnComplete {
+                    stop_reason: StopReason::EndTurn,
+                    usage: Usage::default(),
+                }
+            })),
+        ))
+    }
+}
+
+#[derive(Clone)]
+struct NestedBackgroundProvider {
+    worktree: std::path::PathBuf,
+}
+
+impl Provider for NestedBackgroundProvider {
+    fn stream(&self, request: Request) -> anyhow::Result<EventStream> {
+        let initial_prompt = request
+            .messages
+            .first()
+            .and_then(|message| message.content.first())
+            .and_then(|block| match block {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            });
+        if initial_prompt == Some("remain pending") {
+            return Ok(Box::pin(stream::pending()));
+        }
+        let has_tool_result = request.messages.iter().any(|message| {
+            message
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+        });
+        if has_tool_result {
+            return Ok(Box::pin(stream::iter(vec![
+                ProviderEvent::TextDelta("intermediate finished".into()),
+                ProviderEvent::TurnComplete {
+                    stop_reason: StopReason::EndTurn,
+                    usage: Usage::default(),
+                },
+            ])));
+        }
+        Ok(Box::pin(stream::iter(vec![
+            ProviderEvent::ToolCallStarted {
+                id: "nested-task".into(),
+                name: "task".into(),
+            },
+            ProviderEvent::ToolCallCompleted {
+                id: "nested-task".into(),
+                name: "task".into(),
+                input: serde_json::json!({
+                    "description": "nested pending",
+                    "prompt": "remain pending",
+                    "subagent_type": "explore",
+                    "background": true,
+                    "workspace": {
+                        "cwd": self.worktree.clone(),
+                        "isolation": "git_worktree"
+                    }
+                }),
+            },
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+                usage: Usage::default(),
+            },
+        ])))
     }
 }
 
@@ -369,6 +464,122 @@ async fn root_cancellation_stops_background_bash() {
     assert!(notification.text.contains("cancelled"));
     tokio::time::sleep(Duration::from_millis(1100)).await;
     assert!(!marker.exists());
+}
+
+#[tokio::test]
+async fn root_cancellation_reaches_nested_background_task_after_parent_finishes() {
+    let (_repo, root, worktree) = repository_with_worktree();
+    let (store, session_id) = temp_store();
+    let provider = NestedBackgroundProvider {
+        worktree: worktree.clone(),
+    };
+    let spawner = spawner_for_workspace(
+        Arc::new(provider),
+        &store,
+        AgentWorkspaceMode::Mutable,
+        root.clone(),
+    );
+    let mut notifications = spawner.subscribe();
+    let registry = ToolRegistry::builtin()
+        .with_subagents(spawner.clone())
+        .unwrap();
+    let root_cancel = tokio_util::sync::CancellationToken::new();
+    let mut context = background_tool_context(session_id, spawner.clone(), &root);
+    context.cancel = root_cancel.clone();
+
+    let started = registry
+        .get("task")
+        .unwrap()
+        .run(
+            serde_json::json!({
+                "description": "intermediate parent",
+                "prompt": "launch nested",
+                "subagent_type": "explore",
+                "background": true,
+            }),
+            context,
+        )
+        .await;
+    assert!(!started.is_error, "{}", started.content);
+    let parent_finished = tokio::time::timeout(Duration::from_secs(2), notifications.recv())
+        .await
+        .expect("intermediate task should finish")
+        .expect("intermediate notification should be present");
+    assert!(!parent_finished.is_error, "{}", parent_finished.text);
+
+    root_cancel.cancel();
+    let nested_cancelled = tokio::time::timeout(Duration::from_millis(200), notifications.recv())
+        .await
+        .expect("nested task should inherit root cancellation")
+        .expect("nested cancellation notification should be present");
+    assert!(nested_cancelled.is_error, "{}", nested_cancelled.text);
+    assert_eq!(nested_cancelled.description, "nested pending");
+    assert!(
+        nested_cancelled.text.contains("cancelled") || nested_cancelled.text.contains("aborted"),
+        "{}",
+        nested_cancelled.text
+    );
+
+    spawner.shutdown().await;
+}
+
+#[tokio::test]
+async fn background_subagent_max_iterations_is_error() {
+    let (store, session_id) = temp_store();
+    let spawner = Arc::new(
+        SubagentSpawner::new(
+            Arc::new(FixedProviderResolver::new(Arc::new(MockProvider::new(
+                vec![],
+            )))),
+            store,
+            vec![AgentDefinition {
+                name: "explore".into(),
+                description: "explores".into(),
+                model: None,
+                prompt: String::new(),
+                workspace_mode: AgentWorkspaceMode::Mutable,
+            }],
+            std::env::temp_dir(),
+            0,
+            10,
+            3,
+        )
+        .with_loop_config(LoopConfig {
+            max_iterations: 0,
+            ..LoopConfig::default()
+        }),
+    );
+    let mut notifications = spawner.subscribe();
+    let task = ToolRegistry::builtin()
+        .with_subagents(spawner.clone())
+        .unwrap()
+        .get("task")
+        .unwrap();
+
+    let started = task
+        .run(
+            serde_json::json!({
+                "description": "bounded background",
+                "prompt": "work",
+                "subagent_type": "explore",
+                "background": true,
+            }),
+            background_tool_context(session_id, spawner.clone(), std::env::temp_dir().as_ref()),
+        )
+        .await;
+    assert!(!started.is_error, "{}", started.content);
+    let notification = tokio::time::timeout(Duration::from_secs(2), notifications.recv())
+        .await
+        .expect("bounded task should notify")
+        .expect("bounded task notification should be present");
+    assert!(notification.is_error, "{}", notification.text);
+    assert!(
+        notification.text.contains("iteration"),
+        "{}",
+        notification.text
+    );
+
+    spawner.shutdown().await;
 }
 
 #[tokio::test]
@@ -780,6 +991,130 @@ async fn nested_notification_runs_declared_parent_and_propagates_once() {
     assert_eq!(provider.requests()[0].model, "zai/glm-4.7");
     let child = store.load(&child_id).unwrap();
     assert!(format!("{:?}", child.transcript()).contains("nested result"));
+}
+
+#[tokio::test]
+async fn routed_notification_waits_for_an_active_parent_without_requeueing() {
+    let (store, root_id) = temp_store();
+    let dir = tempfile::tempdir().unwrap();
+    let location = ilar::tools::WorkspaceLocation::shared(dir.path().to_path_buf());
+    let child_id = new_id();
+    drop(
+        store
+            .create(SessionMeta {
+                session_id: child_id.clone(),
+                parent_id: Some(root_id.clone()),
+                agent: "explore".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: Some(location),
+            })
+            .unwrap(),
+    );
+    let started = Arc::new(tokio::sync::Notify::new());
+    let spawner = spawner_for_workspace(
+        Arc::new(NotifyingDelayedText {
+            started: started.clone(),
+        }),
+        &store,
+        AgentWorkspaceMode::Mutable,
+        dir.path().to_path_buf(),
+    );
+    let task = ToolRegistry::builtin()
+        .with_subagents(spawner.clone())
+        .unwrap()
+        .get("task")
+        .unwrap();
+    let context = background_tool_context(root_id.clone(), spawner.clone(), dir.path());
+    let resumed_id = child_id.clone();
+    let active = tokio::spawn(async move {
+        task.run(
+            serde_json::json!({
+                "description": "active parent",
+                "prompt": "continue",
+                "subagent_type": "explore",
+                "task_id": resumed_id,
+            }),
+            context,
+        )
+        .await
+    });
+    started.notified().await;
+
+    let outcome = spawner
+        .route_notification(
+            ilar::subagent::Notification {
+                parent_session_id: child_id,
+                description: "nested result".into(),
+                text: "nested finished".into(),
+                is_error: false,
+            },
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, ilar::subagent::RouteOutcome::Propagate(_)),
+        "active parent notification was requeued"
+    );
+    assert!(!active.await.unwrap().is_error);
+}
+
+#[tokio::test]
+async fn routed_abort_after_append_is_terminal_instead_of_requeued() {
+    let (store, session_id) = temp_store();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let spawner = Arc::new(SubagentSpawner::new(
+        Arc::new(FixedProviderResolver::new(Arc::new(NotifyingPending {
+            started: started.clone(),
+        }))),
+        store.clone(),
+        vec![AgentDefinition {
+            name: "build".into(),
+            description: "builds".into(),
+            model: None,
+            prompt: String::new(),
+            workspace_mode: AgentWorkspaceMode::Mutable,
+        }],
+        std::env::temp_dir(),
+        0,
+        10,
+        3,
+    ));
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let routed_spawner = spawner.clone();
+    let routed_cancel = cancel.clone();
+    let routed_session_id = session_id.clone();
+    let routed = tokio::spawn(async move {
+        routed_spawner
+            .route_notification(
+                ilar::subagent::Notification {
+                    parent_session_id: routed_session_id,
+                    description: "completed child".into(),
+                    text: "synthetic notification".into(),
+                    is_error: false,
+                },
+                routed_cancel,
+            )
+            .await
+    });
+    started.notified().await;
+    cancel.cancel();
+
+    let error = match routed.await.unwrap() {
+        Err(error) => error,
+        Ok(_) => panic!("an appended aborted route must not be replayed"),
+    };
+    assert!(error.to_string().contains("aborted"), "{error:#}");
+    let notification_messages = store
+        .load(&session_id)
+        .unwrap()
+        .events()
+        .iter()
+        .filter(|event| {
+            matches!(event, SessionEvent::UserMessage { text, .. } if text == "synthetic notification")
+        })
+        .count();
+    assert_eq!(notification_messages, 1);
 }
 
 #[tokio::test]

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use futures::StreamExt;
 use ilar::agent::{LoopConfig, TurnOutcome, run_turn};
 use ilar::config::{AgentDefinition, AgentWorkspaceMode};
 use ilar::provider::{
@@ -764,6 +765,209 @@ async fn explicit_task_id_errors_instead_of_starting_a_replacement() {
             out.content
         );
     }
+}
+
+fn task_context(parent_id: &str) -> ToolContext {
+    let mut context = ToolContext::root(std::env::temp_dir());
+    context.session_id = parent_id.to_string();
+    context
+}
+
+#[tokio::test]
+async fn foreground_subagent_max_iterations_is_error() {
+    let (store, parent_id) = temp_store();
+    let spawner = Arc::new(
+        SubagentSpawner::new(
+            Arc::new(FixedProviderResolver::new(Arc::new(MockProvider::new(
+                vec![],
+            )))),
+            store,
+            vec![AgentDefinition {
+                name: "explore".into(),
+                description: "explores".into(),
+                model: None,
+                prompt: String::new(),
+                workspace_mode: AgentWorkspaceMode::Mutable,
+            }],
+            std::env::temp_dir(),
+            0,
+            10,
+            3,
+        )
+        .with_loop_config(LoopConfig {
+            max_iterations: 0,
+            ..LoopConfig::default()
+        }),
+    );
+    let task = parent_registry(spawner).get("task").unwrap();
+
+    let output = task
+        .run(
+            serde_json::json!({
+                "description": "bounded child",
+                "prompt": "work",
+                "subagent_type": "explore",
+            }),
+            task_context(&parent_id),
+        )
+        .await;
+
+    assert!(output.is_error, "{}", output.content);
+    assert!(output.content.contains("iteration"), "{}", output.content);
+}
+
+#[tokio::test]
+async fn foreground_subagent_abort_is_error() {
+    #[derive(Clone)]
+    struct PendingAfterText {
+        started: Arc<tokio::sync::Notify>,
+    }
+    impl Provider for PendingAfterText {
+        fn stream(&self, _request: Request) -> anyhow::Result<EventStream> {
+            self.started.notify_one();
+            Ok(Box::pin(
+                futures::stream::once(async { ProviderEvent::TextDelta("partial".into()) })
+                    .chain(futures::stream::pending()),
+            ))
+        }
+    }
+
+    let (store, parent_id) = temp_store();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let spawner = spawner(
+        Arc::new(PendingAfterText {
+            started: started.clone(),
+        }),
+        &store,
+        10,
+        3,
+    );
+    let task = parent_registry(spawner).get("task").unwrap();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let mut context = task_context(&parent_id);
+    context.cancel = cancel.clone();
+    let running = tokio::spawn(async move {
+        task.run(
+            serde_json::json!({
+                "description": "cancel child",
+                "prompt": "work",
+                "subagent_type": "explore",
+            }),
+            context,
+        )
+        .await
+    });
+    started.notified().await;
+    cancel.cancel();
+    let output = running.await.unwrap();
+
+    assert!(output.is_error, "{}", output.content);
+    assert!(output.content.contains("aborted"), "{}", output.content);
+}
+
+#[tokio::test]
+async fn tool_only_child_does_not_return_its_prompt() {
+    let (store, parent_id) = temp_store();
+    let provider = MockProvider::new(vec![
+        vec![
+            ProviderEvent::ToolCallStarted {
+                id: "missing".into(),
+                name: "not_a_tool".into(),
+            },
+            ProviderEvent::ToolCallCompleted {
+                id: "missing".into(),
+                name: "not_a_tool".into(),
+                input: serde_json::json!({}),
+            },
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+                usage: Usage::default(),
+            },
+        ],
+        vec![ProviderEvent::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        }],
+    ]);
+    let task = parent_registry(spawner(Arc::new(provider), &store, 10, 3))
+        .get("task")
+        .unwrap();
+    let prompt = "do not echo this child prompt";
+
+    let output = task
+        .run(
+            serde_json::json!({
+                "description": "tool only",
+                "prompt": prompt,
+                "subagent_type": "explore",
+            }),
+            task_context(&parent_id),
+        )
+        .await;
+
+    assert!(!output.is_error, "{}", output.content);
+    assert!(!output.content.contains(prompt), "{}", output.content);
+    assert!(output.content.contains("no text"), "{}", output.content);
+}
+
+#[tokio::test]
+async fn resumed_subagent_rejects_an_already_active_session() {
+    let (store, parent_id) = temp_store();
+    let child_id = new_id();
+    drop(
+        store
+            .create(SessionMeta {
+                session_id: child_id.clone(),
+                parent_id: Some(parent_id.clone()),
+                agent: "explore".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+            })
+            .unwrap(),
+    );
+    let spawner = spawner(
+        Arc::new(ScriptedDelayProvider {
+            text: "eventual answer",
+            delay_ms: 300,
+        }),
+        &store,
+        10,
+        3,
+    );
+    let task = parent_registry(spawner.clone()).get("task").unwrap();
+    let first = task
+        .run(
+            serde_json::json!({
+                "description": "first resume",
+                "prompt": "continue",
+                "subagent_type": "explore",
+                "task_id": child_id,
+                "background": true,
+            }),
+            task_context(&parent_id),
+        )
+        .await;
+    assert!(!first.is_error, "{}", first.content);
+
+    let second = task
+        .run(
+            serde_json::json!({
+                "description": "duplicate resume",
+                "prompt": "continue again",
+                "subagent_type": "explore",
+                "task_id": child_id,
+            }),
+            task_context(&parent_id),
+        )
+        .await;
+    assert!(second.is_error, "{}", second.content);
+    assert!(
+        second.content.contains("already active"),
+        "{}",
+        second.content
+    );
+
+    spawner.shutdown().await;
 }
 
 #[tokio::test]

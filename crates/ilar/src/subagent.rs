@@ -3,7 +3,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::agent::{LoopConfig, run_turn};
+use crate::agent::{LoopConfig, TurnOutcome, run_turn};
 use crate::config::system_prompt_for;
 use crate::config::{AgentDefinition, AgentWorkspaceMode};
 use crate::provider::ProviderResolver;
@@ -41,6 +41,8 @@ pub struct SubagentSpawner {
     max_concurrent: usize,
     max_depth: usize,
     running: Arc<AtomicUsize>,
+    active_sessions: Arc<Mutex<std::collections::HashSet<String>>>,
+    active_sessions_changed: tokio::sync::watch::Sender<u64>,
     /// Background completions land here; the session owner consumes.
     notify_tx: tokio::sync::mpsc::UnboundedSender<Notification>,
     /// The single notification receiver, handed out by `subscribe`.
@@ -54,6 +56,7 @@ pub struct SubagentSpawner {
 }
 
 struct BackgroundTask {
+    id: String,
     handle: tokio::task::JoinHandle<()>,
     cancel: tokio_util::sync::CancellationToken,
 }
@@ -78,6 +81,7 @@ impl SubagentSpawner {
         let (notify_tx, notify_rx) = tokio::sync::mpsc::unbounded_channel();
         let workspace_location = crate::tools::WorkspaceLocation::shared(cwd);
         let workspace = crate::tools::WorkspaceScheduler::for_location(&workspace_location);
+        let (active_sessions_changed, _) = tokio::sync::watch::channel(0);
         Self {
             notify_rx: Arc::new(Mutex::new(Some(notify_rx))),
             resolver,
@@ -88,6 +92,8 @@ impl SubagentSpawner {
             max_concurrent,
             max_depth,
             running: Arc::new(AtomicUsize::new(0)),
+            active_sessions: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            active_sessions_changed,
             notify_tx,
             stall_timeout: std::time::Duration::from_secs(600),
             background_tasks: Arc::new(Mutex::new(BackgroundRegistry::default())),
@@ -192,6 +198,8 @@ impl SubagentSpawner {
             max_concurrent: self.max_concurrent,
             max_depth: self.max_depth,
             running: self.running.clone(),
+            active_sessions: self.active_sessions.clone(),
+            active_sessions_changed: self.active_sessions_changed.clone(),
             notify_tx: self.notify_tx.clone(),
             notify_rx: self.notify_rx.clone(),
             stall_timeout: self.stall_timeout,
@@ -278,6 +286,18 @@ impl SubagentSpawner {
             None
         };
         let child_workspace = ctx.workspace.scoped(&child_location);
+
+        let mut active_session = match &input.task_id {
+            Some(id) => match self.claim_session(id) {
+                Some(claim) => Some(claim),
+                None => {
+                    return ToolOutput::error(format!(
+                        "task session {id:?} is already active; wait for it to finish before resuming"
+                    ));
+                }
+            },
+            None => None,
+        };
 
         // Concurrency slot: Claude Code semantics — over cap is a soft
         // error the model must not retry.
@@ -387,6 +407,10 @@ impl SubagentSpawner {
                 id
             }
         };
+        if active_session.is_none() {
+            active_session = self.claim_session(&session_id);
+        }
+        let _active_session = active_session.expect("new session id must be unique");
 
         let mut system_prompt = system_prompt_for(child_location.cwd());
         if !agent.prompt.is_empty() {
@@ -449,7 +473,19 @@ impl SubagentSpawner {
             background_registry
                 .tasks
                 .retain(|task| !task.handle.is_finished());
+            let registry_id = new_id();
+            let task_registry_id = registry_id.clone();
+            let task_registry = self.background_tasks.clone();
+            let (registered_tx, registered_rx) = tokio::sync::oneshot::channel();
             let handle = tokio::spawn(async move {
+                if registered_rx.await.is_err() {
+                    return;
+                }
+                let _background_task = BackgroundTaskGuard {
+                    id: task_registry_id,
+                    registry: task_registry,
+                };
+                let _active_session = _active_session;
                 let _slot = _guard; // hold the concurrency slot for the run
                 let lease = match inherited_lease {
                     Some(lease) => lease,
@@ -518,7 +554,7 @@ impl SubagentSpawner {
                     return;
                 }
                 child_ctx.workspace_lease = Some(lease);
-                let cancel = tokio_util::sync::CancellationToken::new();
+                let cancel = root_cancel.child_token();
                 let (tx, mut rx_evt) = tokio::sync::mpsc::unbounded_channel();
                 // Activity tracker: any child event counts as progress.
                 let last_activity = Arc::new(Mutex::new(std::time::Instant::now()));
@@ -567,19 +603,8 @@ impl SubagentSpawner {
                 let _ = watcher.await;
 
                 let notification = match outcome {
-                    Some(Ok(_)) => {
-                        let text = spawner
-                            .store
-                            .load(&session_id)
-                            .ok()
-                            .and_then(|s| {
-                                s.transcript().iter().rev().find_map(|m| {
-                                    m.content.iter().find_map(|b| match b {
-                                        ContentBlock::Text { text } => Some(text.clone()),
-                                        _ => None,
-                                    })
-                                })
-                            })
+                    Some(Ok(TurnOutcome::Completed)) => {
+                        let text = final_assistant_text(&spawner.store, &session_id)
                             .unwrap_or_else(|| "(finished with no text)".into());
                         Notification {
                             parent_session_id,
@@ -590,6 +615,22 @@ impl SubagentSpawner {
                             is_error: false,
                         }
                     }
+                    Some(Ok(TurnOutcome::Aborted)) => Notification {
+                        parent_session_id,
+                        description: description.clone(),
+                        text: format!(
+                            "<task-notification>\nTask \"{description}\" was aborted.\n</task-notification>"
+                        ),
+                        is_error: true,
+                    },
+                    Some(Ok(TurnOutcome::MaxIterations)) => Notification {
+                        parent_session_id,
+                        description: description.clone(),
+                        text: format!(
+                            "<task-notification>\nTask \"{description}\" failed: subagent reached its iteration limit.\n</task-notification>"
+                        ),
+                        is_error: true,
+                    },
                     Some(Err(e)) => Notification {
                         parent_session_id,
                         description: description.clone(),
@@ -619,9 +660,11 @@ impl SubagentSpawner {
                 let _ = spawner.notify_tx.send(notification);
             });
             background_registry.tasks.push(BackgroundTask {
+                id: registry_id,
                 handle,
                 cancel: background_cancel,
             });
+            let _ = registered_tx.send(());
             return ToolOutput::text(
                 "Task started in the background. You will be notified when it completes. \
 DO NOT sleep, poll, or check on it — work on something else or end your response."
@@ -658,7 +701,7 @@ DO NOT sleep, poll, or check on it — work on something else or end your respon
             }
         }
         child_ctx.workspace_lease = Some(lease);
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let tx = discarded_event_sender();
         let outcome = run_turn(
             self.resolver.as_ref(),
             &registry,
@@ -674,22 +717,14 @@ DO NOT sleep, poll, or check on it — work on something else or end your respon
         .await;
 
         match outcome {
-            Ok(_) => {
-                // Final text = last assistant text block of the child session.
-                let text = self
-                    .store
-                    .load(&session_id)
-                    .ok()
-                    .and_then(|s| {
-                        s.transcript().iter().rev().find_map(|m| {
-                            m.content.iter().find_map(|b| match b {
-                                ContentBlock::Text { text } => Some(text.clone()),
-                                _ => None,
-                            })
-                        })
-                    })
+            Ok(TurnOutcome::Completed) => {
+                let text = final_assistant_text(&self.store, &session_id)
                     .unwrap_or_else(|| "(subagent finished with no text)".into());
                 ToolOutput::text(text)
+            }
+            Ok(TurnOutcome::Aborted) => ToolOutput::error("subagent aborted"),
+            Ok(TurnOutcome::MaxIterations) => {
+                ToolOutput::error("subagent failed: iteration limit reached")
             }
             Err(e) => ToolOutput::error(format!("subagent failed: {e:#}")),
         }
@@ -718,7 +753,18 @@ DO NOT sleep, poll, or check on it — work on something else or end your respon
             background_registry
                 .tasks
                 .retain(|task| !task.handle.is_finished());
+            let registry_id = new_id();
+            let task_registry_id = registry_id.clone();
+            let task_registry = self.background_tasks.clone();
+            let (registered_tx, registered_rx) = tokio::sync::oneshot::channel();
             let handle = tokio::spawn(async move {
+                if registered_rx.await.is_err() {
+                    return;
+                }
+                let _background_task = BackgroundTaskGuard {
+                    id: task_registry_id,
+                    registry: task_registry,
+                };
                 let outcome = tokio::select! {
                     outcome = tokio::time::timeout(timeout, async move {
                         let _permit = workspace.acquire(access).await;
@@ -764,9 +810,11 @@ DO NOT sleep, poll, or check on it — work on something else or end your respon
                 });
             });
             background_registry.tasks.push(BackgroundTask {
+                id: registry_id,
                 handle,
                 cancel: background_cancel,
             });
+            let _ = registered_tx.send(());
         }
         ToolOutput::text(format!(
             "Background job {job_id} started. You will be notified when it completes. Do not poll or sleep; continue other work or end your response."
@@ -815,6 +863,8 @@ DO NOT sleep, poll, or check on it — work on something else or end your respon
             max_concurrent: self.max_concurrent,
             max_depth: self.max_depth,
             running: self.running.clone(),
+            active_sessions: self.active_sessions.clone(),
+            active_sessions_changed: self.active_sessions_changed.clone(),
             notify_tx: self.notify_tx.clone(),
             notify_rx: self.notify_rx.clone(),
             stall_timeout: self.stall_timeout,
@@ -823,6 +873,12 @@ DO NOT sleep, poll, or check on it — work on something else or end your respon
             background_tool_timeout: self.background_tool_timeout,
             loop_config: self.loop_config.clone(),
         });
+        let Some(_active_session) = self
+            .wait_for_session_claim(&notification.parent_session_id, &cancel)
+            .await
+        else {
+            return Ok(RouteOutcome::Requeue(notification));
+        };
         let workspace_access = match agent.workspace_mode {
             AgentWorkspaceMode::Mutable => WorkspaceAccess::Mutating,
             AgentWorkspaceMode::ReadOnly => WorkspaceAccess::ReadOnly,
@@ -840,7 +896,7 @@ DO NOT sleep, poll, or check on it — work on something else or end your respon
                 agent.name, agent.prompt
             );
         }
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let tx = discarded_event_sender();
         let lease = tokio::select! {
             lease = workspace.acquire_lease(workspace_access) => lease,
             () = cancel.cancelled() => return Ok(RouteOutcome::Requeue(notification)),
@@ -904,14 +960,25 @@ DO NOT sleep, poll, or check on it — work on something else or end your respon
             }
         };
         let Some(grandparent_id) = meta.parent_id else {
-            return outcome.map(|_| RouteOutcome::Complete);
+            return match outcome {
+                Ok(TurnOutcome::Completed) => Ok(RouteOutcome::Complete),
+                Ok(TurnOutcome::Aborted) => {
+                    Err(anyhow::anyhow!("notification parent turn was aborted"))
+                }
+                Ok(TurnOutcome::MaxIterations) => Err(anyhow::anyhow!(
+                    "notification parent reached its iteration limit"
+                )),
+                Err(error) => Err(error),
+            };
         };
         let (text, is_error) = match outcome {
-            Ok(crate::agent::TurnOutcome::Aborted) => {
-                ("Nested parent turn was cancelled.".to_string(), true)
-            }
-            Ok(_) => (
-                final_text_after_last_user(&self.store, &notification.parent_session_id)
+            Ok(TurnOutcome::Aborted) => ("Nested parent turn was cancelled.".to_string(), true),
+            Ok(TurnOutcome::MaxIterations) => (
+                "Nested parent turn reached its iteration limit.".to_string(),
+                true,
+            ),
+            Ok(TurnOutcome::Completed) => (
+                final_assistant_text(&self.store, &notification.parent_session_id)
                     .unwrap_or_else(|| "(finished with no text)".into()),
                 false,
             ),
@@ -926,6 +993,35 @@ DO NOT sleep, poll, or check on it — work on something else or end your respon
             ),
             is_error,
         }))
+    }
+
+    fn claim_session(&self, session_id: &str) -> Option<ActiveSessionGuard> {
+        let mut active = self.active_sessions.lock().unwrap();
+        if !active.insert(session_id.to_string()) {
+            return None;
+        }
+        Some(ActiveSessionGuard {
+            session_id: session_id.to_string(),
+            active: self.active_sessions.clone(),
+            changed: self.active_sessions_changed.clone(),
+        })
+    }
+
+    async fn wait_for_session_claim(
+        &self,
+        session_id: &str,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Option<ActiveSessionGuard> {
+        let mut changed = self.active_sessions_changed.subscribe();
+        loop {
+            if let Some(claim) = self.claim_session(session_id) {
+                return Some(claim);
+            }
+            tokio::select! {
+                result = changed.changed() => result.ok()?,
+                () = cancel.cancelled() => return None,
+            }
+        }
     }
 }
 
@@ -1032,7 +1128,7 @@ async fn revalidate_after_lease(
     }
 }
 
-fn final_text_after_last_user(store: &SessionStore, session_id: &str) -> Option<String> {
+fn final_assistant_text(store: &SessionStore, session_id: &str) -> Option<String> {
     store.load(session_id).ok().and_then(|session| {
         let boundary = session
             .events()
@@ -1045,14 +1141,57 @@ fn final_text_after_last_user(store: &SessionStore, session_id: &str) -> Option<
             .rev()
             .find_map(|event| match event {
                 crate::session::SessionEvent::AssistantMessage { content, .. } => {
-                    content.iter().find_map(|block| match block {
-                        ContentBlock::Text { text } => Some(text.clone()),
-                        _ => None,
-                    })
+                    let text = content
+                        .iter()
+                        .filter_map(|block| match block {
+                            ContentBlock::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                        .trim()
+                        .to_string();
+                    (!text.is_empty()).then_some(text)
                 }
                 _ => None,
             })
     })
+}
+
+fn discarded_event_sender() -> tokio::sync::mpsc::UnboundedSender<crate::agent::LoopEvent> {
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    drop(receiver);
+    sender
+}
+
+struct ActiveSessionGuard {
+    session_id: String,
+    active: Arc<Mutex<std::collections::HashSet<String>>>,
+    changed: tokio::sync::watch::Sender<u64>,
+}
+
+impl Drop for ActiveSessionGuard {
+    fn drop(&mut self) {
+        self.active.lock().unwrap().remove(&self.session_id);
+        self.changed.send_modify(|version| {
+            *version = version.wrapping_add(1);
+        });
+    }
+}
+
+struct BackgroundTaskGuard {
+    id: String,
+    registry: Arc<Mutex<BackgroundRegistry>>,
+}
+
+impl Drop for BackgroundTaskGuard {
+    fn drop(&mut self) {
+        self.registry
+            .lock()
+            .unwrap()
+            .tasks
+            .retain(|task| task.id != self.id);
+    }
 }
 
 struct SlotGuard(Arc<AtomicUsize>);
