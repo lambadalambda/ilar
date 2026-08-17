@@ -99,6 +99,30 @@ const MUTED: Color = Color::DarkGray;
 const ASSISTANT: Color = Color::Green;
 const TOOL_ACTIVE: Color = Color::Yellow;
 const ERROR: Color = Color::Red;
+const TODO_SIDEBAR_MIN_WIDTH: u16 = 80;
+const TODO_SIDEBAR_WIDTH: u16 = 28;
+const TODO_SIDEBAR_MAX_ITEMS: usize = 5;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ContentAreas {
+    transcript: Rect,
+    todos: Option<Rect>,
+}
+
+fn content_areas(area: Rect) -> ContentAreas {
+    if area.width < TODO_SIDEBAR_MIN_WIDTH {
+        return ContentAreas {
+            transcript: area,
+            todos: None,
+        };
+    }
+    let areas = Layout::horizontal([Constraint::Min(3), Constraint::Length(TODO_SIDEBAR_WIDTH)])
+        .split(area);
+    ContentAreas {
+        transcript: areas[0],
+        todos: Some(areas[1]),
+    }
+}
 
 #[derive(clap::Subcommand, Debug)]
 enum Command {
@@ -538,11 +562,6 @@ impl App {
                 }
             }
         }
-        let todos = {
-            let todos = self.todos.lock().unwrap();
-            todo_render_snapshot(&todos, width)
-        };
-        output.extend(render_todo_snapshot(&todos, width));
         if self.busy
             && matches!(
                 self.activity,
@@ -732,7 +751,8 @@ impl App {
         ])
         .split(frame.area());
 
-        let transcript_area = chunks[0];
+        let content_areas = content_areas(chunks[0]);
+        let transcript_area = content_areas.transcript;
         let text_width = transcript_area.width.saturating_sub(3);
         let text = self.transcript_lines(text_width, std::time::Instant::now());
         let viewport_rows = transcript_area.height.saturating_sub(2) as usize;
@@ -757,13 +777,22 @@ impl App {
         } else {
             format!(" · {}%", self.scroll_top.saturating_mul(100) / max_scroll)
         };
+        let mut transcript_block = Block::default()
+            .borders(Borders::ALL)
+            .title(format!("ilar{scroll_label}"))
+            .padding(Padding::new(0, 1, 0, 0));
+        if content_areas.todos.is_none() && transcript_area.height > 1 {
+            let snapshot = {
+                let todos = self.todos.lock().unwrap();
+                todo_render_snapshot(&todos, 1)
+            };
+            if let Some(summary) = todo_summary(&snapshot, transcript_area.width.saturating_sub(4))
+            {
+                transcript_block = transcript_block.title_bottom(summary.right_aligned());
+            }
+        }
         let paragraph = Paragraph::new(text)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(format!("ilar{scroll_label}"))
-                    .padding(Padding::new(0, 1, 0, 0)),
-            )
+            .block(transcript_block)
             .wrap(Wrap { trim: false })
             .scroll((self.scroll_top.min(u16::MAX as usize) as u16, 0));
         frame.render_widget(paragraph, transcript_area);
@@ -784,6 +813,25 @@ impl App {
                 transcript_area.height.saturating_sub(2),
             );
             frame.render_stateful_widget(scrollbar, area, &mut state);
+        }
+
+        if let Some(todo_area) = content_areas.todos {
+            let todo_block =
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(Line::from(Span::styled(
+                        "todos",
+                        Style::default()
+                            .fg(TOOL_ACTIVE)
+                            .add_modifier(Modifier::BOLD),
+                    )));
+            let inner = todo_block.inner(todo_area);
+            let snapshot = {
+                let todos = self.todos.lock().unwrap();
+                todo_render_snapshot(&todos, TODO_SIDEBAR_MAX_ITEMS.min(inner.height as usize))
+            };
+            let lines = render_todo_sidebar_snapshot(&snapshot, inner.width, inner.height);
+            frame.render_widget(Paragraph::new(lines).block(todo_block), todo_area);
         }
 
         frame.render_widget(Paragraph::new(self.status_line(chunks[1].width)), chunks[1]);
@@ -831,8 +879,7 @@ struct TodoRenderSnapshot {
     hidden: usize,
 }
 
-fn todo_render_snapshot(list: &ilar::todo::TodoList, width: u16) -> TodoRenderSnapshot {
-    let cap = if width < 64 { 3 } else { 5 };
+fn todo_render_snapshot(list: &ilar::todo::TodoList, cap: usize) -> TodoRenderSnapshot {
     let indices = visible_todo_indices(list, cap);
     TodoRenderSnapshot {
         hidden: list.items.len().saturating_sub(indices.len()),
@@ -844,13 +891,28 @@ fn todo_render_snapshot(list: &ilar::todo::TodoList, width: u16) -> TodoRenderSn
 }
 
 #[cfg(test)]
-fn render_todo_lines(list: &ilar::todo::TodoList, width: u16) -> Vec<Line<'static>> {
-    render_todo_snapshot(&todo_render_snapshot(list, width), width)
+fn render_todo_sidebar_lines(
+    list: &ilar::todo::TodoList,
+    width: u16,
+    height: u16,
+) -> Vec<Line<'static>> {
+    let snapshot = todo_render_snapshot(list, TODO_SIDEBAR_MAX_ITEMS.min(height as usize));
+    render_todo_sidebar_snapshot(&snapshot, width, height)
 }
 
-fn render_todo_snapshot(snapshot: &TodoRenderSnapshot, width: u16) -> Vec<Line<'static>> {
-    if snapshot.items.is_empty() || width == 0 {
+fn render_todo_sidebar_snapshot(
+    snapshot: &TodoRenderSnapshot,
+    width: u16,
+    height: u16,
+) -> Vec<Line<'static>> {
+    if width == 0 || height == 0 {
         return Vec::new();
+    }
+    if snapshot.items.is_empty() {
+        return vec![Line::from(Span::styled(
+            "— no todos",
+            Style::default().fg(MUTED),
+        ))];
     }
     let last = snapshot.items.len().saturating_sub(1);
     snapshot
@@ -858,12 +920,6 @@ fn render_todo_snapshot(snapshot: &TodoRenderSnapshot, width: u16) -> Vec<Line<'
         .iter()
         .enumerate()
         .map(|(position, item)| {
-            let label_width = 5usize.min(width as usize);
-            let label = truncate_display(
-                if position == 0 { "todo " } else { "     " },
-                label_width,
-                Truncation::Right,
-            );
             let (marker, marker_style, content_style) = match item.status {
                 ilar::todo::Status::Completed => (
                     "✓ ",
@@ -877,7 +933,7 @@ fn render_todo_snapshot(snapshot: &TodoRenderSnapshot, width: u16) -> Vec<Line<'
                 ),
                 ilar::todo::Status::Pending => ("○ ", Style::default().fg(MUTED), Style::default()),
             };
-            let remaining = (width as usize).saturating_sub(label_width);
+            let remaining = width as usize;
             let marker = truncate_display(marker, remaining, Truncation::Right);
             let remaining = remaining.saturating_sub(UnicodeWidthStr::width(marker.as_str()));
             let suffix = if position == last && snapshot.hidden > 0 {
@@ -899,12 +955,6 @@ fn render_todo_snapshot(snapshot: &TodoRenderSnapshot, width: u16) -> Vec<Line<'
             );
             let suffix = truncate_display(&suffix, suffix_width, Truncation::Right);
             Line::from(vec![
-                Span::styled(
-                    label,
-                    Style::default()
-                        .fg(TOOL_ACTIVE)
-                        .add_modifier(Modifier::BOLD),
-                ),
                 Span::styled(marker, marker_style),
                 Span::styled(content, content_style),
                 Span::styled(suffix, Style::default().fg(MUTED)),
@@ -913,7 +963,48 @@ fn render_todo_snapshot(snapshot: &TodoRenderSnapshot, width: u16) -> Vec<Line<'
         .collect()
 }
 
+fn todo_summary(snapshot: &TodoRenderSnapshot, width: u16) -> Option<Line<'static>> {
+    let item = snapshot.items.first()?;
+    if width == 0 {
+        return None;
+    }
+    let (marker, marker_style) = match item.status {
+        ilar::todo::Status::Completed => ("✓ ", Style::default().fg(ASSISTANT)),
+        ilar::todo::Status::InProgress => ("▸ ", Style::default().fg(TOOL_ACTIVE)),
+        ilar::todo::Status::Pending => ("○ ", Style::default().fg(MUTED)),
+    };
+    let prefix = "todos ";
+    let suffix = if snapshot.hidden > 0 {
+        format!(" · +{}", snapshot.hidden)
+    } else {
+        String::new()
+    };
+    let fixed_width = UnicodeWidthStr::width(prefix)
+        + UnicodeWidthStr::width(marker)
+        + UnicodeWidthStr::width(suffix.as_str());
+    let content = safe_text(
+        &item
+            .content
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    let content = truncate_display(
+        &content,
+        (width as usize).saturating_sub(fixed_width),
+        Truncation::Right,
+    );
+    let text = format!("{prefix}{marker}{content}{suffix}");
+    Some(Line::from(Span::styled(
+        truncate_display(&text, width as usize, Truncation::Right),
+        marker_style,
+    )))
+}
+
 fn visible_todo_indices(list: &ilar::todo::TodoList, cap: usize) -> Vec<usize> {
+    if cap == 0 {
+        return Vec::new();
+    }
     if list.items.len() <= cap {
         return (0..list.items.len()).collect();
     }
@@ -925,17 +1016,19 @@ fn visible_todo_indices(list: &ilar::todo::TodoList, cap: usize) -> Vec<usize> {
     {
         selected.insert(index);
     }
-    if let Some(index) = list
-        .items
-        .iter()
-        .position(|item| item.status == ilar::todo::Status::Pending)
+    if selected.len() < cap
+        && let Some(index) = list
+            .items
+            .iter()
+            .position(|item| item.status == ilar::todo::Status::Pending)
     {
         selected.insert(index);
     }
-    if let Some(index) = list
-        .items
-        .iter()
-        .rposition(|item| item.status == ilar::todo::Status::Completed)
+    if selected.len() < cap
+        && let Some(index) = list
+            .items
+            .iter()
+            .rposition(|item| item.status == ilar::todo::Status::Completed)
     {
         selected.insert(index);
     }
@@ -3008,7 +3101,6 @@ mod tests {
 
     #[test]
     fn current_todos_render_all_statuses_and_live_replacements() {
-        let mut app = App::new();
         let todos = std::sync::Arc::new(std::sync::Mutex::new(ilar::todo::TodoList {
             items: vec![
                 ilar::todo::TodoItem {
@@ -3025,15 +3117,12 @@ mod tests {
                 },
             ],
         }));
-        app.todos = todos.clone();
-
-        let rendered = app
-            .transcript_lines(80, std::time::Instant::now())
+        let rendered = render_todo_sidebar_lines(&todos.lock().unwrap(), 26, 5)
             .iter()
             .map(rendered_text)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(rendered.contains("todo ✓ done thing"), "{rendered}");
+        assert!(rendered.contains("✓ done thing"), "{rendered}");
         assert!(rendered.contains("▸ active thing"), "{rendered}");
         assert!(rendered.contains("○ later thing"), "{rendered}");
 
@@ -3041,14 +3130,31 @@ mod tests {
             content: "replacement".into(),
             status: ilar::todo::Status::Pending,
         }];
-        let replaced = app
+        let replaced = render_todo_sidebar_lines(&todos.lock().unwrap(), 26, 5)
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(replaced.contains("○ replacement"), "{replaced}");
+        assert!(!replaced.contains("done thing"), "{replaced}");
+    }
+
+    #[test]
+    fn transcript_lines_exclude_current_todos() {
+        let app = App::new();
+        app.todos.lock().unwrap().items = vec![ilar::todo::TodoItem {
+            content: "must stay fixed".into(),
+            status: ilar::todo::Status::InProgress,
+        }];
+
+        let rendered = app
             .transcript_lines(80, std::time::Instant::now())
             .iter()
             .map(rendered_text)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(replaced.contains("todo ○ replacement"), "{replaced}");
-        assert!(!replaced.contains("done thing"), "{replaced}");
+
+        assert!(!rendered.contains("must stay fixed"), "{rendered}");
     }
 
     #[test]
@@ -3077,7 +3183,7 @@ mod tests {
                 },
             ],
         };
-        let lines = render_todo_lines(&list, 40);
+        let lines = render_todo_sidebar_lines(&list, 26, 3);
         let text = lines
             .iter()
             .map(rendered_text)
@@ -3090,7 +3196,134 @@ mod tests {
         assert!(text.contains("+2 hidden"), "{text}");
         assert!(!text.contains('\u{1b}'), "{text:?}");
         assert!(lines.iter().all(|line| !rendered_text(line).contains('\n')));
-        assert!(lines.iter().all(|line| line.width() <= 40));
+        assert!(lines.iter().all(|line| line.width() <= 26));
+    }
+
+    #[test]
+    fn wide_content_reserves_a_fixed_right_sidebar() {
+        let wide = content_areas(Rect::new(0, 0, 80, 8));
+        assert_eq!(wide.transcript, Rect::new(0, 0, 52, 8));
+        assert_eq!(wide.todos, Some(Rect::new(52, 0, 28, 8)));
+
+        let narrow = content_areas(Rect::new(0, 0, 79, 8));
+        assert_eq!(narrow.transcript, Rect::new(0, 0, 79, 8));
+        assert_eq!(narrow.todos, None);
+    }
+
+    #[test]
+    fn todo_updates_do_not_change_transcript_scroll_or_selection() {
+        let backend = ratatui::backend::TestBackend::new(100, 12);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.lines
+            .extend((0..20).map(|index| Line_::System(format!("transcript row {index}"))));
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        app.scroll_up(2);
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let area = app.transcript_text_area;
+        app.begin_transcript_selection(area.x, area.y);
+        app.update_transcript_selection(area.x.saturating_add(3), area.y);
+        let metrics = (
+            app.content_rows,
+            app.viewport_rows,
+            app.scroll_top,
+            app.follow_tail,
+            app.transcript_selection,
+        );
+
+        app.todos.lock().unwrap().items = vec![ilar::todo::TodoItem {
+            content: "fixed sidebar item".into(),
+            status: ilar::todo::Status::InProgress,
+        }];
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        assert_eq!(
+            (
+                app.content_rows,
+                app.viewport_rows,
+                app.scroll_top,
+                app.follow_tail,
+                app.transcript_selection,
+            ),
+            metrics
+        );
+    }
+
+    #[test]
+    fn narrow_todos_use_border_chrome_instead_of_transcript_rows() {
+        let backend = ratatui::backend::TestBackend::new(40, 9);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.todos.lock().unwrap().items = vec![ilar::todo::TodoItem {
+            content: "border task".into(),
+            status: ilar::todo::Status::InProgress,
+        }];
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let screen = (0..buffer.area.height)
+            .map(|row| {
+                (0..buffer.area.width)
+                    .map(|column| buffer[(column, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("todos ▸ border task"), "{screen}");
+        let transcript = app
+            .transcript_lines(40, std::time::Instant::now())
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!transcript.contains("border task"), "{transcript}");
+    }
+
+    #[test]
+    fn one_row_transcript_omits_overlapping_todo_title() {
+        let backend = ratatui::backend::TestBackend::new(40, 5);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.todos.lock().unwrap().items = vec![ilar::todo::TodoItem {
+            content: "border task".into(),
+            status: ilar::todo::Status::InProgress,
+        }];
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let first_row = (0..buffer.area.width)
+            .map(|column| buffer[(column, 0)].symbol())
+            .collect::<String>();
+        assert!(first_row.contains("ilar"), "{first_row}");
+        assert!(!first_row.contains("border task"), "{first_row}");
+    }
+
+    #[test]
+    fn wide_todos_render_in_sidebar_and_sidebar_clicks_do_not_select_transcript() {
+        let backend = ratatui::backend::TestBackend::new(100, 12);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.todos.lock().unwrap().items = vec![ilar::todo::TodoItem {
+            content: "sidebar task".into(),
+            status: ilar::todo::Status::InProgress,
+        }];
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let screen = (0..buffer.area.height)
+            .map(|row| {
+                (0..buffer.area.width)
+                    .map(|column| buffer[(column, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("todos"), "{screen}");
+        assert!(screen.contains("▸ sidebar task"), "{screen}");
+        assert_eq!(app.transcript_text_area.width, 69);
+
+        app.begin_transcript_selection(80, 1);
+        assert_eq!(app.transcript_selection, None);
     }
 
     #[test]
