@@ -7,15 +7,14 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::Parser;
 use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
-    MouseButton, MouseEventKind,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, Borders, Clear, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
-    Wrap,
 };
 use ratatui::{Frame, buffer::Buffer};
 use tokio_util::sync::CancellationToken;
@@ -30,7 +29,7 @@ use ilar::subagent::SubagentSpawner;
 use ilar::tools::{ToolContext, ToolRegistry};
 
 /// A rendered line in the transcript.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 enum Line_ {
     User(String),
     Assistant(String),
@@ -152,29 +151,423 @@ struct Args {
     print_prompt: bool,
 }
 
-struct TerminalSession;
+struct TerminalSession {
+    terminal_initialized: bool,
+    mouse_enabled: bool,
+    paste_enabled: bool,
+}
 
 impl TerminalSession {
     fn start() -> Result<(ratatui::DefaultTerminal, Self)> {
-        let terminal = ratatui::init();
-        if let Err(error) = crossterm::execute!(std::io::stdout(), EnableMouseCapture) {
-            ratatui::restore();
-            return Err(error.into());
+        let mut session = Self {
+            terminal_initialized: false,
+            mouse_enabled: false,
+            paste_enabled: false,
+        };
+        let terminal = match ratatui::try_init() {
+            Ok(terminal) => terminal,
+            Err(error) => {
+                ratatui::restore();
+                return Err(error.into());
+            }
+        };
+        session.terminal_initialized = true;
+
+        session.mouse_enabled = true;
+        crossterm::execute!(std::io::stdout(), EnableMouseCapture)?;
+        session.paste_enabled = true;
+        if let Err(error) = crossterm::execute!(std::io::stdout(), EnableBracketedPaste) {
+            if error.kind() == std::io::ErrorKind::Unsupported {
+                let _ = crossterm::execute!(std::io::stdout(), DisableBracketedPaste);
+                session.paste_enabled = false;
+            } else {
+                return Err(error.into());
+            }
         }
-        Ok((terminal, Self))
+        Ok((terminal, session))
     }
 }
 
 impl Drop for TerminalSession {
     fn drop(&mut self) {
-        let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture);
-        ratatui::restore();
+        if self.paste_enabled {
+            let _ = crossterm::execute!(std::io::stdout(), DisableBracketedPaste);
+        }
+        if self.mouse_enabled {
+            let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture);
+        }
+        if self.terminal_initialized {
+            ratatui::restore();
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct InputBuffer {
+    text: String,
+    cursor: usize,
+}
+
+impl From<&str> for InputBuffer {
+    fn from(text: &str) -> Self {
+        Self {
+            text: text.to_string(),
+            cursor: text.len(),
+        }
+    }
+}
+
+impl From<String> for InputBuffer {
+    fn from(text: String) -> Self {
+        let cursor = text.len();
+        Self { text, cursor }
+    }
+}
+
+impl InputBuffer {
+    #[cfg(test)]
+    fn text(&self) -> &str {
+        &self.text
+    }
+
+    fn is_blank(&self) -> bool {
+        self.text.trim().is_empty()
+    }
+
+    fn clear(&mut self) {
+        self.text.clear();
+        self.cursor = 0;
+    }
+
+    fn take(&mut self) -> String {
+        self.cursor = 0;
+        std::mem::take(&mut self.text)
+    }
+
+    fn insert(&mut self, text: &str) {
+        let text = text
+            .replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .replace('\t', "    ")
+            .chars()
+            .filter(|character| *character == '\n' || !character.is_control())
+            .collect::<String>();
+        let nominal_cursor = self.cursor.saturating_add(text.len());
+        self.text.insert_str(self.cursor, &text);
+        self.cursor = self
+            .text
+            .grapheme_indices(true)
+            .map(|(index, _)| index)
+            .chain(std::iter::once(self.text.len()))
+            .find(|boundary| *boundary >= nominal_cursor)
+            .unwrap_or(self.text.len());
+    }
+
+    fn move_left(&mut self) {
+        self.cursor = self.text[..self.cursor]
+            .grapheme_indices(true)
+            .next_back()
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+    }
+
+    fn move_right(&mut self) {
+        if let Some(grapheme) = self.text[self.cursor..].graphemes(true).next() {
+            self.cursor += grapheme.len();
+        }
+    }
+
+    fn move_home(&mut self) {
+        self.cursor = self.text[..self.cursor]
+            .rfind('\n')
+            .map(|index| index + 1)
+            .unwrap_or(0);
+    }
+
+    fn move_end(&mut self) {
+        self.cursor = self.text[self.cursor..]
+            .find('\n')
+            .map(|offset| self.cursor + offset)
+            .unwrap_or(self.text.len());
+    }
+
+    fn move_vertical(&mut self, direction: isize) -> bool {
+        let line_start = self.text[..self.cursor]
+            .rfind('\n')
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        let line_end = self.text[self.cursor..]
+            .find('\n')
+            .map(|offset| self.cursor + offset)
+            .unwrap_or(self.text.len());
+        let (target_start, target_end) = if direction < 0 {
+            if line_start == 0 {
+                return false;
+            }
+            let end = line_start - 1;
+            let start = self.text[..end]
+                .rfind('\n')
+                .map(|index| index + 1)
+                .unwrap_or(0);
+            (start, end)
+        } else {
+            if line_end == self.text.len() {
+                return false;
+            }
+            let start = line_end + 1;
+            let end = self.text[start..]
+                .find('\n')
+                .map(|offset| start + offset)
+                .unwrap_or(self.text.len());
+            (start, end)
+        };
+        let desired_column = UnicodeWidthStr::width(&self.text[line_start..self.cursor]);
+        let mut column = 0usize;
+        self.cursor = target_start;
+        for grapheme in self.text[target_start..target_end].graphemes(true) {
+            let width = UnicodeWidthStr::width(grapheme);
+            if column.saturating_add(width) > desired_column {
+                break;
+            }
+            column = column.saturating_add(width);
+            self.cursor += grapheme.len();
+        }
+        true
+    }
+
+    fn backspace(&mut self) {
+        let end = self.cursor;
+        self.move_left();
+        self.text.replace_range(self.cursor..end, "");
+    }
+
+    fn delete(&mut self) {
+        let Some(grapheme) = self.text[self.cursor..].graphemes(true).next() else {
+            return;
+        };
+        self.text
+            .replace_range(self.cursor..self.cursor + grapheme.len(), "");
+    }
+
+    fn is_multiline(&self) -> bool {
+        self.text.contains('\n')
+    }
+
+    fn line_count(&self) -> usize {
+        self.text.bytes().filter(|byte| *byte == b'\n').count() + 1
+    }
+
+    #[cfg(test)]
+    fn view(&self, width: u16) -> (String, u16) {
+        text_field_view_at(&self.text, self.cursor, width)
+    }
+
+    fn multiline_view(&self, width: u16, height: u16) -> InputView {
+        let lines = self.text.split('\n').collect::<Vec<_>>();
+        let cursor_line = self.text[..self.cursor]
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count();
+        let cursor_line_start = self.text[..self.cursor]
+            .rfind('\n')
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        let visible_count = (height as usize).max(1).min(lines.len());
+        let start = cursor_line
+            .saturating_add(1)
+            .saturating_sub(visible_count)
+            .min(lines.len().saturating_sub(visible_count));
+        let mut visible = Vec::with_capacity(visible_count);
+        let mut cursor_x = 0;
+        for (index, line) in lines.iter().enumerate().skip(start).take(visible_count) {
+            if index == cursor_line {
+                let (text, offset) =
+                    text_field_view_at(line, self.cursor.saturating_sub(cursor_line_start), width);
+                visible.push(text);
+                cursor_x = offset;
+            } else {
+                visible.push(truncate_display(line, width as usize, Truncation::Right));
+            }
+        }
+        InputView {
+            lines: visible,
+            cursor_x,
+            cursor_y: cursor_line.saturating_sub(start) as u16,
+            cursor_line: cursor_line + 1,
+            line_count: lines.len(),
+        }
+    }
+}
+
+struct InputView {
+    lines: Vec<String>,
+    cursor_x: u16,
+    cursor_y: u16,
+    cursor_line: usize,
+    line_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PromptAction {
+    Edited,
+    Submit,
+    Unhandled,
+}
+
+fn handle_prompt_key(input: &mut InputBuffer, key: KeyEvent) -> PromptAction {
+    let control = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Enter => PromptAction::Submit,
+        KeyCode::Char('j') if control => {
+            input.insert("\n");
+            PromptAction::Edited
+        }
+        KeyCode::Left if !control => {
+            input.move_left();
+            PromptAction::Edited
+        }
+        KeyCode::Right if !control => {
+            input.move_right();
+            PromptAction::Edited
+        }
+        KeyCode::Home if !control => {
+            input.move_home();
+            PromptAction::Edited
+        }
+        KeyCode::End if !control => {
+            input.move_end();
+            PromptAction::Edited
+        }
+        KeyCode::Up if input.is_multiline() => {
+            input.move_vertical(-1);
+            PromptAction::Edited
+        }
+        KeyCode::Down if input.is_multiline() => {
+            input.move_vertical(1);
+            PromptAction::Edited
+        }
+        KeyCode::Backspace if !control => {
+            input.backspace();
+            PromptAction::Edited
+        }
+        KeyCode::Delete if !control => {
+            input.delete();
+            PromptAction::Edited
+        }
+        KeyCode::Char(character)
+            if !key.modifiers.intersects(
+                KeyModifiers::CONTROL
+                    | KeyModifiers::ALT
+                    | KeyModifiers::SUPER
+                    | KeyModifiers::HYPER
+                    | KeyModifiers::META,
+            ) =>
+        {
+            input.insert(&character.to_string());
+            PromptAction::Edited
+        }
+        _ => PromptAction::Unhandled,
+    }
+}
+
+struct RestoredSessionView {
+    lines: Vec<Line_>,
+    latest_usage: Option<ilar::session::Usage>,
+}
+
+fn restored_session_view(session: &ilar::session::SessionReader) -> RestoredSessionView {
+    let events = session.events();
+    let mut cut = 0usize;
+    let mut summary = None;
+    for (index, event) in events.iter().enumerate() {
+        if let ilar::session::SessionEvent::Compaction {
+            kept_from,
+            summary: current,
+            ..
+        } = event
+        {
+            cut = (*kept_from).min(index).max(cut);
+            summary = Some(current.as_str());
+        }
+    }
+    let latest_usage = events.iter().rev().find_map(|event| match event {
+        ilar::session::SessionEvent::AssistantMessage { usage, .. }
+            if usage.context_tokens() > 0 =>
+        {
+            Some(*usage)
+        }
+        _ => None,
+    });
+    let mut lines = summary
+        .map(|summary| vec![Line_::System(format!("transcript compacted\n{summary}"))])
+        .unwrap_or_default();
+    for event in &events[cut..] {
+        match event {
+            ilar::session::SessionEvent::Meta { .. } => {}
+            ilar::session::SessionEvent::UserMessage { text, .. } => {
+                lines.push(Line_::User(text.clone()));
+            }
+            ilar::session::SessionEvent::AssistantMessage { content, .. } => {
+                for block in content {
+                    match block {
+                        ilar::session::ContentBlock::Text { text } => match lines.last_mut() {
+                            Some(Line_::Assistant(current)) => current.push_str(text),
+                            _ => lines.push(Line_::Assistant(text.clone())),
+                        },
+                        ilar::session::ContentBlock::ToolCall { id, name, input } => {
+                            lines.push(Line_::Tool {
+                                id: id.clone(),
+                                name: name.clone(),
+                                arguments: ilar::agent::summarize_tool_input(name, input),
+                                state: ToolState::Running,
+                            });
+                        }
+                        ilar::session::ContentBlock::Thinking { .. }
+                        | ilar::session::ContentBlock::Reasoning { .. }
+                        | ilar::session::ContentBlock::ProviderReplay { .. }
+                        | ilar::session::ContentBlock::Diagnostic { .. }
+                        | ilar::session::ContentBlock::ToolResult { .. } => {}
+                    }
+                }
+            }
+            ilar::session::SessionEvent::ToolResult {
+                tool_use_id,
+                is_error,
+                ..
+            } => {
+                if let Some(state) = lines.iter_mut().rev().find_map(|line| match line {
+                    Line_::Tool { id, state, .. } if id == tool_use_id => Some(state),
+                    _ => None,
+                }) {
+                    *state = if *is_error {
+                        ToolState::Failed
+                    } else {
+                        ToolState::Succeeded
+                    };
+                }
+            }
+            ilar::session::SessionEvent::ModelChange { model, .. } => {
+                lines.push(Line_::System(format!("switched to {model}")));
+            }
+            ilar::session::SessionEvent::Compaction { .. } => {}
+        }
+    }
+    for line in &mut lines {
+        if let Line_::Tool { state, .. } = line
+            && *state == ToolState::Running
+        {
+            *state = ToolState::Failed;
+        }
+    }
+    RestoredSessionView {
+        lines,
+        latest_usage,
     }
 }
 
 struct App {
     lines: Vec<Line_>,
-    input: String,
+    input: InputBuffer,
     busy: bool,
     status: String,
     activity: Activity,
@@ -184,6 +577,7 @@ struct App {
     context_used: u64,
     context_limit: Option<u64>,
     context_estimated: bool,
+    latest_usage: Option<ilar::session::Usage>,
     scroll_top: usize,
     content_rows: usize,
     viewport_rows: usize,
@@ -202,9 +596,10 @@ impl App {
     fn new() -> Self {
         Self {
             lines: vec![Line_::System(
-                "ilar — Ctrl-X M or F2 models, PgUp/PgDn scroll, Esc aborts, Ctrl-C quits".into(),
+                "ilar — Enter sends, Ctrl-J newline, F2 models, PgUp/PgDn scroll, Esc aborts"
+                    .into(),
             )],
-            input: String::new(),
+            input: InputBuffer::default(),
             busy: false,
             status: String::new(),
             activity: Activity::Ready,
@@ -214,6 +609,7 @@ impl App {
             context_used: 0,
             context_limit: None,
             context_estimated: true,
+            latest_usage: None,
             scroll_top: 0,
             content_rows: 0,
             viewport_rows: 0,
@@ -243,6 +639,12 @@ impl App {
         self.context_limit = context_limit;
         self.context_estimated = context_estimated;
         self.status = "ready".into();
+    }
+
+    fn restore_session(&mut self, session: &ilar::session::SessionReader) {
+        let restored = restored_session_view(session);
+        self.lines.extend(restored.lines);
+        self.latest_usage = restored.latest_usage;
     }
 
     fn set_activity(&mut self, activity: Activity) {
@@ -345,6 +747,7 @@ impl App {
                 }
             }
             LoopEvent::StepComplete { stop_reason, usage } => {
+                self.latest_usage = Some(*usage);
                 let reported = usage.context_tokens();
                 if reported > 0 {
                     self.context_used = reported;
@@ -621,7 +1024,7 @@ impl App {
             Activity::Paused => ("Ⅱ", "paused", TOOL_ACTIVE),
             Activity::Error => ("×", "error", ERROR),
         };
-        let usage = context_usage(
+        let context = context_usage(
             self.context_used,
             self.context_limit,
             self.context_estimated,
@@ -635,25 +1038,39 @@ impl App {
             Some(percent) if percent >= 70 => TOOL_ACTIVE,
             _ => MUTED,
         };
+        let percent = self
+            .context_limit
+            .filter(|limit| *limit > 0)
+            .map(|limit| format!("{}%", self.context_used.saturating_mul(100) / limit))
+            .unwrap_or_else(|| "—%".into());
+        let compact_latest_usage = self.latest_usage.map(|latest| {
+            format!(
+                "i{}/o{} c{} {percent}",
+                format_tokens_compact(latest.input_tokens),
+                format_tokens_compact(latest.output_tokens),
+                format_tokens_compact(
+                    latest
+                        .cache_read_input_tokens
+                        .saturating_add(latest.cache_creation_input_tokens)
+                )
+            )
+        });
         if width < 64 {
-            let percent = self
-                .context_limit
-                .filter(|limit| *limit > 0)
-                .map(|limit| format!("{}%", self.context_used.saturating_mul(100) / limit))
-                .unwrap_or_else(|| "—%".into());
-            let usage = match self.context_limit {
-                Some(limit) => format!(
-                    "{}{}/{} {percent}",
-                    if self.context_estimated { "~" } else { "" },
-                    format_tokens_compact(self.context_used),
-                    format_tokens_compact(limit)
-                ),
-                None => format!(
-                    "{}{}/? {percent}",
-                    if self.context_estimated { "~" } else { "" },
-                    format_tokens_compact(self.context_used)
-                ),
-            };
+            let usage = compact_latest_usage
+                .clone()
+                .unwrap_or_else(|| match self.context_limit {
+                    Some(limit) => format!(
+                        "{}{}/{} {percent}",
+                        if self.context_estimated { "~" } else { "" },
+                        format_tokens_compact(self.context_used),
+                        format_tokens_compact(limit)
+                    ),
+                    None => format!(
+                        "{}{}/? {percent}",
+                        if self.context_estimated { "~" } else { "" },
+                        format_tokens_compact(self.context_used)
+                    ),
+                });
             let state_text = format!(" {icon} {state}");
             if width
                 < UnicodeWidthStr::width(state_text.as_str())
@@ -674,44 +1091,79 @@ impl App {
                 .split_once('/')
                 .map(|(_, model)| model)
                 .unwrap_or(&self.current_model);
-            let model_budget = available.saturating_mul(3) / 5;
-            let model = truncate_display(short_model, model_budget.max(1), Truncation::Right);
-            let basename = self
-                .cwd
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("/");
-            let cwd = truncate_display(
-                basename,
+            let model_budget = if self.latest_usage.is_some() {
                 available
-                    .saturating_sub(UnicodeWidthStr::width(model.as_str()))
-                    .max(1),
-                Truncation::Middle,
-            );
+            } else {
+                available.saturating_mul(3) / 5
+            };
+            let model = truncate_display(short_model, model_budget.max(1), Truncation::Right);
+            let cwd = self.latest_usage.is_none().then(|| {
+                let basename = self
+                    .cwd
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("/");
+                truncate_display(
+                    basename,
+                    available
+                        .saturating_sub(UnicodeWidthStr::width(model.as_str()))
+                        .max(1),
+                    Truncation::Middle,
+                )
+            });
+            let middle = cwd
+                .as_deref()
+                .map(|cwd| format!(" {model} {cwd}"))
+                .unwrap_or_else(|| format!(" {model}"));
             let used = UnicodeWidthStr::width(state_text.as_str())
-                + UnicodeWidthStr::width(model.as_str())
-                + UnicodeWidthStr::width(cwd.as_str())
+                + UnicodeWidthStr::width(middle.as_str())
                 + UnicodeWidthStr::width(usage.as_str())
-                + 2;
+                + 1;
             return Line::from(vec![
                 Span::styled(state_text, Style::default().fg(state_color)),
-                Span::styled(format!(" {model} {cwd}"), Style::default().fg(MUTED)),
+                Span::styled(middle, Style::default().fg(MUTED)),
                 Span::raw(" ".repeat(width.saturating_sub(used).max(1))),
                 Span::styled(usage, Style::default().fg(percent_color)),
             ]);
         }
+        let state_width = UnicodeWidthStr::width(state) + 3;
+        let separators = 7;
+        let detailed_usage = self.latest_usage.map(|latest| {
+            format!(
+                "in {} · out {} · cache {} · {context}",
+                latest.input_tokens,
+                latest.output_tokens,
+                latest
+                    .cache_read_input_tokens
+                    .saturating_add(latest.cache_creation_input_tokens)
+            )
+        });
+        let detailed_usage = detailed_usage.filter(|usage| {
+            UnicodeWidthStr::width(usage.as_str())
+                .saturating_add(state_width)
+                .saturating_add(separators)
+                .saturating_add(20)
+                <= width
+        });
+        let show_cwd = detailed_usage.is_some() || compact_latest_usage.is_none();
+        let usage = detailed_usage.or(compact_latest_usage).unwrap_or(context);
+        let usage = truncate_display(
+            &usage,
+            width.saturating_sub(state_width + separators + 8),
+            Truncation::Right,
+        );
         let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-        let cwd = abbreviated_path(&self.cwd, home.as_deref());
+        let cwd = show_cwd.then(|| abbreviated_path(&self.cwd, home.as_deref()));
         let mut model = self.current_model.clone();
 
-        let state_width = UnicodeWidthStr::width(state) + 3;
         let usage_width = UnicodeWidthStr::width(usage.as_str());
-        let separators = 7;
         let available = width
             .saturating_sub(state_width)
             .saturating_sub(usage_width)
             .saturating_sub(separators);
-        let model_budget = if width >= 80 {
+        let model_budget = if !show_cwd {
+            available
+        } else if width >= 80 {
             available.saturating_mul(3) / 5
         } else {
             available / 2
@@ -723,42 +1175,52 @@ impl App {
                 .unwrap_or(model);
         }
         let model = truncate_display(&model, model_budget.max(4), Truncation::Right);
-        let cwd = truncate_display(
-            &cwd,
-            available
-                .saturating_sub(UnicodeWidthStr::width(model.as_str()))
-                .max(4),
-            Truncation::Middle,
-        );
-        let left = format!(" {icon} {state} · {model} · {cwd}");
+        let cwd = cwd.map(|cwd| {
+            truncate_display(
+                &cwd,
+                available
+                    .saturating_sub(UnicodeWidthStr::width(model.as_str()))
+                    .max(4),
+                Truncation::Middle,
+            )
+        });
+        let detail = cwd
+            .as_deref()
+            .map(|cwd| format!(" · {model} · {cwd}"))
+            .unwrap_or_else(|| format!(" · {model}"));
+        let left = format!(" {icon} {state}{detail}");
         let gap = width
             .saturating_sub(UnicodeWidthStr::width(left.as_str()))
             .saturating_sub(usage_width)
             .max(1);
         Line::from(vec![
             Span::styled(format!(" {icon} {state}"), Style::default().fg(state_color)),
-            Span::styled(format!(" · {model} · {cwd}"), Style::default().fg(MUTED)),
+            Span::styled(detail, Style::default().fg(MUTED)),
             Span::raw(" ".repeat(gap)),
             Span::styled(usage, Style::default().fg(percent_color)),
         ])
     }
 
     fn render(&mut self, frame: &mut Frame) {
+        let desired_input_height = self.input.line_count().min(6) as u16 + 2;
+        let input_height = desired_input_height.min(frame.area().height.saturating_sub(4).max(3));
         let chunks = Layout::vertical([
             Constraint::Min(3),
             Constraint::Length(1),
-            Constraint::Length(3),
+            Constraint::Length(input_height),
         ])
         .split(frame.area());
 
         let content_areas = content_areas(chunks[0]);
         let transcript_area = content_areas.transcript;
         let text_width = transcript_area.width.saturating_sub(3);
-        let text = self.transcript_lines(text_width, std::time::Instant::now());
+        let text = self
+            .transcript_lines(text_width, std::time::Instant::now())
+            .into_iter()
+            .flat_map(|line| wrap_styled_line(line, text_width as usize))
+            .collect::<Vec<_>>();
         let viewport_rows = transcript_area.height.saturating_sub(2) as usize;
-        let content_rows = Paragraph::new(text.clone())
-            .wrap(Wrap { trim: false })
-            .line_count(text_width);
+        let content_rows = text.len();
         self.update_scroll_metrics(content_rows, viewport_rows);
         let visible_rows = content_rows
             .saturating_sub(self.scroll_top)
@@ -791,10 +1253,12 @@ impl App {
                 transcript_block = transcript_block.title_bottom(summary.right_aligned());
             }
         }
-        let paragraph = Paragraph::new(text)
-            .block(transcript_block)
-            .wrap(Wrap { trim: false })
-            .scroll((self.scroll_top.min(u16::MAX as usize) as u16, 0));
+        let text = text
+            .into_iter()
+            .skip(self.scroll_top)
+            .take(viewport_rows)
+            .collect::<Vec<_>>();
+        let paragraph = Paragraph::new(text).block(transcript_block);
         frame.render_widget(paragraph, transcript_area);
 
         if max_scroll > 0 && transcript_area.height > 2 {
@@ -836,10 +1300,26 @@ impl App {
 
         frame.render_widget(Paragraph::new(self.status_line(chunks[1].width)), chunks[1]);
 
-        let input_block = Block::default().borders(Borders::ALL).title("input");
+        let input_block = Block::default().borders(Borders::ALL);
         let input_area = input_block.inner(chunks[2]);
-        let (visible_input, cursor_offset) = text_field_view(&self.input, input_area.width);
-        let input = Paragraph::new(visible_input).block(input_block);
+        let input_view = self
+            .input
+            .multiline_view(input_area.width, input_area.height);
+        let input_title = if input_view.line_count > 1 {
+            format!(
+                "input {}/{} · Enter send · Ctrl-J newline",
+                input_view.cursor_line, input_view.line_count
+            )
+        } else {
+            "input · Enter send · Ctrl-J newline".into()
+        };
+        let input_lines = input_view
+            .lines
+            .iter()
+            .cloned()
+            .map(Line::raw)
+            .collect::<Vec<_>>();
+        let input = Paragraph::new(input_lines).block(input_block.title(input_title));
         frame.render_widget(input, chunks[2]);
 
         let transcript_cells = transcript_cells(frame.buffer_mut(), transcript_text_area);
@@ -865,7 +1345,10 @@ impl App {
             && input_area.width > 0
             && input_area.height > 0
         {
-            frame.set_cursor_position((input_area.x.saturating_add(cursor_offset), input_area.y));
+            frame.set_cursor_position((
+                input_area.x.saturating_add(input_view.cursor_x),
+                input_area.y.saturating_add(input_view.cursor_y),
+            ));
         }
 
         if let Some(picker) = &self.model_picker {
@@ -1212,6 +1695,9 @@ fn wrap_styled_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
     if width == 0 {
         return vec![Line::default()];
     }
+    if line.width() <= width {
+        return vec![line];
+    }
 
     let cells: Vec<_> = line
         .spans
@@ -1264,19 +1750,55 @@ fn styled_line(cells: &[StyledGrapheme]) -> Line<'static> {
 }
 
 fn text_field_view(value: &str, width: u16) -> (String, u16) {
+    text_field_view_at(value, value.len(), width)
+}
+
+fn text_field_view_at(value: &str, cursor: usize, width: u16) -> (String, u16) {
     let max_text_width = width.saturating_sub(1) as usize;
-    let mut graphemes = Vec::new();
-    let mut used = 0usize;
-    for grapheme in UnicodeSegmentation::graphemes(value, true).rev() {
+    if max_text_width == 0 {
+        return (String::new(), 0);
+    }
+    let cursor = cursor.min(value.len());
+    let line_start = value[..cursor]
+        .rfind('\n')
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    let line_end = value[cursor..]
+        .find('\n')
+        .map(|offset| cursor + offset)
+        .unwrap_or(value.len());
+    let line = &value[line_start..line_end];
+    let cursor_in_line = cursor.saturating_sub(line_start);
+
+    let right_context_width = line[cursor_in_line..]
+        .graphemes(true)
+        .next()
+        .map(UnicodeWidthStr::width)
+        .unwrap_or(0)
+        .min(max_text_width);
+    let before_budget = max_text_width.saturating_sub(right_context_width);
+    let mut start = cursor_in_line;
+    let mut before_width = 0usize;
+    for (index, grapheme) in line[..cursor_in_line].grapheme_indices(true).rev() {
         let grapheme_width = UnicodeWidthStr::width(grapheme);
-        if used.saturating_add(grapheme_width) > max_text_width {
+        if before_width.saturating_add(grapheme_width) > before_budget {
             break;
         }
-        used = used.saturating_add(grapheme_width);
-        graphemes.push(grapheme);
+        start = index;
+        before_width = before_width.saturating_add(grapheme_width);
     }
-    graphemes.reverse();
-    (graphemes.concat(), used as u16)
+
+    let mut visible = String::new();
+    let mut visible_width = 0usize;
+    for grapheme in line[start..].graphemes(true) {
+        let grapheme_width = UnicodeWidthStr::width(grapheme);
+        if visible_width.saturating_add(grapheme_width) > max_text_width {
+            break;
+        }
+        visible.push_str(grapheme);
+        visible_width = visible_width.saturating_add(grapheme_width);
+    }
+    (visible, before_width as u16)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1913,6 +2435,9 @@ async fn main() -> Result<()> {
     let context_limit = resolver.context_limit(&model_for_session);
     let mut app = App::new();
     app.todos = todos;
+    if let Some(resumed) = &resumed {
+        app.restore_session(resumed);
+    }
     app.configure_runtime(
         model_for_session.clone(),
         cwd.clone(),
@@ -2137,12 +2662,14 @@ async fn run_app(
             continue;
         }
         match crossterm::event::read()? {
-            Event::Key(KeyEvent {
-                code,
-                kind: KeyEventKind::Press | KeyEventKind::Repeat,
-                modifiers,
-                ..
-            }) => {
+            Event::Key(
+                key @ KeyEvent {
+                    code,
+                    kind: KeyEventKind::Press | KeyEventKind::Repeat,
+                    modifiers,
+                    ..
+                },
+            ) => {
                 let control = modifiers.contains(KeyModifiers::CONTROL);
                 if matches!((code, control), (KeyCode::Char('c'), true)) {
                     if let Some(cancel) = &cancel {
@@ -2243,9 +2770,23 @@ async fn run_app(
                             app.input.clear();
                         }
                     }
-                    (KeyCode::Enter, _) => {
-                        if turn_handle.is_none() && !app.busy && !app.input.trim().is_empty() {
-                            let text = std::mem::take(&mut app.input);
+                    (KeyCode::Char('u'), true) => {
+                        app.scroll_up(app.page_size().div_ceil(2));
+                    }
+                    (KeyCode::Char('d'), true) => {
+                        app.scroll_down(app.page_size().div_ceil(2));
+                    }
+                    (KeyCode::Home, true) => app.scroll_to_top(),
+                    (KeyCode::End, true) => app.scroll_to_tail(),
+                    (KeyCode::PageUp, _) => app.scroll_up(app.page_size()),
+                    (KeyCode::PageDown, _) => app.scroll_down(app.page_size()),
+                    (KeyCode::Up, _) if !app.input.is_multiline() => app.scroll_up(1),
+                    (KeyCode::Down, _) if !app.input.is_multiline() => app.scroll_down(1),
+                    _ => match handle_prompt_key(&mut app.input, key) {
+                        PromptAction::Submit
+                            if turn_handle.is_none() && !app.busy && !app.input.is_blank() =>
+                        {
+                            let text = app.input.take();
                             app.lines.push(Line_::User(text.clone()));
                             app.follow_tail = true;
                             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2280,27 +2821,13 @@ async fn run_app(
                                 )
                             }));
                         }
-                    }
-                    (KeyCode::Backspace, _) => {
-                        app.input.pop();
-                    }
-                    (KeyCode::Char('u'), true) => {
-                        app.scroll_up(app.page_size().div_ceil(2));
-                    }
-                    (KeyCode::Char('d'), true) => {
-                        app.scroll_down(app.page_size().div_ceil(2));
-                    }
-                    (KeyCode::Home, true) => app.scroll_to_top(),
-                    (KeyCode::End, true) => app.scroll_to_tail(),
-                    (KeyCode::PageUp, _) => app.scroll_up(app.page_size()),
-                    (KeyCode::PageDown, _) => app.scroll_down(app.page_size()),
-                    (KeyCode::Up, _) => app.scroll_up(1),
-                    (KeyCode::Down, _) => app.scroll_down(1),
-                    (KeyCode::Char(c), false) => {
-                        app.input.push(c);
-                    }
-                    _ => {}
+                        PromptAction::Edited | PromptAction::Unhandled | PromptAction::Submit => {}
+                    },
                 }
+            }
+            Event::Paste(text) if app.model_picker.is_none() => {
+                app.model_key_pending = false;
+                app.input.insert(&text);
             }
             Event::Mouse(mouse) if app.model_picker.is_none() => match mouse.kind {
                 MouseEventKind::ScrollUp => app.scroll_up(3),
@@ -2363,6 +2890,343 @@ mod tests {
             ),
             "openai/persisted"
         );
+    }
+
+    #[test]
+    fn resumed_session_restores_visible_events_and_latest_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf());
+        let session_id = new_id();
+        let mut session = store
+            .create(SessionMeta {
+                session_id: session_id.clone(),
+                parent_id: None,
+                agent: "build".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+            })
+            .unwrap();
+        session
+            .append(ilar::session::SessionEvent::UserMessage {
+                id: new_id(),
+                text: "remember this".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        let usage = ilar::session::Usage {
+            input_tokens: 120,
+            output_tokens: 30,
+            cache_read_input_tokens: 40,
+            cache_creation_input_tokens: 0,
+            input_token_accounting: Some(ilar::session::InputTokenAccounting::ExcludesCached),
+        };
+        session
+            .append(ilar::session::SessionEvent::AssistantMessage {
+                id: new_id(),
+                model: "zai/glm-4.7".into(),
+                content: vec![
+                    ilar::session::ContentBlock::Text {
+                        text: "restored answer".into(),
+                    },
+                    ilar::session::ContentBlock::Thinking {
+                        text: "hidden thought".into(),
+                        signature: None,
+                    },
+                    ilar::session::ContentBlock::ToolCall {
+                        id: "read-1".into(),
+                        name: "read".into(),
+                        input: Default::default(),
+                    },
+                ],
+                usage,
+                stop_reason: "tool_use".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        session
+            .append(ilar::session::SessionEvent::ToolResult {
+                id: new_id(),
+                tool_use_id: "read-1".into(),
+                content: "file contents".into(),
+                is_error: false,
+                state: None,
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        session
+            .append(ilar::session::SessionEvent::ModelChange {
+                id: new_id(),
+                model: "openai/gpt-5.6-sol".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        drop(session);
+
+        let resumed = store.load(&session_id).unwrap();
+        let view = restored_session_view(&resumed);
+        assert_eq!(view.latest_usage, Some(usage));
+        assert!(matches!(&view.lines[0], Line_::User(text) if text == "remember this"));
+        assert!(matches!(&view.lines[1], Line_::Assistant(text) if text == "restored answer"));
+        assert!(matches!(
+            &view.lines[2],
+            Line_::Tool { id, name, arguments, state: ToolState::Succeeded }
+                if id == "read-1" && name == "read" && arguments.is_empty()
+        ));
+        assert!(matches!(
+            view.lines.last(),
+            Some(Line_::System(text)) if text.contains("openai/gpt-5.6-sol")
+        ));
+        let rendered = format!("{:?}", view.lines);
+        assert!(!rendered.contains("hidden thought"), "{rendered}");
+    }
+
+    #[test]
+    fn resumed_unfinished_tools_are_marked_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf());
+        let session_id = new_id();
+        let mut session = store
+            .create(SessionMeta {
+                session_id: session_id.clone(),
+                parent_id: None,
+                agent: "build".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+            })
+            .unwrap();
+        session
+            .append(ilar::session::SessionEvent::AssistantMessage {
+                id: new_id(),
+                model: "zai/glm-4.7".into(),
+                content: vec![ilar::session::ContentBlock::ToolCall {
+                    id: "unfinished".into(),
+                    name: "bash".into(),
+                    input: Default::default(),
+                }],
+                usage: ilar::session::Usage::default(),
+                stop_reason: "tool_use".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        drop(session);
+
+        let view = restored_session_view(&store.load(&session_id).unwrap());
+        assert!(matches!(
+            view.lines.as_slice(),
+            [Line_::Tool {
+                state: ToolState::Failed,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn resumed_compaction_replaces_old_history_with_the_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf());
+        let session_id = new_id();
+        let mut session = store
+            .create(SessionMeta {
+                session_id: session_id.clone(),
+                parent_id: None,
+                agent: "build".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+            })
+            .unwrap();
+        session
+            .append(ilar::session::SessionEvent::UserMessage {
+                id: new_id(),
+                text: "obsolete history".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        session
+            .append(ilar::session::SessionEvent::Compaction {
+                id: new_id(),
+                summary: "decisions retained here".into(),
+                kept_from: 2,
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        session
+            .append(ilar::session::SessionEvent::UserMessage {
+                id: new_id(),
+                text: "current history".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        drop(session);
+
+        let view = restored_session_view(&store.load(&session_id).unwrap());
+        let rendered = format!("{:?}", view.lines);
+        assert!(!rendered.contains("obsolete history"), "{rendered}");
+        assert!(rendered.contains("decisions retained here"), "{rendered}");
+        assert!(rendered.contains("current history"), "{rendered}");
+    }
+
+    #[test]
+    fn prompt_editor_is_grapheme_aware_and_inserts_at_the_cursor() {
+        let mut input = InputBuffer::from("a👩‍💻b");
+        input.move_left();
+        input.backspace();
+        input.insert("界");
+        assert_eq!(input.text(), "a界b");
+        input.move_left();
+        input.delete();
+        assert_eq!(input.text(), "ab");
+        input.move_right();
+        input.insert("c");
+        assert_eq!(input.text(), "abc");
+
+        let mut multiline = InputBuffer::from("first\nsecond\nthird");
+        multiline.move_home();
+        multiline.insert("current ");
+        assert_eq!(multiline.text(), "first\nsecond\ncurrent third");
+        let (visible, cursor) = multiline.view(20);
+        assert_eq!(visible, "current third");
+        assert_eq!(cursor, 8);
+
+        let mut combining = InputBuffer::from("\u{301}");
+        combining.move_home();
+        combining.insert("a");
+        combining.backspace();
+        assert_eq!(combining.text(), "");
+    }
+
+    #[test]
+    fn paste_and_multiline_bindings_are_deliberate() {
+        let mut input = InputBuffer::from("ac");
+        input.move_left();
+        input.insert("b\r\nsecond\rline");
+        assert_eq!(input.text(), "ab\nsecond\nlinec");
+
+        assert_eq!(
+            handle_prompt_key(
+                &mut input,
+                KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL)
+            ),
+            PromptAction::Edited
+        );
+        assert_eq!(input.text(), "ab\nsecond\nline\nc");
+        assert_eq!(
+            handle_prompt_key(
+                &mut input,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+            ),
+            PromptAction::Submit
+        );
+
+        let mut input = InputBuffer::from("one\ntwo\nthree");
+        input.move_home();
+        assert_eq!(
+            handle_prompt_key(&mut input, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+            PromptAction::Edited
+        );
+        input.insert("X");
+        assert_eq!(input.text(), "one\nXtwo\nthree");
+    }
+
+    #[test]
+    fn multiline_input_renders_multiple_lines_and_cursor_position() {
+        let backend = ratatui::backend::TestBackend::new(40, 12);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.input = InputBuffer::from("first line\nsecond line\nthird line");
+
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let screen = (0..terminal.backend().buffer().area.height)
+            .map(|row| {
+                (0..terminal.backend().buffer().area.width)
+                    .map(|column| terminal.backend().buffer()[(column, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("first line"), "{screen}");
+        assert!(screen.contains("second line"), "{screen}");
+        assert!(screen.contains("third line"), "{screen}");
+        assert!(screen.contains("3/3"), "{screen}");
+    }
+
+    #[test]
+    fn idle_status_keeps_model_and_latest_step_usage() {
+        let mut app = App::new();
+        app.configure_runtime(
+            "openai/gpt-5.6-sol".into(),
+            std::path::PathBuf::from("/workspace/project"),
+            0,
+            Some(272_000),
+            true,
+        );
+        app.push_loop_event(&LoopEvent::StepComplete {
+            stop_reason: "end_turn".into(),
+            usage: ilar::session::Usage {
+                input_tokens: 300,
+                output_tokens: 50,
+                cache_read_input_tokens: 1_500,
+                cache_creation_input_tokens: 20,
+                input_token_accounting: Some(ilar::session::InputTokenAccounting::ExcludesCached),
+            },
+        });
+        app.push_loop_event(&LoopEvent::TurnDone {
+            outcome: TurnOutcome::Completed,
+        });
+        app.finish_turn(Ok(TurnOutcome::Completed));
+
+        let status = rendered_text(&app.status_line(120));
+        assert!(status.contains("openai/gpt-5.6-sol"), "{status}");
+        assert!(status.contains("in 300"), "{status}");
+        assert!(status.contains("out 50"), "{status}");
+        assert!(status.contains("cache 1520"), "{status}");
+        let narrow = rendered_text(&app.status_line(60));
+        assert!(narrow.contains("gpt-5.6"), "{narrow}");
+        assert!(narrow.contains("i300/o50"), "{narrow}");
+        for width in [64, 72, 77] {
+            let boundary = rendered_text(&app.status_line(width));
+            assert!(boundary.contains("gpt-5.6"), "width {width}: {boundary}");
+            assert!(boundary.contains("i300/o50"), "width {width}: {boundary}");
+        }
+        for width in 0..=120 {
+            let status = rendered_text(&app.status_line(width));
+            assert!(
+                UnicodeWidthStr::width(status.as_str()) <= width as usize,
+                "width {width}: {status:?}"
+            );
+        }
+        app.latest_usage = None;
+        app.context_used = u64::MAX;
+        app.context_limit = Some(1);
+        let saturated = rendered_text(&app.status_line(64));
+        assert!(
+            UnicodeWidthStr::width(saturated.as_str()) <= 64,
+            "{saturated}"
+        );
+    }
+
+    #[test]
+    fn transcript_tail_renders_beyond_u16_scroll_offsets() {
+        let backend = ratatui::backend::TestBackend::new(40, 9);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.lines = (0..u16::MAX as usize + 20)
+            .map(|index| Line_::System(format!("row {index}")))
+            .collect();
+        app.lines.push(Line_::System("true tail marker".into()));
+
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        assert!(app.scroll_top > u16::MAX as usize);
+        let screen = (0..terminal.backend().buffer().area.height)
+            .map(|row| {
+                (0..terminal.backend().buffer().area.width)
+                    .map(|column| terminal.backend().buffer()[(column, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("true tail marker"), "{screen}");
     }
 
     #[test]

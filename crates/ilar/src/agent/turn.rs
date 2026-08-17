@@ -225,7 +225,8 @@ impl StepAccumulator {
 
 const MAX_TOOL_ARGUMENT_SUMMARY_CHARS: usize = 512;
 
-fn summarize_tool_input(name: &str, input: &serde_json::Value) -> String {
+/// Bounded, redacted tool input summary suitable for persisted UI replay.
+pub fn summarize_tool_input(name: &str, input: &serde_json::Value) -> String {
     let string = |key: &str| {
         input
             .get(key)

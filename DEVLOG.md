@@ -596,3 +596,21 @@ Their shared frontmatter parser accepts BOM and CRLF input, requires exact
 delimiter lines, and reports malformed definitions rather than dropping them.
 Checked-in config and agent examples are parsed by tests so documentation cannot
 silently drift from supported fields.
+
+## 2026-08-17 — Resumable, editable TUI sessions
+
+Resumed sessions now rebuild their visible transcript before entering raw mode,
+including compaction summaries, redacted tool details, completed tool states,
+model switches, todos, and the latest meaningful token usage. Persisted agent
+and model selection remain validated before terminal initialization.
+
+The prompt is now a grapheme-safe multiline editor with cursor movement,
+in-place deletion, bracketed paste, vertical line navigation, and explicit
+Enter-to-send versus Ctrl-J-to-insert-newline bindings. Input expands to show up
+to six lines and reports the current line, while idle status prioritizes model
+and latest usage over lower-value path detail at constrained widths.
+
+Transcript rows are wrapped and sliced with `usize` before Ratatui rendering,
+removing the Paragraph `u16` scroll ceiling. A bounded-row fast path keeps the
+65k-row tail regression responsive; broader transcript caching remains a
+separate stabilization issue.
