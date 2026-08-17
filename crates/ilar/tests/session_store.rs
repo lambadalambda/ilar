@@ -2,9 +2,10 @@ use chrono::Utc;
 use std::io::Write;
 
 use ilar::session::{
-    ChatMessage, ContentBlock, Role, SessionEvent, SessionId, SessionMeta, SessionStore, Usage,
-    new_id,
+    ChatMessage, ContentBlock, Role, SessionEvent, SessionId, SessionMeta, SessionState,
+    SessionStore, Usage, new_id,
 };
+use ilar::todo::{Status as TodoStatus, TodoItem, TodoList};
 
 fn temp_store() -> (SessionStore, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
@@ -60,6 +61,7 @@ fn sample_log(meta: &SessionMeta) -> Vec<SessionEvent> {
             tool_use_id: "toolu_1".into(),
             content: "1: model = ...".into(),
             is_error: false,
+            state: None,
             ts,
         },
         SessionEvent::AssistantMessage {
@@ -73,6 +75,114 @@ fn sample_log(meta: &SessionMeta) -> Vec<SessionEvent> {
             ts,
         },
     ]
+}
+
+#[test]
+fn todo_snapshots_round_trip_and_latest_replacement_wins() {
+    let (store, _dir) = temp_store();
+    let meta = sample_meta();
+    let id = meta.session_id.clone();
+    let mut session = store.create(meta).unwrap();
+    let ts = Utc::now();
+    session
+        .append(SessionEvent::AssistantMessage {
+            id: new_id(),
+            model: "zai/glm-4.7".into(),
+            content: vec![
+                ContentBlock::ToolCall {
+                    id: "todo-1".into(),
+                    name: "todo".into(),
+                    input: serde_json::json!({}),
+                },
+                ContentBlock::ToolCall {
+                    id: "todo-2".into(),
+                    name: "todo".into(),
+                    input: serde_json::json!({}),
+                },
+            ],
+            usage: Usage::default(),
+            stop_reason: "tool_use".into(),
+            ts,
+        })
+        .unwrap();
+    let first = TodoList {
+        items: vec![TodoItem {
+            content: "first".into(),
+            status: TodoStatus::InProgress,
+        }],
+    };
+    let latest = TodoList {
+        items: vec![TodoItem {
+            content: "second".into(),
+            status: TodoStatus::Completed,
+        }],
+    };
+    for (tool_use_id, list) in [("todo-1", first), ("todo-2", latest.clone())] {
+        session
+            .append(SessionEvent::ToolResult {
+                id: new_id(),
+                tool_use_id: tool_use_id.into(),
+                content: "updated".into(),
+                is_error: false,
+                state: Some(SessionState::TodoList { list }),
+                ts,
+            })
+            .unwrap();
+    }
+
+    assert_eq!(session.todo_list(), Some(&latest));
+    assert_eq!(session.transcript().len(), 2);
+    drop(session);
+    let resumed = store.load(&id).unwrap();
+    assert_eq!(resumed.todo_list(), Some(&latest));
+}
+
+#[test]
+fn legacy_tool_results_without_state_still_deserialize() {
+    let event: SessionEvent = serde_json::from_value(serde_json::json!({
+        "type": "tool_result",
+        "id": new_id(),
+        "tool_use_id": "legacy-call",
+        "content": "done",
+        "is_error": false,
+        "ts": Utc::now(),
+    }))
+    .unwrap();
+    assert!(matches!(
+        event,
+        SessionEvent::ToolResult { state: None, .. }
+    ));
+}
+
+#[test]
+fn replay_rejects_todo_state_from_a_non_todo_tool() {
+    let (store, _dir) = temp_store();
+    let meta = sample_meta();
+    let id = meta.session_id.clone();
+    let mut session = store.create(meta).unwrap();
+    session
+        .append(assistant_with_calls(&new_id(), &["read-call"]))
+        .unwrap();
+    session
+        .append(SessionEvent::ToolResult {
+            id: new_id(),
+            tool_use_id: "read-call".into(),
+            content: "done".into(),
+            is_error: false,
+            state: Some(SessionState::TodoList {
+                list: TodoList::default(),
+            }),
+            ts: Utc::now(),
+        })
+        .unwrap();
+    drop(session);
+
+    let error = store
+        .load(&id)
+        .err()
+        .expect("invalid state must fail replay");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("non-todo"), "{error}");
 }
 
 fn assistant_with_calls(event_id: &str, call_ids: &[&str]) -> SessionEvent {
@@ -472,6 +582,7 @@ fn unanswered_tool_calls_are_repaired_once_by_writer() {
             tool_use_id: "answered".into(),
             content: "ok".into(),
             is_error: false,
+            state: None,
             ts: Utc::now(),
         })
         .unwrap();
@@ -513,6 +624,7 @@ fn orphan_tool_results_are_rejected_without_mutation() {
             tool_use_id: "missing-call".into(),
             content: "impossible".into(),
             is_error: false,
+            state: None,
             ts: Utc::now(),
         })
         .unwrap();

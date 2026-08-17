@@ -59,3 +59,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Subagent safety and outcomes](issues/subagent-safety-and-outcomes.md)
 - [x] [Fix subagent launch regression](issues/fix-subagent-launch-regression.md)
 - [x] [Select and copy transcript text](issues/select-and-copy-transcript-text.md)
+- [x] [Persist and render todos](issues/persist-and-render-todos.md)

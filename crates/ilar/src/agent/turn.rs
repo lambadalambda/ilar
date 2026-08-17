@@ -590,6 +590,7 @@ pub async fn run_turn(
                     tool_use_id: id.clone(),
                     content: format!("provider error before execution: {message}"),
                     is_error: true,
+                    state: None,
                     ts: Utc::now(),
                 })?;
                 publish(
@@ -640,6 +641,7 @@ pub async fn run_turn(
                     tool_use_id: id.clone(),
                     content: "aborted before execution".into(),
                     is_error: true,
+                    state: None,
                     ts: Utc::now(),
                 })?;
                 publish(
@@ -785,19 +787,30 @@ pub async fn run_turn(
                     cancelled: false,
                 }
             };
+            let mut output = outcome.output;
+            if let Some(error) = invalid_tool_state(&outcome.name, &output) {
+                output.content = error;
+                output.is_error = true;
+                output.discard_session_state();
+            }
+            let is_error = output.is_error;
+            let state = output.session_state().cloned();
+            let content = std::mem::take(&mut output.content);
             session.append(SessionEvent::ToolResult {
                 id: new_id(),
                 tool_use_id: outcome.id.clone(),
-                content: outcome.output.content,
-                is_error: outcome.output.is_error,
+                content,
+                is_error,
+                state,
                 ts: Utc::now(),
             })?;
+            output.commit_session_state();
             publish(
                 &events,
                 LoopEvent::ToolFinished {
                     id: outcome.id,
                     name: outcome.name,
-                    is_error: outcome.output.is_error,
+                    is_error,
                 },
             );
         }
@@ -810,6 +823,25 @@ pub async fn run_turn(
         },
     );
     Ok(TurnOutcome::MaxIterations)
+}
+
+fn invalid_tool_state(tool_name: &str, output: &crate::tools::ToolOutput) -> Option<String> {
+    let state = output.session_state()?;
+    if output.is_error {
+        return Some("tool error cannot update session state".into());
+    }
+    match state {
+        crate::session::SessionState::TodoList { list } => {
+            if tool_name != "todo" {
+                return Some(format!(
+                    "tool {tool_name:?} cannot update the session todo list"
+                ));
+            }
+            list.validate()
+                .err()
+                .map(|error| format!("invalid todo state: {error}"))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -890,5 +922,41 @@ mod tests {
                 .unwrap_err()
                 .contains("contradicts")
         );
+    }
+
+    #[test]
+    fn session_state_is_accepted_only_from_successful_todo_tools() {
+        let target = std::sync::Arc::new(std::sync::Mutex::new(crate::todo::TodoList::default()));
+        let valid = crate::todo::TodoList {
+            items: vec![crate::todo::TodoItem {
+                content: "work".into(),
+                status: crate::todo::Status::InProgress,
+            }],
+        };
+        let todo =
+            crate::tools::ToolOutput::text("ok").with_todo_state(target.clone(), valid.clone());
+        assert_eq!(invalid_tool_state("todo", &todo), None);
+        assert!(invalid_tool_state("read", &todo).is_some());
+
+        let error =
+            crate::tools::ToolOutput::error("failed").with_todo_state(target.clone(), valid);
+        assert!(invalid_tool_state("todo", &error).is_some());
+
+        let invalid = crate::tools::ToolOutput::text("bad").with_todo_state(
+            target,
+            crate::todo::TodoList {
+                items: vec![
+                    crate::todo::TodoItem {
+                        content: "one".into(),
+                        status: crate::todo::Status::InProgress,
+                    },
+                    crate::todo::TodoItem {
+                        content: "two".into(),
+                        status: crate::todo::Status::InProgress,
+                    },
+                ],
+            },
+        );
+        assert!(invalid_tool_state("todo", &invalid).is_some());
     }
 }

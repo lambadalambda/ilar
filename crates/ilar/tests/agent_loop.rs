@@ -7,6 +7,7 @@ use ilar::agent::{LoopConfig, LoopEvent, TurnOutcome, run_turn};
 use ilar::provider::zai::{Flavor, ZaiProvider};
 use ilar::provider::{EventStream, MockProvider, Provider, ProviderEvent, Request, StopReason};
 use ilar::session::{ContentBlock, SessionMeta, SessionStore, new_id};
+use ilar::todo::Status as TodoStatus;
 use ilar::tools::{
     Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, ToolRegistry, WorkspaceAccess,
 };
@@ -77,6 +78,78 @@ fn tool_call_event(id: &str, msg: &str) -> ProviderEvent {
         name: "echo".into(),
         input: serde_json::json!({"msg": msg}),
     }
+}
+
+#[tokio::test]
+async fn todo_replacements_persist_in_provider_call_order() {
+    let (store, session_id) = temp_session("build");
+    let provider = MockProvider::new(vec![
+        vec![
+            ProviderEvent::ToolCallStarted {
+                id: "todo-1".into(),
+                name: "todo".into(),
+            },
+            ProviderEvent::ToolCallCompleted {
+                id: "todo-1".into(),
+                name: "todo".into(),
+                input: serde_json::json!({"todos": [{"content": "first", "status": "in_progress"}]}),
+            },
+            ProviderEvent::ToolCallStarted {
+                id: "todo-2".into(),
+                name: "todo".into(),
+            },
+            ProviderEvent::ToolCallCompleted {
+                id: "todo-2".into(),
+                name: "todo".into(),
+                input: serde_json::json!({"todos": [{"content": "second", "status": "completed"}]}),
+            },
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+                usage: Default::default(),
+            },
+        ],
+        vec![ProviderEvent::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+            usage: Default::default(),
+        }],
+    ]);
+    let todos = Arc::new(Mutex::new(ilar::todo::TodoList::default()));
+    let registry = ToolRegistry::builtin().with_todos(todos.clone()).unwrap();
+    let (tx, _rx) = events_channel();
+
+    let outcome = run_turn(
+        &provider,
+        &registry,
+        &store,
+        &session_id,
+        "plan",
+        None,
+        LoopConfig::default(),
+        tx,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, TurnOutcome::Completed);
+    let resumed = store.load(&session_id).unwrap();
+    let latest = resumed.todo_list().expect("persisted todo list");
+    assert_eq!(latest.items[0].content, "second");
+    assert_eq!(latest.items[0].status, TodoStatus::Completed);
+    let snapshots = resumed
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            ilar::session::SessionEvent::ToolResult {
+                state: Some(ilar::session::SessionState::TodoList { list }),
+                ..
+            } => Some(list.items[0].content.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(snapshots, ["first", "second"]);
+    assert_eq!(todos.lock().unwrap().items[0].content, "second");
 }
 
 #[tokio::test]

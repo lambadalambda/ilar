@@ -170,6 +170,7 @@ impl SessionWriter {
                 tool_use_id,
                 content: "Tool call interrupted before completion.".into(),
                 is_error: true,
+                state: None,
                 ts: chrono::Utc::now(),
             })?;
         }
@@ -244,7 +245,7 @@ fn validate_replay(events: &[SessionEvent], id: &str) -> std::io::Result<Vec<Str
 
     let mut event_ids = HashSet::new();
     let mut tool_call_ids = HashSet::new();
-    let mut unanswered_calls: Vec<String> = Vec::new();
+    let mut unanswered_calls: Vec<(String, String)> = Vec::new();
     for (index, event) in events.iter().enumerate() {
         if index > 0 && matches!(event, SessionEvent::Meta { .. }) {
             return invalid_replay(id, "duplicate metadata event");
@@ -270,24 +271,53 @@ fn validate_replay(events: &[SessionEvent], id: &str) -> std::io::Result<Vec<Str
                     return invalid_replay(id, "new event before tool calls received results");
                 }
                 for block in content {
-                    if let ContentBlock::ToolCall { id: call_id, .. } = block {
+                    if let ContentBlock::ToolCall {
+                        id: call_id, name, ..
+                    } = block
+                    {
                         if !tool_call_ids.insert(call_id) {
                             return invalid_replay(
                                 id,
                                 format!("duplicate tool call id {call_id:?}"),
                             );
                         }
-                        unanswered_calls.push(call_id.clone());
+                        unanswered_calls.push((call_id.clone(), name.clone()));
                     }
                 }
             }
-            SessionEvent::ToolResult { tool_use_id, .. } => {
+            SessionEvent::ToolResult {
+                tool_use_id,
+                is_error,
+                state,
+                ..
+            } => {
                 let Some(position) = unanswered_calls
                     .iter()
-                    .position(|call_id| call_id == tool_use_id)
+                    .position(|(call_id, _)| call_id == tool_use_id)
                 else {
                     return invalid_replay(id, format!("orphan tool result for {tool_use_id:?}"));
                 };
+                let (_, tool_name) = &unanswered_calls[position];
+                if let Some(state) = state {
+                    if *is_error {
+                        return invalid_replay(
+                            id,
+                            "error tool result cannot persist session state",
+                        );
+                    }
+                    if tool_name != "todo" {
+                        return invalid_replay(
+                            id,
+                            format!("todo state attached to non-todo tool {tool_name:?}"),
+                        );
+                    }
+                    state.todo_list().validate().map_err(|error| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("session {id}: invalid todo state: {error}"),
+                        )
+                    })?;
+                }
                 unanswered_calls.remove(position);
             }
             SessionEvent::Meta { .. } => {}
@@ -297,7 +327,10 @@ fn validate_replay(events: &[SessionEvent], id: &str) -> std::io::Result<Vec<Str
             _ => {}
         }
     }
-    Ok(unanswered_calls)
+    Ok(unanswered_calls
+        .into_iter()
+        .map(|(call_id, _)| call_id)
+        .collect())
 }
 
 fn invalid_replay<T>(id: &str, message: impl std::fmt::Display) -> std::io::Result<T> {
@@ -363,6 +396,10 @@ impl Session {
     pub fn transcript(&self) -> Vec<ChatMessage> {
         transcript_of(&self.events)
     }
+
+    pub fn todo_list(&self) -> Option<&crate::todo::TodoList> {
+        todo_list_of(&self.events)
+    }
 }
 
 /// Append blocks as a user message, coalescing with a preceding user
@@ -424,6 +461,20 @@ impl SessionReader {
     pub fn transcript(&self) -> Vec<ChatMessage> {
         transcript_of(&self.events)
     }
+
+    pub fn todo_list(&self) -> Option<&crate::todo::TodoList> {
+        todo_list_of(&self.events)
+    }
+}
+
+fn todo_list_of(events: &[SessionEvent]) -> Option<&crate::todo::TodoList> {
+    events.iter().rev().find_map(|event| match event {
+        SessionEvent::ToolResult {
+            state: Some(crate::session::SessionState::TodoList { list }),
+            ..
+        } => Some(list),
+        _ => None,
+    })
 }
 
 /// Pure transcript rendering over an event slice.

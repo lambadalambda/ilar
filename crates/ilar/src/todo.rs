@@ -4,11 +4,12 @@
 
 use std::sync::{Arc, Mutex};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::tools::{Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, WorkspaceAccess};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Status {
     #[default]
     Pending,
@@ -26,15 +27,30 @@ impl Status {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TodoList {
     pub items: Vec<TodoItem>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TodoItem {
     pub content: String,
     pub status: Status,
+}
+
+impl TodoList {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self
+            .items
+            .iter()
+            .filter(|item| item.status == Status::InProgress)
+            .count()
+            > 1
+        {
+            return Err("at most one todo item may be in_progress at a time");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Deserialize)]
@@ -104,14 +120,10 @@ impl Tool for TodoTool {
                 Err(e) => return ToolOutput::error(format!("invalid input for todo: {e}")),
             };
             let mut items = Vec::with_capacity(input.todos.len());
-            let mut in_progress = 0;
             for item in input.todos {
                 let status = match item.status.as_str() {
                     "pending" => Status::Pending,
-                    "in_progress" => {
-                        in_progress += 1;
-                        Status::InProgress
-                    }
+                    "in_progress" => Status::InProgress,
                     "completed" => Status::Completed,
                     other => {
                         return ToolOutput::error(format!(
@@ -124,22 +136,21 @@ impl Tool for TodoTool {
                     status,
                 });
             }
-            if in_progress > 1 {
-                return ToolOutput::error("at most one todo item may be in_progress at a time");
+            let updated = TodoList { items };
+            if let Err(error) = updated.validate() {
+                return ToolOutput::error(error);
             }
-            let mut list = list.lock().unwrap();
-            *list = TodoList { items };
-            let rendered: Vec<String> = list
+            let rendered: Vec<String> = updated
                 .items
                 .iter()
                 .map(|i| format!("{} {}", i.status.marker(), i.content))
                 .collect();
-            drop(list);
             ToolOutput::text(if rendered.is_empty() {
                 "(todo list cleared)".into()
             } else {
                 rendered.join("\n")
             })
+            .with_todo_state(list, updated)
         })
     }
 }

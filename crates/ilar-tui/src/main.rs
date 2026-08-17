@@ -171,6 +171,7 @@ struct App {
     transcript_selection: Option<TranscriptSelection>,
     selecting_transcript: bool,
     clipboard: Option<arboard::Clipboard>,
+    todos: std::sync::Arc<std::sync::Mutex<ilar::todo::TodoList>>,
 }
 
 impl App {
@@ -200,6 +201,7 @@ impl App {
             transcript_selection: None,
             selecting_transcript: false,
             clipboard: None,
+            todos: std::sync::Arc::new(std::sync::Mutex::new(ilar::todo::TodoList::default())),
         }
     }
 
@@ -536,6 +538,11 @@ impl App {
                 }
             }
         }
+        let todos = {
+            let todos = self.todos.lock().unwrap();
+            todo_render_snapshot(&todos, width)
+        };
+        output.extend(render_todo_snapshot(&todos, width));
         if self.busy
             && matches!(
                 self.activity,
@@ -817,6 +824,128 @@ impl App {
             render_model_picker(frame, picker);
         }
     }
+}
+
+struct TodoRenderSnapshot {
+    items: Vec<ilar::todo::TodoItem>,
+    hidden: usize,
+}
+
+fn todo_render_snapshot(list: &ilar::todo::TodoList, width: u16) -> TodoRenderSnapshot {
+    let cap = if width < 64 { 3 } else { 5 };
+    let indices = visible_todo_indices(list, cap);
+    TodoRenderSnapshot {
+        hidden: list.items.len().saturating_sub(indices.len()),
+        items: indices
+            .into_iter()
+            .map(|index| list.items[index].clone())
+            .collect(),
+    }
+}
+
+#[cfg(test)]
+fn render_todo_lines(list: &ilar::todo::TodoList, width: u16) -> Vec<Line<'static>> {
+    render_todo_snapshot(&todo_render_snapshot(list, width), width)
+}
+
+fn render_todo_snapshot(snapshot: &TodoRenderSnapshot, width: u16) -> Vec<Line<'static>> {
+    if snapshot.items.is_empty() || width == 0 {
+        return Vec::new();
+    }
+    let last = snapshot.items.len().saturating_sub(1);
+    snapshot
+        .items
+        .iter()
+        .enumerate()
+        .map(|(position, item)| {
+            let label_width = 5usize.min(width as usize);
+            let label = truncate_display(
+                if position == 0 { "todo " } else { "     " },
+                label_width,
+                Truncation::Right,
+            );
+            let (marker, marker_style, content_style) = match item.status {
+                ilar::todo::Status::Completed => (
+                    "✓ ",
+                    Style::default().fg(ASSISTANT),
+                    Style::default().fg(MUTED),
+                ),
+                ilar::todo::Status::InProgress => (
+                    "▸ ",
+                    Style::default().fg(TOOL_ACTIVE),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                ilar::todo::Status::Pending => ("○ ", Style::default().fg(MUTED), Style::default()),
+            };
+            let remaining = (width as usize).saturating_sub(label_width);
+            let marker = truncate_display(marker, remaining, Truncation::Right);
+            let remaining = remaining.saturating_sub(UnicodeWidthStr::width(marker.as_str()));
+            let suffix = if position == last && snapshot.hidden > 0 {
+                format!(" · +{} hidden", snapshot.hidden)
+            } else {
+                String::new()
+            };
+            let suffix_width = UnicodeWidthStr::width(suffix.as_str()).min(remaining);
+            let content = item
+                .content
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let content = safe_text(&content);
+            let content = truncate_display(
+                &content,
+                remaining.saturating_sub(suffix_width),
+                Truncation::Right,
+            );
+            let suffix = truncate_display(&suffix, suffix_width, Truncation::Right);
+            Line::from(vec![
+                Span::styled(
+                    label,
+                    Style::default()
+                        .fg(TOOL_ACTIVE)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(marker, marker_style),
+                Span::styled(content, content_style),
+                Span::styled(suffix, Style::default().fg(MUTED)),
+            ])
+        })
+        .collect()
+}
+
+fn visible_todo_indices(list: &ilar::todo::TodoList, cap: usize) -> Vec<usize> {
+    if list.items.len() <= cap {
+        return (0..list.items.len()).collect();
+    }
+    let mut selected = std::collections::BTreeSet::new();
+    if let Some(index) = list
+        .items
+        .iter()
+        .position(|item| item.status == ilar::todo::Status::InProgress)
+    {
+        selected.insert(index);
+    }
+    if let Some(index) = list
+        .items
+        .iter()
+        .position(|item| item.status == ilar::todo::Status::Pending)
+    {
+        selected.insert(index);
+    }
+    if let Some(index) = list
+        .items
+        .iter()
+        .rposition(|item| item.status == ilar::todo::Status::Completed)
+    {
+        selected.insert(index);
+    }
+    for index in 0..list.items.len() {
+        if selected.len() == cap {
+            break;
+        }
+        selected.insert(index);
+    }
+    selected.into_iter().collect()
 }
 
 fn selection_point(area: Rect, column: u16, row: u16, clamp: bool) -> Option<SelectionPoint> {
@@ -1544,6 +1673,13 @@ fn ensure_direct_resume_allowed(meta: Option<&SessionMeta>) -> Result<()> {
     Ok(())
 }
 
+fn restored_todos(resumed: Option<&ilar::session::SessionReader>) -> ilar::todo::TodoList {
+    resumed
+        .and_then(ilar::session::SessionReader::todo_list)
+        .cloned()
+        .unwrap_or_default()
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -1668,10 +1804,10 @@ async fn main() -> Result<()> {
         ))
         .with_loop_config(loop_config.clone()),
     );
-    let todos = std::sync::Arc::new(std::sync::Mutex::new(ilar::todo::TodoList::default()));
+    let todos = std::sync::Arc::new(std::sync::Mutex::new(restored_todos(resumed.as_ref())));
     let registry = ToolRegistry::builtin()
         .with_subagents(spawner.clone())?
-        .with_todos(todos)?
+        .with_todos(todos.clone())?
         .with_web_tools()?
         .with_skills(skill_store)?;
     let notifications = spawner.subscribe();
@@ -1682,6 +1818,7 @@ async fn main() -> Result<()> {
         session_context_tokens(&store, &session_id, &system_prompt, &registry)?;
     let context_limit = resolver.context_limit(&model_for_session);
     let mut app = App::new();
+    app.todos = todos;
     app.configure_runtime(
         model_for_session.clone(),
         cwd.clone(),
@@ -2867,6 +3004,147 @@ mod tests {
             &current,
             volatile_selection
         ));
+    }
+
+    #[test]
+    fn current_todos_render_all_statuses_and_live_replacements() {
+        let mut app = App::new();
+        let todos = std::sync::Arc::new(std::sync::Mutex::new(ilar::todo::TodoList {
+            items: vec![
+                ilar::todo::TodoItem {
+                    content: "done thing".into(),
+                    status: ilar::todo::Status::Completed,
+                },
+                ilar::todo::TodoItem {
+                    content: "active thing".into(),
+                    status: ilar::todo::Status::InProgress,
+                },
+                ilar::todo::TodoItem {
+                    content: "later thing".into(),
+                    status: ilar::todo::Status::Pending,
+                },
+            ],
+        }));
+        app.todos = todos.clone();
+
+        let rendered = app
+            .transcript_lines(80, std::time::Instant::now())
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("todo ✓ done thing"), "{rendered}");
+        assert!(rendered.contains("▸ active thing"), "{rendered}");
+        assert!(rendered.contains("○ later thing"), "{rendered}");
+
+        todos.lock().unwrap().items = vec![ilar::todo::TodoItem {
+            content: "replacement".into(),
+            status: ilar::todo::Status::Pending,
+        }];
+        let replaced = app
+            .transcript_lines(80, std::time::Instant::now())
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(replaced.contains("todo ○ replacement"), "{replaced}");
+        assert!(!replaced.contains("done thing"), "{replaced}");
+    }
+
+    #[test]
+    fn todo_rendering_is_bounded_and_preserves_each_present_status() {
+        let list = ilar::todo::TodoList {
+            items: vec![
+                ilar::todo::TodoItem {
+                    content: "old completed item".into(),
+                    status: ilar::todo::Status::Completed,
+                },
+                ilar::todo::TodoItem {
+                    content: "another completed item".into(),
+                    status: ilar::todo::Status::Completed,
+                },
+                ilar::todo::TodoItem {
+                    content: "current \u{1b} active\nitem".into(),
+                    status: ilar::todo::Status::InProgress,
+                },
+                ilar::todo::TodoItem {
+                    content: "next pending item".into(),
+                    status: ilar::todo::Status::Pending,
+                },
+                ilar::todo::TodoItem {
+                    content: "extra \u{1b} pending\nitem".into(),
+                    status: ilar::todo::Status::Pending,
+                },
+            ],
+        };
+        let lines = render_todo_lines(&list, 40);
+        let text = lines
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(lines.len(), 3);
+        assert!(text.contains('✓'), "{text}");
+        assert!(text.contains('▸'), "{text}");
+        assert!(text.contains('○'), "{text}");
+        assert!(text.contains("+2 hidden"), "{text}");
+        assert!(!text.contains('\u{1b}'), "{text:?}");
+        assert!(lines.iter().all(|line| !rendered_text(line).contains('\n')));
+        assert!(lines.iter().all(|line| line.width() <= 40));
+    }
+
+    #[test]
+    fn resumed_todos_seed_the_first_shared_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf());
+        let session_id = new_id();
+        let mut session = store
+            .create(SessionMeta {
+                session_id: session_id.clone(),
+                parent_id: None,
+                agent: "build".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+            })
+            .unwrap();
+        session
+            .append(ilar::session::SessionEvent::AssistantMessage {
+                id: new_id(),
+                model: "zai/glm-4.7".into(),
+                content: vec![ilar::session::ContentBlock::ToolCall {
+                    id: "todo-resume".into(),
+                    name: "todo".into(),
+                    input: Default::default(),
+                }],
+                usage: ilar::session::Usage::default(),
+                stop_reason: "tool_use".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        session
+            .append(ilar::session::SessionEvent::ToolResult {
+                id: new_id(),
+                tool_use_id: "todo-resume".into(),
+                content: "updated".into(),
+                is_error: false,
+                state: Some(ilar::session::SessionState::TodoList {
+                    list: ilar::todo::TodoList {
+                        items: vec![ilar::todo::TodoItem {
+                            content: "restored".into(),
+                            status: ilar::todo::Status::InProgress,
+                        }],
+                    },
+                }),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        drop(session);
+        let resumed = store.load(&session_id).unwrap();
+
+        let restored = restored_todos(Some(&resumed));
+        assert_eq!(restored.items.len(), 1);
+        assert_eq!(restored.items[0].content, "restored");
+        assert_eq!(restored.items[0].status, ilar::todo::Status::InProgress);
     }
 
     #[test]

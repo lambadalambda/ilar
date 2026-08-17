@@ -23,6 +23,20 @@ pub struct SessionMeta {
     pub workspace: Option<crate::tools::WorkspaceLocation>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SessionState {
+    TodoList { list: crate::todo::TodoList },
+}
+
+impl SessionState {
+    pub fn todo_list(&self) -> &crate::todo::TodoList {
+        match self {
+            SessionState::TodoList { list } => list,
+        }
+    }
+}
+
 /// One JSONL line. Self-describing via the `type` tag.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -52,6 +66,8 @@ pub enum SessionEvent {
         tool_use_id: String,
         content: String,
         is_error: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        state: Option<SessionState>,
         ts: DateTime<Utc>,
     },
     /// Runtime model switch; effective from the next provider call.

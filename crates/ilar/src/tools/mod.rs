@@ -372,10 +372,37 @@ impl ToolContext {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone)]
 pub struct ToolOutput {
     pub content: String,
     pub is_error: bool,
+    state: Option<crate::session::SessionState>,
+    pending_state_commit: Option<PendingStateCommit>,
+}
+
+#[derive(Clone)]
+struct PendingStateCommit {
+    target: std::sync::Arc<std::sync::Mutex<crate::todo::TodoList>>,
+    list: crate::todo::TodoList,
+}
+
+impl std::fmt::Debug for ToolOutput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ToolOutput")
+            .field("content", &self.content)
+            .field("is_error", &self.is_error)
+            .field("state", &self.state)
+            .finish()
+    }
+}
+
+impl PartialEq for ToolOutput {
+    fn eq(&self, other: &Self) -> bool {
+        self.content == other.content
+            && self.is_error == other.is_error
+            && self.state == other.state
+    }
 }
 
 impl ToolOutput {
@@ -383,6 +410,8 @@ impl ToolOutput {
         Self {
             content: content.into(),
             is_error: false,
+            state: None,
+            pending_state_commit: None,
         }
     }
 
@@ -390,6 +419,33 @@ impl ToolOutput {
         Self {
             content: content.into(),
             is_error: true,
+            state: None,
+            pending_state_commit: None,
+        }
+    }
+
+    pub fn session_state(&self) -> Option<&crate::session::SessionState> {
+        self.state.as_ref()
+    }
+
+    pub(crate) fn with_todo_state(
+        mut self,
+        target: std::sync::Arc<std::sync::Mutex<crate::todo::TodoList>>,
+        list: crate::todo::TodoList,
+    ) -> Self {
+        self.state = Some(crate::session::SessionState::TodoList { list: list.clone() });
+        self.pending_state_commit = Some(PendingStateCommit { target, list });
+        self
+    }
+
+    pub(crate) fn discard_session_state(&mut self) {
+        self.state = None;
+        self.pending_state_commit = None;
+    }
+
+    pub(crate) fn commit_session_state(&mut self) {
+        if let Some(commit) = self.pending_state_commit.take() {
+            *commit.target.lock().unwrap() = commit.list;
         }
     }
 }

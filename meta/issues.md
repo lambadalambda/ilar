@@ -14,7 +14,6 @@
 
 ## Stabilization
 
-- [ ] [Persist and render todos](issues/persist-and-render-todos.md)
 - [ ] [Config loading and frontmatter diagnostics](issues/config-loading-and-frontmatter-diagnostics.md)
 - [ ] [TUI resume, input, and status](issues/tui-resume-input-and-status.md)
 - [ ] [Bounded event channels](issues/bounded-event-channels.md)
