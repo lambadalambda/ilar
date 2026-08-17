@@ -23,7 +23,7 @@ A personal coding agent in Rust. Single binary, TUI-first, no permissions layer
 - `ilar` — core: providers, tools, agent loop, sessions, config. Pure logic,
   no TUI dependencies. Unit-testable with mock SSE streams.
 - `ilar-tui` — ratatui frontend: streaming output, tool display, input box,
-  Enter sends, Ctrl-J inserts a newline, Esc = full abort.
+  Enter sends, Shift-Enter or Ctrl-J inserts a newline, Esc = full abort.
 
 ## Status
 

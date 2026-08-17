@@ -63,3 +63,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Move todos to a sidebar](issues/move-todos-to-sidebar.md)
 - [x] [Config loading and frontmatter diagnostics](issues/config-loading-and-frontmatter-diagnostics.md)
 - [x] [TUI resume, input, and status](issues/tui-resume-input-and-status.md)
+- [x] [Shift-Enter inserts a newline](issues/shift-enter-newline.md)

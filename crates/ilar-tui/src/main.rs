@@ -8,8 +8,10 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
-    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseButton,
+    MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
+use crossterm::terminal::supports_keyboard_enhancement;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -153,6 +155,7 @@ struct Args {
 
 struct TerminalSession {
     terminal_initialized: bool,
+    keyboard_enhanced: bool,
     mouse_enabled: bool,
     paste_enabled: bool,
 }
@@ -161,6 +164,7 @@ impl TerminalSession {
     fn start() -> Result<(ratatui::DefaultTerminal, Self)> {
         let mut session = Self {
             terminal_initialized: false,
+            keyboard_enhanced: false,
             mouse_enabled: false,
             paste_enabled: false,
         };
@@ -172,6 +176,14 @@ impl TerminalSession {
             }
         };
         session.terminal_initialized = true;
+
+        if supports_keyboard_enhancement().unwrap_or(false) {
+            session.keyboard_enhanced = true;
+            crossterm::execute!(
+                std::io::stdout(),
+                PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+            )?;
+        }
 
         session.mouse_enabled = true;
         crossterm::execute!(std::io::stdout(), EnableMouseCapture)?;
@@ -195,6 +207,9 @@ impl Drop for TerminalSession {
         }
         if self.mouse_enabled {
             let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture);
+        }
+        if self.keyboard_enhanced {
+            let _ = crossterm::execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
         }
         if self.terminal_initialized {
             ratatui::restore();
@@ -417,6 +432,10 @@ enum PromptAction {
 fn handle_prompt_key(input: &mut InputBuffer, key: KeyEvent) -> PromptAction {
     let control = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
+        KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            input.insert("\n");
+            PromptAction::Edited
+        }
         KeyCode::Enter => PromptAction::Submit,
         KeyCode::Char('j') if control => {
             input.insert("\n");
@@ -596,7 +615,7 @@ impl App {
     fn new() -> Self {
         Self {
             lines: vec![Line_::System(
-                "ilar — Enter sends, Ctrl-J newline, F2 models, PgUp/PgDn scroll, Esc aborts"
+                "ilar — Enter sends, Shift-Enter/Ctrl-J newline, F2 models, PgUp/PgDn scroll"
                     .into(),
             )],
             input: InputBuffer::default(),
@@ -1307,11 +1326,11 @@ impl App {
             .multiline_view(input_area.width, input_area.height);
         let input_title = if input_view.line_count > 1 {
             format!(
-                "input {}/{} · Enter send · Ctrl-J newline",
+                "input {}/{} · Enter send · Shift-Enter/Ctrl-J newline",
                 input_view.cursor_line, input_view.line_count
             )
         } else {
-            "input · Enter send · Ctrl-J newline".into()
+            "input · Enter send · Shift-Enter/Ctrl-J newline".into()
         };
         let input_lines = input_view
             .lines
@@ -3109,6 +3128,15 @@ mod tests {
             PromptAction::Edited
         );
         assert_eq!(input.text(), "ab\nsecond\nline\nc");
+        let mut shifted = InputBuffer::default();
+        assert_eq!(
+            handle_prompt_key(
+                &mut shifted,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)
+            ),
+            PromptAction::Edited
+        );
+        assert_eq!(shifted.text(), "\n");
         assert_eq!(
             handle_prompt_key(
                 &mut input,
