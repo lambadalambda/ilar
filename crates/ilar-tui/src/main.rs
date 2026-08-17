@@ -1776,9 +1776,10 @@ fn restored_todos(resumed: Option<&ilar::session::SessionReader>) -> ilar::todo:
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    let config = Loader::new().resolve().context("loading config")?;
 
     if let Some(Command::Login) = args.command {
-        let store = ilar::auth::AuthStore::open(ilar::config::default_state_dir());
+        let store = ilar::auth::AuthStore::open(config.state_dir().to_path_buf());
         let tokens = ilar::auth::login_flow(&store, std::time::Duration::from_secs(300), true)
             .await
             .context("login failed")?;
@@ -1793,9 +1794,7 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let config = Loader::new().resolve().context("loading config")?;
-    let state_dir = ilar::config::default_state_dir();
-    let store = SessionStore::new(state_dir.join("sessions"));
+    let store = SessionStore::new(config.state_dir().join("sessions"));
     let resumed = args
         .session
         .as_deref()
@@ -1811,10 +1810,11 @@ async fn main() -> Result<()> {
         .and_then(|session| session.meta())
         .map(|meta| meta.agent.clone());
     let agent_name = selected_agent_name(args.agent.as_deref(), persisted_agent.as_deref());
-    let agent = config
-        .agents()
-        .into_iter()
+    let agents = config.agents().context("loading agent definitions")?;
+    let agent = agents
+        .iter()
         .find(|a| a.name == agent_name)
+        .cloned()
         .with_context(|| format!("unknown agent {agent_name:?}"))?;
     let persisted_model = resumed.as_ref().map(|session| session.effective_model());
     let model_for_session = selected_model(
@@ -1827,9 +1827,11 @@ async fn main() -> Result<()> {
     let cwd = std::env::current_dir().context("no cwd")?;
     let skill_store = std::sync::Arc::new(ilar::skill::SkillStore::new(
         config.dirs().0.to_path_buf(),
-        cwd.clone(),
+        config.dirs().1.to_path_buf(),
     ));
-    let skill_listing = skill_store.listing_prompt();
+    let skill_listing = skill_store
+        .listing_prompt()
+        .context("loading skill definitions")?;
     let mut system_prompt = system_prompt_for(&cwd);
     if !skill_listing.is_empty() {
         system_prompt = format!("{system_prompt}\n\n{skill_listing}");
@@ -1881,7 +1883,6 @@ async fn main() -> Result<()> {
         compaction_threshold: config.compaction.threshold,
         ..LoopConfig::default()
     };
-    let agents = config.agents();
     let spawner = std::sync::Arc::new(
         SubagentSpawner::new(
             resolver.clone(),

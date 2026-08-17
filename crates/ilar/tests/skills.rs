@@ -21,20 +21,11 @@ fn discovers_skills_in_user_and_project_dirs() {
         &project.path().join(".ilar/skills/local-style.md"),
         "---\ndescription = \"Repo-specific style\"\n---\nAlways use tabs here.\n",
     );
-    write(
-        &project.path().join(".ilar/skills/broken.md"),
-        "no frontmatter at all",
-    );
-
     let store = store(user.path(), project.path());
-    let skills = store.list();
+    let skills = store.list().unwrap();
     let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
     assert!(names.contains(&"deploy"), "{names:?}");
     assert!(names.contains(&"local-style"), "{names:?}");
-    assert!(
-        !names.contains(&"broken"),
-        "malformed skill should be skipped: {names:?}"
-    );
 }
 
 #[test]
@@ -50,10 +41,64 @@ fn project_skill_overrides_user_skill_by_name() {
         "---\ndescription = \"project version\"\n---\nPROJECT BODY\n",
     );
     let store = store(user.path(), project.path());
-    let skills = store.list();
+    let skills = store.list().unwrap();
     let deploys: Vec<_> = skills.iter().filter(|s| s.name == "deploy").collect();
     assert_eq!(deploys.len(), 1, "duplicate: {skills:?}");
     assert_eq!(deploys[0].description, "project version");
+}
+
+#[test]
+fn crlf_skill_frontmatter_loads() {
+    let user = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    write(
+        &project.path().join(".ilar/skills/windows.md"),
+        "---\r\ndescription = \"CRLF skill\"\r\n---\r\nUse Windows lines.\r\n",
+    );
+
+    let skill = store(user.path(), project.path())
+        .load("windows")
+        .unwrap()
+        .expect("CRLF skill loads");
+    assert_eq!(skill.description, "CRLF skill");
+    assert_eq!(skill.body, "Use Windows lines.");
+}
+
+#[test]
+fn malformed_skill_frontmatter_reports_its_path() {
+    let user = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let path = project.path().join(".ilar/skills/broken.md");
+    write(
+        &path,
+        "---\ndescription = \"not exactly closed\"\n--- trailing\nbody\n",
+    );
+
+    let error = store(user.path(), project.path())
+        .list()
+        .expect_err("malformed skill must be diagnosed");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains(path.to_string_lossy().as_ref()),
+        "{message}"
+    );
+    assert!(message.contains("exact `---`"), "{message}");
+}
+
+#[test]
+fn documented_skill_triggers_are_accepted() {
+    let user = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    write(
+        &user.path().join("skills/deploy.md"),
+        "---\ndescription = \"Deploy safely\"\ntriggers = [\"deploy\", \"release\"]\n---\nCanary first.\n",
+    );
+
+    let skill = store(user.path(), project.path())
+        .load("deploy")
+        .unwrap()
+        .expect("skill with documented triggers loads");
+    assert_eq!(skill.description, "Deploy safely");
 }
 
 #[test]
@@ -69,7 +114,7 @@ fn listing_renders_for_system_prompt() {
         "---\ndescription = \"Review checklist\"\n---\nbody\n",
     );
     let store = store(user.path(), project.path());
-    let listing = store.listing_prompt();
+    let listing = store.listing_prompt().unwrap();
     assert!(listing.contains("deploy"), "{listing}");
     assert!(listing.contains("How we deploy"), "{listing}");
     assert!(listing.contains("review"), "{listing}");
@@ -88,10 +133,10 @@ fn load_returns_body() {
         "---\ndescription = \"How we deploy\"\n---\nCanary first, then full rollout.\n",
     );
     let store = store(user.path(), project.path());
-    let skill = store.load("deploy").expect("skill loads");
+    let skill = store.load("deploy").unwrap().expect("skill loads");
     assert_eq!(skill.name, "deploy");
     assert!(skill.body.contains("Canary first"));
-    assert!(store.load("nonexistent").is_none());
+    assert!(store.load("nonexistent").unwrap().is_none());
 }
 
 #[test]
@@ -99,7 +144,7 @@ fn builtin_worktree_isolation_skill_present() {
     let user = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
     let store = store(user.path(), project.path());
-    let skills = store.list();
+    let skills = store.list().unwrap();
     let wt = skills
         .iter()
         .find(|s| s.name == "worktree-isolation")

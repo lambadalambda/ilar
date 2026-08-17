@@ -582,3 +582,17 @@ normalization. Search queries, backend duration, result count, JSON size, hit
 fields, errors, and final output are bounded; the public limit is documented
 and clamped to 1–20 results. Fetch errors strip reqwest URLs and retain only a
 bounded origin label so signed paths and queries are not persisted.
+
+## 2026-08-17 — Strict, layered configuration diagnostics
+
+Config files now merge nested provider, compaction, and subagent fields instead
+of replacing whole sections. Only missing files are ignored; read, UTF-8, parse,
+and semantic errors retain their source paths. Loader-injected config and state
+directories now drive OAuth, sessions, agents, and skills consistently, with an
+explicit OpenAI `api_key` mode available to reset inherited ChatGPT auth.
+
+Agent and skill discovery is deterministic across user and project directories.
+Their shared frontmatter parser accepts BOM and CRLF input, requires exact
+delimiter lines, and reports malformed definitions rather than dropping them.
+Checked-in config and agent examples are parsed by tests so documentation cannot
+silently drift from supported fields.

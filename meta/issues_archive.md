@@ -61,3 +61,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Select and copy transcript text](issues/select-and-copy-transcript-text.md)
 - [x] [Persist and render todos](issues/persist-and-render-todos.md)
 - [x] [Move todos to a sidebar](issues/move-todos-to-sidebar.md)
+- [x] [Config loading and frontmatter diagnostics](issues/config-loading-and-frontmatter-diagnostics.md)

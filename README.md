@@ -33,4 +33,5 @@ Pre-alpha. See `meta/issues.md` for the roadmap and
 ## Configuration
 
 `~/.config/ilar/ilar.toml` (see `ilar.toml.example`), custom agents as
-markdown in `~/.config/ilar/agents/`.
+Markdown in `~/.config/ilar/agents/` or project `.ilar/agents/`, and skills in
+`~/.config/ilar/skills/` or project `.ilar/skills/`.

@@ -10,6 +10,7 @@ model = "zai/glm-4.7"
 #   ilar login
 # then set:
 #   auth = "chatgpt"
+# A project override can switch back with auth = "api_key".
 # Models are the -codex/ChatGPT ones (e.g. gpt-5.6-sol), not the API
 # catalog names. Tokens live in <state dir>/auth.json and refresh
 # automatically.
@@ -30,12 +31,5 @@ threshold = 0.85
 max_concurrent = 10
 max_depth = 3
 
-# Custom agents live in ~/.config/ilar/agents/*.md (markdown + frontmatter):
-#
-# ---
-# description = "Fast read-only code explorer"
-# model = "zai/glm-4.7-air"
-# [permission]
-# tools = { bash = false, write = false, edit = false }   # informational only, no enforcement
-# ---
-# You find code. You do not change code. ...
+# Custom agents live in ~/.config/ilar/agents/*.md or .ilar/agents/*.md.
+# See examples/agents/explorer.md for supported frontmatter.

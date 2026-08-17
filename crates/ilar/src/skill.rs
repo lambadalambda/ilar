@@ -4,6 +4,7 @@
 
 use std::path::PathBuf;
 
+use anyhow::Context;
 use serde::Deserialize;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -37,16 +38,17 @@ tools can still access paths outside the worktree.
 "#;
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Frontmatter {
     description: Option<String>,
+    #[serde(rename = "triggers")]
+    _triggers: Option<Vec<String>>,
 }
 
-fn parse_skill_md(name: &str, text: &str) -> Option<Skill> {
-    let text = text.trim_start_matches('\u{feff}');
-    let rest = text.strip_prefix("---\n")?;
-    let (frontmatter, body) = rest.split_once("\n---")?;
-    let fm: Frontmatter = toml::from_str(frontmatter).ok()?;
-    Some(Skill {
+fn parse_skill_md(name: &str, text: &str) -> anyhow::Result<Skill> {
+    let (frontmatter, body) = crate::config::split_frontmatter(text)?;
+    let fm: Frontmatter = toml::from_str(&frontmatter).context("invalid skill frontmatter")?;
+    Ok(Skill {
         name: name.into(),
         description: fm.description.unwrap_or_else(|| name.into()),
         body: body.trim_start_matches('\n').trim().to_string(),
@@ -68,7 +70,7 @@ impl SkillStore {
 
     /// All available skills: built-ins, user dir, project .ilar/skills
     /// (later wins by name).
-    pub fn list(&self) -> Vec<Skill> {
+    pub fn list(&self) -> anyhow::Result<Vec<Skill>> {
         let mut skills = vec![
             parse_skill_md("worktree-isolation", WORKTREE_ISOLATION).expect("builtin skill parses"),
         ];
@@ -77,48 +79,42 @@ impl SkillStore {
             (&self.project_dir, ".ilar/skills"),
         ] {
             let dir = dir.join(sub);
-            let Ok(entries) = std::fs::read_dir(&dir) else {
-                continue;
-            };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().is_none_or(|e| e != "md") {
-                    continue;
-                }
-                let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
-                    continue;
-                };
-                if let Ok(text) = std::fs::read_to_string(&path)
-                    && let Some(skill) = parse_skill_md(name, &text)
-                {
-                    skills.retain(|s| s.name != skill.name);
-                    skills.push(skill);
-                }
+            for path in crate::config::markdown_files(&dir)? {
+                let name = path
+                    .file_stem()
+                    .and_then(|name| name.to_str())
+                    .with_context(|| format!("skill filename is not UTF-8: {}", path.display()))?;
+                let text = std::fs::read_to_string(&path)
+                    .with_context(|| format!("reading skill definition {}", path.display()))?;
+                let skill = parse_skill_md(name, &text)
+                    .with_context(|| format!("parsing skill definition {}", path.display()))?;
+                skills.retain(|existing| existing.name != skill.name);
+                skills.push(skill);
             }
         }
         skills.sort_by(|a, b| a.name.cmp(&b.name));
-        skills
+        Ok(skills)
     }
 
     /// System-prompt listing: names + descriptions only (bodies load on
     /// demand via the skill tool).
-    pub fn listing_prompt(&self) -> String {
-        let skills = self.list();
+    pub fn listing_prompt(&self) -> anyhow::Result<String> {
+        let skills = self.list()?;
         if skills.is_empty() {
-            return String::new();
+            return Ok(String::new());
         }
         let lines: Vec<String> = skills
             .iter()
             .map(|s| format!("- {}: {}", s.name, s.description))
             .collect();
-        format!(
+        Ok(format!(
             "# Skills\n\nAvailable via the `skill` tool (loads the full instructions):\n{}",
             lines.join("\n")
-        )
+        ))
     }
 
-    pub fn load(&self, name: &str) -> Option<Skill> {
-        self.list().into_iter().find(|s| s.name == name)
+    pub fn load(&self, name: &str) -> anyhow::Result<Option<Skill>> {
+        Ok(self.list()?.into_iter().find(|s| s.name == name))
     }
 }
 
@@ -176,19 +172,26 @@ impl crate::tools::Tool for SkillTool {
                 }
             };
             match store.load(&input.name) {
-                Some(skill) => crate::tools::ToolOutput::text(format!(
+                Ok(Some(skill)) => crate::tools::ToolOutput::text(format!(
                     "# Skill: {} — {}\n\n{}",
                     skill.name, skill.description, skill.body
                 )),
-                None => {
-                    let available: Vec<String> =
-                        store.list().iter().map(|s| s.name.clone()).collect();
+                Ok(None) => {
+                    let available: Vec<String> = match store.list() {
+                        Ok(skills) => skills.into_iter().map(|skill| skill.name).collect(),
+                        Err(error) => {
+                            return crate::tools::ToolOutput::error(format!(
+                                "loading skills: {error:#}"
+                            ));
+                        }
+                    };
                     crate::tools::ToolOutput::error(format!(
                         "unknown skill {:?}; available: {}",
                         input.name,
                         available.join(", ")
                     ))
                 }
+                Err(error) => crate::tools::ToolOutput::error(format!("loading skills: {error:#}")),
             }
         })
     }

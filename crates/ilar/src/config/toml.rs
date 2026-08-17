@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use anyhow::Context;
 use serde::Deserialize;
 
 use super::AgentDefinition;
@@ -80,8 +81,22 @@ fn default_background_tool_timeout_ms() -> u64 {
 struct FileConfig {
     general: Option<GeneralConfig>,
     providers: Option<HashMap<String, ProviderConfig>>,
-    compaction: Option<CompactionConfig>,
-    subagents: Option<SubagentConfig>,
+    compaction: Option<CompactionLayer>,
+    subagents: Option<SubagentLayer>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct CompactionLayer {
+    threshold: Option<f64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct SubagentLayer {
+    max_concurrent: Option<usize>,
+    max_depth: Option<usize>,
+    background_tool_timeout_ms: Option<u64>,
 }
 
 /// Fully-resolved configuration.
@@ -93,6 +108,7 @@ pub struct Config {
     pub subagents: SubagentConfig,
     user_dir: PathBuf,
     project_dir: PathBuf,
+    state_dir: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -114,6 +130,7 @@ pub struct ProviderConfigResolved {
 pub struct Loader {
     config_dir: Option<PathBuf>,
     project_dir: Option<PathBuf>,
+    state_dir: Option<PathBuf>,
     env: Vec<(String, String)>,
     ignore_process_env: bool,
 }
@@ -127,6 +144,7 @@ impl Loader {
         Self {
             config_dir: None,
             project_dir: None,
+            state_dir: None,
             env: Vec::new(),
             ignore_process_env: false,
         }
@@ -135,16 +153,18 @@ impl Loader {
     /// Loader that never reads process env (hermetic tests).
     pub fn no_env() -> Self {
         Self {
+            project_dir: Some(PathBuf::from("/nonexistent")),
             ignore_process_env: true,
             ..Self::new()
         }
     }
 
-    /// Loader with an explicit environment (hermetic tests): looked up
-    /// before process env.
+    /// Loader with an explicit environment for hermetic tests.
     pub fn with_env(env: Vec<(&str, String)>, _unused: Vec<()>) -> Self {
         Self {
             env: env.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+            project_dir: Some(PathBuf::from("/nonexistent")),
+            ignore_process_env: true,
             ..Self::new()
         }
     }
@@ -156,6 +176,11 @@ impl Loader {
 
     pub fn project_dir(mut self, dir: PathBuf) -> Self {
         self.project_dir = Some(dir);
+        self
+    }
+
+    pub fn state_dir(mut self, dir: PathBuf) -> Self {
+        self.state_dir = Some(dir);
         self
     }
 
@@ -175,12 +200,22 @@ impl Loader {
     }
 
     pub fn resolve(self) -> anyhow::Result<Config> {
-        let user_dir = self.config_dir.clone().unwrap_or_else(default_config_dir);
-        let project_dir = self
-            .project_dir
+        let home = || PathBuf::from(self.env_lookup("HOME").unwrap_or_else(|| ".".into()));
+        let user_dir = self
+            .config_dir
             .clone()
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-        Config::load(user_dir, project_dir, &self)
+            .or_else(|| self.env_lookup("ILAR_CONFIG_DIR").map(PathBuf::from))
+            .unwrap_or_else(|| home().join(".config/ilar"));
+        let state_dir = self
+            .state_dir
+            .clone()
+            .or_else(|| self.env_lookup("ILAR_STATE_DIR").map(PathBuf::from))
+            .unwrap_or_else(|| home().join(".local/state/ilar"));
+        let project_dir = match self.project_dir.clone() {
+            Some(project_dir) => project_dir,
+            None => std::env::current_dir().context("resolving current project directory")?,
+        };
+        Config::load(user_dir, project_dir, state_dir, &self)
     }
 }
 
@@ -190,26 +225,23 @@ impl Default for Loader {
     }
 }
 
-fn default_config_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("ILAR_CONFIG_DIR") {
-        return PathBuf::from(dir);
-    }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".config/ilar")
-}
-
 impl Config {
-    fn load(user_dir: PathBuf, project_dir: PathBuf, env: &Loader) -> anyhow::Result<Self> {
+    fn load(
+        user_dir: PathBuf,
+        project_dir: PathBuf,
+        state_dir: PathBuf,
+        env: &Loader,
+    ) -> anyhow::Result<Self> {
         // User file first, then project file layered on top.
         let mut merged = FileConfig::default();
-        if let Some(text) = read_config_file(&user_dir.join("ilar.toml")) {
-            merged = merge_file(merged, &text, &user_dir)?;
-        }
-        if let Some(text) = read_config_file(&project_dir.join("ilar.toml")) {
-            merged = merge_file(merged, &text, &project_dir)?;
-        }
-        if let Some(text) = read_config_file(&project_dir.join(".ilar/ilar.toml")) {
-            merged = merge_file(merged, &text, &project_dir)?;
+        for path in [
+            user_dir.join("ilar.toml"),
+            project_dir.join("ilar.toml"),
+            project_dir.join(".ilar/ilar.toml"),
+        ] {
+            if let Some(text) = read_config_file(&path)? {
+                merged = merge_file(merged, &text, &path)?;
+            }
         }
 
         let mut providers = HashMap::new();
@@ -266,38 +298,57 @@ impl Config {
                     .unwrap_or_else(|| "zai/glm-4.7".into()),
             },
             providers,
-            compaction: merged.compaction.unwrap_or_default(),
-            subagents: merged.subagents.unwrap_or_default(),
+            compaction: CompactionConfig {
+                threshold: merged
+                    .compaction
+                    .and_then(|config| config.threshold)
+                    .unwrap_or_else(default_threshold),
+            },
+            subagents: SubagentConfig {
+                max_concurrent: merged
+                    .subagents
+                    .as_ref()
+                    .and_then(|config| config.max_concurrent)
+                    .unwrap_or_else(default_max_concurrent),
+                max_depth: merged
+                    .subagents
+                    .as_ref()
+                    .and_then(|config| config.max_depth)
+                    .unwrap_or_else(default_max_depth),
+                background_tool_timeout_ms: merged
+                    .subagents
+                    .and_then(|config| config.background_tool_timeout_ms)
+                    .unwrap_or_else(default_background_tool_timeout_ms),
+            },
             user_dir,
             project_dir,
+            state_dir,
         })
     }
 
     /// Markdown agents from the config dir merged over built-ins.
-    pub fn agents(&self) -> Vec<AgentDefinition> {
+    pub fn agents(&self) -> anyhow::Result<Vec<AgentDefinition>> {
         let mut agents = AgentDefinition::builtins();
-        let dir = self.user_dir.join("agents");
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            return agents;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().is_none_or(|e| e != "md") {
-                continue;
-            }
-            let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            let Ok(text) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            if let Some(agent) = parse_agent_md(name, &text) {
-                // Markdown agents may override built-ins by name.
-                agents.retain(|a| a.name != agent.name);
-                agents.push(agent);
+        for dir in [
+            self.user_dir.join("agents"),
+            self.project_dir.join(".ilar/agents"),
+        ] {
+            for path in markdown_files(&dir)? {
+                let name = path
+                    .file_stem()
+                    .and_then(|name| name.to_str())
+                    .with_context(|| format!("agent filename is not UTF-8: {}", path.display()))?;
+                let text = std::fs::read_to_string(&path)
+                    .with_context(|| format!("reading agent definition {}", path.display()))?;
+                let agent = parse_agent_md(name, &text)
+                    .with_context(|| format!("parsing agent definition {}", path.display()))?;
+                if let Some(agent) = agent {
+                    agents.retain(|existing| existing.name != name);
+                    agents.push(agent);
+                }
             }
         }
-        agents
+        Ok(agents)
     }
 
     /// Build a concrete provider for "provider/model-id", or None if the
@@ -309,7 +360,7 @@ impl Config {
             "openai" if settings.auth.as_deref() == Some("chatgpt") => {
                 // OAuth mode needs no api_key — tokens come from the store.
                 Box::new(crate::provider::openai::OpenAIProvider::with_chatgpt_auth(
-                    crate::auth::AuthStore::open(default_state_dir()),
+                    crate::auth::AuthStore::open(self.state_dir.clone()),
                     settings.base_url.clone(),
                 ))
             }
@@ -369,6 +420,10 @@ impl Config {
         (&self.user_dir, &self.project_dir)
     }
 
+    pub fn state_dir(&self) -> &Path {
+        &self.state_dir
+    }
+
     /// Deterministic config for tests: both providers keyed, no env.
     pub fn default_for_tests() -> Self {
         let mut providers = HashMap::new();
@@ -399,6 +454,7 @@ impl Config {
             subagents: SubagentConfig::default(),
             user_dir: PathBuf::from("/nonexistent"),
             project_dir: PathBuf::from("/nonexistent"),
+            state_dir: PathBuf::from("/nonexistent"),
         }
     }
 }
@@ -444,38 +500,155 @@ fn fallback_context_limit(model: &str) -> Option<u64> {
         })
 }
 
-fn read_config_file(path: &Path) -> Option<String> {
-    std::fs::read_to_string(path).ok()
+fn read_config_file(path: &Path) -> anyhow::Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("reading config {}", path.display())),
+    }
 }
 
 fn merge_file(base: FileConfig, text: &str, origin: &Path) -> anyhow::Result<FileConfig> {
     let parsed: FileConfig =
-        toml::from_str(text).map_err(|e| anyhow::anyhow!("{origin:?}: {e}"))?;
+        toml::from_str(text).with_context(|| format!("parsing config {}", origin.display()))?;
+    validate_file(&parsed, origin)?;
     let mut merged = base;
     if let Some(g) = parsed.general {
-        merged.general = Some(g);
+        let current = merged.general.get_or_insert_with(GeneralConfig::default);
+        if g.model.is_some() {
+            current.model = g.model;
+        }
     }
     if let Some(p) = parsed.providers {
         let map = merged.providers.get_or_insert_with(HashMap::new);
         for (k, v) in p {
-            map.insert(k, v);
+            let current = map.entry(k).or_default();
+            if v.base_url.is_some() {
+                current.base_url = v.base_url;
+            }
+            if v.api_key.is_some() {
+                current.api_key = v.api_key;
+            }
+            if v.flavor.is_some() {
+                current.flavor = v.flavor;
+            }
+            if v.auth.is_some() {
+                current.auth = v.auth;
+            }
         }
     }
     if let Some(c) = parsed.compaction {
-        merged.compaction = Some(c);
+        let current = merged
+            .compaction
+            .get_or_insert_with(CompactionLayer::default);
+        if c.threshold.is_some() {
+            current.threshold = c.threshold;
+        }
     }
     if let Some(s) = parsed.subagents {
-        merged.subagents = Some(s);
+        let current = merged.subagents.get_or_insert_with(SubagentLayer::default);
+        if s.max_concurrent.is_some() {
+            current.max_concurrent = s.max_concurrent;
+        }
+        if s.max_depth.is_some() {
+            current.max_depth = s.max_depth;
+        }
+        if s.background_tool_timeout_ms.is_some() {
+            current.background_tool_timeout_ms = s.background_tool_timeout_ms;
+        }
     }
     Ok(merged)
 }
 
-/// frontmatter (description, model, disabled) + body prompt.
-fn parse_agent_md(name: &str, text: &str) -> Option<AgentDefinition> {
-    let text = text.trim_start_matches('\u{feff}');
-    let rest = text.strip_prefix("---\n")?;
-    let (frontmatter, body) = rest.split_once("\n---")?;
+fn validate_file(config: &FileConfig, origin: &Path) -> anyhow::Result<()> {
+    if let Some(threshold) = config.compaction.as_ref().and_then(|c| c.threshold) {
+        anyhow::ensure!(
+            threshold.is_finite() && threshold > 0.0 && threshold < 1.0,
+            "{}: compaction.threshold must be finite and between 0 and 1",
+            origin.display()
+        );
+    }
+    if let Some(subagents) = &config.subagents {
+        anyhow::ensure!(
+            subagents.max_concurrent != Some(0),
+            "{}: subagents.max_concurrent must be at least 1",
+            origin.display()
+        );
+        anyhow::ensure!(
+            subagents.max_depth != Some(0),
+            "{}: subagents.max_depth must be at least 1",
+            origin.display()
+        );
+        anyhow::ensure!(
+            subagents.background_tool_timeout_ms != Some(0),
+            "{}: subagents.background_tool_timeout_ms must be at least 1",
+            origin.display()
+        );
+    }
+    if let Some(providers) = &config.providers {
+        for (name, provider) in providers {
+            match name.as_str() {
+                "openai" => {
+                    anyhow::ensure!(
+                        provider
+                            .auth
+                            .as_deref()
+                            .is_none_or(|auth| matches!(auth, "api_key" | "chatgpt")),
+                        "{}: providers.openai.auth must be `api_key` or `chatgpt`",
+                        origin.display()
+                    );
+                    anyhow::ensure!(
+                        provider.flavor.is_none(),
+                        "{}: providers.openai.flavor is not supported",
+                        origin.display()
+                    );
+                }
+                "zai" => {
+                    anyhow::ensure!(
+                        provider
+                            .flavor
+                            .as_deref()
+                            .is_none_or(|flavor| matches!(flavor, "anthropic" | "openai")),
+                        "{}: providers.zai.flavor must be `anthropic` or `openai`",
+                        origin.display()
+                    );
+                    anyhow::ensure!(
+                        provider.auth.is_none(),
+                        "{}: providers.zai.auth is not supported",
+                        origin.display()
+                    );
+                }
+                _ => anyhow::bail!("{}: unsupported provider {name:?}", origin.display()),
+            }
+        }
+    }
+    Ok(())
+}
 
+pub(crate) fn markdown_files(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("reading definition directory {}", dir.display()));
+        }
+    };
+    let mut paths = Vec::new();
+    for entry in entries {
+        let entry = entry.with_context(|| format!("reading entry in {}", dir.display()))?;
+        let path = entry.path();
+        if path.extension().is_some_and(|extension| extension == "md") {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+/// frontmatter (description, model, disabled) + body prompt.
+fn parse_agent_md(name: &str, text: &str) -> anyhow::Result<Option<AgentDefinition>> {
+    let (frontmatter, body) = super::split_frontmatter(text)?;
     #[derive(Deserialize, Default)]
     #[serde(deny_unknown_fields)]
     struct Frontmatter {
@@ -484,11 +657,11 @@ fn parse_agent_md(name: &str, text: &str) -> Option<AgentDefinition> {
         disabled: Option<bool>,
         read_only: Option<bool>,
     }
-    let fm: Frontmatter = toml::from_str(frontmatter).ok()?;
+    let fm: Frontmatter = toml::from_str(&frontmatter).context("invalid agent frontmatter")?;
     if fm.disabled == Some(true) {
-        return None;
+        return Ok(None);
     }
-    Some(AgentDefinition {
+    Ok(Some(AgentDefinition {
         name: name.into(),
         description: fm.description.unwrap_or_else(|| name.into()),
         model: fm.model,
@@ -498,14 +671,5 @@ fn parse_agent_md(name: &str, text: &str) -> Option<AgentDefinition> {
         } else {
             super::AgentWorkspaceMode::Mutable
         },
-    })
-}
-
-/// State directory: ILAR_STATE_DIR override, else ~/.local/state/ilar.
-pub fn default_state_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("ILAR_STATE_DIR") {
-        return PathBuf::from(dir);
-    }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".local/state/ilar")
+    }))
 }

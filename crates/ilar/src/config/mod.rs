@@ -5,9 +5,29 @@ mod agents_md;
 mod toml;
 
 pub use agents_md::system_prompt_for;
-pub use toml::{
-    CompactionConfig, Config, Loader, ProviderConfig, SubagentConfig, default_state_dir, load,
-};
+pub(crate) use toml::markdown_files;
+pub use toml::{CompactionConfig, Config, Loader, ProviderConfig, SubagentConfig, load};
+
+pub(crate) fn split_frontmatter(text: &str) -> anyhow::Result<(String, String)> {
+    let text = text.trim_start_matches('\u{feff}').replace("\r\n", "\n");
+    let mut lines = text.split('\n');
+    anyhow::ensure!(
+        lines.next() == Some("---"),
+        "frontmatter must start with an exact `---` delimiter"
+    );
+
+    let mut frontmatter = Vec::new();
+    let mut closed = false;
+    for line in &mut lines {
+        if line == "---" {
+            closed = true;
+            break;
+        }
+        frontmatter.push(line);
+    }
+    anyhow::ensure!(closed, "frontmatter must end with an exact `---` delimiter");
+    Ok((frontmatter.join("\n"), lines.collect::<Vec<_>>().join("\n")))
+}
 
 /// A usable agent: built-in or markdown-defined.
 #[derive(Debug, Clone, PartialEq)]

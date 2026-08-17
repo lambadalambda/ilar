@@ -1,6 +1,8 @@
 use std::fs;
 
-use ilar::config::{AgentWorkspaceMode, Config, Loader, system_prompt_for};
+use ilar::config::{
+    AgentWorkspaceMode, CompactionConfig, Config, Loader, SubagentConfig, system_prompt_for,
+};
 use ilar::provider::ProviderResolver;
 
 fn tempdir() -> (tempfile::TempDir, std::path::PathBuf) {
@@ -10,6 +12,9 @@ fn tempdir() -> (tempfile::TempDir, std::path::PathBuf) {
 }
 
 fn write(path: &std::path::Path, content: &str) {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
     fs::write(path, content).unwrap();
 }
 
@@ -43,6 +48,17 @@ fn background_tool_timeout_is_configurable() {
     );
     let config = Loader::no_env().config_dir(dir).resolve().unwrap();
     assert_eq!(config.subagents.background_tool_timeout_ms, 42_000);
+}
+
+#[test]
+fn public_section_types_retain_deserialization_defaults() {
+    let compaction: CompactionConfig = toml::from_str("").unwrap();
+    assert_eq!(compaction.threshold, 0.85);
+
+    let subagents: SubagentConfig = toml::from_str("max_depth = 7").unwrap();
+    assert_eq!(subagents.max_concurrent, 10);
+    assert_eq!(subagents.max_depth, 7);
+    assert_eq!(subagents.background_tool_timeout_ms, 600_000);
 }
 
 #[test]
@@ -113,7 +129,7 @@ fn markdown_agents_parsed_and_merged() {
     );
 
     let config = Loader::no_env().config_dir(dir).resolve().unwrap();
-    let agents = config.agents();
+    let agents = config.agents().unwrap();
     let reviewer = agents
         .iter()
         .find(|a| a.name == "reviewer")
@@ -284,5 +300,263 @@ fn chatgpt_auth_takes_catalog_precedence_over_an_api_key() {
         !models
             .iter()
             .any(|model| model.full_id() == "openai/gpt-5.2")
+    );
+}
+
+#[test]
+fn project_layers_preserve_omitted_nested_fields() {
+    let (_gu, user) = tempdir();
+    write(
+        &user.join("ilar.toml"),
+        r#"
+[providers.zai]
+api_key = "user-key"
+base_url = "https://user.example"
+
+[compaction]
+threshold = 0.7
+
+[subagents]
+max_concurrent = 4
+max_depth = 2
+background_tool_timeout_ms = 42000
+"#,
+    );
+    let (_gp, project) = tempdir();
+    write(
+        &project.join(".ilar/ilar.toml"),
+        r#"
+[providers.zai]
+base_url = "https://project.example"
+
+[compaction]
+
+[subagents]
+max_depth = 5
+"#,
+    );
+
+    let config = Loader::no_env()
+        .config_dir(user)
+        .project_dir(project)
+        .resolve()
+        .unwrap();
+    assert_eq!(config.providers["zai"].api_key.as_deref(), Some("user-key"));
+    assert_eq!(
+        config.providers["zai"].base_url.as_deref(),
+        Some("https://project.example")
+    );
+    assert_eq!(config.compaction.threshold, 0.7);
+    assert_eq!(config.subagents.max_concurrent, 4);
+    assert_eq!(config.subagents.max_depth, 5);
+    assert_eq!(config.subagents.background_tool_timeout_ms, 42_000);
+}
+
+#[test]
+fn project_can_reset_inherited_chatgpt_auth_to_api_key() {
+    let (_gu, user) = tempdir();
+    write(
+        &user.join("ilar.toml"),
+        "[providers.openai]\nauth = \"chatgpt\"\n",
+    );
+    let (_gp, project) = tempdir();
+    write(
+        &project.join("ilar.toml"),
+        "[providers.openai]\nauth = \"api_key\"\napi_key = \"project-key\"\n",
+    );
+
+    let config = Loader::no_env()
+        .config_dir(user)
+        .project_dir(project)
+        .resolve()
+        .unwrap();
+    assert_eq!(config.providers["openai"].auth.as_deref(), Some("api_key"));
+    assert_eq!(
+        config.providers["openai"].api_key.as_deref(),
+        Some("project-key")
+    );
+    assert!(config.provider_for("openai/gpt-5.2").is_some());
+}
+
+#[test]
+fn config_read_errors_include_the_file_path() {
+    let (_g, dir) = tempdir();
+    let path = dir.join("ilar.toml");
+    fs::write(&path, [0xff, 0xfe]).unwrap();
+
+    let error = Loader::no_env()
+        .config_dir(dir)
+        .resolve()
+        .expect_err("invalid UTF-8 must not look like a missing config");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains(path.to_string_lossy().as_ref()),
+        "{message}"
+    );
+    assert!(message.to_lowercase().contains("utf"), "{message}");
+}
+
+#[test]
+fn injected_environment_resolves_the_config_directory() {
+    let (_g, dir) = tempdir();
+    let (_gp, project) = tempdir();
+    let (_gs, state) = tempdir();
+    write(
+        &dir.join("ilar.toml"),
+        "[general]\nmodel = \"openai/gpt-5.6-sol\"\n",
+    );
+
+    let config = Loader::with_env(
+        vec![
+            ("ILAR_CONFIG_DIR", dir.display().to_string()),
+            ("ILAR_STATE_DIR", state.display().to_string()),
+        ],
+        vec![],
+    )
+    .project_dir(project)
+    .resolve()
+    .unwrap();
+    assert_eq!(config.general.model, "openai/gpt-5.6-sol");
+    assert_eq!(config.dirs().0, dir);
+    assert_eq!(config.state_dir(), state);
+}
+
+#[test]
+fn project_agents_override_user_agents_and_accept_crlf() {
+    let (_gu, user) = tempdir();
+    write(
+        &user.join("agents/reviewer.md"),
+        "---\ndescription = \"user reviewer\"\n---\nuser prompt\n",
+    );
+    let (_gp, project) = tempdir();
+    write(
+        &project.join(".ilar/agents/reviewer.md"),
+        "---\r\ndescription = \"project reviewer\"\r\nread_only = true\r\n---\r\nproject prompt\r\n",
+    );
+
+    let config = Loader::no_env()
+        .config_dir(user)
+        .project_dir(project)
+        .resolve()
+        .unwrap();
+    let agents = config.agents().unwrap();
+    let reviewers = agents
+        .iter()
+        .filter(|agent| agent.name == "reviewer")
+        .collect::<Vec<_>>();
+    assert_eq!(reviewers.len(), 1, "{agents:?}");
+    assert_eq!(reviewers[0].description, "project reviewer");
+    assert_eq!(reviewers[0].workspace_mode, AgentWorkspaceMode::ReadOnly);
+    assert_eq!(reviewers[0].prompt, "project prompt");
+}
+
+#[test]
+fn semantic_ranges_and_provider_modes_are_validated() {
+    for (name, content) in [
+        ("threshold", "[compaction]\nthreshold = 1.0\n"),
+        ("concurrency", "[subagents]\nmax_concurrent = 0\n"),
+        ("depth", "[subagents]\nmax_depth = 0\n"),
+        (
+            "background timeout",
+            "[subagents]\nbackground_tool_timeout_ms = 0\n",
+        ),
+        ("OpenAI auth", "[providers.openai]\nauth = \"mystery\"\n"),
+        ("z.ai flavor", "[providers.zai]\nflavor = \"mystery\"\n"),
+    ] {
+        let (_g, dir) = tempdir();
+        write(&dir.join("ilar.toml"), content);
+        let error = Loader::no_env().config_dir(dir).resolve().expect_err(name);
+        assert!(
+            format!("{error:#}").contains("ilar.toml"),
+            "{name}: {error:#}"
+        );
+    }
+}
+
+#[test]
+fn checked_in_config_example_parses() {
+    let (_g, dir) = tempdir();
+    write(
+        &dir.join("ilar.toml"),
+        include_str!("../../../ilar.toml.example"),
+    );
+    Loader::no_env().config_dir(dir).resolve().unwrap();
+}
+
+#[test]
+fn checked_in_agent_example_parses() {
+    let (_g, dir) = tempdir();
+    write(
+        &dir.join("agents/explorer.md"),
+        include_str!("../../../examples/agents/explorer.md"),
+    );
+
+    let config = Loader::no_env().config_dir(dir).resolve().unwrap();
+    let agent = config
+        .agents()
+        .unwrap()
+        .into_iter()
+        .find(|agent| agent.name == "explorer")
+        .expect("checked-in agent example loads");
+    assert_eq!(agent.workspace_mode, AgentWorkspaceMode::ReadOnly);
+}
+
+#[test]
+fn malformed_agent_frontmatter_reports_its_path() {
+    let (_g, dir) = tempdir();
+    let path = dir.join("agents/broken.md");
+    write(
+        &path,
+        "---\ndescription = \"not exactly closed\"\n----\nbody\n",
+    );
+    let config = Loader::no_env().config_dir(dir).resolve().unwrap();
+
+    let error = config
+        .agents()
+        .expect_err("an inexact delimiter must be diagnosed");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains(path.to_string_lossy().as_ref()),
+        "{message}"
+    );
+    assert!(message.contains("exact `---`"), "{message}");
+}
+
+#[test]
+fn disabled_override_does_not_remove_an_existing_agent() {
+    let (_g, dir) = tempdir();
+    write(
+        &dir.join("agents/build.md"),
+        "---\ndisabled = true\n---\nunused\n",
+    );
+    let config = Loader::no_env().config_dir(dir).resolve().unwrap();
+
+    let agents = config.agents().unwrap();
+    assert!(
+        agents.iter().any(|agent| agent.name == "build"),
+        "{agents:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn config_permission_errors_are_not_treated_as_missing() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (_g, dir) = tempdir();
+    let path = dir.join("ilar.toml");
+    write(&path, "[general]\nmodel = \"zai/glm-4.7\"\n");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read_to_string(&path).is_ok() {
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        return;
+    }
+
+    let result = Loader::no_env().config_dir(dir).resolve();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    let error = result.expect_err("permission denial must be reported");
+    assert!(
+        format!("{error:#}").contains(path.to_string_lossy().as_ref()),
+        "{error:#}"
     );
 }
