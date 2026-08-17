@@ -3,10 +3,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::StreamExt;
-use ilar::agent::{LoopConfig, LoopEvent, TurnOutcome, run_turn};
+use ilar::agent::{
+    LOOP_EVENT_CAPACITY, LoopConfig, LoopEvent, LoopEventReceiver, LoopEventSender, TurnOutcome,
+    loop_event_channel, run_turn,
+};
 use ilar::provider::zai::{Flavor, ZaiProvider};
 use ilar::provider::{EventStream, MockProvider, Provider, ProviderEvent, Request, StopReason};
-use ilar::session::{ContentBlock, SessionMeta, SessionStore, new_id};
+use ilar::session::{ContentBlock, SessionEvent, SessionMeta, SessionStore, new_id};
 use ilar::todo::Status as TodoStatus;
 use ilar::tools::{
     Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, ToolRegistry, WorkspaceAccess,
@@ -29,11 +32,8 @@ fn temp_session(agent: &str) -> (SessionStore, String) {
     (store, id)
 }
 
-fn events_channel() -> (
-    tokio::sync::mpsc::UnboundedSender<LoopEvent>,
-    tokio::sync::mpsc::UnboundedReceiver<LoopEvent>,
-) {
-    tokio::sync::mpsc::unbounded_channel()
+fn events_channel() -> (LoopEventSender, LoopEventReceiver) {
+    loop_event_channel(LOOP_EVENT_CAPACITY)
 }
 
 /// A tool the model can "call": records invocations, returns canned text.
@@ -78,6 +78,102 @@ fn tool_call_event(id: &str, msg: &str) -> ProviderEvent {
         name: "echo".into(),
         input: serde_json::json!({"msg": msg}),
     }
+}
+
+#[tokio::test]
+async fn cancellation_during_final_event_backpressure_aborts_the_turn() {
+    let (store, session_id) = temp_session("build");
+    let provider = MockProvider::new(vec![vec![
+        ProviderEvent::TextDelta("answer".into()),
+        ProviderEvent::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+            usage: Default::default(),
+        },
+    ]]);
+    let (tx, mut rx) = loop_event_channel(2);
+    let cancel = CancellationToken::new();
+    let turn_cancel = cancel.clone();
+    let turn = tokio::spawn(async move {
+        run_turn(
+            &provider,
+            &ToolRegistry::builtin(),
+            &store,
+            &session_id,
+            "hello",
+            None,
+            LoopConfig::default(),
+            tx,
+            turn_cancel,
+            ToolContext::root(std::env::temp_dir()),
+        )
+        .await
+        .unwrap()
+    });
+
+    tokio::task::yield_now().await;
+    assert!(!turn.is_finished());
+    cancel.cancel();
+    assert_eq!(turn.await.unwrap(), TurnOutcome::Aborted);
+    assert!(matches!(rx.recv().await, Some(LoopEvent::TurnStarted)));
+    assert!(matches!(rx.recv().await, Some(LoopEvent::TextDelta(text)) if text == "answer"));
+    assert!(matches!(
+        rx.recv().await,
+        Some(LoopEvent::TurnDone {
+            outcome: TurnOutcome::Aborted
+        })
+    ));
+}
+
+#[tokio::test]
+async fn cancellation_during_tool_step_backpressure_closes_persisted_calls() {
+    let (store, session_id) = temp_session("build");
+    let provider = MockProvider::new(vec![vec![
+        ProviderEvent::ToolCallStarted {
+            id: "call-1".into(),
+            name: "echo".into(),
+        },
+        tool_call_event("call-1", "hello"),
+        ProviderEvent::TurnComplete {
+            stop_reason: StopReason::ToolUse,
+            usage: Default::default(),
+        },
+    ]]);
+    let (tx, _rx) = loop_event_channel(3);
+    let cancel = CancellationToken::new();
+    let turn_cancel = cancel.clone();
+    let turn_store = store.clone();
+    let turn_session_id = session_id.clone();
+    let turn = tokio::spawn(async move {
+        run_turn(
+            &provider,
+            &ToolRegistry::builtin(),
+            &turn_store,
+            &turn_session_id,
+            "use a tool",
+            None,
+            LoopConfig::default(),
+            tx,
+            turn_cancel,
+            ToolContext::root(std::env::temp_dir()),
+        )
+        .await
+        .unwrap()
+    });
+
+    tokio::task::yield_now().await;
+    assert!(!turn.is_finished());
+    cancel.cancel();
+    assert_eq!(turn.await.unwrap(), TurnOutcome::Aborted);
+
+    let session = store.load(&session_id).unwrap();
+    assert!(session.events().iter().any(|event| matches!(
+        event,
+        SessionEvent::ToolResult {
+            tool_use_id,
+            is_error: true,
+            ..
+        } if tool_use_id == "call-1"
+    )));
 }
 
 #[tokio::test]

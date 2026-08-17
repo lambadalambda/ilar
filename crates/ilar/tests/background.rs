@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::{StreamExt, stream};
-use ilar::agent::{LoopConfig, TurnOutcome, run_turn};
+use ilar::agent::{LOOP_EVENT_CAPACITY, LoopConfig, TurnOutcome, loop_event_channel, run_turn};
 use ilar::config::{AgentDefinition, AgentWorkspaceMode};
 use ilar::provider::{
     EventStream, FixedProviderResolver, MockProvider, Provider, ProviderEvent, Request, StopReason,
@@ -840,7 +840,7 @@ async fn background_task_returns_immediately_and_notifies_once() {
         ],
     ]);
 
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, _) = loop_event_channel(LOOP_EVENT_CAPACITY);
     let start = std::time::Instant::now();
     let outcome = run_turn(
         &parent,
@@ -1788,7 +1788,7 @@ async fn notification_reinvokes_parent_loop_as_synthetic_user_turn() {
             usage: Default::default(),
         },
     ]]);
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, _) = loop_event_channel(LOOP_EVENT_CAPACITY);
     run_turn(
         &parent,
         &registry,

@@ -23,7 +23,10 @@ use tokio_util::sync::CancellationToken;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use ilar::agent::{LoopConfig, LoopEvent, TurnOutcome, run_turn};
+use ilar::agent::{
+    LOOP_EVENT_CAPACITY, LoopConfig, LoopEvent, LoopEventReceiver, TurnOutcome, loop_event_channel,
+    run_turn,
+};
 use ilar::config::{Loader, system_prompt_for};
 use ilar::provider::ProviderResolver;
 use ilar::session::{SessionMeta, SessionStore, new_id};
@@ -786,6 +789,15 @@ impl App {
                     .push(Line_::System("transcript compacted".into()));
             }
             LoopEvent::TurnDone { outcome } => {
+                if *outcome == TurnOutcome::Aborted {
+                    for line in &mut self.lines {
+                        if let Line_::Tool { state, .. } = line
+                            && *state == ToolState::Running
+                        {
+                            *state = ToolState::Failed;
+                        }
+                    }
+                }
                 self.status = match outcome {
                     TurnOutcome::Completed => "ready".into(),
                     TurnOutcome::Aborted => "aborted".into(),
@@ -2498,23 +2510,35 @@ fn session_context_tokens(
     Ok((estimated, true))
 }
 
-fn drain_notifications(
-    notifications: &mut tokio::sync::mpsc::UnboundedReceiver<ilar::subagent::Notification>,
-    queued: &mut std::collections::VecDeque<ilar::subagent::Notification>,
-) {
-    while let Ok(notification) = notifications.try_recv() {
-        queued.push_back(notification);
-    }
+struct PendingNotification {
+    notification: ilar::subagent::Notification,
+    queued_ahead: usize,
 }
 
-fn next_queued_notification(
+fn next_notification(
     turn_active: bool,
     paused: bool,
-    queued: &mut std::collections::VecDeque<ilar::subagent::Notification>,
+    pending: &mut Option<PendingNotification>,
+    notifications: &mut tokio::sync::mpsc::Receiver<ilar::subagent::Notification>,
 ) -> Option<ilar::subagent::Notification> {
-    (!turn_active && !paused)
-        .then(|| queued.pop_front())
-        .flatten()
+    if turn_active || paused {
+        return None;
+    }
+    if pending
+        .as_ref()
+        .is_some_and(|pending| pending.queued_ahead == 0)
+    {
+        return pending.take().map(|pending| pending.notification);
+    }
+    match notifications.try_recv() {
+        Ok(notification) => {
+            if let Some(pending) = pending {
+                pending.queued_ahead = pending.queued_ahead.saturating_sub(1);
+            }
+            Some(notification)
+        }
+        Err(_) => pending.take().map(|pending| pending.notification),
+    }
 }
 
 enum TurnCompletion {
@@ -2533,18 +2557,17 @@ async fn run_app(
     registry: &ToolRegistry,
     tool_ctx: ToolContext,
     spawner: std::sync::Arc<ilar::subagent::SubagentSpawner>,
-    mut notifications: tokio::sync::mpsc::UnboundedReceiver<ilar::subagent::Notification>,
+    mut notifications: tokio::sync::mpsc::Receiver<ilar::subagent::Notification>,
     loop_config: LoopConfig,
     model_choices: Vec<&'static ilar::model::ModelInfo>,
 ) -> Result<()> {
-    let mut events_rx: Option<tokio::sync::mpsc::UnboundedReceiver<LoopEvent>> = None;
-    let mut queued_notifications = std::collections::VecDeque::new();
+    let mut events_rx: Option<LoopEventReceiver> = None;
+    let mut pending_notification = None;
     let mut notifications_paused = false;
     let mut cancel: Option<CancellationToken> = None;
     let mut turn_handle: Option<tokio::task::JoinHandle<TurnCompletion>> = None;
 
     loop {
-        drain_notifications(&mut notifications, &mut queued_notifications);
         // Drain pending loop events.
         if let Some(rx) = events_rx.as_mut() {
             while let Ok(event) = rx.try_recv() {
@@ -2575,7 +2598,10 @@ async fn run_app(
                     app.busy = false;
                     app.status = "ready".into();
                     app.set_activity(Activity::Ready);
-                    queued_notifications.push_back(notification);
+                    pending_notification = Some(PendingNotification {
+                        notification,
+                        queued_ahead: notifications.len(),
+                    });
                 }
                 Ok(TurnCompletion::Routed(Ok(ilar::subagent::RouteOutcome::Requeue(
                     notification,
@@ -2583,7 +2609,10 @@ async fn run_app(
                     app.busy = false;
                     app.status = "notification paused; send a message to resume".into();
                     app.set_activity(Activity::Paused);
-                    queued_notifications.push_front(notification);
+                    pending_notification = Some(PendingNotification {
+                        notification,
+                        queued_ahead: 0,
+                    });
                     notifications_paused = true;
                 }
                 Ok(TurnCompletion::Routed(Ok(ilar::subagent::RouteOutcome::Complete))) => {
@@ -2613,10 +2642,11 @@ async fn run_app(
         }
 
         // Background completions re-invoke their declared parent while idle.
-        if let Some(notification) = next_queued_notification(
+        if let Some(notification) = next_notification(
             turn_handle.is_some(),
             notifications_paused || app.model_picker.is_some(),
-            &mut queued_notifications,
+            &mut pending_notification,
+            &mut notifications,
         ) {
             if notification.parent_session_id != session_id {
                 let token = CancellationToken::new();
@@ -2636,7 +2666,7 @@ async fn run_app(
             )));
             let text = notification.text;
             app.lines.push(Line_::User(text.clone()));
-            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let (tx, rx) = loop_event_channel(LOOP_EVENT_CAPACITY);
             events_rx = Some(rx);
             let token = CancellationToken::new();
             cancel = Some(token.clone());
@@ -2808,7 +2838,7 @@ async fn run_app(
                             let text = app.input.take();
                             app.lines.push(Line_::User(text.clone()));
                             app.follow_tail = true;
-                            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                            let (tx, rx) = loop_event_channel(LOOP_EVENT_CAPACITY);
                             events_rx = Some(rx);
                             let token = CancellationToken::new();
                             cancel = Some(token.clone());
@@ -3559,6 +3589,27 @@ mod tests {
     }
 
     #[test]
+    fn aborted_turn_closes_running_tool_rows() {
+        let mut app = App::new();
+        app.push_loop_event(&LoopEvent::ToolStarted {
+            id: "call-1".into(),
+            name: "bash".into(),
+        });
+
+        app.push_loop_event(&LoopEvent::TurnDone {
+            outcome: TurnOutcome::Aborted,
+        });
+
+        assert!(matches!(
+            app.lines.last(),
+            Some(Line_::Tool {
+                state: ToolState::Failed,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn parallel_tool_completions_match_by_id() {
         let mut app = App::new();
         app.push_loop_event(&LoopEvent::ToolStarted {
@@ -4289,9 +4340,9 @@ mod tests {
 
     #[test]
     fn notification_burst_stays_queued_while_a_turn_is_active() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
         for description in ["first", "second"] {
-            tx.send(ilar::subagent::Notification {
+            tx.try_send(ilar::subagent::Notification {
                 parent_session_id: "parent".into(),
                 description: description.into(),
                 text: description.into(),
@@ -4300,22 +4351,56 @@ mod tests {
             .unwrap();
         }
 
-        let mut queued = std::collections::VecDeque::new();
-        drain_notifications(&mut rx, &mut queued);
-        assert!(next_queued_notification(true, false, &mut queued).is_none());
-        assert!(next_queued_notification(false, true, &mut queued).is_none());
-        assert_eq!(queued.len(), 2);
+        let mut pending = None;
+        assert!(next_notification(true, false, &mut pending, &mut rx).is_none());
+        assert_eq!(rx.len(), 2);
+        assert!(next_notification(false, true, &mut pending, &mut rx).is_none());
+        assert_eq!(rx.len(), 2);
         assert_eq!(
-            next_queued_notification(false, false, &mut queued)
+            next_notification(false, false, &mut pending, &mut rx)
                 .unwrap()
                 .description,
             "first"
         );
         assert_eq!(
-            next_queued_notification(false, false, &mut queued)
+            next_notification(false, false, &mut pending, &mut rx)
                 .unwrap()
                 .description,
             "second"
+        );
+    }
+
+    #[test]
+    fn propagated_notification_follows_the_existing_receiver_backlog() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        tx.try_send(ilar::subagent::Notification {
+            parent_session_id: "parent".into(),
+            description: "queued".into(),
+            text: "queued".into(),
+            is_error: false,
+        })
+        .unwrap();
+        let mut pending = Some(PendingNotification {
+            notification: ilar::subagent::Notification {
+                parent_session_id: "parent".into(),
+                description: "propagated".into(),
+                text: "propagated".into(),
+                is_error: false,
+            },
+            queued_ahead: rx.len(),
+        });
+
+        assert_eq!(
+            next_notification(false, false, &mut pending, &mut rx)
+                .unwrap()
+                .description,
+            "queued"
+        );
+        assert_eq!(
+            next_notification(false, false, &mut pending, &mut rx)
+                .unwrap()
+                .description,
+            "propagated"
         );
     }
 }

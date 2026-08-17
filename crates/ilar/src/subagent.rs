@@ -3,7 +3,9 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::agent::{LoopConfig, TurnOutcome, run_turn};
+use crate::agent::{
+    LOOP_EVENT_CAPACITY, LoopConfig, LoopEventSender, TurnOutcome, loop_event_channel, run_turn,
+};
 use crate::config::system_prompt_for;
 use crate::config::{AgentDefinition, AgentWorkspaceMode};
 use crate::provider::ProviderResolver;
@@ -12,6 +14,8 @@ use crate::tools::{
     Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, ToolRegistry, WorkspaceAccess,
 };
 use serde::Deserialize;
+
+const NOTIFICATION_CAPACITY: usize = 64;
 
 /// A completed background task's notification — the synthetic user
 /// message that re-invokes the parent loop.
@@ -44,9 +48,9 @@ pub struct SubagentSpawner {
     active_sessions: Arc<Mutex<std::collections::HashSet<String>>>,
     active_sessions_changed: tokio::sync::watch::Sender<u64>,
     /// Background completions land here; the session owner consumes.
-    notify_tx: tokio::sync::mpsc::UnboundedSender<Notification>,
+    notify_tx: tokio::sync::mpsc::Sender<Notification>,
     /// The single notification receiver, handed out by `subscribe`.
-    notify_rx: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<Notification>>>>,
+    notify_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<Notification>>>>,
     stall_timeout: std::time::Duration,
     /// Abort handles for detached background tasks.
     background_tasks: Arc<Mutex<BackgroundRegistry>>,
@@ -78,7 +82,7 @@ impl SubagentSpawner {
         max_concurrent: usize,
         max_depth: usize,
     ) -> Self {
-        let (notify_tx, notify_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (notify_tx, notify_rx) = tokio::sync::mpsc::channel(NOTIFICATION_CAPACITY);
         let workspace_location = crate::tools::WorkspaceLocation::shared(cwd);
         let workspace = crate::tools::WorkspaceScheduler::for_location(&workspace_location);
         let (active_sessions_changed, _) = tokio::sync::watch::channel(0);
@@ -133,12 +137,12 @@ impl SubagentSpawner {
 
     /// Receiver for background-task notifications (single consumer;
     /// second call returns an already-closed receiver).
-    pub fn subscribe(&self) -> tokio::sync::mpsc::UnboundedReceiver<Notification> {
+    pub fn subscribe(&self) -> tokio::sync::mpsc::Receiver<Notification> {
         self.notify_rx
             .lock()
             .unwrap()
             .take()
-            .unwrap_or_else(|| tokio::sync::mpsc::unbounded_channel::<Notification>().1)
+            .unwrap_or_else(|| tokio::sync::mpsc::channel::<Notification>(1).1)
     }
 
     /// Abort every detached background task (Ctrl-C path).
@@ -280,6 +284,21 @@ impl SubagentSpawner {
                     return ToolOutput::error(
                         "mutable task cannot run inside a read-only child workspace",
                     );
+                }
+            }
+        } else {
+            None
+        };
+        let notification_permit = if input.background == Some(true) {
+            match self.notify_tx.clone().try_reserve_owned() {
+                Ok(permit) => Some(permit),
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    return ToolOutput::error(
+                        "background task capacity is full; retry after a notification is handled",
+                    );
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    return ToolOutput::error("background notification receiver is closed");
                 }
             }
         } else {
@@ -452,6 +471,7 @@ impl SubagentSpawner {
         };
 
         if input.background == Some(true) {
+            let notification_permit = notification_permit.expect("reserved for background task");
             // Detached: run the child on a spawned task with a stall
             // watchdog; completion lands as a notification for the parent
             // loop; the tool call returns immediately.
@@ -478,6 +498,7 @@ impl SubagentSpawner {
             let task_registry = self.background_tasks.clone();
             let (registered_tx, registered_rx) = tokio::sync::oneshot::channel();
             let handle = tokio::spawn(async move {
+                let mut notification_permit = Some(notification_permit);
                 if registered_rx.await.is_err() {
                     return;
                 }
@@ -491,14 +512,17 @@ impl SubagentSpawner {
                     Some(lease) => lease,
                     None if cross_workspace_nested => {
                         let Some(lease) = workspace.try_acquire_lease(workspace_access) else {
-                            let _ = spawner.notify_tx.send(Notification {
-                                parent_session_id,
-                                description: description.clone(),
-                                text: format!(
-                                    "<task-notification>\nTask \"{description}\" failed: target workspace is busy; retry after the current task finishes\n</task-notification>"
-                                ),
-                                is_error: true,
-                            });
+                            publish_reserved_notification(
+                                &mut notification_permit,
+                                Notification {
+                                    parent_session_id,
+                                    description: description.clone(),
+                                    text: format!(
+                                        "<task-notification>\nTask \"{description}\" failed: target workspace is busy; retry after the current task finishes\n</task-notification>"
+                                    ),
+                                    is_error: true,
+                                },
+                            );
                             return;
                         };
                         lease
@@ -507,7 +531,7 @@ impl SubagentSpawner {
                         tokio::select! {
                             lease = workspace.acquire_lease(workspace_access) => lease,
                             () = task_cancel.cancelled() => {
-                                let _ = spawner.notify_tx.send(Notification {
+                                publish_reserved_notification(&mut notification_permit, Notification {
                                     parent_session_id,
                                     description: description.clone(),
                                     text: format!("<task-notification>\nTask \"{description}\" was cancelled.\n</task-notification>"),
@@ -516,7 +540,7 @@ impl SubagentSpawner {
                                 return;
                             }
                             () = root_cancel.cancelled() => {
-                                let _ = spawner.notify_tx.send(Notification {
+                                publish_reserved_notification(&mut notification_permit, Notification {
                                     parent_session_id,
                                     description: description.clone(),
                                     text: format!("<task-notification>\nTask \"{description}\" was cancelled.\n</task-notification>"),
@@ -529,33 +553,39 @@ impl SubagentSpawner {
                 };
                 let revalidated = revalidate_after_lease(&parent_location, &leased_location).await;
                 if let Err(error) = revalidated.as_ref() {
-                    let _ = spawner.notify_tx.send(Notification {
-                        parent_session_id,
-                        description: description.clone(),
-                        text: format!(
-                            "<task-notification>\nTask \"{description}\" failed: workspace changed while waiting for its lease: {error:#}\n</task-notification>"
-                        ),
-                        is_error: true,
-                    });
+                    publish_reserved_notification(
+                        &mut notification_permit,
+                        Notification {
+                            parent_session_id,
+                            description: description.clone(),
+                            text: format!(
+                                "<task-notification>\nTask \"{description}\" failed: workspace changed while waiting for its lease: {error:#}\n</task-notification>"
+                            ),
+                            is_error: true,
+                        },
+                    );
                     return;
                 }
                 if revalidated
                     .as_ref()
                     .is_ok_and(|location| location != &leased_location)
                 {
-                    let _ = spawner.notify_tx.send(Notification {
-                        parent_session_id,
-                        description: description.clone(),
-                        text: format!(
-                            "<task-notification>\nTask \"{description}\" failed: workspace changed while waiting for its lease\n</task-notification>"
-                        ),
-                        is_error: true,
-                    });
+                    publish_reserved_notification(
+                        &mut notification_permit,
+                        Notification {
+                            parent_session_id,
+                            description: description.clone(),
+                            text: format!(
+                                "<task-notification>\nTask \"{description}\" failed: workspace changed while waiting for its lease\n</task-notification>"
+                            ),
+                            is_error: true,
+                        },
+                    );
                     return;
                 }
                 child_ctx.workspace_lease = Some(lease);
                 let cancel = root_cancel.child_token();
-                let (tx, mut rx_evt) = tokio::sync::mpsc::unbounded_channel();
+                let (tx, mut rx_evt) = loop_event_channel(LOOP_EVENT_CAPACITY);
                 // Activity tracker: any child event counts as progress.
                 let last_activity = Arc::new(Mutex::new(std::time::Instant::now()));
                 let watcher_last = last_activity.clone();
@@ -657,7 +687,7 @@ impl SubagentSpawner {
                         is_error: true,
                     },
                 };
-                let _ = spawner.notify_tx.send(notification);
+                publish_reserved_notification(&mut notification_permit, notification);
             });
             background_registry.tasks.push(BackgroundTask {
                 id: registry_id,
@@ -739,9 +769,19 @@ DO NOT sleep, poll, or check on it — work on something else or end your respon
         access: WorkspaceAccess,
         root_cancel: tokio_util::sync::CancellationToken,
     ) -> ToolOutput {
+        let notification_permit = match self.notify_tx.clone().try_reserve_owned() {
+            Ok(permit) => permit,
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                return ToolOutput::error(
+                    "background task capacity is full; retry after a notification is handled",
+                );
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                return ToolOutput::error("background notification receiver is closed");
+            }
+        };
         let job_id = new_id();
         let notification_id = job_id.clone();
-        let spawner = self.clone();
         let background_cancel = tokio_util::sync::CancellationToken::new();
         let task_cancel = background_cancel.clone();
         let workspace = self.workspace.clone();
@@ -758,6 +798,7 @@ DO NOT sleep, poll, or check on it — work on something else or end your respon
             let task_registry = self.background_tasks.clone();
             let (registered_tx, registered_rx) = tokio::sync::oneshot::channel();
             let handle = tokio::spawn(async move {
+                let mut notification_permit = Some(notification_permit);
                 if registered_rx.await.is_err() {
                     return;
                 }
@@ -802,12 +843,15 @@ DO NOT sleep, poll, or check on it — work on something else or end your respon
                         true,
                     ),
                 };
-                let _ = spawner.notify_tx.send(Notification {
-                    parent_session_id,
-                    description,
-                    text,
-                    is_error,
-                });
+                publish_reserved_notification(
+                    &mut notification_permit,
+                    Notification {
+                        parent_session_id,
+                        description,
+                        text,
+                        is_error,
+                    },
+                );
             });
             background_registry.tasks.push(BackgroundTask {
                 id: registry_id,
@@ -896,7 +940,6 @@ DO NOT sleep, poll, or check on it — work on something else or end your respon
                 agent.name, agent.prompt
             );
         }
-        let tx = discarded_event_sender();
         let lease = tokio::select! {
             lease = workspace.acquire_lease(workspace_access) => lease,
             () = cancel.cancelled() => return Ok(RouteOutcome::Requeue(notification)),
@@ -930,7 +973,7 @@ DO NOT sleep, poll, or check on it — work on something else or end your respon
                 &notification.text,
                 Some(&system_prompt),
                 self.loop_config.clone(),
-                tx.clone(),
+                discarded_event_sender(),
                 cancel.clone(),
                 ToolContext {
                     cwd: workspace_location.cwd().to_path_buf(),
@@ -1128,6 +1171,15 @@ async fn revalidate_after_lease(
     }
 }
 
+fn publish_reserved_notification(
+    permit: &mut Option<tokio::sync::mpsc::OwnedPermit<Notification>>,
+    notification: Notification,
+) {
+    if let Some(permit) = permit.take() {
+        let _ = permit.send(notification);
+    }
+}
+
 fn final_assistant_text(store: &SessionStore, session_id: &str) -> Option<String> {
     store.load(session_id).ok().and_then(|session| {
         let boundary = session
@@ -1158,8 +1210,8 @@ fn final_assistant_text(store: &SessionStore, session_id: &str) -> Option<String
     })
 }
 
-fn discarded_event_sender() -> tokio::sync::mpsc::UnboundedSender<crate::agent::LoopEvent> {
-    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+fn discarded_event_sender() -> LoopEventSender {
+    let (sender, receiver) = loop_event_channel(LOOP_EVENT_CAPACITY);
     drop(receiver);
     sender
 }
@@ -1316,5 +1368,34 @@ impl Tool for TaskTool {
             };
             spawner.run_task(input, &ctx).await
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn notification(description: &str) -> Notification {
+        Notification {
+            parent_session_id: "parent".into(),
+            description: description.into(),
+            text: description.into(),
+            is_error: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn notification_capacity_is_reserved_before_background_admission() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        let permit = sender.clone().try_reserve_owned().unwrap();
+        assert!(matches!(
+            sender.clone().try_reserve_owned(),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_))
+        ));
+
+        let mut permit = Some(permit);
+        publish_reserved_notification(&mut permit, notification("first"));
+        assert_eq!(receiver.recv().await.unwrap().description, "first");
+        assert!(receiver.try_recv().is_err());
     }
 }

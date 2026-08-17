@@ -1,4 +1,4 @@
-use ilar::agent::{LoopConfig, TurnOutcome, run_turn};
+use ilar::agent::{LOOP_EVENT_CAPACITY, LoopConfig, TurnOutcome, loop_event_channel, run_turn};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -120,7 +120,7 @@ async fn estimate_ignores_usage_before_latest_compaction_boundary() {
     drop(session);
 
     let provider = MockProvider::new(vec![text_turn("answer")]);
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, _) = loop_event_channel(LOOP_EVENT_CAPACITY);
     run_turn(
         &provider,
         &ToolRegistry::read_only(),
@@ -257,7 +257,7 @@ async fn oversize_transcript_triggers_compaction() {
     };
     let registry = ToolRegistry::builtin();
 
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, _) = loop_event_channel(LOOP_EVENT_CAPACITY);
     let outcome = run_turn(
         &resolver,
         &registry,
@@ -326,7 +326,7 @@ async fn compaction_rejects_partial_summary_at_eof() {
     let (store, session_id) = temp_session();
     seed_compactable_history(&store, &session_id);
     let provider = MockProvider::new(vec![vec![ProviderEvent::TextDelta("partial".into())]]);
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, _) = loop_event_channel(LOOP_EVENT_CAPACITY);
 
     let error = run_turn(
         &provider,
@@ -372,7 +372,7 @@ async fn compaction_rejects_non_end_turn_terminal_states() {
                 usage: Usage::default(),
             },
         ]]);
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _) = loop_event_channel(LOOP_EVENT_CAPACITY);
 
         let error = run_turn(
             &provider,
@@ -425,7 +425,7 @@ async fn cancellation_stops_in_flight_compaction_without_persisting() {
     };
     let cancel = tokio_util::sync::CancellationToken::new();
     let turn_cancel = cancel.clone();
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, _) = loop_event_channel(LOOP_EVENT_CAPACITY);
     let turn = tokio::spawn(async move {
         let outcome = run_turn(
             &provider,
@@ -469,7 +469,7 @@ async fn small_transcript_skips_compaction() {
     let provider = MockProvider::new(vec![text_turn("answer")]);
     let registry = ToolRegistry::builtin();
 
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, _) = loop_event_channel(LOOP_EVENT_CAPACITY);
     let _ = run_turn(
         &provider,
         &registry,
@@ -508,7 +508,7 @@ async fn no_context_limit_disables_compaction() {
     let provider = MockProvider::new(vec![text_turn("answer")]);
     let registry = ToolRegistry::builtin();
 
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, _) = loop_event_channel(LOOP_EVENT_CAPACITY);
     let _ = run_turn(
         &provider,
         &registry,
@@ -543,7 +543,7 @@ async fn compaction_falls_back_to_chars_estimate_without_usage() {
     }
     let provider = MockProvider::new(vec![text_turn("SUMMARY"), text_turn("ok")]);
     let registry = ToolRegistry::builtin();
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, _) = loop_event_channel(LOOP_EVENT_CAPACITY);
     let _ = run_turn(
         &provider,
         &registry,

@@ -1,4 +1,4 @@
-use ilar::agent::{LoopConfig, run_turn};
+use ilar::agent::{LOOP_EVENT_CAPACITY, LoopConfig, loop_event_channel, run_turn};
 use ilar::provider::openai::OpenAIProvider;
 use ilar::provider::{
     MockProvider, ProviderEvent, ProviderHandle, ProviderResolver, StopReason, resolve_model,
@@ -62,7 +62,7 @@ async fn model_change_applies_from_next_provider_call() {
     let registry = ToolRegistry::builtin();
 
     // Turn 1 on the original model.
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, _) = loop_event_channel(LOOP_EVENT_CAPACITY);
     run_turn(
         &provider,
         &registry,
@@ -93,7 +93,7 @@ async fn model_change_applies_from_next_provider_call() {
         .unwrap();
 
     // Turn 2 uses the new model, and the change is audited in the JSONL.
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, _) = loop_event_channel(LOOP_EVENT_CAPACITY);
     run_turn(
         &provider,
         &registry,
@@ -148,7 +148,7 @@ async fn turn_resolves_provider_from_persisted_effective_model() {
         openai: MockProvider::new(vec![text_turn()]),
     };
 
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, _) = loop_event_channel(LOOP_EVENT_CAPACITY);
     run_turn(
         &resolver,
         &ToolRegistry::builtin(),
@@ -179,7 +179,7 @@ async fn provider_resolution_failure_does_not_append_user_message() {
 
     let (store, session_id) = temp_session("openai/gpt-5.2");
     let before = store.load(&session_id).unwrap().events().len();
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, _) = loop_event_channel(LOOP_EVENT_CAPACITY);
     let error = run_turn(
         &RejectingResolver,
         &ToolRegistry::builtin(),
@@ -204,7 +204,7 @@ async fn concrete_provider_prefix_mismatch_fails_before_user_append() {
     let (store, session_id) = temp_session("zai/glm-4.7");
     let provider = OpenAIProvider::new("test-key".into(), None);
     let before = store.load(&session_id).unwrap().events().len();
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, _) = loop_event_channel(LOOP_EVENT_CAPACITY);
 
     let error = run_turn(
         &provider,

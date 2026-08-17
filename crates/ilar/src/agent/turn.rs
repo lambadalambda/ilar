@@ -6,7 +6,7 @@ use anyhow::Result;
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::event::{LoopEvent, publish};
+use crate::agent::event::{LoopEvent, LoopEventSender};
 use crate::provider::{ProviderEvent, ProviderResolver, Request, StopReason};
 use crate::session::{ContentBlock, SessionEvent, SessionStore, Usage, new_id};
 use crate::tools::ToolRegistry;
@@ -386,7 +386,7 @@ pub async fn run_turn(
     user_input: &str,
     system_prompt: Option<&str>,
     config: LoopConfig,
-    events: tokio::sync::mpsc::UnboundedSender<LoopEvent>,
+    mut events: LoopEventSender,
     cancel: CancellationToken,
     mut tool_ctx: crate::tools::ToolContext,
 ) -> Result<TurnOutcome> {
@@ -398,7 +398,7 @@ pub async fn run_turn(
         text: user_input.to_string(),
         ts: Utc::now(),
     })?;
-    publish(&events, LoopEvent::TurnStarted);
+    events.publish(LoopEvent::TurnStarted, &cancel).await;
 
     let tools = registry.definitions();
 
@@ -421,16 +421,18 @@ pub async fn run_turn(
         )
         .await?
     {
-        publish(
-            &events,
-            LoopEvent::Compacted {
-                context_tokens: crate::compaction::estimate_tokens_with_request(
-                    &session,
-                    system_prompt,
-                    &tools,
-                ),
-            },
-        );
+        events
+            .publish(
+                LoopEvent::Compacted {
+                    context_tokens: crate::compaction::estimate_tokens_with_request(
+                        &session,
+                        system_prompt,
+                        &tools,
+                    ),
+                },
+                &cancel,
+            )
+            .await;
     }
 
     tool_ctx.session_id = session_id.to_string();
@@ -452,12 +454,9 @@ pub async fn run_turn(
                     ts: Utc::now(),
                 })?;
             }
-            publish(
-                &events,
-                LoopEvent::TurnDone {
-                    outcome: TurnOutcome::Aborted,
-                },
-            );
+            events.publish_terminal(LoopEvent::TurnDone {
+                outcome: TurnOutcome::Aborted,
+            });
             return Ok(TurnOutcome::Aborted);
         }
 
@@ -486,11 +485,15 @@ pub async fn run_turn(
             let Some(event) = next else { break };
             match event {
                 ProviderEvent::TextDelta(t) => {
-                    publish(&events, LoopEvent::TextDelta(t.clone()));
+                    events
+                        .publish(LoopEvent::TextDelta(t.clone()), &cancel)
+                        .await;
                     acc.push_text(t);
                 }
                 ProviderEvent::ThinkingDelta(t) => {
-                    publish(&events, LoopEvent::ThinkingDelta(t.clone()));
+                    events
+                        .publish(LoopEvent::ThinkingDelta(t.clone()), &cancel)
+                        .await;
                     acc.push_thinking(t);
                 }
                 ProviderEvent::ThinkingCompleted { signature } => {
@@ -505,7 +508,9 @@ pub async fn run_turn(
                         break;
                     }
                     acc.announced_calls.insert(id.clone(), name.clone());
-                    publish(&events, LoopEvent::ToolStarted { id, name });
+                    events
+                        .publish(LoopEvent::ToolStarted { id, name }, &cancel)
+                        .await;
                 }
                 ProviderEvent::ToolCallInputDelta { id, .. } => {
                     if id.is_empty()
@@ -525,13 +530,15 @@ pub async fn run_turn(
                         errored = Some(error);
                         break;
                     }
-                    publish(
-                        &events,
-                        LoopEvent::ToolArguments {
-                            id: id.clone(),
-                            arguments: summarize_tool_input(&name, &input),
-                        },
-                    );
+                    events
+                        .publish(
+                            LoopEvent::ToolArguments {
+                                id: id.clone(),
+                                arguments: summarize_tool_input(&name, &input),
+                            },
+                            &cancel,
+                        )
+                        .await;
                 }
                 ProviderEvent::ResponseContent { provider, content } => {
                     if provider.is_empty() || acc.response_content.is_some() || !content.is_array()
@@ -594,25 +601,29 @@ pub async fn run_turn(
                     state: None,
                     ts: Utc::now(),
                 })?;
-                publish(
-                    &events,
-                    LoopEvent::ToolFinished {
-                        id: id.clone(),
-                        name: name.clone(),
-                        is_error: true,
-                    },
-                );
-            }
-            for (id, name) in &acc.announced_calls {
-                if !completed_ids.contains(id.as_str()) {
-                    publish(
-                        &events,
+                events
+                    .publish(
                         LoopEvent::ToolFinished {
                             id: id.clone(),
                             name: name.clone(),
                             is_error: true,
                         },
-                    );
+                        &cancel,
+                    )
+                    .await;
+            }
+            for (id, name) in &acc.announced_calls {
+                if !completed_ids.contains(id.as_str()) {
+                    events
+                        .publish(
+                            LoopEvent::ToolFinished {
+                                id: id.clone(),
+                                name: name.clone(),
+                                is_error: true,
+                            },
+                            &cancel,
+                        )
+                        .await;
                 }
             }
             anyhow::bail!(message);
@@ -645,21 +656,20 @@ pub async fn run_turn(
                     state: None,
                     ts: Utc::now(),
                 })?;
-                publish(
-                    &events,
-                    LoopEvent::ToolFinished {
-                        id: id.clone(),
-                        name: name.clone(),
-                        is_error: true,
-                    },
-                );
+                events
+                    .publish(
+                        LoopEvent::ToolFinished {
+                            id: id.clone(),
+                            name: name.clone(),
+                            is_error: true,
+                        },
+                        &cancel,
+                    )
+                    .await;
             }
-            publish(
-                &events,
-                LoopEvent::TurnDone {
-                    outcome: TurnOutcome::Aborted,
-                },
-            );
+            events.publish_terminal(LoopEvent::TurnDone {
+                outcome: TurnOutcome::Aborted,
+            });
             return Ok(TurnOutcome::Aborted);
         }
 
@@ -737,24 +747,39 @@ pub async fn run_turn(
                 ts: Utc::now(),
             })?;
         }
-        publish(
-            &events,
-            LoopEvent::StepComplete {
-                stop_reason: stop_reason.clone(),
-                usage: acc.usage,
-            },
-        );
+        events
+            .publish(
+                LoopEvent::StepComplete {
+                    stop_reason: stop_reason.clone(),
+                    usage: acc.usage,
+                },
+                &cancel,
+            )
+            .await;
+        if cancel.is_cancelled() {
+            for (id, _, _, _) in acc.tool_calls() {
+                session.append(SessionEvent::ToolResult {
+                    id: new_id(),
+                    tool_use_id: id.clone(),
+                    content: "aborted before execution".into(),
+                    is_error: true,
+                    state: None,
+                    ts: Utc::now(),
+                })?;
+            }
+            events.publish_terminal(LoopEvent::TurnDone {
+                outcome: TurnOutcome::Aborted,
+            });
+            return Ok(TurnOutcome::Aborted);
+        }
         continuations.clear();
         continuation_provider = None;
         paused_content.clear();
 
         if !had_tool_calls {
-            publish(
-                &events,
-                LoopEvent::TurnDone {
-                    outcome: TurnOutcome::Completed,
-                },
-            );
+            events.publish_terminal(LoopEvent::TurnDone {
+                outcome: TurnOutcome::Completed,
+            });
             return Ok(TurnOutcome::Completed);
         }
 
@@ -806,23 +831,28 @@ pub async fn run_turn(
                 ts: Utc::now(),
             })?;
             output.commit_session_state();
-            publish(
-                &events,
-                LoopEvent::ToolFinished {
-                    id: outcome.id,
-                    name: outcome.name,
-                    is_error,
-                },
-            );
+            events
+                .publish(
+                    LoopEvent::ToolFinished {
+                        id: outcome.id,
+                        name: outcome.name,
+                        is_error,
+                    },
+                    &cancel,
+                )
+                .await;
         }
     }
 
-    publish(
-        &events,
-        LoopEvent::TurnDone {
-            outcome: TurnOutcome::MaxIterations,
-        },
-    );
+    if cancel.is_cancelled() {
+        events.publish_terminal(LoopEvent::TurnDone {
+            outcome: TurnOutcome::Aborted,
+        });
+        return Ok(TurnOutcome::Aborted);
+    }
+    events.publish_terminal(LoopEvent::TurnDone {
+        outcome: TurnOutcome::MaxIterations,
+    });
     Ok(TurnOutcome::MaxIterations)
 }
 

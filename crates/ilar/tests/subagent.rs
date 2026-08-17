@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
-use ilar::agent::{LoopConfig, TurnOutcome, run_turn};
+use ilar::agent::{LOOP_EVENT_CAPACITY, LoopConfig, TurnOutcome, loop_event_channel, run_turn};
 use ilar::config::{AgentDefinition, AgentWorkspaceMode};
 use ilar::provider::{
     EventStream, FixedProviderResolver, MockProvider, Provider, ProviderEvent, ProviderHandle,
@@ -190,7 +190,7 @@ async fn run_two_tasks(workspace_mode: AgentWorkspaceMode) -> (Duration, Vec<Cha
         ],
     ]);
 
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, _) = loop_event_channel(LOOP_EVENT_CAPACITY);
     let start = Instant::now();
     let outcome = run_turn(
         &parent,
@@ -368,7 +368,7 @@ async fn mutable_tasks_in_distinct_validated_worktrees_may_overlap() {
             usage: Usage::default(),
         }],
     ]);
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, _) = loop_event_channel(LOOP_EVENT_CAPACITY);
     tokio::time::timeout(
         Duration::from_secs(2),
         run_turn(
@@ -659,7 +659,7 @@ async fn concurrency_cap_errors_with_guidance() {
         }],
     ]);
 
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, _) = loop_event_channel(LOOP_EVENT_CAPACITY);
     run_turn(
         &parent,
         &registry,
@@ -1708,7 +1708,7 @@ async fn child_session_created_with_parent_link() {
         }],
     ]);
 
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, _) = loop_event_channel(LOOP_EVENT_CAPACITY);
     run_turn(
         &parent,
         &registry,
