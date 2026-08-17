@@ -8,9 +8,8 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
-    MouseEventKind,
+    MouseButton, MouseEventKind,
 };
-use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -18,6 +17,7 @@ use ratatui::widgets::{
     Block, Borders, Clear, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
     Wrap,
 };
+use ratatui::{Frame, buffer::Buffer};
 use tokio_util::sync::CancellationToken;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -61,6 +61,38 @@ enum Activity {
     Stopped,
     Paused,
     Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct SelectionPoint {
+    row: usize,
+    column: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TranscriptSelection {
+    anchor: SelectionPoint,
+    focus: SelectionPoint,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RenderedCell {
+    Character(char),
+    Text(String),
+    Space,
+    Continuation { lead: usize },
+}
+
+type RenderedRow = Vec<RenderedCell>;
+
+impl TranscriptSelection {
+    fn ordered(self) -> (SelectionPoint, SelectionPoint) {
+        if self.anchor <= self.focus {
+            (self.anchor, self.focus)
+        } else {
+            (self.focus, self.anchor)
+        }
+    }
 }
 
 const MUTED: Color = Color::DarkGray;
@@ -134,6 +166,11 @@ struct App {
     follow_tail: bool,
     model_picker: Option<ModelPicker>,
     model_key_pending: bool,
+    transcript_text_area: Rect,
+    transcript_cells: Vec<RenderedRow>,
+    transcript_selection: Option<TranscriptSelection>,
+    selecting_transcript: bool,
+    clipboard: Option<arboard::Clipboard>,
 }
 
 impl App {
@@ -158,6 +195,11 @@ impl App {
             follow_tail: true,
             model_picker: None,
             model_key_pending: false,
+            transcript_text_area: Rect::default(),
+            transcript_cells: Vec::new(),
+            transcript_selection: None,
+            selecting_transcript: false,
+            clipboard: None,
         }
     }
 
@@ -335,22 +377,26 @@ impl App {
     }
 
     fn scroll_up(&mut self, rows: usize) {
+        self.clear_transcript_selection();
         self.follow_tail = false;
         self.scroll_top = self.scroll_top.saturating_sub(rows);
     }
 
     fn scroll_down(&mut self, rows: usize) {
+        self.clear_transcript_selection();
         let max_scroll = self.max_scroll();
         self.scroll_top = self.scroll_top.saturating_add(rows).min(max_scroll);
         self.follow_tail = self.scroll_top == max_scroll;
     }
 
     fn scroll_to_top(&mut self) {
+        self.clear_transcript_selection();
         self.scroll_top = 0;
         self.follow_tail = self.max_scroll() == 0;
     }
 
     fn scroll_to_tail(&mut self) {
+        self.clear_transcript_selection();
         self.scroll_top = self.max_scroll();
         self.follow_tail = true;
     }
@@ -364,6 +410,60 @@ impl App {
         } else {
             self.scroll_top = self.scroll_top.min(max_scroll);
         }
+    }
+
+    fn clear_transcript_selection(&mut self) {
+        self.transcript_selection = None;
+        self.selecting_transcript = false;
+    }
+
+    fn begin_transcript_selection(&mut self, column: u16, row: u16) {
+        self.clear_transcript_selection();
+        let Some(point) = selection_point(self.transcript_text_area, column, row, false) else {
+            return;
+        };
+        self.transcript_selection = Some(TranscriptSelection {
+            anchor: point,
+            focus: point,
+        });
+        self.selecting_transcript = true;
+    }
+
+    fn update_transcript_selection(&mut self, column: u16, row: u16) {
+        if !self.selecting_transcript {
+            return;
+        }
+        let Some(point) = selection_point(self.transcript_text_area, column, row, true) else {
+            return;
+        };
+        if let Some(selection) = &mut self.transcript_selection {
+            selection.focus = point;
+        }
+    }
+
+    fn finish_transcript_selection(&mut self, column: u16, row: u16) -> Option<String> {
+        if !self.selecting_transcript {
+            return None;
+        }
+        self.update_transcript_selection(column, row);
+        self.selecting_transcript = false;
+        let selection = self.transcript_selection?;
+        let text = selected_transcript_text(&self.transcript_cells, selection);
+        if text.is_none() {
+            self.transcript_selection = None;
+        }
+        text
+    }
+
+    fn copy_to_clipboard(&mut self, text: &str) -> Result<()> {
+        if self.clipboard.is_none() {
+            self.clipboard = Some(arboard::Clipboard::new().context("opening clipboard")?);
+        }
+        self.clipboard
+            .as_mut()
+            .expect("clipboard initialized")
+            .set_text(text.to_string())
+            .context("writing clipboard")
     }
 
     fn transcript_lines(&self, width: u16, now: std::time::Instant) -> Vec<Line<'static>> {
@@ -633,6 +733,15 @@ impl App {
             .wrap(Wrap { trim: false })
             .line_count(text_width);
         self.update_scroll_metrics(content_rows, viewport_rows);
+        let visible_rows = content_rows
+            .saturating_sub(self.scroll_top)
+            .min(viewport_rows) as u16;
+        let transcript_text_area = Rect::new(
+            transcript_area.x.saturating_add(1),
+            transcript_area.y.saturating_add(1),
+            text_width,
+            visible_rows,
+        );
         let max_scroll = self.max_scroll();
         let scroll_label = if max_scroll == 0 {
             String::new()
@@ -678,6 +787,24 @@ impl App {
         let input = Paragraph::new(visible_input).block(input_block);
         frame.render_widget(input, chunks[2]);
 
+        let transcript_cells = transcript_cells(frame.buffer_mut(), transcript_text_area);
+        if self.transcript_selection.is_some_and(|selection| {
+            self.transcript_text_area != transcript_text_area
+                || !selected_rows_unchanged(&self.transcript_cells, &transcript_cells, selection)
+        }) {
+            self.clear_transcript_selection();
+        }
+        self.transcript_text_area = transcript_text_area;
+        self.transcript_cells = transcript_cells;
+        if let Some(selection) = self.transcript_selection {
+            highlight_transcript_selection(
+                frame.buffer_mut(),
+                self.transcript_text_area,
+                selection,
+                &self.transcript_cells,
+            );
+        }
+
         if !self.busy
             && self.model_picker.is_none()
             && input_area.width > 0
@@ -688,6 +815,166 @@ impl App {
 
         if let Some(picker) = &self.model_picker {
             render_model_picker(frame, picker);
+        }
+    }
+}
+
+fn selection_point(area: Rect, column: u16, row: u16, clamp: bool) -> Option<SelectionPoint> {
+    if area.width == 0 || area.height == 0 {
+        return None;
+    }
+    if !clamp && (column < area.x || column >= area.right() || row < area.y || row >= area.bottom())
+    {
+        return None;
+    }
+    let column = column.clamp(area.x, area.right().saturating_sub(1));
+    let row = row.clamp(area.y, area.bottom().saturating_sub(1));
+    Some(SelectionPoint {
+        row: row.saturating_sub(area.y) as usize,
+        column: column.saturating_sub(area.x) as usize,
+    })
+}
+
+fn selected_columns(
+    selection: TranscriptSelection,
+    row: usize,
+    width: usize,
+) -> Option<std::ops::RangeInclusive<usize>> {
+    if width == 0 || selection.anchor == selection.focus {
+        return None;
+    }
+    let (start, end) = selection.ordered();
+    if row < start.row || row > end.row {
+        return None;
+    }
+    let first = if row == start.row { start.column } else { 0 }.min(width - 1);
+    let last = if row == end.row {
+        end.column
+    } else {
+        width - 1
+    }
+    .min(width - 1);
+    (first <= last).then_some(first..=last)
+}
+
+fn grapheme_columns(
+    row: &RenderedRow,
+    columns: std::ops::RangeInclusive<usize>,
+) -> std::ops::RangeInclusive<usize> {
+    let mut first = *columns.start();
+    let mut last = *columns.end();
+    if let Some(RenderedCell::Continuation { lead }) = row.get(first) {
+        first = *lead;
+    }
+    if let Some(RenderedCell::Continuation { lead }) = row.get(last) {
+        last = *lead;
+    }
+    while matches!(row.get(last + 1), Some(RenderedCell::Continuation { lead }) if *lead == last) {
+        last += 1;
+    }
+    first..=last
+}
+
+fn selected_transcript_text(
+    rows: &[RenderedRow],
+    selection: TranscriptSelection,
+) -> Option<String> {
+    if selection.anchor == selection.focus || rows.is_empty() {
+        return None;
+    }
+    let (start, end) = selection.ordered();
+    let last_row = end.row.min(rows.len().saturating_sub(1));
+    if start.row > last_row {
+        return None;
+    }
+    let selected = (start.row..=last_row)
+        .map(|row| {
+            let cells = &rows[row];
+            selected_columns(selection, row, cells.len())
+                .map(|columns| {
+                    let mut text = String::new();
+                    for column in grapheme_columns(cells, columns) {
+                        match cells.get(column) {
+                            Some(RenderedCell::Character(value)) => text.push(*value),
+                            Some(RenderedCell::Text(value)) => text.push_str(value),
+                            Some(RenderedCell::Space) => text.push(' '),
+                            Some(RenderedCell::Continuation { .. }) | None => {}
+                        }
+                    }
+                    text.trim_end_matches(' ').to_string()
+                })
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!selected.is_empty()).then_some(selected)
+}
+
+fn selected_rows_unchanged(
+    previous: &[RenderedRow],
+    current: &[RenderedRow],
+    selection: TranscriptSelection,
+) -> bool {
+    let (start, end) = selection.ordered();
+    (start.row..=end.row).all(|row| previous.get(row) == current.get(row))
+}
+
+fn transcript_cells(buffer: &Buffer, area: Rect) -> Vec<RenderedRow> {
+    (area.y..area.bottom())
+        .map(|row| {
+            let mut rendered = Vec::with_capacity(area.width as usize);
+            let mut column = area.x;
+            while column < area.right() {
+                let symbol = buffer
+                    .cell((column, row))
+                    .map(|cell| cell.symbol())
+                    .unwrap_or(" ");
+                if symbol == " " {
+                    rendered.push(RenderedCell::Space);
+                    column += 1;
+                    continue;
+                }
+                let lead = rendered.len();
+                let width = UnicodeWidthStr::width(symbol)
+                    .max(1)
+                    .min(area.right().saturating_sub(column) as usize);
+                let mut characters = symbol.chars();
+                match (characters.next(), characters.next()) {
+                    (Some(character), None) => {
+                        rendered.push(RenderedCell::Character(character));
+                    }
+                    _ => rendered.push(RenderedCell::Text(symbol.to_string())),
+                }
+                for _ in 1..width {
+                    rendered.push(RenderedCell::Continuation { lead });
+                }
+                column = column.saturating_add(width as u16);
+            }
+            rendered
+        })
+        .collect()
+}
+
+fn highlight_transcript_selection(
+    buffer: &mut Buffer,
+    area: Rect,
+    selection: TranscriptSelection,
+    rows: &[RenderedRow],
+) {
+    for row in 0..area.height as usize {
+        let Some(rendered) = rows.get(row) else {
+            continue;
+        };
+        let Some(columns) = selected_columns(selection, row, rendered.len()) else {
+            continue;
+        };
+        for column in grapheme_columns(rendered, columns) {
+            if let Some(cell) = buffer.cell_mut((
+                area.x.saturating_add(column as u16),
+                area.y.saturating_add(row as u16),
+            )) {
+                cell.set_style(Style::default().add_modifier(Modifier::REVERSED));
+            }
         }
     }
 }
@@ -1787,6 +2074,22 @@ async fn run_app(
             Event::Mouse(mouse) if app.model_picker.is_none() => match mouse.kind {
                 MouseEventKind::ScrollUp => app.scroll_up(3),
                 MouseEventKind::ScrollDown => app.scroll_down(3),
+                MouseEventKind::Down(MouseButton::Left) => {
+                    app.begin_transcript_selection(mouse.column, mouse.row);
+                }
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    app.update_transcript_selection(mouse.column, mouse.row);
+                }
+                MouseEventKind::Up(MouseButton::Left) => {
+                    if let Some(text) = app.finish_transcript_selection(mouse.column, mouse.row)
+                        && let Err(error) = app.copy_to_clipboard(&text)
+                    {
+                        app.lines
+                            .push(Line_::System(format!("clipboard copy failed: {error:#}")));
+                        app.follow_tail = true;
+                        app.set_activity(Activity::Error);
+                    }
+                }
                 _ => {}
             },
             _ => {}
@@ -2385,6 +2688,185 @@ mod tests {
         app.scroll_down(100);
         assert_eq!(app.scroll_top, 20);
         assert!(app.follow_tail);
+    }
+
+    fn cells(rows: &[&str], width: usize) -> Vec<RenderedRow> {
+        rows.iter()
+            .map(|row| {
+                row.chars()
+                    .map(|character| match character {
+                        ' ' => RenderedCell::Space,
+                        _ => RenderedCell::Character(character),
+                    })
+                    .chain(std::iter::repeat(RenderedCell::Space))
+                    .take(width)
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn transcript_selection_copies_multiline_text_in_display_order() {
+        let rows = cells(&["abc", "wxyz"], 6);
+        let forward = TranscriptSelection {
+            anchor: SelectionPoint { row: 0, column: 1 },
+            focus: SelectionPoint { row: 1, column: 2 },
+        };
+        let reverse = TranscriptSelection {
+            anchor: forward.focus,
+            focus: forward.anchor,
+        };
+
+        assert_eq!(
+            selected_transcript_text(&rows, forward).as_deref(),
+            Some("bc\nwxy")
+        );
+        assert_eq!(
+            selected_transcript_text(&rows, reverse).as_deref(),
+            Some("bc\nwxy")
+        );
+    }
+
+    #[test]
+    fn transcript_selection_ignores_clicks_and_trailing_viewport_padding() {
+        let rows = cells(&["ilar hello"], 16);
+        let click = TranscriptSelection {
+            anchor: SelectionPoint { row: 0, column: 3 },
+            focus: SelectionPoint { row: 0, column: 3 },
+        };
+        let drag = TranscriptSelection {
+            anchor: SelectionPoint { row: 0, column: 5 },
+            focus: SelectionPoint { row: 0, column: 15 },
+        };
+
+        assert_eq!(selected_transcript_text(&rows, click), None);
+        assert_eq!(
+            selected_transcript_text(&rows, drag).as_deref(),
+            Some("hello")
+        );
+    }
+
+    #[test]
+    fn transcript_mouse_points_are_clamped_to_the_visible_text_area() {
+        let area = Rect::new(10, 4, 8, 3);
+        assert_eq!(
+            selection_point(area, 12, 5, false),
+            Some(SelectionPoint { row: 1, column: 2 })
+        );
+        assert_eq!(selection_point(area, 9, 5, false), None);
+        assert_eq!(
+            selection_point(area, 30, 20, true),
+            Some(SelectionPoint { row: 2, column: 7 })
+        );
+    }
+
+    #[test]
+    fn transcript_selection_highlights_cells_and_scrolling_clears_it() {
+        let area = Rect::new(0, 0, 4, 2);
+        let mut buffer = Buffer::empty(area);
+        buffer.set_string(0, 0, "abcd", Style::default());
+        buffer.set_string(0, 1, "efgh", Style::default());
+        let selection = TranscriptSelection {
+            anchor: SelectionPoint { row: 0, column: 1 },
+            focus: SelectionPoint { row: 1, column: 1 },
+        };
+        let rows = transcript_cells(&buffer, area);
+        highlight_transcript_selection(&mut buffer, area, selection, &rows);
+
+        assert!(!buffer[(0, 0)].modifier.contains(Modifier::REVERSED));
+        for position in [(1, 0), (2, 0), (3, 0), (0, 1), (1, 1)] {
+            assert!(
+                buffer[position].modifier.contains(Modifier::REVERSED),
+                "missing highlight at {position:?}"
+            );
+        }
+        assert!(!buffer[(2, 1)].modifier.contains(Modifier::REVERSED));
+
+        let mut app = App::new();
+        app.transcript_selection = Some(selection);
+        app.selecting_transcript = true;
+        app.scroll_down(3);
+        assert_eq!(app.transcript_selection, None);
+        assert!(!app.selecting_transcript);
+    }
+
+    #[test]
+    fn transcript_selection_preserves_wide_graphemes_without_phantom_spaces() {
+        let area = Rect::new(0, 0, 4, 1);
+        let mut buffer = Buffer::empty(area);
+        buffer.set_string(0, 0, "界B", Style::default());
+        let rows = transcript_cells(&buffer, area);
+        let selection = TranscriptSelection {
+            anchor: SelectionPoint { row: 0, column: 1 },
+            focus: SelectionPoint { row: 0, column: 2 },
+        };
+
+        assert_eq!(
+            selected_transcript_text(&rows, selection).as_deref(),
+            Some("界B")
+        );
+        highlight_transcript_selection(&mut buffer, area, selection, &rows);
+        for column in 0..=2 {
+            assert!(buffer[(column, 0)].modifier.contains(Modifier::REVERSED));
+        }
+    }
+
+    #[test]
+    fn transcript_selection_does_not_copy_vertical_viewport_padding() {
+        let rows = cells(&["hello"], 8);
+        let selection = TranscriptSelection {
+            anchor: SelectionPoint { row: 0, column: 0 },
+            focus: SelectionPoint { row: 4, column: 7 },
+        };
+        assert_eq!(
+            selected_transcript_text(&rows, selection).as_deref(),
+            Some("hello")
+        );
+    }
+
+    #[test]
+    fn transcript_selection_is_cancelled_when_visible_output_changes() {
+        let backend = ratatui::backend::TestBackend::new(40, 9);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let area = app.transcript_text_area;
+        app.begin_transcript_selection(area.x, area.y);
+        app.update_transcript_selection(area.x.saturating_add(3), area.y);
+        assert!(app.transcript_selection.is_some());
+        let previous = app.transcript_cells.clone();
+
+        app.lines[0] = Line_::System("changed output".into());
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        assert_ne!(previous, app.transcript_cells);
+        assert_eq!(app.transcript_selection, None);
+        assert!(!app.selecting_transcript);
+    }
+
+    #[test]
+    fn transcript_selection_ignores_changes_outside_selected_rows() {
+        let previous = cells(&["stable", "thinking one"], 16);
+        let current = cells(&["stable", "thinking two"], 16);
+        let stable_selection = TranscriptSelection {
+            anchor: SelectionPoint { row: 0, column: 0 },
+            focus: SelectionPoint { row: 0, column: 3 },
+        };
+        let volatile_selection = TranscriptSelection {
+            anchor: SelectionPoint { row: 1, column: 0 },
+            focus: SelectionPoint { row: 1, column: 3 },
+        };
+
+        assert!(selected_rows_unchanged(
+            &previous,
+            &current,
+            stable_selection
+        ));
+        assert!(!selected_rows_unchanged(
+            &previous,
+            &current,
+            volatile_selection
+        ));
     }
 
     #[test]

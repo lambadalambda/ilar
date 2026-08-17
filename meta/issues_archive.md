@@ -58,3 +58,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Bound and sanitize web tools](issues/bound-and-sanitize-web-tools.md)
 - [x] [Subagent safety and outcomes](issues/subagent-safety-and-outcomes.md)
 - [x] [Fix subagent launch regression](issues/fix-subagent-launch-regression.md)
+- [x] [Select and copy transcript text](issues/select-and-copy-transcript-text.md)
