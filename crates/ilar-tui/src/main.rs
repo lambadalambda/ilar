@@ -54,6 +54,105 @@ enum ToolState {
     Failed,
 }
 
+#[derive(Default)]
+struct TranscriptRenderCache {
+    width: Option<u16>,
+    entries: Vec<CachedTranscriptEntry>,
+    #[cfg(test)]
+    rebuilds: usize,
+}
+
+struct CachedTranscriptEntry {
+    source: Line_,
+    rows: Vec<Line<'static>>,
+}
+
+impl TranscriptRenderCache {
+    fn update(
+        &mut self,
+        lines: &[Line_],
+        width: u16,
+        now: std::time::Instant,
+        activity_started: std::time::Instant,
+    ) {
+        if self.width != Some(width) {
+            self.width = Some(width);
+            self.entries.clear();
+        }
+        self.entries.truncate(lines.len());
+        for (index, source) in lines.iter().enumerate() {
+            let animated = matches!(
+                source,
+                Line_::Tool {
+                    state: ToolState::Running,
+                    ..
+                }
+            );
+            let changed = self
+                .entries
+                .get(index)
+                .is_none_or(|cached| cached.source != *source);
+            if !changed && !animated {
+                continue;
+            }
+            let rows = transcript_entry_lines(source, width, now, activity_started)
+                .into_iter()
+                .flat_map(|line| wrap_styled_line(line, width as usize))
+                .collect();
+            if let Some(cached) = self.entries.get_mut(index) {
+                if changed {
+                    cached.source = source.clone();
+                }
+                cached.rows = rows;
+            } else {
+                self.entries.push(CachedTranscriptEntry {
+                    source: source.clone(),
+                    rows,
+                });
+            }
+            #[cfg(test)]
+            {
+                self.rebuilds += 1;
+            }
+        }
+    }
+
+    fn row_count(&self) -> usize {
+        self.entries.iter().map(|entry| entry.rows.len()).sum()
+    }
+
+    fn visible_rows(
+        &self,
+        start: usize,
+        count: usize,
+        trailing: &[Line<'static>],
+    ) -> Vec<Line<'static>> {
+        let mut skip = start;
+        let mut remaining = count;
+        let mut output = Vec::with_capacity(count.min(128));
+        for rows in self
+            .entries
+            .iter()
+            .map(|entry| entry.rows.as_slice())
+            .chain(std::iter::once(trailing))
+        {
+            if remaining == 0 {
+                break;
+            }
+            if skip >= rows.len() {
+                skip -= rows.len();
+                continue;
+            }
+            let available = rows.len() - skip;
+            let take = available.min(remaining);
+            output.extend(rows[skip..skip + take].iter().cloned());
+            remaining -= take;
+            skip = 0;
+        }
+        output
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Activity {
     Ready,
@@ -587,6 +686,137 @@ fn restored_session_view(session: &ilar::session::SessionReader) -> RestoredSess
     }
 }
 
+fn transcript_entry_lines(
+    entry: &Line_,
+    width: u16,
+    now: std::time::Instant,
+    activity_started: std::time::Instant,
+) -> Vec<Line<'static>> {
+    match entry {
+        Line_::Assistant(text) => {
+            let mut output = Vec::new();
+            let mut first = true;
+            let label_width = 5usize.min(width.saturating_sub(2) as usize);
+            for line in markdown::render(text) {
+                if line.spans.is_empty() {
+                    output.push(Line::default());
+                    continue;
+                }
+                for mut line in wrap_styled_line(line, (width as usize).saturating_sub(label_width))
+                {
+                    let label = if first {
+                        truncate_display("ilar ", label_width, Truncation::Right)
+                    } else {
+                        " ".repeat(label_width)
+                    };
+                    first = false;
+                    let mut spans = vec![Span::styled(
+                        label,
+                        Style::default()
+                            .fg(Color::Green)
+                            .add_modifier(Modifier::BOLD),
+                    )];
+                    spans.append(&mut line.spans);
+                    output.push(Line::from(spans));
+                }
+            }
+            output
+        }
+        Line_::User(text) => safe_lines(text)
+            .into_iter()
+            .enumerate()
+            .map(|(index, text)| {
+                Line::from(vec![
+                    Span::styled(
+                        if index == 0 { "you  " } else { "     " },
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(text),
+                ])
+            })
+            .collect(),
+        Line_::Tool {
+            name,
+            arguments,
+            state,
+            ..
+        } => vec![tool_line(
+            name,
+            arguments,
+            *state,
+            width,
+            now.saturating_duration_since(activity_started),
+        )],
+        Line_::System(text) => safe_lines(text)
+            .into_iter()
+            .enumerate()
+            .map(|(index, text)| {
+                Line::from(vec![
+                    Span::styled(
+                        if index == 0 { "—    " } else { "     " },
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(text, Style::default().fg(Color::DarkGray)),
+                ])
+            })
+            .collect(),
+    }
+}
+
+fn activity_line(
+    busy: bool,
+    activity: Activity,
+    now: std::time::Instant,
+    activity_started: std::time::Instant,
+) -> Option<Line<'static>> {
+    if !busy
+        || !matches!(
+            activity,
+            Activity::Thinking | Activity::Responding | Activity::Tools
+        )
+    {
+        return None;
+    }
+    let elapsed = now.saturating_duration_since(activity_started);
+    let (frame, label, color) = match activity {
+        Activity::Thinking => {
+            let frames = ["◐", "◓", "◑", "◒"];
+            (
+                frames[(elapsed.as_millis() / 160) as usize % frames.len()],
+                "thinking…",
+                TOOL_ACTIVE,
+            )
+        }
+        Activity::Responding => {
+            let frames = ["▏", "▎", "▍", "▎"];
+            (
+                frames[(elapsed.as_millis() / 120) as usize % frames.len()],
+                "responding…",
+                ASSISTANT,
+            )
+        }
+        Activity::Tools => {
+            let frames = ["◐", "◓", "◑", "◒"];
+            (
+                frames[(elapsed.as_millis() / 160) as usize % frames.len()],
+                "running tools…",
+                TOOL_ACTIVE,
+            )
+        }
+        _ => unreachable!(),
+    };
+    Some(Line::from(vec![
+        Span::styled(
+            "ilar ",
+            Style::default().fg(ASSISTANT).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!("{frame} "), Style::default().fg(color)),
+        Span::styled(label, Style::default().fg(MUTED)),
+    ]))
+}
+
 struct App {
     lines: Vec<Line_>,
     input: InputBuffer,
@@ -607,6 +837,7 @@ struct App {
     model_picker: Option<ModelPicker>,
     model_key_pending: bool,
     transcript_text_area: Rect,
+    transcript_cache: TranscriptRenderCache,
     transcript_cells: Vec<RenderedRow>,
     transcript_selection: Option<TranscriptSelection>,
     selecting_transcript: bool,
@@ -639,6 +870,7 @@ impl App {
             model_picker: None,
             model_key_pending: false,
             transcript_text_area: Rect::default(),
+            transcript_cache: TranscriptRenderCache::default(),
             transcript_cells: Vec::new(),
             transcript_selection: None,
             selecting_transcript: false,
@@ -926,118 +1158,20 @@ impl App {
             .context("writing clipboard")
     }
 
+    #[cfg(test)]
     fn transcript_lines(&self, width: u16, now: std::time::Instant) -> Vec<Line<'static>> {
         let mut output = Vec::new();
         for entry in &self.lines {
-            match entry {
-                Line_::Assistant(text) => {
-                    let mut first = true;
-                    let label_width = 5usize.min(width.saturating_sub(2) as usize);
-                    for line in markdown::render(text) {
-                        if line.spans.is_empty() {
-                            output.push(Line::default());
-                            continue;
-                        }
-                        for mut line in
-                            wrap_styled_line(line, (width as usize).saturating_sub(label_width))
-                        {
-                            let label = if first {
-                                truncate_display("ilar ", label_width, Truncation::Right)
-                            } else {
-                                " ".repeat(label_width)
-                            };
-                            first = false;
-                            let mut spans = vec![Span::styled(
-                                label,
-                                Style::default()
-                                    .fg(Color::Green)
-                                    .add_modifier(Modifier::BOLD),
-                            )];
-                            spans.append(&mut line.spans);
-                            output.push(Line::from(spans));
-                        }
-                    }
-                }
-                Line_::User(text) => {
-                    for (index, text) in safe_lines(text).into_iter().enumerate() {
-                        output.push(Line::from(vec![
-                            Span::styled(
-                                if index == 0 { "you  " } else { "     " },
-                                Style::default()
-                                    .fg(Color::Cyan)
-                                    .add_modifier(Modifier::BOLD),
-                            ),
-                            Span::raw(text),
-                        ]));
-                    }
-                }
-                Line_::Tool {
-                    name,
-                    arguments,
-                    state,
-                    ..
-                } => output.push(tool_line(
-                    name,
-                    arguments,
-                    *state,
-                    width,
-                    now.saturating_duration_since(self.activity_started),
-                )),
-                Line_::System(text) => {
-                    for (index, text) in safe_lines(text).into_iter().enumerate() {
-                        output.push(Line::from(vec![
-                            Span::styled(
-                                if index == 0 { "—    " } else { "     " },
-                                Style::default().fg(Color::DarkGray),
-                            ),
-                            Span::styled(text, Style::default().fg(Color::DarkGray)),
-                        ]));
-                    }
-                }
-            }
+            output.extend(transcript_entry_lines(
+                entry,
+                width,
+                now,
+                self.activity_started,
+            ));
         }
-        if self.busy
-            && matches!(
-                self.activity,
-                Activity::Thinking | Activity::Responding | Activity::Tools
-            )
+        if let Some(activity) = activity_line(self.busy, self.activity, now, self.activity_started)
         {
-            let elapsed = now.saturating_duration_since(self.activity_started);
-            let (frame, label, color) = match self.activity {
-                Activity::Thinking => {
-                    let frames = ["◐", "◓", "◑", "◒"];
-                    (
-                        frames[(elapsed.as_millis() / 160) as usize % frames.len()],
-                        "thinking…",
-                        TOOL_ACTIVE,
-                    )
-                }
-                Activity::Responding => {
-                    let frames = ["▏", "▎", "▍", "▎"];
-                    (
-                        frames[(elapsed.as_millis() / 120) as usize % frames.len()],
-                        "responding…",
-                        ASSISTANT,
-                    )
-                }
-                Activity::Tools => {
-                    let frames = ["◐", "◓", "◑", "◒"];
-                    (
-                        frames[(elapsed.as_millis() / 160) as usize % frames.len()],
-                        "running tools…",
-                        TOOL_ACTIVE,
-                    )
-                }
-                _ => unreachable!(),
-            };
-            output.push(Line::from(vec![
-                Span::styled(
-                    "ilar ",
-                    Style::default().fg(ASSISTANT).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(format!("{frame} "), Style::default().fg(color)),
-                Span::styled(label, Style::default().fg(MUTED)),
-            ]));
+            output.push(activity);
         }
         output
     }
@@ -1245,13 +1379,18 @@ impl App {
         let content_areas = content_areas(chunks[0]);
         let transcript_area = content_areas.transcript;
         let text_width = transcript_area.width.saturating_sub(3);
-        let text = self
-            .transcript_lines(text_width, std::time::Instant::now())
+        let now = std::time::Instant::now();
+        self.transcript_cache
+            .update(&self.lines, text_width, now, self.activity_started);
+        let activity_rows = activity_line(self.busy, self.activity, now, self.activity_started)
             .into_iter()
             .flat_map(|line| wrap_styled_line(line, text_width as usize))
             .collect::<Vec<_>>();
         let viewport_rows = transcript_area.height.saturating_sub(2) as usize;
-        let content_rows = text.len();
+        let content_rows = self
+            .transcript_cache
+            .row_count()
+            .saturating_add(activity_rows.len());
         self.update_scroll_metrics(content_rows, viewport_rows);
         let visible_rows = content_rows
             .saturating_sub(self.scroll_top)
@@ -1284,11 +1423,9 @@ impl App {
                 transcript_block = transcript_block.title_bottom(summary.right_aligned());
             }
         }
-        let text = text
-            .into_iter()
-            .skip(self.scroll_top)
-            .take(viewport_rows)
-            .collect::<Vec<_>>();
+        let text =
+            self.transcript_cache
+                .visible_rows(self.scroll_top, viewport_rows, &activity_rows);
         let paragraph = Paragraph::new(text).block(transcript_block);
         frame.render_widget(paragraph, transcript_area);
 
@@ -4099,6 +4236,73 @@ mod tests {
             .join("\n");
 
         assert!(!rendered.contains("must stay fixed"), "{rendered}");
+    }
+
+    #[test]
+    fn transcript_cache_rebuilds_only_the_changed_streaming_entry() {
+        let mut app = App::new();
+        app.lines = vec![
+            Line_::Assistant("final **answer**".into()),
+            Line_::Tool {
+                id: "done".into(),
+                name: "read".into(),
+                arguments: "src/main.rs".into(),
+                state: ToolState::Succeeded,
+            },
+            Line_::Assistant("stream".into()),
+        ];
+        let now = std::time::Instant::now();
+        app.transcript_cache
+            .update(&app.lines, 40, now, app.activity_started);
+        assert_eq!(app.transcript_cache.rebuilds, 3);
+
+        app.push_loop_event(&LoopEvent::TextDelta("ing".into()));
+        app.transcript_cache
+            .update(&app.lines, 40, now, app.activity_started);
+
+        assert_eq!(app.transcript_cache.rebuilds, 4);
+    }
+
+    #[test]
+    fn idle_transcript_cache_returns_only_viewport_rows() {
+        let mut app = App::new();
+        app.lines = (0..1_000)
+            .map(|index| Line_::System(format!("row {index}")))
+            .collect();
+        let now = std::time::Instant::now();
+        app.transcript_cache
+            .update(&app.lines, 40, now, app.activity_started);
+        let rebuilds = app.transcript_cache.rebuilds;
+
+        let visible = app.transcript_cache.visible_rows(500, 7, &[]);
+        app.transcript_cache
+            .update(&app.lines, 40, now, app.activity_started);
+
+        assert_eq!(visible.len(), 7);
+        assert_eq!(app.transcript_cache.rebuilds, rebuilds);
+    }
+
+    #[test]
+    fn cached_transcript_output_matches_the_existing_renderer() {
+        let mut app = App::new();
+        app.lines = vec![
+            Line_::User("hello\nthere".into()),
+            Line_::Assistant("## Result\n\nA **styled** response that wraps.".into()),
+            Line_::System("finished".into()),
+        ];
+        let width = 24;
+        let now = std::time::Instant::now();
+        let expected = app
+            .transcript_lines(width, now)
+            .into_iter()
+            .flat_map(|line| wrap_styled_line(line, width as usize))
+            .collect::<Vec<_>>();
+
+        app.transcript_cache
+            .update(&app.lines, width, now, app.activity_started);
+        let actual = app.transcript_cache.visible_rows(0, usize::MAX, &[]);
+
+        assert_eq!(actual, expected);
     }
 
     #[test]

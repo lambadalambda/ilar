@@ -14,7 +14,6 @@
 
 ## Stabilization
 
-- [ ] [Cache transcript rendering](issues/cache-transcript-rendering.md)
 - [ ] [Index session replay](issues/index-session-replay.md)
 - [ ] [Extract provider transport](issues/extract-provider-transport.md)
 - [ ] [Deterministic test harness](issues/deterministic-test-harness.md)
