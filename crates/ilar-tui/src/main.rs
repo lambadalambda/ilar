@@ -1884,6 +1884,7 @@ struct App {
     content_rows: usize,
     viewport_rows: usize,
     follow_tail: bool,
+    command_palette: Option<CommandPalette>,
     model_picker: Option<ModelPicker>,
     model_key_pending: bool,
     transcript_text_area: Rect,
@@ -1905,7 +1906,7 @@ impl App {
     fn new() -> Self {
         Self {
             lines: vec![Line_::System(
-                "ilar — Enter sends, Shift-Enter/Ctrl-J newline, F2 models, PgUp/PgDn scroll"
+                "ilar — Enter sends, Shift-Enter/Ctrl-J newline, Ctrl-P commands, PgUp/PgDn scroll"
                     .into(),
             )],
             input: InputBuffer::default(),
@@ -1924,6 +1925,7 @@ impl App {
             content_rows: 0,
             viewport_rows: 0,
             follow_tail: true,
+            command_palette: None,
             model_picker: None,
             model_key_pending: false,
             transcript_text_area: Rect::default(),
@@ -1939,6 +1941,13 @@ impl App {
             transcript_revision: 0,
             pending_subagent_activity: std::collections::VecDeque::new(),
             todos: std::sync::Arc::new(std::sync::Mutex::new(ilar::todo::TodoList::default())),
+        }
+    }
+
+    fn open_command_palette(&mut self) {
+        if !self.busy && self.model_picker.is_none() {
+            self.model_key_pending = false;
+            self.command_palette = Some(CommandPalette::new());
         }
     }
 
@@ -2880,6 +2889,7 @@ impl App {
         }
 
         if !self.busy
+            && self.command_palette.is_none()
             && self.model_picker.is_none()
             && input_area.width > 0
             && input_area.height > 0
@@ -2892,6 +2902,8 @@ impl App {
 
         if let Some(picker) = &self.model_picker {
             render_model_picker(frame, picker);
+        } else if let Some(palette) = &self.command_palette {
+            render_command_palette(frame, palette);
         }
     }
 }
@@ -3485,6 +3497,119 @@ fn text_field_view_at(value: &str, cursor: usize, width: u16) -> (String, u16) {
     (visible, before_width as u16)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaletteCommand {
+    SwitchModel,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PaletteCommandDefinition {
+    id: PaletteCommand,
+    section: &'static str,
+    label: &'static str,
+    shortcut: &'static str,
+    search_terms: &'static str,
+}
+
+static PALETTE_COMMANDS: &[PaletteCommandDefinition] = &[PaletteCommandDefinition {
+    id: PaletteCommand::SwitchModel,
+    section: "General",
+    label: "Switch model",
+    shortcut: "F2",
+    search_terms: "model provider",
+}];
+
+#[derive(Debug, PartialEq, Eq)]
+enum CommandPaletteAction {
+    Stay,
+    Dismiss,
+    Choose(PaletteCommand),
+}
+
+struct CommandPalette {
+    query: String,
+    selected: usize,
+}
+
+impl CommandPalette {
+    fn new() -> Self {
+        Self {
+            query: String::new(),
+            selected: 0,
+        }
+    }
+
+    fn filtered_commands(&self) -> Vec<&'static PaletteCommandDefinition> {
+        let query = self.query.to_lowercase();
+        let terms = query.split_whitespace().collect::<Vec<_>>();
+        PALETTE_COMMANDS
+            .iter()
+            .filter(|command| {
+                let haystack = format!(
+                    "{} {} {} {}",
+                    command.section, command.label, command.shortcut, command.search_terms
+                )
+                .to_lowercase();
+                terms.iter().all(|term| haystack.contains(term))
+            })
+            .collect()
+    }
+
+    fn move_selection(&mut self, delta: isize) {
+        let count = self.filtered_commands().len();
+        if count == 0 {
+            self.selected = 0;
+        } else {
+            self.selected = (self.selected as isize + delta).rem_euclid(count as isize) as usize;
+        }
+    }
+
+    fn insert_query(&mut self, text: &str) {
+        self.query
+            .extend(text.chars().filter(|character| !character.is_control()));
+        self.selected = 0;
+    }
+
+    fn handle_key(&mut self, code: KeyCode, control: bool) -> CommandPaletteAction {
+        match (code, control) {
+            (KeyCode::Esc, _) => CommandPaletteAction::Dismiss,
+            (KeyCode::Enter, _) => self
+                .filtered_commands()
+                .get(self.selected)
+                .map(|command| CommandPaletteAction::Choose(command.id))
+                .unwrap_or(CommandPaletteAction::Stay),
+            (KeyCode::Up, _) | (KeyCode::Char('p'), true) => {
+                self.move_selection(-1);
+                CommandPaletteAction::Stay
+            }
+            (KeyCode::Down, _) | (KeyCode::Char('n'), true) => {
+                self.move_selection(1);
+                CommandPaletteAction::Stay
+            }
+            (KeyCode::Home, _) => {
+                self.selected = 0;
+                CommandPaletteAction::Stay
+            }
+            (KeyCode::End, _) => {
+                self.selected = self.filtered_commands().len().saturating_sub(1);
+                CommandPaletteAction::Stay
+            }
+            (KeyCode::Backspace, _) => {
+                if let Some((index, _)) = self.query.grapheme_indices(true).next_back() {
+                    self.query.truncate(index);
+                }
+                self.selected = 0;
+                CommandPaletteAction::Stay
+            }
+            (KeyCode::Char(character), false) => {
+                self.insert_query(&character.to_string());
+                CommandPaletteAction::Stay
+            }
+            _ => CommandPaletteAction::Stay,
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum PickerAction {
     Stay,
@@ -3615,6 +3740,20 @@ impl ModelPicker {
     }
 }
 
+fn activate_palette_command(
+    app: &mut App,
+    command: PaletteCommand,
+    model_choices: Vec<&'static ilar::model::ModelInfo>,
+) {
+    app.command_palette = None;
+    match command {
+        PaletteCommand::SwitchModel if !model_choices.is_empty() => {
+            app.model_picker = Some(ModelPicker::new(model_choices, &app.current_model));
+        }
+        PaletteCommand::SwitchModel => {}
+    }
+}
+
 fn centered_rect(area: Rect, max_width: u16, max_height: u16) -> Rect {
     let width = max_width.min(area.width.saturating_sub(2).max(1));
     let height = max_height.min(area.height.saturating_sub(2).max(1));
@@ -3625,6 +3764,109 @@ fn centered_rect(area: Rect, max_width: u16, max_height: u16) -> Rect {
         width,
         height,
     )
+}
+
+fn render_command_palette(frame: &mut Frame, palette: &CommandPalette) {
+    let area = centered_rect(frame.area(), 72, 7);
+    frame.render_widget(Clear, area);
+
+    let footer = if area.width < 44 {
+        " Enter select · Esc close "
+    } else {
+        " ↑↓ move · Enter select · Esc close "
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" commands ")
+        .title_bottom(Line::from(footer).right_aligned());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let query_area_width = inner.width.saturating_sub(7);
+    let (visible_query, query_cursor_offset) = text_field_view(&palette.query, query_area_width);
+    let query = if palette.query.is_empty() {
+        Span::styled(
+            truncate_display(
+                "type to search commands",
+                query_area_width as usize,
+                Truncation::Right,
+            ),
+            Style::default().fg(MUTED),
+        )
+    } else {
+        Span::raw(visible_query)
+    };
+    let mut lines = vec![Line::from(vec![
+        Span::styled("search ", Style::default().fg(MUTED)),
+        query,
+    ])];
+    let commands = palette.filtered_commands();
+    if commands.is_empty() {
+        if inner.height > 1 {
+            lines.push(Line::styled(
+                " no matching commands",
+                Style::default().fg(MUTED),
+            ));
+        }
+    } else {
+        if inner.height >= 4 {
+            lines.push(Line::default());
+        }
+        if inner.height >= 3 {
+            lines.push(Line::styled(
+                commands[0].section,
+                Style::default()
+                    .fg(TOOL_ACTIVE)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        let row_count = inner.height.saturating_sub(lines.len() as u16) as usize;
+        let selected = palette.selected.min(commands.len().saturating_sub(1));
+        let start = selected
+            .saturating_add(1)
+            .saturating_sub(row_count)
+            .min(commands.len().saturating_sub(row_count));
+        for (index, command) in commands.iter().enumerate().skip(start).take(row_count) {
+            let marker = if index == selected { "> " } else { "  " };
+            let shortcut = (inner.width >= 32).then_some(command.shortcut);
+            let suffix_width = shortcut
+                .map(|shortcut| UnicodeWidthStr::width(shortcut).saturating_add(1))
+                .unwrap_or(0);
+            let label_width = (inner.width as usize)
+                .saturating_sub(UnicodeWidthStr::width(marker))
+                .saturating_sub(suffix_width);
+            let label = truncate_display(command.label, label_width, Truncation::Right);
+            let gap = shortcut
+                .map(|shortcut| {
+                    " ".repeat(
+                        (inner.width as usize)
+                            .saturating_sub(UnicodeWidthStr::width(marker))
+                            .saturating_sub(UnicodeWidthStr::width(label.as_str()))
+                            .saturating_sub(UnicodeWidthStr::width(shortcut)),
+                    )
+                })
+                .unwrap_or_default();
+            let text = shortcut
+                .map(|shortcut| format!("{marker}{label}{gap}{shortcut}"))
+                .unwrap_or_else(|| format!("{marker}{label}"));
+            let text = format!("{text:<width$}", width = inner.width as usize);
+            let style = if index == selected {
+                Style::default().fg(Color::Black).bg(Color::Cyan)
+            } else {
+                Style::default()
+            };
+            lines.push(Line::styled(text, style));
+        }
+    }
+
+    frame.render_widget(Paragraph::new(lines), inner);
+    let offset = 7usize
+        .saturating_add(query_cursor_offset as usize)
+        .min(inner.width.saturating_sub(1) as usize) as u16;
+    frame.set_cursor_position((inner.x.saturating_add(offset), inner.y));
 }
 
 fn render_model_picker(frame: &mut Frame, picker: &ModelPicker) {
@@ -4378,6 +4620,18 @@ fn drain_wheel_batch(
     })
 }
 
+fn is_command_palette_shortcut(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::Key(KeyEvent {
+            code: KeyCode::Char('p'),
+            kind: KeyEventKind::Press | KeyEventKind::Repeat,
+            modifiers,
+            ..
+        }) if modifiers.contains(KeyModifiers::CONTROL)
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_app(
     terminal: &mut ratatui::DefaultTerminal,
@@ -4485,10 +4739,29 @@ async fn run_app(
             cancel = None;
         }
 
+        // Let a buffered Ctrl-P open the palette before starting queued work.
+        let mut modal_open = app.command_palette.is_some() || app.model_picker.is_some();
+        if turn_handle.is_none()
+            && !notifications_paused
+            && !modal_open
+            && pending_terminal_event.is_none()
+            && crossterm::event::poll(std::time::Duration::ZERO)?
+        {
+            pending_terminal_event = Some(crossterm::event::read()?);
+        }
+        if pending_terminal_event
+            .as_ref()
+            .is_some_and(is_command_palette_shortcut)
+        {
+            pending_terminal_event = None;
+            app.model_key_pending = false;
+            app.open_command_palette();
+            modal_open = app.command_palette.is_some();
+        }
         // Background completions re-invoke their declared parent while idle.
         if let Some(notification) = next_notification(
             turn_handle.is_some(),
-            notifications_paused || app.model_picker.is_some(),
+            notifications_paused || modal_open,
             &mut pending_notification,
             &mut notifications,
         ) {
@@ -4621,6 +4894,23 @@ async fn run_app(
                     }
                     continue;
                 }
+                if let Some(palette) = app.command_palette.as_mut() {
+                    match palette.handle_key(code, control) {
+                        CommandPaletteAction::Stay => {}
+                        CommandPaletteAction::Dismiss => {
+                            app.command_palette = None;
+                        }
+                        CommandPaletteAction::Choose(command) => {
+                            activate_palette_command(app, command, model_choices.clone());
+                        }
+                    }
+                    continue;
+                }
+                if matches!((code, control), (KeyCode::Char('p'), true)) {
+                    app.model_key_pending = false;
+                    app.open_command_palette();
+                    continue;
+                }
                 if app.model_key_pending {
                     app.model_key_pending = false;
                     if code == KeyCode::Esc {
@@ -4727,47 +5017,52 @@ async fn run_app(
                     },
                 }
             }
+            Event::Paste(text) if app.command_palette.is_some() => {
+                app.command_palette.as_mut().unwrap().insert_query(&text);
+            }
             Event::Paste(text) if app.model_picker.is_none() => {
                 app.model_key_pending = false;
                 app.input.insert(&text);
             }
-            Event::Mouse(mouse) if app.model_picker.is_none() => match mouse.kind {
-                kind @ (MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) => {
-                    let initial_rows = if kind == MouseEventKind::ScrollUp {
-                        -3
-                    } else {
-                        3
-                    };
-                    let batch =
-                        drain_wheel_batch(initial_rows, MAX_WHEEL_EVENTS_PER_BATCH, || {
-                            if crossterm::event::poll(std::time::Duration::ZERO)? {
-                                Ok(Some(crossterm::event::read()?))
-                            } else {
-                                Ok(None)
-                            }
-                        })?;
-                    pending_terminal_event = batch.deferred;
-                    app.scroll_wheel(batch.rows);
-                }
-                MouseEventKind::Down(MouseButton::Left) => {
-                    app.begin_transcript_selection(mouse.column, mouse.row);
-                }
-                MouseEventKind::Drag(MouseButton::Left) => {
-                    app.drag_transcript_selection(mouse.column, mouse.row);
-                }
-                MouseEventKind::Up(MouseButton::Left) => {
-                    if let Some(text) = app.finish_transcript_selection(mouse.column, mouse.row)
-                        && let Err(error) = app.copy_to_clipboard(&text)
-                    {
-                        app.push_transcript_line(Line_::System(format!(
-                            "clipboard copy failed: {error:#}"
-                        )));
-                        app.follow_tail = true;
-                        app.set_activity(Activity::Error);
+            Event::Mouse(mouse) if app.command_palette.is_none() && app.model_picker.is_none() => {
+                match mouse.kind {
+                    kind @ (MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) => {
+                        let initial_rows = if kind == MouseEventKind::ScrollUp {
+                            -3
+                        } else {
+                            3
+                        };
+                        let batch =
+                            drain_wheel_batch(initial_rows, MAX_WHEEL_EVENTS_PER_BATCH, || {
+                                if crossterm::event::poll(std::time::Duration::ZERO)? {
+                                    Ok(Some(crossterm::event::read()?))
+                                } else {
+                                    Ok(None)
+                                }
+                            })?;
+                        pending_terminal_event = batch.deferred;
+                        app.scroll_wheel(batch.rows);
                     }
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        app.begin_transcript_selection(mouse.column, mouse.row);
+                    }
+                    MouseEventKind::Drag(MouseButton::Left) => {
+                        app.drag_transcript_selection(mouse.column, mouse.row);
+                    }
+                    MouseEventKind::Up(MouseButton::Left) => {
+                        if let Some(text) = app.finish_transcript_selection(mouse.column, mouse.row)
+                            && let Err(error) = app.copy_to_clipboard(&text)
+                        {
+                            app.push_transcript_line(Line_::System(format!(
+                                "clipboard copy failed: {error:#}"
+                            )));
+                            app.follow_tail = true;
+                            app.set_activity(Activity::Error);
+                        }
+                    }
+                    _ => {}
                 }
-                _ => {}
-            },
+            }
             _ => {}
         }
     }
@@ -5441,6 +5736,97 @@ mod tests {
             PickerAction::Dismiss,
             "confirming the active model is a no-op"
         );
+    }
+
+    #[test]
+    fn command_palette_searches_and_selects_defined_commands() {
+        let mut palette = CommandPalette::new();
+
+        assert_eq!(palette.filtered_commands(), vec![&PALETTE_COMMANDS[0]]);
+        assert_eq!(
+            palette.handle_key(KeyCode::Enter, false),
+            CommandPaletteAction::Choose(PaletteCommand::SwitchModel)
+        );
+
+        palette.handle_key(KeyCode::Char('s'), false);
+        palette.handle_key(KeyCode::Char('e'), false);
+        palette.handle_key(KeyCode::Char('s'), false);
+        assert!(palette.filtered_commands().is_empty());
+        assert_eq!(
+            palette.handle_key(KeyCode::Enter, false),
+            CommandPaletteAction::Stay
+        );
+        assert_eq!(
+            palette.handle_key(KeyCode::Esc, false),
+            CommandPaletteAction::Dismiss
+        );
+
+        let mut palette = CommandPalette::new();
+        palette.insert_query("model 🚀\n");
+        assert_eq!(palette.query, "model 🚀");
+        palette.handle_key(KeyCode::Backspace, false);
+        assert_eq!(palette.query, "model ");
+    }
+
+    #[test]
+    fn command_palette_opens_only_while_idle_and_switches_to_model_picker() {
+        assert!(is_command_palette_shortcut(&Event::Key(KeyEvent::new(
+            KeyCode::Char('p'),
+            KeyModifiers::CONTROL,
+        ))));
+        assert!(!is_command_palette_shortcut(&Event::Key(KeyEvent::new(
+            KeyCode::Char('p'),
+            KeyModifiers::NONE,
+        ))));
+
+        let mut app = App::new();
+        app.input = "draft prompt".into();
+        app.status = "paused".into();
+        app.model_key_pending = true;
+        app.busy = true;
+
+        app.open_command_palette();
+        assert!(app.command_palette.is_none());
+        assert_eq!(app.status, "paused");
+
+        app.busy = false;
+        app.open_command_palette();
+        assert!(app.command_palette.is_some());
+        assert!(!app.model_key_pending);
+        assert_eq!(app.status, "paused");
+        assert_eq!(app.input.text(), "draft prompt");
+
+        activate_palette_command(
+            &mut app,
+            PaletteCommand::SwitchModel,
+            ilar::model::catalog().iter().collect(),
+        );
+        assert!(app.command_palette.is_none());
+        assert!(app.model_picker.is_some());
+        assert_eq!(app.input.text(), "draft prompt");
+    }
+
+    #[test]
+    fn command_palette_renders_a_selectable_command_on_narrow_terminals() {
+        let backend = ratatui::backend::TestBackend::new(30, 6);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.command_palette = Some(CommandPalette::new());
+
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let screen = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("commands"), "{screen}");
+        assert!(screen.contains("search"), "{screen}");
+        assert!(screen.contains("Switch model"), "{screen}");
     }
 
     #[test]

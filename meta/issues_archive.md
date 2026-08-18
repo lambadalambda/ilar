@@ -83,3 +83,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Hierarchical transcript activity](issues/hierarchical-transcript-activity.md)
 - [x] [Group tools by thought phase](issues/group-tools-by-thought-phase.md)
 - [x] [Ring terminal bell after turn](issues/ring-terminal-bell-after-turn.md)
+- [x] [Add command palette](issues/add-command-palette.md)
