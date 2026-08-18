@@ -163,6 +163,48 @@ async fn error_fixture_maps_to_error_event() {
 }
 
 #[tokio::test]
+async fn top_level_nested_stream_error_exposes_its_message() {
+    let body = b"data: {\"type\":\"error\",\"error\":{\"code\":\"rate_limit\",\"message\":\"Please retry shortly\"}}\n\n";
+    let events = drain(
+        provider(http_server(body.to_vec()).0)
+            .stream(request_with_tool())
+            .unwrap(),
+    )
+    .await;
+
+    assert!(matches!(
+        &events[0],
+        ProviderEvent::Error(error) if error.contains("Please retry shortly")
+    ));
+}
+
+#[tokio::test]
+async fn message_less_stream_error_has_a_sanitized_bounded_fallback() {
+    let body = format!(
+        "data: {{\"type\":\"error\",\"error\":{{\"code\":\"backend_failure\",\"api_key\":\"super-secret\",\"detail\":\"Authorization: Bearer sk-live {}\"}}}}\n\n",
+        "padding".repeat(2_000)
+    );
+    let events = drain(
+        provider(http_server(body.into_bytes()).0)
+            .stream(request_with_tool())
+            .unwrap(),
+    )
+    .await;
+
+    let ProviderEvent::Error(error) = &events[0] else {
+        panic!("expected provider error: {events:?}");
+    };
+    assert!(error.contains("backend_failure"), "{error}");
+    assert!(!error.contains("super-secret"), "{error}");
+    assert!(!error.contains("sk-live"), "{error}");
+    assert!(
+        error.len() <= 4096,
+        "unbounded stream error: {}",
+        error.len()
+    );
+}
+
+#[tokio::test]
 async fn http_error_body_is_bounded_and_redacted() {
     let body = format!(
         "Authorization: Bearer super-secret {}",

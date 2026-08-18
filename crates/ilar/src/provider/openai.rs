@@ -583,11 +583,9 @@ impl EventMapper {
             }
             "response.failed" | "error" => {
                 self.completed = true; // terminal: don't synthesize a second error
-                let message = value["response"]["error"]["message"]
-                    .as_str()
-                    .or_else(|| value["message"].as_str())
-                    .unwrap_or("unknown provider error");
-                vec![ProviderEvent::Error(message.into())]
+                vec![ProviderEvent::Error(
+                    super::error_body::stream_error_message(&value),
+                )]
             }
             _ => Vec::new(),
         };

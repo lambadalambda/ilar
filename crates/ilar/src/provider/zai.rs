@@ -836,11 +836,9 @@ impl AnthropicMapper {
             }
             "error" => {
                 self.completed = true;
-                let message = value["error"]["message"]
-                    .as_str()
-                    .or_else(|| value["error"].as_str())
-                    .unwrap_or("unknown provider error");
-                vec![ProviderEvent::Error(message.into())]
+                vec![ProviderEvent::Error(
+                    super::error_body::stream_error_message(&value),
+                )]
             }
             _ => Vec::new(),
         };
@@ -1122,13 +1120,11 @@ impl OpenAiMapper {
         }
         // Mid-stream error payloads (chat-completions reports failures as
         // error chunks rather than terminating the HTTP response).
-        if let Some(error) = value["error"].as_object() {
-            let message = error
-                .get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or("unknown provider error");
+        if value["error"].is_object() {
             self.completed = true;
-            return Ok(vec![ProviderEvent::Error(message.into())]);
+            return Ok(vec![ProviderEvent::Error(
+                super::error_body::stream_error_message(&value),
+            )]);
         }
         if let Some(usage) = value["usage"].as_object() {
             merge_usage(&mut self.usage, usage);

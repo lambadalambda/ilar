@@ -1,7 +1,44 @@
 use futures::StreamExt;
 
 const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
+const MAX_STREAM_ERROR_BYTES: usize = 4096;
 const TRUNCATED: &str = "...[truncated]";
+
+pub(super) fn stream_error_message(value: &serde_json::Value) -> String {
+    for pointer in [
+        "/response/error/message",
+        "/response/status_details/error/message",
+        "/error/message",
+        "/message",
+    ] {
+        if let Some(message) = value
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_str)
+            .filter(|message| !message.is_empty())
+        {
+            return bounded_stream_text(redact_text(message));
+        }
+    }
+    if let Some(error) = value
+        .get("error")
+        .and_then(serde_json::Value::as_str)
+        .filter(|error| !error.is_empty())
+    {
+        return bounded_stream_text(redact_text(error));
+    }
+
+    let mut sanitized = value.clone();
+    redact_json(&mut sanitized);
+    bounded_stream_text(format!("provider stream error: {sanitized}"))
+}
+
+fn bounded_stream_text(mut value: String) -> String {
+    if value.len() > MAX_STREAM_ERROR_BYTES {
+        truncate_utf8(&mut value, MAX_STREAM_ERROR_BYTES - TRUNCATED.len());
+        value.push_str(TRUNCATED);
+    }
+    value
+}
 
 pub(super) async fn bounded_error_body(response: reqwest::Response, secrets: &[&str]) -> String {
     let mut bytes = Vec::new();
@@ -72,6 +109,7 @@ fn redact_json(value: &mut serde_json::Value) {
             }
         }
         serde_json::Value::Array(values) => values.iter_mut().for_each(redact_json),
+        serde_json::Value::String(value) => *value = redact_text(value),
         _ => {}
     }
 }
@@ -176,5 +214,32 @@ mod tests {
         let mut boundary = "request failed: super-sec".to_string();
         redact_explicit_secrets(&mut boundary, &["super-secret"], true);
         assert_eq!(boundary, "request failed: <redacted>");
+    }
+
+    #[test]
+    fn stream_errors_use_common_messages_or_sanitized_fallbacks() {
+        for value in [
+            serde_json::json!({"response": {"error": {"message": "retry"}}}),
+            serde_json::json!({"response": {"status_details": {"error": {"message": "retry"}}}}),
+            serde_json::json!({"error": {"message": "retry"}}),
+            serde_json::json!({"message": "retry"}),
+        ] {
+            assert_eq!(stream_error_message(&value), "retry");
+        }
+        let message = stream_error_message(&serde_json::json!({
+            "error": {"message": "Authorization: Bearer sk-live"}
+        }));
+        assert!(!message.contains("sk-live"), "{message}");
+        let fallback = stream_error_message(&serde_json::json!({
+            "type": "error",
+            "error": {
+                "code": "failed",
+                "api_key": "secret",
+                "detail": "Authorization: Bearer sk-live"
+            }
+        }));
+        assert!(fallback.contains("failed"), "{fallback}");
+        assert!(!fallback.contains("secret"), "{fallback}");
+        assert!(!fallback.contains("sk-live"), "{fallback}");
     }
 }
