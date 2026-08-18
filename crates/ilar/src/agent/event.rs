@@ -13,6 +13,15 @@ pub enum LoopEvent {
         id: String,
         arguments: String,
     },
+    ToolInputProgress {
+        id: String,
+        received_bytes: u64,
+        last_data: std::time::Instant,
+    },
+    ToolExecutionStarted {
+        id: String,
+        received_bytes: u64,
+    },
     ToolFinished {
         id: String,
         name: String,
@@ -38,11 +47,24 @@ const MAX_COALESCED_DELTA_BYTES: usize = 16 * 1024;
 pub struct LoopEventSender {
     sender: tokio::sync::mpsc::Sender<LoopEvent>,
     terminal: Option<tokio::sync::mpsc::OwnedPermit<LoopEvent>>,
+    progress:
+        std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, ToolProgressSnapshot>>>,
+    progress_wake: tokio::sync::mpsc::Sender<()>,
 }
 
 pub struct LoopEventReceiver {
     receiver: tokio::sync::mpsc::Receiver<LoopEvent>,
     pending: Option<LoopEvent>,
+    progress:
+        std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, ToolProgressSnapshot>>>,
+    progress_wake: tokio::sync::mpsc::Receiver<()>,
+    ready_progress: std::collections::VecDeque<LoopEvent>,
+}
+
+#[derive(Clone, Copy)]
+struct ToolProgressSnapshot {
+    received_bytes: u64,
+    last_data: std::time::Instant,
 }
 
 /// Bounded loop-event channel with one additional slot reserved for `TurnDone`.
@@ -52,14 +74,21 @@ pub fn loop_event_channel(capacity: usize) -> (LoopEventSender, LoopEventReceive
         .clone()
         .try_reserve_owned()
         .expect("new loop event channel has terminal capacity");
+    let progress = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let (progress_wake, progress_receiver) = tokio::sync::mpsc::channel(1);
     (
         LoopEventSender {
             sender,
             terminal: Some(terminal),
+            progress: progress.clone(),
+            progress_wake,
         },
         LoopEventReceiver {
             receiver,
             pending: None,
+            progress,
+            progress_wake: progress_receiver,
+            ready_progress: std::collections::VecDeque::new(),
         },
     )
 }
@@ -74,6 +103,18 @@ impl LoopEventSender {
         }
     }
 
+    /// Publish a cumulative progress snapshot without slowing the provider stream.
+    pub fn publish_tool_input_progress(&self, id: &str, received_bytes: u64) {
+        self.progress.lock().unwrap().insert(
+            id.to_string(),
+            ToolProgressSnapshot {
+                received_bytes,
+                last_data: std::time::Instant::now(),
+            },
+        );
+        let _ = self.progress_wake.try_send(());
+    }
+
     /// Publish the single terminal event through capacity reserved at construction.
     pub fn publish_terminal(&mut self, event: LoopEvent) {
         if let Some(permit) = self.terminal.take() {
@@ -84,24 +125,53 @@ impl LoopEventSender {
 
 impl LoopEventReceiver {
     pub async fn recv(&mut self) -> Option<LoopEvent> {
-        let event = match self.pending.take() {
-            Some(event) => event,
-            None => self.receiver.recv().await?,
-        };
-        Some(self.coalesce_available(event))
+        loop {
+            match self.try_recv() {
+                Ok(event) => return Some(event),
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => return None,
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+            }
+            tokio::select! {
+                biased;
+                event = self.receiver.recv() => {
+                    return event.map(|event| self.coalesce_available(event));
+                }
+                wake = self.progress_wake.recv() => {
+                    wake?;
+                    self.drain_progress();
+                }
+            }
+        }
     }
 
     pub fn try_recv(&mut self) -> Result<LoopEvent, tokio::sync::mpsc::error::TryRecvError> {
-        let event = match self.pending.take() {
+        let reliable = match self.pending.take() {
             Some(event) => event,
-            None => self.receiver.try_recv()?,
+            None => match self.receiver.try_recv() {
+                Ok(event) => event,
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                    if let Some(progress) = self.next_progress() {
+                        return Ok(progress);
+                    }
+                    return Err(tokio::sync::mpsc::error::TryRecvError::Empty);
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    if let Some(progress) = self.next_progress() {
+                        return Ok(progress);
+                    }
+                    return Err(tokio::sync::mpsc::error::TryRecvError::Disconnected);
+                }
+            },
         };
-        Ok(self.coalesce_available(event))
+        Ok(self.coalesce_available(reliable))
     }
 
     #[cfg(test)]
     fn len(&self) -> usize {
-        self.receiver.len() + usize::from(self.pending.is_some())
+        self.receiver.len()
+            + usize::from(self.pending.is_some())
+            + self.progress_wake.len()
+            + self.ready_progress.len()
     }
 
     fn coalesce_available(&mut self, mut event: LoopEvent) -> LoopEvent {
@@ -134,6 +204,37 @@ impl LoopEventReceiver {
                 return event;
             }
         }
+    }
+
+    fn next_progress(&mut self) -> Option<LoopEvent> {
+        if let Some(progress) = self.ready_progress.pop_front() {
+            return Some(progress);
+        }
+        self.progress_wake.try_recv().ok()?;
+        self.drain_progress();
+        self.ready_progress.pop_front()
+    }
+
+    fn drain_progress(&mut self) {
+        while self.progress_wake.try_recv().is_ok() {}
+        let updates = std::mem::take(&mut *self.progress.lock().unwrap());
+        let mut updates = updates.into_iter().collect::<Vec<_>>();
+        updates.sort_by(|(left, _), (right, _)| left.cmp(right));
+        self.ready_progress.extend(updates.into_iter().map(
+            |(
+                id,
+                ToolProgressSnapshot {
+                    received_bytes,
+                    last_data,
+                },
+            )| {
+                LoopEvent::ToolInputProgress {
+                    id,
+                    received_bytes,
+                    last_data,
+                }
+            },
+        ));
     }
 }
 
@@ -207,5 +308,51 @@ mod tests {
 
         assert!(matches!(rx.recv().await, Some(LoopEvent::TextDelta(text)) if text == chunk));
         assert!(matches!(rx.recv().await, Some(LoopEvent::TextDelta(text)) if text == chunk));
+    }
+
+    #[tokio::test]
+    async fn tool_progress_is_lossy_and_coalesces_to_the_latest_count() {
+        let (tx, mut rx) = loop_event_channel(3);
+        tx.publish_tool_input_progress("write-1", 1024);
+        tx.publish_tool_input_progress("write-1", 4096);
+        tx.publish_tool_input_progress("write-1", 8192);
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let Some(LoopEvent::ToolInputProgress {
+            id,
+            received_bytes,
+            last_data,
+        }) = rx.recv().await
+        else {
+            panic!("expected tool progress");
+        };
+        assert_eq!(id, "write-1");
+        assert_eq!(received_bytes, 8192);
+        assert!(last_data.elapsed() >= std::time::Duration::from_millis(10));
+
+        tx.publish_tool_input_progress("write-1", 16_384);
+        tx.publish_tool_input_progress("write-1", 32_768);
+        tx.publish_tool_input_progress("write-1", 65_536);
+        tx.publish_tool_input_progress("write-1", 131_072);
+        assert_eq!(rx.len(), 1, "progress uses one latest-value wakeup");
+    }
+
+    #[tokio::test]
+    async fn tool_progress_does_not_consume_reliable_event_capacity() {
+        let (tx, mut rx) = loop_event_channel(1);
+        let cancel = CancellationToken::new();
+        tx.publish_tool_input_progress("write-1", 1024);
+
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            tx.publish(LoopEvent::TurnStarted, &cancel),
+        )
+        .await
+        .expect("progress blocked a reliable lifecycle event");
+        assert!(matches!(rx.recv().await, Some(LoopEvent::TurnStarted)));
+        assert!(matches!(
+            rx.recv().await,
+            Some(LoopEvent::ToolInputProgress { id, .. }) if id == "write-1"
+        ));
     }
 }

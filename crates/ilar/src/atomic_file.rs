@@ -18,6 +18,15 @@ pub(crate) fn replace(path: &Path, content: &[u8], mode: Mode) -> std::io::Resul
     replace_with(path, content, mode, &NoHooks)
 }
 
+pub(crate) fn replace_cancellable(
+    path: &Path,
+    content: &[u8],
+    mode: Mode,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> std::io::Result<()> {
+    replace_with(path, content, mode, &CancelHooks(cancel))
+}
+
 trait Hooks {
     fn before_write(&self) -> std::io::Result<()> {
         Ok(())
@@ -32,6 +41,28 @@ trait Hooks {
 
 struct NoHooks;
 impl Hooks for NoHooks {}
+
+struct CancelHooks<'a>(&'a tokio_util::sync::CancellationToken);
+
+impl Hooks for CancelHooks<'_> {
+    fn before_write(&self) -> std::io::Result<()> {
+        self.check()
+    }
+
+    fn before_rename(&self) -> std::io::Result<()> {
+        self.check()
+    }
+}
+
+impl CancelHooks<'_> {
+    fn check(&self) -> std::io::Result<()> {
+        if self.0.is_cancelled() {
+            Err(Error::new(ErrorKind::Interrupted, "write cancelled"))
+        } else {
+            Ok(())
+        }
+    }
+}
 
 fn replace_with(path: &Path, content: &[u8], mode: Mode, hooks: &dyn Hooks) -> std::io::Result<()> {
     #[cfg(unix)]
@@ -304,6 +335,22 @@ mod tests {
         std::fs::write(&path, b"old").unwrap();
         replace(&path, b"complete replacement", Mode::Preserve).unwrap();
         assert_eq!(std::fs::read(path).unwrap(), b"complete replacement");
+    }
+
+    #[test]
+    fn cancelled_replacement_preserves_original_and_cleans_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("target");
+        std::fs::write(&path, b"original").unwrap();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel();
+
+        let error = replace_cancellable(&path, b"replacement", Mode::Preserve, &cancel)
+            .expect_err("cancelled replacement must fail");
+
+        assert_eq!(error.kind(), ErrorKind::Interrupted);
+        assert_eq!(std::fs::read(path).unwrap(), b"original");
+        assert!(temp_entries(dir.path()).is_empty());
     }
 
     #[cfg(unix)]

@@ -465,6 +465,9 @@ pub trait Tool: Send + Sync {
     fn manages_workspace_access(&self) -> bool {
         false
     }
+    fn accepts_executor_workspace_lease(&self) -> bool {
+        false
+    }
     fn input_schema(&self) -> serde_json::Value;
     fn run(&self, input: serde_json::Value, ctx: ToolContext) -> ToolFuture;
 }

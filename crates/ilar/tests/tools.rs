@@ -214,6 +214,27 @@ async fn write_creates_file_and_parent_dirs() {
     );
 }
 
+#[tokio::test]
+async fn cancelled_write_preserves_existing_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("existing.txt");
+    std::fs::write(&path, "original").unwrap();
+    let context = ctx(dir.path());
+    context.cancel.cancel();
+
+    let out = run(
+        &registry(),
+        "write",
+        serde_json::json!({"path": "existing.txt", "content": "replacement"}),
+        &context,
+    )
+    .await;
+
+    assert!(out.is_error, "{}", out.content);
+    assert!(out.content.contains("cancelled"), "{}", out.content);
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "original");
+}
+
 // ---- edit ----
 
 #[tokio::test]

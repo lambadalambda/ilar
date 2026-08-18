@@ -3,7 +3,8 @@
 use serde::Deserialize;
 
 use super::{
-    Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, WorkspaceAccess, parse_input,
+    Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, WorkspaceAccess, WorkspaceCoverage,
+    WorkspaceLease, parse_input,
 };
 
 pub struct WriteTool;
@@ -31,6 +32,14 @@ impl Tool for WriteTool {
         WorkspaceAccess::Mutating
     }
 
+    fn manages_workspace_access(&self) -> bool {
+        true
+    }
+
+    fn accepts_executor_workspace_lease(&self) -> bool {
+        true
+    }
+
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -48,24 +57,112 @@ impl Tool for WriteTool {
                 Ok(v) => v,
                 Err(e) => return e,
             };
-            let path = ctx.cwd.join(&input.path);
-            if let Some(parent) = path.parent()
-                && let Err(e) = std::fs::create_dir_all(parent)
-            {
-                return ToolOutput::error(format!("write {}: {e}", input.path));
-            }
-            match crate::atomic_file::replace(
-                &path,
-                input.content.as_bytes(),
-                crate::atomic_file::Mode::Preserve,
-            ) {
-                Ok(()) => ToolOutput::text(format!(
-                    "wrote {} ({} bytes)",
-                    input.path,
-                    input.content.len()
-                )),
-                Err(e) => ToolOutput::error(format!("write {}: {e}", input.path)),
+            let display_path = input.path;
+            let byte_len = input.content.len();
+            let content = input.content.into_bytes();
+            let lease = match ctx.workspace_coverage(WorkspaceAccess::Mutating) {
+                WorkspaceCoverage::Covered => ctx
+                    .workspace_lease
+                    .expect("covered workspace access has a lease"),
+                WorkspaceCoverage::Absent => {
+                    ctx.workspace.acquire_lease(WorkspaceAccess::Mutating).await
+                }
+                WorkspaceCoverage::Incompatible => {
+                    return ToolOutput::error(
+                        "write requests workspace access not covered by its inherited lease",
+                    );
+                }
+            };
+            let cancel = ctx.cancel;
+            let path = ctx.cwd.join(&display_path);
+            let result = run_blocking_io(lease, move || {
+                if cancel.is_cancelled() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "write cancelled",
+                    ));
+                }
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                crate::atomic_file::replace_cancellable(
+                    &path,
+                    &content,
+                    crate::atomic_file::Mode::Preserve,
+                    &cancel,
+                )
+            })
+            .await;
+
+            match result {
+                Ok(()) => ToolOutput::text(format!("wrote {display_path} ({byte_len} bytes)")),
+                Err(e) => ToolOutput::error(format!("write {display_path}: {e}")),
             }
         })
+    }
+}
+
+async fn run_blocking_io<T, F>(
+    lease: std::sync::Arc<WorkspaceLease>,
+    operation: F,
+) -> std::io::Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> std::io::Result<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let _lease = lease;
+        operation()
+    })
+    .await
+    .map_err(|error| std::io::Error::other(format!("blocking write task failed: {error}")))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn filesystem_work_uses_the_blocking_pool() {
+        let runtime_thread = std::thread::current().id();
+        let lease = crate::tools::WorkspaceScheduler::new()
+            .acquire_lease(WorkspaceAccess::Mutating)
+            .await;
+        let worker_thread = run_blocking_io(lease, || Ok(std::thread::current().id()))
+            .await
+            .unwrap();
+
+        assert_ne!(runtime_thread, worker_thread);
+    }
+
+    #[tokio::test]
+    async fn dropped_write_future_keeps_its_workspace_lease_until_io_stops() {
+        let scheduler = crate::tools::WorkspaceScheduler::new();
+        let lease = scheduler.acquire_lease(WorkspaceAccess::Mutating).await;
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let task = tokio::spawn(run_blocking_io(lease, move || {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            Ok(())
+        }));
+        started_rx.await.unwrap();
+
+        task.abort();
+        let _ = task.await;
+        assert!(
+            scheduler
+                .try_acquire_lease(WorkspaceAccess::Mutating)
+                .is_none(),
+            "detached filesystem work released its workspace lease"
+        );
+
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            scheduler.acquire_lease(WorkspaceAccess::Mutating),
+        )
+        .await
+        .expect("workspace lease was not released after filesystem work stopped");
     }
 }

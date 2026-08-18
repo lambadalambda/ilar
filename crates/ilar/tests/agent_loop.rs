@@ -80,6 +80,164 @@ fn tool_call_event(id: &str, msg: &str) -> ProviderEvent {
     }
 }
 
+struct PartialWriteProvider;
+
+impl Provider for PartialWriteProvider {
+    fn stream(&self, _req: Request) -> anyhow::Result<EventStream> {
+        Ok(Box::pin(
+            futures::stream::iter(vec![
+                ProviderEvent::ToolCallStarted {
+                    id: "write-1".into(),
+                    name: "write".into(),
+                },
+                ProviderEvent::ToolCallInputDelta {
+                    id: "write-1".into(),
+                    delta: r#"{"path":"src/generated.html","content":""#.into(),
+                },
+            ])
+            .chain(futures::stream::pending()),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn streamed_write_path_is_published_before_arguments_complete() {
+    let (store, session_id) = temp_session("build");
+    let (tx, mut rx) = events_channel();
+    let cancel = CancellationToken::new();
+    let registry = ToolRegistry::builtin();
+    let turn = run_turn(
+        &PartialWriteProvider,
+        &registry,
+        &store,
+        &session_id,
+        "generate a page",
+        None,
+        LoopConfig::default(),
+        tx,
+        cancel.clone(),
+        ToolContext::root(std::env::temp_dir()),
+    );
+    tokio::pin!(turn);
+
+    let (arguments, received_bytes) = tokio::time::timeout(Duration::from_secs(1), async {
+        let mut arguments = None;
+        let mut received_bytes = None;
+        loop {
+            tokio::select! {
+                event = rx.recv() => {
+                    match event {
+                        Some(LoopEvent::ToolInputProgress { id, received_bytes: bytes, .. })
+                            if id == "write-1" => received_bytes = Some(bytes),
+                        Some(LoopEvent::ToolArguments { id, arguments: summary }) if id == "write-1" => {
+                            arguments = Some(summary);
+                        }
+                        _ => {}
+                    }
+                    if let Some(received_bytes) = received_bytes
+                        && let Some(arguments) = arguments.take()
+                    {
+                        break (arguments, received_bytes);
+                    }
+                }
+                result = &mut turn => panic!("turn ended before path was published: {result:?}"),
+            }
+        }
+    })
+    .await
+    .expect("write path was not published while arguments were streaming");
+
+    assert_eq!(arguments, "src/generated.html");
+    assert_eq!(
+        received_bytes,
+        r#"{"path":"src/generated.html","content":""#.len() as u64
+    );
+    cancel.cancel();
+    assert_eq!(turn.await.unwrap(), TurnOutcome::Aborted);
+}
+
+#[tokio::test]
+async fn completed_write_arguments_transition_from_receiving_to_execution() {
+    let (store, session_id) = temp_session("build");
+    let dir = tempfile::tempdir().unwrap();
+    let delta = r#"{"path":"generated.txt","content":"hello"}"#;
+    let provider = MockProvider::new(vec![
+        vec![
+            ProviderEvent::ToolCallStarted {
+                id: "write-1".into(),
+                name: "write".into(),
+            },
+            ProviderEvent::ToolCallInputDelta {
+                id: "write-1".into(),
+                delta: delta.into(),
+            },
+            ProviderEvent::ToolCallCompleted {
+                id: "write-1".into(),
+                name: "write".into(),
+                input: serde_json::json!({"path": "generated.txt", "content": "hello"}),
+            },
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+                usage: Default::default(),
+            },
+        ],
+        vec![ProviderEvent::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+            usage: Default::default(),
+        }],
+    ]);
+    let (tx, mut rx) = events_channel();
+
+    let outcome = run_turn(
+        &provider,
+        &ToolRegistry::builtin(),
+        &store,
+        &session_id,
+        "write it",
+        None,
+        LoopConfig::default(),
+        tx,
+        CancellationToken::new(),
+        ToolContext::root(dir.path().to_path_buf()),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, TurnOutcome::Completed);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("generated.txt")).unwrap(),
+        "hello"
+    );
+    let mut published = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        published.push(event);
+    }
+    let position = |predicate: &dyn Fn(&LoopEvent) -> bool| {
+        published
+            .iter()
+            .position(predicate)
+            .expect("expected write lifecycle event")
+    };
+    let receiving = position(&|event| {
+        matches!(
+            event,
+            LoopEvent::ToolInputProgress { id, received_bytes, .. }
+                if id == "write-1" && *received_bytes == delta.len() as u64
+        )
+    });
+    let executing = position(&|event| {
+        matches!(
+            event,
+            LoopEvent::ToolExecutionStarted { id, received_bytes }
+                if id == "write-1" && *received_bytes == delta.len() as u64
+        )
+    });
+    let finished =
+        position(&|event| matches!(event, LoopEvent::ToolFinished { id, .. } if id == "write-1"));
+    assert_ne!(receiving, executing);
+    assert!(executing < finished);
+}
+
 #[tokio::test]
 async fn cancellation_during_final_event_backpressure_aborts_the_turn() {
     let (store, session_id) = temp_session("build");
@@ -712,6 +870,14 @@ async fn multi_turn_tool_conversation_end_to_end() {
     assert_eq!(
         published
             .iter()
+            .filter(|event| matches!(event, LoopEvent::ToolExecutionStarted { .. }))
+            .count(),
+        2,
+        "immediately-ready tools must still publish execution starts"
+    );
+    assert_eq!(
+        published
+            .iter()
             .filter(|e| matches!(e, LoopEvent::ToolStarted { .. }))
             .count(),
         2,
@@ -740,9 +906,12 @@ async fn multi_turn_tool_conversation_end_to_end() {
         position(&|event| matches!(event, LoopEvent::ToolStarted { id, .. } if id == "t1"));
     let arguments =
         position(&|event| matches!(event, LoopEvent::ToolArguments { id, .. } if id == "t1"));
+    let executing = position(
+        &|event| matches!(event, LoopEvent::ToolExecutionStarted { id, .. } if id == "t1"),
+    );
     let finished =
         position(&|event| matches!(event, LoopEvent::ToolFinished { id, .. } if id == "t1"));
-    assert!(started < arguments && arguments < finished);
+    assert!(started < arguments && arguments < executing && executing < finished);
     assert!(
         published
             .iter()

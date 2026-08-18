@@ -43,6 +43,7 @@ enum Line_ {
         name: String,
         arguments: String,
         state: ToolState,
+        progress: ToolProgress,
     },
     System(String),
 }
@@ -52,6 +53,18 @@ enum ToolState {
     Running,
     Succeeded,
     Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolProgress {
+    None,
+    Receiving {
+        received_bytes: u64,
+        last_data: std::time::Instant,
+    },
+    Executing {
+        received_bytes: u64,
+    },
 }
 
 #[derive(Default)]
@@ -641,6 +654,7 @@ fn restored_session_view(session: &ilar::session::SessionReader) -> RestoredSess
                                 name: name.clone(),
                                 arguments: ilar::agent::summarize_tool_input(name, input),
                                 state: ToolState::Running,
+                                progress: ToolProgress::None,
                             });
                         }
                         ilar::session::ContentBlock::Thinking { .. }
@@ -741,6 +755,7 @@ fn transcript_entry_lines(
             name,
             arguments,
             state,
+            progress,
             ..
         } => vec![tool_line(
             name,
@@ -748,6 +763,8 @@ fn transcript_entry_lines(
             *state,
             width,
             now.saturating_duration_since(activity_started),
+            *progress,
+            now,
         )],
         Line_::System(text) => safe_lines(text)
             .into_iter()
@@ -932,6 +949,7 @@ impl App {
                     name: name.clone(),
                     arguments: String::new(),
                     state: ToolState::Running,
+                    progress: ToolProgress::None,
                 });
                 self.status = format!("running {name}");
                 self.set_activity(Activity::Tools);
@@ -951,19 +969,63 @@ impl App {
                     *arguments = summary.clone();
                 }
             }
-            LoopEvent::ToolFinished { id, name, is_error } => {
-                let mut matched = false;
-                if let Some(state) = self.lines.iter_mut().rev().find_map(|line| match line {
+            LoopEvent::ToolInputProgress {
+                id,
+                received_bytes,
+                last_data,
+            } => {
+                if let Some(progress) = self.lines.iter_mut().rev().find_map(|line| match line {
                     Line_::Tool {
-                        id: line_id, state, ..
-                    } if line_id == id && *state == ToolState::Running => Some(state),
+                        id: line_id,
+                        state: ToolState::Running,
+                        progress,
+                        ..
+                    } if line_id == id => Some(progress),
+                    _ => None,
+                }) && !matches!(progress, ToolProgress::Executing { .. })
+                {
+                    *progress = ToolProgress::Receiving {
+                        received_bytes: *received_bytes,
+                        last_data: *last_data,
+                    };
+                }
+            }
+            LoopEvent::ToolExecutionStarted { id, received_bytes } => {
+                if let Some(progress) = self.lines.iter_mut().rev().find_map(|line| match line {
+                    Line_::Tool {
+                        id: line_id,
+                        state: ToolState::Running,
+                        progress,
+                        ..
+                    } if line_id == id => Some(progress),
                     _ => None,
                 }) {
+                    *progress = ToolProgress::Executing {
+                        received_bytes: *received_bytes,
+                    };
+                }
+            }
+            LoopEvent::ToolFinished { id, name, is_error } => {
+                let mut matched = false;
+                if let Some((state, progress)) =
+                    self.lines.iter_mut().rev().find_map(|line| match line {
+                        Line_::Tool {
+                            id: line_id,
+                            state,
+                            progress,
+                            ..
+                        } if line_id == id && *state == ToolState::Running => {
+                            Some((state, progress))
+                        }
+                        _ => None,
+                    })
+                {
                     *state = if *is_error {
                         ToolState::Failed
                     } else {
                         ToolState::Succeeded
                     };
+                    *progress = ToolProgress::None;
                     matched = true;
                 }
                 if !matched {
@@ -976,6 +1038,7 @@ impl App {
                         } else {
                             ToolState::Succeeded
                         },
+                        progress: ToolProgress::None,
                     });
                 }
                 let running = self
@@ -2253,6 +2316,8 @@ fn tool_line(
     state: ToolState,
     width: u16,
     elapsed: std::time::Duration,
+    progress: ToolProgress,
+    now: std::time::Instant,
 ) -> Line<'static> {
     let width = width as usize;
     let (state_icon, state_color) = match state {
@@ -2280,11 +2345,51 @@ fn tool_line(
     let name_budget = width.saturating_sub(fixed).clamp(1, 20);
     let name = truncate_display(name, name_budget, Truncation::Right);
     let used = fixed + UnicodeWidthStr::width(name.as_str());
-    let arguments = truncate_display(
-        &safe_text(arguments)
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" "),
+    let arguments = safe_text(arguments)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let progress = match (state, progress) {
+        (
+            ToolState::Running,
+            ToolProgress::Receiving {
+                received_bytes,
+                last_data,
+            },
+        ) => {
+            let quiet = now.saturating_duration_since(last_data);
+            if quiet >= std::time::Duration::from_secs(2) {
+                format!(
+                    "waiting for provider · {} received · last data {}s ago",
+                    format_bytes(received_bytes),
+                    quiet.as_secs()
+                )
+            } else {
+                format!("receiving {}", format_bytes(received_bytes))
+            }
+        }
+        (ToolState::Running, ToolProgress::Executing { received_bytes }) => {
+            let action = if name == "write" {
+                "writing"
+            } else {
+                "executing"
+            };
+            if received_bytes == 0 {
+                action.into()
+            } else {
+                format!("{action} · {} received", format_bytes(received_bytes))
+            }
+        }
+        _ => String::new(),
+    };
+    let details = match (arguments.is_empty(), progress.is_empty()) {
+        (false, false) => format!("{arguments} · {progress}"),
+        (false, true) => arguments,
+        (true, false) => progress,
+        (true, true) => String::new(),
+    };
+    let details = truncate_display(
+        &details,
         width.saturating_sub(used).saturating_sub(1),
         Truncation::Right,
     );
@@ -2294,13 +2399,23 @@ fn tool_line(
         Span::styled(name, Style::default().add_modifier(Modifier::BOLD)),
         Span::styled(format!(" {state_icon}"), Style::default().fg(state_color)),
     ];
-    if !arguments.is_empty() {
+    if !details.is_empty() {
         spans.push(Span::styled(
-            format!(" {arguments}"),
+            format!(" {details}"),
             Style::default().fg(MUTED),
         ));
     }
     Line::from(spans)
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+    }
 }
 
 fn truncate_display(value: &str, max_width: usize, mode: Truncation) -> String {
@@ -3155,7 +3270,7 @@ mod tests {
         assert!(matches!(&view.lines[1], Line_::Assistant(text) if text == "restored answer"));
         assert!(matches!(
             &view.lines[2],
-            Line_::Tool { id, name, arguments, state: ToolState::Succeeded }
+            Line_::Tool { id, name, arguments, state: ToolState::Succeeded, .. }
                 if id == "read-1" && name == "read" && arguments.is_empty()
         ));
         assert!(matches!(
@@ -3806,6 +3921,77 @@ mod tests {
     }
 
     #[test]
+    fn write_progress_distinguishes_receiving_waiting_and_writing() {
+        let now = std::time::Instant::now();
+        let receiving = tool_line(
+            "write",
+            "src/generated.html",
+            ToolState::Running,
+            120,
+            std::time::Duration::ZERO,
+            ToolProgress::Receiving {
+                received_bytes: 48 * 1024,
+                last_data: now,
+            },
+            now,
+        );
+        let receiving = rendered_text(&receiving);
+        assert!(receiving.contains("src/generated.html"), "{receiving}");
+        assert!(receiving.contains("receiving 48.0 KiB"), "{receiving}");
+
+        let waiting = tool_line(
+            "write",
+            "src/generated.html",
+            ToolState::Running,
+            120,
+            std::time::Duration::ZERO,
+            ToolProgress::Receiving {
+                received_bytes: 48 * 1024,
+                last_data: now - std::time::Duration::from_secs(3),
+            },
+            now,
+        );
+        let waiting = rendered_text(&waiting);
+        assert!(waiting.contains("waiting for provider"), "{waiting}");
+        assert!(waiting.contains("last data 3s ago"), "{waiting}");
+
+        let mut app = App::new();
+        app.push_loop_event(&LoopEvent::ToolStarted {
+            id: "write-1".into(),
+            name: "write".into(),
+        });
+        app.push_loop_event(&LoopEvent::ToolInputProgress {
+            id: "write-1".into(),
+            received_bytes: 48 * 1024,
+            last_data: now,
+        });
+        app.push_loop_event(&LoopEvent::ToolExecutionStarted {
+            id: "write-1".into(),
+            received_bytes: 64 * 1024,
+        });
+        let writing = app.transcript_lines(120, now);
+        let writing = rendered_text(writing.last().unwrap());
+        assert!(writing.contains("writing · 64.0 KiB received"), "{writing}");
+
+        let executing = tool_line(
+            "bash",
+            "cargo test",
+            ToolState::Running,
+            120,
+            std::time::Duration::ZERO,
+            ToolProgress::Executing {
+                received_bytes: 2048,
+            },
+            now,
+        );
+        let executing = rendered_text(&executing);
+        assert!(
+            executing.contains("executing · 2.0 KiB received"),
+            "{executing}"
+        );
+    }
+
+    #[test]
     fn telemetry_always_contains_runtime_context() {
         let mut app = App::new();
         app.configure_runtime(
@@ -3882,12 +4068,15 @@ mod tests {
         });
         let tools = app.transcript_lines(80, app.activity_started);
         assert!(rendered_text(tools.last().unwrap()).contains("running tools"));
+        let tool_now = std::time::Instant::now();
         let first_tool = tool_line(
             "read",
             "src/main.rs",
             ToolState::Running,
             80,
             std::time::Duration::ZERO,
+            ToolProgress::None,
+            tool_now,
         );
         let next_tool = tool_line(
             "read",
@@ -3895,6 +4084,8 @@ mod tests {
             ToolState::Running,
             80,
             std::time::Duration::from_millis(200),
+            ToolProgress::None,
+            tool_now + std::time::Duration::from_millis(200),
         );
         assert_ne!(rendered_text(&first_tool), rendered_text(&next_tool));
 
@@ -3919,11 +4110,31 @@ mod tests {
                 ToolState::Succeeded,
                 width,
                 std::time::Duration::ZERO,
+                ToolProgress::None,
+                std::time::Instant::now(),
             );
             let rendered = rendered_text(&line);
             assert!(
                 UnicodeWidthStr::width(rendered.as_str()) <= width as usize,
                 "width {width}: {rendered:?}"
+            );
+            let now = std::time::Instant::now();
+            let progress = tool_line(
+                "write",
+                "👩‍💻 /very/long/path/to/a/file",
+                ToolState::Running,
+                width,
+                std::time::Duration::ZERO,
+                ToolProgress::Receiving {
+                    received_bytes: u64::MAX,
+                    last_data: now - std::time::Duration::from_secs(30),
+                },
+                now,
+            );
+            let rendered = rendered_text(&progress);
+            assert!(
+                UnicodeWidthStr::width(rendered.as_str()) <= width as usize,
+                "progress width {width}: {rendered:?}"
             );
         }
     }
@@ -4248,6 +4459,7 @@ mod tests {
                 name: "read".into(),
                 arguments: "src/main.rs".into(),
                 state: ToolState::Succeeded,
+                progress: ToolProgress::None,
             },
             Line_::Assistant("stream".into()),
         ];

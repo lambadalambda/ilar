@@ -10,7 +10,7 @@ use crate::agent::event::{LoopEvent, LoopEventSender};
 use crate::provider::{ProviderEvent, ProviderResolver, Request, StopReason};
 use crate::session::{ContentBlock, SessionEvent, SessionStore, Usage, new_id};
 use crate::tools::ToolRegistry;
-use crate::tools::executor::{CallOutcome, ToolCall, execute_calls};
+use crate::tools::executor::{CallOutcome, ToolCall, execute_calls_observed};
 use chrono::Utc;
 
 /// Loop tuning knobs.
@@ -59,6 +59,9 @@ struct StepAccumulator {
     completed_calls: std::collections::HashSet<String>,
     /// Tool-call ids that already got a ToolStarted announcement.
     announced_calls: std::collections::HashMap<String, String>,
+    tool_input_scanners: std::collections::HashMap<String, PartialWriteInput>,
+    tool_received_bytes: std::collections::HashMap<String, u64>,
+    published_arguments: std::collections::HashMap<String, String>,
     usage: Usage,
     stop_reason: Option<StopReason>,
     response_content: Option<(String, serde_json::Value)>,
@@ -169,6 +172,51 @@ impl StepAccumulator {
         Ok(())
     }
 
+    fn push_tool_input_delta(&mut self, id: &str, delta: &str) -> Result<ToolInputUpdate, String> {
+        if id.is_empty() || !self.tool_indices.contains_key(id) || self.completed_calls.contains(id)
+        {
+            return Err(format!(
+                "tool argument delta references unknown call {id:?}"
+            ));
+        }
+        let received = self.tool_received_bytes.entry(id.to_string()).or_default();
+        *received = received.saturating_add(delta.len() as u64);
+
+        if self.announced_calls.get(id).map(String::as_str) != Some("write")
+            || self.published_arguments.contains_key(id)
+        {
+            return Ok(ToolInputUpdate {
+                arguments: None,
+                received_bytes: *received,
+            });
+        }
+
+        let scanner = self.tool_input_scanners.entry(id.to_string()).or_default();
+        let Some(path) = scanner.push(delta) else {
+            return Ok(ToolInputUpdate {
+                arguments: None,
+                received_bytes: *received,
+            });
+        };
+        self.tool_input_scanners.remove(id);
+        let arguments = summarize_tool_input("write", &serde_json::json!({"path": path}));
+        self.published_arguments
+            .insert(id.to_string(), arguments.clone());
+        Ok(ToolInputUpdate {
+            arguments: Some(arguments),
+            received_bytes: *received,
+        })
+    }
+
+    fn arguments_changed(&mut self, id: &str, arguments: &str) -> bool {
+        if self.published_arguments.get(id).map(String::as_str) == Some(arguments) {
+            return false;
+        }
+        self.published_arguments
+            .insert(id.to_string(), arguments.to_string());
+        true
+    }
+
     fn validate_terminal(&self, stop_reason: &StopReason) -> Result<(), String> {
         let has_calls = !self.tool_indices.is_empty();
         let calls = self.tool_calls();
@@ -224,6 +272,304 @@ impl StepAccumulator {
 }
 
 const MAX_TOOL_ARGUMENT_SUMMARY_CHARS: usize = 512;
+const MAX_STREAMED_PATH_BYTES: usize = 4 * 1024;
+const MAX_STREAMED_JSON_DEPTH: usize = 64;
+
+#[derive(Default)]
+struct PartialWriteInput {
+    state: PartialJsonState,
+}
+
+struct ToolInputUpdate {
+    arguments: Option<String>,
+    received_bytes: u64,
+}
+
+#[derive(Default)]
+enum PartialJsonState {
+    #[default]
+    Start,
+    BeforeKey,
+    Key {
+        raw: Vec<u8>,
+        escaped: bool,
+        overflow: bool,
+    },
+    AfterKey {
+        wanted: bool,
+    },
+    BeforeValue {
+        wanted: bool,
+    },
+    Path {
+        raw: Vec<u8>,
+        escaped: bool,
+        overflow: bool,
+    },
+    Skip {
+        stack: Vec<u8>,
+        in_string: bool,
+        escaped: bool,
+        scalar: bool,
+    },
+    AfterValue,
+    Done,
+    Invalid,
+}
+
+impl PartialWriteInput {
+    fn push(&mut self, delta: &str) -> Option<String> {
+        for &byte in delta.as_bytes() {
+            let state = std::mem::replace(&mut self.state, PartialJsonState::Invalid);
+            self.state = match state {
+                PartialJsonState::Start if byte.is_ascii_whitespace() => PartialJsonState::Start,
+                PartialJsonState::Start if byte == b'{' => PartialJsonState::BeforeKey,
+                PartialJsonState::BeforeKey if byte.is_ascii_whitespace() => {
+                    PartialJsonState::BeforeKey
+                }
+                PartialJsonState::BeforeKey if byte == b'}' => PartialJsonState::Done,
+                PartialJsonState::BeforeKey if byte == b'"' => PartialJsonState::Key {
+                    raw: vec![byte],
+                    escaped: false,
+                    overflow: false,
+                },
+                PartialJsonState::Key {
+                    mut raw,
+                    escaped,
+                    mut overflow,
+                } => {
+                    push_bounded_byte(&mut raw, byte, &mut overflow);
+                    if escaped {
+                        PartialJsonState::Key {
+                            raw,
+                            escaped: false,
+                            overflow,
+                        }
+                    } else if byte == b'\\' {
+                        PartialJsonState::Key {
+                            raw,
+                            escaped: true,
+                            overflow,
+                        }
+                    } else if byte == b'"' {
+                        let wanted = !overflow
+                            && serde_json::from_slice::<String>(&raw)
+                                .is_ok_and(|key| key == "path");
+                        PartialJsonState::AfterKey { wanted }
+                    } else {
+                        PartialJsonState::Key {
+                            raw,
+                            escaped: false,
+                            overflow,
+                        }
+                    }
+                }
+                PartialJsonState::AfterKey { wanted } if byte.is_ascii_whitespace() => {
+                    PartialJsonState::AfterKey { wanted }
+                }
+                PartialJsonState::AfterKey { wanted } if byte == b':' => {
+                    PartialJsonState::BeforeValue { wanted }
+                }
+                PartialJsonState::BeforeValue { wanted } if byte.is_ascii_whitespace() => {
+                    PartialJsonState::BeforeValue { wanted }
+                }
+                PartialJsonState::BeforeValue { wanted: true } if byte == b'"' => {
+                    PartialJsonState::Path {
+                        raw: vec![byte],
+                        escaped: false,
+                        overflow: false,
+                    }
+                }
+                PartialJsonState::BeforeValue { .. } => skip_value(byte),
+                PartialJsonState::Path {
+                    mut raw,
+                    escaped,
+                    mut overflow,
+                } => {
+                    push_bounded_byte(&mut raw, byte, &mut overflow);
+                    if escaped {
+                        PartialJsonState::Path {
+                            raw,
+                            escaped: false,
+                            overflow,
+                        }
+                    } else if byte == b'\\' {
+                        PartialJsonState::Path {
+                            raw,
+                            escaped: true,
+                            overflow,
+                        }
+                    } else if byte == b'"' {
+                        if !overflow && let Ok(path) = serde_json::from_slice::<String>(&raw) {
+                            self.state = PartialJsonState::Done;
+                            return Some(path);
+                        }
+                        PartialJsonState::AfterValue
+                    } else {
+                        PartialJsonState::Path {
+                            raw,
+                            escaped: false,
+                            overflow,
+                        }
+                    }
+                }
+                PartialJsonState::Skip {
+                    stack,
+                    in_string: true,
+                    escaped,
+                    scalar,
+                } => {
+                    if escaped {
+                        PartialJsonState::Skip {
+                            stack,
+                            in_string: true,
+                            escaped: false,
+                            scalar,
+                        }
+                    } else if byte == b'\\' {
+                        PartialJsonState::Skip {
+                            stack,
+                            in_string: true,
+                            escaped: true,
+                            scalar,
+                        }
+                    } else if byte == b'"' {
+                        if stack.is_empty() {
+                            PartialJsonState::AfterValue
+                        } else {
+                            PartialJsonState::Skip {
+                                stack,
+                                in_string: false,
+                                escaped: false,
+                                scalar,
+                            }
+                        }
+                    } else {
+                        PartialJsonState::Skip {
+                            stack,
+                            in_string: true,
+                            escaped: false,
+                            scalar,
+                        }
+                    }
+                }
+                PartialJsonState::Skip {
+                    stack,
+                    in_string: false,
+                    escaped: false,
+                    scalar: true,
+                } => match byte {
+                    b',' if stack.is_empty() => PartialJsonState::BeforeKey,
+                    b'}' if stack.is_empty() => PartialJsonState::Done,
+                    _ => PartialJsonState::Skip {
+                        stack,
+                        in_string: false,
+                        escaped: false,
+                        scalar: true,
+                    },
+                },
+                PartialJsonState::Skip {
+                    mut stack,
+                    in_string: false,
+                    escaped: false,
+                    scalar: false,
+                } => match byte {
+                    b'"' => PartialJsonState::Skip {
+                        stack,
+                        in_string: true,
+                        escaped: false,
+                        scalar: false,
+                    },
+                    b'{' if stack.len() < MAX_STREAMED_JSON_DEPTH => {
+                        stack.push(b'}');
+                        PartialJsonState::Skip {
+                            stack,
+                            in_string: false,
+                            escaped: false,
+                            scalar: false,
+                        }
+                    }
+                    b'[' if stack.len() < MAX_STREAMED_JSON_DEPTH => {
+                        stack.push(b']');
+                        PartialJsonState::Skip {
+                            stack,
+                            in_string: false,
+                            escaped: false,
+                            scalar: false,
+                        }
+                    }
+                    b'{' | b'[' => PartialJsonState::Invalid,
+                    closing if stack.last() == Some(&closing) => {
+                        stack.pop();
+                        if stack.is_empty() {
+                            PartialJsonState::AfterValue
+                        } else {
+                            PartialJsonState::Skip {
+                                stack,
+                                in_string: false,
+                                escaped: false,
+                                scalar: false,
+                            }
+                        }
+                    }
+                    b'}' | b']' => PartialJsonState::Invalid,
+                    _ => PartialJsonState::Skip {
+                        stack,
+                        in_string: false,
+                        escaped: false,
+                        scalar: false,
+                    },
+                },
+                PartialJsonState::AfterValue if byte.is_ascii_whitespace() => {
+                    PartialJsonState::AfterValue
+                }
+                PartialJsonState::AfterValue if byte == b',' => PartialJsonState::BeforeKey,
+                PartialJsonState::AfterValue if byte == b'}' => PartialJsonState::Done,
+                PartialJsonState::Done => PartialJsonState::Done,
+                PartialJsonState::Invalid => PartialJsonState::Invalid,
+                _ => PartialJsonState::Invalid,
+            };
+        }
+        None
+    }
+}
+
+fn push_bounded_byte(raw: &mut Vec<u8>, byte: u8, overflow: &mut bool) {
+    if raw.len() < MAX_STREAMED_PATH_BYTES {
+        raw.push(byte);
+    } else {
+        *overflow = true;
+    }
+}
+
+fn skip_value(byte: u8) -> PartialJsonState {
+    match byte {
+        b'"' => PartialJsonState::Skip {
+            stack: Vec::new(),
+            in_string: true,
+            escaped: false,
+            scalar: false,
+        },
+        b'{' => PartialJsonState::Skip {
+            stack: vec![b'}'],
+            in_string: false,
+            escaped: false,
+            scalar: false,
+        },
+        b'[' => PartialJsonState::Skip {
+            stack: vec![b']'],
+            in_string: false,
+            escaped: false,
+            scalar: false,
+        },
+        _ => PartialJsonState::Skip {
+            stack: Vec::new(),
+            in_string: false,
+            escaped: false,
+            scalar: true,
+        },
+    }
+}
 
 /// Bounded, redacted tool input summary suitable for persisted UI replay.
 pub fn summarize_tool_input(name: &str, input: &serde_json::Value) -> String {
@@ -512,15 +858,20 @@ pub async fn run_turn(
                         .publish(LoopEvent::ToolStarted { id, name }, &cancel)
                         .await;
                 }
-                ProviderEvent::ToolCallInputDelta { id, .. } => {
-                    if id.is_empty()
-                        || !acc.tool_indices.contains_key(&id)
-                        || acc.completed_calls.contains(&id)
-                    {
-                        errored = Some(format!(
-                            "tool argument delta references unknown call {id:?}"
-                        ));
-                        break;
+                ProviderEvent::ToolCallInputDelta { id, delta } => {
+                    match acc.push_tool_input_delta(&id, &delta) {
+                        Ok(update) => {
+                            events.publish_tool_input_progress(&id, update.received_bytes);
+                            if let Some(arguments) = update.arguments {
+                                events
+                                    .publish(LoopEvent::ToolArguments { id, arguments }, &cancel)
+                                    .await;
+                            }
+                        }
+                        Err(error) => {
+                            errored = Some(error);
+                            break;
+                        }
                     }
                 }
                 ProviderEvent::ToolCallCompleted { id, name, input } => {
@@ -530,15 +881,18 @@ pub async fn run_turn(
                         errored = Some(error);
                         break;
                     }
-                    events
-                        .publish(
-                            LoopEvent::ToolArguments {
-                                id: id.clone(),
-                                arguments: summarize_tool_input(&name, &input),
-                            },
-                            &cancel,
-                        )
-                        .await;
+                    let arguments = summarize_tool_input(&name, &input);
+                    if acc.arguments_changed(&id, &arguments) {
+                        events
+                            .publish(
+                                LoopEvent::ToolArguments {
+                                    id: id.clone(),
+                                    arguments,
+                                },
+                                &cancel,
+                            )
+                            .await;
+                    }
                 }
                 ProviderEvent::ResponseContent { provider, content } => {
                     if provider.is_empty() || acc.response_content.is_some() || !content.is_array()
@@ -797,8 +1151,48 @@ pub async fn run_turn(
             .collect();
         let mut call_ctx = tool_ctx.clone();
         call_ctx.cancel = cancel.clone();
-        let outcomes =
-            execute_calls(calls, |name| registry.get(name), call_ctx, cancel.clone()).await;
+        let received_bytes = acc.tool_received_bytes.clone();
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+        let execution = execute_calls_observed(
+            calls,
+            |name| registry.get(name),
+            call_ctx,
+            cancel.clone(),
+            move |id, name| {
+                let _ = started_tx.send((id, name));
+            },
+        );
+        tokio::pin!(execution);
+        let outcomes = loop {
+            tokio::select! {
+                biased;
+                Some((id, _name)) = started_rx.recv() => {
+                    events
+                        .publish(
+                            LoopEvent::ToolExecutionStarted {
+                                received_bytes: received_bytes.get(&id).copied().unwrap_or(0),
+                                id,
+                            },
+                            &cancel,
+                        )
+                        .await;
+                }
+                outcomes = &mut execution => {
+                    while let Ok((id, _name)) = started_rx.try_recv() {
+                        events
+                            .publish(
+                                LoopEvent::ToolExecutionStarted {
+                                    received_bytes: received_bytes.get(&id).copied().unwrap_or(0),
+                                    id,
+                                },
+                                &cancel,
+                            )
+                            .await;
+                    }
+                    break outcomes;
+                },
+            }
+        };
         let mut outcomes = outcomes.into_iter();
         for (id, name, input, completed) in ordered_calls {
             let outcome = if completed && !input.is_null() {
@@ -905,6 +1299,63 @@ mod tests {
         assert!(!custom.contains("secret"), "{custom}");
         assert!(!custom.contains("session"), "{custom}");
         assert!(custom.chars().count() <= MAX_TOOL_ARGUMENT_SUMMARY_CHARS);
+    }
+
+    #[test]
+    fn partial_write_path_extraction_is_bounded_and_json_aware() {
+        let mut accumulator = StepAccumulator::default();
+        accumulator
+            .start_tool_call("write-1".into(), "write".into())
+            .unwrap();
+        accumulator
+            .announced_calls
+            .insert("write-1".into(), "write".into());
+
+        assert_eq!(
+            accumulator
+                .push_tool_input_delta("write-1", r#"{"content_preview":"not a \"path\"","pa"#)
+                .unwrap()
+                .arguments,
+            None
+        );
+        assert_eq!(
+            accumulator
+                .push_tool_input_delta("write-1", r#"th":"src/a\nb.rs","content":""#)
+                .unwrap()
+                .arguments,
+            Some("src/a b.rs".into())
+        );
+        assert!(!accumulator.tool_input_scanners.contains_key("write-1"));
+
+        let mut content_first = StepAccumulator::default();
+        content_first
+            .start_tool_call("write-2".into(), "write".into())
+            .unwrap();
+        content_first
+            .announced_calls
+            .insert("write-2".into(), "write".into());
+        let large_content = format!(
+            r#"{{"metadata":{{"path":"wrong"}},"content":"{}""#,
+            "x".repeat(32 * 1024)
+        );
+        assert_eq!(
+            content_first
+                .push_tool_input_delta("write-2", &large_content)
+                .unwrap()
+                .arguments,
+            None
+        );
+        assert!(matches!(
+            content_first.tool_input_scanners["write-2"].state,
+            PartialJsonState::AfterValue
+        ));
+        assert_eq!(
+            content_first
+                .push_tool_input_delta("write-2", r#", "path":"late.html"}"#)
+                .unwrap()
+                .arguments,
+            Some("late.html".into())
+        );
     }
 
     #[test]
