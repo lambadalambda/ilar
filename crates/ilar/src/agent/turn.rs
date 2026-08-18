@@ -927,6 +927,7 @@ pub async fn run_turn(
             messages: session.transcript(),
             tools: tools.clone(),
             continuations: continuations.clone(),
+            cache_key: Some(session_id.to_string()),
             options: request_options.clone(),
         };
 

@@ -499,3 +499,75 @@ async fn live_chatgpt_backend_text_turn() {
     assert!(!text.is_empty());
     assert_eq!(terminal, Some(StopReason::EndTurn));
 }
+
+async fn live_chatgpt_prompt_cache_probe(keyed: bool) {
+    let state_dir = std::env::var("ILAR_LIVE_CHATGPT_STATE_DIR")
+        .expect("ILAR_LIVE_CHATGPT_STATE_DIR with seeded auth.json");
+    let provider = OpenAIProvider::with_chatgpt_auth(AuthStore::open(state_dir.into()), None);
+    let provider = if keyed {
+        provider.with_prompt_cache_key_for_test()
+    } else {
+        provider
+    };
+    let cache_key = format!("ilar-live-probe-{}", uuid::Uuid::new_v4());
+    let synthetic_prefix = (0..3_000)
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut observed = Vec::new();
+
+    for attempt in 0..3 {
+        let mut request = Request::with_model("openai/gpt-5.6-sol");
+        request.messages = vec![ilar::session::ChatMessage::user_text(
+            synthetic_prefix.clone(),
+        )];
+        request.cache_key = keyed.then(|| cache_key.clone());
+        request.options = serde_json::json!({"reasoning": {"effort": "low"}});
+        let mut stream = provider.stream(request).unwrap();
+        let usage = loop {
+            match stream.next().await {
+                Some(ProviderEvent::TurnComplete { usage, .. }) => break usage,
+                Some(ProviderEvent::Error(error)) => panic!("provider error: {error}"),
+                Some(_) => {}
+                None => panic!("provider stream ended without usage"),
+            }
+        };
+        println!(
+            "{} cache probe {}: uncached={} cached={} output={}",
+            if keyed { "keyed" } else { "automatic" },
+            attempt + 1,
+            usage.input_tokens,
+            usage.cache_read_input_tokens,
+            usage.output_tokens
+        );
+        assert!(
+            usage
+                .input_tokens
+                .saturating_add(usage.cache_read_input_tokens)
+                .saturating_add(usage.cache_creation_input_tokens)
+                >= 1_024,
+            "probe input was not cache eligible"
+        );
+        observed.push(usage);
+        if attempt < 2 {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+    }
+
+    assert_eq!(observed.len(), 3);
+}
+
+/// Live ChatGPT prompt-cache routing probe. Prints token counts only, never
+/// prompt or response content.
+#[tokio::test]
+#[ignore]
+async fn live_chatgpt_prompt_cache_routing_probe() {
+    live_chatgpt_prompt_cache_probe(false).await;
+}
+
+/// Live support probe for the undocumented ChatGPT cache-key behavior.
+#[tokio::test]
+#[ignore]
+async fn live_chatgpt_prompt_cache_key_probe() {
+    live_chatgpt_prompt_cache_probe(true).await;
+}

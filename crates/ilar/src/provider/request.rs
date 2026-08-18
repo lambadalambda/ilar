@@ -23,6 +23,8 @@ pub struct Request {
     /// Opaque assistant content from provider-paused responses. Providers
     /// that emit continuations must replay them without persistence.
     pub continuations: Vec<serde_json::Value>,
+    /// Stable conversation affinity for provider-side prompt caches.
+    pub cache_key: Option<String>,
     /// Provider passthrough options (temperature, etc.).
     pub options: serde_json::Value,
 }

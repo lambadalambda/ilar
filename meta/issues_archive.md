@@ -88,3 +88,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Refresh TUI theme and chrome](issues/refresh-tui-theme-and-chrome.md)
 - [x] [Improve operational status](issues/improve-operational-status.md)
 - [x] [Polish transcript hierarchy](issues/polish-transcript-hierarchy.md)
+- [x] [Stabilize OpenAI prompt caching](issues/stabilize-openai-prompt-caching.md)

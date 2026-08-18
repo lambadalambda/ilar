@@ -80,6 +80,57 @@ fn tool_call_event(id: &str, msg: &str) -> ProviderEvent {
     }
 }
 
+#[tokio::test]
+async fn every_provider_step_uses_the_stable_session_cache_key() {
+    let (store, session_id) = temp_session("build");
+    let provider = MockProvider::new(vec![
+        vec![
+            ProviderEvent::ToolCallStarted {
+                id: "echo-1".into(),
+                name: "echo".into(),
+            },
+            tool_call_event("echo-1", "first"),
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+                usage: Default::default(),
+            },
+        ],
+        vec![
+            ProviderEvent::TextDelta("finished".into()),
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+                usage: Default::default(),
+            },
+        ],
+    ]);
+    let registry = registry_with(EchoTool {
+        calls: Arc::new(Mutex::new(Vec::new())),
+    });
+
+    run_turn(
+        &provider,
+        &registry,
+        &store,
+        &session_id,
+        "start",
+        Some("stable instructions"),
+        LoopConfig::default(),
+        events_channel().0,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+    )
+    .await
+    .unwrap();
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.cache_key.as_deref() == Some(session_id.as_str()))
+    );
+}
+
 struct PartialWriteProvider;
 
 impl Provider for PartialWriteProvider {

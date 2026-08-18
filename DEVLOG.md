@@ -641,3 +641,21 @@ display-only content block, while the completed encrypted reasoning item remains
 the sole replay input. The TUI extracts the provider's leading Markdown heading
 and renders it as `Thinking: <topic>` while streaming and `Thought: <topic>`
 after completion; private thinking and unsigned diagnostics remain hidden.
+
+## 2026-08-19 — OpenAI prompt-cache routing diagnostics
+
+OpenAI requests now carry the session UUID as a provider-neutral cache affinity
+key. The documented API-key Responses endpoint maps it to `prompt_cache_key`;
+custom endpoints omit it by default. ChatGPT OAuth deliberately omits the
+undocumented field after controlled keyed samples accepted it but reported
+0/0/0 and 0/6912/0 cached tokens, failing to demonstrate stable affinity. An
+automatic-cache control with three byte-identical 8k token ChatGPT requests also
+reported 0/6912/0. This confirms that zero/high oscillation can be backend
+routing, not local prefix mutation.
+
+Regression tests pin the stable serialized model, instructions, tools, reasoning
+options, prior-input prefix, and cache key across consecutive requests. OpenAI
+usage parsing accepts both Responses `input_tokens_details.cached_tokens` and
+Chat Completions `prompt_tokens_details.cached_tokens` shapes. The TUI now labels
+cache reads and writes separately for the latest request rather than implying a
+cumulative session counter.

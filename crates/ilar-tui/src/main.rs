@@ -2343,8 +2343,11 @@ impl App {
                     self.context_estimated = true;
                 }
                 self.status = format!(
-                    "{stop_reason} · in {} out {} (cache {})",
-                    usage.input_tokens, usage.output_tokens, usage.cache_read_input_tokens
+                    "{stop_reason} · in {} out {} (request cache read {} / write {})",
+                    usage.input_tokens,
+                    usage.output_tokens,
+                    usage.cache_read_input_tokens,
+                    usage.cache_creation_input_tokens
                 );
             }
             LoopEvent::Compacted { context_tokens } => {
@@ -2779,14 +2782,11 @@ impl App {
         };
         let compact_latest_usage = self.latest_usage.map(|latest| {
             format!(
-                "i{}/o{} c{} {percent}",
+                "i{}/o{} req-cache r{}/w{} {percent}",
                 format_tokens_compact(latest.input_tokens),
                 format_tokens_compact(latest.output_tokens),
-                format_tokens_compact(
-                    latest
-                        .cache_read_input_tokens
-                        .saturating_add(latest.cache_creation_input_tokens)
-                )
+                format_tokens_compact(latest.cache_read_input_tokens),
+                format_tokens_compact(latest.cache_creation_input_tokens)
             )
         });
         if width < 64 {
@@ -2861,12 +2861,11 @@ impl App {
         let separators = 7;
         let detailed_usage = self.latest_usage.map(|latest| {
             format!(
-                "in {} · out {} · cache {} · {context_display}",
+                "in {} · out {} · req cache r{}/w{} · {context_display}",
                 latest.input_tokens,
                 latest.output_tokens,
-                latest
-                    .cache_read_input_tokens
-                    .saturating_add(latest.cache_creation_input_tokens)
+                latest.cache_read_input_tokens,
+                latest.cache_creation_input_tokens
             )
         });
         let detailed_usage = detailed_usage.filter(|usage| {
@@ -6158,11 +6157,12 @@ mod tests {
         assert!(status.contains("openai/gpt-5.6-sol@high"), "{status}");
         assert!(status.contains("in 300"), "{status}");
         assert!(status.contains("out 50"), "{status}");
-        assert!(status.contains("cache 1520"), "{status}");
+        assert!(status.contains("req cache r1500/w20"), "{status}");
         let narrow = rendered_text(&app.status_line(60));
         assert!(narrow.contains("gpt-5.6"), "{narrow}");
         assert!(narrow.contains("high"), "{narrow}");
         assert!(narrow.contains("i300/o50"), "{narrow}");
+        assert!(narrow.contains("req-cache r1k/w20"), "{narrow}");
         for width in [64, 72, 77] {
             let boundary = rendered_text(&app.status_line(width));
             assert!(boundary.contains("gpt-5.6"), "width {width}: {boundary}");

@@ -24,6 +24,7 @@ enum Auth {
 pub struct OpenAIProvider {
     auth: Auth,
     base_url: String,
+    prompt_cache_key: bool,
     token_url: String,
     http: reqwest::Client,
 }
@@ -32,9 +33,11 @@ impl OpenAIProvider {
     /// `base_url` overrides the default `https://api.openai.com/v1`
     /// (proxies, gateways).
     pub fn new(api_key: String, base_url: Option<String>) -> Self {
+        let prompt_cache_key = base_url.is_none();
         Self {
             auth: Auth::ApiKey(api_key),
             base_url: base_url.unwrap_or_else(|| "https://api.openai.com/v1".into()),
+            prompt_cache_key,
             token_url: format!("{}/oauth/token", crate::auth::AUTH_BASE),
             http: reqwest::Client::new(),
         }
@@ -45,6 +48,7 @@ impl OpenAIProvider {
         Self {
             auth: Auth::ChatGpt { store },
             base_url: base_url.unwrap_or_else(|| "https://chatgpt.com/backend-api/codex".into()),
+            prompt_cache_key: false,
             token_url: format!("{}/oauth/token", crate::auth::AUTH_BASE),
             http: reqwest::Client::new(),
         }
@@ -53,6 +57,13 @@ impl OpenAIProvider {
     /// Test hook: point the refresh endpoint at a mock server.
     pub fn with_token_url_for_test(mut self, url: impl Into<String>) -> Self {
         self.token_url = url.into();
+        self
+    }
+
+    /// Test hook for probing endpoint support without changing production
+    /// capability defaults.
+    pub fn with_prompt_cache_key_for_test(mut self) -> Self {
+        self.prompt_cache_key = true;
         self
     }
 
@@ -79,11 +90,23 @@ impl OpenAIProvider {
             "tools".into(),
             serde_json::json!(req.tools.iter().map(wire_tool).collect::<Vec<_>>()),
         );
+        if self.prompt_cache_key
+            && let Some(cache_key) = &req.cache_key
+        {
+            body.insert("prompt_cache_key".into(), serde_json::json!(cache_key));
+        }
         body.insert("stream".into(), serde_json::json!(true));
         merge_options(
             &mut body,
             &req.options,
-            &["model", "instructions", "input", "tools", "stream"],
+            &[
+                "model",
+                "instructions",
+                "input",
+                "tools",
+                "prompt_cache_key",
+                "stream",
+            ],
         )?;
         if reasoning_summaries {
             let reasoning = body
@@ -778,6 +801,7 @@ fn required_u64(value: &serde_json::Value, field: &str, label: &str) -> Result<u
 fn wire_usage(usage: &serde_json::Value) -> Usage {
     let cached = usage["input_tokens_details"]["cached_tokens"]
         .as_u64()
+        .or_else(|| usage["prompt_tokens_details"]["cached_tokens"].as_u64())
         .unwrap_or_default();
     let input = usage["input_tokens"]
         .as_u64()
@@ -809,6 +833,124 @@ mod tests {
         assert_eq!(usage.input_tokens, 300);
         assert_eq!(usage.cache_read_input_tokens, 1_500);
         assert_eq!(usage.context_tokens(), 1_850);
+    }
+
+    #[test]
+    fn cached_input_accepts_chat_completions_usage_shape() {
+        let usage = wire_usage(&serde_json::json!({
+            "prompt_tokens": 1_800,
+            "completion_tokens": 50,
+            "prompt_tokens_details": {"cached_tokens": 1_500}
+        }));
+        assert_eq!(usage.input_tokens, 300);
+        assert_eq!(usage.output_tokens, 50);
+        assert_eq!(usage.cache_read_input_tokens, 1_500);
+    }
+
+    #[test]
+    fn cache_key_is_mapped_to_openai_prompt_cache_key() {
+        let provider = OpenAIProvider::new("test".into(), None);
+        let mut request = Request::with_model("openai/gpt-5.2");
+        request.cache_key = Some("session-123".into());
+
+        let body = provider.wire_body(&request).unwrap();
+
+        assert_eq!(body["prompt_cache_key"], "session-123");
+    }
+
+    #[test]
+    fn chatgpt_backend_does_not_receive_undocumented_prompt_cache_key() {
+        let provider = OpenAIProvider::with_chatgpt_auth(
+            crate::auth::AuthStore::open(std::path::PathBuf::from("unused")),
+            None,
+        );
+        let mut request = Request::with_model("openai/gpt-5.2");
+        request.cache_key = Some("session-123".into());
+
+        let body = provider.wire_body(&request).unwrap();
+
+        assert!(body.get("prompt_cache_key").is_none());
+    }
+
+    #[test]
+    fn custom_openai_endpoint_does_not_receive_prompt_cache_key_by_default() {
+        let provider =
+            OpenAIProvider::new("test".into(), Some("https://gateway.example/v1".into()));
+        let mut request = Request::with_model("openai/gpt-5.2");
+        request.cache_key = Some("session-123".into());
+
+        let body = provider.wire_body(&request).unwrap();
+
+        assert!(body.get("prompt_cache_key").is_none());
+    }
+
+    #[test]
+    fn consecutive_requests_keep_the_openai_prefix_byte_stable() {
+        let provider = OpenAIProvider::new("test".into(), None);
+        let mut first = Request::with_model("openai/gpt-5.2");
+        first.system_prompt = Some("stable instructions".into());
+        first.cache_key = Some("session-123".into());
+        first.options = serde_json::json!({"reasoning": {"effort": "high"}});
+        first.tools = vec![ToolDefinition {
+            name: "read".into(),
+            description: "read a file".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }];
+        first.messages = vec![
+            crate::session::ChatMessage::user_text("first"),
+            crate::session::ChatMessage {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Reasoning {
+                        item: serde_json::json!({
+                            "type": "reasoning",
+                            "id": "rs_1",
+                            "encrypted_content": "synthetic"
+                        }),
+                    },
+                    ContentBlock::ToolCall {
+                        id: "call_1".into(),
+                        name: "read".into(),
+                        input: serde_json::json!({"path": "Cargo.toml"}),
+                    },
+                ],
+            },
+            crate::session::ChatMessage {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "call_1".into(),
+                    content: "contents".into(),
+                    is_error: false,
+                }],
+            },
+        ];
+        let mut second = first.clone();
+        second
+            .messages
+            .push(crate::session::ChatMessage::user_text("second"));
+
+        let first = provider.wire_body(&first).unwrap();
+        let second = provider.wire_body(&second).unwrap();
+
+        for key in [
+            "model",
+            "instructions",
+            "tools",
+            "reasoning",
+            "prompt_cache_key",
+        ] {
+            assert_eq!(
+                serde_json::to_vec(&first[key]).unwrap(),
+                serde_json::to_vec(&second[key]).unwrap(),
+                "unstable {key}"
+            );
+        }
+        let first_input = first["input"].as_array().unwrap();
+        let second_input = second["input"].as_array().unwrap();
+        assert_eq!(
+            serde_json::to_vec(&second_input[..first_input.len()]).unwrap(),
+            serde_json::to_vec(first_input).unwrap()
+        );
     }
 
     #[test]
