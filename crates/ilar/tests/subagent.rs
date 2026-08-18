@@ -1770,6 +1770,7 @@ async fn child_session_created_with_parent_link() {
         .append(ilar::session::SessionEvent::ModelChange {
             id: new_id(),
             model: "openai/gpt-5.2".into(),
+            variant: Some("high".into()),
             ts: chrono::Utc::now(),
         })
         .unwrap();
@@ -1846,6 +1847,7 @@ async fn child_session_created_with_parent_link() {
     );
     assert_eq!(child_session.meta().unwrap().agent, "explore");
     assert_eq!(child_session.meta().unwrap().model, "openai/gpt-5.2");
+    assert_eq!(child_session.effective_variant(), Some("high".into()));
     let child_transcript = child_session.transcript();
     assert!(matches!(
         &child_transcript[0].content[0],
@@ -1921,6 +1923,7 @@ async fn resumed_subagent_uses_its_persisted_model() {
         .append(ilar::session::SessionEvent::ModelChange {
             id: new_id(),
             model: "openai/gpt-5.2".into(),
+            variant: None,
             ts: chrono::Utc::now(),
         })
         .unwrap();

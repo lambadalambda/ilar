@@ -53,6 +53,103 @@ fn effective_model_defaults_to_meta() {
     let (store, id) = temp_session("zai/glm-4.7");
     let session = store.load(&id).unwrap();
     assert_eq!(session.effective_model(), "zai/glm-4.7");
+    assert_eq!(session.effective_variant(), None);
+}
+
+#[tokio::test]
+async fn reasoning_variant_is_persisted_and_applied_to_the_next_turn() {
+    let (store, session_id) = temp_session("openai/gpt-5.2");
+    store
+        .acquire_writer(&session_id)
+        .unwrap()
+        .load()
+        .unwrap()
+        .append(SessionEvent::ModelChange {
+            id: new_id(),
+            model: "openai/gpt-5.2".into(),
+            variant: Some("high".into()),
+            ts: chrono::Utc::now(),
+        })
+        .unwrap();
+    let provider = MockProvider::new(vec![text_turn()]);
+
+    let (tx, _) = loop_event_channel(LOOP_EVENT_CAPACITY);
+    run_turn(
+        &provider,
+        &ToolRegistry::builtin(),
+        &store,
+        &session_id,
+        "think",
+        None,
+        LoopConfig::default(),
+        tx,
+        tokio_util::sync::CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        provider.requests()[0].options,
+        serde_json::json!({"reasoning": {"effort": "high"}})
+    );
+    assert_eq!(
+        store.load(&session_id).unwrap().effective_variant(),
+        Some("high".into())
+    );
+}
+
+#[tokio::test]
+async fn invalid_persisted_variant_fails_before_user_append() {
+    let (store, session_id) = temp_session("openai/gpt-5.2");
+    let mut session = store.acquire_writer(&session_id).unwrap().load().unwrap();
+    session
+        .append(SessionEvent::ModelChange {
+            id: new_id(),
+            model: "openai/gpt-5.2".into(),
+            variant: Some("max".into()),
+            ts: chrono::Utc::now(),
+        })
+        .unwrap();
+    let before = session.events().len();
+    drop(session);
+    let provider = MockProvider::new(vec![text_turn()]);
+    let (tx, _) = loop_event_channel(LOOP_EVENT_CAPACITY);
+
+    let error = run_turn(
+        &provider,
+        &ToolRegistry::builtin(),
+        &store,
+        &session_id,
+        "must not persist",
+        None,
+        LoopConfig::default(),
+        tx,
+        tokio_util::sync::CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("variant"));
+    assert!(provider.requests().is_empty());
+    assert_eq!(store.load(&session_id).unwrap().events().len(), before);
+}
+
+#[test]
+fn legacy_model_change_without_variant_uses_provider_default() {
+    let event: SessionEvent = serde_json::from_value(serde_json::json!({
+        "type": "model_change",
+        "id": new_id(),
+        "model": "openai/gpt-5.2",
+        "ts": chrono::Utc::now(),
+    }))
+    .unwrap();
+
+    assert!(matches!(
+        event,
+        SessionEvent::ModelChange { variant: None, .. }
+    ));
 }
 
 #[tokio::test]
@@ -88,6 +185,7 @@ async fn model_change_applies_from_next_provider_call() {
         .append(SessionEvent::ModelChange {
             id: new_id(),
             model: "zai/glm-4.7-air".into(),
+            variant: None,
             ts: chrono::Utc::now(),
         })
         .unwrap();
@@ -140,6 +238,7 @@ async fn turn_resolves_provider_from_persisted_effective_model() {
         .append(SessionEvent::ModelChange {
             id: new_id(),
             model: "openai/gpt-5.2".into(),
+            variant: None,
             ts: chrono::Utc::now(),
         })
         .unwrap();

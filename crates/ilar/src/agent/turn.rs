@@ -844,6 +844,8 @@ pub async fn run_turn(
 ) -> Result<TurnOutcome> {
     let mut session = store.acquire_writer(session_id)?.load()?;
     let model = session.effective_model();
+    let variant = session.effective_variant();
+    let request_options = crate::model::variant_options(&model, variant.as_deref())?;
     let provider = resolver.resolve_provider(&model)?;
     if let Some(parent_tool_call_id) = tool_ctx.call_id.as_ref() {
         session.append(SessionEvent::SubagentInvocation {
@@ -925,7 +927,7 @@ pub async fn run_turn(
             messages: session.transcript(),
             tools: tools.clone(),
             continuations: continuations.clone(),
-            options: serde_json::Value::Null,
+            options: request_options.clone(),
         };
 
         let mut stream = provider.as_provider().stream(request)?;

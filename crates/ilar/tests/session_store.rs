@@ -707,6 +707,7 @@ fn replay_index_preserves_folded_model_and_todo_state() {
         .append(SessionEvent::ModelChange {
             id: new_id(),
             model: "openai/gpt-5.1".into(),
+            variant: Some("high".into()),
             ts: Utc::now(),
         })
         .unwrap();
@@ -764,6 +765,7 @@ fn replay_index_preserves_folded_model_and_todo_state() {
     let indexed = store.load(&meta.session_id).unwrap();
 
     assert_eq!(indexed.effective_model(), "openai/gpt-5.1");
+    assert_eq!(indexed.effective_variant(), Some("high".into()));
     assert_eq!(indexed.todo_list(), Some(&expected_todos));
 }
 

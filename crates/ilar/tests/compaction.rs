@@ -242,6 +242,7 @@ async fn oversize_transcript_triggers_compaction() {
             .append(SessionEvent::ModelChange {
                 id: new_id(),
                 model: "openai/gpt-5.2".into(),
+                variant: Some("high".into()),
                 ts: chrono::Utc::now(),
             })
             .unwrap();
@@ -296,6 +297,9 @@ async fn oversize_transcript_triggers_compaction() {
         "compaction call must not carry tools"
     );
     assert_eq!(requests[1].model, "openai/gpt-5.2");
+    let expected_options = serde_json::json!({"reasoning": {"effort": "high"}});
+    assert_eq!(requests[0].options, expected_options);
+    assert_eq!(requests[1].options, expected_options);
 
     // Session contains a compaction event before the new exchange.
     let session = store.load(&session_id).unwrap();

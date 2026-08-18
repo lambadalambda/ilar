@@ -58,6 +58,7 @@ pub struct Session {
     event_base: usize,
     canonical_event_count: usize,
     effective_model: String,
+    effective_variant: Option<String>,
     todo_list: Option<crate::todo::TodoList>,
     checkpoint: Option<ReplayCheckpoint>,
     checkpoint_tail_start: usize,
@@ -73,7 +74,7 @@ pub struct SessionWriter {
     replay_index_path: PathBuf,
 }
 
-const REPLAY_INDEX_VERSION: u32 = 1;
+const REPLAY_INDEX_VERSION: u32 = 2;
 const REPLAY_IDS_MAGIC: &[u8; 8] = b"ILARIDS1";
 const REPLAY_IDS_HEADER_LEN: u64 = 32;
 const REPLAY_ID_RECORD_LEN: u64 = 33;
@@ -104,6 +105,8 @@ struct ReplayCheckpoint {
     active_start: usize,
     events: Vec<SessionEvent>,
     effective_model: String,
+    #[serde(default)]
+    effective_variant: Option<String>,
     todo_list: Option<crate::todo::TodoList>,
     id_root: String,
     observed: FileStamp,
@@ -116,6 +119,7 @@ struct ReplayData {
     event_base: usize,
     canonical_event_count: usize,
     effective_model: String,
+    effective_variant: Option<String>,
     todo_list: Option<crate::todo::TodoList>,
     checkpoint: Option<ReplayCheckpoint>,
     checkpoint_tail_start: usize,
@@ -212,6 +216,7 @@ impl SessionStore {
             event_base: 0,
             canonical_event_count: 0,
             effective_model: meta.model.clone(),
+            effective_variant: None,
             todo_list: None,
             checkpoint: None,
             checkpoint_tail_start: 0,
@@ -246,6 +251,7 @@ impl SessionStore {
         Ok(SessionReader {
             events: replay.events,
             effective_model: replay.effective_model,
+            effective_variant: replay.effective_variant,
             todo_list: replay.todo_list,
         })
     }
@@ -277,6 +283,7 @@ impl SessionWriter {
             event_base: replay.event_base,
             canonical_event_count: replay.canonical_event_count,
             effective_model: replay.effective_model,
+            effective_variant: replay.effective_variant,
             todo_list: replay.todo_list,
             checkpoint: replay.checkpoint,
             checkpoint_tail_start: replay.checkpoint_tail_start,
@@ -319,7 +326,7 @@ fn read_replay(
     }
     let (full_events, unanswered_calls, observed_stamp) = read_events(file, path, id, repair_tail)?;
     let canonical_event_count = full_events.len();
-    let (effective_model, todo_list) = replay_state(&full_events);
+    let (effective_model, effective_variant, todo_list) = replay_state(&full_events);
     let (events, event_base) = if repair_tail {
         (full_events, 0)
     } else {
@@ -331,6 +338,7 @@ fn read_replay(
         unanswered_calls,
         event_base,
         effective_model,
+        effective_variant,
         todo_list,
         checkpoint: None,
         checkpoint_tail_start: 0,
@@ -402,9 +410,15 @@ fn read_indexed_replay(
     events.extend(tail_events.iter().cloned());
     let unanswered_calls = validate_replay(&events, id)?;
     let mut effective_model = checkpoint.effective_model.clone();
+    let mut effective_variant = checkpoint.effective_variant.clone();
     let mut todo_list = checkpoint.todo_list.clone();
     let checkpoint_tail_start = checkpoint.events.len();
-    apply_replay_state(&tail_events, &mut effective_model, &mut todo_list);
+    apply_replay_state(
+        &tail_events,
+        &mut effective_model,
+        &mut effective_variant,
+        &mut todo_list,
+    );
     if file_stamp(&file.metadata()?)? != observed
         || file_stamp(&std::fs::metadata(path)?)? != observed
     {
@@ -419,6 +433,7 @@ fn read_indexed_replay(
             .checked_add(tail_events.len())
             .ok_or_else(|| invalid_data("canonical event count overflow"))?,
         effective_model,
+        effective_variant,
         todo_list,
         checkpoint: Some(checkpoint),
         checkpoint_tail_start,
@@ -543,7 +558,9 @@ fn file_stamp(metadata: &std::fs::Metadata) -> std::io::Result<FileStamp> {
     }
 }
 
-fn replay_state(events: &[SessionEvent]) -> (String, Option<crate::todo::TodoList>) {
+fn replay_state(
+    events: &[SessionEvent],
+) -> (String, Option<String>, Option<crate::todo::TodoList>) {
     let mut effective_model = events
         .iter()
         .find_map(|event| match event {
@@ -552,8 +569,14 @@ fn replay_state(events: &[SessionEvent]) -> (String, Option<crate::todo::TodoLis
         })
         .unwrap_or_default();
     let mut todo_list = None;
-    apply_replay_state(events, &mut effective_model, &mut todo_list);
-    (effective_model, todo_list)
+    let mut effective_variant = None;
+    apply_replay_state(
+        events,
+        &mut effective_model,
+        &mut effective_variant,
+        &mut todo_list,
+    );
+    (effective_model, effective_variant, todo_list)
 }
 
 fn active_replay_window(events: &[SessionEvent]) -> (Vec<SessionEvent>, usize) {
@@ -581,11 +604,15 @@ fn active_replay_window(events: &[SessionEvent]) -> (Vec<SessionEvent>, usize) {
 fn apply_replay_state(
     events: &[SessionEvent],
     effective_model: &mut String,
+    effective_variant: &mut Option<String>,
     todo_list: &mut Option<crate::todo::TodoList>,
 ) {
     for event in events {
         match event {
-            SessionEvent::ModelChange { model, .. } => *effective_model = model.clone(),
+            SessionEvent::ModelChange { model, variant, .. } => {
+                *effective_model = model.clone();
+                *effective_variant = variant.clone();
+            }
             SessionEvent::ToolResult {
                 state: Some(crate::session::SessionState::TodoList { list }),
                 ..
@@ -896,6 +923,7 @@ fn checkpoint_checksum(checkpoint: &ReplayCheckpoint) -> std::io::Result<String>
         checkpoint.active_start,
         &checkpoint.events,
         &checkpoint.effective_model,
+        &checkpoint.effective_variant,
         &checkpoint.todo_list,
         &checkpoint.id_root,
         &checkpoint.observed,
@@ -1042,6 +1070,10 @@ impl Session {
         self.effective_model.clone()
     }
 
+    pub fn effective_variant(&self) -> Option<String> {
+        self.effective_variant.clone()
+    }
+
     /// Session id (empty string only in a pathological no-meta session).
     pub fn session_id(&self) -> &str {
         self.meta()
@@ -1099,8 +1131,14 @@ impl Session {
         }
         self.observed_stamp = observed_stamp;
         match &event {
-            SessionEvent::Meta { meta, .. } => self.effective_model = meta.model.clone(),
-            SessionEvent::ModelChange { model, .. } => self.effective_model = model.clone(),
+            SessionEvent::Meta { meta, .. } => {
+                self.effective_model = meta.model.clone();
+                self.effective_variant = None;
+            }
+            SessionEvent::ModelChange { model, variant, .. } => {
+                self.effective_model = model.clone();
+                self.effective_variant = variant.clone();
+            }
             SessionEvent::ToolResult {
                 state: Some(crate::session::SessionState::TodoList { list }),
                 ..
@@ -1228,6 +1266,7 @@ impl Session {
             active_start,
             events,
             effective_model: self.effective_model.clone(),
+            effective_variant: self.effective_variant.clone(),
             todo_list: self.todo_list.clone(),
             id_root,
             observed: self.observed_stamp.clone(),
@@ -1283,10 +1322,11 @@ impl Session {
     /// In-memory view of `events[..cut]` for summarization (compaction).
     pub fn from_events_for_compaction(events: &[SessionEvent], cut: usize) -> SessionReader {
         let events = events[..cut.min(events.len())].to_vec();
-        let (effective_model, todo_list) = replay_state(&events);
+        let (effective_model, effective_variant, todo_list) = replay_state(&events);
         SessionReader {
             events,
             effective_model,
+            effective_variant,
             todo_list,
         }
     }
@@ -1296,6 +1336,7 @@ impl Session {
 pub struct SessionReader {
     events: Vec<SessionEvent>,
     effective_model: String,
+    effective_variant: Option<String>,
     todo_list: Option<crate::todo::TodoList>,
 }
 
@@ -1315,6 +1356,10 @@ impl SessionReader {
 
     pub fn effective_model(&self) -> String {
         self.effective_model.clone()
+    }
+
+    pub fn effective_variant(&self) -> Option<String> {
+        self.effective_variant.clone()
     }
 
     pub fn session_id(&self) -> &str {

@@ -82,6 +82,8 @@ pub enum SessionEvent {
     ModelChange {
         id: String,
         model: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        variant: Option<String>,
         ts: DateTime<Utc>,
     },
     /// Compaction boundary: everything before `kept_from` (exclusive) is

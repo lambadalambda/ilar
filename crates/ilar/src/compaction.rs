@@ -192,7 +192,7 @@ pub(crate) async fn compact_if_needed_locked(
         messages: older.transcript(),
         tools: Vec::new(),
         continuations: Vec::new(),
-        options: serde_json::Value::Null,
+        options: crate::model::variant_options(model, session.effective_variant().as_deref())?,
     };
     let mut stream = provider.stream(request)?;
     let mut summary = String::new();

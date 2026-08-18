@@ -20,9 +20,148 @@ pub struct ModelInfo {
     pub(crate) access: ModelAccess,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelVariant {
+    pub id: &'static str,
+    pub name: &'static str,
+}
+
+const NO_VARIANTS: &[ModelVariant] = &[];
+const OPENAI_WIDE_VARIANTS: &[ModelVariant] = &[
+    ModelVariant {
+        id: "low",
+        name: "Low",
+    },
+    ModelVariant {
+        id: "medium",
+        name: "Medium",
+    },
+    ModelVariant {
+        id: "high",
+        name: "High",
+    },
+];
+const OPENAI_GPT5_VARIANTS: &[ModelVariant] = &[
+    ModelVariant {
+        id: "minimal",
+        name: "Minimal",
+    },
+    ModelVariant {
+        id: "low",
+        name: "Low",
+    },
+    ModelVariant {
+        id: "medium",
+        name: "Medium",
+    },
+    ModelVariant {
+        id: "high",
+        name: "High",
+    },
+];
+const OPENAI_GPT51_VARIANTS: &[ModelVariant] = &[
+    ModelVariant {
+        id: "none",
+        name: "None",
+    },
+    ModelVariant {
+        id: "low",
+        name: "Low",
+    },
+    ModelVariant {
+        id: "medium",
+        name: "Medium",
+    },
+    ModelVariant {
+        id: "high",
+        name: "High",
+    },
+];
+const OPENAI_GPT52_VARIANTS: &[ModelVariant] = &[
+    ModelVariant {
+        id: "none",
+        name: "None",
+    },
+    ModelVariant {
+        id: "low",
+        name: "Low",
+    },
+    ModelVariant {
+        id: "medium",
+        name: "Medium",
+    },
+    ModelVariant {
+        id: "high",
+        name: "High",
+    },
+    ModelVariant {
+        id: "xhigh",
+        name: "Extra high",
+    },
+];
+const OPENAI_PRO_VARIANTS: &[ModelVariant] = &[ModelVariant {
+    id: "high",
+    name: "High",
+}];
+const OPENAI_CHAT_VARIANTS: &[ModelVariant] = &[ModelVariant {
+    id: "medium",
+    name: "Medium",
+}];
+const OPENAI_VERSIONED_PRO_VARIANTS: &[ModelVariant] = &[
+    ModelVariant {
+        id: "medium",
+        name: "Medium",
+    },
+    ModelVariant {
+        id: "high",
+        name: "High",
+    },
+    ModelVariant {
+        id: "xhigh",
+        name: "Extra high",
+    },
+];
+
 impl ModelInfo {
     pub fn full_id(&self) -> String {
         format!("{}/{}", self.provider, self.id)
+    }
+
+    pub fn variants(&self) -> &'static [ModelVariant] {
+        if self.provider != "openai" {
+            return NO_VARIANTS;
+        }
+        if self.id == "gpt-5.2-chat-latest" {
+            return OPENAI_CHAT_VARIANTS;
+        }
+        if !self.reasoning_summaries {
+            return NO_VARIANTS;
+        }
+        if self.id == "gpt-5-pro" {
+            return OPENAI_PRO_VARIANTS;
+        }
+        if self.id.starts_with("gpt-5.") && self.id.contains("-pro") {
+            return OPENAI_VERSIONED_PRO_VARIANTS;
+        }
+        if let Some(version) = self
+            .id
+            .strip_prefix("gpt-5.")
+            .and_then(|id| id.split('-').next())
+            .and_then(|version| version.parse::<u8>().ok())
+        {
+            return if version == 1 {
+                OPENAI_GPT51_VARIANTS
+            } else {
+                OPENAI_GPT52_VARIANTS
+            };
+        }
+        if self.id.starts_with("gpt-5") {
+            return OPENAI_GPT5_VARIANTS;
+        }
+        if self.id.starts_with("o3") {
+            return OPENAI_WIDE_VARIANTS;
+        }
+        NO_VARIANTS
     }
 }
 
@@ -372,4 +511,68 @@ pub fn find(full_id: &str) -> Option<&'static ModelInfo> {
             .split_once('/')
             .is_some_and(|(provider, id)| provider == model.provider && id == model.id)
     })
+}
+
+pub fn variant_options(full_id: &str, variant: Option<&str>) -> anyhow::Result<serde_json::Value> {
+    let Some(variant) = variant else {
+        return Ok(serde_json::Value::Null);
+    };
+    let model = find(full_id).ok_or_else(|| anyhow::anyhow!("unknown model {full_id}"))?;
+    if !model
+        .variants()
+        .iter()
+        .any(|candidate| candidate.id == variant)
+    {
+        anyhow::bail!("unsupported variant {variant:?} for {full_id}");
+    }
+    match model.provider {
+        "openai" => Ok(serde_json::json!({"reasoning": {"effort": variant}})),
+        provider => anyhow::bail!("provider {provider} does not support reasoning variants"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn openai_reasoning_variants_are_model_specific() {
+        let ids = |model: &str| {
+            find(model)
+                .unwrap()
+                .variants()
+                .iter()
+                .map(|variant| variant.id)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            ids("openai/gpt-5.6-sol"),
+            vec!["none", "low", "medium", "high", "xhigh"]
+        );
+        assert_eq!(ids("openai/gpt-5.5-pro"), vec!["medium", "high", "xhigh"]);
+        assert_eq!(ids("openai/gpt-5.1"), vec!["none", "low", "medium", "high"]);
+        assert_eq!(
+            ids("openai/gpt-5"),
+            vec!["minimal", "low", "medium", "high"]
+        );
+        assert_eq!(ids("openai/gpt-5.2-chat-latest"), vec!["medium"]);
+        assert!(ids("openai/gpt-5.3-chat-latest").is_empty());
+        assert!(ids("openai/gpt-4.1").is_empty());
+        assert!(ids("zai/glm-5.2").is_empty());
+    }
+
+    #[test]
+    fn variant_options_validate_before_building_provider_fields() {
+        assert_eq!(
+            variant_options("openai/gpt-5.2", Some("high")).unwrap(),
+            serde_json::json!({"reasoning": {"effort": "high"}})
+        );
+        assert_eq!(
+            variant_options("openai/gpt-5.2", None).unwrap(),
+            serde_json::Value::Null
+        );
+        assert!(variant_options("openai/gpt-5.2", Some("max")).is_err());
+        assert!(variant_options("zai/glm-5.2", Some("high")).is_err());
+    }
 }

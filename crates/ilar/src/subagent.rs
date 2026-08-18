@@ -426,10 +426,10 @@ impl SubagentSpawner {
             },
             None => {
                 let id = new_id();
-                let model = match &agent.model {
-                    Some(model) => model.clone(),
+                let (model, inherited_variant) = match &agent.model {
+                    Some(model) => (model.clone(), None),
                     None => match self.store.load(&ctx.session_id) {
-                        Ok(parent) => parent.effective_model(),
+                        Ok(parent) => (parent.effective_model(), parent.effective_variant()),
                         Err(error) => {
                             return ToolOutput::error(format!(
                                 "loading parent session {:?}: {error}",
@@ -438,6 +438,13 @@ impl SubagentSpawner {
                         }
                     },
                 };
+                if let Err(error) =
+                    crate::model::variant_options(&model, inherited_variant.as_deref())
+                {
+                    return ToolOutput::error(format!(
+                        "validating inherited subagent reasoning variant: {error}"
+                    ));
+                }
                 let created = self.store.create(SessionMeta {
                     session_id: id.clone(),
                     parent_id: Some(ctx.session_id.clone()),
@@ -446,7 +453,27 @@ impl SubagentSpawner {
                     workspace: Some(child_location.clone()),
                 });
                 match created {
-                    Ok(session) => drop(session),
+                    Ok(mut session) => {
+                        let inherited_model = session.effective_model();
+                        if let Some(variant) = inherited_variant
+                            && let Err(error) =
+                                session.append(crate::session::SessionEvent::ModelChange {
+                                    id: new_id(),
+                                    model: inherited_model,
+                                    variant: Some(variant),
+                                    ts: chrono::Utc::now(),
+                                })
+                        {
+                            drop(session);
+                            if let Ok(path) = self.store.session_path(&id) {
+                                let _ = std::fs::remove_file(path);
+                            }
+                            return ToolOutput::error(format!(
+                                "persisting inherited subagent reasoning variant: {error}"
+                            ));
+                        }
+                        drop(session);
+                    }
                     Err(error) => {
                         return ToolOutput::error(format!("creating subagent session: {error}"));
                     }
