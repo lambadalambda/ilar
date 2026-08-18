@@ -70,3 +70,5 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Write tool progress and stalls](issues/write-tool-progress-and-stalls.md)
 - [x] [Streaming tool progress](issues/streaming-tool-progress.md)
 - [x] [Provider stream error diagnostics](issues/provider-stream-error-diagnostics.md)
+- [x] [Task notification presentation](issues/task-notification-presentation.md)
+- [x] [Task delegation guidance](issues/task-delegation-guidance.md)
