@@ -37,6 +37,8 @@ use ilar::tools::{ToolContext, ToolRegistry};
 #[derive(Debug, Clone, PartialEq)]
 enum Line_ {
     User(String),
+    Task(String),
+    Job(String),
     Assistant(String),
     Tool {
         id: String,
@@ -609,6 +611,58 @@ struct RestoredSessionView {
     latest_usage: Option<ilar::session::Usage>,
 }
 
+fn task_notification_display(text: &str) -> Option<String> {
+    notification_display(text, "task-notification", normalize_task_notification)
+}
+
+fn normalize_task_notification(first: &str) -> String {
+    let Some(first) = first.strip_prefix("Task \"") else {
+        return first.to_string();
+    };
+    for separator in [
+        "\" completed.",
+        "\" failed:",
+        "\" was cancelled.",
+        "\" was aborted.",
+        "\" stalled:",
+    ] {
+        if let Some(index) = first.rfind(separator) {
+            return format!("{} {}", &first[..index], &first[index + 2..]);
+        }
+    }
+    format!("Task \"{first}")
+}
+
+fn tool_notification_display(text: &str) -> Option<String> {
+    notification_display(text, "tool-notification", |first| {
+        first
+            .strip_prefix("Background job ")
+            .unwrap_or(first)
+            .to_string()
+    })
+}
+
+fn notification_display(
+    text: &str,
+    tag: &str,
+    normalize_first: impl FnOnce(&str) -> String,
+) -> Option<String> {
+    let opening = format!("<{tag}>\n");
+    let closing = format!("\n</{tag}>");
+    let inner = text.strip_prefix(&opening)?.strip_suffix(&closing)?;
+    let (first, body) = inner.split_once('\n').unwrap_or((inner, ""));
+    let body = body
+        .strip_prefix("<result>\n")
+        .and_then(|body| body.strip_suffix("\n</result>"))
+        .unwrap_or(body);
+    let first = normalize_first(first);
+    if body.is_empty() {
+        Some(first)
+    } else {
+        Some(format!("{first}\n{body}"))
+    }
+}
+
 fn restored_session_view(session: &ilar::session::SessionReader) -> RestoredSessionView {
     let events = session.events();
     let mut cut = 0usize;
@@ -639,7 +693,13 @@ fn restored_session_view(session: &ilar::session::SessionReader) -> RestoredSess
         match event {
             ilar::session::SessionEvent::Meta { .. } => {}
             ilar::session::SessionEvent::UserMessage { text, .. } => {
-                lines.push(Line_::User(text.clone()));
+                match task_notification_display(text) {
+                    Some(text) => lines.push(Line_::Task(text)),
+                    None => match tool_notification_display(text) {
+                        Some(text) => lines.push(Line_::Job(text)),
+                        None => lines.push(Line_::User(text.clone())),
+                    },
+                }
             }
             ilar::session::SessionEvent::AssistantMessage { content, .. } => {
                 for block in content {
@@ -745,6 +805,36 @@ fn transcript_entry_lines(
                         if index == 0 { "you  " } else { "     " },
                         Style::default()
                             .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(text),
+                ])
+            })
+            .collect(),
+        Line_::Task(text) => safe_lines(text)
+            .into_iter()
+            .enumerate()
+            .map(|(index, text)| {
+                Line::from(vec![
+                    Span::styled(
+                        if index == 0 { "task " } else { "     " },
+                        Style::default()
+                            .fg(Color::Magenta)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(text),
+                ])
+            })
+            .collect(),
+        Line_::Job(text) => safe_lines(text)
+            .into_iter()
+            .enumerate()
+            .map(|(index, text)| {
+                Line::from(vec![
+                    Span::styled(
+                        if index == 0 { "job  " } else { "     " },
+                        Style::default()
+                            .fg(Color::Yellow)
                             .add_modifier(Modifier::BOLD),
                     ),
                     Span::raw(text),
@@ -922,6 +1012,18 @@ impl App {
         if self.activity != activity {
             self.activity = activity;
             self.activity_started = std::time::Instant::now();
+        }
+    }
+
+    fn push_notification(&mut self, description: &str, text: &str) {
+        if let Some(text) = task_notification_display(text) {
+            self.lines.push(Line_::Task(text));
+        } else if let Some(text) = tool_notification_display(text) {
+            self.lines.push(Line_::Job(text));
+        } else {
+            self.lines
+                .push(Line_::System(format!("task notification: {description}")));
+            self.lines.push(Line_::User(text.to_string()));
         }
     }
 
@@ -2912,12 +3014,8 @@ async fn run_app(
                 }));
                 continue;
             }
-            app.lines.push(Line_::System(format!(
-                "task notification: {}",
-                notification.description
-            )));
             let text = notification.text;
-            app.lines.push(Line_::User(text.clone()));
+            app.push_notification(&notification.description, &text);
             let (tx, rx) = loop_event_channel(LOOP_EVENT_CAPACITY);
             events_rx = Some(rx);
             let token = CancellationToken::new();
@@ -3319,6 +3417,118 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    #[test]
+    fn restored_task_notifications_are_not_attributed_to_the_user() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf());
+        let session_id = new_id();
+        let mut session = store
+            .create(SessionMeta {
+                session_id: session_id.clone(),
+                parent_id: None,
+                agent: "build".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+            })
+            .unwrap();
+        session
+            .append(ilar::session::SessionEvent::UserMessage {
+                id: new_id(),
+                text: "hello".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        session
+            .append(ilar::session::SessionEvent::UserMessage {
+                id: new_id(),
+                text: "<task-notification>\nTask \"Assess architecture and risks\" completed.\n<result>\nRepository review\n</result>\n</task-notification>".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        session
+            .append(ilar::session::SessionEvent::UserMessage {
+                id: new_id(),
+                text: "<tool-notification>\nBackground job job-1 (\"Run checks\") completed.\n<result>\nchecks passed\n</result>\n</tool-notification>".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        drop(session);
+
+        let view = restored_session_view(&store.load(&session_id).unwrap());
+        let now = std::time::Instant::now();
+        let rendered = view
+            .lines
+            .iter()
+            .flat_map(|line| transcript_entry_lines(line, 100, now, now))
+            .map(|line| rendered_text(&line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("you  hello"), "{rendered}");
+        assert!(
+            rendered.contains("task Assess architecture and risks completed."),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("you  Task"), "{rendered}");
+        assert!(
+            rendered.contains("job  job-1 (\"Run checks\") completed."),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("you  Background job"), "{rendered}");
+        assert!(!rendered.contains("<task-notification>"), "{rendered}");
+        assert!(!rendered.contains("<tool-notification>"), "{rendered}");
+        assert!(!rendered.contains("<result>"), "{rendered}");
+
+        let mut app = App::new();
+        app.push_notification(
+            "Live review",
+            "<task-notification>\nTask \"Live review\" completed.\n<result>\nDone\n</result>\n</task-notification>",
+        );
+        let rendered = app
+            .transcript_lines(100, now)
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            rendered.contains("task Live review completed."),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("you  "), "{rendered}");
+        assert!(!rendered.contains("<result>"), "{rendered}");
+
+        let parsed = task_notification_display(
+            "<task-notification>\nTask \"Review \"risky\" paths\" completed.\n<result>\nLiteral delimiters:\n<result>\ninside\n</result>\n</result>\n</task-notification>",
+        )
+        .unwrap();
+        assert!(
+            parsed.starts_with("Review \"risky\" paths completed."),
+            "{parsed}"
+        );
+        assert!(parsed.contains("<result>\ninside\n</result>"), "{parsed}");
+        assert_eq!(
+            task_notification_display(
+                "<task-notification>\nTask \"Build project\" failed: path \"foo\" is unavailable\n</task-notification>"
+            )
+            .unwrap(),
+            "Build project failed: path \"foo\" is unavailable"
+        );
+
+        let mut fallback = App::new();
+        fallback.push_notification("Unknown format", "opaque notification");
+        let rendered = fallback
+            .transcript_lines(100, now)
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            rendered.contains("task notification: Unknown format"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("you  opaque notification"), "{rendered}");
     }
 
     #[test]
