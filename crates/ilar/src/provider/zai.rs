@@ -2,16 +2,10 @@
 //! OpenAI-compatible (`/chat/completions`) flavors.
 
 use std::collections::{HashMap, HashSet};
-use std::panic::AssertUnwindSafe;
-use std::task::{Context, Poll};
-
-use futures::{FutureExt, Stream, StreamExt};
-use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
 
 use super::event::{ProviderEvent, StopReason};
 use super::request::{Request, ToolDefinition, merge_options, resolve_model};
-use super::sse::SseParser;
+use super::transport::{self, EventMapper as TransportEventMapper, TransportResponse};
 use super::{EventStream, Provider};
 use crate::session::{ChatMessage, ContentBlock, InputTokenAccounting, Role, Usage};
 
@@ -388,10 +382,7 @@ impl Provider for ZaiProvider {
             Flavor::Anthropic => format!("{}/v1/messages", self.base_url),
             Flavor::OpenAI => format!("{}/chat/completions", self.base_url),
         };
-        let mut request = self
-            .http
-            .post(url)
-            .timeout(std::time::Duration::from_secs(600));
+        let mut request = self.http.post(url).timeout(transport::REQUEST_TIMEOUT);
         request = match self.flavor {
             Flavor::Anthropic => request
                 .header("x-api-key", &self.api_key)
@@ -400,122 +391,24 @@ impl Provider for ZaiProvider {
         };
         let request = request.json(&body).build()?;
 
-        let (tx, rx) = mpsc::channel(64);
         let http = self.http.clone();
         let flavor = self.flavor;
         let api_key = self.api_key.clone();
-        let tx_panic = tx.clone();
-        let pump = async move {
-            let mut parser = SseParser::new();
-            let mut mapper = match flavor {
-                Flavor::Anthropic => PumpMapper::Anthropic(AnthropicMapper::default()),
-                Flavor::OpenAI => PumpMapper::OpenAI(OpenAiMapper::default()),
-            };
-            match http.execute(request).await {
-                Ok(response) if response.status().is_success() => {
-                    let mut stream = response.bytes_stream();
-                    while let Some(chunk) = stream.next().await {
-                        match chunk {
-                            Ok(bytes) => {
-                                let data = match parser.feed(&bytes) {
-                                    Ok(data) => data,
-                                    Err(error) => {
-                                        let _ =
-                                            tx.send(ProviderEvent::Error(error.to_string())).await;
-                                        return;
-                                    }
-                                };
-                                for data in data {
-                                    let events = match mapper.map(&data) {
-                                        Ok(events) => events,
-                                        Err(error) => {
-                                            let _ = tx.send(ProviderEvent::Error(error)).await;
-                                            return;
-                                        }
-                                    };
-                                    for event in events {
-                                        let terminal = matches!(
-                                            event,
-                                            ProviderEvent::TurnComplete { .. }
-                                                | ProviderEvent::Error(_)
-                                        );
-                                        if tx.send(event).await.is_err() {
-                                            return; // consumer dropped
-                                        }
-                                        if terminal {
-                                            return;
-                                        }
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                let _ = tx.send(ProviderEvent::Error(e.to_string())).await;
-                                return;
-                            }
-                        }
-                    }
-                    if let Err(error) = parser.finish() {
-                        let _ = tx.send(ProviderEvent::Error(error.to_string())).await;
-                        return;
-                    }
-                    if let Some(event) = mapper.finish() {
-                        let _ = tx.send(event).await;
-                    }
-                }
-                Ok(response) => {
-                    let status = response.status();
-                    let body =
-                        super::error_body::bounded_error_body(response, &[api_key.as_str()]).await;
-                    let _ = tx
-                        .send(ProviderEvent::Error(format!("HTTP {status}: {body}")))
-                        .await;
-                }
-                Err(e) => {
-                    let _ = tx.send(ProviderEvent::Error(e.to_string())).await;
-                }
-            }
+        let send = async move {
+            let response = http
+                .execute(request)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(TransportResponse {
+                response,
+                secrets: vec![api_key],
+            })
         };
-        let handle = tokio::spawn(async move {
-            if let Err(panic) = AssertUnwindSafe(pump).catch_unwind().await {
-                let message = panic
-                    .downcast_ref::<&str>()
-                    .map(|s| s.to_string())
-                    .or_else(|| panic.downcast_ref::<String>().cloned())
-                    .unwrap_or_else(|| "provider pump panicked".into());
-                let _ = tx_panic
-                    .send(ProviderEvent::Error(format!("internal error: {message}")))
-                    .await;
-            }
-        });
-
-        Ok(Box::pin(AbortOnDropStream {
-            stream: ReceiverStream::new(rx),
-            handle: Some(handle),
-        }))
-    }
-}
-
-struct AbortOnDropStream<S> {
-    stream: S,
-    handle: Option<tokio::task::JoinHandle<()>>,
-}
-
-impl<S> Drop for AbortOnDropStream<S> {
-    fn drop(&mut self) {
-        if let Some(handle) = self.handle.take() {
-            handle.abort();
-        }
-    }
-}
-
-impl<S: Stream + Unpin> Stream for AbortOnDropStream<S> {
-    type Item = S::Item;
-
-    fn poll_next(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Self::Item>> {
-        self.stream.poll_next_unpin(cx)
+        let mapper = match flavor {
+            Flavor::Anthropic => PumpMapper::Anthropic(AnthropicMapper::default()),
+            Flavor::OpenAI => PumpMapper::OpenAI(OpenAiMapper::default()),
+        };
+        Ok(transport::stream(send, mapper))
     }
 }
 
@@ -524,7 +417,7 @@ enum PumpMapper {
     OpenAI(OpenAiMapper),
 }
 
-impl PumpMapper {
+impl TransportEventMapper for PumpMapper {
     fn map(&mut self, data: &str) -> Result<Vec<ProviderEvent>, String> {
         match self {
             PumpMapper::Anthropic(m) => m.map(data),

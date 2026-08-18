@@ -14,5 +14,4 @@
 
 ## Stabilization
 
-- [ ] [Extract provider transport](issues/extract-provider-transport.md)
 - [ ] [Deterministic test harness](issues/deterministic-test-harness.md)

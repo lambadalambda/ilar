@@ -5,6 +5,7 @@ mod event;
 mod mock;
 mod request;
 mod sse;
+mod transport;
 
 pub mod openai;
 pub mod zai;

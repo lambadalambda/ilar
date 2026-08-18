@@ -614,3 +614,12 @@ Transcript rows are wrapped and sliced with `usize` before Ratatui rendering,
 removing the Paragraph `u16` scroll ceiling. A bounded-row fast path keeps the
 65k-row tail regression responsive; broader transcript caching remains a
 separate stabilization issue.
+
+## 2026-08-18 — Shared provider transport
+
+OpenAI and z.ai now share one private transport shell for bounded HTTP errors,
+SSE parsing, terminal-event cutoff, panic conversion, and abort-on-drop task
+ownership. Provider modules still own request construction, authentication and
+wire-event mapping; in particular, OpenAI's ChatGPT token refresh remains
+outside the transport abstraction. Direct shell tests cover send failure,
+panic conversion, terminal SSE handling, and prompt cancellation on drop.
