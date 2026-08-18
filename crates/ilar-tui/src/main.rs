@@ -56,6 +56,7 @@ enum Line_ {
         state: ToolState,
         progress: ToolProgress,
         expanded: bool,
+        full: bool,
         child_lines: Vec<Line_>,
         child_group: u64,
         child_running: bool,
@@ -113,7 +114,14 @@ enum TranscriptEntry {
         id: String,
         calls: Vec<Line_>,
         expanded: bool,
+        child: bool,
     },
+}
+
+impl TranscriptEntry {
+    fn is_child(&self) -> bool {
+        matches!(self, Self::ToolGroup { child: true, .. })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,7 +161,7 @@ impl TranscriptRenderCache {
                         now,
                         activity_started,
                     );
-                    if index > 0 {
+                    if index > 0 && !cached.source.is_child() {
                         rows.insert(
                             0,
                             TranscriptRow {
@@ -180,7 +188,7 @@ impl TranscriptRenderCache {
             }
             let mut rows =
                 transcript_entry_rows(source, expanded_groups, width, now, activity_started);
-            if index > 0 {
+            if index > 0 && !source.is_child() {
                 rows.insert(
                     0,
                     TranscriptRow {
@@ -889,6 +897,7 @@ fn restored_session_invocation_view(
                                 state: ToolState::Running,
                                 progress: ToolProgress::None,
                                 expanded: false,
+                                full: false,
                                 child_lines: Vec::new(),
                                 child_group: 0,
                                 child_running: false,
@@ -1029,6 +1038,7 @@ fn transcript_entries(
     let mut index = 0;
     while index < lines.len() {
         let Line_::Tool {
+            id: first_call_id,
             group_id,
             kind: ToolKind::Tool,
             ..
@@ -1043,23 +1053,20 @@ fn transcript_entries(
             && matches!(
                 &lines[index],
                 Line_::Tool {
-                    group_id: next,
                     kind: ToolKind::Tool,
                     ..
-                } if next == group_id
+                }
             )
         {
             index += 1;
         }
-        if index - start == 1 {
-            entries.push(TranscriptEntry::Item(Box::new(lines[start].clone())));
-        } else {
-            entries.push(TranscriptEntry::ToolGroup {
-                id: group_id.clone(),
-                calls: lines[start..index].to_vec(),
-                expanded: expanded_groups.contains(group_id),
-            });
-        }
+        let group_id = format!("{group_id}:{first_call_id}");
+        entries.push(TranscriptEntry::ToolGroup {
+            id: group_id.clone(),
+            calls: lines[start..index].to_vec(),
+            expanded: expanded_groups.contains(&group_id),
+            child: start > 0 && matches!(lines[start - 1], Line_::Thought { .. }),
+        });
     }
     entries
 }
@@ -1069,12 +1076,20 @@ fn toggle_tool_expansion(lines: &mut [Line_], id: &str) -> bool {
         if let Line_::Tool {
             id: line_id,
             expanded,
+            full,
             child_lines,
             ..
         } = line
         {
             if line_id == id {
-                *expanded = !*expanded;
+                match (*expanded, *full) {
+                    (false, _) => *expanded = true,
+                    (true, false) => *full = true,
+                    (true, true) => {
+                        *expanded = false;
+                        *full = false;
+                    }
+                }
                 return true;
             }
             if toggle_tool_expansion(child_lines, id) {
@@ -1221,6 +1236,7 @@ fn apply_child_loop_event(lines: &mut Vec<Line_>, group: &mut u64, scope: &str, 
             state: ToolState::Running,
             progress: ToolProgress::None,
             expanded: false,
+            full: false,
             child_lines: Vec::new(),
             child_group: 0,
             child_running: false,
@@ -1402,6 +1418,7 @@ fn transcript_entry_rows(
             id,
             calls,
             expanded,
+            child,
         } => {
             let running = calls.iter().filter(|call| tool_is_active(call)).count();
             let failed = calls
@@ -1416,8 +1433,21 @@ fn transcript_entry_rows(
                     )
                 })
                 .count();
+            let group_indent = (usize::from(*child) * 2).min(width as usize);
+            let mut header = tool_group_line(
+                calls.len(),
+                running,
+                failed,
+                *expanded,
+                width.saturating_sub(group_indent as u16),
+            );
+            if group_indent > 0 {
+                let mut spans = vec![Span::raw(" ".repeat(group_indent))];
+                spans.append(&mut header.spans);
+                header = Line::from(spans);
+            }
             let mut rows = vec![TranscriptRow {
-                line: tool_group_line(calls.len(), running, failed, *expanded, width),
+                line: header,
                 target: Some(TranscriptHitTarget::ToolGroup(id.clone())),
             }];
             let visible = calls
@@ -1430,7 +1460,7 @@ fn transcript_entry_rows(
                     width,
                     now,
                     activity_started,
-                    2,
+                    group_indent + 2,
                 ));
             }
             rows
@@ -1448,14 +1478,18 @@ fn tool_group_line(
     let disclosure = if expanded { "▾" } else { "▸" };
     let (status, icon, color) = if running > 0 {
         (
-            format!("{running} running · {calls} calls"),
+            format!("{running} running · {}", call_count(calls)),
             "◐",
             TOOL_ACTIVE,
         )
     } else if failed > 0 {
-        (format!("{calls} calls · {failed} failed"), "×", ERROR)
+        (
+            format!("{} · {failed} failed", call_count(calls)),
+            "×",
+            ERROR,
+        )
     } else {
-        (format!("{calls} calls"), "✓", ASSISTANT)
+        (call_count(calls), "✓", ASSISTANT)
     };
     let text = truncate_display(
         &format!("tools {disclosure} {status} {icon}"),
@@ -1463,6 +1497,10 @@ fn tool_group_line(
         Truncation::Right,
     );
     Line::from(Span::styled(text, Style::default().fg(color)))
+}
+
+fn call_count(calls: usize) -> String {
+    format!("{calls} {}", if calls == 1 { "call" } else { "calls" })
 }
 
 fn tool_entry_rows(
@@ -1484,6 +1522,7 @@ fn tool_entry_rows(
         state,
         progress,
         expanded,
+        full,
         child_lines,
         child_running,
         ..
@@ -1506,6 +1545,7 @@ fn tool_entry_rows(
         *progress,
         now,
         *expanded,
+        *full,
     );
     let mut spans = vec![Span::raw(" ".repeat(indent))];
     spans.extend(line.spans);
@@ -1519,7 +1559,7 @@ fn tool_entry_rows(
             argument_detail,
             width,
             indent + 4,
-            4,
+            if *full { usize::MAX } else { 4 },
             false,
         ));
         if matches!(kind, ToolKind::Tool) || child_lines.is_empty() || *state == ToolState::Failed {
@@ -1528,7 +1568,7 @@ fn tool_entry_rows(
                 result.as_deref().unwrap_or("pending"),
                 width,
                 indent + 4,
-                8,
+                if *full { usize::MAX } else { 8 },
                 *state == ToolState::Failed,
             ));
         }
@@ -2003,6 +2043,7 @@ impl App {
                     state: ToolState::Running,
                     progress: ToolProgress::None,
                     expanded: false,
+                    full: false,
                     child_lines: Vec::new(),
                     child_group: 0,
                     child_running: false,
@@ -2177,6 +2218,7 @@ impl App {
                         },
                         progress: ToolProgress::None,
                         expanded: false,
+                        full: false,
                         child_lines: Vec::new(),
                         child_group: 0,
                         child_running: false,
@@ -2455,7 +2497,7 @@ impl App {
             .iter()
             .enumerate()
         {
-            if index > 0 {
+            if index > 0 && !entry.is_child() {
                 output.push(Line::default());
             }
             output.extend(
@@ -3733,7 +3775,7 @@ fn tool_line(
     now: std::time::Instant,
 ) -> Line<'static> {
     tool_line_with_disclosure(
-        name, kind, arguments, state, width, elapsed, progress, now, false,
+        name, kind, arguments, state, width, elapsed, progress, now, false, false,
     )
 }
 
@@ -3748,6 +3790,7 @@ fn tool_line_with_disclosure(
     progress: ToolProgress,
     now: std::time::Instant,
     expanded: bool,
+    full: bool,
 ) -> Line<'static> {
     let width = width as usize;
     let tool_name = name;
@@ -3771,7 +3814,11 @@ fn tool_line_with_disclosure(
         ToolState::Succeeded => ("✓", ASSISTANT),
         ToolState::Failed => ("×", ERROR),
     };
-    let disclosure = if expanded { "▾" } else { "▶" };
+    let disclosure = match (expanded, full) {
+        (false, _) => "▶",
+        (true, false) => "▾",
+        (true, true) => "▼",
+    };
     let fixed = UnicodeWidthStr::width(format!("{label} {disclosure}  ").as_str())
         + UnicodeWidthStr::width(state_icon);
     if width <= fixed {
@@ -5600,7 +5647,7 @@ mod tests {
         assert!(rendered[0].contains("tools"), "{rendered:?}");
         assert!(rendered[0].contains("2 calls"), "{rendered:?}");
 
-        app.toggle_transcript_target(TranscriptHitTarget::ToolGroup("live:0".into()));
+        app.toggle_transcript_target(TranscriptHitTarget::ToolGroup("live:0:call-1".into()));
         let expanded = app
             .transcript_lines(80, std::time::Instant::now())
             .iter()
@@ -5612,7 +5659,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_step_boundary_splits_adjacent_single_calls() {
+    fn provider_steps_in_one_thought_phase_share_a_group() {
         let mut app = App::new();
         app.lines.clear();
         for (index, (id, name)) in [("call-1", "read"), ("call-2", "grep")]
@@ -5643,9 +5690,58 @@ mod tests {
             .iter()
             .map(rendered_text)
             .collect::<Vec<_>>();
-        assert_eq!(rendered.len(), 3);
-        assert_eq!(rendered[1], "");
-        assert!(!rendered.iter().any(|line| line.starts_with("tools ")));
+        assert_eq!(rendered.len(), 1);
+        assert!(rendered[0].contains("tools"), "{rendered:?}");
+        assert!(rendered[0].contains("2 calls"), "{rendered:?}");
+    }
+
+    #[test]
+    fn single_tool_group_is_a_compact_child_of_its_thought() {
+        let mut app = App::new();
+        app.lines.clear();
+        app.push_loop_event(&LoopEvent::ReasoningSummaryDelta(
+            "Inspecting layout".into(),
+        ));
+        app.push_loop_event(&LoopEvent::ReasoningSummaryCompleted);
+        app.push_loop_event(&LoopEvent::ToolStarted {
+            id: "read-1".into(),
+            name: "read".into(),
+        });
+        app.push_loop_event(&LoopEvent::ToolFinished {
+            id: "read-1".into(),
+            name: "read".into(),
+            is_error: false,
+            result: String::new(),
+            child_session_id: None,
+        });
+
+        let rendered = app
+            .transcript_lines(80, std::time::Instant::now())
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(rendered.len(), 2);
+        assert!(rendered[0].contains("Thought: Inspecting layout"));
+        assert!(rendered[1].starts_with("  tools "), "{rendered:?}");
+        assert!(rendered[1].contains("1 call"), "{rendered:?}");
+        for width in 0..=2 {
+            app.transcript_cache.update(
+                &app.lines,
+                &app.expanded_tool_groups,
+                app.transcript_revision,
+                width,
+                std::time::Instant::now(),
+                app.activity_started,
+            );
+            assert!(
+                app.transcript_cache
+                    .visible_rows(0, usize::MAX, &[])
+                    .iter()
+                    .all(|row| row.line.width() <= width as usize),
+                "width {width}"
+            );
+        }
     }
 
     #[test]
@@ -5672,10 +5768,54 @@ mod tests {
             .map(rendered_text)
             .collect::<Vec<_>>();
 
-        assert!(rendered[0].starts_with("tool "), "{rendered:?}");
-        assert_eq!(rendered[1], "");
-        assert!(rendered[2].starts_with("agent "), "{rendered:?}");
-        assert!(rendered[3].contains("thinking"), "{rendered:?}");
+        assert!(rendered[0].starts_with("tools "), "{rendered:?}");
+        assert!(rendered[1].starts_with("  tool "), "{rendered:?}");
+        assert_eq!(rendered[2], "");
+        assert!(rendered[3].starts_with("agent "), "{rendered:?}");
+        assert!(rendered[4].contains("thinking"), "{rendered:?}");
+    }
+
+    #[test]
+    fn tool_runs_around_an_agent_expand_independently() {
+        let mut app = App::new();
+        app.lines.clear();
+        for (id, name) in [("read-1", "read"), ("task-1", "task"), ("grep-1", "grep")] {
+            app.push_loop_event(&LoopEvent::ToolStarted {
+                id: id.into(),
+                name: name.into(),
+            });
+            if name == "task" {
+                app.push_loop_event(&LoopEvent::SubagentConfigured {
+                    id: id.into(),
+                    description: "Inspect".into(),
+                    agent: "explore".into(),
+                });
+            }
+            app.push_loop_event(&LoopEvent::ToolFinished {
+                id: id.into(),
+                name: name.into(),
+                is_error: false,
+                result: String::new(),
+                child_session_id: None,
+            });
+        }
+
+        app.toggle_transcript_target(TranscriptHitTarget::ToolGroup("live:0:read-1".into()));
+        let rendered = app
+            .transcript_lines(100, std::time::Instant::now())
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>();
+
+        assert!(rendered.iter().any(|line| line.contains("read")));
+        assert!(!rendered.iter().any(|line| line.contains("grep")));
+        assert_eq!(
+            rendered
+                .iter()
+                .filter(|line| line.contains("tools ▸"))
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -5753,9 +5893,13 @@ mod tests {
             id: "read-1".into(),
             name: "read".into(),
             is_error: false,
-            result: "first\nsecond".into(),
+            result: (1..=12)
+                .map(|line| format!("result line {line}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
             child_session_id: None,
         });
+        app.toggle_transcript_target(TranscriptHitTarget::ToolGroup("live:0:read-1".into()));
         app.toggle_transcript_target(TranscriptHitTarget::Tool("read-1".into()));
 
         let rendered = app
@@ -5767,7 +5911,8 @@ mod tests {
         assert!(rendered.iter().any(|line| line.contains("args")));
         assert!(rendered.iter().any(|line| line.contains("src/main.rs")));
         assert!(rendered.iter().any(|line| line.contains("result")));
-        assert!(rendered.iter().any(|line| line.contains("second")));
+        assert!(rendered.iter().any(|line| line.contains("… more")));
+        assert!(!rendered.iter().any(|line| line.contains("result line 12")));
         assert!(rendered.iter().all(|line| line.width() <= 60));
         for width in 0..=20 {
             let narrow = app.transcript_lines(width, std::time::Instant::now());
@@ -5777,6 +5922,24 @@ mod tests {
                 narrow.iter().map(rendered_text).collect::<Vec<_>>()
             );
         }
+
+        app.toggle_transcript_target(TranscriptHitTarget::Tool("read-1".into()));
+        let full = app
+            .transcript_lines(60, std::time::Instant::now())
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>();
+        assert!(full.iter().any(|line| line.contains("result line 12")));
+        assert!(!full.iter().any(|line| line.contains("… more")));
+
+        app.toggle_transcript_target(TranscriptHitTarget::Tool("read-1".into()));
+        let collapsed = app
+            .transcript_lines(60, std::time::Instant::now())
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>();
+        assert_eq!(collapsed.len(), 2);
+        assert!(!collapsed.iter().any(|line| line.contains("args")));
     }
 
     #[test]
@@ -6106,6 +6269,7 @@ mod tests {
             result: String::new(),
             child_session_id: None,
         });
+        app.toggle_transcript_target(TranscriptHitTarget::ToolGroup("live:0:bash-1".into()));
 
         let lines = app.transcript_lines(36, std::time::Instant::now());
         let tool = lines.last().unwrap();
@@ -6872,6 +7036,7 @@ mod tests {
                 state: ToolState::Succeeded,
                 progress: ToolProgress::None,
                 expanded: false,
+                full: false,
                 child_lines: Vec::new(),
                 child_group: 0,
                 child_running: false,
