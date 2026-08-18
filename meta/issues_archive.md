@@ -85,3 +85,6 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Ring terminal bell after turn](issues/ring-terminal-bell-after-turn.md)
 - [x] [Add command palette](issues/add-command-palette.md)
 - [x] [Add model reasoning variants](issues/add-model-reasoning-variants.md)
+- [x] [Refresh TUI theme and chrome](issues/refresh-tui-theme-and-chrome.md)
+- [x] [Improve operational status](issues/improve-operational-status.md)
+- [x] [Polish transcript hierarchy](issues/polish-transcript-hierarchy.md)

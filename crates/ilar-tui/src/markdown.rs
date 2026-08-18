@@ -1,6 +1,8 @@
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
+
+use crate::theme;
 
 #[derive(Clone, Copy)]
 enum ColumnAlignment {
@@ -44,7 +46,7 @@ pub fn render(source: &str, width: usize) -> Vec<Line<'static>> {
                 if !language.is_empty() {
                     lines.push(Line::from(Span::styled(
                         format!("  {language}"),
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(theme::MUTED),
                     )));
                 }
                 continue;
@@ -52,10 +54,10 @@ pub fn render(source: &str, width: usize) -> Vec<Line<'static>> {
         }
 
         if code_fence.is_some() {
-            lines.push(Line::from(Span::styled(
-                format!("│ {}", expand_tabs(raw)),
-                Style::default().fg(Color::Cyan),
-            )));
+            lines.push(Line::from(vec![
+                Span::styled("│ ", Style::default().fg(theme::CODE)),
+                Span::styled(expand_tabs(raw), Style::default().fg(theme::PRIMARY)),
+            ]));
             continue;
         }
 
@@ -75,9 +77,9 @@ pub fn render(source: &str, width: usize) -> Vec<Line<'static>> {
 
         if let Some((level, text)) = heading(trimmed) {
             let (prefix, color) = match level {
-                1 => ("▌ ", Color::Magenta),
-                2 => ("◆ ", Color::Magenta),
-                _ => ("› ", Color::Blue),
+                1 => ("▌ ", theme::MARKUP),
+                2 => ("◆ ", theme::MARKUP),
+                _ => ("› ", theme::MARKUP),
             };
             let style = Style::default().fg(color).add_modifier(Modifier::BOLD);
             let mut spans = vec![Span::styled(prefix.to_string(), style)];
@@ -88,7 +90,7 @@ pub fn render(source: &str, width: usize) -> Vec<Line<'static>> {
 
         if let Some(text) = trimmed.strip_prefix("> ") {
             let style = Style::default()
-                .fg(Color::DarkGray)
+                .fg(theme::MUTED)
                 .add_modifier(Modifier::ITALIC);
             let mut spans = vec![Span::styled("│ ", style)];
             spans.extend(render_inline(text, style));
@@ -99,7 +101,7 @@ pub fn render(source: &str, width: usize) -> Vec<Line<'static>> {
         if is_rule(trimmed) {
             lines.push(Line::from(Span::styled(
                 "────────────────────────",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme::MUTED),
             )));
             continue;
         }
@@ -107,7 +109,7 @@ pub fn render(source: &str, width: usize) -> Vec<Line<'static>> {
         if let Some((indent, marker, text)) = list_item(raw) {
             let mut spans = vec![Span::styled(
                 format!("{}{} ", "  ".repeat(indent), marker),
-                Style::default().fg(Color::Blue),
+                Style::default().fg(theme::MARKUP),
             )];
             spans.extend(render_inline(text, Style::default()));
             lines.push(Line::from(spans));
@@ -348,7 +350,7 @@ fn render_grid_row(
         .map(|(cell, width)| bounded_wrap(Line::from(render_inline(cell, base)), *width))
         .collect::<Vec<_>>();
     let height = wrapped.iter().map(Vec::len).max().unwrap_or(1);
-    let separator_style = Style::default().fg(Color::DarkGray);
+    let separator_style = Style::default().fg(theme::MUTED);
     let mut output = Vec::with_capacity(height);
 
     for row in 0..height {
@@ -388,7 +390,7 @@ fn pad_cell(
 }
 
 fn table_rule(widths: &[usize]) -> Line<'static> {
-    let style = Style::default().fg(Color::DarkGray);
+    let style = Style::default().fg(theme::MUTED);
     let mut spans = Vec::new();
     for (column, width) in widths.iter().enumerate() {
         if column > 0 {
@@ -404,7 +406,7 @@ fn render_stacked_table(table: MarkdownTable, width: usize) -> Vec<Line<'static>
         return vec![Line::default()];
     }
     let label_style = Style::default()
-        .fg(Color::DarkGray)
+        .fg(theme::MUTED)
         .add_modifier(Modifier::BOLD);
     let labels = table
         .headers
@@ -593,7 +595,7 @@ fn render_inline(text: &str, base: Style) -> Vec<Span<'static>> {
                 let content = &rest[opening..end];
                 spans.push(Span::styled(
                     content.to_string(),
-                    base.fg(Color::Yellow).add_modifier(Modifier::REVERSED),
+                    base.fg(theme::PRIMARY).add_modifier(Modifier::REVERSED),
                 ));
                 rest = &rest[end + opening..];
             } else {
@@ -612,7 +614,7 @@ fn render_inline(text: &str, base: Style) -> Vec<Span<'static>> {
                 after[..label_end].to_string(),
                 base.add_modifier(Modifier::UNDERLINED),
             ));
-            spans.push(Span::styled(format!(" <{url}>"), base.fg(Color::DarkGray)));
+            spans.push(Span::styled(format!(" <{url}>"), base.fg(theme::MUTED)));
             rest = &after[url_start + url_end + 1..];
             continue;
         }
@@ -651,10 +653,11 @@ fn matching_backticks(text: &str, length: usize) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use ratatui::style::{Color, Modifier};
+    use ratatui::style::Modifier;
     use unicode_width::UnicodeWidthStr;
 
     use super::render as render_with_width;
+    use crate::theme;
 
     fn render(source: &str) -> Vec<ratatui::text::Line<'static>> {
         render_with_width(source, usize::MAX)
@@ -683,7 +686,7 @@ mod tests {
             .iter()
             .find(|line| text(line) == "◆ Overview")
             .unwrap();
-        assert_eq!(heading.spans[0].style.fg, Some(Color::Magenta));
+        assert_eq!(heading.spans[0].style.fg, Some(theme::MARKUP));
         assert!(heading.spans[0].style.add_modifier.contains(Modifier::BOLD));
     }
 
@@ -707,11 +710,11 @@ mod tests {
         assert!(spans.iter().any(|span| {
             span.content == "care" && span.style.add_modifier.contains(Modifier::ITALIC)
         }));
-        assert!(
-            spans
-                .iter()
-                .any(|span| span.content == "cargo test" && span.style.fg == Some(Color::Yellow))
-        );
+        assert!(spans.iter().any(|span| {
+            span.content == "cargo test"
+                && span.style.fg == Some(theme::PRIMARY)
+                && span.style.add_modifier.contains(Modifier::REVERSED)
+        }));
         assert!(spans.iter().any(|span| {
             span.content == "Ratatui" && span.style.add_modifier.contains(Modifier::UNDERLINED)
         }));
@@ -727,12 +730,8 @@ mod tests {
         assert_eq!(rendered[1], "│ fn main() {");
         assert_eq!(rendered[2], "│ ");
         assert_eq!(rendered[3], "│     println!(\"hi\");");
-        assert!(
-            lines[1]
-                .spans
-                .iter()
-                .all(|span| span.style.fg == Some(Color::Cyan))
-        );
+        assert_eq!(lines[1].spans[0].style.fg, Some(theme::CODE));
+        assert_eq!(lines[1].spans[1].style.fg, Some(theme::PRIMARY));
     }
 
     #[test]
@@ -782,12 +781,11 @@ mod tests {
             span.content.contains("Signed-device testing")
                 && span.style.add_modifier.contains(Modifier::BOLD)
         }));
-        assert!(
-            lines[3]
-                .spans
-                .iter()
-                .any(|span| span.content == "x|y" && span.style.fg == Some(Color::Yellow))
-        );
+        assert!(lines[3].spans.iter().any(|span| {
+            span.content == "x|y"
+                && span.style.fg == Some(theme::PRIMARY)
+                && span.style.add_modifier.contains(Modifier::REVERSED)
+        }));
     }
 
     #[test]
@@ -854,12 +852,11 @@ mod tests {
         let lines = render_with_width("| Code | State |\n| - | - |\n| ``a`b|c`` | ready |", 40);
 
         assert!(text(&lines[2]).contains("a`b|c"));
-        assert!(
-            lines[2]
-                .spans
-                .iter()
-                .any(|span| span.content == "a`b|c" && span.style.fg == Some(Color::Yellow))
-        );
+        assert!(lines[2].spans.iter().any(|span| {
+            span.content == "a`b|c"
+                && span.style.fg == Some(theme::PRIMARY)
+                && span.style.add_modifier.contains(Modifier::REVERSED)
+        }));
     }
 
     #[test]

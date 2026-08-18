@@ -1,6 +1,7 @@
 //! ilar TUI: transcript, streaming, tool display, input. Esc aborts.
 
 mod markdown;
+mod theme;
 
 use std::sync::Arc;
 
@@ -16,7 +17,8 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Borders, Clear, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+    Block, BorderType, Borders, Clear, Padding, Paragraph, Scrollbar, ScrollbarOrientation,
+    ScrollbarState,
 };
 use ratatui::{Frame, buffer::Buffer};
 use tokio_util::sync::CancellationToken;
@@ -160,6 +162,7 @@ impl TranscriptRenderCache {
                         width,
                         now,
                         activity_started,
+                        false,
                     );
                     if index > 0 && !cached.source.is_child() {
                         rows.insert(
@@ -187,7 +190,7 @@ impl TranscriptRenderCache {
                 continue;
             }
             let mut rows =
-                transcript_entry_rows(source, expanded_groups, width, now, activity_started);
+                transcript_entry_rows(source, expanded_groups, width, now, activity_started, false);
             if index > 0 && !source.is_child() {
                 rows.insert(
                     0,
@@ -270,6 +273,20 @@ enum Activity {
     Error,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NoticeLevel {
+    Info,
+    Warning,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StatusNotice {
+    text: String,
+    level: NoticeLevel,
+    persistent: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct SelectionPoint {
     row: usize,
@@ -302,10 +319,10 @@ impl TranscriptSelection {
     }
 }
 
-const MUTED: Color = Color::DarkGray;
-const ASSISTANT: Color = Color::Green;
-const TOOL_ACTIVE: Color = Color::Yellow;
-const ERROR: Color = Color::Red;
+const MUTED: Color = theme::MUTED;
+const ASSISTANT: Color = theme::ASSISTANT;
+const TOOL_ACTIVE: Color = theme::RUNNING;
+const ERROR: Color = theme::ERROR;
 const CONTENT_HORIZONTAL_PADDING: u16 = 2;
 const TODO_SIDEBAR_MIN_WIDTH: u16 = 121;
 const TODO_SIDEBAR_WIDTH: u16 = 42;
@@ -1406,11 +1423,12 @@ fn transcript_entry_rows(
     width: u16,
     now: std::time::Instant,
     activity_started: std::time::Instant,
+    nested: bool,
 ) -> Vec<TranscriptRow> {
     match entry {
         TranscriptEntry::Item(item) => match item.as_ref() {
             tool @ Line_::Tool { .. } => {
-                tool_entry_rows(tool, expanded_groups, width, now, activity_started, 0)
+                tool_entry_rows(tool, expanded_groups, width, now, activity_started, 0, None)
             }
             item => transcript_entry_lines(item, width, now, activity_started)
                 .into_iter()
@@ -1437,7 +1455,12 @@ fn transcript_entry_rows(
                     )
                 })
                 .count();
-            let group_indent = (usize::from(*child) * 2).min(width as usize);
+            let show_hierarchy = width >= 64;
+            let group_indent = if *child && show_hierarchy && !nested {
+                2
+            } else {
+                0
+            };
             let mut header = tool_group_line(
                 calls.len(),
                 running,
@@ -1446,7 +1469,10 @@ fn transcript_entry_rows(
                 width.saturating_sub(group_indent as u16),
             );
             if group_indent > 0 {
-                let mut spans = vec![Span::raw(" ".repeat(group_indent))];
+                let mut spans = vec![Span::styled(
+                    hierarchy_prefix(group_indent, "└─"),
+                    Style::default().fg(theme::BORDER),
+                )];
                 spans.append(&mut header.spans);
                 header = Line::from(spans);
             }
@@ -1456,15 +1482,24 @@ fn transcript_entry_rows(
             }];
             let visible = calls
                 .iter()
-                .filter(|call| *expanded || tool_is_active(call));
-            for call in visible {
+                .filter(|call| *expanded || tool_is_active(call))
+                .collect::<Vec<_>>();
+            let visible_count = visible.len();
+            for (index, call) in visible.into_iter().enumerate() {
+                let branch = show_hierarchy.then_some(if index + 1 == visible_count {
+                    "└─"
+                } else {
+                    "├─"
+                });
+                let call_indent = if show_hierarchy { group_indent + 2 } else { 0 };
                 rows.extend(tool_entry_rows(
                     call,
                     expanded_groups,
                     width,
                     now,
                     activity_started,
-                    group_indent + 2,
+                    call_indent,
+                    branch,
                 ));
             }
             rows
@@ -1493,7 +1528,7 @@ fn tool_group_line(
             ERROR,
         )
     } else {
-        (call_count(calls), "✓", ASSISTANT)
+        (call_count(calls), "✓", theme::SUCCESS)
     };
     let text = truncate_display(
         &format!("tools {disclosure} {status} {icon}"),
@@ -1514,6 +1549,7 @@ fn tool_entry_rows(
     now: std::time::Instant,
     activity_started: std::time::Instant,
     indent: usize,
+    branch: Option<&str>,
 ) -> Vec<TranscriptRow> {
     let indent = indent.min(width as usize);
     let Line_::Tool {
@@ -1551,7 +1587,14 @@ fn tool_entry_rows(
         *expanded,
         *full,
     );
-    let mut spans = vec![Span::raw(" ".repeat(indent))];
+    let mut spans = branch
+        .map(|branch| {
+            vec![Span::styled(
+                hierarchy_prefix(indent, branch),
+                Style::default().fg(theme::BORDER),
+            )]
+        })
+        .unwrap_or_default();
     spans.extend(line.spans);
     let mut rows = vec![TranscriptRow {
         line: Line::from(spans),
@@ -1582,24 +1625,38 @@ fn tool_entry_rows(
             || *child_running
             || matches!(*state, ToolState::Running | ToolState::Complete))
     {
-        let nested_indent = (indent + 4).min(width as usize);
+        let nested_indent = if width >= 64 {
+            (indent + 4).min(width as usize)
+        } else {
+            0
+        };
         let visible = if *expanded {
             child_lines.clone()
         } else {
             agent_live_preview(child_lines)
         };
-        for child in transcript_entries(&visible, expanded_groups) {
-            rows.extend(
-                transcript_entry_rows(
-                    &child,
-                    expanded_groups,
-                    width.saturating_sub(nested_indent as u16),
-                    now,
-                    activity_started,
-                )
-                .into_iter()
-                .map(|row| indent_transcript_row(row, nested_indent)),
+        let entries = transcript_entries(&visible, expanded_groups);
+        let entry_count = entries.len();
+        for (index, child) in entries.into_iter().enumerate() {
+            let last = index + 1 == entry_count;
+            let child_rows = transcript_entry_rows(
+                &child,
+                expanded_groups,
+                width.saturating_sub(nested_indent as u16),
+                now,
+                activity_started,
+                true,
             );
+            rows.extend(child_rows.into_iter().enumerate().map(|(row_index, row)| {
+                let branch = if row_index == 0 {
+                    if last { "└─" } else { "├─" }
+                } else if last {
+                    "  "
+                } else {
+                    "│ "
+                };
+                indent_transcript_row(row, nested_indent, branch)
+            }));
         }
     }
     rows
@@ -1623,11 +1680,21 @@ fn agent_live_preview(lines: &[Line_]) -> Vec<Line_> {
     preview
 }
 
-fn indent_transcript_row(mut row: TranscriptRow, indent: usize) -> TranscriptRow {
-    let mut spans = vec![Span::raw(" ".repeat(indent))];
+fn indent_transcript_row(mut row: TranscriptRow, indent: usize, branch: &str) -> TranscriptRow {
+    let mut spans = vec![Span::styled(
+        hierarchy_prefix(indent, branch),
+        Style::default().fg(theme::BORDER),
+    )];
     spans.append(&mut row.line.spans);
     row.line = Line::from(spans);
     row
+}
+
+fn hierarchy_prefix(indent: usize, branch: &str) -> String {
+    if indent < 2 {
+        return " ".repeat(indent);
+    }
+    format!("{}{branch}", " ".repeat(indent - 2))
 }
 
 fn tool_detail_rows(
@@ -1710,18 +1777,18 @@ fn transcript_entry_lines(
                     continue;
                 }
                 for mut line in wrap_markdown_line(line, content_width) {
+                    for span in &mut line.spans {
+                        if span.style.fg.is_none() {
+                            span.style = span.style.fg(theme::PRIMARY);
+                        }
+                    }
                     let label = if first {
                         truncate_display("ilar ", label_width, Truncation::Right)
                     } else {
                         " ".repeat(label_width)
                     };
                     first = false;
-                    let mut spans = vec![Span::styled(
-                        label,
-                        Style::default()
-                            .fg(Color::Green)
-                            .add_modifier(Modifier::BOLD),
-                    )];
+                    let mut spans = vec![Span::styled(label, theme::title(theme::ASSISTANT))];
                     spans.append(&mut line.spans);
                     output.push(Line::from(spans));
                 }
@@ -1737,7 +1804,7 @@ fn transcript_entry_lines(
                     width as usize,
                     Truncation::Right,
                 ),
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(theme::REASONING),
             ))]
         }
         Line_::User(text) => safe_lines(text)
@@ -1747,11 +1814,9 @@ fn transcript_entry_lines(
                 Line::from(vec![
                     Span::styled(
                         if index == 0 { "you  " } else { "     " },
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
+                        theme::title(theme::USER),
                     ),
-                    Span::raw(text),
+                    Span::styled(text, Style::default().fg(theme::PRIMARY)),
                 ])
             })
             .collect(),
@@ -1762,11 +1827,9 @@ fn transcript_entry_lines(
                 Line::from(vec![
                     Span::styled(
                         if index == 0 { "task " } else { "     " },
-                        Style::default()
-                            .fg(Color::Magenta)
-                            .add_modifier(Modifier::BOLD),
+                        theme::title(theme::REASONING),
                     ),
-                    Span::raw(text),
+                    Span::styled(text, Style::default().fg(theme::PRIMARY)),
                 ])
             })
             .collect(),
@@ -1777,11 +1840,9 @@ fn transcript_entry_lines(
                 Line::from(vec![
                     Span::styled(
                         if index == 0 { "job  " } else { "     " },
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
+                        theme::title(theme::WAITING),
                     ),
-                    Span::raw(text),
+                    Span::styled(text, Style::default().fg(theme::PRIMARY)),
                 ])
             })
             .collect(),
@@ -1809,9 +1870,9 @@ fn transcript_entry_lines(
                 Line::from(vec![
                     Span::styled(
                         if index == 0 { "—    " } else { "     " },
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(theme::MUTED),
                     ),
-                    Span::styled(text, Style::default().fg(Color::DarkGray)),
+                    Span::styled(text, Style::default().fg(theme::MUTED)),
                 ])
             })
             .collect(),
@@ -1839,7 +1900,7 @@ fn activity_line(
             (
                 frames[(elapsed.as_millis() / 160) as usize % frames.len()],
                 "thinking…",
-                TOOL_ACTIVE,
+                theme::REASONING,
             )
         }
         Activity::Responding => {
@@ -1875,6 +1936,7 @@ struct App {
     input: InputBuffer,
     busy: bool,
     status: String,
+    notice: Option<StatusNotice>,
     activity: Activity,
     activity_started: std::time::Instant,
     current_model: String,
@@ -1918,6 +1980,7 @@ impl App {
             input: InputBuffer::default(),
             busy: false,
             status: String::new(),
+            notice: None,
             activity: Activity::Ready,
             activity_started: std::time::Instant::now(),
             current_model: "unknown".into(),
@@ -1955,6 +2018,7 @@ impl App {
     fn open_command_palette(&mut self) {
         if !self.busy && self.model_picker.is_none() && self.variant_picker.is_none() {
             self.model_key_pending = false;
+            self.clear_transient_notice();
             self.command_palette = Some(CommandPalette::new());
         }
     }
@@ -1975,6 +2039,7 @@ impl App {
         self.context_limit = context_limit;
         self.context_estimated = context_estimated;
         self.status = "ready".into();
+        self.notice = None;
     }
 
     fn restore_session(&mut self, session: &ilar::session::SessionReader, store: &SessionStore) {
@@ -2013,6 +2078,7 @@ impl App {
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
         match event {
             LoopEvent::TurnStarted => {
+                self.clear_transient_notice();
                 self.status = "thinking…".into();
                 self.set_activity(Activity::Thinking);
             }
@@ -2311,6 +2377,13 @@ impl App {
                     TurnOutcome::Aborted => "aborted".into(),
                     TurnOutcome::MaxIterations => "stopped: max iterations".into(),
                 };
+                match outcome {
+                    TurnOutcome::Completed => self.clear_transient_notice(),
+                    TurnOutcome::Aborted => self.set_notice("turn aborted", NoticeLevel::Warning),
+                    TurnOutcome::MaxIterations => {
+                        self.set_notice("stopped: max iterations", NoticeLevel::Warning)
+                    }
+                }
                 self.set_activity(match outcome {
                     TurnOutcome::Completed => Activity::Ready,
                     TurnOutcome::Aborted => Activity::Aborted,
@@ -2362,7 +2435,9 @@ impl App {
                     *state = ToolState::Failed;
                 }
             }
-            self.lines.push(Line_::System(format!("error: {error:#}")));
+            let message = format!("error: {error:#}");
+            self.set_notice(&message, NoticeLevel::Error);
+            self.lines.push(Line_::System(message));
             self.status = "error".into();
             self.set_activity(Activity::Error);
         }
@@ -2526,6 +2601,7 @@ impl App {
                     width,
                     now,
                     self.activity_started,
+                    false,
                 )
                 .into_iter()
                 .map(|row| row.line),
@@ -2562,17 +2638,79 @@ impl App {
         format!("{model}{suffix}")
     }
 
+    fn set_notice(&mut self, text: impl Into<String>, level: NoticeLevel) {
+        self.set_notice_with_lifetime(text, level, level == NoticeLevel::Error);
+    }
+
+    fn set_persistent_notice(&mut self, text: impl Into<String>, level: NoticeLevel) {
+        self.set_notice_with_lifetime(text, level, true);
+    }
+
+    fn set_notice_with_lifetime(
+        &mut self,
+        text: impl Into<String>,
+        level: NoticeLevel,
+        persistent: bool,
+    ) {
+        if self.notice.as_ref().is_some_and(|current| {
+            current.persistent
+                && (!persistent
+                    || (current.level == NoticeLevel::Error && level != NoticeLevel::Error))
+        }) {
+            return;
+        }
+        let text = text.into();
+        let text = text
+            .lines()
+            .next()
+            .map(safe_text)
+            .unwrap_or_default()
+            .chars()
+            .take(240)
+            .collect::<String>();
+        self.notice = (!text.is_empty()).then_some(StatusNotice {
+            text,
+            level,
+            persistent,
+        });
+    }
+
+    fn clear_notice(&mut self) {
+        self.notice = None;
+    }
+
+    fn clear_transient_notice(&mut self) {
+        if self
+            .notice
+            .as_ref()
+            .is_some_and(|notice| !notice.persistent)
+        {
+            self.notice = None;
+        }
+    }
+
+    fn operational_notice(&self) -> Option<(&str, Color)> {
+        self.notice.as_ref().map(|notice| {
+            let color = match notice.level {
+                NoticeLevel::Info => theme::PRIMARY,
+                NoticeLevel::Warning => theme::WAITING,
+                NoticeLevel::Error => theme::ERROR,
+            };
+            (notice.text.as_str(), color)
+        })
+    }
+
     fn status_line(&self, width: u16) -> Line<'static> {
         let width = width as usize;
         let (icon, state, state_color) = match self.activity {
-            Activity::Ready => ("●", "ready", ASSISTANT),
-            Activity::Thinking => ("○", "thinking", TOOL_ACTIVE),
+            Activity::Ready => ("●", "ready", theme::SUCCESS),
+            Activity::Thinking => ("○", "thinking", theme::REASONING),
             Activity::Responding => ("▸", "responding", ASSISTANT),
             Activity::Tools => ("◆", "tools", TOOL_ACTIVE),
-            Activity::Aborting => ("■", "aborting", TOOL_ACTIVE),
-            Activity::Aborted => ("■", "aborted", TOOL_ACTIVE),
-            Activity::Stopped => ("■", "stopped", TOOL_ACTIVE),
-            Activity::Paused => ("Ⅱ", "paused", TOOL_ACTIVE),
+            Activity::Aborting => ("■", "aborting", theme::WAITING),
+            Activity::Aborted => ("■", "aborted", theme::WAITING),
+            Activity::Stopped => ("■", "stopped", theme::WAITING),
+            Activity::Paused => ("Ⅱ", "paused", theme::WAITING),
             Activity::Error => ("×", "error", ERROR),
         };
         let context = context_usage(
@@ -2586,7 +2724,7 @@ impl App {
             .map(|limit| self.context_used.saturating_mul(100) / limit)
         {
             Some(percent) if percent >= 85 => ERROR,
-            Some(percent) if percent >= 70 => TOOL_ACTIVE,
+            Some(percent) if percent >= 70 => theme::WAITING,
             _ => MUTED,
         };
         let percent = self
@@ -2594,6 +2732,51 @@ impl App {
             .filter(|limit| *limit > 0)
             .map(|limit| format!("{}%", self.context_used.saturating_mul(100) / limit))
             .unwrap_or_else(|| "—%".into());
+        let meter = context_meter(
+            self.context_used,
+            self.context_limit,
+            self.context_estimated,
+            8,
+        );
+        if let Some((notice, notice_color)) = self.operational_notice() {
+            let right = if width >= 80 {
+                meter.unwrap_or_else(|| percent.clone())
+            } else {
+                percent.clone()
+            };
+            let right_width = UnicodeWidthStr::width(right.as_str());
+            let prefix = format!(" {icon} ");
+            let prefix_width = UnicodeWidthStr::width(prefix.as_str());
+            if width <= right_width.saturating_add(prefix_width) {
+                return Line::from(Span::styled(
+                    truncate_display(
+                        &format!("{prefix}{notice} {right}"),
+                        width,
+                        Truncation::Right,
+                    ),
+                    Style::default().fg(state_color),
+                ));
+            }
+            let left_budget = width.saturating_sub(right_width).saturating_sub(1);
+            let notice = truncate_display(
+                notice,
+                left_budget.saturating_sub(prefix_width),
+                Truncation::Right,
+            );
+            let left_width = prefix_width + UnicodeWidthStr::width(notice.as_str());
+            let gap = width.saturating_sub(left_width).saturating_sub(right_width);
+            return Line::from(vec![
+                Span::styled(prefix, Style::default().fg(state_color)),
+                Span::styled(notice, Style::default().fg(notice_color)),
+                Span::raw(" ".repeat(gap)),
+                Span::styled(right, Style::default().fg(percent_color)),
+            ]);
+        }
+        let context_display = if width >= 100 {
+            meter.unwrap_or_else(|| context.clone())
+        } else {
+            context.clone()
+        };
         let compact_latest_usage = self.latest_usage.map(|latest| {
             format!(
                 "i{}/o{} c{} {percent}",
@@ -2678,7 +2861,7 @@ impl App {
         let separators = 7;
         let detailed_usage = self.latest_usage.map(|latest| {
             format!(
-                "in {} · out {} · cache {} · {context}",
+                "in {} · out {} · cache {} · {context_display}",
                 latest.input_tokens,
                 latest.output_tokens,
                 latest
@@ -2694,7 +2877,9 @@ impl App {
                 <= width
         });
         let show_cwd = detailed_usage.is_some() || compact_latest_usage.is_none();
-        let usage = detailed_usage.or(compact_latest_usage).unwrap_or(context);
+        let usage = detailed_usage
+            .or(compact_latest_usage)
+            .unwrap_or(context_display);
         let usage = truncate_display(
             &usage,
             width.saturating_sub(state_width + separators + 8),
@@ -2801,7 +2986,12 @@ impl App {
         };
         let mut transcript_block = Block::default()
             .borders(Borders::ALL)
-            .title(format!("ilar{scroll_label}"))
+            .border_type(BorderType::Plain)
+            .border_style(theme::panel_border())
+            .title(Line::from(vec![
+                Span::styled("ilar", theme::title(theme::ASSISTANT)),
+                Span::styled(scroll_label, Style::default().fg(theme::MUTED)),
+            ]))
             .padding(Padding::new(
                 CONTENT_HORIZONTAL_PADDING,
                 CONTENT_HORIZONTAL_PADDING,
@@ -2847,6 +3037,8 @@ impl App {
         if let Some(todo_area) = content_areas.todos {
             let todo_block = Block::default()
                 .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(theme::panel_border())
                 .padding(Padding::new(
                     CONTENT_HORIZONTAL_PADDING,
                     CONTENT_HORIZONTAL_PADDING,
@@ -2855,9 +3047,7 @@ impl App {
                 ))
                 .title(Line::from(Span::styled(
                     "todos",
-                    Style::default()
-                        .fg(TOOL_ACTIVE)
-                        .add_modifier(Modifier::BOLD),
+                    theme::title(theme::WAITING),
                 )));
             let inner = todo_block.inner(todo_area);
             let snapshot = {
@@ -2870,18 +3060,33 @@ impl App {
 
         frame.render_widget(Paragraph::new(self.status_line(chunks[1].width)), chunks[1]);
 
-        let input_block = Block::default().borders(Borders::ALL);
+        let input_focused = !self.busy
+            && self.command_palette.is_none()
+            && self.model_picker.is_none()
+            && self.variant_picker.is_none();
+        let input_block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(if input_focused {
+                BorderType::Thick
+            } else {
+                BorderType::Plain
+            })
+            .border_style(if input_focused {
+                theme::focus_border()
+            } else {
+                theme::panel_border()
+            });
         let input_area = input_block.inner(chunks[2]);
         let input_view = self
             .input
             .multiline_view(input_area.width, input_area.height);
         let input_title = if input_view.line_count > 1 {
             format!(
-                "input {}/{} · Enter send · Shift-Enter/Ctrl-J newline",
+                " input {}/{} ",
                 input_view.cursor_line, input_view.line_count
             )
         } else {
-            "input · Enter send · Shift-Enter/Ctrl-J newline".into()
+            " input ".into()
         };
         let input_lines = input_view
             .lines
@@ -2889,7 +3094,25 @@ impl App {
             .cloned()
             .map(Line::raw)
             .collect::<Vec<_>>();
-        let input = Paragraph::new(input_lines).block(input_block.title(input_title));
+        let mut input_block = input_block.title(Line::styled(
+            input_title,
+            theme::title(if input_focused {
+                theme::USER
+            } else {
+                theme::SECONDARY
+            }),
+        ));
+        let input_help = if chunks[2].width >= 48 {
+            " Enter send · Shift-Enter/Ctrl-J newline "
+        } else {
+            " Enter send "
+        };
+        input_block = input_block.title_bottom(
+            Line::styled(input_help, Style::default().fg(theme::MUTED)).right_aligned(),
+        );
+        let input = Paragraph::new(input_lines)
+            .style(Style::default().fg(theme::PRIMARY))
+            .block(input_block);
         frame.render_widget(input, chunks[2]);
 
         let transcript_cells = transcript_cells(frame.buffer_mut(), transcript_text_area);
@@ -2984,15 +3207,21 @@ fn render_todo_sidebar_snapshot(
             let (marker, marker_style, content_style) = match item.status {
                 ilar::todo::Status::Completed => (
                     "✓ ",
-                    Style::default().fg(ASSISTANT),
-                    Style::default().fg(Color::Gray),
+                    Style::default().fg(theme::SUCCESS),
+                    Style::default().fg(theme::SECONDARY),
                 ),
                 ilar::todo::Status::InProgress => (
                     "▸ ",
-                    Style::default().fg(TOOL_ACTIVE),
-                    Style::default().add_modifier(Modifier::BOLD),
+                    Style::default().fg(theme::WAITING),
+                    Style::default()
+                        .fg(theme::PRIMARY)
+                        .add_modifier(Modifier::BOLD),
                 ),
-                ilar::todo::Status::Pending => ("○ ", Style::default().fg(MUTED), Style::default()),
+                ilar::todo::Status::Pending => (
+                    "○ ",
+                    Style::default().fg(MUTED),
+                    Style::default().fg(theme::SECONDARY),
+                ),
             };
             let remaining = width as usize;
             let marker = truncate_display(marker, remaining, Truncation::Right);
@@ -3101,7 +3330,7 @@ fn todo_summary(snapshot: &TodoRenderSnapshot, width: u16) -> Option<Line<'stati
         return None;
     }
     let (marker, marker_style) = match item.status {
-        ilar::todo::Status::Completed => ("✓ ", Style::default().fg(ASSISTANT)),
+        ilar::todo::Status::Completed => ("✓ ", Style::default().fg(theme::SUCCESS)),
         ilar::todo::Status::InProgress => ("▸ ", Style::default().fg(TOOL_ACTIVE)),
         ilar::todo::Status::Pending => ("○ ", Style::default().fg(MUTED)),
     };
@@ -3341,11 +3570,10 @@ struct StyledGrapheme {
 }
 
 fn wrap_markdown_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
-    let preformatted = !line.spans.is_empty()
-        && line
-            .spans
-            .iter()
-            .all(|span| span.style.fg == Some(Color::Cyan));
+    let preformatted = line
+        .spans
+        .first()
+        .is_some_and(|span| span.content == "│ " && span.style.fg == Some(theme::CODE));
     if preformatted {
         hard_wrap_styled_line(line, width)
     } else {
@@ -3363,7 +3591,11 @@ fn hard_wrap_styled_line(line: Line<'static>, width: usize) -> Vec<Line<'static>
     let mut output = Vec::new();
     let mut current = Vec::new();
     let mut current_width = 0usize;
-    for cell in styled_graphemes(line) {
+    for mut cell in styled_graphemes(line) {
+        if cell.width > width {
+            cell.text = "…".into();
+            cell.width = 1;
+        }
         if !current.is_empty() && current_width.saturating_add(cell.width) > width {
             output.push(styled_line(&current));
             current.clear();
@@ -3386,7 +3618,16 @@ fn wrap_styled_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
         return vec![line];
     }
 
-    let cells = styled_graphemes(line);
+    let cells = styled_graphemes(line)
+        .into_iter()
+        .map(|mut cell| {
+            if cell.width > width {
+                cell.text = "…".into();
+                cell.width = 1;
+            }
+            cell
+        })
+        .collect::<Vec<_>>();
     if cells.is_empty() {
         return vec![Line::default()];
     }
@@ -3877,6 +4118,10 @@ fn activate_palette_command(
                     Some(VariantPicker::new(model, app.current_variant.as_deref()));
             } else {
                 app.status = "current model has no reasoning variants".into();
+                app.set_notice(
+                    "current model has no reasoning variants",
+                    NoticeLevel::Warning,
+                );
             }
         }
     }
@@ -3905,8 +4150,10 @@ fn render_command_palette(frame: &mut Frame, palette: &CommandPalette) {
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" commands ")
-        .title_bottom(Line::from(footer).right_aligned());
+        .border_type(BorderType::Double)
+        .border_style(theme::focus_border())
+        .title(Line::styled(" commands ", theme::title(theme::PRIMARY)))
+        .title_bottom(Line::styled(footer, Style::default().fg(theme::MUTED)).right_aligned());
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -3983,7 +4230,7 @@ fn render_command_palette(frame: &mut Frame, palette: &CommandPalette) {
                 .unwrap_or_else(|| format!("{marker}{label}"));
             let text = format!("{text:<width$}", width = inner.width as usize);
             let style = if index == selected {
-                Style::default().fg(Color::Black).bg(Color::Cyan)
+                theme::selected()
             } else {
                 Style::default()
             };
@@ -4009,8 +4256,10 @@ fn render_variant_picker(frame: &mut Frame, picker: &VariantPicker) {
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" reasoning ")
-        .title_bottom(Line::from(footer).right_aligned());
+        .border_type(BorderType::Double)
+        .border_style(theme::focus_border())
+        .title(Line::styled(" reasoning ", theme::title(theme::REASONING)))
+        .title_bottom(Line::styled(footer, Style::default().fg(theme::MUTED)).right_aligned());
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -4066,9 +4315,9 @@ fn render_variant_picker(frame: &mut Frame, picker: &VariantPicker) {
         let text = truncate_display(&text, inner.width as usize, Truncation::Right);
         let text = format!("{text:<width$}", width = inner.width as usize);
         let style = if index == selected {
-            Style::default().fg(Color::Black).bg(Color::Cyan)
+            theme::selected()
         } else if active {
-            Style::default().fg(ASSISTANT)
+            Style::default().fg(theme::SUCCESS)
         } else {
             Style::default()
         };
@@ -4088,8 +4337,10 @@ fn render_model_picker(frame: &mut Frame, picker: &ModelPicker) {
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" models ")
-        .title_bottom(Line::from(footer).right_aligned());
+        .border_type(BorderType::Double)
+        .border_style(theme::focus_border())
+        .title(Line::styled(" models ", theme::title(theme::PRIMARY)))
+        .title_bottom(Line::styled(footer, Style::default().fg(theme::MUTED)).right_aligned());
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -4190,9 +4441,9 @@ fn render_model_picker(frame: &mut Frame, picker: &ModelPicker) {
             let text = truncate_display(&text, inner.width as usize, Truncation::Right);
             let text = format!("{text:<width$}", width = inner.width as usize);
             let style = if index == selected {
-                Style::default().fg(Color::Black).bg(Color::Cyan)
+                theme::selected()
             } else if active {
-                Style::default().fg(ASSISTANT)
+                Style::default().fg(theme::SUCCESS)
             } else {
                 Style::default()
             };
@@ -4249,8 +4500,13 @@ fn tool_line_with_disclosure(
         .collect::<Vec<_>>()
         .join(" ");
     let (label, name, label_color) = match kind {
-        ToolKind::Tool => ("tool", tool_name.to_string(), Color::Yellow),
-        ToolKind::Agent { name } => ("agent", name.clone(), Color::Magenta),
+        ToolKind::Tool => ("tool", tool_name.to_string(), theme::SECONDARY),
+        ToolKind::Agent { name } => ("agent", name.clone(), theme::REASONING),
+    };
+    let label = if width >= 72 {
+        format!("{label:<6}")
+    } else {
+        format!("{label} ")
     };
     let (state_icon, state_color) = match state {
         ToolState::Running => {
@@ -4260,8 +4516,8 @@ fn tool_line_with_disclosure(
                 TOOL_ACTIVE,
             )
         }
-        ToolState::Complete => ("•", Color::Blue),
-        ToolState::Succeeded => ("✓", ASSISTANT),
+        ToolState::Complete => ("•", theme::SECONDARY),
+        ToolState::Succeeded => ("✓", theme::SUCCESS),
         ToolState::Failed => ("×", ERROR),
     };
     let disclosure = match (expanded, full) {
@@ -4269,12 +4525,12 @@ fn tool_line_with_disclosure(
         (true, false) => "▾",
         (true, true) => "▼",
     };
-    let fixed = UnicodeWidthStr::width(format!("{label} {disclosure}  ").as_str())
+    let fixed = UnicodeWidthStr::width(format!("{label}{disclosure}  ").as_str())
         + UnicodeWidthStr::width(state_icon);
     if width <= fixed {
         return Line::from(Span::styled(
             truncate_display(
-                &format!("{label} {disclosure} {name} {state_icon}"),
+                &format!("{label}{disclosure} {name} {state_icon}"),
                 width,
                 Truncation::Right,
             ),
@@ -4327,12 +4583,20 @@ fn tool_line_with_disclosure(
         .next()
         .map(|label| UnicodeWidthStr::width(label) + 2)
         .unwrap_or(0);
-    let name_budget = width
-        .saturating_sub(fixed)
-        .saturating_sub(progress_reserve)
-        .clamp(1, 20);
-    let name = truncate_display(&name, name_budget, Truncation::Right);
-    let used = fixed + UnicodeWidthStr::width(name.as_str());
+    let available_name = width.saturating_sub(fixed).saturating_sub(progress_reserve);
+    let name_column = available_name.clamp(1, 20);
+    let name = truncate_display(&name, name_column, Truncation::Right);
+    let name_padding = if width >= 72 {
+        name_column.saturating_sub(UnicodeWidthStr::width(name.as_str()))
+    } else {
+        0
+    };
+    let used = fixed + UnicodeWidthStr::width(name.as_str()) + name_padding;
+    let details_color = if progress.starts_with("waiting") || progress == "queued" {
+        theme::WAITING
+    } else {
+        theme::SECONDARY
+    };
     let details = match (arguments.is_empty(), progress.is_empty()) {
         (false, false) => format!("{progress} · {arguments}"),
         (false, true) => arguments,
@@ -4345,15 +4609,23 @@ fn tool_line_with_disclosure(
         Truncation::Right,
     );
     let mut spans = vec![
-        Span::styled(format!("{label} "), Style::default().fg(label_color)),
-        Span::styled(format!("{disclosure} "), Style::default().fg(TOOL_ACTIVE)),
-        Span::styled(name, Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(label, Style::default().fg(label_color)),
+        Span::styled(
+            format!("{disclosure} "),
+            Style::default().fg(theme::SECONDARY),
+        ),
+        Span::styled(
+            format!("{name}{}", " ".repeat(name_padding)),
+            Style::default()
+                .fg(theme::PRIMARY)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(format!(" {state_icon}"), Style::default().fg(state_color)),
     ];
     if !details.is_empty() {
         spans.push(Span::styled(
             format!(" {details}"),
-            Style::default().fg(MUTED),
+            Style::default().fg(details_color),
         ));
     }
     Line::from(spans)
@@ -4470,6 +4742,22 @@ fn context_usage(used: u64, limit: Option<u64>, estimated: bool) -> String {
     }
 }
 
+fn context_meter(used: u64, limit: Option<u64>, estimated: bool, cells: usize) -> Option<String> {
+    let limit = limit.filter(|limit| *limit > 0)?;
+    let percent = used.saturating_mul(100) / limit;
+    let filled = (percent.min(100) as usize)
+        .saturating_mul(cells)
+        .saturating_add(99)
+        / 100;
+    Some(format!(
+        "ctx [{}{}] {}{}%",
+        "█".repeat(filled),
+        "░".repeat(cells.saturating_sub(filled)),
+        if estimated { "~" } else { "" },
+        percent
+    ))
+}
+
 fn safe_text(text: &str) -> String {
     let mut output = String::new();
     let mut column = 0usize;
@@ -4559,6 +4847,7 @@ fn adopt_model_selection(
         app.context_estimated = estimated;
     }
     app.status = "ready".into();
+    app.clear_notice();
     let selection = variant
         .as_deref()
         .map(|variant| format!("{model}@{variant}"))
@@ -4942,6 +5231,7 @@ async fn run_app(
                 )))) => {
                     app.busy = false;
                     app.status = "ready".into();
+                    app.clear_transient_notice();
                     app.set_activity(Activity::Ready);
                     pending_notification = Some(PendingNotification {
                         notification,
@@ -4953,6 +5243,10 @@ async fn run_app(
                 )))) => {
                     app.busy = false;
                     app.status = "notification paused; send a message to resume".into();
+                    app.set_persistent_notice(
+                        "notification paused; send a message to resume",
+                        NoticeLevel::Warning,
+                    );
                     app.set_activity(Activity::Paused);
                     pending_notification = Some(PendingNotification {
                         notification,
@@ -4963,23 +5257,24 @@ async fn run_app(
                 Ok(TurnCompletion::Routed(Ok(ilar::subagent::RouteOutcome::Complete))) => {
                     app.busy = false;
                     app.status = "ready".into();
+                    app.clear_transient_notice();
                     app.set_activity(Activity::Ready);
                 }
                 Ok(TurnCompletion::Routed(Err(error))) => {
                     app.busy = false;
                     app.status = "error".into();
                     app.set_activity(Activity::Error);
-                    app.push_transcript_line(Line_::System(format!(
-                        "notification routing failed: {error}"
-                    )));
+                    let message = format!("notification routing failed: {error}");
+                    app.set_notice(&message, NoticeLevel::Error);
+                    app.push_transcript_line(Line_::System(message));
                 }
                 Err(error) => {
                     app.busy = false;
                     app.status = "error".into();
                     app.set_activity(Activity::Error);
-                    app.push_transcript_line(Line_::System(format!(
-                        "notification routing failed: {error}"
-                    )));
+                    let message = format!("notification routing failed: {error}");
+                    app.set_notice(&message, NoticeLevel::Error);
+                    app.push_transcript_line(Line_::System(message));
                 }
             }
             events_rx = None;
@@ -5019,6 +5314,7 @@ async fn run_app(
                 cancel = Some(token.clone());
                 app.busy = true;
                 app.status = format!("routing task to {}", notification.parent_session_id);
+                app.clear_transient_notice();
                 app.set_activity(Activity::Thinking);
                 let spawner = spawner.clone();
                 turn_handle = Some(tokio::spawn(async move {
@@ -5034,6 +5330,7 @@ async fn run_app(
             cancel = Some(token.clone());
             app.busy = true;
             app.status = "thinking".into();
+            app.clear_transient_notice();
             app.set_activity(Activity::Thinking);
             let resolver = resolver.clone();
             let store = store.clone();
@@ -5106,11 +5403,13 @@ async fn run_app(
                         PickerAction::Dismiss => {
                             app.model_picker = None;
                             app.status = "ready".into();
+                            app.clear_transient_notice();
                         }
                         PickerAction::Choose(new_model) => {
                             if let Some(model) = ilar::model::find(&new_model)
                                 && !model.variants().is_empty()
                             {
+                                app.clear_transient_notice();
                                 let active_variant = (new_model == app.current_model)
                                     .then_some(app.current_variant.as_deref())
                                     .flatten();
@@ -5152,6 +5451,7 @@ async fn run_app(
                         VariantPickerAction::Stay => {}
                         VariantPickerAction::Dismiss => {
                             app.variant_picker = None;
+                            app.clear_transient_notice();
                         }
                         VariantPickerAction::Choose(variant) => {
                             match adopt_model_selection(
@@ -5198,27 +5498,32 @@ async fn run_app(
                     app.model_key_pending = false;
                     if code == KeyCode::Esc {
                         app.status = "ready".into();
+                        app.clear_transient_notice();
                         continue;
                     }
                     if matches!(code, KeyCode::Char('m' | 'M'))
                         && !app.busy
                         && !model_choices.is_empty()
                     {
+                        app.clear_transient_notice();
                         app.model_picker =
                             Some(ModelPicker::new(model_choices.clone(), &app.current_model));
                         continue;
                     }
                     app.status = "ready".into();
+                    app.clear_transient_notice();
                 }
                 if matches!((code, control), (KeyCode::Char('x'), true)) && !app.busy {
                     app.model_key_pending = true;
                     app.status = "Ctrl-X: press M for models".into();
+                    app.set_notice("Ctrl-X: press M for models", NoticeLevel::Info);
                     continue;
                 }
                 match (code, control) {
                     (KeyCode::Char('m'), true) | (KeyCode::F(2), false)
                         if !app.busy && !model_choices.is_empty() =>
                     {
+                        app.clear_transient_notice();
                         app.model_picker =
                             Some(ModelPicker::new(model_choices.clone(), &app.current_model));
                     }
@@ -5227,7 +5532,11 @@ async fn run_app(
                         if background > 0 {
                             spawner.abort_all();
                             notifications_paused = true;
-                            app.status = format!("cancelling {background} background job(s)…");
+                            app.status = "background notifications paused".into();
+                            app.set_persistent_notice(
+                                "background jobs cancelled; notifications paused; send a message to resume",
+                                NoticeLevel::Warning,
+                            );
                             app.set_activity(if app.busy {
                                 Activity::Aborting
                             } else {
@@ -5238,6 +5547,7 @@ async fn run_app(
                             if let Some(cancel) = &cancel {
                                 cancel.cancel();
                                 app.status = "aborting…".into();
+                                app.set_notice("aborting turn…", NoticeLevel::Warning);
                                 app.set_activity(Activity::Aborting);
                             }
                         } else if background == 0 {
@@ -5261,6 +5571,7 @@ async fn run_app(
                             if turn_handle.is_none() && !app.busy && !app.input.is_blank() =>
                         {
                             let text = app.input.take();
+                            app.clear_notice();
                             app.push_transcript_line(Line_::User(text.clone()));
                             app.follow_tail = true;
                             let (tx, rx) = loop_event_channel(LOOP_EVENT_CAPACITY);
@@ -5296,7 +5607,8 @@ async fn run_app(
                                 )
                             }));
                         }
-                        PromptAction::Edited | PromptAction::Unhandled | PromptAction::Submit => {}
+                        PromptAction::Edited => app.clear_transient_notice(),
+                        PromptAction::Unhandled | PromptAction::Submit => {}
                     },
                 }
             }
@@ -5305,6 +5617,7 @@ async fn run_app(
             }
             Event::Paste(text) if app.model_picker.is_none() && app.variant_picker.is_none() => {
                 app.model_key_pending = false;
+                app.clear_transient_notice();
                 app.input.insert(&text);
             }
             Event::Mouse(mouse)
@@ -5340,9 +5653,9 @@ async fn run_app(
                         if let Some(text) = app.finish_transcript_selection(mouse.column, mouse.row)
                             && let Err(error) = app.copy_to_clipboard(&text)
                         {
-                            app.push_transcript_line(Line_::System(format!(
-                                "clipboard copy failed: {error:#}"
-                            )));
+                            let message = format!("clipboard copy failed: {error:#}");
+                            app.set_notice(&message, NoticeLevel::Error);
+                            app.push_transcript_line(Line_::System(message));
                             app.follow_tail = true;
                             app.set_activity(Activity::Error);
                         }
@@ -5880,6 +6193,180 @@ mod tests {
     }
 
     #[test]
+    fn status_line_prioritizes_notices_and_shows_a_wide_context_meter() {
+        let mut app = App::new();
+        app.configure_runtime(
+            "openai/gpt-5.6-sol".into(),
+            Some("high".into()),
+            std::path::PathBuf::from("/workspace/project"),
+            204_000,
+            Some(272_000),
+            false,
+        );
+        app.status = "notification paused; send a message to resume".into();
+        app.set_notice(
+            "notification paused; send a message to resume",
+            NoticeLevel::Warning,
+        );
+        app.set_activity(Activity::Paused);
+
+        let wide = rendered_text(&app.status_line(120));
+        assert!(wide.contains("notification paused"), "{wide}");
+        assert!(wide.contains("ctx ["), "{wide}");
+        assert!(wide.contains("75%"), "{wide}");
+
+        let narrow = rendered_text(&app.status_line(48));
+        assert!(narrow.contains("notification paused"), "{narrow}");
+        assert!(narrow.contains("75%"), "{narrow}");
+        assert!(UnicodeWidthStr::width(narrow.as_str()) <= 48);
+    }
+
+    #[test]
+    fn transcript_uses_neutral_body_text_and_distinct_reasoning_color() {
+        let now = std::time::Instant::now();
+        let assistant =
+            transcript_entry_lines(&Line_::Assistant("plain response".into()), 80, now, now);
+        assert_eq!(assistant[0].spans[0].style.fg, Some(theme::ASSISTANT));
+        assert_eq!(assistant[0].spans[1].style.fg, Some(theme::PRIMARY));
+
+        let user = transcript_entry_lines(&Line_::User("plain request".into()), 80, now, now);
+        assert_eq!(user[0].spans[0].style.fg, Some(theme::USER));
+        assert_eq!(user[0].spans[1].style.fg, Some(theme::PRIMARY));
+
+        let thought = transcript_entry_lines(
+            &Line_::Thought {
+                text: "Inspecting state".into(),
+                complete: true,
+            },
+            80,
+            now,
+            now,
+        );
+        assert_eq!(thought[0].spans[0].style.fg, Some(theme::REASONING));
+        assert_ne!(theme::REASONING, theme::WAITING);
+    }
+
+    #[test]
+    fn focused_input_border_is_stronger_and_help_moves_to_the_footer() {
+        let backend = ratatui::backend::TestBackend::new(80, 12);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new();
+
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(0, 0)].fg, theme::BORDER);
+        assert_eq!(buffer[(0, 9)].fg, theme::FOCUS_BORDER);
+        assert_eq!(buffer[(0, 0)].symbol(), "┌");
+        assert_eq!(buffer[(0, 9)].symbol(), "┏");
+        let bottom = (0..buffer.area.width)
+            .map(|x| buffer[(x, 11)].symbol())
+            .collect::<String>();
+        assert!(bottom.contains("Enter send"), "{bottom}");
+
+        let backend = ratatui::backend::TestBackend::new(40, 12);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let bottom = (0..buffer.area.width)
+            .map(|x| buffer[(x, 11)].symbol())
+            .collect::<String>();
+        assert!(bottom.contains("Enter send"), "{bottom}");
+    }
+
+    #[test]
+    fn wide_tool_rows_align_state_and_nested_rows_have_tree_rails() {
+        let now = std::time::Instant::now();
+        let short = rendered_text(&tool_line(
+            "read",
+            &ToolKind::Tool,
+            "src/main.rs",
+            ToolState::Succeeded,
+            100,
+            std::time::Duration::ZERO,
+            ToolProgress::None,
+            now,
+        ));
+        let long = rendered_text(&tool_line(
+            "a-much-longer-tool-name",
+            &ToolKind::Tool,
+            "src/main.rs",
+            ToolState::Succeeded,
+            100,
+            std::time::Duration::ZERO,
+            ToolProgress::None,
+            now,
+        ));
+        assert_eq!(
+            short.chars().position(|character| character == '✓'),
+            long.chars().position(|character| character == '✓'),
+            "{short:?} {long:?}"
+        );
+
+        let mut app = App::new();
+        app.lines.clear();
+        app.push_loop_event(&LoopEvent::ReasoningSummaryDelta("Inspecting".into()));
+        app.push_loop_event(&LoopEvent::ReasoningSummaryCompleted);
+        app.push_loop_event(&LoopEvent::ToolStarted {
+            id: "read-1".into(),
+            name: "read".into(),
+        });
+        app.push_loop_event(&LoopEvent::ToolFinished {
+            id: "read-1".into(),
+            name: "read".into(),
+            is_error: false,
+            result: String::new(),
+            child_session_id: None,
+        });
+        app.toggle_transcript_target(TranscriptHitTarget::ToolGroup("live:0:read-1".into()));
+        let rendered = app
+            .transcript_lines(100, now)
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>();
+        assert!(rendered[1].starts_with("└─tools "), "{rendered:?}");
+        assert!(rendered[2].starts_with("  └─tool "), "{rendered:?}");
+
+        let compact = app
+            .transcript_lines(48, now)
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>();
+        assert!(
+            !compact.iter().any(|line| line.contains('─')),
+            "{compact:?}"
+        );
+    }
+
+    #[test]
+    fn operational_notices_are_bounded_and_clear_when_work_starts() {
+        let mut app = App::new();
+        app.finish_turn(Err(anyhow::anyhow!("provider unavailable\nsecret detail")));
+
+        let notice = app.notice.as_ref().expect("error notice");
+        assert_eq!(notice.level, NoticeLevel::Error);
+        assert_eq!(notice.text, "error: provider unavailable");
+        assert!(notice.persistent);
+
+        app.push_loop_event(&LoopEvent::TurnStarted);
+        assert!(app.notice.is_some());
+        app.clear_notice();
+        assert!(app.notice.is_none());
+
+        app.set_persistent_notice(
+            "notification paused; send a message to resume",
+            NoticeLevel::Warning,
+        );
+        app.clear_transient_notice();
+        assert!(app.notice.is_some());
+        app.set_notice("aborting turn…", NoticeLevel::Warning);
+        assert_eq!(
+            app.notice.as_ref().map(|notice| notice.text.as_str()),
+            Some("notification paused; send a message to resume")
+        );
+    }
+
+    #[test]
     fn transcript_tail_renders_beyond_u16_scroll_offsets() {
         let backend = ratatui::backend::TestBackend::new(40, 9);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
@@ -6330,16 +6817,23 @@ mod tests {
             wrapped.iter().map(rendered_text).collect::<String>(),
             original_code
         );
-        assert!(
-            wrapped
+        assert!(wrapped.iter().flat_map(|line| &line.spans).all(|span| {
+            span.style.fg == Some(theme::CODE) || span.style.fg == Some(theme::PRIMARY)
+        }));
+
+        let inline = markdown::render("`│ alpha beta`", usize::MAX).remove(0);
+        assert_eq!(
+            wrap_markdown_line(inline, 8)
                 .iter()
-                .flat_map(|line| &line.spans)
-                .all(|span| { span.style.fg == Some(Color::Cyan) })
+                .map(rendered_text)
+                .collect::<Vec<_>>(),
+            ["│ alpha", "beta"]
         );
 
         let wide = wrap_styled_line(Line::raw("界界"), 2);
         assert_eq!(wide.len(), 2);
         assert!(wide.iter().all(|line| line.width() == 2));
+        assert_eq!(rendered_text(&wrap_styled_line(Line::raw("界"), 1)[0]), "…");
 
         let words = wrap_styled_line(Line::raw("alpha beta gamma"), 10)
             .iter()
@@ -6523,7 +7017,7 @@ mod tests {
 
         assert_eq!(rendered.len(), 2);
         assert!(rendered[0].contains("Thought: Inspecting layout"));
-        assert!(rendered[1].starts_with("  tools "), "{rendered:?}");
+        assert!(rendered[1].starts_with("└─tools "), "{rendered:?}");
         assert!(rendered[1].contains("1 call"), "{rendered:?}");
         for width in 0..=2 {
             app.transcript_cache.update(
@@ -6569,7 +7063,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(rendered[0].starts_with("tools "), "{rendered:?}");
-        assert!(rendered[1].starts_with("  tool "), "{rendered:?}");
+        assert!(rendered[1].starts_with("└─tool "), "{rendered:?}");
         assert_eq!(rendered[2], "");
         assert!(rendered[3].starts_with("agent "), "{rendered:?}");
         assert!(rendered[4].contains("thinking"), "{rendered:?}");
@@ -6783,6 +7277,11 @@ mod tests {
         assert!(
             live.iter()
                 .any(|line| line.contains("child-read") || line.contains("read"))
+        );
+        assert!(
+            live.iter()
+                .all(|line| !line.contains("└─└─") && !line.contains("├─└─")),
+            "{live:?}"
         );
 
         app.push_subagent_activity(&ilar::subagent::SubagentActivity {
@@ -7074,7 +7573,7 @@ mod tests {
         let lines = app.transcript_lines(36, std::time::Instant::now());
         let tool = lines.last().unwrap();
         assert!(UnicodeWidthStr::width(rendered_text(tool).as_str()) <= 36);
-        assert_eq!(tool.spans.last().unwrap().style.fg, Some(MUTED));
+        assert_eq!(tool.spans.last().unwrap().style.fg, Some(theme::SECONDARY));
         assert!(rendered_text(tool).contains("cargo test"));
         assert!(!rendered_text(tool).contains('\n'));
     }
@@ -7252,7 +7751,7 @@ mod tests {
         assert!(wide.contains("ready"));
         assert!(wide.contains("openai/gpt-5.6-sol"));
         assert!(wide.contains("project"));
-        assert!(wide.contains("68.0k/272.0k"));
+        assert!(wide.contains("ctx ["), "{wide}");
         assert!(wide.contains("25%"));
 
         let narrow = rendered_text(&app.status_line(40));
@@ -7434,6 +7933,7 @@ mod tests {
         });
         assert!(rendered_text(&app.status_line(80)).contains("stopped"));
         app.set_activity(Activity::Paused);
+        app.set_notice("paused", NoticeLevel::Warning);
         assert!(rendered_text(&app.status_line(80)).contains("paused"));
     }
 
@@ -7788,7 +8288,7 @@ mod tests {
                 .spans
                 .iter()
                 .any(|span| span.content.contains("done thing")
-                    && span.style.fg == Some(Color::Gray))
+                    && span.style.fg == Some(theme::SECONDARY))
         );
 
         todos.lock().unwrap().items = vec![ilar::todo::TodoItem {
