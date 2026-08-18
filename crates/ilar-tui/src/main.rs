@@ -217,8 +217,9 @@ const MUTED: Color = Color::DarkGray;
 const ASSISTANT: Color = Color::Green;
 const TOOL_ACTIVE: Color = Color::Yellow;
 const ERROR: Color = Color::Red;
-const TODO_SIDEBAR_MIN_WIDTH: u16 = 80;
-const TODO_SIDEBAR_WIDTH: u16 = 28;
+const CONTENT_HORIZONTAL_PADDING: u16 = 2;
+const TODO_SIDEBAR_MIN_WIDTH: u16 = 121;
+const TODO_SIDEBAR_WIDTH: u16 = 42;
 const TODO_SIDEBAR_MAX_ITEMS: usize = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -776,7 +777,8 @@ fn transcript_entry_lines(
                     output.push(Line::default());
                     continue;
                 }
-                for mut line in wrap_styled_line(line, (width as usize).saturating_sub(label_width))
+                for mut line in
+                    wrap_markdown_line(line, (width as usize).saturating_sub(label_width))
                 {
                     let label = if first {
                         truncate_display("ilar ", label_width, Truncation::Right)
@@ -1543,7 +1545,9 @@ impl App {
 
         let content_areas = content_areas(chunks[0]);
         let transcript_area = content_areas.transcript;
-        let text_width = transcript_area.width.saturating_sub(3);
+        let text_width = transcript_area
+            .width
+            .saturating_sub(2 + CONTENT_HORIZONTAL_PADDING * 2);
         let now = std::time::Instant::now();
         self.transcript_cache
             .update(&self.lines, text_width, now, self.activity_started);
@@ -1561,7 +1565,9 @@ impl App {
             .saturating_sub(self.scroll_top)
             .min(viewport_rows) as u16;
         let transcript_text_area = Rect::new(
-            transcript_area.x.saturating_add(1),
+            transcript_area
+                .x
+                .saturating_add(1 + CONTENT_HORIZONTAL_PADDING),
             transcript_area.y.saturating_add(1),
             text_width,
             visible_rows,
@@ -1577,7 +1583,12 @@ impl App {
         let mut transcript_block = Block::default()
             .borders(Borders::ALL)
             .title(format!("ilar{scroll_label}"))
-            .padding(Padding::new(0, 1, 0, 0));
+            .padding(Padding::new(
+                CONTENT_HORIZONTAL_PADDING,
+                CONTENT_HORIZONTAL_PADDING,
+                0,
+                0,
+            ));
         if content_areas.todos.is_none() && transcript_area.height > 1 {
             let snapshot = {
                 let todos = self.todos.lock().unwrap();
@@ -1613,19 +1624,24 @@ impl App {
         }
 
         if let Some(todo_area) = content_areas.todos {
-            let todo_block =
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(Line::from(Span::styled(
-                        "todos",
-                        Style::default()
-                            .fg(TOOL_ACTIVE)
-                            .add_modifier(Modifier::BOLD),
-                    )));
+            let todo_block = Block::default()
+                .borders(Borders::ALL)
+                .padding(Padding::new(
+                    CONTENT_HORIZONTAL_PADDING,
+                    CONTENT_HORIZONTAL_PADDING,
+                    0,
+                    0,
+                ))
+                .title(Line::from(Span::styled(
+                    "todos",
+                    Style::default()
+                        .fg(TOOL_ACTIVE)
+                        .add_modifier(Modifier::BOLD),
+                )));
             let inner = todo_block.inner(todo_area);
             let snapshot = {
                 let todos = self.todos.lock().unwrap();
-                todo_render_snapshot(&todos, TODO_SIDEBAR_MAX_ITEMS.min(inner.height as usize))
+                todo_sidebar_snapshot(&todos, inner.height as usize)
             };
             let lines = render_todo_sidebar_snapshot(&snapshot, inner.width, inner.height);
             frame.render_widget(Paragraph::new(lines).block(todo_block), todo_area);
@@ -1706,13 +1722,17 @@ fn todo_render_snapshot(list: &ilar::todo::TodoList, cap: usize) -> TodoRenderSn
     }
 }
 
+fn todo_sidebar_snapshot(list: &ilar::todo::TodoList, height: usize) -> TodoRenderSnapshot {
+    todo_render_snapshot(list, TODO_SIDEBAR_MAX_ITEMS.min(height))
+}
+
 #[cfg(test)]
 fn render_todo_sidebar_lines(
     list: &ilar::todo::TodoList,
     width: u16,
     height: u16,
 ) -> Vec<Line<'static>> {
-    let snapshot = todo_render_snapshot(list, TODO_SIDEBAR_MAX_ITEMS.min(height as usize));
+    let snapshot = todo_sidebar_snapshot(list, height as usize);
     render_todo_sidebar_snapshot(&snapshot, width, height)
 }
 
@@ -1730,17 +1750,15 @@ fn render_todo_sidebar_snapshot(
             Style::default().fg(MUTED),
         ))];
     }
-    let last = snapshot.items.len().saturating_sub(1);
-    snapshot
+    let rendered = snapshot
         .items
         .iter()
-        .enumerate()
-        .map(|(position, item)| {
+        .map(|item| {
             let (marker, marker_style, content_style) = match item.status {
                 ilar::todo::Status::Completed => (
                     "✓ ",
                     Style::default().fg(ASSISTANT),
-                    Style::default().fg(MUTED),
+                    Style::default().fg(Color::Gray),
                 ),
                 ilar::todo::Status::InProgress => (
                     "▸ ",
@@ -1752,31 +1770,102 @@ fn render_todo_sidebar_snapshot(
             let remaining = width as usize;
             let marker = truncate_display(marker, remaining, Truncation::Right);
             let remaining = remaining.saturating_sub(UnicodeWidthStr::width(marker.as_str()));
-            let suffix = if position == last && snapshot.hidden > 0 {
-                format!(" · +{} hidden", snapshot.hidden)
-            } else {
-                String::new()
-            };
-            let suffix_width = UnicodeWidthStr::width(suffix.as_str()).min(remaining);
             let content = item
                 .content
                 .split_whitespace()
                 .collect::<Vec<_>>()
                 .join(" ");
             let content = safe_text(&content);
-            let content = truncate_display(
-                &content,
-                remaining.saturating_sub(suffix_width),
-                Truncation::Right,
-            );
-            let suffix = truncate_display(&suffix, suffix_width, Truncation::Right);
-            Line::from(vec![
-                Span::styled(marker, marker_style),
-                Span::styled(content, content_style),
-                Span::styled(suffix, Style::default().fg(MUTED)),
-            ])
+            let body = Line::from(Span::styled(content, content_style));
+            wrap_styled_line(body, remaining)
+                .into_iter()
+                .enumerate()
+                .map(move |(line_index, mut body)| {
+                    let prefix = if line_index == 0 {
+                        Span::styled(marker.clone(), marker_style)
+                    } else {
+                        Span::raw(" ".repeat(UnicodeWidthStr::width(marker.as_str())))
+                    };
+                    let mut spans = vec![prefix];
+                    spans.append(&mut body.spans);
+                    Line::from(spans)
+                })
+                .collect::<Vec<_>>()
         })
-        .collect()
+        .collect::<Vec<_>>();
+
+    let height = height as usize;
+    let mut output = Vec::new();
+    let mut shown_items = 0usize;
+    for rows in &rendered {
+        if output.len().saturating_add(rows.len()) > height {
+            break;
+        }
+        output.extend(rows.iter().cloned());
+        shown_items += 1;
+    }
+
+    let mut partial_item = false;
+    if shown_items == 0
+        && let Some(rows) = rendered.first()
+    {
+        output.extend(rows.iter().take(height).cloned());
+        partial_item = rows.len() > height;
+        shown_items = 1;
+    }
+
+    let hidden = snapshot.hidden + rendered.len().saturating_sub(shown_items);
+    if output.len() < height && (partial_item || hidden > 0) {
+        let message = match (partial_item, hidden) {
+            (true, 0) => "…".to_string(),
+            (true, hidden) => format!("… · +{hidden} hidden"),
+            (false, hidden) => format!("+{hidden} hidden"),
+        };
+        output.push(Line::from(Span::styled(
+            truncate_display(&message, width as usize, Truncation::Right),
+            Style::default().fg(MUTED),
+        )));
+    } else if partial_item || hidden > 0 {
+        let message = match (partial_item, hidden) {
+            (true, 0) => " · …".to_string(),
+            (true, hidden) => format!(" · … · +{hidden} hidden"),
+            (false, hidden) => format!(" · +{hidden} hidden"),
+        };
+        if let Some(last) = output.pop() {
+            output.push(append_todo_note(last, width as usize, &message));
+        }
+    }
+    output
+}
+
+fn append_todo_note(line: Line<'static>, width: usize, note: &str) -> Line<'static> {
+    let note = truncate_display(note, width, Truncation::Right);
+    let cells = styled_graphemes(line);
+    let mut available = width.saturating_sub(UnicodeWidthStr::width(note.as_str()));
+    let mut end = 0usize;
+    let mut used = 0usize;
+    while end < cells.len() && used.saturating_add(cells[end].width) <= available {
+        used = used.saturating_add(cells[end].width);
+        end += 1;
+    }
+    let shortened = end < cells.len() && !note.contains('…') && available > 0;
+    if shortened {
+        available -= 1;
+        end = 0;
+        used = 0;
+        while end < cells.len() && used.saturating_add(cells[end].width) <= available {
+            used = used.saturating_add(cells[end].width);
+            end += 1;
+        }
+    }
+    let mut line = styled_line(&cells[..end]);
+    if shortened {
+        line.spans
+            .push(Span::styled("…", Style::default().fg(MUTED)));
+    }
+    line.spans
+        .push(Span::styled(note, Style::default().fg(MUTED)));
+    line
 }
 
 fn todo_summary(snapshot: &TodoRenderSnapshot, width: u16) -> Option<Line<'static>> {
@@ -2024,36 +2113,30 @@ struct StyledGrapheme {
     width: usize,
 }
 
-fn wrap_styled_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
+fn wrap_markdown_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
+    let preformatted = !line.spans.is_empty()
+        && line
+            .spans
+            .iter()
+            .all(|span| span.style.fg == Some(Color::Cyan));
+    if preformatted {
+        hard_wrap_styled_line(line, width)
+    } else {
+        wrap_styled_line(line, width)
+    }
+}
+
+fn hard_wrap_styled_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
     if width == 0 {
         return vec![Line::default()];
     }
     if line.width() <= width {
         return vec![line];
     }
-
-    let cells: Vec<_> = line
-        .spans
-        .into_iter()
-        .flat_map(|span| {
-            let style = span.style;
-            UnicodeSegmentation::graphemes(span.content.as_ref(), true)
-                .map(move |text| StyledGrapheme {
-                    text: text.to_string(),
-                    style,
-                    width: UnicodeWidthStr::width(text),
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    if cells.is_empty() {
-        return vec![Line::default()];
-    }
-
     let mut output = Vec::new();
     let mut current = Vec::new();
     let mut current_width = 0usize;
-    for cell in cells {
+    for cell in styled_graphemes(line) {
         if !current.is_empty() && current_width.saturating_add(cell.width) > width {
             output.push(styled_line(&current));
             current.clear();
@@ -2066,6 +2149,84 @@ fn wrap_styled_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
         output.push(styled_line(&current));
     }
     output
+}
+
+fn wrap_styled_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
+    if width == 0 {
+        return vec![Line::default()];
+    }
+    if line.width() <= width {
+        return vec![line];
+    }
+
+    let cells = styled_graphemes(line);
+    if cells.is_empty() {
+        return vec![Line::default()];
+    }
+
+    let mut output = Vec::new();
+    let mut start = 0usize;
+    while start < cells.len() {
+        let mut end = start;
+        let mut row_width = 0usize;
+        while end < cells.len() && row_width.saturating_add(cells[end].width) <= width {
+            row_width = row_width.saturating_add(cells[end].width);
+            end += 1;
+        }
+        if end == cells.len() {
+            output.push(styled_line(&cells[start..]));
+            break;
+        }
+        if end == start {
+            output.push(styled_line(&cells[start..start + 1]));
+            start += 1;
+            continue;
+        }
+
+        if cells[end].text.chars().all(char::is_whitespace) {
+            output.push(styled_line(&cells[start..end]));
+            start = end + 1;
+            while start < cells.len() && cells[start].text.chars().all(char::is_whitespace) {
+                start += 1;
+            }
+            continue;
+        }
+
+        let first_content =
+            (start..end).find(|index| !cells[*index].text.chars().all(char::is_whitespace));
+        let word_break = first_content.and_then(|first_content| {
+            (first_content..end)
+                .rev()
+                .find(|index| cells[*index].text.chars().all(char::is_whitespace))
+        });
+        if let Some(word_break) = word_break {
+            output.push(styled_line(&cells[start..word_break]));
+            start = word_break + 1;
+            while start < cells.len() && cells[start].text.chars().all(char::is_whitespace) {
+                start += 1;
+            }
+        } else {
+            output.push(styled_line(&cells[start..end]));
+            start = end;
+        }
+    }
+    output
+}
+
+fn styled_graphemes(line: Line<'static>) -> Vec<StyledGrapheme> {
+    line.spans
+        .into_iter()
+        .flat_map(|span| {
+            let style = span.style;
+            UnicodeSegmentation::graphemes(span.content.as_ref(), true)
+                .map(move |text| StyledGrapheme {
+                    text: text.to_string(),
+                    style,
+                    width: UnicodeWidthStr::width(text),
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 fn styled_line(cells: &[StyledGrapheme]) -> Line<'static> {
@@ -3964,7 +4125,7 @@ mod tests {
         let continuation_start = (1..buffer.area.width.saturating_sub(1))
             .find(|x| buffer[(*x, 2)].symbol() != " ")
             .unwrap();
-        assert_eq!(continuation_start, 6);
+        assert_eq!(continuation_start, 8);
     }
 
     #[test]
@@ -3999,15 +4160,15 @@ mod tests {
     }
 
     #[test]
-    fn styled_hard_wrap_preserves_code_and_never_adds_blank_rows() {
+    fn styled_wrap_prefers_words_and_never_adds_blank_rows() {
         let code = markdown::render("```\n    hello world\n```").remove(0);
-        let original = rendered_text(&code);
-        let wrapped = wrap_styled_line(code, 5);
+        let original_code = rendered_text(&code);
+        let wrapped = wrap_markdown_line(code, 5);
 
         assert!(wrapped.iter().all(|line| !rendered_text(line).is_empty()));
         assert_eq!(
             wrapped.iter().map(rendered_text).collect::<String>(),
-            original
+            original_code
         );
         assert!(
             wrapped
@@ -4019,6 +4180,18 @@ mod tests {
         let wide = wrap_styled_line(Line::raw("界界"), 2);
         assert_eq!(wide.len(), 2);
         assert!(wide.iter().all(|line| line.width() == 2));
+
+        let words = wrap_styled_line(Line::raw("alpha beta gamma"), 10)
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>();
+        assert_eq!(words, ["alpha beta", "gamma"]);
+
+        let long_word = wrap_styled_line(Line::raw("abcdefgh"), 5)
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>();
+        assert_eq!(long_word, ["abcde", "fgh"]);
     }
 
     #[test]
@@ -4627,6 +4800,13 @@ mod tests {
         assert!(rendered.contains("✓ done thing"), "{rendered}");
         assert!(rendered.contains("▸ active thing"), "{rendered}");
         assert!(rendered.contains("○ later thing"), "{rendered}");
+        assert!(
+            render_todo_sidebar_lines(&todos.lock().unwrap(), 26, 5)[0]
+                .spans
+                .iter()
+                .any(|span| span.content.contains("done thing")
+                    && span.style.fg == Some(Color::Gray))
+        );
 
         todos.lock().unwrap().items = vec![ilar::todo::TodoItem {
             content: "replacement".into(),
@@ -4770,14 +4950,126 @@ mod tests {
     }
 
     #[test]
-    fn wide_content_reserves_a_fixed_right_sidebar() {
-        let wide = content_areas(Rect::new(0, 0, 80, 8));
-        assert_eq!(wide.transcript, Rect::new(0, 0, 52, 8));
-        assert_eq!(wide.todos, Some(Rect::new(52, 0, 28, 8)));
+    fn todo_sidebar_wraps_with_a_hanging_status_indent() {
+        let list = ilar::todo::TodoList {
+            items: vec![ilar::todo::TodoItem {
+                content: "active task with readable wrapping".into(),
+                status: ilar::todo::Status::InProgress,
+            }],
+        };
 
-        let narrow = content_areas(Rect::new(0, 0, 79, 8));
-        assert_eq!(narrow.transcript, Rect::new(0, 0, 79, 8));
+        let lines = render_todo_sidebar_lines(&list, 20, 4);
+        let text = lines.iter().map(rendered_text).collect::<Vec<_>>();
+
+        assert_eq!(text, ["▸ active task with", "  readable wrapping"]);
+        assert!(lines.iter().all(|line| line.width() <= 20));
+    }
+
+    #[test]
+    fn todo_sidebar_reports_items_displaced_by_wrapping() {
+        let list = ilar::todo::TodoList {
+            items: vec![
+                ilar::todo::TodoItem {
+                    content: "first todo needs multiple rows to render".into(),
+                    status: ilar::todo::Status::InProgress,
+                },
+                ilar::todo::TodoItem {
+                    content: "later todo".into(),
+                    status: ilar::todo::Status::Pending,
+                },
+            ],
+        };
+
+        let lines = render_todo_sidebar_lines(&list, 20, 2);
+        let text = lines.iter().map(rendered_text).collect::<Vec<_>>();
+
+        assert_eq!(lines.len(), 2);
+        assert!(text[0].starts_with("▸ first todo"), "{text:?}");
+        assert!(text[1].contains("+1 hidden"), "{text:?}");
+    }
+
+    #[test]
+    fn todo_sidebar_wraps_the_last_visible_item_before_hidden_count() {
+        let mut items = (0..4)
+            .map(|index| ilar::todo::TodoItem {
+                content: format!("short todo {index}"),
+                status: ilar::todo::Status::Pending,
+            })
+            .collect::<Vec<_>>();
+        items.push(ilar::todo::TodoItem {
+            content: "final selected todo wraps with visible ending".into(),
+            status: ilar::todo::Status::Pending,
+        });
+        items.push(ilar::todo::TodoItem {
+            content: "hidden todo".into(),
+            status: ilar::todo::Status::Pending,
+        });
+
+        let lines = render_todo_sidebar_lines(&ilar::todo::TodoList { items }, 20, 10);
+        let text = lines.iter().map(rendered_text).collect::<Vec<_>>();
+
+        assert!(
+            text.iter().any(|line| line.contains("visible ending")),
+            "{text:?}"
+        );
+        assert!(
+            text.iter().any(|line| line.contains("+1 hidden")),
+            "{text:?}"
+        );
+    }
+
+    #[test]
+    fn inline_hidden_count_marks_shortened_todo_content() {
+        let list = ilar::todo::TodoList {
+            items: vec![
+                ilar::todo::TodoItem {
+                    content: "first".into(),
+                    status: ilar::todo::Status::Pending,
+                },
+                ilar::todo::TodoItem {
+                    content: "second".into(),
+                    status: ilar::todo::Status::Pending,
+                },
+                ilar::todo::TodoItem {
+                    content: "third item nearly".into(),
+                    status: ilar::todo::Status::Pending,
+                },
+                ilar::todo::TodoItem {
+                    content: "hidden".into(),
+                    status: ilar::todo::Status::Pending,
+                },
+            ],
+        };
+
+        let lines = render_todo_sidebar_lines(&list, 20, 3);
+        let last = rendered_text(lines.last().unwrap());
+
+        assert!(last.contains("… · +1 hidden"), "{last}");
+        assert!(lines.iter().all(|line| line.width() <= 20));
+    }
+
+    #[test]
+    fn wide_content_reserves_a_fixed_right_sidebar() {
+        let wide = content_areas(Rect::new(0, 0, 121, 8));
+        assert_eq!(wide.transcript, Rect::new(0, 0, 79, 8));
+        assert_eq!(wide.todos, Some(Rect::new(79, 0, 42, 8)));
+
+        let narrow = content_areas(Rect::new(0, 0, 120, 8));
+        assert_eq!(narrow.transcript, Rect::new(0, 0, 120, 8));
         assert_eq!(narrow.todos, None);
+    }
+
+    #[test]
+    fn wide_transcript_keeps_two_cell_horizontal_margins() {
+        let backend = ratatui::backend::TestBackend::new(140, 12);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.lines.push(Line_::Assistant("visible prose".into()));
+
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        assert_eq!(app.transcript_text_area.x, 3);
+        assert_eq!(app.transcript_text_area.width, 92);
     }
 
     #[test]
@@ -4870,7 +5162,7 @@ mod tests {
 
     #[test]
     fn wide_todos_render_in_sidebar_and_sidebar_clicks_do_not_select_transcript() {
-        let backend = ratatui::backend::TestBackend::new(100, 12);
+        let backend = ratatui::backend::TestBackend::new(140, 12);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         let mut app = App::new();
         app.todos.lock().unwrap().items = vec![ilar::todo::TodoItem {
@@ -4890,9 +5182,9 @@ mod tests {
             .join("\n");
         assert!(screen.contains("todos"), "{screen}");
         assert!(screen.contains("▸ sidebar task"), "{screen}");
-        assert_eq!(app.transcript_text_area.width, 69);
+        assert_eq!(app.transcript_text_area.width, 92);
 
-        app.begin_transcript_selection(80, 1);
+        app.begin_transcript_selection(110, 1);
         assert_eq!(app.transcript_selection, None);
     }
 

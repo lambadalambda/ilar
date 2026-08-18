@@ -72,3 +72,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Provider stream error diagnostics](issues/provider-stream-error-diagnostics.md)
 - [x] [Task notification presentation](issues/task-notification-presentation.md)
 - [x] [Task delegation guidance](issues/task-delegation-guidance.md)
+- [x] [TUI content margins and wrapping](issues/tui-content-margins-and-wrapping.md)
