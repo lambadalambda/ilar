@@ -73,3 +73,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Task notification presentation](issues/task-notification-presentation.md)
 - [x] [Task delegation guidance](issues/task-delegation-guidance.md)
 - [x] [TUI content margins and wrapping](issues/tui-content-margins-and-wrapping.md)
+- [x] [Discard stale wheel input](issues/discard-stale-wheel-input.md)

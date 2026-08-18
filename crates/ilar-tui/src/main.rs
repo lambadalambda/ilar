@@ -221,6 +221,7 @@ const CONTENT_HORIZONTAL_PADDING: u16 = 2;
 const TODO_SIDEBAR_MIN_WIDTH: u16 = 121;
 const TODO_SIDEBAR_WIDTH: u16 = 42;
 const TODO_SIDEBAR_MAX_ITEMS: usize = 5;
+const MAX_WHEEL_EVENTS_PER_BATCH: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ContentAreas {
@@ -1246,6 +1247,15 @@ impl App {
         let max_scroll = self.max_scroll();
         self.scroll_top = self.scroll_top.saturating_add(rows).min(max_scroll);
         self.follow_tail = self.scroll_top == max_scroll;
+    }
+
+    fn scroll_wheel(&mut self, rows: isize) {
+        self.clear_transcript_selection();
+        if rows < 0 {
+            self.scroll_up(rows.unsigned_abs());
+        } else if rows > 0 {
+            self.scroll_down(rows as usize);
+        }
     }
 
     fn scroll_to_top(&mut self) {
@@ -3061,6 +3071,49 @@ enum TurnCompletion {
     Routed(Result<ilar::subagent::RouteOutcome>),
 }
 
+struct WheelBatch {
+    rows: isize,
+    deferred: Option<Event>,
+}
+
+fn wheel_rows(event: &Event) -> Option<isize> {
+    match event {
+        Event::Mouse(mouse) if mouse.kind == MouseEventKind::ScrollUp => Some(-3),
+        Event::Mouse(mouse) if mouse.kind == MouseEventKind::ScrollDown => Some(3),
+        _ => None,
+    }
+}
+
+fn drain_wheel_batch(
+    initial_rows: isize,
+    max_events: usize,
+    mut try_next: impl FnMut() -> Result<Option<Event>>,
+) -> Result<WheelBatch> {
+    let mut rows = initial_rows;
+    let mut events = 1usize;
+    while events < max_events.max(1) {
+        let Some(event) = try_next()? else {
+            return Ok(WheelBatch {
+                rows,
+                deferred: None,
+            });
+        };
+        if let Some(next_rows) = wheel_rows(&event) {
+            rows = rows.saturating_add(next_rows);
+            events += 1;
+        } else {
+            return Ok(WheelBatch {
+                rows,
+                deferred: Some(event),
+            });
+        }
+    }
+    Ok(WheelBatch {
+        rows,
+        deferred: None,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_app(
     terminal: &mut ratatui::DefaultTerminal,
@@ -3081,6 +3134,7 @@ async fn run_app(
     let mut notifications_paused = false;
     let mut cancel: Option<CancellationToken> = None;
     let mut turn_handle: Option<tokio::task::JoinHandle<TurnCompletion>> = None;
+    let mut pending_terminal_event = None;
 
     loop {
         // Drain pending loop events.
@@ -3218,10 +3272,15 @@ async fn run_app(
         } else {
             std::time::Duration::from_millis(250)
         };
-        if !crossterm::event::poll(timeout)? {
-            continue;
-        }
-        match crossterm::event::read()? {
+        let event = if let Some(event) = pending_terminal_event.take() {
+            event
+        } else {
+            if !crossterm::event::poll(timeout)? {
+                continue;
+            }
+            crossterm::event::read()?
+        };
+        match event {
             Event::Key(
                 key @ KeyEvent {
                     code,
@@ -3390,8 +3449,23 @@ async fn run_app(
                 app.input.insert(&text);
             }
             Event::Mouse(mouse) if app.model_picker.is_none() => match mouse.kind {
-                MouseEventKind::ScrollUp => app.scroll_up(3),
-                MouseEventKind::ScrollDown => app.scroll_down(3),
+                kind @ (MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) => {
+                    let initial_rows = if kind == MouseEventKind::ScrollUp {
+                        -3
+                    } else {
+                        3
+                    };
+                    let batch =
+                        drain_wheel_batch(initial_rows, MAX_WHEEL_EVENTS_PER_BATCH, || {
+                            if crossterm::event::poll(std::time::Duration::ZERO)? {
+                                Ok(Some(crossterm::event::read()?))
+                            } else {
+                                Ok(None)
+                            }
+                        })?;
+                    pending_terminal_event = batch.deferred;
+                    app.scroll_wheel(batch.rows);
+                }
                 MouseEventKind::Down(MouseButton::Left) => {
                     app.begin_transcript_selection(mouse.column, mouse.row);
                 }
@@ -4593,6 +4667,83 @@ mod tests {
         app.scroll_down(100);
         assert_eq!(app.scroll_top, 20);
         assert!(app.follow_tail);
+    }
+
+    #[test]
+    fn queued_wheel_events_are_coalesced_until_the_next_distinct_input() {
+        let key = Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        let mut queued = vec![
+            Event::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            }),
+            Event::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            }),
+            key,
+            Event::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            }),
+        ]
+        .into_iter();
+
+        let batch = drain_wheel_batch(-3, 32, || Ok(queued.next())).unwrap();
+
+        assert_eq!(batch.rows, -3);
+        assert!(matches!(
+            batch.deferred,
+            Some(Event::Key(KeyEvent {
+                code: KeyCode::Char('x'),
+                ..
+            }))
+        ));
+        assert!(matches!(
+            queued.next(),
+            Some(Event::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn wheel_batch_work_is_bounded_and_zero_net_clears_selection() {
+        let mut reads = 0;
+        let batch = drain_wheel_batch(-3, 4, || {
+            reads += 1;
+            Ok(Some(Event::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            })))
+        })
+        .unwrap();
+        assert_eq!(reads, 3);
+        assert_eq!(batch.rows, -12);
+        assert!(batch.deferred.is_none());
+
+        let mut app = App::new();
+        app.scroll_top = 7;
+        app.follow_tail = false;
+        app.transcript_selection = Some(TranscriptSelection {
+            anchor: SelectionPoint { row: 0, column: 0 },
+            focus: SelectionPoint { row: 0, column: 1 },
+        });
+
+        app.scroll_wheel(0);
+
+        assert_eq!(app.scroll_top, 7);
+        assert!(!app.follow_tail);
+        assert_eq!(app.transcript_selection, None);
     }
 
     fn cells(rows: &[&str], width: usize) -> Vec<RenderedRow> {
