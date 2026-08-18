@@ -632,3 +632,12 @@ source. Intentional loop tests opt into `MockProvider::repeating` explicitly.
 Provider fixture tests validate required SSE termination without repairing
 tracked files; the full workspace suite passes from a read-only source checkout
 with a separate writable Cargo target directory.
+
+## 2026-08-18 — Visible OpenAI reasoning summaries
+
+Reasoning-capable OpenAI Responses requests now ask for automatic public
+summaries. Their `reasoning_summary_text` stream is validated and persisted as a
+display-only content block, while the completed encrypted reasoning item remains
+the sole replay input. The TUI extracts the provider's leading Markdown heading
+and renders it as `Thinking: <topic>` while streaming and `Thought: <topic>`
+after completion; private thinking and unsigned diagnostics remain hidden.

@@ -125,6 +125,138 @@ async fn text_fixture_maps_to_neutral_events() {
 }
 
 #[tokio::test]
+async fn reasoning_summary_fixture_maps_public_summary_separately() {
+    let base = http_server(fixture("openai_reasoning_summary.sse")).0;
+    let events = drain(provider(base).stream(request_with_tool()).unwrap()).await;
+
+    assert!(
+        matches!(&events[0], ProviderEvent::ReasoningSummaryDelta(text) if text == "**Running")
+    );
+    assert!(
+        matches!(&events[1], ProviderEvent::ReasoningSummaryDelta(text) if text == " tests**\n\nChecking the suite.")
+    );
+    assert_eq!(events[2], ProviderEvent::ReasoningSummaryCompleted);
+    assert!(matches!(&events[3], ProviderEvent::ReasoningItem { item }
+        if item["encrypted_content"] == "encrypted-1"));
+    assert!(
+        matches!(
+            events[4],
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+                ..
+            }
+        ),
+        "{events:#?}"
+    );
+}
+
+#[tokio::test]
+async fn reasoning_summary_completion_must_match_streamed_text() {
+    let sse = concat!(
+        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"summary\":[]}}\n\n",
+        "data: {\"type\":\"response.reasoning_summary_part.added\",\"item_id\":\"rs_1\",\"output_index\":0,\"summary_index\":0,\"part\":{\"type\":\"summary_text\",\"text\":\"\"}}\n\n",
+        "data: {\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs_1\",\"output_index\":0,\"summary_index\":0,\"delta\":\"first\"}\n\n",
+        "data: {\"type\":\"response.reasoning_summary_text.done\",\"item_id\":\"rs_1\",\"output_index\":0,\"summary_index\":0,\"text\":\"changed\"}\n\n",
+    )
+    .as_bytes()
+    .to_vec();
+    let events = drain(
+        provider(http_server(sse).0)
+            .stream(request_with_tool())
+            .unwrap(),
+    )
+    .await;
+
+    assert!(matches!(&events[0], ProviderEvent::ReasoningSummaryDelta(text) if text == "first"));
+    assert!(matches!(&events[1], ProviderEvent::Error(error)
+        if error.contains("reasoning summary changed")));
+}
+
+#[tokio::test]
+async fn empty_and_incomplete_reasoning_summaries_are_valid() {
+    let empty = concat!(
+        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"summary\":[]}}\n\n",
+        "data: {\"type\":\"response.reasoning_summary_part.added\",\"item_id\":\"rs_1\",\"output_index\":0,\"summary_index\":0,\"part\":{\"type\":\"summary_text\",\"text\":\"\"}}\n\n",
+        "data: {\"type\":\"response.reasoning_summary_text.done\",\"item_id\":\"rs_1\",\"output_index\":0,\"summary_index\":0,\"text\":\"\"}\n\n",
+        "data: {\"type\":\"response.reasoning_summary_part.done\",\"item_id\":\"rs_1\",\"output_index\":0,\"summary_index\":0,\"part\":{\"type\":\"summary_text\",\"text\":\"\"}}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"\"}]}}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{}}}\n\n",
+    )
+    .as_bytes()
+    .to_vec();
+    let empty_events = drain(
+        provider(http_server(empty).0)
+            .stream(request_with_tool())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(empty_events[0], ProviderEvent::ReasoningSummaryCompleted);
+    assert!(matches!(
+        empty_events[1],
+        ProviderEvent::ReasoningItem { .. }
+    ));
+    assert_eq!(
+        empty_events[2].clone().stop_reason(),
+        Some(StopReason::EndTurn)
+    );
+
+    let incomplete = concat!(
+        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"rs_2\",\"type\":\"reasoning\",\"summary\":[]}}\n\n",
+        "data: {\"type\":\"response.reasoning_summary_part.added\",\"item_id\":\"rs_2\",\"output_index\":0,\"summary_index\":0,\"part\":{\"type\":\"summary_text\",\"text\":\"\"}}\n\n",
+        "data: {\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs_2\",\"output_index\":0,\"summary_index\":0,\"delta\":\"**Working\"}\n\n",
+        "data: {\"type\":\"response.reasoning_summary_part.done\",\"item_id\":\"rs_2\",\"output_index\":0,\"summary_index\":0,\"part\":{\"type\":\"summary_text\",\"text\":\"**Working\"},\"status\":\"incomplete\"}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"rs_2\",\"type\":\"reasoning\",\"status\":\"incomplete\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"**Working\"}]}}\n\n",
+        "data: {\"type\":\"response.incomplete\",\"response\":{\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"usage\":{}}}\n\n",
+    )
+    .as_bytes()
+    .to_vec();
+    let incomplete_events = drain(
+        provider(http_server(incomplete).0)
+            .stream(request_with_tool())
+            .unwrap(),
+    )
+    .await;
+    assert!(
+        matches!(&incomplete_events[0], ProviderEvent::ReasoningSummaryDelta(text)
+        if text == "**Working")
+    );
+    assert!(
+        !incomplete_events
+            .iter()
+            .any(|event| matches!(event, ProviderEvent::ReasoningSummaryCompleted))
+    );
+    assert_eq!(
+        incomplete_events
+            .last()
+            .and_then(ProviderEvent::stop_reason),
+        Some(StopReason::MaxTokens)
+    );
+}
+
+#[tokio::test]
+async fn duplicate_reasoning_summary_completion_is_terminal() {
+    let sse = concat!(
+        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"summary\":[]}}\n\n",
+        "data: {\"type\":\"response.reasoning_summary_part.added\",\"item_id\":\"rs_1\",\"output_index\":0,\"summary_index\":0,\"part\":{\"type\":\"summary_text\",\"text\":\"\"}}\n\n",
+        "data: {\"type\":\"response.reasoning_summary_text.done\",\"item_id\":\"rs_1\",\"output_index\":0,\"summary_index\":0,\"text\":\"\"}\n\n",
+        "data: {\"type\":\"response.reasoning_summary_part.done\",\"item_id\":\"rs_1\",\"output_index\":0,\"summary_index\":0,\"part\":{\"type\":\"summary_text\",\"text\":\"\"}}\n\n",
+        "data: {\"type\":\"response.reasoning_summary_part.done\",\"item_id\":\"rs_1\",\"output_index\":0,\"summary_index\":0,\"part\":{\"type\":\"summary_text\",\"text\":\"\"}}\n\n",
+    )
+    .as_bytes()
+    .to_vec();
+    let events = drain(
+        provider(http_server(sse).0)
+            .stream(request_with_tool())
+            .unwrap(),
+    )
+    .await;
+
+    assert_eq!(events[0], ProviderEvent::ReasoningSummaryCompleted);
+    assert!(matches!(&events[1], ProviderEvent::Error(error)
+        if error.contains("duplicate OpenAI reasoning summary part completion")));
+}
+
+#[tokio::test]
 async fn tool_call_fixture_maps_to_neutral_events() {
     let base = http_server(fixture("openai_toolcall.sse")).0;
     let events = drain(provider(base).stream(request_with_tool()).unwrap()).await;
@@ -545,6 +677,7 @@ async fn neutral_request_serializes_to_wire_format() {
     let body: serde_json::Value = serde_json::from_str(req[body_start..].trim()).unwrap();
     assert_eq!(body["model"], "gpt-5.2");
     assert_eq!(body["stream"], true);
+    assert_eq!(body["reasoning"]["summary"], "auto");
     assert_eq!(body["instructions"], "be terse");
     assert_eq!(body["tools"][0]["name"], "read");
     assert_eq!(body["tools"][0]["type"], "function");
@@ -563,7 +696,8 @@ async fn neutral_request_serializes_to_wire_format() {
 #[tokio::test]
 async fn stateless_tool_continuation_replays_opaque_reasoning_in_order() {
     let first_sse = concat!(
-        "data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"summary\":[],\"encrypted_content\":\"encrypted-1\"}}\n\n",
+        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"summary\":[]}}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"summary\":[],\"encrypted_content\":\"encrypted-1\"}}\n\n",
         "data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"read\"}}\n\n",
         "data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_1\",\"arguments\":\"{\\\"path\\\":\\\"Cargo.toml\\\"}\"}\n\n",
         "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{}}}\n\n",
@@ -605,7 +739,14 @@ async fn stateless_tool_continuation_replays_opaque_reasoning_in_order() {
         ilar::session::ChatMessage::user_text("read it"),
         ilar::session::ChatMessage {
             role: Role::Assistant,
-            content: vec![ContentBlock::Reasoning { item: reasoning }, call],
+            content: vec![
+                ContentBlock::ReasoningSummary {
+                    text: "**Reading configuration**".into(),
+                    completed: true,
+                },
+                ContentBlock::Reasoning { item: reasoning },
+                call,
+            ],
         },
         ilar::session::ChatMessage {
             role: Role::User,

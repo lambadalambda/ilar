@@ -57,6 +57,8 @@ impl OpenAIProvider {
     }
 
     fn wire_body(&self, req: &Request) -> anyhow::Result<serde_json::Value> {
+        let reasoning_summaries =
+            crate::model::find(&req.model).is_some_and(|model| model.reasoning_summaries);
         let (provider, model_id) = resolve_model(&req.model)?;
         if provider != "openai" {
             anyhow::bail!("model provider mismatch: expected openai, got {provider}");
@@ -83,6 +85,16 @@ impl OpenAIProvider {
             &req.options,
             &["model", "instructions", "input", "tools", "stream"],
         )?;
+        if reasoning_summaries {
+            let reasoning = body
+                .entry("reasoning")
+                .or_insert_with(|| serde_json::json!({}));
+            if let Some(reasoning) = reasoning.as_object_mut() {
+                reasoning
+                    .entry("summary")
+                    .or_insert_with(|| serde_json::json!("auto"));
+            }
+        }
         Ok(serde_json::Value::Object(body))
     }
 }
@@ -104,6 +116,7 @@ fn wire_input_items(msg: &ChatMessage) -> Vec<serde_json::Value> {
         match block {
             ContentBlock::Text { text: t } => text.push_str(t),
             ContentBlock::Thinking { .. } => {} // reasoning items are server-managed
+            ContentBlock::ReasoningSummary { .. } => {}
             ContentBlock::Diagnostic { .. } => {}
             ContentBlock::ProviderReplay { .. } => {}
             ContentBlock::Reasoning { item } => {
@@ -271,7 +284,30 @@ struct EventMapper {
     pending: Vec<String>,
     tool_call_seen: bool,
     refusal_seen: bool,
+    reasoning_items: HashMap<String, u64>,
+    reasoning_summary: Option<ActiveReasoningSummary>,
+    started_summaries: std::collections::HashSet<ReasoningSummaryKey>,
+    closed_summaries: HashMap<ReasoningSummaryKey, ClosedReasoningSummary>,
     completed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ReasoningSummaryKey {
+    item_id: String,
+    output_index: u64,
+    summary_index: u64,
+}
+
+struct ActiveReasoningSummary {
+    key: ReasoningSummaryKey,
+    text: String,
+    text_done: bool,
+}
+
+#[derive(Clone)]
+struct ClosedReasoningSummary {
+    text: String,
+    complete: bool,
 }
 
 impl TransportEventMapper for EventMapper {
@@ -296,6 +332,142 @@ impl TransportEventMapper for EventMapper {
                     required_str(&value, "delta", "OpenAI refusal delta")?.into(),
                 )]
             }
+            "response.reasoning_summary_part.added" => {
+                let key = reasoning_summary_key(&value)?;
+                if !self.started_summaries.insert(key.clone())
+                    || self.closed_summaries.contains_key(&key)
+                {
+                    return Err("duplicate OpenAI reasoning summary part".into());
+                }
+                if self.reasoning_items.get(&key.item_id) != Some(&key.output_index) {
+                    return Err("OpenAI reasoning summary referenced an unannounced item".into());
+                }
+                if self.reasoning_summary.is_some() {
+                    return Err("OpenAI reasoning summaries overlapped".into());
+                }
+                let text = reasoning_summary_part_text(&value)?;
+                self.reasoning_summary = Some(ActiveReasoningSummary {
+                    key,
+                    text: text.into(),
+                    text_done: false,
+                });
+                if text.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![ProviderEvent::ReasoningSummaryDelta(text.into())]
+                }
+            }
+            "response.reasoning_summary_text.delta" => {
+                let key = reasoning_summary_key(&value)?;
+                if !self.started_summaries.contains(&key)
+                    || self.closed_summaries.contains_key(&key)
+                {
+                    return Err("OpenAI reasoning summary delta arrived outside its part".into());
+                }
+                let delta = required_string(&value, "delta", "OpenAI reasoning summary delta")?;
+                let Some(summary) = self
+                    .reasoning_summary
+                    .as_mut()
+                    .filter(|summary| summary.key == key)
+                else {
+                    return Err("OpenAI reasoning summary delta referenced the wrong part".into());
+                };
+                if summary.text_done {
+                    return Err(
+                        "OpenAI reasoning summary delta arrived after text completion".into(),
+                    );
+                }
+                summary.text.push_str(delta);
+                if delta.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![ProviderEvent::ReasoningSummaryDelta(delta.into())]
+                }
+            }
+            "response.reasoning_summary_text.done" => {
+                let key = reasoning_summary_key(&value)?;
+                if !self.started_summaries.contains(&key)
+                    || self.closed_summaries.contains_key(&key)
+                {
+                    return Err("OpenAI reasoning summary text completed outside its part".into());
+                }
+                let text = required_string(&value, "text", "OpenAI reasoning summary text")?;
+                let Some(summary) = self
+                    .reasoning_summary
+                    .as_mut()
+                    .filter(|summary| summary.key == key)
+                else {
+                    return Err("OpenAI reasoning summary text referenced the wrong part".into());
+                };
+                if summary.text_done {
+                    return Err("duplicate OpenAI reasoning summary text completion".into());
+                }
+                let mut events = Vec::new();
+                if summary.text.is_empty() && !text.is_empty() {
+                    summary.text.push_str(text);
+                    events.push(ProviderEvent::ReasoningSummaryDelta(text.into()));
+                } else if summary.text != text {
+                    return Err("OpenAI reasoning summary changed at completion".into());
+                }
+                summary.text_done = true;
+                events
+            }
+            "response.reasoning_summary_part.done" => {
+                let key = reasoning_summary_key(&value)?;
+                if !self.started_summaries.contains(&key)
+                    || self.closed_summaries.contains_key(&key)
+                {
+                    return Err("duplicate OpenAI reasoning summary part completion".into());
+                }
+                let text = reasoning_summary_part_text(&value)?;
+                let Some(mut summary) = self
+                    .reasoning_summary
+                    .take()
+                    .filter(|summary| summary.key == key)
+                else {
+                    return Err("OpenAI reasoning summary part completion mismatch".into());
+                };
+                let mut events = Vec::new();
+                if summary.text.is_empty() && !text.is_empty() {
+                    summary.text.push_str(text);
+                    events.push(ProviderEvent::ReasoningSummaryDelta(text.into()));
+                } else if summary.text != text {
+                    return Err("OpenAI reasoning summary part changed at completion".into());
+                }
+                let status = value
+                    .get("status")
+                    .map(|status| {
+                        status
+                            .as_str()
+                            .ok_or_else(|| "invalid OpenAI reasoning summary status".to_string())
+                    })
+                    .transpose()?;
+                let complete = match status {
+                    None if summary.text_done => {
+                        events.push(ProviderEvent::ReasoningSummaryCompleted);
+                        true
+                    }
+                    None => {
+                        return Err(
+                            "OpenAI reasoning summary part completed before its text".into()
+                        );
+                    }
+                    Some("incomplete") => false,
+                    Some(status) => {
+                        return Err(format!(
+                            "unsupported OpenAI reasoning summary status {status:?}"
+                        ));
+                    }
+                };
+                self.closed_summaries.insert(
+                    key,
+                    ClosedReasoningSummary {
+                        text: summary.text,
+                        complete,
+                    },
+                );
+                events
+            }
             "response.output_item.added" => {
                 let item = value
                     .get("item")
@@ -315,6 +487,18 @@ impl TransportEventMapper for EventMapper {
                     self.pending.push(call_id.clone());
                     self.tool_call_seen = true;
                     vec![ProviderEvent::ToolCallStarted { id: call_id, name }]
+                } else if item_type == "reasoning" {
+                    let item_id = required_str(item, "id", "OpenAI reasoning item id")?;
+                    let output_index =
+                        required_u64(&value, "output_index", "OpenAI reasoning output index")?;
+                    if self
+                        .reasoning_items
+                        .insert(item_id.into(), output_index)
+                        .is_some()
+                    {
+                        return Err(format!("duplicate OpenAI reasoning item {item_id:?}"));
+                    }
+                    Vec::new()
                 } else {
                     Vec::new()
                 }
@@ -326,6 +510,61 @@ impl TransportEventMapper for EventMapper {
                     .ok_or_else(|| "missing OpenAI completed output item".to_string())?;
                 let item_type = required_str(item, "type", "OpenAI completed item type")?;
                 if item_type == "reasoning" {
+                    let item_id = required_str(item, "id", "OpenAI completed reasoning item id")?;
+                    if !self.completed_items.insert(item_id.into()) {
+                        return Err(format!(
+                            "duplicate completed OpenAI reasoning item {item_id:?}"
+                        ));
+                    }
+                    let output_index =
+                        required_u64(&value, "output_index", "OpenAI reasoning output index")?;
+                    if self.reasoning_items.remove(item_id) != Some(output_index) {
+                        return Err("OpenAI completed reasoning item mismatched its start".into());
+                    }
+                    let summaries = item
+                        .get("summary")
+                        .and_then(serde_json::Value::as_array)
+                        .ok_or_else(|| {
+                            "missing OpenAI completed reasoning summaries".to_string()
+                        })?;
+                    let expected = self
+                        .closed_summaries
+                        .iter()
+                        .filter(|(key, _)| key.item_id == item_id)
+                        .map(|(key, summary)| (key.clone(), summary.clone()))
+                        .collect::<Vec<_>>();
+                    if summaries.len() != expected.len() {
+                        return Err("OpenAI completed reasoning summaries changed count".into());
+                    }
+                    let item_incomplete = item.get("status").and_then(serde_json::Value::as_str)
+                        == Some("incomplete");
+                    for (key, expected_summary) in &expected {
+                        let summary = summaries
+                            .get(key.summary_index as usize)
+                            .filter(|summary| summary.is_object())
+                            .ok_or_else(|| {
+                                "missing OpenAI completed reasoning summary".to_string()
+                            })?;
+                        if required_str(summary, "type", "OpenAI reasoning summary type")?
+                            != "summary_text"
+                            || required_string(
+                                summary,
+                                "text",
+                                "OpenAI completed reasoning summary text",
+                            )? != expected_summary.text
+                        {
+                            return Err("OpenAI completed reasoning summary changed content".into());
+                        }
+                        if !expected_summary.complete && !item_incomplete {
+                            return Err(
+                                "incomplete OpenAI reasoning summary closed in a completed item"
+                                    .into(),
+                            );
+                        }
+                    }
+                    for (key, _) in expected {
+                        self.closed_summaries.remove(&key);
+                    }
                     vec![ProviderEvent::ReasoningItem { item: item.clone() }]
                 } else if item_type == "function_call" {
                     let item_id = required_str(item, "id", "OpenAI completed tool item id")?;
@@ -401,6 +640,12 @@ impl TransportEventMapper for EventMapper {
                 vec![ProviderEvent::ToolCallCompleted { id, name, input }]
             }
             "response.completed" | "response.incomplete" => {
+                if self.reasoning_summary.is_some()
+                    || !self.reasoning_items.is_empty()
+                    || !self.closed_summaries.is_empty()
+                {
+                    return Err("OpenAI response completed with unfinished reasoning state".into());
+                }
                 let response = value
                     .get("response")
                     .and_then(serde_json::Value::as_object)
@@ -493,6 +738,43 @@ fn required_str<'a>(
         .ok_or_else(|| format!("missing or empty {label}"))
 }
 
+fn required_string<'a>(
+    value: &'a serde_json::Value,
+    key: &str,
+    label: &str,
+) -> Result<&'a str, String> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("missing or invalid {label}"))
+}
+
+fn reasoning_summary_key(value: &serde_json::Value) -> Result<ReasoningSummaryKey, String> {
+    Ok(ReasoningSummaryKey {
+        item_id: required_str(value, "item_id", "OpenAI reasoning item id")?.into(),
+        output_index: required_u64(value, "output_index", "OpenAI reasoning output index")?,
+        summary_index: required_u64(value, "summary_index", "OpenAI reasoning summary index")?,
+    })
+}
+
+fn reasoning_summary_part_text(value: &serde_json::Value) -> Result<&str, String> {
+    let part = value
+        .get("part")
+        .filter(|part| part.is_object())
+        .ok_or_else(|| "missing OpenAI reasoning summary part".to_string())?;
+    if required_str(part, "type", "OpenAI reasoning summary part type")? != "summary_text" {
+        return Err("unsupported OpenAI reasoning summary part type".into());
+    }
+    required_string(part, "text", "OpenAI reasoning summary part text")
+}
+
+fn required_u64(value: &serde_json::Value, field: &str, label: &str) -> Result<u64, String> {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| format!("missing or invalid {label}"))
+}
+
 fn wire_usage(usage: &serde_json::Value) -> Usage {
     let cached = usage["input_tokens_details"]["cached_tokens"]
         .as_u64()
@@ -527,5 +809,32 @@ mod tests {
         assert_eq!(usage.input_tokens, 300);
         assert_eq!(usage.cache_read_input_tokens, 1_500);
         assert_eq!(usage.context_tokens(), 1_850);
+    }
+
+    #[test]
+    fn reasoning_summaries_are_requested_only_for_reasoning_models() {
+        let supports = |id| crate::model::find(id).unwrap().reasoning_summaries;
+        assert!(supports("openai/gpt-5.6-sol"));
+        assert!(supports("openai/gpt-5.2"));
+        assert!(supports("openai/o3"));
+        assert!(!supports("openai/gpt-5.2-chat-latest"));
+        assert!(!supports("openai/gpt-4o"));
+    }
+
+    #[test]
+    fn explicit_reasoning_options_are_preserved() {
+        let provider = OpenAIProvider::new("test".into(), None);
+        let mut reasoning = Request::with_model("openai/gpt-5.2");
+        reasoning.options = serde_json::json!({
+            "reasoning": {"effort": "high", "summary": "detailed"}
+        });
+        let body = provider.wire_body(&reasoning).unwrap();
+        assert_eq!(body["reasoning"]["effort"], "high");
+        assert_eq!(body["reasoning"]["summary"], "detailed");
+
+        let non_reasoning = provider
+            .wire_body(&Request::with_model("openai/gpt-4o"))
+            .unwrap();
+        assert!(non_reasoning.get("reasoning").is_none());
     }
 }

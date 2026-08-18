@@ -27,6 +27,11 @@ pub enum ContentBlock {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         signature: Option<String>,
     },
+    /// Provider-approved reasoning summary shown to the user but never replayed.
+    ReasoningSummary {
+        text: String,
+        completed: bool,
+    },
     /// Opaque provider state required to continue stateless reasoning turns.
     Reasoning {
         item: serde_json::Value,

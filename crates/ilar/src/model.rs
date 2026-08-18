@@ -16,6 +16,7 @@ pub struct ModelInfo {
     pub max_context_limit: u64,
     pub input_limit: u64,
     pub output_limit: u64,
+    pub(crate) reasoning_summaries: bool,
     pub(crate) access: ModelAccess,
 }
 
@@ -36,6 +37,9 @@ pub(crate) enum ModelAccess {
 
 macro_rules! model {
     ($provider:literal, $id:literal, $name:literal, $context:literal, $output:literal, $access:ident) => {
+        model!($provider, $id, $name, $context, $output, $access, false)
+    };
+    ($provider:literal, $id:literal, $name:literal, $context:literal, $output:literal, $access:ident, $reasoning_summaries:literal) => {
         ModelInfo {
             provider: $provider,
             id: $id,
@@ -44,6 +48,7 @@ macro_rules! model {
             max_context_limit: $context,
             input_limit: $context - $output,
             output_limit: $output,
+            reasoning_summaries: $reasoning_summaries,
             access: ModelAccess::$access,
         }
     };
@@ -51,6 +56,11 @@ macro_rules! model {
 
 macro_rules! model_input {
     ($provider:literal, $id:literal, $name:literal, $context:literal, $input:literal, $output:literal, $access:ident) => {
+        model_input!(
+            $provider, $id, $name, $context, $input, $output, $access, false
+        )
+    };
+    ($provider:literal, $id:literal, $name:literal, $context:literal, $input:literal, $output:literal, $access:ident, $reasoning_summaries:literal) => {
         ModelInfo {
             provider: $provider,
             id: $id,
@@ -59,6 +69,7 @@ macro_rules! model_input {
             max_context_limit: $context,
             input_limit: $input,
             output_limit: $output,
+            reasoning_summaries: $reasoning_summaries,
             access: ModelAccess::$access,
         }
     };
@@ -66,6 +77,19 @@ macro_rules! model_input {
 
 macro_rules! model_window {
     ($provider:literal, $id:literal, $name:literal, $context:literal, $max_context:literal, $input:literal, $output:literal, $access:ident) => {
+        model_window!(
+            $provider,
+            $id,
+            $name,
+            $context,
+            $max_context,
+            $input,
+            $output,
+            $access,
+            false
+        )
+    };
+    ($provider:literal, $id:literal, $name:literal, $context:literal, $max_context:literal, $input:literal, $output:literal, $access:ident, $reasoning_summaries:literal) => {
         ModelInfo {
             provider: $provider,
             id: $id,
@@ -74,6 +98,7 @@ macro_rules! model_window {
             max_context_limit: $max_context,
             input_limit: $input,
             output_limit: $output,
+            reasoning_summaries: $reasoning_summaries,
             access: ModelAccess::$access,
         }
     };
@@ -92,9 +117,12 @@ static CATALOG: &[ModelInfo] = &[
         1_050_000,
         272_000,
         128_000,
-        OpenAiBoth
+        OpenAiBoth,
+        true
     ),
-    model!("openai", "gpt-5.6", "GPT-5.6", 1_050_000, 128_000, OpenAi),
+    model!(
+        "openai", "gpt-5.6", "GPT-5.6", 1_050_000, 128_000, OpenAi, true
+    ),
     model_window!(
         "openai",
         "gpt-5.6-luna",
@@ -103,7 +131,8 @@ static CATALOG: &[ModelInfo] = &[
         1_050_000,
         272_000,
         128_000,
-        OpenAiBoth
+        OpenAiBoth,
+        true
     ),
     model_window!(
         "openai",
@@ -113,7 +142,8 @@ static CATALOG: &[ModelInfo] = &[
         1_050_000,
         272_000,
         128_000,
-        OpenAiBoth
+        OpenAiBoth,
+        true
     ),
     model!(
         "openai",
@@ -121,10 +151,11 @@ static CATALOG: &[ModelInfo] = &[
         "GPT-5.5 Pro",
         1_050_000,
         128_000,
-        OpenAi
+        OpenAi,
+        true
     ),
     model!(
-        "openai", "gpt-5.5", "GPT-5.5", 1_050_000, 128_000, OpenAiBoth
+        "openai", "gpt-5.5", "GPT-5.5", 1_050_000, 128_000, OpenAiBoth, true
     ),
     model!(
         "openai",
@@ -132,16 +163,20 @@ static CATALOG: &[ModelInfo] = &[
         "GPT-5.4 Pro",
         1_050_000,
         128_000,
-        OpenAi
+        OpenAi,
+        true
     ),
-    model!("openai", "gpt-5.4", "GPT-5.4", 1_050_000, 128_000, OpenAi),
+    model!(
+        "openai", "gpt-5.4", "GPT-5.4", 1_050_000, 128_000, OpenAi, true
+    ),
     model!(
         "openai",
         "gpt-5.4-mini",
         "GPT-5.4 mini",
         400_000,
         128_000,
-        OpenAi
+        OpenAi,
+        true
     ),
     model!(
         "openai",
@@ -149,7 +184,8 @@ static CATALOG: &[ModelInfo] = &[
         "GPT-5.4 nano",
         400_000,
         128_000,
-        OpenAi
+        OpenAi,
+        true
     ),
     model!(
         "openai",
@@ -157,7 +193,8 @@ static CATALOG: &[ModelInfo] = &[
         "GPT-5.3 Codex",
         400_000,
         128_000,
-        OpenAi
+        OpenAi,
+        true
     ),
     model_input!(
         "openai",
@@ -166,7 +203,8 @@ static CATALOG: &[ModelInfo] = &[
         128_000,
         100_000,
         32_000,
-        OpenAiBoth
+        OpenAiBoth,
+        true
     ),
     model!(
         "openai",
@@ -182,9 +220,12 @@ static CATALOG: &[ModelInfo] = &[
         "GPT-5.2 Pro",
         400_000,
         128_000,
-        OpenAi
+        OpenAi,
+        true
     ),
-    model!("openai", "gpt-5.2", "GPT-5.2", 400_000, 128_000, OpenAi),
+    model!(
+        "openai", "gpt-5.2", "GPT-5.2", 400_000, 128_000, OpenAi, true
+    ),
     model!(
         "openai",
         "gpt-5.2-chat-latest",
@@ -193,7 +234,9 @@ static CATALOG: &[ModelInfo] = &[
         16_384,
         OpenAi
     ),
-    model!("openai", "gpt-5.1", "GPT-5.1", 400_000, 128_000, OpenAi),
+    model!(
+        "openai", "gpt-5.1", "GPT-5.1", 400_000, 128_000, OpenAi, true
+    ),
     model_input!(
         "openai",
         "gpt-5-pro",
@@ -201,16 +244,18 @@ static CATALOG: &[ModelInfo] = &[
         400_000,
         272_000,
         272_000,
-        OpenAi
+        OpenAi,
+        true
     ),
-    model!("openai", "gpt-5", "GPT-5", 400_000, 128_000, OpenAi),
+    model!("openai", "gpt-5", "GPT-5", 400_000, 128_000, OpenAi, true),
     model!(
         "openai",
         "gpt-5-mini",
         "GPT-5 Mini",
         400_000,
         128_000,
-        OpenAi
+        OpenAi,
+        true
     ),
     model!(
         "openai",
@@ -218,10 +263,11 @@ static CATALOG: &[ModelInfo] = &[
         "GPT-5 Nano",
         400_000,
         128_000,
-        OpenAi
+        OpenAi,
+        true
     ),
-    model!("openai", "o3-pro", "o3-pro", 200_000, 100_000, OpenAi),
-    model!("openai", "o3", "o3", 200_000, 100_000, OpenAi),
+    model!("openai", "o3-pro", "o3-pro", 200_000, 100_000, OpenAi, true),
+    model!("openai", "o3", "o3", 200_000, 100_000, OpenAi, true),
     model!("openai", "gpt-4.1", "GPT-4.1", 1_047_576, 32_768, OpenAi),
     model!(
         "openai",

@@ -103,6 +103,7 @@ fn estimate_tokens_from(
                 .map(|block| match block {
                     crate::session::ContentBlock::Text { text } => text.chars().count(),
                     crate::session::ContentBlock::Thinking { text, .. } => text.chars().count(),
+                    crate::session::ContentBlock::ReasoningSummary { .. } => 0,
                     crate::session::ContentBlock::Reasoning { item } => {
                         item.to_string().chars().count()
                     }

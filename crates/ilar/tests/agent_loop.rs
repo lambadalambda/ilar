@@ -1036,6 +1036,94 @@ async fn opaque_reasoning_is_persisted_and_replayed_with_tool_continuation() {
 }
 
 #[tokio::test]
+async fn public_reasoning_summary_is_persisted_without_becoming_replay_input() {
+    let (store, session_id) = temp_session("build");
+    let reasoning = serde_json::json!({
+        "id": "rs_1",
+        "type": "reasoning",
+        "encrypted_content": "encrypted"
+    });
+    let provider = MockProvider::new(vec![vec![
+        ProviderEvent::ReasoningSummaryDelta("**Inspecting".into()),
+        ProviderEvent::ReasoningSummaryDelta(" configuration**".into()),
+        ProviderEvent::ReasoningSummaryCompleted,
+        ProviderEvent::ReasoningItem {
+            item: reasoning.clone(),
+        },
+        ProviderEvent::TextDelta("done".into()),
+        ProviderEvent::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+            usage: Default::default(),
+        },
+    ]]);
+    let (tx, mut rx) = events_channel();
+
+    run_turn(
+        &provider,
+        &ToolRegistry::builtin(),
+        &store,
+        &session_id,
+        "go",
+        None,
+        LoopConfig::default(),
+        tx,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+    )
+    .await
+    .unwrap();
+
+    let content = &store.load(&session_id).unwrap().transcript()[1].content;
+    assert!(
+        matches!(&content[0], ContentBlock::ReasoningSummary { text, completed: true }
+        if text == "**Inspecting configuration**")
+    );
+    assert!(matches!(&content[1], ContentBlock::Reasoning { item } if item == &reasoning));
+    assert!(matches!(&content[2], ContentBlock::Text { text } if text == "done"));
+    let mut published = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        published.push(event);
+    }
+    assert!(published.iter().any(|event| matches!(
+        event,
+        LoopEvent::ReasoningSummaryDelta(text) if text.contains("Inspecting")
+    )));
+    assert!(
+        published
+            .iter()
+            .any(|event| matches!(event, LoopEvent::ReasoningSummaryCompleted))
+    );
+}
+
+#[tokio::test]
+async fn interrupted_reasoning_summary_is_not_persisted() {
+    let (store, session_id) = temp_session("build");
+    let provider = MockProvider::new(vec![vec![
+        ProviderEvent::ReasoningSummaryDelta("**Half written".into()),
+        ProviderEvent::Error("connection lost".into()),
+    ]]);
+    let (tx, _rx) = events_channel();
+
+    let error = run_turn(
+        &provider,
+        &ToolRegistry::builtin(),
+        &store,
+        &session_id,
+        "go",
+        None,
+        LoopConfig::default(),
+        tx,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("connection lost"));
+    assert_eq!(store.load(&session_id).unwrap().transcript().len(), 1);
+}
+
+#[tokio::test]
 async fn unsigned_thinking_is_persisted_as_diagnostic_text() {
     let (store, session_id) = temp_session("build");
     let provider = MockProvider::new(vec![vec![

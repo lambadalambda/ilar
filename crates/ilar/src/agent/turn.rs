@@ -55,6 +55,7 @@ pub enum TurnOutcome {
 struct StepAccumulator {
     content: Vec<ContentBlock>,
     thinking_open: Option<usize>,
+    reasoning_summary_open: Option<usize>,
     tool_indices: std::collections::HashMap<String, usize>,
     completed_calls: std::collections::HashSet<String>,
     /// Tool-call ids that already got a ToolStarted announcement.
@@ -71,12 +72,15 @@ impl StepAccumulator {
     fn content_blocks(&self) -> Vec<ContentBlock> {
         self.content
             .iter()
-            .map(|block| match block {
+            .filter_map(|block| match block {
                 ContentBlock::Thinking {
                     text,
                     signature: None,
-                } => ContentBlock::Diagnostic { text: text.clone() },
-                block => block.clone(),
+                } => Some(ContentBlock::Diagnostic { text: text.clone() }),
+                ContentBlock::ReasoningSummary {
+                    completed: false, ..
+                } => None,
+                block => Some(block.clone()),
             })
             .collect()
     }
@@ -114,6 +118,33 @@ impl StepAccumulator {
             } = &mut self.content[index]
         {
             *stored = signature;
+        }
+    }
+
+    fn push_reasoning_summary(&mut self, delta: String) {
+        self.thinking_open = None;
+        let index = match self.reasoning_summary_open {
+            Some(index) => index,
+            None => {
+                self.content.push(ContentBlock::ReasoningSummary {
+                    text: String::new(),
+                    completed: false,
+                });
+                let index = self.content.len() - 1;
+                self.reasoning_summary_open = Some(index);
+                index
+            }
+        };
+        if let ContentBlock::ReasoningSummary { text, .. } = &mut self.content[index] {
+            text.push_str(&delta);
+        }
+    }
+
+    fn complete_reasoning_summary(&mut self) {
+        if let Some(index) = self.reasoning_summary_open.take()
+            && let ContentBlock::ReasoningSummary { completed, .. } = &mut self.content[index]
+        {
+            *completed = true;
         }
     }
 
@@ -877,6 +908,18 @@ pub async fn run_turn(
                 }
                 ProviderEvent::ThinkingCompleted { signature } => {
                     acc.complete_thinking(signature);
+                }
+                ProviderEvent::ReasoningSummaryDelta(summary) => {
+                    events
+                        .publish(LoopEvent::ReasoningSummaryDelta(summary.clone()), &cancel)
+                        .await;
+                    acc.push_reasoning_summary(summary);
+                }
+                ProviderEvent::ReasoningSummaryCompleted => {
+                    events
+                        .publish(LoopEvent::ReasoningSummaryCompleted, &cancel)
+                        .await;
+                    acc.complete_reasoning_summary();
                 }
                 ProviderEvent::ReasoningItem { item } => {
                     acc.push_reasoning(item);

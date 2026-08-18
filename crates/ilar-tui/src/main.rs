@@ -40,6 +40,10 @@ enum Line_ {
     Task(String),
     Job(String),
     Assistant(String),
+    Thought {
+        text: String,
+        complete: bool,
+    },
     Tool {
         id: String,
         name: String,
@@ -720,6 +724,18 @@ fn restored_session_view(session: &ilar::session::SessionReader) -> RestoredSess
                             Some(Line_::Assistant(current)) => current.push_str(text),
                             _ => lines.push(Line_::Assistant(text.clone())),
                         },
+                        ilar::session::ContentBlock::ReasoningSummary {
+                            text,
+                            completed: true,
+                        } => {
+                            lines.push(Line_::Thought {
+                                text: text.clone(),
+                                complete: true,
+                            });
+                        }
+                        ilar::session::ContentBlock::ReasoningSummary {
+                            completed: false, ..
+                        } => {}
                         ilar::session::ContentBlock::ToolCall { id, name, input } => {
                             let (kind, arguments) = if name == "task" {
                                 match ilar::agent::summarize_task_input(input) {
@@ -791,6 +807,29 @@ fn restored_session_view(session: &ilar::session::SessionReader) -> RestoredSess
     }
 }
 
+fn reasoning_summary_title(summary: &str) -> String {
+    let first = summary.trim_start().lines().next().unwrap_or("").trim();
+    let title = first
+        .strip_prefix("**")
+        .and_then(|heading| heading.split_once("**").map(|(title, _)| title))
+        .or_else(|| {
+            first.starts_with('#').then(|| {
+                first
+                    .trim_start_matches('#')
+                    .trim()
+                    .trim_end_matches('#')
+                    .trim()
+            })
+        })
+        .unwrap_or_else(|| first.trim_matches('*'))
+        .trim();
+    if title.is_empty() {
+        "reasoning".into()
+    } else {
+        safe_text(title)
+    }
+}
+
 fn transcript_entry_lines(
     entry: &Line_,
     width: u16,
@@ -827,6 +866,18 @@ fn transcript_entry_lines(
                 }
             }
             output
+        }
+        Line_::Thought { text, complete } => {
+            let state = if *complete { "Thought" } else { "Thinking" };
+            let title = reasoning_summary_title(text);
+            vec![Line::from(Span::styled(
+                truncate_display(
+                    &format!("+ {state}: {title}"),
+                    width as usize,
+                    Truncation::Right,
+                ),
+                Style::default().fg(Color::Yellow),
+            ))]
         }
         Line_::User(text) => safe_lines(text)
             .into_iter()
@@ -1079,6 +1130,28 @@ impl App {
                 self.status = "thinking".into();
                 self.set_activity(Activity::Thinking);
             }
+            LoopEvent::ReasoningSummaryDelta(summary) => {
+                self.status = "thinking".into();
+                self.set_activity(Activity::Thinking);
+                match self.lines.last_mut() {
+                    Some(Line_::Thought {
+                        text,
+                        complete: false,
+                    }) => text.push_str(summary),
+                    _ => self.lines.push(Line_::Thought {
+                        text: summary.clone(),
+                        complete: false,
+                    }),
+                }
+            }
+            LoopEvent::ReasoningSummaryCompleted => {
+                if let Some(complete) = self.lines.iter_mut().rev().find_map(|line| match line {
+                    Line_::Thought { complete, .. } if !*complete => Some(complete),
+                    _ => None,
+                }) {
+                    *complete = true;
+                }
+            }
             LoopEvent::ToolStarted { id, name } => {
                 self.lines.push(Line_::Tool {
                     id: id.clone(),
@@ -1284,6 +1357,15 @@ impl App {
                     .push(Line_::System("transcript compacted".into()));
             }
             LoopEvent::TurnDone { outcome } => {
+                self.lines.retain(|line| {
+                    !matches!(
+                        line,
+                        Line_::Thought {
+                            complete: false,
+                            ..
+                        }
+                    )
+                });
                 if *outcome == TurnOutcome::Aborted {
                     for line in &mut self.lines {
                         if let Line_::Tool { state, .. } = line
@@ -1309,6 +1391,15 @@ impl App {
 
     fn finish_turn(&mut self, result: anyhow::Result<TurnOutcome>) {
         if let Err(error) = result {
+            self.lines.retain(|line| {
+                !matches!(
+                    line,
+                    Line_::Thought {
+                        complete: false,
+                        ..
+                    }
+                )
+            });
             for line in &mut self.lines {
                 if let Line_::Tool { state, .. } = line
                     && matches!(*state, ToolState::Running | ToolState::Complete)
@@ -3695,6 +3786,10 @@ mod tests {
                         text: "hidden thought".into(),
                         signature: None,
                     },
+                    ilar::session::ContentBlock::ReasoningSummary {
+                        text: "**Reviewing restored state**\n\nDetails remain collapsed.".into(),
+                        completed: true,
+                    },
                     ilar::session::ContentBlock::ToolCall {
                         id: "read-1".into(),
                         name: "read".into(),
@@ -3750,11 +3845,16 @@ mod tests {
         assert!(matches!(&view.lines[1], Line_::Assistant(text) if text == "restored answer"));
         assert!(matches!(
             &view.lines[2],
+            Line_::Thought { text, complete: true }
+                if text.contains("Reviewing restored state")
+        ));
+        assert!(matches!(
+            &view.lines[3],
             Line_::Tool { id, name, arguments, state: ToolState::Succeeded, .. }
                 if id == "read-1" && name == "read" && arguments.is_empty()
         ));
         assert!(matches!(
-            &view.lines[3],
+            &view.lines[4],
             Line_::Tool {
                 id,
                 name,
@@ -4799,6 +4899,42 @@ mod tests {
         app.finish_turn(Ok(TurnOutcome::Completed));
         let complete = app.transcript_lines(80, std::time::Instant::now());
         assert!(!rendered_text(complete.last().unwrap()).contains("responding"));
+    }
+
+    #[test]
+    fn streamed_reasoning_summary_becomes_a_completed_thought_row() {
+        assert_eq!(
+            reasoning_summary_title("## Reviewing tests ##\n\nMore detail"),
+            "Reviewing tests"
+        );
+        let mut app = App::new();
+        app.push_loop_event(&LoopEvent::ReasoningSummaryDelta("**Running".into()));
+        app.push_loop_event(&LoopEvent::ReasoningSummaryDelta(
+            " tests**\n\nChecking the suite.".into(),
+        ));
+        let live = app.transcript_lines(80, std::time::Instant::now());
+        assert!(
+            rendered_text(live.last().unwrap()).contains("Thinking: Running tests"),
+            "{live:?}"
+        );
+
+        app.push_loop_event(&LoopEvent::ReasoningSummaryCompleted);
+        let complete = app.transcript_lines(80, std::time::Instant::now());
+        assert!(
+            rendered_text(complete.last().unwrap()).contains("Thought: Running tests"),
+            "{complete:?}"
+        );
+        assert!(!rendered_text(complete.last().unwrap()).contains("Checking the suite"));
+
+        let mut interrupted = App::new();
+        interrupted.push_loop_event(&LoopEvent::ReasoningSummaryDelta("**Partial".into()));
+        interrupted.finish_turn(Err(anyhow::anyhow!("connection lost")));
+        assert!(
+            !interrupted
+                .lines
+                .iter()
+                .any(|line| matches!(line, Line_::Thought { .. }))
+        );
     }
 
     #[test]

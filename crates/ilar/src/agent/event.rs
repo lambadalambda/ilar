@@ -5,6 +5,8 @@ pub enum LoopEvent {
     TurnStarted,
     TextDelta(String),
     ThinkingDelta(String),
+    ReasoningSummaryDelta(String),
+    ReasoningSummaryCompleted,
     ToolStarted {
         id: String,
         name: String,
@@ -188,23 +190,26 @@ impl LoopEventReceiver {
 
     fn coalesce_available(&mut self, mut event: LoopEvent) -> LoopEvent {
         loop {
-            let is_text = match &event {
-                LoopEvent::TextDelta(_) => true,
-                LoopEvent::ThinkingDelta(_) => false,
+            let delta_kind = match &event {
+                LoopEvent::TextDelta(_) => 0,
+                LoopEvent::ThinkingDelta(_) => 1,
+                LoopEvent::ReasoningSummaryDelta(_) => 2,
                 _ => return event,
             };
             let next = match self.receiver.try_recv() {
                 Ok(next) => next,
                 Err(_) => return event,
             };
-            let adjacent = match (is_text, &next) {
-                (true, LoopEvent::TextDelta(next)) | (false, LoopEvent::ThinkingDelta(next)) => {
-                    Some(next)
-                }
+            let adjacent = match (delta_kind, &next) {
+                (0, LoopEvent::TextDelta(next))
+                | (1, LoopEvent::ThinkingDelta(next))
+                | (2, LoopEvent::ReasoningSummaryDelta(next)) => Some(next),
                 _ => None,
             };
             let text = match &mut event {
-                LoopEvent::TextDelta(text) | LoopEvent::ThinkingDelta(text) => text,
+                LoopEvent::TextDelta(text)
+                | LoopEvent::ThinkingDelta(text)
+                | LoopEvent::ReasoningSummaryDelta(text) => text,
                 _ => unreachable!(),
             };
             if let Some(next) = adjacent
@@ -292,7 +297,7 @@ mod tests {
 
     #[tokio::test]
     async fn receiver_coalesces_adjacent_deltas_without_crossing_boundaries() {
-        let (tx, mut rx) = loop_event_channel(4);
+        let (tx, mut rx) = loop_event_channel(8);
         let cancel = CancellationToken::new();
         tx.publish(LoopEvent::TextDelta("hel".into()), &cancel)
             .await;
@@ -301,11 +306,28 @@ mod tests {
             .await;
         tx.publish(LoopEvent::ThinkingDelta(" two".into()), &cancel)
             .await;
+        tx.publish(
+            LoopEvent::ReasoningSummaryDelta("**Running".into()),
+            &cancel,
+        )
+        .await;
+        tx.publish(LoopEvent::ReasoningSummaryDelta(" tests**".into()), &cancel)
+            .await;
+        tx.publish(LoopEvent::ReasoningSummaryCompleted, &cancel)
+            .await;
 
         assert!(matches!(rx.recv().await, Some(LoopEvent::TextDelta(text)) if text == "hello"));
         assert!(
             matches!(rx.recv().await, Some(LoopEvent::ThinkingDelta(text)) if text == "one two")
         );
+        assert!(matches!(
+            rx.recv().await,
+            Some(LoopEvent::ReasoningSummaryDelta(text)) if text == "**Running tests**"
+        ));
+        assert!(matches!(
+            rx.recv().await,
+            Some(LoopEvent::ReasoningSummaryCompleted)
+        ));
     }
 
     #[tokio::test]

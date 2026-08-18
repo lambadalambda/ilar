@@ -25,6 +25,9 @@ pub enum StopReason {
 ///   text → tool call → more text round-trips without block ids)
 /// - thinking: `ThinkingDelta`s, then one `ThinkingCompleted` carrying the
 ///   provider signature (if any)
+/// - reasoning summaries: `ReasoningSummaryDelta`s, then one
+///   `ReasoningSummaryCompleted`; summaries are public display text, not hidden
+///   chain-of-thought or replay state
 /// - tool calls: `ToolCallStarted`, zero+ `ToolCallInputDelta`, exactly one
 ///   `ToolCallCompleted`
 /// - `TurnComplete` is always the last event of a successful call;
@@ -42,6 +45,10 @@ pub enum ProviderEvent {
     ThinkingDelta(String),
     /// A thinking block completed; signature if the provider signs.
     ThinkingCompleted { signature: Option<String> },
+    /// A chunk of provider-approved, user-visible reasoning summary text.
+    ReasoningSummaryDelta(String),
+    /// The current reasoning summary block completed.
+    ReasoningSummaryCompleted,
     /// Opaque provider reasoning item, preserved exactly for replay.
     ReasoningItem { item: serde_json::Value },
     /// A tool call was announced (id + name known, args not yet).

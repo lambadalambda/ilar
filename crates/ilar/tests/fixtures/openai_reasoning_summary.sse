@@ -1,0 +1,17 @@
+data: {"type":"response.output_item.added","output_index":0,"item":{"id":"rs_1","type":"reasoning","summary":[]},"sequence_number":1}
+
+data: {"type":"response.reasoning_summary_part.added","item_id":"rs_1","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":""},"sequence_number":2}
+
+data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_1","output_index":0,"summary_index":0,"delta":"**Running","sequence_number":3}
+
+data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_1","output_index":0,"summary_index":0,"delta":" tests**\n\nChecking the suite.","sequence_number":4}
+
+data: {"type":"response.reasoning_summary_text.done","item_id":"rs_1","output_index":0,"summary_index":0,"text":"**Running tests**\n\nChecking the suite.","sequence_number":5}
+
+data: {"type":"response.reasoning_summary_part.done","item_id":"rs_1","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":"**Running tests**\n\nChecking the suite."},"sequence_number":6}
+
+data: {"type":"response.output_item.done","output_index":0,"item":{"id":"rs_1","type":"reasoning","summary":[{"type":"summary_text","text":"**Running tests**\n\nChecking the suite."}],"encrypted_content":"encrypted-1"},"sequence_number":7}
+
+data: {"type":"response.completed","response":{"usage":{"input_tokens":20,"output_tokens":8}},"sequence_number":8}
+
+: trailing bytes ignored after the terminal event

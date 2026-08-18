@@ -255,6 +255,7 @@ fn anthropic_message(msg: &ChatMessage) -> anyhow::Result<Option<serde_json::Val
             ContentBlock::Thinking {
                 signature: None, ..
             } => None,
+            ContentBlock::ReasoningSummary { .. } => None,
             ContentBlock::Reasoning { .. } => None,
             ContentBlock::ProviderReplay { .. } => None,
             ContentBlock::Diagnostic { .. } => None,
@@ -308,6 +309,7 @@ fn openai_message(msg: &ChatMessage) -> Vec<serde_json::Value> {
         match block {
             ContentBlock::Text { text } => content_text.push_str(text),
             ContentBlock::Thinking { .. }
+            | ContentBlock::ReasoningSummary { .. }
             | ContentBlock::Reasoning { .. }
             | ContentBlock::ProviderReplay { .. }
             | ContentBlock::Diagnostic { .. } => {}

@@ -78,3 +78,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Parallel read-only review agents](issues/parallel-read-only-review-agents.md)
 - [x] [Extract provider transport](issues/extract-provider-transport.md)
 - [x] [Deterministic test harness](issues/deterministic-test-harness.md)
+- [x] [Present OpenAI reasoning summaries](issues/present-openai-reasoning-summaries.md)
