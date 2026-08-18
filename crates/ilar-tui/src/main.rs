@@ -54,6 +54,7 @@ enum Line_ {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ToolState {
     Running,
+    Complete,
     Succeeded,
     Failed,
 }
@@ -1183,6 +1184,24 @@ impl App {
                     };
                 }
             }
+            LoopEvent::ToolExecutionCompleted { id } => {
+                if let Some((state, progress)) =
+                    self.lines.iter_mut().rev().find_map(|line| match line {
+                        Line_::Tool {
+                            id: line_id,
+                            state,
+                            progress,
+                            ..
+                        } if line_id == id && *state == ToolState::Running => {
+                            Some((state, progress))
+                        }
+                        _ => None,
+                    })
+                {
+                    *state = ToolState::Complete;
+                    *progress = ToolProgress::None;
+                }
+            }
             LoopEvent::ToolFinished { id, name, is_error } => {
                 let mut matched = false;
                 if let Some((state, progress)) =
@@ -1192,7 +1211,9 @@ impl App {
                             state,
                             progress,
                             ..
-                        } if line_id == id && *state == ToolState::Running => {
+                        } if line_id == id
+                            && matches!(*state, ToolState::Running | ToolState::Complete) =>
+                        {
                             Some((state, progress))
                         }
                         _ => None,
@@ -1266,7 +1287,7 @@ impl App {
                 if *outcome == TurnOutcome::Aborted {
                     for line in &mut self.lines {
                         if let Line_::Tool { state, .. } = line
-                            && *state == ToolState::Running
+                            && matches!(*state, ToolState::Running | ToolState::Complete)
                         {
                             *state = ToolState::Failed;
                         }
@@ -1290,7 +1311,7 @@ impl App {
         if let Err(error) = result {
             for line in &mut self.lines {
                 if let Line_::Tool { state, .. } = line
-                    && *state == ToolState::Running
+                    && matches!(*state, ToolState::Running | ToolState::Complete)
                 {
                     *state = ToolState::Failed;
                 }
@@ -2686,6 +2707,7 @@ fn tool_line(
                 TOOL_ACTIVE,
             )
         }
+        ToolState::Complete => ("•", Color::Blue),
         ToolState::Succeeded => ("✓", ASSISTANT),
         ToolState::Failed => ("×", ERROR),
     };
@@ -2701,9 +2723,6 @@ fn tool_line(
             Style::default().fg(label_color),
         ));
     }
-    let name_budget = width.saturating_sub(fixed).clamp(1, 20);
-    let name = truncate_display(&name, name_budget, Truncation::Right);
-    let used = fixed + UnicodeWidthStr::width(name.as_str());
     let progress = match (state, progress) {
         (
             ToolState::Running,
@@ -2742,10 +2761,22 @@ fn tool_line(
                 format!("executing · {elapsed}")
             }
         }
+        (ToolState::Complete, _) => "done".into(),
         _ => String::new(),
     };
+    let progress_reserve = progress
+        .split_whitespace()
+        .next()
+        .map(|label| UnicodeWidthStr::width(label) + 2)
+        .unwrap_or(0);
+    let name_budget = width
+        .saturating_sub(fixed)
+        .saturating_sub(progress_reserve)
+        .clamp(1, 20);
+    let name = truncate_display(&name, name_budget, Truncation::Right);
+    let used = fixed + UnicodeWidthStr::width(name.as_str());
     let details = match (arguments.is_empty(), progress.is_empty()) {
-        (false, false) => format!("{arguments} · {progress}"),
+        (false, false) => format!("{progress} · {arguments}"),
         (false, true) => arguments,
         (true, false) => progress,
         (true, true) => String::new(),
@@ -4572,6 +4603,31 @@ mod tests {
             rendered_text(still_queued.last().unwrap()).contains("queued"),
             "{still_queued:?}"
         );
+        let long_queued = rendered_text(&tool_line(
+            "bash",
+            &ToolKind::Tool,
+            "git status --short && find . -maxdepth 3 -type f | sort | sed -n 1,200p",
+            ToolState::Running,
+            36,
+            std::time::Duration::ZERO,
+            ToolProgress::Queued,
+            now,
+        ));
+        assert!(long_queued.contains("queued"), "{long_queued}");
+        let narrow_agent = rendered_text(&tool_line(
+            "task",
+            &ToolKind::Agent {
+                name: "repository-reviewer".into(),
+            },
+            "inspect every lifecycle path",
+            ToolState::Running,
+            26,
+            std::time::Duration::ZERO,
+            ToolProgress::Queued,
+            now,
+        ));
+        assert!(narrow_agent.contains("queued"), "{narrow_agent}");
+
         app.push_loop_event(&LoopEvent::ToolExecutionStarted {
             id: "write-1".into(),
             received_bytes: 64 * 1024,
@@ -4581,6 +4637,11 @@ mod tests {
         let writing = rendered_text(writing.last().unwrap());
         assert!(writing.contains("writing 64.0 KiB · 0s"), "{writing}");
         assert!(!writing.contains("received"), "{writing}");
+        app.push_loop_event(&LoopEvent::ToolExecutionCompleted {
+            id: "write-1".into(),
+        });
+        let complete = rendered_text(app.transcript_lines(120, now).last().unwrap());
+        assert!(complete.contains("done"), "{complete}");
 
         let executing = tool_line(
             "bash",

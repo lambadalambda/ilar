@@ -144,6 +144,12 @@ fn markdown_agents_parsed_and_merged() {
     );
     // Built-in build agent still present.
     assert!(agents.iter().any(|a| a.name == "build"));
+    let explore = agents
+        .iter()
+        .find(|agent| agent.name == "explore")
+        .expect("built-in read-only explorer present");
+    assert_eq!(explore.workspace_mode, AgentWorkspaceMode::ReadOnly);
+    assert!(explore.description.contains("review"));
 }
 
 #[test]

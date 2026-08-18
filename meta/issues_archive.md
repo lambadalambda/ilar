@@ -75,3 +75,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [TUI content margins and wrapping](issues/tui-content-margins-and-wrapping.md)
 - [x] [Discard stale wheel input](issues/discard-stale-wheel-input.md)
 - [x] [Accurate tool and subagent activity](issues/accurate-tool-and-subagent-activity.md)
+- [x] [Parallel read-only review agents](issues/parallel-read-only-review-agents.md)

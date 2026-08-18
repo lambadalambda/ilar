@@ -35,3 +35,6 @@ Pre-alpha. See `meta/issues.md` for the roadmap and
 `~/.config/ilar/ilar.toml` (see `ilar.toml.example`), custom agents as
 Markdown in `~/.config/ilar/agents/` or project `.ilar/agents/`, and skills in
 `~/.config/ilar/skills/` or project `.ilar/skills/`.
+
+Built-in subagents are `build` (mutable, serialized per checkout) and `explore`
+(read-only, safe for parallel repository inspection and review).

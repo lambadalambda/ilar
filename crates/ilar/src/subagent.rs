@@ -561,7 +561,27 @@ impl SubagentSpawner {
                         }
                     }
                 };
-                let revalidated = revalidate_after_lease(&parent_location, &leased_location).await;
+                let revalidated = tokio::select! {
+                    result = revalidate_after_lease(&parent_location, &leased_location) => result,
+                    () = task_cancel.cancelled() => {
+                        publish_reserved_notification(&mut notification_permit, Notification {
+                            parent_session_id,
+                            description: description.clone(),
+                            text: format!("<task-notification>\nTask \"{description}\" was cancelled.\n</task-notification>"),
+                            is_error: true,
+                        });
+                        return;
+                    }
+                    () = root_cancel.cancelled() => {
+                        publish_reserved_notification(&mut notification_permit, Notification {
+                            parent_session_id,
+                            description: description.clone(),
+                            text: format!("<task-notification>\nTask \"{description}\" was cancelled.\n</task-notification>"),
+                            is_error: true,
+                        });
+                        return;
+                    }
+                };
                 if let Err(error) = revalidated.as_ref() {
                     publish_reserved_notification(
                         &mut notification_permit,
@@ -1323,7 +1343,7 @@ impl Tool for TaskTool {
     }
 
     fn description(&self) -> &'static str {
-        "Delegate one clearly bounded unit of work. Delegation transfers ownership: do not perform the delegated scope yourself. Independent reviews must be explicitly delegated as separate bounded review tasks. Omit background when the result is needed for the current answer; foreground sibling tasks can be called together for parallel work. Use background only for intentionally deferred work that should trigger a separate follow-up turn."
+        "Delegate one clearly bounded unit of work. Delegation transfers ownership: do not perform the delegated scope yourself. Independent reviews must be explicitly delegated as separate bounded review tasks. Prefer an agent marked read-only for repository inspection and review so sibling tasks can run concurrently; use a mutable agent only when edits or mutating tools are required. Omit background when the result is needed for the current answer; foreground sibling tasks can be called together for parallel work. Use background only for intentionally deferred work that should trigger a separate follow-up turn."
     }
 
     fn concurrency(&self) -> ToolConcurrency {
@@ -1345,6 +1365,19 @@ impl Tool for TaskTool {
             .iter()
             .map(|agent| agent.name.as_str())
             .collect::<Vec<_>>();
+        let agent_guidance = self
+            .spawner
+            .agents()
+            .iter()
+            .map(|agent| {
+                let mode = match agent.workspace_mode {
+                    AgentWorkspaceMode::Mutable => "mutable",
+                    AgentWorkspaceMode::ReadOnly => "read-only",
+                };
+                format!("{} ({mode}): {}", agent.name, agent.description)
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -1353,7 +1386,7 @@ impl Tool for TaskTool {
                 "subagent_type": {
                     "type": "string",
                     "enum": agents,
-                    "description": "Configured agent to run"
+                    "description": format!("Configured agent to run. Available agents: {agent_guidance}. Prefer an agent marked read-only for repository review and parallel inspection; use a mutable agent only when edits or mutating tools are required.")
                 },
                 "task_id": {
                     "type": ["string", "null"],

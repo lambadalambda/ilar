@@ -8,6 +8,7 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures::stream::{FuturesUnordered, StreamExt};
 use tokio_util::sync::CancellationToken;
@@ -61,20 +62,22 @@ pub async fn execute_calls<F>(
 where
     F: Fn(&str) -> Option<Arc<dyn Tool>>,
 {
-    execute_calls_observed(calls, resolve, ctx, cancel, |_, _| {}).await
+    execute_calls_observed(calls, resolve, ctx, cancel, |_, _| {}, |_, _| {}).await
 }
 
 #[allow(clippy::type_complexity)]
-pub(crate) async fn execute_calls_observed<F, O>(
+pub(crate) async fn execute_calls_observed<F, O, C>(
     calls: Vec<ToolCall>,
     resolve: F,
     ctx: ToolContext,
     cancel: CancellationToken,
     on_start: O,
+    on_complete: C,
 ) -> Vec<CallOutcome>
 where
     F: Fn(&str) -> Option<Arc<dyn Tool>>,
     O: Fn(String, String) + Clone + Send + 'static,
+    C: Fn(String, String) + Clone + Send + 'static,
 {
     let call_count = calls.len();
     let mut outcomes: Vec<Option<CallOutcome>> = calls.iter().map(|_| None).collect();
@@ -82,7 +85,7 @@ where
     let mut running_meta: Vec<Running> = Vec::new();
     // (idx, future) pairs wrapped into single futures — tuples of futures
     // don't implement Future.
-    type RunningFuture = Pin<Box<dyn Future<Output = (usize, ToolOutput)> + Send>>;
+    type RunningFuture = Pin<Box<dyn Future<Output = (usize, ToolOutput, bool)> + Send>>;
     let mut running: FuturesUnordered<RunningFuture> = FuturesUnordered::new();
     let mut next_idx = 0usize;
 
@@ -151,7 +154,10 @@ where
             let started_id = call.id.clone();
             let started_name = call.name.clone();
             running.push(Box::pin(async move {
+                let started = Arc::new(AtomicBool::new(false));
+                let observed_start = started.clone();
                 let start: ToolStartObserver = Box::new(move || {
+                    observed_start.store(true, Ordering::SeqCst);
                     on_start(started_id, started_name);
                 });
                 let output = if background {
@@ -188,7 +194,7 @@ where
                         )),
                     }
                 };
-                (idx, output)
+                (idx, output, started.load(Ordering::SeqCst))
             }));
         }
 
@@ -198,9 +204,12 @@ where
 
         tokio::select! {
             maybe = running.next() => {
-                let Some((idx, output)) = maybe else { continue };
+                let Some((idx, output, started)) = maybe else { continue };
                 if let Some(pos) = running_meta.iter().position(|r| r.idx == idx) {
                     let meta = running_meta.remove(pos);
+                    if started {
+                        on_complete(meta.id.clone(), meta.name.clone());
+                    }
                     outcomes[idx] = Some(CallOutcome {
                         id: meta.id,
                         name: meta.name,
@@ -314,6 +323,43 @@ mod tests {
         }
     }
 
+    struct RejectedBeforeStartTool;
+
+    impl Tool for RejectedBeforeStartTool {
+        fn name(&self) -> &'static str {
+            "rejected"
+        }
+
+        fn description(&self) -> &'static str {
+            "rejects before execution"
+        }
+
+        fn concurrency(&self) -> ToolConcurrency {
+            ToolConcurrency::Barrier
+        }
+
+        fn workspace_access(&self) -> WorkspaceAccess {
+            WorkspaceAccess::None
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn run(&self, _input: serde_json::Value, _ctx: ToolContext) -> super::super::ToolFuture {
+            Box::pin(async { ToolOutput::error("rejected") })
+        }
+
+        fn run_observed(
+            &self,
+            _input: serde_json::Value,
+            _ctx: ToolContext,
+            _on_start: ToolStartObserver,
+        ) -> super::super::ToolFuture {
+            Box::pin(async { ToolOutput::error("rejected") })
+        }
+    }
+
     struct ManagedLeaseTool;
 
     impl Tool for ManagedLeaseTool {
@@ -363,6 +409,9 @@ mod tests {
         let gate_tool: Arc<dyn Tool> = Arc::new(GateTool { gate: gate.clone() });
         let immediate_tool: Arc<dyn Tool> = Arc::new(ImmediateTool);
         let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+        let lifecycle = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let started_lifecycle = lifecycle.clone();
+        let completed_lifecycle = lifecycle.clone();
         let execution = execute_calls_observed(
             vec![
                 ToolCall {
@@ -384,7 +433,17 @@ mod tests {
             ToolContext::root(dir.path().to_path_buf()),
             CancellationToken::new(),
             move |id, _| {
+                started_lifecycle
+                    .lock()
+                    .unwrap()
+                    .push(format!("start:{id}"));
                 let _ = started_tx.send(id);
+            },
+            move |id, _| {
+                completed_lifecycle
+                    .lock()
+                    .unwrap()
+                    .push(format!("complete:{id}"));
             },
         );
         let execution = tokio::spawn(execution);
@@ -404,6 +463,15 @@ mod tests {
                 .unwrap()
                 .iter()
                 .all(|outcome| !outcome.output.is_error)
+        );
+        assert_eq!(
+            *lifecycle.lock().unwrap(),
+            [
+                "start:gate-1",
+                "complete:gate-1",
+                "start:immediate-1",
+                "complete:immediate-1",
+            ]
         );
     }
 
@@ -428,6 +496,7 @@ mod tests {
             move |id, _| {
                 let _ = started_tx.send(id);
             },
+            |_, _| {},
         ));
 
         assert!(
@@ -445,5 +514,41 @@ mod tests {
                 .iter()
                 .all(|outcome| !outcome.output.is_error)
         );
+    }
+
+    #[tokio::test]
+    async fn completion_observer_only_pairs_with_a_started_execution() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool: Arc<dyn Tool> = Arc::new(RejectedBeforeStartTool);
+        let lifecycle = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let started_lifecycle = lifecycle.clone();
+        let completed_lifecycle = lifecycle.clone();
+
+        let outcomes = execute_calls_observed(
+            vec![ToolCall {
+                id: "rejected-1".into(),
+                name: "rejected".into(),
+                input: serde_json::json!({}),
+            }],
+            move |_| Some(tool.clone()),
+            ToolContext::root(dir.path().to_path_buf()),
+            CancellationToken::new(),
+            move |id, _| {
+                started_lifecycle
+                    .lock()
+                    .unwrap()
+                    .push(format!("start:{id}"))
+            },
+            move |id, _| {
+                completed_lifecycle
+                    .lock()
+                    .unwrap()
+                    .push(format!("complete:{id}"));
+            },
+        )
+        .await;
+
+        assert!(outcomes[0].output.is_error);
+        assert!(lifecycle.lock().unwrap().is_empty());
     }
 }

@@ -285,6 +285,30 @@ struct ToolInputUpdate {
     received_bytes: u64,
 }
 
+enum ToolExecutionLifecycle {
+    Started {
+        id: String,
+        started: std::time::Instant,
+    },
+    Completed {
+        id: String,
+    },
+}
+
+fn tool_execution_loop_event(
+    lifecycle: ToolExecutionLifecycle,
+    received_bytes: &std::collections::HashMap<String, u64>,
+) -> LoopEvent {
+    match lifecycle {
+        ToolExecutionLifecycle::Started { id, started } => LoopEvent::ToolExecutionStarted {
+            received_bytes: received_bytes.get(&id).copied().unwrap_or(0),
+            id,
+            started,
+        },
+        ToolExecutionLifecycle::Completed { id } => LoopEvent::ToolExecutionCompleted { id },
+    }
+}
+
 #[derive(Default)]
 enum PartialJsonState {
     #[default]
@@ -1178,43 +1202,36 @@ pub async fn run_turn(
         let mut call_ctx = tool_ctx.clone();
         call_ctx.cancel = cancel.clone();
         let received_bytes = acc.tool_received_bytes.clone();
-        let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (lifecycle_tx, mut lifecycle_rx) = tokio::sync::mpsc::unbounded_channel();
+        let completed_tx = lifecycle_tx.clone();
         let execution = execute_calls_observed(
             calls,
             |name| registry.get(name),
             call_ctx,
             cancel.clone(),
-            move |id, name| {
-                let _ = started_tx.send((id, name, std::time::Instant::now()));
+            move |id, _name| {
+                let _ = lifecycle_tx.send(ToolExecutionLifecycle::Started {
+                    id,
+                    started: std::time::Instant::now(),
+                });
+            },
+            move |id, _name| {
+                let _ = completed_tx.send(ToolExecutionLifecycle::Completed { id });
             },
         );
         tokio::pin!(execution);
         let outcomes = loop {
             tokio::select! {
                 biased;
-                Some((id, _name, started)) = started_rx.recv() => {
+                Some(lifecycle) = lifecycle_rx.recv() => {
                     events
-                        .publish(
-                            LoopEvent::ToolExecutionStarted {
-                                received_bytes: received_bytes.get(&id).copied().unwrap_or(0),
-                                id,
-                                started,
-                            },
-                            &cancel,
-                        )
+                        .publish(tool_execution_loop_event(lifecycle, &received_bytes), &cancel)
                         .await;
                 }
                 outcomes = &mut execution => {
-                    while let Ok((id, _name, started)) = started_rx.try_recv() {
+                    while let Ok(lifecycle) = lifecycle_rx.try_recv() {
                         events
-                            .publish(
-                                LoopEvent::ToolExecutionStarted {
-                                    received_bytes: received_bytes.get(&id).copied().unwrap_or(0),
-                                    id,
-                                    started,
-                                },
-                                &cancel,
-                            )
+                            .publish(tool_execution_loop_event(lifecycle, &received_bytes), &cancel)
                             .await;
                     }
                     break outcomes;

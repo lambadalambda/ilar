@@ -31,6 +31,9 @@ pub enum LoopEvent {
         received_bytes: u64,
         started: std::time::Instant,
     },
+    ToolExecutionCompleted {
+        id: String,
+    },
     ToolFinished {
         id: String,
         name: String,

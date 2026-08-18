@@ -258,6 +258,21 @@ async fn mutable_tasks_sharing_a_checkout_are_serialized_and_merge_in_order() {
         second.saturating_duration_since(first) >= Duration::from_millis(200),
         "serialized child was marked active before its workspace lease"
     );
+    let position = |predicate: &dyn Fn(&LoopEvent) -> bool| {
+        events
+            .iter()
+            .position(predicate)
+            .expect("expected task lifecycle event")
+    };
+    let first_complete =
+        position(&|event| matches!(event, LoopEvent::ToolExecutionCompleted { id } if id == "t1"));
+    let second_started = position(
+        &|event| matches!(event, LoopEvent::ToolExecutionStarted { id, .. } if id == "t2"),
+    );
+    assert!(
+        first_complete < second_started,
+        "second child appeared active before the first was marked done"
+    );
     assert!(events.iter().any(|event| matches!(
         event,
         LoopEvent::SubagentConfigured { id, description, agent }
@@ -950,6 +965,10 @@ fn task_schema_guides_new_calls_without_placeholder_routing_values() {
     assert!(background.contains("foreground sibling"), "{background}");
     assert!(background.contains("current answer"), "{background}");
     assert!(background.contains("Do not poll"), "{background}");
+    let subagent = properties["subagent_type"]["description"].as_str().unwrap();
+    assert!(subagent.contains("explore (mutable)"), "{subagent}");
+    assert!(subagent.contains("marked read-only"), "{subagent}");
+    assert!(!subagent.contains("Prefer explore"), "{subagent}");
 }
 
 /// Live smoke for the provider behavior that triggered the launch regression.

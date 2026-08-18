@@ -49,12 +49,22 @@ pub enum AgentWorkspaceMode {
 impl AgentDefinition {
     /// Built-in agents.
     pub fn builtins() -> Vec<Self> {
-        vec![Self {
-            name: "build".into(),
-            description: "General-purpose coding agent with all tools".into(),
-            model: None,
-            prompt: String::new(), // base prompt; TUI supplies the core text
-            workspace_mode: AgentWorkspaceMode::Mutable,
-        }]
+        vec![
+            Self {
+                name: "build".into(),
+                description: "General-purpose coding agent with all tools".into(),
+                model: None,
+                prompt: String::new(), // base prompt; TUI supplies the core text
+                workspace_mode: AgentWorkspaceMode::Mutable,
+            },
+            Self {
+                name: "explore".into(),
+                description:
+                    "Read-only repository explorer and code reviewer for parallel inspection".into(),
+                model: None,
+                prompt: "Inspect, analyze, and review without modifying the workspace.".into(),
+                workspace_mode: AgentWorkspaceMode::ReadOnly,
+            },
+        ]
     }
 }
