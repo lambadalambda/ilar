@@ -841,14 +841,13 @@ fn transcript_entry_lines(
             let mut output = Vec::new();
             let mut first = true;
             let label_width = 5usize.min(width.saturating_sub(2) as usize);
-            for line in markdown::render(text) {
+            let content_width = (width as usize).saturating_sub(label_width);
+            for line in markdown::render(text, content_width) {
                 if line.spans.is_empty() {
                     output.push(Line::default());
                     continue;
                 }
-                for mut line in
-                    wrap_markdown_line(line, (width as usize).saturating_sub(label_width))
-                {
+                for mut line in wrap_markdown_line(line, content_width) {
                     let label = if first {
                         truncate_display("ilar ", label_width, Truncation::Right)
                     } else {
@@ -4496,7 +4495,7 @@ mod tests {
 
     #[test]
     fn styled_wrap_prefers_words_and_never_adds_blank_rows() {
-        let code = markdown::render("```\n    hello world\n```").remove(0);
+        let code = markdown::render("```\n    hello world\n```", usize::MAX).remove(0);
         let original_code = rendered_text(&code);
         let wrapped = wrap_markdown_line(code, 5);
 
@@ -4527,6 +4526,25 @@ mod tests {
             .map(rendered_text)
             .collect::<Vec<_>>();
         assert_eq!(long_word, ["abcde", "fgh"]);
+    }
+
+    #[test]
+    fn markdown_tables_use_the_transcript_content_width() {
+        let now = std::time::Instant::now();
+        let rows = transcript_entry_lines(
+            &Line_::Assistant(
+                "| Phase | Estimate |\n| --- | ---: |\n| Signed-device testing | 1–2 weeks |"
+                    .into(),
+            ),
+            26,
+            now,
+            now,
+        );
+        let rendered = rows.iter().map(rendered_text).collect::<Vec<_>>();
+
+        assert!(rendered.iter().all(|line| line.width() <= 26));
+        assert!(rendered.iter().any(|line| line.contains("Phase:")));
+        assert!(!rendered.iter().any(|line| line.contains("---")));
     }
 
     #[test]

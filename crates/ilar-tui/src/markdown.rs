@@ -1,16 +1,35 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use unicode_width::UnicodeWidthStr;
+
+#[derive(Clone, Copy)]
+enum ColumnAlignment {
+    Left,
+    Center,
+    Right,
+}
+
+struct MarkdownTable {
+    headers: Vec<String>,
+    alignments: Vec<ColumnAlignment>,
+    rows: Vec<Vec<String>>,
+}
 
 /// Render the Markdown subset used in agent responses into terminal-native
-/// lines. Incomplete delimiters remain literal, which keeps streaming output
-/// readable while a response is still arriving.
-pub fn render(source: &str) -> Vec<Line<'static>> {
+/// lines while constraining tables to `width` cells. Incomplete delimiters
+/// remain literal, which keeps streaming output readable.
+pub fn render(source: &str, width: usize) -> Vec<Line<'static>> {
     let source = sanitize(source);
+    let source_lines = source.lines().collect::<Vec<_>>();
     let mut lines = Vec::new();
     let mut code_fence: Option<(char, usize)> = None;
     let mut pending_separator = false;
+    let mut index = 0;
 
-    for raw in source.lines() {
+    while index < source_lines.len() {
+        let raw = source_lines[index];
+        let current_index = index;
+        index += 1;
         let trimmed = raw.trim_start();
         if let Some((fence, length, suffix)) = fence(trimmed) {
             if let Some((open_fence, open_length)) = code_fence {
@@ -42,6 +61,13 @@ pub fn render(source: &str) -> Vec<Line<'static>> {
 
         if trimmed.is_empty() {
             pending_separator = true;
+            continue;
+        }
+
+        if let Some((table, consumed)) = parse_table(&source_lines, current_index) {
+            flush_separator(&mut lines, &mut pending_separator);
+            lines.extend(render_table(table, width));
+            index = current_index + consumed;
             continue;
         }
 
@@ -95,6 +121,362 @@ pub fn render(source: &str) -> Vec<Line<'static>> {
     }
 
     lines
+}
+
+fn parse_table(lines: &[&str], start: usize) -> Option<(MarkdownTable, usize)> {
+    let headers = split_table_row(lines.get(start)?)?;
+    let delimiter_cells = split_table_row(lines.get(start + 1)?)?;
+    if headers.len() != delimiter_cells.len() {
+        return None;
+    }
+    let alignments = delimiter_cells
+        .iter()
+        .map(|cell| delimiter_alignment(cell))
+        .collect::<Option<Vec<_>>>()?;
+
+    let column_count = headers.len();
+    let mut rows = Vec::new();
+    let mut consumed = 2;
+    while let Some(raw) = lines.get(start + consumed) {
+        if raw.trim().is_empty() {
+            break;
+        }
+        if starts_markdown_block(raw) {
+            break;
+        }
+        let Some(mut row) = split_table_row(raw) else {
+            break;
+        };
+        row.resize(column_count, String::new());
+        row.truncate(column_count);
+        rows.push(row);
+        consumed += 1;
+    }
+
+    Some((
+        MarkdownTable {
+            headers,
+            alignments,
+            rows,
+        },
+        consumed,
+    ))
+}
+
+fn split_table_row(line: &str) -> Option<Vec<String>> {
+    let line = line.trim();
+    let characters = line.chars().collect::<Vec<_>>();
+    let mut cells = vec![String::new()];
+    let mut separators = 0;
+    let mut code_fence = None;
+    let mut index = 0;
+
+    while index < characters.len() {
+        let character = characters[index];
+        if character == '\\' {
+            let run = characters[index..]
+                .iter()
+                .take_while(|character| **character == '\\')
+                .count();
+            if characters.get(index + run) == Some(&'|') {
+                cells.last_mut()?.extend(std::iter::repeat_n('\\', run / 2));
+                if run % 2 == 1 {
+                    cells.last_mut()?.push('|');
+                    index += run + 1;
+                } else {
+                    index += run;
+                }
+            } else {
+                cells.last_mut()?.extend(std::iter::repeat_n('\\', run));
+                index += run;
+            }
+            continue;
+        }
+        if character == '`' {
+            let run = characters[index..]
+                .iter()
+                .take_while(|character| **character == '`')
+                .count();
+            if code_fence == Some(run) {
+                code_fence = None;
+            } else if code_fence.is_none() {
+                code_fence = Some(run);
+            }
+            cells.last_mut()?.extend(std::iter::repeat_n('`', run));
+            index += run;
+            continue;
+        }
+        if character == '|' && code_fence.is_none() {
+            cells.push(String::new());
+            separators += 1;
+        } else {
+            cells.last_mut()?.push(character);
+        }
+        index += 1;
+    }
+
+    if separators == 0 {
+        return None;
+    }
+    if cells.first().is_some_and(|cell| cell.trim().is_empty()) {
+        cells.remove(0);
+    }
+    if cells.last().is_some_and(|cell| cell.trim().is_empty()) {
+        cells.pop();
+    }
+    if cells.is_empty() {
+        return None;
+    }
+    Some(
+        cells
+            .into_iter()
+            .map(|cell| expand_tabs(cell.trim()))
+            .collect(),
+    )
+}
+
+fn starts_markdown_block(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    fence(trimmed).is_some()
+        || starts_atx_heading(trimmed)
+        || trimmed.starts_with('>')
+        || starts_list_marker(trimmed)
+        || is_rule(trimmed)
+}
+
+fn starts_atx_heading(line: &str) -> bool {
+    let hashes = line
+        .chars()
+        .take_while(|character| *character == '#')
+        .count();
+    (1..=6).contains(&hashes)
+        && line[hashes..]
+            .chars()
+            .next()
+            .is_none_or(char::is_whitespace)
+}
+
+fn starts_list_marker(line: &str) -> bool {
+    if let Some(rest) = line.strip_prefix(['-', '*', '+']) {
+        return rest.chars().next().is_none_or(char::is_whitespace);
+    }
+    let digits = line
+        .bytes()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    if digits == 0 {
+        return false;
+    }
+    line[digits..]
+        .strip_prefix(['.', ')'])
+        .is_some_and(|rest| rest.chars().next().is_none_or(char::is_whitespace))
+}
+
+fn delimiter_alignment(cell: &str) -> Option<ColumnAlignment> {
+    let cell = cell.trim();
+    let left = cell.starts_with(':');
+    let right = cell.ends_with(':');
+    let dashes = cell.trim_start_matches(':').trim_end_matches(':');
+    if dashes.is_empty() || !dashes.chars().all(|character| character == '-') {
+        return None;
+    }
+    Some(match (left, right) {
+        (true, true) => ColumnAlignment::Center,
+        (false, true) => ColumnAlignment::Right,
+        _ => ColumnAlignment::Left,
+    })
+}
+
+fn render_table(table: MarkdownTable, width: usize) -> Vec<Line<'static>> {
+    let separator_width = 3usize.saturating_mul(table.headers.len().saturating_sub(1));
+    let available = width.saturating_sub(separator_width);
+    if available >= 10usize.saturating_mul(table.headers.len()) {
+        render_grid_table(table, available)
+    } else {
+        render_stacked_table(table, width)
+    }
+}
+
+fn render_grid_table(table: MarkdownTable, available: usize) -> Vec<Line<'static>> {
+    let header_style = Style::default().add_modifier(Modifier::BOLD);
+    let mut widths = (0..table.headers.len())
+        .map(|column| {
+            std::iter::once(&table.headers[column])
+                .chain(table.rows.iter().map(|row| &row[column]))
+                .map(|cell| inline_width(cell, Style::default()))
+                .max()
+                .unwrap_or(1)
+                .max(3)
+                .min(available)
+        })
+        .collect::<Vec<_>>();
+    while widths.iter().sum::<usize>() > available {
+        let Some(column) = widths
+            .iter()
+            .enumerate()
+            .filter(|(_, width)| **width > 3)
+            .max_by_key(|(_, width)| **width)
+            .map(|(column, _)| column)
+        else {
+            break;
+        };
+        widths[column] -= 1;
+    }
+
+    let mut lines = render_grid_row(&table.headers, &widths, &table.alignments, header_style);
+    lines.push(table_rule(&widths));
+    for row in table.rows {
+        lines.extend(render_grid_row(
+            &row,
+            &widths,
+            &table.alignments,
+            Style::default(),
+        ));
+    }
+    lines
+}
+
+fn render_grid_row(
+    cells: &[String],
+    widths: &[usize],
+    alignments: &[ColumnAlignment],
+    base: Style,
+) -> Vec<Line<'static>> {
+    let wrapped = cells
+        .iter()
+        .zip(widths)
+        .map(|(cell, width)| bounded_wrap(Line::from(render_inline(cell, base)), *width))
+        .collect::<Vec<_>>();
+    let height = wrapped.iter().map(Vec::len).max().unwrap_or(1);
+    let separator_style = Style::default().fg(Color::DarkGray);
+    let mut output = Vec::with_capacity(height);
+
+    for row in 0..height {
+        let mut spans = Vec::new();
+        for column in 0..cells.len() {
+            if column > 0 {
+                spans.push(Span::styled(" │ ", separator_style));
+            }
+            let line = wrapped[column].get(row).cloned().unwrap_or_default();
+            spans.extend(pad_cell(line, widths[column], alignments[column]));
+        }
+        output.push(Line::from(spans));
+    }
+    output
+}
+
+fn pad_cell(
+    mut line: Line<'static>,
+    width: usize,
+    alignment: ColumnAlignment,
+) -> Vec<Span<'static>> {
+    let padding = width.saturating_sub(line.width());
+    let (left, right) = match alignment {
+        ColumnAlignment::Left => (0, padding),
+        ColumnAlignment::Center => (padding / 2, padding - padding / 2),
+        ColumnAlignment::Right => (padding, 0),
+    };
+    let mut spans = Vec::new();
+    if left > 0 {
+        spans.push(Span::raw(" ".repeat(left)));
+    }
+    spans.append(&mut line.spans);
+    if right > 0 {
+        spans.push(Span::raw(" ".repeat(right)));
+    }
+    spans
+}
+
+fn table_rule(widths: &[usize]) -> Line<'static> {
+    let style = Style::default().fg(Color::DarkGray);
+    let mut spans = Vec::new();
+    for (column, width) in widths.iter().enumerate() {
+        if column > 0 {
+            spans.push(Span::styled("─┼─", style));
+        }
+        spans.push(Span::styled("─".repeat(*width), style));
+    }
+    Line::from(spans)
+}
+
+fn render_stacked_table(table: MarkdownTable, width: usize) -> Vec<Line<'static>> {
+    if width == 0 {
+        return vec![Line::default()];
+    }
+    let label_style = Style::default()
+        .fg(Color::DarkGray)
+        .add_modifier(Modifier::BOLD);
+    let labels = table
+        .headers
+        .iter()
+        .map(|header| {
+            let mut label = render_inline(header, label_style);
+            label.push(Span::styled(":", label_style));
+            Line::from(label)
+        })
+        .collect::<Vec<_>>();
+    let label_width = labels.iter().map(Line::width).max().unwrap_or(0);
+    let inline_values = label_width.saturating_add(14) <= width;
+    let mut output = Vec::new();
+
+    for (row_index, row) in table.rows.iter().enumerate() {
+        if row_index > 0 {
+            output.push(Line::default());
+        }
+        for (column, cell) in row.iter().enumerate() {
+            let value = Line::from(render_inline(cell, Style::default()));
+            if inline_values {
+                let value_width = width - label_width - 1;
+                let values = bounded_wrap(value, value_width);
+                for (line_index, mut value) in values.into_iter().enumerate() {
+                    let mut spans = if line_index == 0 {
+                        pad_cell(labels[column].clone(), label_width, ColumnAlignment::Left)
+                    } else {
+                        vec![Span::raw(" ".repeat(label_width))]
+                    };
+                    spans.push(Span::raw(" "));
+                    spans.append(&mut value.spans);
+                    output.push(Line::from(spans));
+                }
+            } else {
+                output.extend(bounded_wrap(labels[column].clone(), width));
+                output.extend(bounded_wrap(value, width));
+            }
+        }
+    }
+    if table.rows.is_empty() {
+        for label in labels {
+            output.extend(bounded_wrap(label, width));
+        }
+    }
+    output
+}
+
+fn inline_width(cell: &str, base: Style) -> usize {
+    render_inline(cell, base)
+        .iter()
+        .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+        .sum()
+}
+
+fn bounded_wrap(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
+    super::wrap_styled_line(line, width)
+        .into_iter()
+        .map(|line| {
+            if line.width() <= width {
+                line
+            } else if width == 0 {
+                Line::default()
+            } else {
+                let style = line
+                    .spans
+                    .first()
+                    .map(|span| span.style)
+                    .unwrap_or_default();
+                Line::from(Span::styled("…", style))
+            }
+        })
+        .collect()
 }
 
 fn flush_separator(lines: &mut Vec<Line<'static>>, pending: &mut bool) {
@@ -205,14 +587,19 @@ fn render_inline(text: &str, base: Style) -> Vec<Span<'static>> {
             rest = &after[end + 1..];
             continue;
         }
-        if let Some(after) = rest.strip_prefix('`')
-            && let Some(end) = after.find('`')
-        {
-            spans.push(Span::styled(
-                after[..end].to_string(),
-                base.fg(Color::Yellow).add_modifier(Modifier::REVERSED),
-            ));
-            rest = &after[end + 1..];
+        if rest.starts_with('`') {
+            let opening = rest.bytes().take_while(|byte| *byte == b'`').count();
+            if let Some(end) = matching_backticks(rest, opening) {
+                let content = &rest[opening..end];
+                spans.push(Span::styled(
+                    content.to_string(),
+                    base.fg(Color::Yellow).add_modifier(Modifier::REVERSED),
+                ));
+                rest = &rest[end + opening..];
+            } else {
+                spans.push(Span::styled("`".repeat(opening), base));
+                rest = &rest[opening..];
+            }
             continue;
         }
         if let Some(after) = rest.strip_prefix('[')
@@ -242,11 +629,36 @@ fn render_inline(text: &str, base: Style) -> Vec<Span<'static>> {
     spans
 }
 
+fn matching_backticks(text: &str, length: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut index = length;
+    while index < bytes.len() {
+        if bytes[index] != b'`' {
+            index += 1;
+            continue;
+        }
+        let run = bytes[index..]
+            .iter()
+            .take_while(|byte| **byte == b'`')
+            .count();
+        if run == length {
+            return Some(index);
+        }
+        index += run;
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use ratatui::style::{Color, Modifier};
+    use unicode_width::UnicodeWidthStr;
 
-    use super::render;
+    use super::render as render_with_width;
+
+    fn render(source: &str) -> Vec<ratatui::text::Line<'static>> {
+        render_with_width(source, usize::MAX)
+    }
 
     fn text(line: &ratatui::text::Line<'_>) -> String {
         line.spans
@@ -345,5 +757,140 @@ mod tests {
         let lines = render("```\n\tlet x = 1;\n  \treturn x;\n```");
         assert_eq!(text(&lines[0]), "│     let x = 1;");
         assert_eq!(text(&lines[1]), "│     return x;");
+    }
+
+    #[test]
+    fn complete_tables_render_as_styled_ruled_rows() {
+        let lines = render_with_width(
+            "| Phase | Estimate |\n| :--- | ---: |\n| **Signed-device testing** | 1–2 weeks |\n| Escaped \\| pipe | `x|y` |",
+            80,
+        );
+        let rendered: Vec<String> = lines.iter().map(text).collect();
+
+        assert_eq!(rendered.len(), 4);
+        assert!(rendered[0].contains("Phase"));
+        assert!(rendered[0].contains('│'));
+        assert!(rendered[1].contains('┼'));
+        assert!(!rendered.iter().any(|line| line.contains("---")));
+        assert!(rendered[2].ends_with("1–2 weeks"));
+        assert!(rendered[3].contains("Escaped | pipe"));
+        assert!(rendered[3].contains("x|y"));
+        assert!(lines[0].spans.iter().any(|span| {
+            span.content.contains("Phase") && span.style.add_modifier.contains(Modifier::BOLD)
+        }));
+        assert!(lines[2].spans.iter().any(|span| {
+            span.content.contains("Signed-device testing")
+                && span.style.add_modifier.contains(Modifier::BOLD)
+        }));
+        assert!(
+            lines[3]
+                .spans
+                .iter()
+                .any(|span| span.content == "x|y" && span.style.fg == Some(Color::Yellow))
+        );
+    }
+
+    #[test]
+    fn narrow_tables_render_as_bounded_labeled_records() {
+        let lines = render_with_width(
+            "| Phase | Estimate |\n| --- | ---: |\n| Signed-device testing across iOS and Android | 1–2 weeks |\n| Unicode 界界界 validation | Complete |",
+            22,
+        );
+        let rendered: Vec<String> = lines.iter().map(text).collect();
+
+        assert!(rendered.iter().any(|line| line.contains("Phase:")));
+        assert!(rendered.iter().any(|line| line.contains("Estimate:")));
+        assert!(rendered.iter().any(|line| line.contains("Signed-device")));
+        assert!(rendered.iter().any(|line| line.contains("界界界")));
+        assert!(!rendered.iter().any(|line| line.contains("---")));
+        assert!(
+            rendered
+                .iter()
+                .all(|line| UnicodeWidthStr::width(line.as_str()) <= 22)
+        );
+    }
+
+    #[test]
+    fn incomplete_streaming_table_syntax_stays_literal() {
+        let lines = render_with_width("| Phase | Estimate |\n| --- |", 80);
+        let rendered: Vec<String> = lines.iter().map(text).collect();
+
+        assert_eq!(rendered, ["| Phase | Estimate |", "| --- |"]);
+    }
+
+    #[test]
+    fn renders_single_column_tables_with_outer_pipes() {
+        let lines = render_with_width("| Status\n| -\n| Ready", 40);
+        let rendered: Vec<String> = lines.iter().map(text).collect();
+
+        assert_eq!(rendered, ["Status", "──────", "Ready "]);
+    }
+
+    #[test]
+    fn table_body_stops_before_another_markdown_block() {
+        let lines = render_with_width("| A | B |\n| - | - |\n| 1 | 2 |\n## Next | section", 40);
+        let rendered: Vec<String> = lines.iter().map(text).collect();
+
+        assert_eq!(rendered.last().unwrap(), "◆ Next | section");
+        assert_eq!(rendered.len(), 4);
+    }
+
+    #[test]
+    fn table_body_stops_before_compact_or_tabbed_block_markers() {
+        for marker in [">quote | value", "#\tHeading | value", "-\titem | value"] {
+            let source = format!("| A | B |\n| - | - |\n{marker}");
+            let rendered = render_with_width(&source, 40)
+                .iter()
+                .map(text)
+                .collect::<Vec<_>>();
+
+            assert!(rendered.last().unwrap().contains(" | "), "{rendered:?}");
+            assert!(!rendered.last().unwrap().contains('│'), "{rendered:?}");
+        }
+    }
+
+    #[test]
+    fn multiple_backticks_protect_and_style_pipes_in_code_spans() {
+        let lines = render_with_width("| Code | State |\n| - | - |\n| ``a`b|c`` | ready |", 40);
+
+        assert!(text(&lines[2]).contains("a`b|c"));
+        assert!(
+            lines[2]
+                .spans
+                .iter()
+                .any(|span| span.content == "a`b|c" && span.style.fg == Some(Color::Yellow))
+        );
+    }
+
+    #[test]
+    fn even_backslashes_leave_a_pipe_as_a_column_separator() {
+        let lines = render_with_width("| One | Two | Three |\n| - | - | - |\n| a\\\\| b | c |", 60);
+        let row = text(&lines[2]);
+        let cells = row.split('│').map(str::trim).collect::<Vec<_>>();
+
+        assert_eq!(cells, ["a\\", "b", "c"]);
+    }
+
+    #[test]
+    fn tabs_in_table_cells_expand_to_visible_spacing() {
+        let lines = render_with_width("| Value |\n| - |\n| a\tb |", 40);
+
+        assert!(text(&lines[2]).starts_with("a   b"));
+    }
+
+    #[test]
+    fn partial_body_rows_and_tiny_widths_remain_bounded() {
+        let complete = "| A | B |\n| - | - |\n| partial | row |";
+        for width in 0..=2 {
+            let lines = render_with_width(complete, width);
+            assert!(lines.iter().all(|line| line.width() <= width));
+        }
+
+        let partial = "| A | B |\n| - | - |\n| partial";
+        let rendered = render_with_width(partial, 40)
+            .iter()
+            .map(text)
+            .collect::<Vec<_>>();
+        assert!(rendered.iter().any(|line| line.contains("partial")));
     }
 }
