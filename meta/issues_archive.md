@@ -67,3 +67,6 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Bounded event channels](issues/bounded-event-channels.md)
 - [x] [Cache transcript rendering](issues/cache-transcript-rendering.md)
 - [x] [Index session replay](issues/index-session-replay.md)
+- [x] [Write tool progress and stalls](issues/write-tool-progress-and-stalls.md)
+- [x] [Streaming tool progress](issues/streaming-tool-progress.md)
+- [x] [Provider stream error diagnostics](issues/provider-stream-error-diagnostics.md)
