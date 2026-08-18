@@ -18,9 +18,18 @@ pub enum LoopEvent {
         received_bytes: u64,
         last_data: std::time::Instant,
     },
+    ToolInputComplete {
+        id: String,
+    },
+    SubagentConfigured {
+        id: String,
+        description: String,
+        agent: String,
+    },
     ToolExecutionStarted {
         id: String,
         received_bytes: u64,
+        started: std::time::Instant,
     },
     ToolFinished {
         id: String,

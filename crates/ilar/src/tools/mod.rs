@@ -451,6 +451,7 @@ impl ToolOutput {
 }
 
 pub type ToolFuture = Pin<Box<dyn Future<Output = ToolOutput> + Send>>;
+pub type ToolStartObserver = Box<dyn FnOnce() + Send>;
 
 /// A built-in or custom tool. `run` is boxed (not `async fn`) so the
 /// registry can hold `Arc<dyn Tool>`.
@@ -470,6 +471,15 @@ pub trait Tool: Send + Sync {
     }
     fn input_schema(&self) -> serde_json::Value;
     fn run(&self, input: serde_json::Value, ctx: ToolContext) -> ToolFuture;
+    fn run_observed(
+        &self,
+        input: serde_json::Value,
+        ctx: ToolContext,
+        on_start: ToolStartObserver,
+    ) -> ToolFuture {
+        on_start();
+        self.run(input, ctx)
+    }
 }
 
 /// Named tool lookup + provider-facing definitions.

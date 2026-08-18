@@ -978,6 +978,7 @@ dependencies = [
  "futures",
  "ilar",
  "ratatui",
+ "serde_json",
  "tempfile",
  "tokio",
  "tokio-util",

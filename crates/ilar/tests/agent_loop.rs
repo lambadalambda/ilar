@@ -225,16 +225,19 @@ async fn completed_write_arguments_transition_from_receiving_to_execution() {
                 if id == "write-1" && *received_bytes == delta.len() as u64
         )
     });
+    let queued =
+        position(&|event| matches!(event, LoopEvent::ToolInputComplete { id } if id == "write-1"));
     let executing = position(&|event| {
         matches!(
             event,
-            LoopEvent::ToolExecutionStarted { id, received_bytes }
+            LoopEvent::ToolExecutionStarted { id, received_bytes, .. }
                 if id == "write-1" && *received_bytes == delta.len() as u64
         )
     });
     let finished =
         position(&|event| matches!(event, LoopEvent::ToolFinished { id, .. } if id == "write-1"));
     assert_ne!(receiving, executing);
+    assert!(queued < executing);
     assert!(executing < finished);
 }
 

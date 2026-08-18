@@ -43,6 +43,7 @@ enum Line_ {
     Tool {
         id: String,
         name: String,
+        kind: ToolKind,
         arguments: String,
         state: ToolState,
         progress: ToolProgress,
@@ -57,6 +58,12 @@ enum ToolState {
     Failed,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ToolKind {
+    Tool,
+    Agent { name: String },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ToolProgress {
     None,
@@ -64,8 +71,10 @@ enum ToolProgress {
         received_bytes: u64,
         last_data: std::time::Instant,
     },
+    Queued,
     Executing {
         received_bytes: u64,
+        started: std::time::Instant,
     },
 }
 
@@ -711,10 +720,29 @@ fn restored_session_view(session: &ilar::session::SessionReader) -> RestoredSess
                             _ => lines.push(Line_::Assistant(text.clone())),
                         },
                         ilar::session::ContentBlock::ToolCall { id, name, input } => {
+                            let (kind, arguments) = if name == "task" {
+                                match ilar::agent::summarize_task_input(input) {
+                                    Some((description, agent)) => {
+                                        (ToolKind::Agent { name: agent }, description)
+                                    }
+                                    None => (
+                                        ToolKind::Agent {
+                                            name: "subagent".into(),
+                                        },
+                                        ilar::agent::summarize_tool_input(name, input),
+                                    ),
+                                }
+                            } else {
+                                (
+                                    ToolKind::Tool,
+                                    ilar::agent::summarize_tool_input(name, input),
+                                )
+                            };
                             lines.push(Line_::Tool {
                                 id: id.clone(),
                                 name: name.clone(),
-                                arguments: ilar::agent::summarize_tool_input(name, input),
+                                kind,
+                                arguments,
                                 state: ToolState::Running,
                                 progress: ToolProgress::None,
                             });
@@ -846,12 +874,14 @@ fn transcript_entry_lines(
             .collect(),
         Line_::Tool {
             name,
+            kind,
             arguments,
             state,
             progress,
             ..
         } => vec![tool_line(
             name,
+            kind,
             arguments,
             *state,
             width,
@@ -911,7 +941,7 @@ fn activity_line(
             let frames = ["◐", "◓", "◑", "◒"];
             (
                 frames[(elapsed.as_millis() / 160) as usize % frames.len()],
-                "running tools…",
+                "processing tools and agents…",
                 TOOL_ACTIVE,
             )
         }
@@ -1052,6 +1082,7 @@ impl App {
                 self.lines.push(Line_::Tool {
                     id: id.clone(),
                     name: name.clone(),
+                    kind: ToolKind::Tool,
                     arguments: String::new(),
                     state: ToolState::Running,
                     progress: ToolProgress::None,
@@ -1087,15 +1118,56 @@ impl App {
                         ..
                     } if line_id == id => Some(progress),
                     _ => None,
-                }) && !matches!(progress, ToolProgress::Executing { .. })
-                {
+                }) && !matches!(
+                    progress,
+                    ToolProgress::Queued | ToolProgress::Executing { .. }
+                ) {
                     *progress = ToolProgress::Receiving {
                         received_bytes: *received_bytes,
                         last_data: *last_data,
                     };
                 }
             }
-            LoopEvent::ToolExecutionStarted { id, received_bytes } => {
+            LoopEvent::ToolInputComplete { id } => {
+                if let Some(progress) = self.lines.iter_mut().rev().find_map(|line| match line {
+                    Line_::Tool {
+                        id: line_id,
+                        state: ToolState::Running,
+                        progress,
+                        ..
+                    } if line_id == id => Some(progress),
+                    _ => None,
+                }) {
+                    *progress = ToolProgress::Queued;
+                }
+            }
+            LoopEvent::SubagentConfigured {
+                id,
+                description,
+                agent,
+            } => {
+                if let Some((kind, arguments)) =
+                    self.lines.iter_mut().rev().find_map(|line| match line {
+                        Line_::Tool {
+                            id: line_id,
+                            kind,
+                            arguments,
+                            ..
+                        } if line_id == id => Some((kind, arguments)),
+                        _ => None,
+                    })
+                {
+                    *kind = ToolKind::Agent {
+                        name: agent.clone(),
+                    };
+                    *arguments = description.clone();
+                }
+            }
+            LoopEvent::ToolExecutionStarted {
+                id,
+                received_bytes,
+                started,
+            } => {
                 if let Some(progress) = self.lines.iter_mut().rev().find_map(|line| match line {
                     Line_::Tool {
                         id: line_id,
@@ -1107,6 +1179,7 @@ impl App {
                 }) {
                     *progress = ToolProgress::Executing {
                         received_bytes: *received_bytes,
+                        started: *started,
                     };
                 }
             }
@@ -1137,6 +1210,7 @@ impl App {
                     self.lines.push(Line_::Tool {
                         id: id.clone(),
                         name: name.clone(),
+                        kind: ToolKind::Tool,
                         arguments: String::new(),
                         state: if *is_error {
                             ToolState::Failed
@@ -2583,8 +2657,10 @@ enum Truncation {
     Middle,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn tool_line(
     name: &str,
+    kind: &ToolKind,
     arguments: &str,
     state: ToolState,
     width: u16,
@@ -2593,6 +2669,15 @@ fn tool_line(
     now: std::time::Instant,
 ) -> Line<'static> {
     let width = width as usize;
+    let tool_name = name;
+    let arguments = safe_text(arguments)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let (label, name, label_color) = match kind {
+        ToolKind::Tool => ("tool", tool_name.to_string(), Color::Yellow),
+        ToolKind::Agent { name } => ("agent", name.clone(), Color::Magenta),
+    };
     let (state_icon, state_color) = match state {
         ToolState::Running => {
             let frames = ["◐", "◓", "◑", "◒"];
@@ -2604,24 +2689,21 @@ fn tool_line(
         ToolState::Succeeded => ("✓", ASSISTANT),
         ToolState::Failed => ("×", ERROR),
     };
-    let fixed = UnicodeWidthStr::width("tool ▶  ") + UnicodeWidthStr::width(state_icon);
+    let fixed = UnicodeWidthStr::width(format!("{label} ▶  ").as_str())
+        + UnicodeWidthStr::width(state_icon);
     if width <= fixed {
         return Line::from(Span::styled(
             truncate_display(
-                &format!("tool ▶ {name} {state_icon}"),
+                &format!("{label} ▶ {name} {state_icon}"),
                 width,
                 Truncation::Right,
             ),
-            Style::default().fg(TOOL_ACTIVE),
+            Style::default().fg(label_color),
         ));
     }
     let name_budget = width.saturating_sub(fixed).clamp(1, 20);
-    let name = truncate_display(name, name_budget, Truncation::Right);
+    let name = truncate_display(&name, name_budget, Truncation::Right);
     let used = fixed + UnicodeWidthStr::width(name.as_str());
-    let arguments = safe_text(arguments)
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
     let progress = match (state, progress) {
         (
             ToolState::Running,
@@ -2641,16 +2723,23 @@ fn tool_line(
                 format!("receiving {}", format_bytes(received_bytes))
             }
         }
-        (ToolState::Running, ToolProgress::Executing { received_bytes }) => {
-            let action = if name == "write" {
-                "writing"
+        (ToolState::Running, ToolProgress::Queued) => "queued".into(),
+        (
+            ToolState::Running,
+            ToolProgress::Executing {
+                received_bytes,
+                started,
+            },
+        ) => {
+            let elapsed = format_elapsed(now.saturating_duration_since(started));
+            if tool_name == "task" {
+                format!("running · {elapsed}")
+            } else if tool_name == "write" && received_bytes > 0 {
+                format!("writing {} · {elapsed}", format_bytes(received_bytes))
+            } else if tool_name == "write" {
+                format!("writing · {elapsed}")
             } else {
-                "executing"
-            };
-            if received_bytes == 0 {
-                action.into()
-            } else {
-                format!("{action} · {} received", format_bytes(received_bytes))
+                format!("executing · {elapsed}")
             }
         }
         _ => String::new(),
@@ -2667,7 +2756,7 @@ fn tool_line(
         Truncation::Right,
     );
     let mut spans = vec![
-        Span::styled("tool ", Style::default().fg(Color::Yellow)),
+        Span::styled(format!("{label} "), Style::default().fg(label_color)),
         Span::styled("▶ ", Style::default().fg(TOOL_ACTIVE)),
         Span::styled(name, Style::default().add_modifier(Modifier::BOLD)),
         Span::styled(format!(" {state_icon}"), Style::default().fg(state_color)),
@@ -2688,6 +2777,15 @@ fn format_bytes(bytes: u64) -> String {
         format!("{:.1} KiB", bytes as f64 / 1024.0)
     } else {
         format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+fn format_elapsed(duration: std::time::Duration) -> String {
+    let seconds = duration.as_secs();
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else {
+        format!("{}m {}s", seconds / 60, seconds % 60)
     }
 }
 
@@ -3571,9 +3669,27 @@ mod tests {
                         name: "read".into(),
                         input: Default::default(),
                     },
+                    ilar::session::ContentBlock::ToolCall {
+                        id: "task-1".into(),
+                        name: "task".into(),
+                        input: serde_json::json!({
+                            "description": "Review restored security paths",
+                            "subagent_type": "build · secure",
+                        }),
+                    },
                 ],
                 usage,
                 stop_reason: "tool_use".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        session
+            .append(ilar::session::SessionEvent::ToolResult {
+                id: new_id(),
+                tool_use_id: "task-1".into(),
+                content: "review complete".into(),
+                is_error: false,
+                state: None,
                 ts: chrono::Utc::now(),
             })
             .unwrap();
@@ -3605,6 +3721,20 @@ mod tests {
             &view.lines[2],
             Line_::Tool { id, name, arguments, state: ToolState::Succeeded, .. }
                 if id == "read-1" && name == "read" && arguments.is_empty()
+        ));
+        assert!(matches!(
+            &view.lines[3],
+            Line_::Tool {
+                id,
+                name,
+                kind: ToolKind::Agent { name: agent },
+                arguments,
+                state: ToolState::Succeeded,
+                ..
+            } if id == "task-1"
+                && name == "task"
+                && agent == "build · secure"
+                && arguments == "Review restored security paths"
         ));
         assert!(matches!(
             view.lines.last(),
@@ -4382,6 +4512,7 @@ mod tests {
         let now = std::time::Instant::now();
         let receiving = tool_line(
             "write",
+            &ToolKind::Tool,
             "src/generated.html",
             ToolState::Running,
             120,
@@ -4398,6 +4529,7 @@ mod tests {
 
         let waiting = tool_line(
             "write",
+            &ToolKind::Tool,
             "src/generated.html",
             ToolState::Running,
             120,
@@ -4422,30 +4554,78 @@ mod tests {
             received_bytes: 48 * 1024,
             last_data: now,
         });
+        app.push_loop_event(&LoopEvent::ToolInputComplete {
+            id: "write-1".into(),
+        });
+        let queued = app.transcript_lines(120, now);
+        let queued = rendered_text(queued.last().unwrap());
+        assert!(queued.contains("queued"), "{queued}");
+        assert!(!queued.contains("provider"), "{queued}");
+
+        app.push_loop_event(&LoopEvent::ToolInputProgress {
+            id: "write-1".into(),
+            received_bytes: 48 * 1024,
+            last_data: now,
+        });
+        let still_queued = app.transcript_lines(120, now);
+        assert!(
+            rendered_text(still_queued.last().unwrap()).contains("queued"),
+            "{still_queued:?}"
+        );
         app.push_loop_event(&LoopEvent::ToolExecutionStarted {
             id: "write-1".into(),
             received_bytes: 64 * 1024,
+            started: now,
         });
         let writing = app.transcript_lines(120, now);
         let writing = rendered_text(writing.last().unwrap());
-        assert!(writing.contains("writing · 64.0 KiB received"), "{writing}");
+        assert!(writing.contains("writing 64.0 KiB · 0s"), "{writing}");
+        assert!(!writing.contains("received"), "{writing}");
 
         let executing = tool_line(
             "bash",
+            &ToolKind::Tool,
             "cargo test",
             ToolState::Running,
             120,
             std::time::Duration::ZERO,
             ToolProgress::Executing {
                 received_bytes: 2048,
+                started: now - std::time::Duration::from_secs(3),
             },
             now,
         );
         let executing = rendered_text(&executing);
-        assert!(
-            executing.contains("executing · 2.0 KiB received"),
-            "{executing}"
-        );
+        assert!(executing.contains("executing · 3s"), "{executing}");
+        assert!(!executing.contains("received"), "{executing}");
+
+        let mut agent_app = App::new();
+        agent_app.push_loop_event(&LoopEvent::ToolStarted {
+            id: "task-1".into(),
+            name: "task".into(),
+        });
+        agent_app.push_loop_event(&LoopEvent::ToolArguments {
+            id: "task-1".into(),
+            arguments: "ambiguous · summary".into(),
+        });
+        agent_app.push_loop_event(&LoopEvent::SubagentConfigured {
+            id: "task-1".into(),
+            description: "Review security paths".into(),
+            agent: "build · secure".into(),
+        });
+        agent_app.push_loop_event(&LoopEvent::ToolInputComplete {
+            id: "task-1".into(),
+        });
+        agent_app.push_loop_event(&LoopEvent::ToolExecutionStarted {
+            id: "task-1".into(),
+            received_bytes: 406,
+            started: now - std::time::Duration::from_secs(72),
+        });
+        let subagent = rendered_text(agent_app.transcript_lines(120, now).last().unwrap());
+        assert!(subagent.contains("agent ▶ build · secure"), "{subagent}");
+        assert!(subagent.contains("Review security paths"), "{subagent}");
+        assert!(subagent.contains("running · 1m 12s"), "{subagent}");
+        assert!(!subagent.contains("received"), "{subagent}");
     }
 
     #[test]
@@ -4524,10 +4704,11 @@ mod tests {
             name: "read".into(),
         });
         let tools = app.transcript_lines(80, app.activity_started);
-        assert!(rendered_text(tools.last().unwrap()).contains("running tools"));
+        assert!(rendered_text(tools.last().unwrap()).contains("processing tools and agents"));
         let tool_now = std::time::Instant::now();
         let first_tool = tool_line(
             "read",
+            &ToolKind::Tool,
             "src/main.rs",
             ToolState::Running,
             80,
@@ -4537,6 +4718,7 @@ mod tests {
         );
         let next_tool = tool_line(
             "read",
+            &ToolKind::Tool,
             "src/main.rs",
             ToolState::Running,
             80,
@@ -4563,6 +4745,7 @@ mod tests {
         for width in 0..=100 {
             let line = tool_line(
                 "extremely-long-tool-name",
+                &ToolKind::Tool,
                 "👩‍💻 /very/long/path/to/a/file with arguments",
                 ToolState::Succeeded,
                 width,
@@ -4578,6 +4761,7 @@ mod tests {
             let now = std::time::Instant::now();
             let progress = tool_line(
                 "write",
+                &ToolKind::Tool,
                 "👩‍💻 /very/long/path/to/a/file",
                 ToolState::Running,
                 width,
@@ -4998,6 +5182,7 @@ mod tests {
             Line_::Tool {
                 id: "done".into(),
                 name: "read".into(),
+                kind: ToolKind::Tool,
                 arguments: "src/main.rs".into(),
                 state: ToolState::Succeeded,
                 progress: ToolProgress::None,

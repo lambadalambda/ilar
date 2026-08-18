@@ -11,7 +11,8 @@ use crate::config::{AgentDefinition, AgentWorkspaceMode};
 use crate::provider::ProviderResolver;
 use crate::session::{ContentBlock, SessionMeta, SessionStore, new_id};
 use crate::tools::{
-    Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, ToolRegistry, WorkspaceAccess,
+    Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, ToolRegistry, ToolStartObserver,
+    WorkspaceAccess,
 };
 use serde::Deserialize;
 
@@ -216,6 +217,15 @@ impl SubagentSpawner {
 
     /// Run one subagent task; returns its final text as the tool output.
     pub async fn run_task(self: &Arc<Self>, input: TaskInput, ctx: &ToolContext) -> ToolOutput {
+        self.run_task_observed(input, ctx, None).await
+    }
+
+    async fn run_task_observed(
+        self: &Arc<Self>,
+        input: TaskInput,
+        ctx: &ToolContext,
+        mut on_start: Option<ToolStartObserver>,
+    ) -> ToolOutput {
         if self.depth >= self.max_depth {
             return ToolOutput::error(format!(
                 "Subagent nesting limit reached (depth {} of {}). Complete this task directly with your tools instead of spawning another agent.",
@@ -695,6 +705,9 @@ impl SubagentSpawner {
                 cancel: background_cancel,
             });
             let _ = registered_tx.send(());
+            if let Some(on_start) = on_start.take() {
+                on_start();
+            }
             return ToolOutput::text(
                 "Deferred background task started. Completion will trigger a separate follow-up turn. \
 Do not sleep, poll, or check on it. Do not perform this task's scope yourself; continue only \
@@ -732,6 +745,9 @@ clearly disjoint work."
             }
         }
         child_ctx.workspace_lease = Some(lease);
+        if let Some(on_start) = on_start.take() {
+            on_start();
+        }
         let tx = discarded_event_sender();
         let outcome = run_turn(
             self.resolver.as_ref(),
@@ -1367,6 +1383,22 @@ impl Tool for TaskTool {
                 Err(e) => return ToolOutput::error(format!("invalid input for task: {e}")),
             };
             spawner.run_task(input, &ctx).await
+        })
+    }
+
+    fn run_observed(
+        &self,
+        input: serde_json::Value,
+        ctx: ToolContext,
+        on_start: ToolStartObserver,
+    ) -> ToolFuture {
+        let spawner = self.spawner.clone();
+        Box::pin(async move {
+            let input: TaskInput = match serde_json::from_value(input) {
+                Ok(v) => v,
+                Err(e) => return ToolOutput::error(format!("invalid input for task: {e}")),
+            };
+            spawner.run_task_observed(input, &ctx, Some(on_start)).await
         })
     }
 }

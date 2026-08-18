@@ -596,10 +596,8 @@ pub fn summarize_tool_input(name: &str, input: &serde_json::Value) -> String {
             None => format!("/{pattern}/"),
         }),
         "glob" => string("pattern"),
-        "task" => string("description").map(|description| match string("subagent_type") {
-            Some(agent) => format!("{description} · {agent}"),
-            None => description,
-        }),
+        "task" => summarize_task_input(input)
+            .map(|(description, agent)| format!("{description} · {agent}")),
         _ => input.as_object().map(|values| {
             values
                 .iter()
@@ -627,6 +625,17 @@ pub fn summarize_tool_input(name: &str, input: &serde_json::Value) -> String {
         .chars()
         .take(MAX_TOOL_ARGUMENT_SUMMARY_CHARS)
         .collect()
+}
+
+pub fn summarize_task_input(input: &serde_json::Value) -> Option<(String, String)> {
+    let bounded = |key: &str, limit| {
+        input
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(collapse_whitespace)
+            .map(|value| value.chars().take(limit).collect::<String>())
+    };
+    Some((bounded("description", 256)?, bounded("subagent_type", 128)?))
 }
 
 fn collapse_whitespace(value: &str) -> String {
@@ -893,6 +902,23 @@ pub async fn run_turn(
                             )
                             .await;
                     }
+                    if name == "task"
+                        && let Some((description, agent)) = summarize_task_input(&input)
+                    {
+                        events
+                            .publish(
+                                LoopEvent::SubagentConfigured {
+                                    id: id.clone(),
+                                    description,
+                                    agent,
+                                },
+                                &cancel,
+                            )
+                            .await;
+                    }
+                    events
+                        .publish(LoopEvent::ToolInputComplete { id }, &cancel)
+                        .await;
                 }
                 ProviderEvent::ResponseContent { provider, content } => {
                     if provider.is_empty() || acc.response_content.is_some() || !content.is_array()
@@ -1159,31 +1185,33 @@ pub async fn run_turn(
             call_ctx,
             cancel.clone(),
             move |id, name| {
-                let _ = started_tx.send((id, name));
+                let _ = started_tx.send((id, name, std::time::Instant::now()));
             },
         );
         tokio::pin!(execution);
         let outcomes = loop {
             tokio::select! {
                 biased;
-                Some((id, _name)) = started_rx.recv() => {
+                Some((id, _name, started)) = started_rx.recv() => {
                     events
                         .publish(
                             LoopEvent::ToolExecutionStarted {
                                 received_bytes: received_bytes.get(&id).copied().unwrap_or(0),
                                 id,
+                                started,
                             },
                             &cancel,
                         )
                         .await;
                 }
                 outcomes = &mut execution => {
-                    while let Ok((id, _name)) = started_rx.try_recv() {
+                    while let Ok((id, _name, started)) = started_rx.try_recv() {
                         events
                             .publish(
                                 LoopEvent::ToolExecutionStarted {
                                     received_bytes: received_bytes.get(&id).copied().unwrap_or(0),
                                     id,
+                                    started,
                                 },
                                 &cancel,
                             )

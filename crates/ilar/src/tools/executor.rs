@@ -12,7 +12,10 @@ use std::sync::Arc;
 use futures::stream::{FuturesUnordered, StreamExt};
 use tokio_util::sync::CancellationToken;
 
-use super::{Tool, ToolConcurrency, ToolContext, ToolOutput, WorkspaceAccess, WorkspaceCoverage};
+use super::{
+    Tool, ToolConcurrency, ToolContext, ToolOutput, ToolStartObserver, WorkspaceAccess,
+    WorkspaceCoverage,
+};
 
 /// One tool call from an assistant turn.
 #[derive(Debug, Clone)]
@@ -148,20 +151,20 @@ where
             let started_id = call.id.clone();
             let started_name = call.name.clone();
             running.push(Box::pin(async move {
-                let output = if background {
+                let start: ToolStartObserver = Box::new(move || {
                     on_start(started_id, started_name);
-                    tool.run(input, call_ctx).await
+                });
+                let output = if background {
+                    tool.run_observed(input, call_ctx, start).await
                 } else if manages_workspace_access && accepts_executor_workspace_lease {
                     match call_ctx.workspace_coverage(access) {
                         WorkspaceCoverage::Covered => {
-                            on_start(started_id, started_name);
-                            tool.run(input, call_ctx).await
+                            tool.run_observed(input, call_ctx, start).await
                         }
                         WorkspaceCoverage::Absent => {
                             let lease = call_ctx.workspace.acquire_lease(access).await;
                             call_ctx.workspace_lease = Some(lease);
-                            on_start(started_id, started_name);
-                            tool.run(input, call_ctx).await
+                            tool.run_observed(input, call_ctx, start).await
                         }
                         WorkspaceCoverage::Incompatible => ToolOutput::error(format!(
                             "tool {} requests workspace access not covered by its inherited lease",
@@ -169,18 +172,15 @@ where
                         )),
                     }
                 } else if manages_workspace_access || access == WorkspaceAccess::None {
-                    on_start(started_id, started_name);
-                    tool.run(input, call_ctx).await
+                    tool.run_observed(input, call_ctx, start).await
                 } else {
                     match call_ctx.workspace_coverage(access) {
                         WorkspaceCoverage::Covered => {
-                            on_start(started_id, started_name);
-                            tool.run(input, call_ctx).await
+                            tool.run_observed(input, call_ctx, start).await
                         }
                         WorkspaceCoverage::Absent => {
                             let _permit = call_ctx.workspace.acquire(access).await;
-                            on_start(started_id, started_name);
-                            tool.run(input, call_ctx).await
+                            tool.run_observed(input, call_ctx, start).await
                         }
                         WorkspaceCoverage::Incompatible => ToolOutput::error(format!(
                             "tool {} requests workspace access not covered by its inherited lease",

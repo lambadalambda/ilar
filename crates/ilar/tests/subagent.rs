@@ -2,7 +2,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
-use ilar::agent::{LOOP_EVENT_CAPACITY, LoopConfig, TurnOutcome, loop_event_channel, run_turn};
+use ilar::agent::{
+    LOOP_EVENT_CAPACITY, LoopConfig, LoopEvent, TurnOutcome, loop_event_channel, run_turn,
+};
 use ilar::config::{AgentDefinition, AgentWorkspaceMode};
 use ilar::provider::{
     EventStream, FixedProviderResolver, MockProvider, Provider, ProviderEvent, ProviderHandle,
@@ -147,7 +149,9 @@ fn task_call(id: &str, prompt: &str) -> ProviderEvent {
     }
 }
 
-async fn run_two_tasks(workspace_mode: AgentWorkspaceMode) -> (Duration, Vec<ChatMessage>) {
+async fn run_two_tasks(
+    workspace_mode: AgentWorkspaceMode,
+) -> (Duration, Vec<ChatMessage>, Vec<LoopEvent>) {
     let (store, session_id) = temp_store();
     // Children answer after 250ms; serial execution would take 500ms.
     let child = Arc::new(ScriptedDelayProvider {
@@ -190,7 +194,7 @@ async fn run_two_tasks(workspace_mode: AgentWorkspaceMode) -> (Duration, Vec<Cha
         ],
     ]);
 
-    let (tx, _) = loop_event_channel(LOOP_EVENT_CAPACITY);
+    let (tx, mut rx) = loop_event_channel(LOOP_EVENT_CAPACITY);
     let start = Instant::now();
     let outcome = run_turn(
         &parent,
@@ -211,12 +215,16 @@ async fn run_two_tasks(workspace_mode: AgentWorkspaceMode) -> (Duration, Vec<Cha
     assert_eq!(outcome, TurnOutcome::Completed);
 
     let session = store.load(&session_id).unwrap();
-    (elapsed, session.transcript())
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+    (elapsed, session.transcript(), events)
 }
 
 #[tokio::test]
 async fn mutable_tasks_sharing_a_checkout_are_serialized_and_merge_in_order() {
-    let (elapsed, transcript) = run_two_tasks(AgentWorkspaceMode::Mutable).await;
+    let (elapsed, transcript, events) = run_two_tasks(AgentWorkspaceMode::Mutable).await;
     assert!(
         elapsed >= Duration::from_millis(450),
         "mutable tasks overlapped: {elapsed:?}"
@@ -234,11 +242,32 @@ async fn mutable_tasks_sharing_a_checkout_are_serialized_and_merge_in_order() {
         ContentBlock::ToolResult { tool_use_id, content, is_error: false }
             if tool_use_id == "t2" && content.contains("beta")
     ));
+    let started = |id: &str| {
+        events.iter().find_map(|event| match event {
+            LoopEvent::ToolExecutionStarted {
+                id: event_id,
+                started,
+                ..
+            } if event_id == id => Some(*started),
+            _ => None,
+        })
+    };
+    let first = started("t1").expect("first child should report actual activation");
+    let second = started("t2").expect("second child should report actual activation");
+    assert!(
+        second.saturating_duration_since(first) >= Duration::from_millis(200),
+        "serialized child was marked active before its workspace lease"
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        LoopEvent::SubagentConfigured { id, description, agent }
+            if id == "t1" && description == "explore" && agent == "explore"
+    )));
 }
 
 #[tokio::test]
 async fn enforced_read_only_tasks_may_overlap() {
-    let (elapsed, _) = run_two_tasks(AgentWorkspaceMode::ReadOnly).await;
+    let (elapsed, _, _) = run_two_tasks(AgentWorkspaceMode::ReadOnly).await;
     assert!(
         elapsed < Duration::from_millis(450),
         "read-only tasks looked serial: {elapsed:?}"
