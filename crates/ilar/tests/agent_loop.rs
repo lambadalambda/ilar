@@ -225,8 +225,9 @@ async fn completed_write_arguments_transition_from_receiving_to_execution() {
                 if id == "write-1" && *received_bytes == delta.len() as u64
         )
     });
-    let queued =
-        position(&|event| matches!(event, LoopEvent::ToolInputComplete { id } if id == "write-1"));
+    let queued = position(
+        &|event| matches!(event, LoopEvent::ToolInputComplete { id, .. } if id == "write-1"),
+    );
     let executing = position(&|event| {
         matches!(
             event,
@@ -236,6 +237,16 @@ async fn completed_write_arguments_transition_from_receiving_to_execution() {
     });
     let finished =
         position(&|event| matches!(event, LoopEvent::ToolFinished { id, .. } if id == "write-1"));
+    assert!(published.iter().any(|event| matches!(
+        event,
+        LoopEvent::ToolInputComplete { id, arguments }
+            if id == "write-1" && arguments.contains("generated.txt")
+    )));
+    assert!(published.iter().any(|event| matches!(
+        event,
+        LoopEvent::ToolFinished { id, result, .. }
+            if id == "write-1" && !result.is_empty()
+    )));
     assert_ne!(receiving, executing);
     assert!(queued < executing);
     assert!(executing < finished);

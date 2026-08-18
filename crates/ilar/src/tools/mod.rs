@@ -309,6 +309,8 @@ pub struct ToolContext {
     pub location: WorkspaceLocation,
     /// Session the tool call belongs to (parent link for subagents).
     pub session_id: String,
+    /// Current provider tool-call id while a tool is executing.
+    pub call_id: Option<String>,
     /// Subagent nesting depth (0 = root session).
     pub depth: usize,
     /// Subagent spawner, when the task tool is available.
@@ -327,6 +329,7 @@ impl ToolContext {
         Self {
             cwd: location.cwd.clone(),
             session_id: String::new(),
+            call_id: None,
             depth: 0,
             subagent: None,
             workspace: WorkspaceScheduler::for_location(&location),
@@ -376,6 +379,7 @@ impl ToolContext {
 pub struct ToolOutput {
     pub content: String,
     pub is_error: bool,
+    child_session_id: Option<String>,
     state: Option<crate::session::SessionState>,
     pending_state_commit: Option<PendingStateCommit>,
 }
@@ -392,6 +396,7 @@ impl std::fmt::Debug for ToolOutput {
             .debug_struct("ToolOutput")
             .field("content", &self.content)
             .field("is_error", &self.is_error)
+            .field("child_session_id", &self.child_session_id)
             .field("state", &self.state)
             .finish()
     }
@@ -401,6 +406,7 @@ impl PartialEq for ToolOutput {
     fn eq(&self, other: &Self) -> bool {
         self.content == other.content
             && self.is_error == other.is_error
+            && self.child_session_id == other.child_session_id
             && self.state == other.state
     }
 }
@@ -410,6 +416,7 @@ impl ToolOutput {
         Self {
             content: content.into(),
             is_error: false,
+            child_session_id: None,
             state: None,
             pending_state_commit: None,
         }
@@ -419,6 +426,7 @@ impl ToolOutput {
         Self {
             content: content.into(),
             is_error: true,
+            child_session_id: None,
             state: None,
             pending_state_commit: None,
         }
@@ -426,6 +434,15 @@ impl ToolOutput {
 
     pub fn session_state(&self) -> Option<&crate::session::SessionState> {
         self.state.as_ref()
+    }
+
+    pub fn child_session_id(&self) -> Option<&str> {
+        self.child_session_id.as_deref()
+    }
+
+    pub(crate) fn with_child_session(mut self, session_id: String) -> Self {
+        self.child_session_id = Some(session_id);
+        self
     }
 
     pub(crate) fn with_todo_state(

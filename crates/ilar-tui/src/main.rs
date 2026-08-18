@@ -35,6 +35,7 @@ use ilar::tools::{ToolContext, ToolRegistry};
 
 /// A rendered line in the transcript.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)] // Tool entries own bounded detail and nested agent activity.
 enum Line_ {
     User(String),
     Task(String),
@@ -46,11 +47,19 @@ enum Line_ {
     },
     Tool {
         id: String,
+        group_id: String,
         name: String,
         kind: ToolKind,
         arguments: String,
+        argument_detail: String,
+        result: Option<String>,
         state: ToolState,
         progress: ToolProgress,
+        expanded: bool,
+        child_lines: Vec<Line_>,
+        child_group: u64,
+        child_running: bool,
+        child_session_id: Option<String>,
     },
     System(String),
 }
@@ -86,37 +95,82 @@ enum ToolProgress {
 #[derive(Default)]
 struct TranscriptRenderCache {
     width: Option<u16>,
+    revision: Option<u64>,
     entries: Vec<CachedTranscriptEntry>,
     #[cfg(test)]
     rebuilds: usize,
 }
 
 struct CachedTranscriptEntry {
-    source: Line_,
-    rows: Vec<Line<'static>>,
+    source: TranscriptEntry,
+    rows: Vec<TranscriptRow>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum TranscriptEntry {
+    Item(Box<Line_>),
+    ToolGroup {
+        id: String,
+        calls: Vec<Line_>,
+        expanded: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TranscriptHitTarget {
+    ToolGroup(String),
+    Tool(String),
+}
+
+#[derive(Clone)]
+struct TranscriptRow {
+    line: Line<'static>,
+    target: Option<TranscriptHitTarget>,
 }
 
 impl TranscriptRenderCache {
     fn update(
         &mut self,
         lines: &[Line_],
+        expanded_groups: &std::collections::HashSet<String>,
+        revision: u64,
         width: u16,
         now: std::time::Instant,
         activity_started: std::time::Instant,
     ) {
         if self.width != Some(width) {
             self.width = Some(width);
+            self.revision = None;
             self.entries.clear();
         }
-        self.entries.truncate(lines.len());
-        for (index, source) in lines.iter().enumerate() {
-            let animated = matches!(
-                source,
-                Line_::Tool {
-                    state: ToolState::Running,
-                    ..
+        if self.revision == Some(revision) {
+            for (index, cached) in self.entries.iter_mut().enumerate() {
+                if transcript_entry_animated(&cached.source) {
+                    let mut rows = transcript_entry_rows(
+                        &cached.source,
+                        expanded_groups,
+                        width,
+                        now,
+                        activity_started,
+                    );
+                    if index > 0 {
+                        rows.insert(
+                            0,
+                            TranscriptRow {
+                                line: Line::default(),
+                                target: None,
+                            },
+                        );
+                    }
+                    cached.rows = rows;
                 }
-            );
+            }
+            return;
+        }
+        let sources = transcript_entries(lines, expanded_groups);
+        self.entries.truncate(sources.len());
+        for (index, source) in sources.iter().enumerate() {
+            let animated = transcript_entry_animated(source);
             let changed = self
                 .entries
                 .get(index)
@@ -124,10 +178,17 @@ impl TranscriptRenderCache {
             if !changed && !animated {
                 continue;
             }
-            let rows = transcript_entry_lines(source, width, now, activity_started)
-                .into_iter()
-                .flat_map(|line| wrap_styled_line(line, width as usize))
-                .collect();
+            let mut rows =
+                transcript_entry_rows(source, expanded_groups, width, now, activity_started);
+            if index > 0 {
+                rows.insert(
+                    0,
+                    TranscriptRow {
+                        line: Line::default(),
+                        target: None,
+                    },
+                );
+            }
             if let Some(cached) = self.entries.get_mut(index) {
                 if changed {
                     cached.source = source.clone();
@@ -144,6 +205,7 @@ impl TranscriptRenderCache {
                 self.rebuilds += 1;
             }
         }
+        self.revision = Some(revision);
     }
 
     fn row_count(&self) -> usize {
@@ -155,15 +217,20 @@ impl TranscriptRenderCache {
         start: usize,
         count: usize,
         trailing: &[Line<'static>],
-    ) -> Vec<Line<'static>> {
+    ) -> Vec<TranscriptRow> {
         let mut skip = start;
         let mut remaining = count;
         let mut output = Vec::with_capacity(count.min(128));
+        let trailing = trailing
+            .iter()
+            .cloned()
+            .map(|line| TranscriptRow { line, target: None })
+            .collect::<Vec<_>>();
         for rows in self
             .entries
             .iter()
             .map(|entry| entry.rows.as_slice())
-            .chain(std::iter::once(trailing))
+            .chain(std::iter::once(trailing.as_slice()))
         {
             if remaining == 0 {
                 break;
@@ -680,10 +747,51 @@ fn notification_display(
 }
 
 fn restored_session_view(session: &ilar::session::SessionReader) -> RestoredSessionView {
-    let events = session.events();
+    restored_session_invocation_view(session, None)
+}
+
+fn restored_session_invocation_view(
+    session: &ilar::session::SessionReader,
+    parent_tool_call_id: Option<&str>,
+) -> RestoredSessionView {
+    let all_events = session.events();
+    let events = match parent_tool_call_id {
+        Some(parent_tool_call_id) => {
+            let start = all_events.iter().position(|event| {
+                matches!(
+                    event,
+                    ilar::session::SessionEvent::SubagentInvocation {
+                        parent_tool_call_id: current,
+                        ..
+                    } if current == parent_tool_call_id
+                )
+            });
+            let Some(start) = start else {
+                return RestoredSessionView {
+                    lines: Vec::new(),
+                    latest_usage: None,
+                };
+            };
+            let end = all_events[start + 1..]
+                .iter()
+                .position(|event| {
+                    matches!(
+                        event,
+                        ilar::session::SessionEvent::SubagentInvocation { .. }
+                    )
+                })
+                .map(|offset| start + 1 + offset)
+                .unwrap_or(all_events.len());
+            &all_events[start + 1..end]
+        }
+        None => all_events,
+    };
     let mut cut = 0usize;
     let mut summary = None;
     for (index, event) in events.iter().enumerate() {
+        if parent_tool_call_id.is_some() {
+            continue;
+        }
         if let ilar::session::SessionEvent::Compaction {
             kept_from,
             summary: current,
@@ -708,6 +816,7 @@ fn restored_session_view(session: &ilar::session::SessionReader) -> RestoredSess
     for event in &events[cut..] {
         match event {
             ilar::session::SessionEvent::Meta { .. } => {}
+            ilar::session::SessionEvent::SubagentInvocation { .. } => {}
             ilar::session::SessionEvent::UserMessage { text, .. } => {
                 match task_notification_display(text) {
                     Some(text) => lines.push(Line_::Task(text)),
@@ -717,8 +826,22 @@ fn restored_session_view(session: &ilar::session::SessionReader) -> RestoredSess
                     },
                 }
             }
-            ilar::session::SessionEvent::AssistantMessage { content, .. } => {
+            ilar::session::SessionEvent::AssistantMessage {
+                id: message_id,
+                content,
+                ..
+            } => {
+                let mut tool_run = 0usize;
+                let mut in_tool_run = false;
                 for block in content {
+                    if matches!(block, ilar::session::ContentBlock::ToolCall { .. }) {
+                        if !in_tool_run {
+                            tool_run += 1;
+                            in_tool_run = true;
+                        }
+                    } else {
+                        in_tool_run = false;
+                    }
                     match block {
                         ilar::session::ContentBlock::Text { text } => match lines.last_mut() {
                             Some(Line_::Assistant(current)) => current.push_str(text),
@@ -757,11 +880,19 @@ fn restored_session_view(session: &ilar::session::SessionReader) -> RestoredSess
                             };
                             lines.push(Line_::Tool {
                                 id: id.clone(),
+                                group_id: format!("{message_id}:{tool_run}"),
                                 name: name.clone(),
                                 kind,
                                 arguments,
+                                argument_detail: ilar::agent::tool_argument_detail(name, input),
+                                result: None,
                                 state: ToolState::Running,
                                 progress: ToolProgress::None,
+                                expanded: false,
+                                child_lines: Vec::new(),
+                                child_group: 0,
+                                child_running: false,
+                                child_session_id: None,
                             });
                         }
                         ilar::session::ContentBlock::Thinking { .. }
@@ -774,18 +905,30 @@ fn restored_session_view(session: &ilar::session::SessionReader) -> RestoredSess
             }
             ilar::session::SessionEvent::ToolResult {
                 tool_use_id,
+                content,
                 is_error,
+                child_session_id,
                 ..
             } => {
-                if let Some(state) = lines.iter_mut().rev().find_map(|line| match line {
-                    Line_::Tool { id, state, .. } if id == tool_use_id => Some(state),
-                    _ => None,
-                }) {
+                if let Some((state, result, stored_child_session)) =
+                    lines.iter_mut().rev().find_map(|line| match line {
+                        Line_::Tool {
+                            id,
+                            state,
+                            result,
+                            child_session_id,
+                            ..
+                        } if id == tool_use_id => Some((state, result, child_session_id)),
+                        _ => None,
+                    })
+                {
                     *state = if *is_error {
                         ToolState::Failed
                     } else {
                         ToolState::Succeeded
                     };
+                    *result = Some(bounded_detail(content));
+                    *stored_child_session = child_session_id.clone();
                 }
             }
             ilar::session::SessionEvent::ModelChange { model, .. } => {
@@ -804,6 +947,54 @@ fn restored_session_view(session: &ilar::session::SessionReader) -> RestoredSess
     RestoredSessionView {
         lines,
         latest_usage,
+    }
+}
+
+fn restored_session_view_with_store(
+    session: &ilar::session::SessionReader,
+    store: &SessionStore,
+) -> RestoredSessionView {
+    let mut view = restored_session_view(session);
+    let owner_session_id = session
+        .meta()
+        .map(|meta| meta.session_id.as_str())
+        .unwrap_or_default();
+    restore_child_activity(&mut view.lines, store, owner_session_id, 0);
+    view
+}
+
+fn restore_child_activity(
+    lines: &mut [Line_],
+    store: &SessionStore,
+    owner_session_id: &str,
+    depth: usize,
+) {
+    if depth >= 8 {
+        return;
+    }
+    for line in lines {
+        let Line_::Tool {
+            id: parent_tool_call_id,
+            child_session_id: Some(session_id),
+            child_lines,
+            ..
+        } = line
+        else {
+            continue;
+        };
+        let Ok(session) = store.load(session_id) else {
+            continue;
+        };
+        if session.meta().and_then(|meta| meta.parent_id.as_deref()) != Some(owner_session_id) {
+            continue;
+        }
+        let mut restored =
+            restored_session_invocation_view(&session, Some(parent_tool_call_id)).lines;
+        if matches!(restored.first(), Some(Line_::User(_))) {
+            restored.remove(0);
+        }
+        restore_child_activity(&mut restored, store, session_id, depth + 1);
+        *child_lines = restored;
     }
 }
 
@@ -828,6 +1019,633 @@ fn reasoning_summary_title(summary: &str) -> String {
     } else {
         safe_text(title)
     }
+}
+
+fn transcript_entries(
+    lines: &[Line_],
+    expanded_groups: &std::collections::HashSet<String>,
+) -> Vec<TranscriptEntry> {
+    let mut entries = Vec::new();
+    let mut index = 0;
+    while index < lines.len() {
+        let Line_::Tool {
+            group_id,
+            kind: ToolKind::Tool,
+            ..
+        } = &lines[index]
+        else {
+            entries.push(TranscriptEntry::Item(Box::new(lines[index].clone())));
+            index += 1;
+            continue;
+        };
+        let start = index;
+        while index < lines.len()
+            && matches!(
+                &lines[index],
+                Line_::Tool {
+                    group_id: next,
+                    kind: ToolKind::Tool,
+                    ..
+                } if next == group_id
+            )
+        {
+            index += 1;
+        }
+        if index - start == 1 {
+            entries.push(TranscriptEntry::Item(Box::new(lines[start].clone())));
+        } else {
+            entries.push(TranscriptEntry::ToolGroup {
+                id: group_id.clone(),
+                calls: lines[start..index].to_vec(),
+                expanded: expanded_groups.contains(group_id),
+            });
+        }
+    }
+    entries
+}
+
+fn toggle_tool_expansion(lines: &mut [Line_], id: &str) -> bool {
+    for line in lines {
+        if let Line_::Tool {
+            id: line_id,
+            expanded,
+            child_lines,
+            ..
+        } = line
+        {
+            if line_id == id {
+                *expanded = !*expanded;
+                return true;
+            }
+            if toggle_tool_expansion(child_lines, id) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn contains_child_session(lines: &[Line_], session_id: &str) -> bool {
+    lines.iter().any(|line| match line {
+        Line_::Tool {
+            child_session_id,
+            child_lines,
+            ..
+        } => {
+            child_session_id.as_deref() == Some(session_id)
+                || contains_child_session(child_lines, session_id)
+        }
+        _ => false,
+    })
+}
+
+fn session_lines_for_call_mut<'a>(
+    lines: &'a mut [Line_],
+    session_id: &str,
+    call_id: &str,
+) -> Option<&'a mut Vec<Line_>> {
+    for line in lines {
+        if let Line_::Tool {
+            child_session_id,
+            child_lines,
+            ..
+        } = line
+        {
+            if child_session_id.as_deref() == Some(session_id)
+                && child_lines
+                    .iter()
+                    .any(|line| matches!(line, Line_::Tool { id, .. } if id == call_id))
+            {
+                return Some(child_lines);
+            }
+            if let Some(found) = session_lines_for_call_mut(child_lines, session_id, call_id) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+fn direct_tool_mut<'a>(lines: &'a mut [Line_], id: &str) -> Option<&'a mut Line_> {
+    lines
+        .iter_mut()
+        .find(|line| matches!(line, Line_::Tool { id: line_id, .. } if line_id == id))
+}
+
+fn apply_subagent_activity(
+    lines: &mut Vec<Line_>,
+    root_session_id: &str,
+    activity: &ilar::subagent::SubagentActivity,
+) -> bool {
+    let owner = if activity.parent_session_id == root_session_id || root_session_id.is_empty() {
+        lines
+    } else if contains_child_session(lines, &activity.parent_session_id) {
+        let Some(owner) = session_lines_for_call_mut(
+            lines,
+            &activity.parent_session_id,
+            &activity.parent_call_id,
+        ) else {
+            return false;
+        };
+        owner
+    } else {
+        return false;
+    };
+    let Some(Line_::Tool {
+        child_lines,
+        child_group,
+        child_running,
+        child_session_id,
+        ..
+    }) = direct_tool_mut(owner, &activity.parent_call_id)
+    else {
+        return false;
+    };
+    *child_session_id = Some(activity.child_session_id.clone());
+    *child_running = !matches!(activity.event, LoopEvent::TurnDone { .. });
+    apply_child_loop_event(
+        child_lines,
+        child_group,
+        &activity.parent_call_id,
+        &activity.event,
+    );
+    true
+}
+
+fn apply_child_loop_event(lines: &mut Vec<Line_>, group: &mut u64, scope: &str, event: &LoopEvent) {
+    match event {
+        LoopEvent::TextDelta(text) => match lines.last_mut() {
+            Some(Line_::Assistant(current)) => current.push_str(text),
+            _ => lines.push(Line_::Assistant(text.clone())),
+        },
+        LoopEvent::ThinkingDelta(_) => {
+            if !matches!(
+                lines.last(),
+                Some(Line_::Thought {
+                    complete: false,
+                    ..
+                })
+            ) {
+                lines.push(Line_::Thought {
+                    text: "reasoning".into(),
+                    complete: false,
+                });
+            }
+        }
+        LoopEvent::ReasoningSummaryDelta(summary) => match lines.last_mut() {
+            Some(Line_::Thought {
+                text,
+                complete: false,
+            }) => text.push_str(summary),
+            _ => lines.push(Line_::Thought {
+                text: summary.clone(),
+                complete: false,
+            }),
+        },
+        LoopEvent::ReasoningSummaryCompleted => {
+            if let Some(complete) = lines.iter_mut().rev().find_map(|line| match line {
+                Line_::Thought { complete, .. } if !*complete => Some(complete),
+                _ => None,
+            }) {
+                *complete = true;
+            }
+        }
+        LoopEvent::ToolStarted { id, name } => lines.push(Line_::Tool {
+            id: id.clone(),
+            group_id: format!("{scope}:{group}"),
+            name: name.clone(),
+            kind: ToolKind::Tool,
+            arguments: String::new(),
+            argument_detail: String::new(),
+            result: None,
+            state: ToolState::Running,
+            progress: ToolProgress::None,
+            expanded: false,
+            child_lines: Vec::new(),
+            child_group: 0,
+            child_running: false,
+            child_session_id: None,
+        }),
+        LoopEvent::ToolArguments { id, arguments } => {
+            if let Some(Line_::Tool {
+                arguments: current, ..
+            }) = direct_tool_mut(lines, id)
+            {
+                *current = arguments.clone();
+            }
+        }
+        LoopEvent::ToolInputProgress {
+            id,
+            received_bytes,
+            last_data,
+        } => {
+            if let Some(Line_::Tool {
+                state: ToolState::Running,
+                progress,
+                ..
+            }) = direct_tool_mut(lines, id)
+                && !matches!(
+                    progress,
+                    ToolProgress::Queued | ToolProgress::Executing { .. }
+                )
+            {
+                *progress = ToolProgress::Receiving {
+                    received_bytes: *received_bytes,
+                    last_data: *last_data,
+                };
+            }
+        }
+        LoopEvent::ToolInputComplete { id, arguments } => {
+            if let Some(Line_::Tool {
+                progress,
+                argument_detail,
+                ..
+            }) = direct_tool_mut(lines, id)
+            {
+                *progress = ToolProgress::Queued;
+                *argument_detail = bounded_detail(arguments);
+            }
+        }
+        LoopEvent::SubagentConfigured {
+            id,
+            description,
+            agent,
+        } => {
+            if let Some(Line_::Tool {
+                kind, arguments, ..
+            }) = direct_tool_mut(lines, id)
+            {
+                *kind = ToolKind::Agent {
+                    name: agent.clone(),
+                };
+                *arguments = description.clone();
+            }
+        }
+        LoopEvent::ToolExecutionStarted {
+            id,
+            received_bytes,
+            started,
+        } => {
+            if let Some(Line_::Tool { progress, .. }) = direct_tool_mut(lines, id) {
+                *progress = ToolProgress::Executing {
+                    received_bytes: *received_bytes,
+                    started: *started,
+                };
+            }
+        }
+        LoopEvent::ToolExecutionCompleted { id } => {
+            if let Some(Line_::Tool {
+                state, progress, ..
+            }) = direct_tool_mut(lines, id)
+            {
+                *state = ToolState::Complete;
+                *progress = ToolProgress::None;
+            }
+        }
+        LoopEvent::ToolFinished {
+            id,
+            is_error,
+            result,
+            child_session_id,
+            ..
+        } => {
+            if let Some(Line_::Tool {
+                state,
+                progress,
+                result: current,
+                child_session_id: current_child,
+                ..
+            }) = direct_tool_mut(lines, id)
+            {
+                *state = if *is_error {
+                    ToolState::Failed
+                } else {
+                    ToolState::Succeeded
+                };
+                *progress = ToolProgress::None;
+                *current = Some(bounded_detail(result));
+                *current_child = child_session_id.clone();
+            }
+        }
+        LoopEvent::StepComplete { .. } => *group = group.saturating_add(1),
+        LoopEvent::TurnDone { outcome } => {
+            lines.retain(|line| {
+                !matches!(
+                    line,
+                    Line_::Thought {
+                        complete: false,
+                        ..
+                    }
+                )
+            });
+            if *outcome != TurnOutcome::Completed {
+                mark_running_tools_failed(lines);
+            }
+        }
+        LoopEvent::TurnStarted | LoopEvent::Compacted { .. } => {}
+    }
+}
+
+fn mark_running_tools_failed(lines: &mut [Line_]) {
+    for line in lines {
+        if let Line_::Tool {
+            state, child_lines, ..
+        } = line
+        {
+            if matches!(*state, ToolState::Running | ToolState::Complete) {
+                *state = ToolState::Failed;
+            }
+            mark_running_tools_failed(child_lines);
+        }
+    }
+}
+
+fn transcript_entry_animated(entry: &TranscriptEntry) -> bool {
+    match entry {
+        TranscriptEntry::Item(item) => tool_is_active(item),
+        TranscriptEntry::ToolGroup { calls, .. } => calls.iter().any(tool_is_active),
+    }
+}
+
+fn tool_is_active(line: &Line_) -> bool {
+    matches!(
+        line,
+        Line_::Tool {
+            state: ToolState::Running | ToolState::Complete,
+            ..
+        } | Line_::Tool {
+            child_running: true,
+            ..
+        }
+    )
+}
+
+fn transcript_entry_rows(
+    entry: &TranscriptEntry,
+    expanded_groups: &std::collections::HashSet<String>,
+    width: u16,
+    now: std::time::Instant,
+    activity_started: std::time::Instant,
+) -> Vec<TranscriptRow> {
+    match entry {
+        TranscriptEntry::Item(item) => match item.as_ref() {
+            tool @ Line_::Tool { .. } => {
+                tool_entry_rows(tool, expanded_groups, width, now, activity_started, 0)
+            }
+            item => transcript_entry_lines(item, width, now, activity_started)
+                .into_iter()
+                .flat_map(|line| wrap_styled_line(line, width as usize))
+                .map(|line| TranscriptRow { line, target: None })
+                .collect(),
+        },
+        TranscriptEntry::ToolGroup {
+            id,
+            calls,
+            expanded,
+        } => {
+            let running = calls.iter().filter(|call| tool_is_active(call)).count();
+            let failed = calls
+                .iter()
+                .filter(|call| {
+                    matches!(
+                        call,
+                        Line_::Tool {
+                            state: ToolState::Failed,
+                            ..
+                        }
+                    )
+                })
+                .count();
+            let mut rows = vec![TranscriptRow {
+                line: tool_group_line(calls.len(), running, failed, *expanded, width),
+                target: Some(TranscriptHitTarget::ToolGroup(id.clone())),
+            }];
+            let visible = calls
+                .iter()
+                .filter(|call| *expanded || tool_is_active(call));
+            for call in visible {
+                rows.extend(tool_entry_rows(
+                    call,
+                    expanded_groups,
+                    width,
+                    now,
+                    activity_started,
+                    2,
+                ));
+            }
+            rows
+        }
+    }
+}
+
+fn tool_group_line(
+    calls: usize,
+    running: usize,
+    failed: usize,
+    expanded: bool,
+    width: u16,
+) -> Line<'static> {
+    let disclosure = if expanded { "▾" } else { "▸" };
+    let (status, icon, color) = if running > 0 {
+        (
+            format!("{running} running · {calls} calls"),
+            "◐",
+            TOOL_ACTIVE,
+        )
+    } else if failed > 0 {
+        (format!("{calls} calls · {failed} failed"), "×", ERROR)
+    } else {
+        (format!("{calls} calls"), "✓", ASSISTANT)
+    };
+    let text = truncate_display(
+        &format!("tools {disclosure} {status} {icon}"),
+        width as usize,
+        Truncation::Right,
+    );
+    Line::from(Span::styled(text, Style::default().fg(color)))
+}
+
+fn tool_entry_rows(
+    entry: &Line_,
+    expanded_groups: &std::collections::HashSet<String>,
+    width: u16,
+    now: std::time::Instant,
+    activity_started: std::time::Instant,
+    indent: usize,
+) -> Vec<TranscriptRow> {
+    let indent = indent.min(width as usize);
+    let Line_::Tool {
+        id,
+        name,
+        kind,
+        arguments,
+        argument_detail,
+        result,
+        state,
+        progress,
+        expanded,
+        child_lines,
+        child_running,
+        ..
+    } = entry
+    else {
+        return Vec::new();
+    };
+    let display_state = if *child_running {
+        ToolState::Running
+    } else {
+        *state
+    };
+    let line = tool_line_with_disclosure(
+        name,
+        kind,
+        arguments,
+        display_state,
+        width.saturating_sub(indent as u16),
+        now.saturating_duration_since(activity_started),
+        *progress,
+        now,
+        *expanded,
+    );
+    let mut spans = vec![Span::raw(" ".repeat(indent))];
+    spans.extend(line.spans);
+    let mut rows = vec![TranscriptRow {
+        line: Line::from(spans),
+        target: Some(TranscriptHitTarget::Tool(id.clone())),
+    }];
+    if *expanded {
+        rows.extend(tool_detail_rows(
+            "args",
+            argument_detail,
+            width,
+            indent + 4,
+            4,
+            false,
+        ));
+        if matches!(kind, ToolKind::Tool) || child_lines.is_empty() || *state == ToolState::Failed {
+            rows.extend(tool_detail_rows(
+                "result",
+                result.as_deref().unwrap_or("pending"),
+                width,
+                indent + 4,
+                8,
+                *state == ToolState::Failed,
+            ));
+        }
+    }
+    if matches!(kind, ToolKind::Agent { .. })
+        && (*expanded
+            || *child_running
+            || matches!(*state, ToolState::Running | ToolState::Complete))
+    {
+        let nested_indent = (indent + 4).min(width as usize);
+        let visible = if *expanded {
+            child_lines.clone()
+        } else {
+            agent_live_preview(child_lines)
+        };
+        for child in transcript_entries(&visible, expanded_groups) {
+            rows.extend(
+                transcript_entry_rows(
+                    &child,
+                    expanded_groups,
+                    width.saturating_sub(nested_indent as u16),
+                    now,
+                    activity_started,
+                )
+                .into_iter()
+                .map(|row| indent_transcript_row(row, nested_indent)),
+            );
+        }
+    }
+    rows
+}
+
+fn agent_live_preview(lines: &[Line_]) -> Vec<Line_> {
+    let mut preview = if let Some(response @ Line_::Assistant(_)) = lines.last() {
+        vec![response.clone()]
+    } else {
+        lines
+            .iter()
+            .rfind(|line| matches!(line, Line_::Thought { .. }))
+            .cloned()
+            .into_iter()
+            .collect::<Vec<_>>()
+    };
+    preview.extend(lines.iter().filter(|line| tool_is_active(line)).cloned());
+    if preview.is_empty() {
+        preview.push(Line_::System("thinking…".into()));
+    }
+    preview
+}
+
+fn indent_transcript_row(mut row: TranscriptRow, indent: usize) -> TranscriptRow {
+    let mut spans = vec![Span::raw(" ".repeat(indent))];
+    spans.append(&mut row.line.spans);
+    row.line = Line::from(spans);
+    row
+}
+
+fn tool_detail_rows(
+    label: &str,
+    text: &str,
+    width: u16,
+    indent: usize,
+    limit: usize,
+    error: bool,
+) -> Vec<TranscriptRow> {
+    let width = width as usize;
+    if width == 0 {
+        return vec![TranscriptRow {
+            line: Line::default(),
+            target: None,
+        }];
+    }
+    let indent = indent.min(width.saturating_sub(1));
+    let remaining = width - indent;
+    let label_width = 8usize.min(remaining.saturating_sub(1));
+    let content_width = remaining.saturating_sub(label_width).max(1);
+    let mut content = safe_lines(text)
+        .into_iter()
+        .flat_map(|line| wrap_styled_line(Line::raw(line), content_width))
+        .collect::<Vec<_>>();
+    let truncated = content.len() > limit;
+    content.truncate(limit);
+    if truncated && let Some(last) = content.last_mut() {
+        *last = Line::styled(
+            truncate_display("… more", content_width, Truncation::Right),
+            Style::default().fg(MUTED),
+        );
+    }
+    if content.is_empty() {
+        content.push(Line::default());
+    }
+    let label_style = Style::default().fg(if error { ERROR } else { MUTED });
+    content
+        .into_iter()
+        .enumerate()
+        .map(|(index, mut line)| {
+            let mut spans = vec![
+                Span::raw(" ".repeat(indent)),
+                Span::styled(
+                    if index == 0 {
+                        format!(
+                            "{:<label_width$}",
+                            truncate_display(label, label_width, Truncation::Right)
+                        )
+                    } else {
+                        " ".repeat(label_width)
+                    },
+                    label_style,
+                ),
+            ];
+            spans.append(&mut line.spans);
+            TranscriptRow {
+                line: Line::from(spans),
+                target: None,
+            }
+        })
+        .collect()
 }
 
 fn transcript_entry_lines(
@@ -1016,6 +1834,7 @@ struct App {
     activity: Activity,
     activity_started: std::time::Instant,
     current_model: String,
+    session_id: String,
     cwd: std::path::PathBuf,
     context_used: u64,
     context_limit: Option<u64>,
@@ -1029,10 +1848,16 @@ struct App {
     model_key_pending: bool,
     transcript_text_area: Rect,
     transcript_cache: TranscriptRenderCache,
+    transcript_hit_targets: Vec<Option<TranscriptHitTarget>>,
     transcript_cells: Vec<RenderedRow>,
     transcript_selection: Option<TranscriptSelection>,
     selecting_transcript: bool,
+    transcript_dragged: bool,
     clipboard: Option<arboard::Clipboard>,
+    next_tool_group: u64,
+    expanded_tool_groups: std::collections::HashSet<String>,
+    transcript_revision: u64,
+    pending_subagent_activity: std::collections::VecDeque<ilar::subagent::SubagentActivity>,
     todos: std::sync::Arc<std::sync::Mutex<ilar::todo::TodoList>>,
 }
 
@@ -1049,6 +1874,7 @@ impl App {
             activity: Activity::Ready,
             activity_started: std::time::Instant::now(),
             current_model: "unknown".into(),
+            session_id: String::new(),
             cwd: std::path::PathBuf::from("."),
             context_used: 0,
             context_limit: None,
@@ -1062,10 +1888,16 @@ impl App {
             model_key_pending: false,
             transcript_text_area: Rect::default(),
             transcript_cache: TranscriptRenderCache::default(),
+            transcript_hit_targets: Vec::new(),
             transcript_cells: Vec::new(),
             transcript_selection: None,
             selecting_transcript: false,
+            transcript_dragged: false,
             clipboard: None,
+            next_tool_group: 0,
+            expanded_tool_groups: std::collections::HashSet::new(),
+            transcript_revision: 0,
+            pending_subagent_activity: std::collections::VecDeque::new(),
             todos: std::sync::Arc::new(std::sync::Mutex::new(ilar::todo::TodoList::default())),
         }
     }
@@ -1086,10 +1918,11 @@ impl App {
         self.status = "ready".into();
     }
 
-    fn restore_session(&mut self, session: &ilar::session::SessionReader) {
-        let restored = restored_session_view(session);
+    fn restore_session(&mut self, session: &ilar::session::SessionReader, store: &SessionStore) {
+        let restored = restored_session_view_with_store(session, store);
         self.lines.extend(restored.lines);
         self.latest_usage = restored.latest_usage;
+        self.transcript_revision = self.transcript_revision.wrapping_add(1);
     }
 
     fn set_activity(&mut self, activity: Activity) {
@@ -1099,7 +1932,13 @@ impl App {
         }
     }
 
+    fn push_transcript_line(&mut self, line: Line_) {
+        self.lines.push(line);
+        self.transcript_revision = self.transcript_revision.wrapping_add(1);
+    }
+
     fn push_notification(&mut self, description: &str, text: &str) {
+        self.transcript_revision = self.transcript_revision.wrapping_add(1);
         if let Some(text) = task_notification_display(text) {
             self.lines.push(Line_::Task(text));
         } else if let Some(text) = tool_notification_display(text) {
@@ -1112,6 +1951,7 @@ impl App {
     }
 
     fn push_loop_event(&mut self, event: &LoopEvent) {
+        self.transcript_revision = self.transcript_revision.wrapping_add(1);
         match event {
             LoopEvent::TurnStarted => {
                 self.status = "thinking…".into();
@@ -1154,11 +1994,19 @@ impl App {
             LoopEvent::ToolStarted { id, name } => {
                 self.lines.push(Line_::Tool {
                     id: id.clone(),
+                    group_id: format!("live:{}", self.next_tool_group),
                     name: name.clone(),
                     kind: ToolKind::Tool,
                     arguments: String::new(),
+                    argument_detail: String::new(),
+                    result: None,
                     state: ToolState::Running,
                     progress: ToolProgress::None,
+                    expanded: false,
+                    child_lines: Vec::new(),
+                    child_group: 0,
+                    child_running: false,
+                    child_session_id: None,
                 });
                 self.status = format!("running {name}");
                 self.set_activity(Activity::Tools);
@@ -1201,17 +2049,21 @@ impl App {
                     };
                 }
             }
-            LoopEvent::ToolInputComplete { id } => {
-                if let Some(progress) = self.lines.iter_mut().rev().find_map(|line| match line {
-                    Line_::Tool {
-                        id: line_id,
-                        state: ToolState::Running,
-                        progress,
-                        ..
-                    } if line_id == id => Some(progress),
-                    _ => None,
-                }) {
+            LoopEvent::ToolInputComplete { id, arguments } => {
+                if let Some((progress, detail)) =
+                    self.lines.iter_mut().rev().find_map(|line| match line {
+                        Line_::Tool {
+                            id: line_id,
+                            state: ToolState::Running,
+                            progress,
+                            argument_detail,
+                            ..
+                        } if line_id == id => Some((progress, argument_detail)),
+                        _ => None,
+                    })
+                {
                     *progress = ToolProgress::Queued;
+                    *detail = bounded_detail(arguments);
                 }
             }
             LoopEvent::SubagentConfigured {
@@ -1274,19 +2126,27 @@ impl App {
                     *progress = ToolProgress::None;
                 }
             }
-            LoopEvent::ToolFinished { id, name, is_error } => {
+            LoopEvent::ToolFinished {
+                id,
+                name,
+                is_error,
+                result,
+                child_session_id,
+            } => {
                 let mut matched = false;
-                if let Some((state, progress)) =
+                if let Some((state, progress, stored_result, stored_child_session)) =
                     self.lines.iter_mut().rev().find_map(|line| match line {
                         Line_::Tool {
                             id: line_id,
                             state,
                             progress,
+                            result,
+                            child_session_id,
                             ..
                         } if line_id == id
                             && matches!(*state, ToolState::Running | ToolState::Complete) =>
                         {
-                            Some((state, progress))
+                            Some((state, progress, result, child_session_id))
                         }
                         _ => None,
                     })
@@ -1297,20 +2157,30 @@ impl App {
                         ToolState::Succeeded
                     };
                     *progress = ToolProgress::None;
+                    *stored_result = Some(bounded_detail(result));
+                    *stored_child_session = child_session_id.clone();
                     matched = true;
                 }
                 if !matched {
                     self.lines.push(Line_::Tool {
                         id: id.clone(),
+                        group_id: format!("live:{}", self.next_tool_group),
                         name: name.clone(),
                         kind: ToolKind::Tool,
                         arguments: String::new(),
+                        argument_detail: String::new(),
+                        result: Some(bounded_detail(result)),
                         state: if *is_error {
                             ToolState::Failed
                         } else {
                             ToolState::Succeeded
                         },
                         progress: ToolProgress::None,
+                        expanded: false,
+                        child_lines: Vec::new(),
+                        child_group: 0,
+                        child_running: false,
+                        child_session_id: child_session_id.clone(),
                     });
                 }
                 let running = self
@@ -1336,6 +2206,7 @@ impl App {
                 }
             }
             LoopEvent::StepComplete { stop_reason, usage } => {
+                self.next_tool_group = self.next_tool_group.saturating_add(1);
                 self.latest_usage = Some(*usage);
                 let reported = usage.context_tokens();
                 if reported > 0 {
@@ -1388,7 +2259,31 @@ impl App {
         }
     }
 
+    fn push_subagent_activity(&mut self, activity: &ilar::subagent::SubagentActivity) {
+        self.transcript_revision = self.transcript_revision.wrapping_add(1);
+        if !apply_subagent_activity(&mut self.lines, &self.session_id, activity)
+            && self.pending_subagent_activity.len() < 256
+        {
+            self.pending_subagent_activity.push_back(activity.clone());
+        }
+        self.retry_subagent_activity();
+    }
+
+    fn retry_subagent_activity(&mut self) {
+        let pending = self.pending_subagent_activity.len();
+        for _ in 0..pending {
+            let Some(activity) = self.pending_subagent_activity.pop_front() else {
+                break;
+            };
+            if !apply_subagent_activity(&mut self.lines, &self.session_id, &activity) {
+                self.pending_subagent_activity.push_back(activity);
+            }
+        }
+    }
+
     fn finish_turn(&mut self, result: anyhow::Result<TurnOutcome>) {
+        self.transcript_revision = self.transcript_revision.wrapping_add(1);
+        self.retry_subagent_activity();
         if let Err(error) = result {
             self.lines.retain(|line| {
                 !matches!(
@@ -1469,6 +2364,7 @@ impl App {
     fn clear_transcript_selection(&mut self) {
         self.transcript_selection = None;
         self.selecting_transcript = false;
+        self.transcript_dragged = false;
     }
 
     fn begin_transcript_selection(&mut self, column: u16, row: u16) {
@@ -1495,6 +2391,11 @@ impl App {
         }
     }
 
+    fn drag_transcript_selection(&mut self, column: u16, row: u16) {
+        self.transcript_dragged = true;
+        self.update_transcript_selection(column, row);
+    }
+
     fn finish_transcript_selection(&mut self, column: u16, row: u16) -> Option<String> {
         if !self.selecting_transcript {
             return None;
@@ -1502,11 +2403,38 @@ impl App {
         self.update_transcript_selection(column, row);
         self.selecting_transcript = false;
         let selection = self.transcript_selection?;
+        if selection.anchor == selection.focus && !self.transcript_dragged {
+            let target = self
+                .transcript_hit_targets
+                .get(selection.focus.row)
+                .cloned()
+                .flatten();
+            self.transcript_selection = None;
+            if let Some(target) = target {
+                self.toggle_transcript_target(target);
+            }
+            return None;
+        }
         let text = selected_transcript_text(&self.transcript_cells, selection);
         if text.is_none() {
             self.transcript_selection = None;
         }
         text
+    }
+
+    fn toggle_transcript_target(&mut self, target: TranscriptHitTarget) {
+        match target {
+            TranscriptHitTarget::ToolGroup(id) => {
+                if !self.expanded_tool_groups.remove(&id) {
+                    self.expanded_tool_groups.insert(id);
+                }
+            }
+            TranscriptHitTarget::Tool(id) => {
+                toggle_tool_expansion(&mut self.lines, &id);
+            }
+        }
+        self.transcript_cache.entries.clear();
+        self.transcript_revision = self.transcript_revision.wrapping_add(1);
     }
 
     fn copy_to_clipboard(&mut self, text: &str) -> Result<()> {
@@ -1523,16 +2451,30 @@ impl App {
     #[cfg(test)]
     fn transcript_lines(&self, width: u16, now: std::time::Instant) -> Vec<Line<'static>> {
         let mut output = Vec::new();
-        for entry in &self.lines {
-            output.extend(transcript_entry_lines(
-                entry,
-                width,
-                now,
-                self.activity_started,
-            ));
+        for (index, entry) in transcript_entries(&self.lines, &self.expanded_tool_groups)
+            .iter()
+            .enumerate()
+        {
+            if index > 0 {
+                output.push(Line::default());
+            }
+            output.extend(
+                transcript_entry_rows(
+                    entry,
+                    &self.expanded_tool_groups,
+                    width,
+                    now,
+                    self.activity_started,
+                )
+                .into_iter()
+                .map(|row| row.line),
+            );
         }
         if let Some(activity) = activity_line(self.busy, self.activity, now, self.activity_started)
         {
+            if !output.is_empty() {
+                output.push(Line::default());
+            }
             output.push(activity);
         }
         output
@@ -1744,12 +2686,21 @@ impl App {
             .width
             .saturating_sub(2 + CONTENT_HORIZONTAL_PADDING * 2);
         let now = std::time::Instant::now();
-        self.transcript_cache
-            .update(&self.lines, text_width, now, self.activity_started);
-        let activity_rows = activity_line(self.busy, self.activity, now, self.activity_started)
+        self.transcript_cache.update(
+            &self.lines,
+            &self.expanded_tool_groups,
+            self.transcript_revision,
+            text_width,
+            now,
+            self.activity_started,
+        );
+        let mut activity_rows = activity_line(self.busy, self.activity, now, self.activity_started)
             .into_iter()
             .flat_map(|line| wrap_styled_line(line, text_width as usize))
             .collect::<Vec<_>>();
+        if !activity_rows.is_empty() && self.transcript_cache.row_count() > 0 {
+            activity_rows.insert(0, Line::default());
+        }
         let viewport_rows = transcript_area.height.saturating_sub(2) as usize;
         let content_rows = self
             .transcript_cache
@@ -1794,9 +2745,11 @@ impl App {
                 transcript_block = transcript_block.title_bottom(summary.right_aligned());
             }
         }
-        let text =
+        let visible =
             self.transcript_cache
                 .visible_rows(self.scroll_top, viewport_rows, &activity_rows);
+        self.transcript_hit_targets = visible.iter().map(|row| row.target.clone()).collect();
+        let text = visible.into_iter().map(|row| row.line).collect::<Vec<_>>();
         let paragraph = Paragraph::new(text).block(transcript_block);
         frame.render_widget(paragraph, transcript_area);
 
@@ -2779,6 +3732,23 @@ fn tool_line(
     progress: ToolProgress,
     now: std::time::Instant,
 ) -> Line<'static> {
+    tool_line_with_disclosure(
+        name, kind, arguments, state, width, elapsed, progress, now, false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tool_line_with_disclosure(
+    name: &str,
+    kind: &ToolKind,
+    arguments: &str,
+    state: ToolState,
+    width: u16,
+    elapsed: std::time::Duration,
+    progress: ToolProgress,
+    now: std::time::Instant,
+    expanded: bool,
+) -> Line<'static> {
     let width = width as usize;
     let tool_name = name;
     let arguments = safe_text(arguments)
@@ -2801,12 +3771,13 @@ fn tool_line(
         ToolState::Succeeded => ("✓", ASSISTANT),
         ToolState::Failed => ("×", ERROR),
     };
-    let fixed = UnicodeWidthStr::width(format!("{label} ▶  ").as_str())
+    let disclosure = if expanded { "▾" } else { "▶" };
+    let fixed = UnicodeWidthStr::width(format!("{label} {disclosure}  ").as_str())
         + UnicodeWidthStr::width(state_icon);
     if width <= fixed {
         return Line::from(Span::styled(
             truncate_display(
-                &format!("{label} ▶ {name} {state_icon}"),
+                &format!("{label} {disclosure} {name} {state_icon}"),
                 width,
                 Truncation::Right,
             ),
@@ -2878,7 +3849,7 @@ fn tool_line(
     );
     let mut spans = vec![
         Span::styled(format!("{label} "), Style::default().fg(label_color)),
-        Span::styled("▶ ", Style::default().fg(TOOL_ACTIVE)),
+        Span::styled(format!("{disclosure} "), Style::default().fg(TOOL_ACTIVE)),
         Span::styled(name, Style::default().add_modifier(Modifier::BOLD)),
         Span::styled(format!(" {state_icon}"), Style::default().fg(state_color)),
     ];
@@ -3025,6 +3996,16 @@ fn safe_lines(text: &str) -> Vec<String> {
     } else {
         lines
     }
+}
+
+fn bounded_detail(text: &str) -> String {
+    const MAX_DETAIL_CHARS: usize = 16 * 1024;
+    let mut detail = text.lines().map(safe_text).collect::<Vec<_>>().join("\n");
+    if detail.chars().count() > MAX_DETAIL_CHARS {
+        detail = detail.chars().take(MAX_DETAIL_CHARS).collect();
+        detail.push_str("\n… output truncated");
+    }
+    detail
 }
 
 fn selected_agent_name(cli: Option<&str>, persisted: Option<&str>) -> String {
@@ -3202,6 +4183,7 @@ async fn main() -> Result<()> {
         .with_web_tools()?
         .with_skills(skill_store)?;
     let notifications = spawner.subscribe();
+    let subagent_activity = spawner.subscribe_activity();
     let tool_ctx = ToolContext::root(cwd.clone()).with_subagents(spawner.clone());
     let model_choices = config.available_models();
 
@@ -3209,9 +4191,10 @@ async fn main() -> Result<()> {
         session_context_tokens(&store, &session_id, &system_prompt, &registry)?;
     let context_limit = resolver.context_limit(&model_for_session);
     let mut app = App::new();
+    app.session_id = session_id.clone();
     app.todos = todos;
     if let Some(resumed) = &resumed {
-        app.restore_session(resumed);
+        app.restore_session(resumed, &store);
     }
     app.configure_runtime(
         model_for_session.clone(),
@@ -3233,6 +4216,7 @@ async fn main() -> Result<()> {
         tool_ctx,
         spawner,
         notifications,
+        subagent_activity,
         loop_config,
         model_choices,
     )
@@ -3345,6 +4329,7 @@ async fn run_app(
     tool_ctx: ToolContext,
     spawner: std::sync::Arc<ilar::subagent::SubagentSpawner>,
     mut notifications: tokio::sync::mpsc::Receiver<ilar::subagent::Notification>,
+    mut subagent_activity: tokio::sync::broadcast::Receiver<ilar::subagent::SubagentActivity>,
     loop_config: LoopConfig,
     model_choices: Vec<&'static ilar::model::ModelInfo>,
 ) -> Result<()> {
@@ -3361,6 +4346,13 @@ async fn run_app(
             while let Ok(event) = rx.try_recv() {
                 app.push_loop_event(&event);
             }
+        }
+        app.retry_subagent_activity();
+        for _ in 0..256 {
+            let Ok(activity) = subagent_activity.try_recv() else {
+                break;
+            };
+            app.push_subagent_activity(&activity);
         }
         // Turn finished? Join and clean up.
         if let Some(handle) = turn_handle.as_mut()
@@ -3412,7 +4404,7 @@ async fn run_app(
                     app.busy = false;
                     app.status = "error".into();
                     app.set_activity(Activity::Error);
-                    app.lines.push(Line_::System(format!(
+                    app.push_transcript_line(Line_::System(format!(
                         "notification routing failed: {error}"
                     )));
                 }
@@ -3420,7 +4412,7 @@ async fn run_app(
                     app.busy = false;
                     app.status = "error".into();
                     app.set_activity(Activity::Error);
-                    app.lines.push(Line_::System(format!(
+                    app.push_transcript_line(Line_::System(format!(
                         "notification routing failed: {error}"
                     )));
                 }
@@ -3543,8 +4535,9 @@ async fn run_app(
                                         app.context_estimated = estimated;
                                     }
                                     app.status = "ready".into();
-                                    app.lines
-                                        .push(Line_::System(format!("switched to {new_model}")));
+                                    app.push_transcript_line(Line_::System(format!(
+                                        "switched to {new_model}"
+                                    )));
                                     app.model_picker = None;
                                 }
                                 Err(error) => {
@@ -3625,7 +4618,7 @@ async fn run_app(
                             if turn_handle.is_none() && !app.busy && !app.input.is_blank() =>
                         {
                             let text = app.input.take();
-                            app.lines.push(Line_::User(text.clone()));
+                            app.push_transcript_line(Line_::User(text.clone()));
                             app.follow_tail = true;
                             let (tx, rx) = loop_event_channel(LOOP_EVENT_CAPACITY);
                             events_rx = Some(rx);
@@ -3689,14 +4682,15 @@ async fn run_app(
                     app.begin_transcript_selection(mouse.column, mouse.row);
                 }
                 MouseEventKind::Drag(MouseButton::Left) => {
-                    app.update_transcript_selection(mouse.column, mouse.row);
+                    app.drag_transcript_selection(mouse.column, mouse.row);
                 }
                 MouseEventKind::Up(MouseButton::Left) => {
                     if let Some(text) = app.finish_transcript_selection(mouse.column, mouse.row)
                         && let Err(error) = app.copy_to_clipboard(&text)
                     {
-                        app.lines
-                            .push(Line_::System(format!("clipboard copy failed: {error:#}")));
+                        app.push_transcript_line(Line_::System(format!(
+                            "clipboard copy failed: {error:#}"
+                        )));
                         app.follow_tail = true;
                         app.set_activity(Activity::Error);
                     }
@@ -3814,6 +4808,7 @@ mod tests {
                 tool_use_id: "task-1".into(),
                 content: "review complete".into(),
                 is_error: false,
+                child_session_id: None,
                 state: None,
                 ts: chrono::Utc::now(),
             })
@@ -3824,6 +4819,7 @@ mod tests {
                 tool_use_id: "read-1".into(),
                 content: "file contents".into(),
                 is_error: false,
+                child_session_id: None,
                 state: None,
                 ts: chrono::Utc::now(),
             })
@@ -4577,6 +5573,465 @@ mod tests {
     }
 
     #[test]
+    fn completed_consecutive_tools_collapse_to_one_group_row() {
+        let mut app = App::new();
+        app.lines.clear();
+        for (id, name) in [("call-1", "read"), ("call-2", "grep")] {
+            app.push_loop_event(&LoopEvent::ToolStarted {
+                id: id.into(),
+                name: name.into(),
+            });
+            app.push_loop_event(&LoopEvent::ToolFinished {
+                id: id.into(),
+                name: name.into(),
+                is_error: false,
+                result: String::new(),
+                child_session_id: None,
+            });
+        }
+
+        let rendered = app
+            .transcript_lines(80, std::time::Instant::now())
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(rendered.len(), 1);
+        assert!(rendered[0].contains("tools"), "{rendered:?}");
+        assert!(rendered[0].contains("2 calls"), "{rendered:?}");
+
+        app.toggle_transcript_target(TranscriptHitTarget::ToolGroup("live:0".into()));
+        let expanded = app
+            .transcript_lines(80, std::time::Instant::now())
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>();
+        assert_eq!(expanded.len(), 3);
+        assert!(expanded.iter().any(|line| line.contains("read")));
+        assert!(expanded.iter().any(|line| line.contains("grep")));
+    }
+
+    #[test]
+    fn provider_step_boundary_splits_adjacent_single_calls() {
+        let mut app = App::new();
+        app.lines.clear();
+        for (index, (id, name)) in [("call-1", "read"), ("call-2", "grep")]
+            .into_iter()
+            .enumerate()
+        {
+            app.push_loop_event(&LoopEvent::ToolStarted {
+                id: id.into(),
+                name: name.into(),
+            });
+            app.push_loop_event(&LoopEvent::ToolFinished {
+                id: id.into(),
+                name: name.into(),
+                is_error: false,
+                result: String::new(),
+                child_session_id: None,
+            });
+            if index == 0 {
+                app.push_loop_event(&LoopEvent::StepComplete {
+                    stop_reason: "tool_use".into(),
+                    usage: Default::default(),
+                });
+            }
+        }
+
+        let rendered = app
+            .transcript_lines(80, std::time::Instant::now())
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>();
+        assert_eq!(rendered.len(), 3);
+        assert_eq!(rendered[1], "");
+        assert!(!rendered.iter().any(|line| line.starts_with("tools ")));
+    }
+
+    #[test]
+    fn agent_is_a_spaced_top_level_parent_outside_tool_groups() {
+        let mut app = App::new();
+        app.lines.clear();
+        app.push_loop_event(&LoopEvent::ToolStarted {
+            id: "read-1".into(),
+            name: "read".into(),
+        });
+        app.push_loop_event(&LoopEvent::ToolStarted {
+            id: "task-1".into(),
+            name: "task".into(),
+        });
+        app.push_loop_event(&LoopEvent::SubagentConfigured {
+            id: "task-1".into(),
+            description: "Inspect rendering".into(),
+            agent: "explore".into(),
+        });
+
+        let rendered = app
+            .transcript_lines(100, std::time::Instant::now())
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>();
+
+        assert!(rendered[0].starts_with("tool "), "{rendered:?}");
+        assert_eq!(rendered[1], "");
+        assert!(rendered[2].starts_with("agent "), "{rendered:?}");
+        assert!(rendered[3].contains("thinking"), "{rendered:?}");
+    }
+
+    #[test]
+    fn collapsed_running_group_shows_only_active_children() {
+        let mut app = App::new();
+        app.lines.clear();
+        for (id, name) in [("call-1", "read"), ("call-2", "grep")] {
+            app.push_loop_event(&LoopEvent::ToolStarted {
+                id: id.into(),
+                name: name.into(),
+            });
+        }
+        app.push_loop_event(&LoopEvent::ToolFinished {
+            id: "call-1".into(),
+            name: "read".into(),
+            is_error: false,
+            result: String::new(),
+            child_session_id: None,
+        });
+
+        let rendered = app
+            .transcript_lines(100, std::time::Instant::now())
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>();
+
+        assert!(rendered[0].contains("1 running · 2 calls"), "{rendered:?}");
+        assert!(rendered.iter().any(|line| line.contains("grep")));
+        assert!(!rendered.iter().any(|line| line.contains("read")));
+    }
+
+    #[test]
+    fn top_level_items_have_one_blank_separator_row() {
+        let mut app = App::new();
+        app.lines = vec![
+            Line_::User("Question".into()),
+            Line_::Thought {
+                text: "Answering".into(),
+                complete: true,
+            },
+            Line_::Assistant("Response".into()),
+        ];
+
+        let rendered = app
+            .transcript_lines(80, std::time::Instant::now())
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered,
+            [
+                "you  Question",
+                "",
+                "+ Thought: Answering",
+                "",
+                "ilar Response"
+            ]
+        );
+    }
+
+    #[test]
+    fn expanded_tool_shows_bounded_arguments_and_result() {
+        let mut app = App::new();
+        app.lines.clear();
+        app.push_loop_event(&LoopEvent::ToolStarted {
+            id: "read-1".into(),
+            name: "read".into(),
+        });
+        app.push_loop_event(&LoopEvent::ToolInputComplete {
+            id: "read-1".into(),
+            arguments: "{\n  \"path\": \"src/main.rs\"\n}".into(),
+        });
+        app.push_loop_event(&LoopEvent::ToolFinished {
+            id: "read-1".into(),
+            name: "read".into(),
+            is_error: false,
+            result: "first\nsecond".into(),
+            child_session_id: None,
+        });
+        app.toggle_transcript_target(TranscriptHitTarget::Tool("read-1".into()));
+
+        let rendered = app
+            .transcript_lines(60, std::time::Instant::now())
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>();
+
+        assert!(rendered.iter().any(|line| line.contains("args")));
+        assert!(rendered.iter().any(|line| line.contains("src/main.rs")));
+        assert!(rendered.iter().any(|line| line.contains("result")));
+        assert!(rendered.iter().any(|line| line.contains("second")));
+        assert!(rendered.iter().all(|line| line.width() <= 60));
+        for width in 0..=20 {
+            let narrow = app.transcript_lines(width, std::time::Instant::now());
+            assert!(
+                narrow.iter().all(|line| line.width() <= width as usize),
+                "width {width}: {:?}",
+                narrow.iter().map(rendered_text).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn agent_shows_live_children_and_expands_completed_timeline() {
+        let mut app = App::new();
+        app.lines.clear();
+        app.push_loop_event(&LoopEvent::ToolStarted {
+            id: "task-1".into(),
+            name: "task".into(),
+        });
+        app.push_loop_event(&LoopEvent::SubagentConfigured {
+            id: "task-1".into(),
+            description: "Inspect rendering".into(),
+            agent: "explore".into(),
+        });
+        for event in [
+            LoopEvent::ReasoningSummaryDelta("Tracing transcript".into()),
+            LoopEvent::ReasoningSummaryCompleted,
+            LoopEvent::ToolStarted {
+                id: "child-read".into(),
+                name: "read".into(),
+            },
+        ] {
+            app.push_subagent_activity(&ilar::subagent::SubagentActivity {
+                parent_session_id: String::new(),
+                parent_call_id: "task-1".into(),
+                child_session_id: "child-session".into(),
+                event,
+            });
+        }
+
+        let live = app
+            .transcript_lines(100, std::time::Instant::now())
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>();
+        assert!(
+            live.iter()
+                .any(|line| line.contains("Thought: Tracing transcript"))
+        );
+        assert!(
+            live.iter()
+                .any(|line| line.contains("child-read") || line.contains("read"))
+        );
+
+        app.push_subagent_activity(&ilar::subagent::SubagentActivity {
+            parent_session_id: String::new(),
+            parent_call_id: "task-1".into(),
+            child_session_id: "child-session".into(),
+            event: LoopEvent::TextDelta("Nested answer".into()),
+        });
+        app.push_subagent_activity(&ilar::subagent::SubagentActivity {
+            parent_session_id: String::new(),
+            parent_call_id: "task-1".into(),
+            child_session_id: "child-session".into(),
+            event: LoopEvent::TurnDone {
+                outcome: TurnOutcome::Completed,
+            },
+        });
+        app.push_loop_event(&LoopEvent::ToolFinished {
+            id: "task-1".into(),
+            name: "task".into(),
+            is_error: false,
+            result: "Nested answer".into(),
+            child_session_id: Some("child-session".into()),
+        });
+        let collapsed = app
+            .transcript_lines(100, std::time::Instant::now())
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>();
+        assert!(!collapsed.iter().any(|line| line.contains("Nested answer")));
+
+        app.toggle_transcript_target(TranscriptHitTarget::Tool("task-1".into()));
+        let expanded = app
+            .transcript_lines(100, std::time::Instant::now())
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>();
+        assert!(expanded.iter().any(|line| line.contains("Nested answer")));
+        assert!(
+            expanded
+                .iter()
+                .any(|line| line.contains("Tracing transcript"))
+        );
+    }
+
+    #[test]
+    fn early_child_activity_waits_for_its_parent_row() {
+        let mut app = App::new();
+        app.lines.clear();
+        app.push_subagent_activity(&ilar::subagent::SubagentActivity {
+            parent_session_id: "root-session".into(),
+            parent_call_id: "task-early".into(),
+            child_session_id: "child-early".into(),
+            event: LoopEvent::ReasoningSummaryDelta("Already working".into()),
+        });
+        assert_eq!(app.pending_subagent_activity.len(), 1);
+
+        app.push_loop_event(&LoopEvent::ToolStarted {
+            id: "task-early".into(),
+            name: "task".into(),
+        });
+        app.push_loop_event(&LoopEvent::SubagentConfigured {
+            id: "task-early".into(),
+            description: "Fast child".into(),
+            agent: "explore".into(),
+        });
+        app.retry_subagent_activity();
+
+        assert!(app.pending_subagent_activity.is_empty());
+        assert!(matches!(
+            app.lines.last(),
+            Some(Line_::Tool { child_lines, .. })
+                if matches!(child_lines.last(), Some(Line_::Thought { text, .. }) if text == "Already working")
+        ));
+    }
+
+    #[test]
+    fn restored_agent_loads_its_child_timeline() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(directory.path().join("sessions"));
+        let parent_id = new_id();
+        let child_id = new_id();
+        let mut child = store
+            .create(SessionMeta {
+                session_id: child_id.clone(),
+                parent_id: Some(parent_id.clone()),
+                agent: "explore".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+            })
+            .unwrap();
+        child
+            .append(ilar::session::SessionEvent::SubagentInvocation {
+                id: new_id(),
+                parent_tool_call_id: "task-restore".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        child
+            .append(ilar::session::SessionEvent::UserMessage {
+                id: new_id(),
+                text: "Inspect rendering".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        child
+            .append(ilar::session::SessionEvent::AssistantMessage {
+                id: new_id(),
+                model: "zai/glm-4.7".into(),
+                content: vec![ilar::session::ContentBlock::Text {
+                    text: "Nested restored answer".into(),
+                }],
+                usage: Default::default(),
+                stop_reason: "end_turn".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        child
+            .append(ilar::session::SessionEvent::SubagentInvocation {
+                id: new_id(),
+                parent_tool_call_id: "later-task".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        child
+            .append(ilar::session::SessionEvent::UserMessage {
+                id: new_id(),
+                text: "Later request".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        child
+            .append(ilar::session::SessionEvent::AssistantMessage {
+                id: new_id(),
+                model: "zai/glm-4.7".into(),
+                content: vec![ilar::session::ContentBlock::Text {
+                    text: "Later answer".into(),
+                }],
+                usage: Default::default(),
+                stop_reason: "end_turn".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        drop(child);
+
+        let mut parent = store
+            .create(SessionMeta {
+                session_id: parent_id.clone(),
+                parent_id: None,
+                agent: "build".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+            })
+            .unwrap();
+        parent
+            .append(ilar::session::SessionEvent::AssistantMessage {
+                id: new_id(),
+                model: "zai/glm-4.7".into(),
+                content: vec![ilar::session::ContentBlock::ToolCall {
+                    id: "task-restore".into(),
+                    name: "task".into(),
+                    input: serde_json::json!({
+                        "description": "Inspect rendering",
+                        "subagent_type": "explore"
+                    }),
+                }],
+                usage: Default::default(),
+                stop_reason: "tool_use".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        parent
+            .append(ilar::session::SessionEvent::ToolResult {
+                id: new_id(),
+                tool_use_id: "task-restore".into(),
+                content: "Nested restored answer".into(),
+                is_error: false,
+                child_session_id: Some(child_id),
+                state: None,
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        drop(parent);
+
+        let restored = restored_session_view_with_store(&store.load(&parent_id).unwrap(), &store);
+        let child_lines = restored.lines.iter().find_map(|line| match line {
+            Line_::Tool { child_lines, .. } => Some(child_lines),
+            _ => None,
+        });
+
+        assert!(child_lines.is_some_and(|lines| {
+            lines.iter().any(
+                |line| matches!(line, Line_::Assistant(text) if text == "Nested restored answer"),
+            ) && !lines
+                .iter()
+                .any(|line| matches!(line, Line_::Assistant(text) if text == "Later answer"))
+        }));
+    }
+
+    #[test]
+    fn zero_distance_click_toggles_a_semantic_transcript_row() {
+        let mut app = App::new();
+        app.transcript_text_area = Rect::new(4, 2, 40, 1);
+        app.transcript_hit_targets = vec![Some(TranscriptHitTarget::ToolGroup("group-1".into()))];
+
+        app.begin_transcript_selection(5, 2);
+        assert_eq!(app.finish_transcript_selection(5, 2), None);
+
+        assert!(app.expanded_tool_groups.contains("group-1"));
+        assert!(app.transcript_selection.is_none());
+    }
+
+    #[test]
     fn aborted_turn_closes_running_tool_rows() {
         let mut app = App::new();
         app.push_loop_event(&LoopEvent::ToolStarted {
@@ -4612,6 +6067,8 @@ mod tests {
             id: "read-1".into(),
             name: "read".into(),
             is_error: false,
+            result: String::new(),
+            child_session_id: None,
         });
 
         assert!(matches!(
@@ -4646,6 +6103,8 @@ mod tests {
             id: "bash-1".into(),
             name: "bash".into(),
             is_error: false,
+            result: String::new(),
+            child_session_id: None,
         });
 
         let lines = app.transcript_lines(36, std::time::Instant::now());
@@ -4705,6 +6164,7 @@ mod tests {
         });
         app.push_loop_event(&LoopEvent::ToolInputComplete {
             id: "write-1".into(),
+            arguments: "{\"path\":\"src/generated.html\"}".into(),
         });
         let queued = app.transcript_lines(120, now);
         let queued = rendered_text(queued.last().unwrap());
@@ -4794,13 +6254,19 @@ mod tests {
         });
         agent_app.push_loop_event(&LoopEvent::ToolInputComplete {
             id: "task-1".into(),
+            arguments: "{\"description\":\"Review security paths\"}".into(),
         });
         agent_app.push_loop_event(&LoopEvent::ToolExecutionStarted {
             id: "task-1".into(),
             received_bytes: 406,
             started: now - std::time::Duration::from_secs(72),
         });
-        let subagent = rendered_text(agent_app.transcript_lines(120, now).last().unwrap());
+        let subagent = agent_app
+            .transcript_lines(120, now)
+            .iter()
+            .map(rendered_text)
+            .find(|line| line.contains("agent"))
+            .unwrap();
         assert!(subagent.contains("agent ▶ build · secure"), "{subagent}");
         assert!(subagent.contains("Review security paths"), "{subagent}");
         assert!(subagent.contains("running · 1m 12s"), "{subagent}");
@@ -5292,6 +6758,7 @@ mod tests {
         let previous = app.transcript_cells.clone();
 
         app.lines[0] = Line_::System("changed output".into());
+        app.transcript_revision = app.transcript_revision.wrapping_add(1);
         terminal.draw(|frame| app.render(frame)).unwrap();
 
         assert_ne!(previous, app.transcript_cells);
@@ -5396,22 +6863,42 @@ mod tests {
             Line_::Assistant("final **answer**".into()),
             Line_::Tool {
                 id: "done".into(),
+                group_id: "test:0".into(),
                 name: "read".into(),
                 kind: ToolKind::Tool,
                 arguments: "src/main.rs".into(),
+                argument_detail: String::new(),
+                result: None,
                 state: ToolState::Succeeded,
                 progress: ToolProgress::None,
+                expanded: false,
+                child_lines: Vec::new(),
+                child_group: 0,
+                child_running: false,
+                child_session_id: None,
             },
             Line_::Assistant("stream".into()),
         ];
         let now = std::time::Instant::now();
-        app.transcript_cache
-            .update(&app.lines, 40, now, app.activity_started);
+        app.transcript_cache.update(
+            &app.lines,
+            &app.expanded_tool_groups,
+            app.transcript_revision,
+            40,
+            now,
+            app.activity_started,
+        );
         assert_eq!(app.transcript_cache.rebuilds, 3);
 
         app.push_loop_event(&LoopEvent::TextDelta("ing".into()));
-        app.transcript_cache
-            .update(&app.lines, 40, now, app.activity_started);
+        app.transcript_cache.update(
+            &app.lines,
+            &app.expanded_tool_groups,
+            app.transcript_revision,
+            40,
+            now,
+            app.activity_started,
+        );
 
         assert_eq!(app.transcript_cache.rebuilds, 4);
     }
@@ -5423,13 +6910,25 @@ mod tests {
             .map(|index| Line_::System(format!("row {index}")))
             .collect();
         let now = std::time::Instant::now();
-        app.transcript_cache
-            .update(&app.lines, 40, now, app.activity_started);
+        app.transcript_cache.update(
+            &app.lines,
+            &app.expanded_tool_groups,
+            app.transcript_revision,
+            40,
+            now,
+            app.activity_started,
+        );
         let rebuilds = app.transcript_cache.rebuilds;
 
         let visible = app.transcript_cache.visible_rows(500, 7, &[]);
-        app.transcript_cache
-            .update(&app.lines, 40, now, app.activity_started);
+        app.transcript_cache.update(
+            &app.lines,
+            &app.expanded_tool_groups,
+            app.transcript_revision,
+            40,
+            now,
+            app.activity_started,
+        );
 
         assert_eq!(visible.len(), 7);
         assert_eq!(app.transcript_cache.rebuilds, rebuilds);
@@ -5451,9 +6950,20 @@ mod tests {
             .flat_map(|line| wrap_styled_line(line, width as usize))
             .collect::<Vec<_>>();
 
-        app.transcript_cache
-            .update(&app.lines, width, now, app.activity_started);
-        let actual = app.transcript_cache.visible_rows(0, usize::MAX, &[]);
+        app.transcript_cache.update(
+            &app.lines,
+            &app.expanded_tool_groups,
+            app.transcript_revision,
+            width,
+            now,
+            app.activity_started,
+        );
+        let actual = app
+            .transcript_cache
+            .visible_rows(0, usize::MAX, &[])
+            .into_iter()
+            .map(|row| row.line)
+            .collect::<Vec<_>>();
 
         assert_eq!(actual, expected);
     }
@@ -5773,6 +7283,7 @@ mod tests {
                 tool_use_id: "todo-resume".into(),
                 content: "updated".into(),
                 is_error: false,
+                child_session_id: None,
                 state: Some(ilar::session::SessionState::TodoList {
                     list: ilar::todo::TodoList {
                         items: vec![ilar::todo::TodoItem {

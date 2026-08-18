@@ -61,6 +61,7 @@ fn sample_log(meta: &SessionMeta) -> Vec<SessionEvent> {
             tool_use_id: "toolu_1".into(),
             content: "1: model = ...".into(),
             is_error: false,
+            child_session_id: None,
             state: None,
             ts,
         },
@@ -124,6 +125,7 @@ fn todo_snapshots_round_trip_and_latest_replacement_wins() {
                 tool_use_id: tool_use_id.into(),
                 content: "updated".into(),
                 is_error: false,
+                child_session_id: None,
                 state: Some(SessionState::TodoList { list }),
                 ts,
             })
@@ -169,6 +171,7 @@ fn replay_rejects_todo_state_from_a_non_todo_tool() {
             tool_use_id: "read-call".into(),
             content: "done".into(),
             is_error: false,
+            child_session_id: None,
             state: Some(SessionState::TodoList {
                 list: TodoList::default(),
             }),
@@ -733,6 +736,7 @@ fn replay_index_preserves_folded_model_and_todo_state() {
             tool_use_id: "todo-before-cut".into(),
             content: "updated".into(),
             is_error: false,
+            child_session_id: None,
             state: Some(SessionState::TodoList {
                 list: expected_todos.clone(),
             }),
@@ -1071,6 +1075,7 @@ fn unanswered_tool_calls_are_repaired_once_by_writer() {
             tool_use_id: "answered".into(),
             content: "ok".into(),
             is_error: false,
+            child_session_id: None,
             state: None,
             ts: Utc::now(),
         })
@@ -1113,6 +1118,7 @@ fn orphan_tool_results_are_rejected_without_mutation() {
             tool_use_id: "missing-call".into(),
             content: "impossible".into(),
             is_error: false,
+            child_session_id: None,
             state: None,
             ts: Utc::now(),
         })

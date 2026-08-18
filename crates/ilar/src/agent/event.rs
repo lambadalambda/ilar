@@ -22,6 +22,7 @@ pub enum LoopEvent {
     },
     ToolInputComplete {
         id: String,
+        arguments: String,
     },
     SubagentConfigured {
         id: String,
@@ -40,6 +41,8 @@ pub enum LoopEvent {
         id: String,
         name: String,
         is_error: bool,
+        result: String,
+        child_session_id: Option<String>,
     },
     /// One provider call completed (stop reason + usage).
     StepComplete {

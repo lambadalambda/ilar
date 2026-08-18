@@ -151,7 +151,12 @@ fn task_call(id: &str, prompt: &str) -> ProviderEvent {
 
 async fn run_two_tasks(
     workspace_mode: AgentWorkspaceMode,
-) -> (Duration, Vec<ChatMessage>, Vec<LoopEvent>) {
+) -> (
+    Duration,
+    Vec<ChatMessage>,
+    Vec<LoopEvent>,
+    Vec<ilar::subagent::SubagentActivity>,
+) {
     let (store, session_id) = temp_store();
     // Children answer after 250ms; serial execution would take 500ms.
     let child = Arc::new(ScriptedDelayProvider {
@@ -165,6 +170,7 @@ async fn run_two_tasks(
     // One shared provider instance answering both tasks:
     let shared: Arc<dyn Provider> = Arc::new(SharedProvider::new(vec![child, Arc::new(child2)]));
     let spawner = spawner_with_mode(shared.clone(), &store, 10, 3, workspace_mode);
+    let mut activity_rx = spawner.subscribe_activity();
     let registry = parent_registry(spawner);
 
     // Parent: two task calls, then a final text turn.
@@ -219,12 +225,16 @@ async fn run_two_tasks(
     while let Ok(event) = rx.try_recv() {
         events.push(event);
     }
-    (elapsed, session.transcript(), events)
+    let mut activity = Vec::new();
+    while let Ok(event) = activity_rx.try_recv() {
+        activity.push(event);
+    }
+    (elapsed, session.transcript(), events, activity)
 }
 
 #[tokio::test]
 async fn mutable_tasks_sharing_a_checkout_are_serialized_and_merge_in_order() {
-    let (elapsed, transcript, events) = run_two_tasks(AgentWorkspaceMode::Mutable).await;
+    let (elapsed, transcript, events, activity) = run_two_tasks(AgentWorkspaceMode::Mutable).await;
     assert!(
         elapsed >= Duration::from_millis(450),
         "mutable tasks overlapped: {elapsed:?}"
@@ -278,11 +288,19 @@ async fn mutable_tasks_sharing_a_checkout_are_serialized_and_merge_in_order() {
         LoopEvent::SubagentConfigured { id, description, agent }
             if id == "t1" && description == "explore" && agent == "explore"
     )));
+    assert!(activity.iter().any(|activity| {
+        activity.parent_call_id == "t1"
+            && matches!(&activity.event, LoopEvent::TextDelta(text) if text.contains("alpha"))
+    }));
+    assert!(activity.iter().any(|activity| {
+        activity.parent_call_id == "t2"
+            && matches!(&activity.event, LoopEvent::TextDelta(text) if text.contains("beta"))
+    }));
 }
 
 #[tokio::test]
 async fn enforced_read_only_tasks_may_overlap() {
-    let (elapsed, _, _) = run_two_tasks(AgentWorkspaceMode::ReadOnly).await;
+    let (elapsed, _, _, _) = run_two_tasks(AgentWorkspaceMode::ReadOnly).await;
     assert!(
         elapsed < Duration::from_millis(450),
         "read-only tasks looked serial: {elapsed:?}"

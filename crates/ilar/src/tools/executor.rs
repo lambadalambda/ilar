@@ -149,6 +149,7 @@ where
             let accepts_executor_workspace_lease = tool.accepts_executor_workspace_lease();
             let access = tool.workspace_access();
             let mut call_ctx = ctx.clone();
+            call_ctx.call_id = Some(call.id.clone());
             let input = call.input;
             let on_start = on_start.clone();
             let started_id = call.id.clone();

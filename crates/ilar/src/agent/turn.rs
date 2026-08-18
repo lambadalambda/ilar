@@ -693,6 +693,48 @@ pub fn summarize_task_input(input: &serde_json::Value) -> Option<(String, String
     Some((bounded("description", 256)?, bounded("subagent_type", 128)?))
 }
 
+fn bounded_tool_detail(text: &str) -> String {
+    const MAX_DETAIL_CHARS: usize = 16 * 1024;
+    let mut output = text
+        .chars()
+        .filter(|character| matches!(character, '\n' | '\t') || !character.is_control())
+        .take(MAX_DETAIL_CHARS + 1)
+        .collect::<String>();
+    if output.chars().count() > MAX_DETAIL_CHARS {
+        output = output.chars().take(MAX_DETAIL_CHARS).collect();
+        output.push_str("\n… output truncated");
+    }
+    output
+}
+
+pub fn tool_argument_detail(name: &str, input: &serde_json::Value) -> String {
+    fn redact(name: &str, value: &serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Object(values) => serde_json::Value::Object(
+                values
+                    .iter()
+                    .map(|(key, value)| {
+                        let value = if sensitive_key(key) {
+                            serde_json::Value::String("<redacted>".into())
+                        } else if name == "bash" && key == "command" {
+                            serde_json::Value::String(redact_command(value.as_str().unwrap_or("")))
+                        } else {
+                            redact(name, value)
+                        };
+                        (key.clone(), value)
+                    })
+                    .collect(),
+            ),
+            serde_json::Value::Array(values) => {
+                serde_json::Value::Array(values.iter().map(|value| redact(name, value)).collect())
+            }
+            _ => value.clone(),
+        }
+    }
+    let input = redact(name, input);
+    bounded_tool_detail(&serde_json::to_string_pretty(&input).unwrap_or_else(|_| input.to_string()))
+}
+
 fn collapse_whitespace(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -803,6 +845,13 @@ pub async fn run_turn(
     let mut session = store.acquire_writer(session_id)?.load()?;
     let model = session.effective_model();
     let provider = resolver.resolve_provider(&model)?;
+    if let Some(parent_tool_call_id) = tool_ctx.call_id.as_ref() {
+        session.append(SessionEvent::SubagentInvocation {
+            id: new_id(),
+            parent_tool_call_id: parent_tool_call_id.clone(),
+            ts: Utc::now(),
+        })?;
+    }
     session.append(SessionEvent::UserMessage {
         id: new_id(),
         text: user_input.to_string(),
@@ -984,7 +1033,13 @@ pub async fn run_turn(
                             .await;
                     }
                     events
-                        .publish(LoopEvent::ToolInputComplete { id }, &cancel)
+                        .publish(
+                            LoopEvent::ToolInputComplete {
+                                id,
+                                arguments: tool_argument_detail(&name, &input),
+                            },
+                            &cancel,
+                        )
                         .await;
                 }
                 ProviderEvent::ResponseContent { provider, content } => {
@@ -1045,6 +1100,7 @@ pub async fn run_turn(
                     tool_use_id: id.clone(),
                     content: format!("provider error before execution: {message}"),
                     is_error: true,
+                    child_session_id: None,
                     state: None,
                     ts: Utc::now(),
                 })?;
@@ -1054,6 +1110,10 @@ pub async fn run_turn(
                             id: id.clone(),
                             name: name.clone(),
                             is_error: true,
+                            result: bounded_tool_detail(&format!(
+                                "provider error before execution: {message}"
+                            )),
+                            child_session_id: None,
                         },
                         &cancel,
                     )
@@ -1067,6 +1127,10 @@ pub async fn run_turn(
                                 id: id.clone(),
                                 name: name.clone(),
                                 is_error: true,
+                                result: bounded_tool_detail(&format!(
+                                    "provider error before execution: {message}"
+                                )),
+                                child_session_id: None,
                             },
                             &cancel,
                         )
@@ -1100,6 +1164,7 @@ pub async fn run_turn(
                     tool_use_id: id.clone(),
                     content: "aborted before execution".into(),
                     is_error: true,
+                    child_session_id: None,
                     state: None,
                     ts: Utc::now(),
                 })?;
@@ -1109,6 +1174,8 @@ pub async fn run_turn(
                             id: id.clone(),
                             name: name.clone(),
                             is_error: true,
+                            result: "aborted before execution".into(),
+                            child_session_id: None,
                         },
                         &cancel,
                     )
@@ -1210,6 +1277,7 @@ pub async fn run_turn(
                     tool_use_id: id.clone(),
                     content: "aborted before execution".into(),
                     is_error: true,
+                    child_session_id: None,
                     state: None,
                     ts: Utc::now(),
                 })?;
@@ -1302,13 +1370,16 @@ pub async fn run_turn(
                 output.discard_session_state();
             }
             let is_error = output.is_error;
+            let child_session_id = output.child_session_id().map(str::to_string);
             let state = output.session_state().cloned();
             let content = std::mem::take(&mut output.content);
+            let result = bounded_tool_detail(&content);
             session.append(SessionEvent::ToolResult {
                 id: new_id(),
                 tool_use_id: outcome.id.clone(),
                 content,
                 is_error,
+                child_session_id,
                 state,
                 ts: Utc::now(),
             })?;
@@ -1319,6 +1390,8 @@ pub async fn run_turn(
                         id: outcome.id,
                         name: outcome.name,
                         is_error,
+                        result,
+                        child_session_id: output.child_session_id().map(str::to_string),
                     },
                     &cancel,
                 )
@@ -1387,6 +1460,23 @@ mod tests {
         assert!(!custom.contains("secret"), "{custom}");
         assert!(!custom.contains("session"), "{custom}");
         assert!(custom.chars().count() <= MAX_TOOL_ARGUMENT_SUMMARY_CHARS);
+    }
+
+    #[test]
+    fn expanded_tool_details_are_sanitized_and_bounded() {
+        let detail = bounded_tool_detail(&format!("ok\u{1b}[31m{}", "x".repeat(20_000)));
+
+        assert!(!detail.contains('\u{1b}'));
+        assert!(detail.ends_with("… output truncated"));
+        assert!(detail.chars().count() <= 16 * 1024 + 20);
+
+        let arguments = tool_argument_detail(
+            "custom",
+            &serde_json::json!({"token": "secret", "nested": {"password": "hidden"}}),
+        );
+        assert!(!arguments.contains("secret"));
+        assert!(!arguments.contains("hidden"));
+        assert!(arguments.contains("<redacted>"));
     }
 
     #[test]

@@ -926,6 +926,7 @@ async fn stall_watchdog_fires_on_silent_child() {
                 cwd: std::env::temp_dir(),
                 location: ilar::tools::WorkspaceLocation::shared(std::env::temp_dir()),
                 session_id,
+                call_id: None,
                 depth: 0,
                 subagent: Some(spawner),
                 workspace: ilar::tools::WorkspaceScheduler::new(),

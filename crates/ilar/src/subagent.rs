@@ -4,7 +4,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::agent::{
-    LOOP_EVENT_CAPACITY, LoopConfig, LoopEventSender, TurnOutcome, loop_event_channel, run_turn,
+    LOOP_EVENT_CAPACITY, LoopConfig, LoopEvent, LoopEventSender, TurnOutcome, loop_event_channel,
+    run_turn,
 };
 use crate::config::system_prompt_for;
 use crate::config::{AgentDefinition, AgentWorkspaceMode};
@@ -17,6 +18,7 @@ use crate::tools::{
 use serde::Deserialize;
 
 const NOTIFICATION_CAPACITY: usize = 64;
+const ACTIVITY_CAPACITY: usize = 256;
 
 /// A completed background task's notification — the synthetic user
 /// message that re-invokes the parent loop.
@@ -26,6 +28,14 @@ pub struct Notification {
     pub description: String,
     pub text: String,
     pub is_error: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct SubagentActivity {
+    pub parent_session_id: String,
+    pub parent_call_id: String,
+    pub child_session_id: String,
+    pub event: LoopEvent,
 }
 
 pub enum RouteOutcome {
@@ -52,6 +62,7 @@ pub struct SubagentSpawner {
     notify_tx: tokio::sync::mpsc::Sender<Notification>,
     /// The single notification receiver, handed out by `subscribe`.
     notify_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<Notification>>>>,
+    activity_tx: tokio::sync::broadcast::Sender<SubagentActivity>,
     stall_timeout: std::time::Duration,
     /// Abort handles for detached background tasks.
     background_tasks: Arc<Mutex<BackgroundRegistry>>,
@@ -84,6 +95,7 @@ impl SubagentSpawner {
         max_depth: usize,
     ) -> Self {
         let (notify_tx, notify_rx) = tokio::sync::mpsc::channel(NOTIFICATION_CAPACITY);
+        let (activity_tx, _) = tokio::sync::broadcast::channel(ACTIVITY_CAPACITY);
         let workspace_location = crate::tools::WorkspaceLocation::shared(cwd);
         let workspace = crate::tools::WorkspaceScheduler::for_location(&workspace_location);
         let (active_sessions_changed, _) = tokio::sync::watch::channel(0);
@@ -100,6 +112,7 @@ impl SubagentSpawner {
             active_sessions: Arc::new(Mutex::new(std::collections::HashSet::new())),
             active_sessions_changed,
             notify_tx,
+            activity_tx,
             stall_timeout: std::time::Duration::from_secs(600),
             background_tasks: Arc::new(Mutex::new(BackgroundRegistry::default())),
             workspace,
@@ -144,6 +157,10 @@ impl SubagentSpawner {
             .unwrap()
             .take()
             .unwrap_or_else(|| tokio::sync::mpsc::channel::<Notification>(1).1)
+    }
+
+    pub fn subscribe_activity(&self) -> tokio::sync::broadcast::Receiver<SubagentActivity> {
+        self.activity_tx.subscribe()
     }
 
     /// Abort every detached background task (Ctrl-C path).
@@ -207,6 +224,7 @@ impl SubagentSpawner {
             active_sessions_changed: self.active_sessions_changed.clone(),
             notify_tx: self.notify_tx.clone(),
             notify_rx: self.notify_rx.clone(),
+            activity_tx: self.activity_tx.clone(),
             stall_timeout: self.stall_timeout,
             background_tasks: self.background_tasks.clone(),
             workspace,
@@ -440,6 +458,7 @@ impl SubagentSpawner {
             active_session = self.claim_session(&session_id);
         }
         let _active_session = active_session.expect("new session id must be unique");
+        let parent_call_id = ctx.call_id.clone().unwrap_or_default();
 
         let mut system_prompt = system_prompt_for(child_location.cwd());
         if !agent.prompt.is_empty() {
@@ -471,6 +490,7 @@ impl SubagentSpawner {
         let mut child_ctx = ToolContext {
             cwd: child_location.cwd().to_path_buf(),
             session_id: session_id.clone(),
+            call_id: ctx.call_id.clone(),
             depth: self.depth + 1,
             subagent: Some(child_spawner),
             workspace: child_workspace.clone(),
@@ -506,6 +526,11 @@ impl SubagentSpawner {
             let registry_id = new_id();
             let task_registry_id = registry_id.clone();
             let task_registry = self.background_tasks.clone();
+            let activity_tx = self.activity_tx.clone();
+            let activity_parent_session_id = parent_session_id.clone();
+            let activity_call_id = parent_call_id.clone();
+            let activity_session_id = session_id.clone();
+            let returned_session_id = session_id.clone();
             let (registered_tx, registered_rx) = tokio::sync::oneshot::channel();
             let handle = tokio::spawn(async move {
                 let mut notification_permit = Some(notification_permit);
@@ -620,8 +645,14 @@ impl SubagentSpawner {
                 let last_activity = Arc::new(Mutex::new(std::time::Instant::now()));
                 let watcher_last = last_activity.clone();
                 let watcher = tokio::spawn(async move {
-                    while rx_evt.recv().await.is_some() {
+                    while let Some(event) = rx_evt.recv().await {
                         *watcher_last.lock().unwrap() = std::time::Instant::now();
+                        let _ = activity_tx.send(SubagentActivity {
+                            parent_session_id: activity_parent_session_id.clone(),
+                            parent_call_id: activity_call_id.clone(),
+                            child_session_id: activity_session_id.clone(),
+                            event,
+                        });
                     }
                 });
                 let stall_watch = async {
@@ -659,8 +690,19 @@ impl SubagentSpawner {
                         (None, true)
                     }
                 };
-                watcher.abort();
                 let _ = watcher.await;
+                let activity_outcome = match &outcome {
+                    Some(Ok(outcome)) => *outcome,
+                    _ => TurnOutcome::Aborted,
+                };
+                let _ = spawner.activity_tx.send(SubagentActivity {
+                    parent_session_id: parent_session_id.clone(),
+                    parent_call_id: parent_call_id.clone(),
+                    child_session_id: session_id.clone(),
+                    event: LoopEvent::TurnDone {
+                        outcome: activity_outcome,
+                    },
+                });
 
                 let notification = match outcome {
                     Some(Ok(TurnOutcome::Completed)) => {
@@ -733,7 +775,8 @@ impl SubagentSpawner {
 Do not sleep, poll, or check on it. Do not perform this task's scope yourself; continue only \
 clearly disjoint work."
                     .to_string(),
-            );
+            )
+            .with_child_session(returned_session_id);
         }
 
         let lease = match inherited_lease {
@@ -768,8 +811,12 @@ clearly disjoint work."
         if let Some(on_start) = on_start.take() {
             on_start();
         }
-        let tx = discarded_event_sender();
-        let outcome = run_turn(
+        let (tx, mut rx_evt) = loop_event_channel(LOOP_EVENT_CAPACITY);
+        let activity_tx = self.activity_tx.clone();
+        let activity_parent_session_id = ctx.session_id.clone();
+        let activity_call_id = parent_call_id;
+        let activity_session_id = session_id.clone();
+        let turn = run_turn(
             self.resolver.as_ref(),
             &registry,
             &self.store,
@@ -780,10 +827,45 @@ clearly disjoint work."
             tx,
             ctx.cancel.clone(),
             child_ctx,
-        )
-        .await;
+        );
+        tokio::pin!(turn);
+        let outcome = loop {
+            tokio::select! {
+                event = rx_evt.recv() => {
+                    if let Some(event) = event {
+                        let _ = activity_tx.send(SubagentActivity {
+                            parent_session_id: activity_parent_session_id.clone(),
+                            parent_call_id: activity_call_id.clone(),
+                            child_session_id: activity_session_id.clone(),
+                            event,
+                        });
+                    }
+                }
+                outcome = &mut turn => break outcome,
+            }
+        };
+        while let Ok(event) = rx_evt.try_recv() {
+            let _ = activity_tx.send(SubagentActivity {
+                parent_session_id: activity_parent_session_id.clone(),
+                parent_call_id: activity_call_id.clone(),
+                child_session_id: activity_session_id.clone(),
+                event,
+            });
+        }
+        let activity_outcome = match &outcome {
+            Ok(outcome) => *outcome,
+            Err(_) => TurnOutcome::Aborted,
+        };
+        let _ = activity_tx.send(SubagentActivity {
+            parent_session_id: activity_parent_session_id,
+            parent_call_id: activity_call_id,
+            child_session_id: activity_session_id,
+            event: LoopEvent::TurnDone {
+                outcome: activity_outcome,
+            },
+        });
 
-        match outcome {
+        let output = match outcome {
             Ok(TurnOutcome::Completed) => {
                 let text = final_assistant_text(&self.store, &session_id)
                     .unwrap_or_else(|| "(subagent finished with no text)".into());
@@ -794,7 +876,8 @@ clearly disjoint work."
                 ToolOutput::error("subagent failed: iteration limit reached")
             }
             Err(e) => ToolOutput::error(format!("subagent failed: {e:#}")),
-        }
+        };
+        output.with_child_session(session_id.clone())
     }
 
     pub async fn spawn_background_tool(
@@ -948,6 +1031,7 @@ clearly disjoint work."
             active_sessions_changed: self.active_sessions_changed.clone(),
             notify_tx: self.notify_tx.clone(),
             notify_rx: self.notify_rx.clone(),
+            activity_tx: self.activity_tx.clone(),
             stall_timeout: self.stall_timeout,
             background_tasks: self.background_tasks.clone(),
             workspace: workspace.clone(),
@@ -1015,6 +1099,7 @@ clearly disjoint work."
                 ToolContext {
                     cwd: workspace_location.cwd().to_path_buf(),
                     session_id: notification.parent_session_id.clone(),
+                    call_id: None,
                     depth,
                     subagent: Some(runtime.clone()),
                     workspace: workspace.clone(),

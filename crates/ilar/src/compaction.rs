@@ -166,11 +166,19 @@ pub(crate) async fn compact_if_needed_locked(
     }
 
     // Cut at the current turn's user message (last UserMessage event).
-    let cut = session
+    let mut cut = session
         .events()
         .iter()
         .rposition(|e| matches!(e, SessionEvent::UserMessage { .. }))
         .unwrap_or(0);
+    if cut > 0
+        && matches!(
+            session.events()[cut - 1],
+            SessionEvent::SubagentInvocation { .. }
+        )
+    {
+        cut -= 1;
+    }
 
     // Build the older transcript for summarization.
     let older = Session::from_events_for_compaction(session.events(), cut);

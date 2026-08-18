@@ -51,6 +51,12 @@ pub enum SessionEvent {
         text: String,
         ts: DateTime<Utc>,
     },
+    /// Associates one child-session turn with the parent task call that invoked it.
+    SubagentInvocation {
+        id: String,
+        parent_tool_call_id: String,
+        ts: DateTime<Utc>,
+    },
     /// A completed assistant turn: text/thinking blocks and tool calls.
     /// Streaming deltas are loop-internal; only completed turns persist.
     AssistantMessage {
@@ -66,6 +72,8 @@ pub enum SessionEvent {
         tool_use_id: String,
         content: String,
         is_error: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        child_session_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         state: Option<SessionState>,
         ts: DateTime<Utc>,
@@ -98,6 +106,7 @@ impl SessionEvent {
         match self {
             SessionEvent::Meta { ts, .. }
             | SessionEvent::UserMessage { ts, .. }
+            | SessionEvent::SubagentInvocation { ts, .. }
             | SessionEvent::AssistantMessage { ts, .. }
             | SessionEvent::ToolResult { ts, .. }
             | SessionEvent::ModelChange { ts, .. }

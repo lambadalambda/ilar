@@ -80,3 +80,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Deterministic test harness](issues/deterministic-test-harness.md)
 - [x] [Present OpenAI reasoning summaries](issues/present-openai-reasoning-summaries.md)
 - [x] [Render Markdown tables](issues/render-markdown-tables.md)
+- [x] [Hierarchical transcript activity](issues/hierarchical-transcript-activity.md)

@@ -298,6 +298,7 @@ impl SessionWriter {
                 tool_use_id,
                 content: "Tool call interrupted before completion.".into(),
                 is_error: true,
+                child_session_id: None,
                 state: None,
                 ts: chrono::Utc::now(),
             })?;
@@ -600,6 +601,7 @@ fn id_records(events: &[SessionEvent]) -> Vec<[u8; REPLAY_ID_RECORD_LEN as usize
         let event_id = match event {
             SessionEvent::Meta { .. } => None,
             SessionEvent::UserMessage { id, .. }
+            | SessionEvent::SubagentInvocation { id, .. }
             | SessionEvent::AssistantMessage { id, .. }
             | SessionEvent::ToolResult { id, .. }
             | SessionEvent::ModelChange { id, .. }
@@ -932,6 +934,7 @@ fn validate_replay(events: &[SessionEvent], id: &str) -> std::io::Result<Vec<Str
         let event_id = match event {
             SessionEvent::Meta { .. } => None,
             SessionEvent::UserMessage { id, .. }
+            | SessionEvent::SubagentInvocation { id, .. }
             | SessionEvent::AssistantMessage { id, .. }
             | SessionEvent::ToolResult { id, .. }
             | SessionEvent::ModelChange { id, .. }
@@ -998,7 +1001,7 @@ fn validate_replay(events: &[SessionEvent], id: &str) -> std::io::Result<Vec<Str
                 }
                 unanswered_calls.remove(position);
             }
-            SessionEvent::Meta { .. } => {}
+            SessionEvent::Meta { .. } | SessionEvent::SubagentInvocation { .. } => {}
             _ if !unanswered_calls.is_empty() => {
                 return invalid_replay(id, "new event before tool calls received results");
             }
@@ -1355,7 +1358,7 @@ fn transcript_of(events: &[SessionEvent]) -> Vec<ChatMessage> {
     let mut pending_results: Vec<ContentBlock> = Vec::new();
     for event in &events[cut..] {
         match event {
-            SessionEvent::Meta { .. } => {}
+            SessionEvent::Meta { .. } | SessionEvent::SubagentInvocation { .. } => {}
             SessionEvent::UserMessage { text, .. } => {
                 if !pending_results.is_empty() {
                     push_user_blocks(&mut messages, std::mem::take(&mut pending_results));
