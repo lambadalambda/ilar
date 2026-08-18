@@ -940,8 +940,12 @@ fn restored_session_invocation_view(
                     *stored_child_session = child_session_id.clone();
                 }
             }
-            ilar::session::SessionEvent::ModelChange { model, .. } => {
-                lines.push(Line_::System(format!("switched to {model}")));
+            ilar::session::SessionEvent::ModelChange { model, variant, .. } => {
+                let selection = variant
+                    .as_deref()
+                    .map(|variant| format!("{model}@{variant}"))
+                    .unwrap_or_else(|| model.clone());
+                lines.push(Line_::System(format!("switched to {selection}")));
             }
             ilar::session::SessionEvent::Compaction { .. } => {}
         }
@@ -1874,6 +1878,7 @@ struct App {
     activity: Activity,
     activity_started: std::time::Instant,
     current_model: String,
+    current_variant: Option<String>,
     session_id: String,
     cwd: std::path::PathBuf,
     context_used: u64,
@@ -1886,6 +1891,7 @@ struct App {
     follow_tail: bool,
     command_palette: Option<CommandPalette>,
     model_picker: Option<ModelPicker>,
+    variant_picker: Option<VariantPicker>,
     model_key_pending: bool,
     transcript_text_area: Rect,
     transcript_cache: TranscriptRenderCache,
@@ -1915,6 +1921,7 @@ impl App {
             activity: Activity::Ready,
             activity_started: std::time::Instant::now(),
             current_model: "unknown".into(),
+            current_variant: None,
             session_id: String::new(),
             cwd: std::path::PathBuf::from("."),
             context_used: 0,
@@ -1927,6 +1934,7 @@ impl App {
             follow_tail: true,
             command_palette: None,
             model_picker: None,
+            variant_picker: None,
             model_key_pending: false,
             transcript_text_area: Rect::default(),
             transcript_cache: TranscriptRenderCache::default(),
@@ -1945,7 +1953,7 @@ impl App {
     }
 
     fn open_command_palette(&mut self) {
-        if !self.busy && self.model_picker.is_none() {
+        if !self.busy && self.model_picker.is_none() && self.variant_picker.is_none() {
             self.model_key_pending = false;
             self.command_palette = Some(CommandPalette::new());
         }
@@ -1954,12 +1962,14 @@ impl App {
     fn configure_runtime(
         &mut self,
         model: String,
+        variant: Option<String>,
         cwd: std::path::PathBuf,
         context_used: u64,
         context_limit: Option<u64>,
         context_estimated: bool,
     ) {
         self.current_model = model;
+        self.current_variant = variant;
         self.cwd = cwd;
         self.context_used = context_used;
         self.context_limit = context_limit;
@@ -2531,6 +2541,27 @@ impl App {
         output
     }
 
+    fn model_status_label(&self, include_provider: bool, width: usize) -> String {
+        let model = if include_provider {
+            self.current_model.as_str()
+        } else {
+            self.current_model
+                .split_once('/')
+                .map(|(_, model)| model)
+                .unwrap_or(&self.current_model)
+        };
+        let Some(variant) = self.current_variant.as_deref() else {
+            return truncate_display(model, width, Truncation::Right);
+        };
+        let suffix = format!("@{variant}");
+        let suffix_width = UnicodeWidthStr::width(suffix.as_str());
+        if suffix_width > width {
+            return String::new();
+        }
+        let model = truncate_display(model, width.saturating_sub(suffix_width), Truncation::Right);
+        format!("{model}{suffix}")
+    }
+
     fn status_line(&self, width: u16) -> Line<'static> {
         let width = width as usize;
         let (icon, state, state_color) = match self.activity {
@@ -2606,17 +2637,12 @@ impl App {
                 .saturating_sub(UnicodeWidthStr::width(state_text.as_str()))
                 .saturating_sub(UnicodeWidthStr::width(usage.as_str()))
                 .saturating_sub(3);
-            let short_model = self
-                .current_model
-                .split_once('/')
-                .map(|(_, model)| model)
-                .unwrap_or(&self.current_model);
             let model_budget = if self.latest_usage.is_some() {
                 available
             } else {
                 available.saturating_mul(3) / 5
             };
-            let model = truncate_display(short_model, model_budget.max(1), Truncation::Right);
+            let model = self.model_status_label(false, model_budget.max(1));
             let cwd = self.latest_usage.is_none().then(|| {
                 let basename = self
                     .cwd
@@ -2631,10 +2657,12 @@ impl App {
                     Truncation::Middle,
                 )
             });
-            let middle = cwd
-                .as_deref()
-                .map(|cwd| format!(" {model} {cwd}"))
-                .unwrap_or_else(|| format!(" {model}"));
+            let middle = match (model.is_empty(), cwd.as_deref()) {
+                (true, Some(cwd)) => format!(" {cwd}"),
+                (true, None) => String::new(),
+                (false, Some(cwd)) => format!(" {model} {cwd}"),
+                (false, None) => format!(" {model}"),
+            };
             let used = UnicodeWidthStr::width(state_text.as_str())
                 + UnicodeWidthStr::width(middle.as_str())
                 + UnicodeWidthStr::width(usage.as_str())
@@ -2674,8 +2702,6 @@ impl App {
         );
         let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
         let cwd = show_cwd.then(|| abbreviated_path(&self.cwd, home.as_deref()));
-        let mut model = self.current_model.clone();
-
         let usage_width = UnicodeWidthStr::width(usage.as_str());
         let available = width
             .saturating_sub(state_width)
@@ -2688,13 +2714,7 @@ impl App {
         } else {
             available / 2
         };
-        if width < 80 {
-            model = model
-                .split_once('/')
-                .map(|(_, model)| model.to_string())
-                .unwrap_or(model);
-        }
-        let model = truncate_display(&model, model_budget.max(4), Truncation::Right);
+        let model = self.model_status_label(width >= 80, model_budget.max(4));
         let cwd = cwd.map(|cwd| {
             truncate_display(
                 &cwd,
@@ -2704,10 +2724,12 @@ impl App {
                 Truncation::Middle,
             )
         });
-        let detail = cwd
-            .as_deref()
-            .map(|cwd| format!(" · {model} · {cwd}"))
-            .unwrap_or_else(|| format!(" · {model}"));
+        let detail = match (model.is_empty(), cwd.as_deref()) {
+            (true, Some(cwd)) => format!(" · {cwd}"),
+            (true, None) => String::new(),
+            (false, Some(cwd)) => format!(" · {model} · {cwd}"),
+            (false, None) => format!(" · {model}"),
+        };
         let left = format!(" {icon} {state}{detail}");
         let gap = width
             .saturating_sub(UnicodeWidthStr::width(left.as_str()))
@@ -2891,6 +2913,7 @@ impl App {
         if !self.busy
             && self.command_palette.is_none()
             && self.model_picker.is_none()
+            && self.variant_picker.is_none()
             && input_area.width > 0
             && input_area.height > 0
         {
@@ -2902,6 +2925,8 @@ impl App {
 
         if let Some(picker) = &self.model_picker {
             render_model_picker(frame, picker);
+        } else if let Some(picker) = &self.variant_picker {
+            render_variant_picker(frame, picker);
         } else if let Some(palette) = &self.command_palette {
             render_command_palette(frame, palette);
         }
@@ -3500,6 +3525,7 @@ fn text_field_view_at(value: &str, cursor: usize, width: u16) -> (String, u16) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PaletteCommand {
     SwitchModel,
+    SwitchReasoning,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -3511,13 +3537,22 @@ struct PaletteCommandDefinition {
     search_terms: &'static str,
 }
 
-static PALETTE_COMMANDS: &[PaletteCommandDefinition] = &[PaletteCommandDefinition {
-    id: PaletteCommand::SwitchModel,
-    section: "General",
-    label: "Switch model",
-    shortcut: "F2",
-    search_terms: "model provider",
-}];
+static PALETTE_COMMANDS: &[PaletteCommandDefinition] = &[
+    PaletteCommandDefinition {
+        id: PaletteCommand::SwitchModel,
+        section: "General",
+        label: "Switch model",
+        shortcut: "F2",
+        search_terms: "model provider",
+    },
+    PaletteCommandDefinition {
+        id: PaletteCommand::SwitchReasoning,
+        section: "General",
+        label: "Switch reasoning",
+        shortcut: "",
+        search_terms: "variant thinking effort level",
+    },
+];
 
 #[derive(Debug, PartialEq, Eq)]
 enum CommandPaletteAction {
@@ -3688,12 +3723,12 @@ impl ModelPicker {
             (KeyCode::Enter, _) => self
                 .filtered_models()
                 .get(self.selected)
-                .map(|model| model.full_id())
                 .map(|model| {
-                    if model == self.active_model {
+                    let id = model.full_id();
+                    if id == self.active_model && model.variants().is_empty() {
                         PickerAction::Dismiss
                     } else {
-                        PickerAction::Choose(model)
+                        PickerAction::Choose(id)
                     }
                 })
                 .unwrap_or(PickerAction::Stay),
@@ -3740,6 +3775,89 @@ impl ModelPicker {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum VariantPickerAction {
+    Stay,
+    Dismiss,
+    Choose(Option<String>),
+}
+
+struct VariantPicker {
+    model: &'static ilar::model::ModelInfo,
+    active_variant: Option<String>,
+    selected: usize,
+    error: Option<String>,
+}
+
+impl VariantPicker {
+    fn new(model: &'static ilar::model::ModelInfo, active_variant: Option<&str>) -> Self {
+        let selected = active_variant
+            .and_then(|active| {
+                model
+                    .variants()
+                    .iter()
+                    .position(|variant| variant.id == active)
+            })
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        Self {
+            model,
+            active_variant: active_variant.map(String::from),
+            selected,
+            error: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn selected_index(&self) -> usize {
+        self.selected
+    }
+
+    fn move_selection(&mut self, delta: isize) {
+        let count = self.model.variants().len() + 1;
+        self.selected = (self.selected as isize + delta).rem_euclid(count as isize) as usize;
+        self.error = None;
+    }
+
+    fn selected_variant(&self) -> Option<String> {
+        self.selected
+            .checked_sub(1)
+            .and_then(|index| self.model.variants().get(index))
+            .map(|variant| variant.id.to_string())
+    }
+
+    fn handle_key(&mut self, code: KeyCode, control: bool) -> VariantPickerAction {
+        match (code, control) {
+            (KeyCode::Esc, _) => VariantPickerAction::Dismiss,
+            (KeyCode::Enter, _) => {
+                let selected = self.selected_variant();
+                if selected == self.active_variant {
+                    VariantPickerAction::Dismiss
+                } else {
+                    VariantPickerAction::Choose(selected)
+                }
+            }
+            (KeyCode::Up, _) | (KeyCode::Char('p'), true) => {
+                self.move_selection(-1);
+                VariantPickerAction::Stay
+            }
+            (KeyCode::Down, _) | (KeyCode::Char('n'), true) => {
+                self.move_selection(1);
+                VariantPickerAction::Stay
+            }
+            (KeyCode::Home, _) => {
+                self.selected = 0;
+                VariantPickerAction::Stay
+            }
+            (KeyCode::End, _) => {
+                self.selected = self.model.variants().len();
+                VariantPickerAction::Stay
+            }
+            _ => VariantPickerAction::Stay,
+        }
+    }
+}
+
 fn activate_palette_command(
     app: &mut App,
     command: PaletteCommand,
@@ -3751,6 +3869,16 @@ fn activate_palette_command(
             app.model_picker = Some(ModelPicker::new(model_choices, &app.current_model));
         }
         PaletteCommand::SwitchModel => {}
+        PaletteCommand::SwitchReasoning => {
+            if let Some(model) = ilar::model::find(&app.current_model)
+                && !model.variants().is_empty()
+            {
+                app.variant_picker =
+                    Some(VariantPicker::new(model, app.current_variant.as_deref()));
+            } else {
+                app.status = "current model has no reasoning variants".into();
+            }
+        }
     }
 }
 
@@ -3831,7 +3959,8 @@ fn render_command_palette(frame: &mut Frame, palette: &CommandPalette) {
             .min(commands.len().saturating_sub(row_count));
         for (index, command) in commands.iter().enumerate().skip(start).take(row_count) {
             let marker = if index == selected { "> " } else { "  " };
-            let shortcut = (inner.width >= 32).then_some(command.shortcut);
+            let shortcut =
+                (inner.width >= 32 && !command.shortcut.is_empty()).then_some(command.shortcut);
             let suffix_width = shortcut
                 .map(|shortcut| UnicodeWidthStr::width(shortcut).saturating_add(1))
                 .unwrap_or(0);
@@ -3867,6 +3996,85 @@ fn render_command_palette(frame: &mut Frame, palette: &CommandPalette) {
         .saturating_add(query_cursor_offset as usize)
         .min(inner.width.saturating_sub(1) as usize) as u16;
     frame.set_cursor_position((inner.x.saturating_add(offset), inner.y));
+}
+
+fn render_variant_picker(frame: &mut Frame, picker: &VariantPicker) {
+    let area = centered_rect(frame.area(), 54, 10);
+    frame.render_widget(Clear, area);
+
+    let footer = if area.width < 38 {
+        " Enter select · Esc close "
+    } else {
+        " ↑↓ move · Enter select · Esc close "
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" reasoning ")
+        .title_bottom(Line::from(footer).right_aligned());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let mut lines = Vec::new();
+    if let Some(error) = &picker.error {
+        lines.push(Line::styled(
+            truncate_display(error, inner.width as usize, Truncation::Right),
+            Style::default().fg(ERROR),
+        ));
+    } else if inner.height >= 6 {
+        lines.push(Line::styled(
+            truncate_display(picker.model.name, inner.width as usize, Truncation::Right),
+            Style::default().fg(MUTED),
+        ));
+    }
+
+    let row_count = inner.height.saturating_sub(lines.len() as u16) as usize;
+    let choice_count = picker.model.variants().len() + 1;
+    let selected = picker.selected.min(choice_count.saturating_sub(1));
+    let start = selected
+        .saturating_add(1)
+        .saturating_sub(row_count)
+        .min(choice_count.saturating_sub(row_count));
+    for index in start..choice_count.min(start.saturating_add(row_count)) {
+        let (id, name) = if index == 0 {
+            ("default", "Provider default")
+        } else {
+            let variant = &picker.model.variants()[index - 1];
+            (variant.id, variant.name)
+        };
+        let active = picker.active_variant.as_deref() == (index > 0).then_some(id);
+        let marker = if index == selected && active {
+            ">●"
+        } else if index == selected {
+            "> "
+        } else if active {
+            " ●"
+        } else {
+            "  "
+        };
+        let suffix = format!("  {id}");
+        let name_width = (inner.width as usize)
+            .saturating_sub(UnicodeWidthStr::width(marker))
+            .saturating_sub(UnicodeWidthStr::width(suffix.as_str()))
+            .saturating_sub(1);
+        let text = format!(
+            "{marker} {}{suffix}",
+            truncate_display(name, name_width, Truncation::Right)
+        );
+        let text = truncate_display(&text, inner.width as usize, Truncation::Right);
+        let text = format!("{text:<width$}", width = inner.width as usize);
+        let style = if index == selected {
+            Style::default().fg(Color::Black).bg(Color::Cyan)
+        } else if active {
+            Style::default().fg(ASSISTANT)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::styled(text, style));
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn render_model_picker(frame: &mut Frame, picker: &ModelPicker) {
@@ -4315,14 +4523,47 @@ fn persist_model_change(
     store: &SessionStore,
     session_id: &str,
     model: &str,
+    variant: Option<&str>,
 ) -> Result<()> {
     drop(resolver.resolve_provider(model)?);
+    ilar::model::variant_options(model, variant)?;
     let mut session = store.acquire_writer(session_id)?.load()?;
     session.append(ilar::session::SessionEvent::ModelChange {
         id: ilar::session::new_id(),
         model: model.to_string(),
+        variant: variant.map(String::from),
         ts: chrono::Utc::now(),
     })?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn adopt_model_selection(
+    app: &mut App,
+    resolver: &dyn ProviderResolver,
+    store: &SessionStore,
+    session_id: &str,
+    system_prompt: &str,
+    registry: &ToolRegistry,
+    model: String,
+    variant: Option<String>,
+) -> Result<()> {
+    persist_model_change(resolver, store, session_id, &model, variant.as_deref())?;
+    app.current_model = model.clone();
+    app.current_variant = variant.clone();
+    app.context_limit = resolver.context_limit(&model);
+    if let Ok((used, estimated)) =
+        session_context_tokens(store, session_id, system_prompt, registry)
+    {
+        app.context_used = used;
+        app.context_estimated = estimated;
+    }
+    app.status = "ready".into();
+    let selection = variant
+        .as_deref()
+        .map(|variant| format!("{model}@{variant}"))
+        .unwrap_or(model);
+    app.push_transcript_line(Line_::System(format!("switched to {selection}")));
     Ok(())
 }
 
@@ -4384,6 +4625,9 @@ async fn main() -> Result<()> {
         .cloned()
         .with_context(|| format!("unknown agent {agent_name:?}"))?;
     let persisted_model = resumed.as_ref().map(|session| session.effective_model());
+    let persisted_variant = resumed
+        .as_ref()
+        .and_then(|session| session.effective_variant());
     let model_for_session = selected_model(
         args.model.as_deref(),
         persisted_model.as_deref(),
@@ -4426,7 +4670,7 @@ async fn main() -> Result<()> {
             if args.model.is_some()
                 && persisted_model.as_deref() != Some(model_for_session.as_str())
             {
-                persist_model_change(resolver.as_ref(), &store, id, &model_for_session)
+                persist_model_change(resolver.as_ref(), &store, id, &model_for_session, None)
                     .with_context(|| format!("persisting model override {model_for_session}"))?;
             }
             id.clone()
@@ -4487,6 +4731,9 @@ async fn main() -> Result<()> {
     }
     app.configure_runtime(
         model_for_session.clone(),
+        (persisted_model.as_deref() == Some(model_for_session.as_str()))
+            .then_some(persisted_variant)
+            .flatten(),
         cwd.clone(),
         context_used,
         context_limit,
@@ -4740,7 +4987,9 @@ async fn run_app(
         }
 
         // Let a buffered Ctrl-P open the palette before starting queued work.
-        let mut modal_open = app.command_palette.is_some() || app.model_picker.is_some();
+        let mut modal_open = app.command_palette.is_some()
+            || app.model_picker.is_some()
+            || app.variant_picker.is_some();
         if turn_handle.is_none()
             && !notifications_paused
             && !modal_open
@@ -4859,34 +5108,68 @@ async fn run_app(
                             app.status = "ready".into();
                         }
                         PickerAction::Choose(new_model) => {
-                            match persist_model_change(
+                            if let Some(model) = ilar::model::find(&new_model)
+                                && !model.variants().is_empty()
+                            {
+                                let active_variant = (new_model == app.current_model)
+                                    .then_some(app.current_variant.as_deref())
+                                    .flatten();
+                                app.model_picker = None;
+                                app.variant_picker =
+                                    Some(VariantPicker::new(model, active_variant));
+                                continue;
+                            }
+                            match adopt_model_selection(
+                                app,
                                 resolver.as_ref(),
                                 store,
                                 session_id,
-                                &new_model,
+                                system_prompt,
+                                registry,
+                                new_model.clone(),
+                                None,
                             ) {
                                 Ok(()) => {
-                                    app.current_model = new_model.clone();
-                                    app.context_limit = resolver.context_limit(&new_model);
-                                    if let Ok((used, estimated)) = session_context_tokens(
-                                        store,
-                                        session_id,
-                                        system_prompt,
-                                        registry,
-                                    ) {
-                                        app.context_used = used;
-                                        app.context_estimated = estimated;
-                                    }
-                                    app.status = "ready".into();
-                                    app.push_transcript_line(Line_::System(format!(
-                                        "switched to {new_model}"
-                                    )));
                                     app.model_picker = None;
                                 }
                                 Err(error) => {
                                     if let Some(picker) = app.model_picker.as_mut() {
                                         picker.error =
                                             Some(format!("cannot switch to {new_model}: {error}"));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
+                if app.variant_picker.is_some() {
+                    let (action, model) = {
+                        let picker = app.variant_picker.as_mut().unwrap();
+                        (picker.handle_key(code, control), picker.model.full_id())
+                    };
+                    match action {
+                        VariantPickerAction::Stay => {}
+                        VariantPickerAction::Dismiss => {
+                            app.variant_picker = None;
+                        }
+                        VariantPickerAction::Choose(variant) => {
+                            match adopt_model_selection(
+                                app,
+                                resolver.as_ref(),
+                                store,
+                                session_id,
+                                system_prompt,
+                                registry,
+                                model.clone(),
+                                variant,
+                            ) {
+                                Ok(()) => app.variant_picker = None,
+                                Err(error) => {
+                                    if let Some(picker) = app.variant_picker.as_mut() {
+                                        picker.error = Some(format!(
+                                            "cannot switch reasoning for {model}: {error}"
+                                        ));
                                     }
                                 }
                             }
@@ -5020,11 +5303,15 @@ async fn run_app(
             Event::Paste(text) if app.command_palette.is_some() => {
                 app.command_palette.as_mut().unwrap().insert_query(&text);
             }
-            Event::Paste(text) if app.model_picker.is_none() => {
+            Event::Paste(text) if app.model_picker.is_none() && app.variant_picker.is_none() => {
                 app.model_key_pending = false;
                 app.input.insert(&text);
             }
-            Event::Mouse(mouse) if app.command_palette.is_none() && app.model_picker.is_none() => {
+            Event::Mouse(mouse)
+                if app.command_palette.is_none()
+                    && app.model_picker.is_none()
+                    && app.variant_picker.is_none() =>
+            {
                 match mouse.kind {
                     kind @ (MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) => {
                         let initial_rows = if kind == MouseEventKind::ScrollUp {
@@ -5194,6 +5481,7 @@ mod tests {
             .append(ilar::session::SessionEvent::ModelChange {
                 id: new_id(),
                 model: "openai/gpt-5.6-sol".into(),
+                variant: Some("high".into()),
                 ts: chrono::Utc::now(),
             })
             .unwrap();
@@ -5532,6 +5820,7 @@ mod tests {
         let mut app = App::new();
         app.configure_runtime(
             "openai/gpt-5.6-sol".into(),
+            Some("high".into()),
             std::path::PathBuf::from("/workspace/project"),
             0,
             Some(272_000),
@@ -5553,12 +5842,13 @@ mod tests {
         app.finish_turn(Ok(TurnOutcome::Completed));
 
         let status = rendered_text(&app.status_line(120));
-        assert!(status.contains("openai/gpt-5.6-sol"), "{status}");
+        assert!(status.contains("openai/gpt-5.6-sol@high"), "{status}");
         assert!(status.contains("in 300"), "{status}");
         assert!(status.contains("out 50"), "{status}");
         assert!(status.contains("cache 1520"), "{status}");
         let narrow = rendered_text(&app.status_line(60));
         assert!(narrow.contains("gpt-5.6"), "{narrow}");
+        assert!(narrow.contains("high"), "{narrow}");
         assert!(narrow.contains("i300/o50"), "{narrow}");
         for width in [64, 72, 77] {
             let boundary = rendered_text(&app.status_line(width));
@@ -5570,6 +5860,13 @@ mod tests {
             assert!(
                 UnicodeWidthStr::width(status.as_str()) <= width as usize,
                 "width {width}: {status:?}"
+            );
+        }
+        for width in 0..=20 {
+            let model = app.model_status_label(false, width);
+            assert!(
+                model.is_empty() || model.ends_with("@high"),
+                "{width}: {model}"
             );
         }
         app.latest_usage = None;
@@ -5672,17 +5969,30 @@ mod tests {
         let resolver = ilar::provider::MockProvider::default();
 
         let writer = store.acquire_writer(&session_id).unwrap();
-        assert!(persist_model_change(&resolver, &store, &session_id, "openai/gpt-5.2").is_err());
+        assert!(
+            persist_model_change(&resolver, &store, &session_id, "openai/gpt-5.2", None).is_err()
+        );
         assert_eq!(
             store.load(&session_id).unwrap().effective_model(),
             "zai/glm-4.7"
         );
         drop(writer);
 
-        persist_model_change(&resolver, &store, &session_id, "openai/gpt-5.2").unwrap();
+        persist_model_change(
+            &resolver,
+            &store,
+            &session_id,
+            "openai/gpt-5.2",
+            Some("high"),
+        )
+        .unwrap();
         assert_eq!(
             store.load(&session_id).unwrap().effective_model(),
             "openai/gpt-5.2"
+        );
+        assert_eq!(
+            store.load(&session_id).unwrap().effective_variant(),
+            Some("high".into())
         );
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -5731,10 +6041,16 @@ mod tests {
 
         let active = ilar::model::catalog()[0].full_id();
         let mut picker = ModelPicker::new(vec![&ilar::model::catalog()[0]], &active);
+        assert!(matches!(
+            picker.handle_key(KeyCode::Enter, false),
+            PickerAction::Choose(_)
+        ));
+
+        let model = ilar::model::find("openai/gpt-4.1").unwrap();
+        let mut picker = ModelPicker::new(vec![model], &model.full_id());
         assert_eq!(
             picker.handle_key(KeyCode::Enter, false),
-            PickerAction::Dismiss,
-            "confirming the active model is a no-op"
+            PickerAction::Dismiss
         );
     }
 
@@ -5742,7 +6058,7 @@ mod tests {
     fn command_palette_searches_and_selects_defined_commands() {
         let mut palette = CommandPalette::new();
 
-        assert_eq!(palette.filtered_commands(), vec![&PALETTE_COMMANDS[0]]);
+        assert_eq!(palette.filtered_commands().len(), 2);
         assert_eq!(
             palette.handle_key(KeyCode::Enter, false),
             CommandPaletteAction::Choose(PaletteCommand::SwitchModel)
@@ -5804,6 +6120,38 @@ mod tests {
         assert!(app.command_palette.is_none());
         assert!(app.model_picker.is_some());
         assert_eq!(app.input.text(), "draft prompt");
+
+        app.model_picker = None;
+        app.current_model = "openai/gpt-5.2".into();
+        app.current_variant = Some("high".into());
+        app.command_palette = Some(CommandPalette::new());
+        activate_palette_command(
+            &mut app,
+            PaletteCommand::SwitchReasoning,
+            ilar::model::catalog().iter().collect(),
+        );
+        assert!(app.command_palette.is_none());
+        assert!(app.variant_picker.is_some());
+    }
+
+    #[test]
+    fn reasoning_variant_picker_includes_default_and_current_level() {
+        let model = ilar::model::find("openai/gpt-5.2").unwrap();
+        let mut picker = VariantPicker::new(model, Some("high"));
+
+        assert_eq!(picker.selected_index(), 4);
+        assert_eq!(
+            picker.handle_key(KeyCode::Home, false),
+            VariantPickerAction::Stay
+        );
+        assert_eq!(
+            picker.handle_key(KeyCode::Enter, false),
+            VariantPickerAction::Choose(None)
+        );
+        assert_eq!(
+            picker.handle_key(KeyCode::Esc, false),
+            VariantPickerAction::Dismiss
+        );
     }
 
     #[test]
@@ -5827,6 +6175,31 @@ mod tests {
         assert!(screen.contains("commands"), "{screen}");
         assert!(screen.contains("search"), "{screen}");
         assert!(screen.contains("Switch model"), "{screen}");
+    }
+
+    #[test]
+    fn reasoning_variant_picker_renders_on_narrow_terminals() {
+        let backend = ratatui::backend::TestBackend::new(30, 6);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.variant_picker = Some(VariantPicker::new(
+            ilar::model::find("openai/gpt-5.2").unwrap(),
+            Some("high"),
+        ));
+
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let screen = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("reasoning"), "{screen}");
+        assert!(screen.contains("high"), "{screen}");
     }
 
     #[test]
@@ -6869,6 +7242,7 @@ mod tests {
         let mut app = App::new();
         app.configure_runtime(
             "openai/gpt-5.6-sol".into(),
+            None,
             std::path::PathBuf::from("/very/long/workspace/project"),
             68_000,
             Some(272_000),
@@ -7070,6 +7444,7 @@ mod tests {
         let mut app = App::new();
         app.configure_runtime(
             "openai/gpt-5.6-sol".into(),
+            None,
             std::path::PathBuf::from("/workspace/very-long-project-name"),
             204_000,
             Some(272_000),

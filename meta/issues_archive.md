@@ -84,3 +84,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Group tools by thought phase](issues/group-tools-by-thought-phase.md)
 - [x] [Ring terminal bell after turn](issues/ring-terminal-bell-after-turn.md)
 - [x] [Add command palette](issues/add-command-palette.md)
+- [x] [Add model reasoning variants](issues/add-model-reasoning-variants.md)
