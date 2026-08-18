@@ -4321,6 +4321,20 @@ enum TurnCompletion {
     Routed(Result<ilar::subagent::RouteOutcome>),
 }
 
+fn ring_terminal_bell_if_idle(
+    writer: &mut impl std::io::Write,
+    pending: &mut bool,
+    turn_active: bool,
+) -> std::io::Result<bool> {
+    if !*pending || turn_active {
+        return Ok(false);
+    }
+    *pending = false;
+    writer.write_all(b"\x07")?;
+    writer.flush()?;
+    Ok(true)
+}
+
 struct WheelBatch {
     rows: isize,
     deferred: Option<Event>,
@@ -4385,6 +4399,8 @@ async fn run_app(
     let mut notifications_paused = false;
     let mut cancel: Option<CancellationToken> = None;
     let mut turn_handle: Option<tokio::task::JoinHandle<TurnCompletion>> = None;
+    let mut ring_on_turn_completion = false;
+    let mut bell_pending = false;
     let mut pending_terminal_event = None;
 
     loop {
@@ -4406,6 +4422,7 @@ async fn run_app(
             && handle.is_finished()
         {
             let handle = turn_handle.take().unwrap();
+            bell_pending |= std::mem::take(&mut ring_on_turn_completion);
             if let Some(rx) = events_rx.as_mut() {
                 while let Ok(event) = rx.try_recv() {
                     app.push_loop_event(&event);
@@ -4521,6 +4538,12 @@ async fn run_app(
                 )
             }));
         }
+
+        let _ = ring_terminal_bell_if_idle(
+            &mut std::io::stdout(),
+            &mut bell_pending,
+            turn_handle.is_some(),
+        );
 
         terminal.draw(|frame| app.render(frame))?;
 
@@ -4681,6 +4704,7 @@ async fn run_app(
                             let registry = registry.clone();
                             let turn_ctx = tool_ctx.clone();
                             let loop_config = loop_config.clone();
+                            ring_on_turn_completion = true;
                             turn_handle = Some(tokio::spawn(async move {
                                 TurnCompletion::Root(
                                     run_turn(
@@ -5617,6 +5641,23 @@ mod tests {
 
         app.finish_turn(Ok(TurnOutcome::Completed));
         assert!(!app.busy);
+    }
+
+    #[test]
+    fn terminal_bell_waits_for_idle_and_only_writes_once() {
+        let mut output = Vec::new();
+        let mut pending = true;
+
+        assert!(!ring_terminal_bell_if_idle(&mut output, &mut pending, true).unwrap());
+        assert!(output.is_empty());
+        assert!(pending);
+
+        assert!(ring_terminal_bell_if_idle(&mut output, &mut pending, false).unwrap());
+        assert_eq!(output, b"\x07");
+        assert!(!pending);
+
+        assert!(!ring_terminal_bell_if_idle(&mut output, &mut pending, false).unwrap());
+        assert_eq!(output, b"\x07");
     }
 
     #[test]
