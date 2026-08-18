@@ -70,9 +70,22 @@ async fn mock_streams_scripted_events_through_trait() {
     );
 }
 
+#[test]
+fn mock_rejects_calls_after_its_script_is_exhausted() {
+    let provider = MockProvider::new(vec![text_turn()]);
+    drop(provider.stream(Request::with_model("m")).unwrap());
+
+    let error = match provider.stream(Request::with_model("m")) {
+        Ok(_) => panic!("unexpected provider call should fail"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("script exhausted"), "{error:#}");
+    assert_eq!(provider.requests().len(), 2);
+}
+
 #[tokio::test]
 async fn mock_serves_scripted_turns_in_order_then_repeats_last() {
-    let provider = MockProvider::new(vec![text_turn(), tool_turn()]);
+    let provider = MockProvider::repeating(vec![text_turn(), tool_turn()]);
     let drain = |provider: &MockProvider| {
         let mut stream = provider.stream(Request::with_model("m")).unwrap();
         async move {

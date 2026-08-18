@@ -9,19 +9,35 @@ use super::request::Request;
 use super::{EventStream, Provider};
 
 /// Serves scripted turns through the [`Provider`] trait. Turns play in
-/// order; after the script is exhausted the last turn repeats (keeps
-/// loop tests simple).
+/// order and unexpected calls fail unless repetition is explicitly enabled.
 #[derive(Clone, Default)]
 pub struct MockProvider {
-    turns: Arc<Mutex<Vec<Vec<ProviderEvent>>>>,
-    requests: Arc<Mutex<Vec<Request>>>,
+    state: Arc<Mutex<MockState>>,
+    repeat_last: bool,
+}
+
+#[derive(Default)]
+struct MockState {
+    turns: Vec<Vec<ProviderEvent>>,
+    requests: Vec<Request>,
 }
 
 impl MockProvider {
     pub fn new(turns: Vec<Vec<ProviderEvent>>) -> Self {
         Self {
-            turns: Arc::new(Mutex::new(turns)),
-            requests: Arc::new(Mutex::new(Vec::new())),
+            state: Arc::new(Mutex::new(MockState {
+                turns,
+                requests: Vec::new(),
+            })),
+            repeat_last: false,
+        }
+    }
+
+    /// Scripted provider whose final turn repeats indefinitely.
+    pub fn repeating(turns: Vec<Vec<ProviderEvent>>) -> Self {
+        Self {
+            repeat_last: true,
+            ..Self::new(turns)
         }
     }
 
@@ -32,23 +48,19 @@ impl MockProvider {
 
     /// All requests seen so far, for assertions.
     pub fn requests(&self) -> Vec<Request> {
-        self.requests.lock().unwrap().clone()
-    }
-
-    fn next_turn(&self) -> Vec<ProviderEvent> {
-        let mut turns = self.turns.lock().unwrap();
-        match turns.len() {
-            0 => vec![ProviderEvent::Error("mock: no scripted turns".into())],
-            1 => turns[0].clone(),
-            _ => turns.remove(0),
-        }
+        self.state.lock().unwrap().requests.clone()
     }
 }
 
 impl Provider for MockProvider {
     fn stream(&self, req: Request) -> anyhow::Result<EventStream> {
-        self.requests.lock().unwrap().push(req);
-        let events = self.next_turn();
+        let mut state = self.state.lock().unwrap();
+        state.requests.push(req);
+        let events = match state.turns.len() {
+            0 => anyhow::bail!("mock provider script exhausted"),
+            1 if self.repeat_last => state.turns[0].clone(),
+            _ => state.turns.remove(0),
+        };
         Ok(Box::pin(stream::iter(events)))
     }
 }

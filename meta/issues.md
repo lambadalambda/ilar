@@ -14,4 +14,4 @@
 
 ## Stabilization
 
-- [ ] [Deterministic test harness](issues/deterministic-test-harness.md)
+(all complete — see issues_archive.md)

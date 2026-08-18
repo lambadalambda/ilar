@@ -528,7 +528,7 @@ async fn paused_turn_is_reissued_without_persisting_an_assistant_step() {
 #[tokio::test]
 async fn paused_turn_retry_cap_is_finite() {
     let (store, session_id) = temp_session("build");
-    let provider = MockProvider::new(vec![vec![
+    let provider = MockProvider::repeating(vec![vec![
         ProviderEvent::ResponseContent {
             provider: "zai-anthropic".into(),
             content: serde_json::json!([{
@@ -1426,7 +1426,7 @@ async fn max_iterations_guard_stops_loop() {
     let (store, session_id) = temp_session("build");
     let registry = ToolRegistry::builtin();
     // Always ends with a tool call -> would loop forever without the guard.
-    let provider = MockProvider::new(vec![vec![
+    let provider = MockProvider::repeating(vec![vec![
         ProviderEvent::ToolCallStarted {
             id: "t".into(),
             name: "echo".into(),

@@ -623,3 +623,12 @@ ownership. Provider modules still own request construction, authentication and
 wire-event mapping; in particular, OpenAI's ChatGPT token refresh remains
 outside the transport abstraction. Direct shell tests cover send failure,
 panic conversion, terminal SSE handling, and prompt cancellation on drop.
+
+## 2026-08-18 — Deterministic provider tests
+
+`MockProvider` now consumes each scripted turn exactly once and reports script
+exhaustion from `Provider::stream`, making accidental extra calls fail at their
+source. Intentional loop tests opt into `MockProvider::repeating` explicitly.
+Provider fixture tests validate required SSE termination without repairing
+tracked files; the full workspace suite passes from a read-only source checkout
+with a separate writable Cargo target directory.

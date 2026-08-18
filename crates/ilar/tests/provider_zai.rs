@@ -98,19 +98,20 @@ async fn drain(mut stream: ilar::provider::EventStream) -> Vec<ProviderEvent> {
     events
 }
 
-fn ensure_terminated_blank(fixtures: &[&str]) {
+fn assert_terminated_blank(fixtures: &[&str]) {
     for name in fixtures {
         let path = format!("tests/fixtures/{name}");
         let content = std::fs::read_to_string(&path).unwrap();
-        if !content.ends_with("\n\n") {
-            std::fs::write(&path, format!("{content}\n")).unwrap();
-        }
+        assert!(
+            content.ends_with("\n\n"),
+            "fixture {name} must end with a blank line"
+        );
     }
 }
 
 #[tokio::test]
 async fn text_fixture_maps_to_neutral_events() {
-    ensure_terminated_blank(&["zai_text.sse"]);
+    assert_terminated_blank(&["zai_text.sse"]);
     let (base, _server) = http_server(fixture("zai_text.sse"));
     let events = drain(anthropic_provider(base).stream(request()).unwrap()).await;
 
@@ -138,7 +139,7 @@ async fn text_fixture_maps_to_neutral_events() {
 
 #[tokio::test]
 async fn tool_call_fixture_maps_thinking_and_tool_use() {
-    ensure_terminated_blank(&["zai_toolcall.sse"]);
+    assert_terminated_blank(&["zai_toolcall.sse"]);
     let (base, _server) = http_server(fixture("zai_toolcall.sse"));
     let events = drain(anthropic_provider(base).stream(request()).unwrap()).await;
 
@@ -338,7 +339,7 @@ async fn openai_reasoning_runs_close_at_content_and_tool_boundaries() {
 
 #[tokio::test]
 async fn error_fixture_maps_to_error_event() {
-    ensure_terminated_blank(&["zai_error.sse"]);
+    assert_terminated_blank(&["zai_error.sse"]);
     let (base, _server) = http_server(fixture("zai_error.sse"));
     let events = drain(anthropic_provider(base).stream(request()).unwrap()).await;
     assert_eq!(events.len(), 1);
@@ -367,7 +368,7 @@ async fn http_error_body_is_bounded_and_redacted() {
 
 #[tokio::test]
 async fn truncated_tool_call_synthesizes_null_completion() {
-    ensure_terminated_blank(&["zai_truncated.sse"]);
+    assert_terminated_blank(&["zai_truncated.sse"]);
     let (base, _server) = http_server(fixture("zai_truncated.sse"));
     let events = drain(anthropic_provider(base).stream(request()).unwrap()).await;
 
@@ -660,7 +661,7 @@ async fn openai_compatible_duplicate_tool_ids_are_terminal() {
 
 #[tokio::test]
 async fn wire_format_anthropic_flavor() {
-    ensure_terminated_blank(&["zai_text.sse"]);
+    assert_terminated_blank(&["zai_text.sse"]);
     let (base, server) = http_server(fixture("zai_text.sse"));
     let mut req = request();
     req.system_prompt = Some("be terse".into());
@@ -886,7 +887,7 @@ async fn reserved_options_are_rejected_before_zai_network_io() {
 
 #[tokio::test]
 async fn cache_breakpoints_placed() {
-    ensure_terminated_blank(&["zai_text.sse"]);
+    assert_terminated_blank(&["zai_text.sse"]);
     let (base, server) = http_server(fixture("zai_text.sse"));
     let mut req = request();
     req.system_prompt = Some("sys".into());

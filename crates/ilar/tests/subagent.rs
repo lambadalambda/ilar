@@ -814,20 +814,17 @@ async fn explicit_task_id_errors_instead_of_starting_a_replacement() {
 #[tokio::test]
 async fn blank_task_id_starts_a_new_session() {
     let (store, parent_id) = temp_store();
-    let task = parent_registry(spawner(
-        Arc::new(MockProvider::new(vec![vec![
-            ProviderEvent::TextDelta("fresh child".into()),
-            ProviderEvent::TurnComplete {
-                stop_reason: StopReason::EndTurn,
-                usage: Usage::default(),
-            },
-        ]])),
-        &store,
-        10,
-        3,
-    ))
-    .get("task")
-    .unwrap();
+    let turn = vec![
+        ProviderEvent::TextDelta("fresh child".into()),
+        ProviderEvent::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        },
+    ];
+    let provider = Arc::new(MockProvider::new(vec![turn.clone(), turn.clone(), turn]));
+    let task = parent_registry(spawner(provider.clone(), &store, 10, 3))
+        .get("task")
+        .unwrap();
 
     for task_id in ["", " "] {
         let output = task
@@ -859,6 +856,7 @@ async fn blank_task_id_starts_a_new_session() {
         .await;
     assert!(!output.is_error, "{}", output.content);
     assert_eq!(output.content, "fresh child");
+    assert_eq!(provider.requests().len(), 3);
 }
 
 #[tokio::test]
