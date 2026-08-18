@@ -895,6 +895,32 @@ fn task_schema_guides_new_calls_without_placeholder_routing_values() {
         properties["workspace"]["type"],
         serde_json::json!(["object", "null"])
     );
+    let tool_description = task.description();
+    assert!(tool_description.contains("bounded"), "{tool_description}");
+    assert!(
+        tool_description.contains("Delegation transfers ownership"),
+        "{tool_description}"
+    );
+    assert!(
+        tool_description.contains("do not perform the delegated scope yourself"),
+        "{tool_description}"
+    );
+    assert!(
+        tool_description.contains("Independent reviews must be explicitly delegated"),
+        "{tool_description}"
+    );
+    let background = properties["background"]["description"].as_str().unwrap();
+    assert!(
+        background.contains("intentionally deferred"),
+        "{background}"
+    );
+    assert!(
+        background.contains("separate follow-up turn"),
+        "{background}"
+    );
+    assert!(background.contains("foreground sibling"), "{background}");
+    assert!(background.contains("current answer"), "{background}");
+    assert!(background.contains("Do not poll"), "{background}");
 }
 
 /// Live smoke for the provider behavior that triggered the launch regression.

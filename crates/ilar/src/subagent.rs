@@ -696,8 +696,9 @@ impl SubagentSpawner {
             });
             let _ = registered_tx.send(());
             return ToolOutput::text(
-                "Task started in the background. You will be notified when it completes. \
-DO NOT sleep, poll, or check on it — work on something else or end your response."
+                "Deferred background task started. Completion will trigger a separate follow-up turn. \
+Do not sleep, poll, or check on it. Do not perform this task's scope yourself; continue only \
+clearly disjoint work."
                     .to_string(),
             );
         }
@@ -1306,8 +1307,7 @@ impl Tool for TaskTool {
     }
 
     fn description(&self) -> &'static str {
-        // Agent list is dynamic; description built in `dynamic_description`.
-        "Launch a subagent to do a unit of work. Returns its final answer."
+        "Delegate one clearly bounded unit of work. Delegation transfers ownership: do not perform the delegated scope yourself. Independent reviews must be explicitly delegated as separate bounded review tasks. Omit background when the result is needed for the current answer; foreground sibling tasks can be called together for parallel work. Use background only for intentionally deferred work that should trigger a separate follow-up turn."
     }
 
     fn concurrency(&self) -> ToolConcurrency {
@@ -1333,7 +1333,7 @@ impl Tool for TaskTool {
             "type": "object",
             "properties": {
                 "description": {"type": "string", "description": "Short task description (3-5 words)"},
-                "prompt": {"type": "string", "description": "Full instructions for the subagent"},
+                "prompt": {"type": "string", "description": "Full instructions for one bounded scope. The parent should continue only clearly disjoint work."},
                 "subagent_type": {
                     "type": "string",
                     "enum": agents,
@@ -1343,7 +1343,7 @@ impl Tool for TaskTool {
                     "type": ["string", "null"],
                     "description": "Existing task session UUID to resume. Set null or omit when starting a new task; never invent a value."
                 },
-                "background": {"type": "boolean", "description": "Run detached; you will be notified on completion. DO NOT poll."}
+                "background": {"type": "boolean", "description": "Run detached only for intentionally deferred work whose completion should trigger a separate follow-up turn. Do not use when the result is needed for the current answer; call foreground sibling tasks together for parallel current-answer work. Do not poll."}
                 ,"workspace": {
                     "type": ["object", "null"],
                     "description": "Validated sibling Git worktree for isolation. Set null or omit to use the current workspace. This is a cooperative scheduling domain, not a sandbox.",

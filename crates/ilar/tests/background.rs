@@ -865,11 +865,23 @@ async fn background_task_returns_immediately_and_notifies_once() {
     );
     let session = store.load(&session_id).unwrap();
     let results = &session.transcript()[2].content;
-    assert!(matches!(
-        &results[0],
-        ContentBlock::ToolResult { content, is_error: false, .. }
-            if content.to_lowercase().contains("background")
-    ));
+    let launch = match &results[0] {
+        ContentBlock::ToolResult {
+            content,
+            is_error: false,
+            ..
+        } => content,
+        result => panic!("expected successful task result, got {result:?}"),
+    };
+    assert!(launch.to_lowercase().contains("background"), "{launch}");
+    assert!(launch.contains("separate follow-up turn"), "{launch}");
+    assert!(launch.contains("disjoint"), "{launch}");
+    assert!(
+        launch.contains("Do not perform this task's scope"),
+        "{launch}"
+    );
+    assert!(launch.contains("Do not sleep, poll, or check"), "{launch}");
+    assert!(!launch.contains("end your response"), "{launch}");
 
     // Exactly one notification arrives with the child's answer.
     let notification = tokio::time::timeout(Duration::from_secs(5), notifications.recv())
