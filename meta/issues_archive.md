@@ -100,3 +100,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Cumulative session usage + cost display](issues/cumulative-usage-and-cost.md)
 - [x] [Help overlay with keybindings](issues/help-overlay.md)
 - [x] [Readline-style input editing](issues/readline-input-editing.md)
+- [x] [Skill triggers + user skill invocation](issues/skill-triggers-and-user-invocation.md)

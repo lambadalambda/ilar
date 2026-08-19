@@ -18,7 +18,6 @@
 
 ## Milestone 4 — Daily-driver UX
 
-- [ ] [Skill triggers + user skill invocation](issues/skill-triggers-and-user-invocation.md)
 - [ ] [Todo sidebar narrow-terminal fallback](issues/todo-sidebar-narrow-fallback.md)
 - [ ] [MCP via skill (no built-in MCP client)](issues/mcp-via-skill.md)
 - [ ] [Per-agent tool restriction](issues/per-agent-tool-restriction.md)
