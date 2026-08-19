@@ -113,3 +113,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Session housekeeping (delete + fork)](issues/session-housekeeping.md)
 - [x] [Fuzzy session search in the picker](issues/session-picker-fuzzy.md)
 - [x] [Message queueing during turns](issues/message-queueing.md)
+- [x] [Manual compaction + summary visibility](issues/manual-compaction.md)

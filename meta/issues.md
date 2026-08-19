@@ -21,5 +21,4 @@
 ## Milestone 5 — Flow
 
 - [ ] [Transcript search](issues/transcript-search.md)
-- [ ] [Manual compaction + summary visibility](issues/manual-compaction.md)
 - [ ] [Live bash output tail](issues/bash-live-tail.md)
