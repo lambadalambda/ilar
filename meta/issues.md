@@ -22,7 +22,6 @@
 
 - [ ] [Message queueing during turns](issues/message-queueing.md)
 - [ ] [Transcript search](issues/transcript-search.md)
-- [ ] [One-key turn retry](issues/turn-retry-key.md)
 - [ ] [Manual compaction + summary visibility](issues/manual-compaction.md)
 - [ ] [Session housekeeping (delete + fork)](issues/session-housekeeping.md)
 - [ ] [Fuzzy session search in the picker](issues/session-picker-fuzzy.md)

@@ -107,3 +107,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Syntax highlighting in code fences](issues/code-fence-syntax-highlighting.md)
 - [x] [Throughput in the liveness display](issues/liveness-throughput.md)
 - [x] [Plan-billing cost label](issues/plan-billing-label.md)
+- [x] [One-key turn retry](issues/turn-retry-key.md)
