@@ -2574,7 +2574,7 @@ impl App {
         if !self.busy && !self.has_modal() {
             self.model_key_pending = false;
             self.clear_transient_notice();
-            self.command_palette = Some(CommandPalette::new(palette_items(&self.skills)));
+            self.command_palette = Some(CommandPalette::new(palette_items()));
         }
     }
 
@@ -4647,6 +4647,7 @@ enum PaletteCommand {
     Usage,
     Compact,
     Export,
+    Skills,
     Help,
 }
 
@@ -4710,6 +4711,13 @@ static PALETTE_COMMANDS: &[PaletteCommandDefinition] = &[
         search_terms: "export markdown save share transcript write file",
     },
     PaletteCommandDefinition {
+        id: PaletteCommand::Skills,
+        section: "Skills",
+        label: "Invoke skill…",
+        shortcut: "/",
+        search_terms: "skill skills slash command invoke run",
+    },
+    PaletteCommandDefinition {
         id: PaletteCommand::Help,
         section: "General",
         label: "Help",
@@ -4721,7 +4729,6 @@ static PALETTE_COMMANDS: &[PaletteCommandDefinition] = &[
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PaletteAction {
     Command(PaletteCommand),
-    Skill(String),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -4732,9 +4739,9 @@ struct PaletteItem {
     search_terms: String,
 }
 
-/// Palette entries: built-in commands plus one row per available skill.
-fn palette_items(skills: &[(String, String)]) -> Vec<PaletteItem> {
-    let mut items: Vec<PaletteItem> = PALETTE_COMMANDS
+/// Palette entries, one per built-in command.
+fn palette_items() -> Vec<PaletteItem> {
+    PALETTE_COMMANDS
         .iter()
         .map(|command| PaletteItem {
             action: PaletteAction::Command(command.id),
@@ -4742,16 +4749,7 @@ fn palette_items(skills: &[(String, String)]) -> Vec<PaletteItem> {
             shortcut: command.shortcut.to_string(),
             search_terms: format!("{} {}", command.section, command.search_terms),
         })
-        .collect();
-    for (name, description) in skills {
-        items.push(PaletteItem {
-            action: PaletteAction::Skill(name.clone()),
-            label: format!("/{name} — {description}"),
-            shortcut: "skill".into(),
-            search_terms: format!("skill skills invoke {name} {description}"),
-        });
-    }
-    items
+        .collect()
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -5671,13 +5669,7 @@ fn activate_palette_command(
     model_choices: Vec<&'static ilar::model::ModelInfo>,
 ) {
     app.command_palette = None;
-    let command = match action {
-        PaletteAction::Command(command) => command,
-        PaletteAction::Skill(name) => {
-            app.input = InputBuffer::from(format!("/{name} "));
-            return;
-        }
-    };
+    let PaletteAction::Command(command) = action;
     match command {
         PaletteCommand::Model if !model_choices.is_empty() => {
             app.model_picker = Some(ModelPicker::new(model_choices, &app.current_model));
@@ -5723,6 +5715,9 @@ fn activate_palette_command(
                 ilar::model::CATALOG_UPDATED,
             )));
             app.follow_tail = true;
+        }
+        PaletteCommand::Skills => {
+            app.skill_picker = Some(SkillPicker::new(app.skills.clone()));
         }
         PaletteCommand::Compact => {
             app.compact_requested = true;
@@ -8446,7 +8441,7 @@ mod tests {
     #[test]
     fn command_palette_sizes_to_show_every_command() {
         let mut app = App::new();
-        app.command_palette = Some(CommandPalette::new(palette_items(&app.skills)));
+        app.command_palette = Some(CommandPalette::new(palette_items()));
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
         terminal.draw(|frame| app.render(frame)).unwrap();
@@ -9131,7 +9126,7 @@ mod tests {
 
     #[test]
     fn command_palette_searches_and_selects_defined_commands() {
-        let mut palette = CommandPalette::new(palette_items(&[]));
+        let mut palette = CommandPalette::new(palette_items());
 
         assert_eq!(palette.filtered_commands().len(), PALETTE_COMMANDS.len());
         assert_eq!(
@@ -9156,13 +9151,13 @@ mod tests {
             CommandPaletteAction::Dismiss
         );
 
-        let mut palette = CommandPalette::new(palette_items(&[]));
+        let mut palette = CommandPalette::new(palette_items());
         palette.insert_query("model 🚀\n");
         assert_eq!(palette.query, "model 🚀");
         palette.handle_key(KeyCode::Backspace, false);
         assert_eq!(palette.query, "model ");
 
-        let mut palette = CommandPalette::new(palette_items(&[]));
+        let mut palette = CommandPalette::new(palette_items());
         palette.insert_query("theme");
         assert_eq!(palette.filtered_commands().len(), 1);
         assert_eq!(
@@ -9235,19 +9230,26 @@ mod tests {
     }
 
     #[test]
-    fn skills_are_inline_palette_rows_that_prefill_the_input() {
-        let skills = vec![("deploy".into(), "Deploy things".into())];
-        let mut palette = CommandPalette::new(palette_items(&skills));
-        assert_eq!(palette.items.len(), PALETTE_COMMANDS.len() + 1);
-        palette.insert_query("deploy");
+    fn skills_open_as_a_palette_submenu() {
+        // The palette lists a single Skills entry, not one row per skill.
+        let mut palette = CommandPalette::new(palette_items());
+        assert_eq!(palette.items.len(), PALETTE_COMMANDS.len());
+        palette.insert_query("skill");
         assert_eq!(
             palette.handle_key(KeyCode::Enter, false),
-            CommandPaletteAction::Choose(PaletteAction::Skill("deploy".into()))
+            CommandPaletteAction::Choose(PaletteAction::Command(PaletteCommand::Skills))
         );
 
         let mut app = App::new();
-        activate_palette_command(&mut app, PaletteAction::Skill("deploy".into()), Vec::new());
-        assert_eq!(app.input.text(), "/deploy ");
+        app.skills = vec![("deploy".into(), "Deploy things".into())];
+        activate_palette_command(
+            &mut app,
+            PaletteAction::Command(PaletteCommand::Skills),
+            Vec::new(),
+        );
+        let picker = app.skill_picker.as_ref().expect("skill picker opens");
+        assert_eq!(picker.skills.len(), 1);
+        assert!(!picker.from_slash, "palette-opened picker owes no slash");
         assert!(app.command_palette.is_none());
     }
 
@@ -9418,7 +9420,7 @@ mod tests {
         app.model_picker = None;
         app.current_model = "openai/gpt-5.2".into();
         app.current_variant = Some("high".into());
-        app.command_palette = Some(CommandPalette::new(palette_items(&app.skills)));
+        app.command_palette = Some(CommandPalette::new(palette_items()));
         activate_palette_command(
             &mut app,
             PaletteAction::Command(PaletteCommand::Reasoning),
@@ -9428,7 +9430,7 @@ mod tests {
         assert!(app.variant_picker.is_some());
 
         app.variant_picker = None;
-        app.command_palette = Some(CommandPalette::new(palette_items(&app.skills)));
+        app.command_palette = Some(CommandPalette::new(palette_items()));
         activate_palette_command(
             &mut app,
             PaletteAction::Command(PaletteCommand::Theme),
@@ -9567,7 +9569,7 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(30, 6);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         let mut app = App::new();
-        app.command_palette = Some(CommandPalette::new(palette_items(&app.skills)));
+        app.command_palette = Some(CommandPalette::new(palette_items()));
 
         terminal.draw(|frame| app.render(frame)).unwrap();
 
