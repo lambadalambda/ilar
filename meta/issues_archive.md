@@ -93,3 +93,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Bound project context discovery](issues/bound-project-context-discovery.md)
 - [x] [Clarify external sandbox requirement](issues/clarify-external-sandbox-requirement.md)
 - [x] [Document OpenAI OAuth setup](issues/document-openai-oauth-setup.md)
+- [x] [Keyless Exa MCP websearch fallback](issues/websearch-exa-fallback.md)

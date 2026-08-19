@@ -10,9 +10,7 @@
 
 ## Milestone 3 — Polish & extras
 
-- [ ] [Keyless Exa MCP websearch fallback](issues/websearch-exa-fallback.md)
-
-(previous issues complete — see issues_archive.md)
+(all complete — see issues_archive.md)
 
 ## Stabilization
 
