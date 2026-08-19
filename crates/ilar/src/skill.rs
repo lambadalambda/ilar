@@ -11,6 +11,9 @@ use serde::Deserialize;
 pub struct Skill {
     pub name: String,
     pub description: String,
+    /// Cue phrases surfaced in the system-prompt listing so the model
+    /// invokes the skill when they match the task.
+    pub triggers: Vec<String>,
     pub body: String,
 }
 
@@ -41,8 +44,7 @@ tools can still access paths outside the worktree.
 #[serde(deny_unknown_fields)]
 struct Frontmatter {
     description: Option<String>,
-    #[serde(rename = "triggers")]
-    _triggers: Option<Vec<String>>,
+    triggers: Option<Vec<String>>,
 }
 
 fn parse_skill_md(name: &str, text: &str) -> anyhow::Result<Skill> {
@@ -51,6 +53,7 @@ fn parse_skill_md(name: &str, text: &str) -> anyhow::Result<Skill> {
     Ok(Skill {
         name: name.into(),
         description: fm.description.unwrap_or_else(|| name.into()),
+        triggers: fm.triggers.unwrap_or_default(),
         body: body.trim_start_matches('\n').trim().to_string(),
     })
 }
@@ -105,10 +108,22 @@ impl SkillStore {
         }
         let lines: Vec<String> = skills
             .iter()
-            .map(|s| format!("- {}: {}", s.name, s.description))
+            .map(|s| {
+                if s.triggers.is_empty() {
+                    format!("- {}: {}", s.name, s.description)
+                } else {
+                    format!(
+                        "- {}: {} (use when: {})",
+                        s.name,
+                        s.description,
+                        s.triggers.join("; ")
+                    )
+                }
+            })
             .collect();
         Ok(format!(
-            "# Skills\n\nAvailable via the `skill` tool (loads the full instructions):\n{}",
+            "# Skills\n\nAvailable via the `skill` tool (loads the full instructions). \
+             Invoke a skill whenever its description or cues match the task:\n{}",
             lines.join("\n")
         ))
     }

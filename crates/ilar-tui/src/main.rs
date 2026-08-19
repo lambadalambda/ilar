@@ -2203,6 +2203,9 @@ struct App {
     session_picker_requested: bool,
     help_visible: bool,
     help_scroll: usize,
+    skill_picker: Option<SkillPicker>,
+    /// (name, description) pairs for slash invocation and the picker.
+    skills: Vec<(String, String)>,
     theme: theme::ThemeId,
     theme_picker: Option<ThemePicker>,
     model_key_pending: bool,
@@ -2256,6 +2259,8 @@ impl App {
             session_picker_requested: false,
             help_visible: false,
             help_scroll: 0,
+            skill_picker: None,
+            skills: Vec::new(),
             theme: theme::ThemeId::Terminal,
             theme_picker: None,
             model_key_pending: false,
@@ -2290,6 +2295,7 @@ impl App {
             || self.theme_picker.is_some()
             || self.session_picker.is_some()
             || self.help_visible
+            || self.skill_picker.is_some()
     }
 
     fn configure_runtime(
@@ -3446,6 +3452,8 @@ impl App {
             render_session_picker(frame, picker);
         } else if self.help_visible {
             render_help(frame, self.help_scroll);
+        } else if let Some(picker) = &self.skill_picker {
+            render_skill_picker(frame, picker);
         } else if let Some(palette) = &self.command_palette {
             render_command_palette(frame, palette);
         }
@@ -4280,6 +4288,13 @@ static HELP_SECTIONS: &[HelpSection] = &[
         ],
     },
     HelpSection {
+        title: "Skills",
+        bindings: &[
+            binding!("/", "skill picker (blank input)"),
+            binding!("/<name> [args]", "invoke a skill directly"),
+        ],
+    },
+    HelpSection {
         title: "Session",
         bindings: &[
             binding!("palette: Resume session", "switch to another session"),
@@ -4363,6 +4378,139 @@ fn render_help(frame: &mut Frame, scroll: usize) {
         .take(inner.height as usize)
         .collect();
     frame.render_widget(Paragraph::new(visible), inner);
+}
+
+/// `/name args` parsed from a submitted prompt; `None` when the text is
+/// not shaped like a skill invocation (and should submit unchanged).
+fn parse_slash_invocation(text: &str) -> Option<(&str, &str)> {
+    let rest = text.strip_prefix('/')?;
+    let (name, args) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "-_".contains(character))
+    {
+        return None;
+    }
+    Some((name, args.trim()))
+}
+
+fn skill_invocation_prompt(name: &str, args: &str) -> String {
+    if args.is_empty() {
+        format!("Use the `skill` tool to load the skill \"{name}\" and follow its instructions.")
+    } else {
+        format!(
+            "Use the `skill` tool to load the skill \"{name}\" and follow its instructions. Arguments: {args}"
+        )
+    }
+}
+
+fn close_skill_matches(skills: &[(String, String)], name: &str) -> Vec<String> {
+    let lowered = name.to_lowercase();
+    let mut matches: Vec<String> = skills
+        .iter()
+        .filter(|(candidate, _)| candidate.to_lowercase().contains(&lowered))
+        .map(|(candidate, _)| candidate.clone())
+        .collect();
+    if matches.is_empty() {
+        matches = skills
+            .iter()
+            .map(|(candidate, _)| candidate.clone())
+            .collect();
+    }
+    matches.truncate(6);
+    matches
+}
+
+struct SkillPicker {
+    skills: Vec<(String, String)>,
+    selected: usize,
+}
+
+impl SkillPicker {
+    fn new(skills: Vec<(String, String)>) -> Self {
+        Self {
+            skills,
+            selected: 0,
+        }
+    }
+
+    fn move_selection(&mut self, delta: isize) {
+        let count = self.skills.len();
+        if count == 0 {
+            self.selected = 0;
+        } else {
+            self.selected = (self.selected as isize + delta).rem_euclid(count as isize) as usize;
+        }
+    }
+
+    fn handle_key(&mut self, code: KeyCode, control: bool) -> PickerAction {
+        match (code, control) {
+            (KeyCode::Esc, _) => PickerAction::Dismiss,
+            (KeyCode::Enter, _) => self
+                .skills
+                .get(self.selected)
+                .map(|(name, _)| PickerAction::Choose(name.clone()))
+                .unwrap_or(PickerAction::Dismiss),
+            (KeyCode::Up, _) | (KeyCode::Char('p'), true) => {
+                self.move_selection(-1);
+                PickerAction::Stay
+            }
+            (KeyCode::Down, _) | (KeyCode::Char('n'), true) => {
+                self.move_selection(1);
+                PickerAction::Stay
+            }
+            _ => PickerAction::Stay,
+        }
+    }
+}
+
+fn render_skill_picker(frame: &mut Frame, picker: &SkillPicker) {
+    let area = centered_rect(frame.area(), 72, 14);
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .border_style(theme::focus_border())
+        .title(Line::styled(" skills ", theme::title(theme::MARKUP)))
+        .title_bottom(
+            Line::styled(
+                " ↑↓ select · Enter insert · Esc cancel ",
+                Style::default().fg(theme::MUTED),
+            )
+            .right_aligned(),
+        );
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let selected = picker.selected.min(picker.skills.len().saturating_sub(1));
+    let row_count = inner.height as usize;
+    let start = selected
+        .saturating_add(1)
+        .saturating_sub(row_count)
+        .min(picker.skills.len().saturating_sub(row_count));
+    let mut lines = Vec::new();
+    for (index, (name, description)) in picker.skills.iter().enumerate().skip(start).take(row_count)
+    {
+        let marker = if index == selected { "> " } else { "  " };
+        let text = truncate_display(
+            &format!("{marker}/{name} — {description}"),
+            inner.width as usize,
+            Truncation::Right,
+        );
+        let style = if index == selected {
+            theme::selected()
+        } else {
+            Style::default().fg(theme::PRIMARY)
+        };
+        lines.push(Line::styled(
+            format!("{text:<width$}", width = inner.width as usize),
+            style,
+        ));
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 struct SessionPicker {
@@ -5803,6 +5951,12 @@ async fn main() -> Result<()> {
         let skill_listing = skill_store
             .listing_prompt()
             .context("loading skill definitions")?;
+        let skill_inventory: Vec<(String, String)> = skill_store
+            .list()
+            .context("loading skill definitions")?
+            .into_iter()
+            .map(|skill| (skill.name, skill.description))
+            .collect();
         let mut system_prompt =
             system_prompt_for(config.dirs().0, &cwd).context("loading project instructions")?;
         if !skill_listing.is_empty() {
@@ -5889,6 +6043,7 @@ async fn main() -> Result<()> {
         let mut app = App::new();
         app.theme = active_theme;
         app.history = history::PromptHistory::load(config.state_dir().join("prompt_history.jsonl"));
+        app.skills = skill_inventory;
         app.session_id = session_id.clone();
         app.todos = todos;
         if let Some(resumed) = &resumed {
@@ -6312,6 +6467,21 @@ async fn run_app(
                     });
                     continue;
                 }
+                if let Some(picker) = app.skill_picker.as_mut() {
+                    match picker.handle_key(code, control) {
+                        PickerAction::Stay => {}
+                        PickerAction::Dismiss => {
+                            app.skill_picker = None;
+                            // The user typed `/` to get here; give it back.
+                            app.input.insert("/");
+                        }
+                        PickerAction::Choose(name) => {
+                            app.skill_picker = None;
+                            app.input = InputBuffer::from(format!("/{name} "));
+                        }
+                    }
+                    continue;
+                }
                 if let Some(picker) = app.session_picker.as_mut() {
                     match picker.handle_key(code, control) {
                         PickerAction::Stay => {}
@@ -6573,12 +6743,35 @@ async fn run_app(
                     }
                     (KeyCode::Up, _) if !app.input.is_multiline() => app.scroll_up(1),
                     (KeyCode::Down, _) if !app.input.is_multiline() => app.scroll_down(1),
+                    (KeyCode::Char('/'), false)
+                        if app.input.is_blank()
+                            && !app.skills.is_empty()
+                            && !key.modifiers.contains(KeyModifiers::ALT) =>
+                    {
+                        app.skill_picker = Some(SkillPicker::new(app.skills.clone()));
+                    }
                     _ => match handle_prompt_key(&mut app.input, key) {
                         PromptAction::Submit
                             if turn_handle.is_none() && !app.busy && !app.input.is_blank() =>
                         {
-                            let text = app.input.take();
+                            let mut text = app.input.take();
                             app.history.push(&text);
+                            if let Some((name, args)) = parse_slash_invocation(&text) {
+                                if app.skills.iter().any(|(skill, _)| skill == name) {
+                                    text = skill_invocation_prompt(name, args);
+                                } else {
+                                    let matches = close_skill_matches(&app.skills, name);
+                                    app.input = InputBuffer::from(text.as_str());
+                                    app.set_notice(
+                                        format!(
+                                            "unknown skill /{name} · available: {}",
+                                            matches.join(", ")
+                                        ),
+                                        NoticeLevel::Warning,
+                                    );
+                                    continue;
+                                }
+                            }
                             app.clear_notice();
                             app.push_transcript_line(Line_::User(text.clone()));
                             app.follow_tail = true;
@@ -7772,6 +7965,39 @@ mod tests {
         assert_eq!(
             palette.handle_key(KeyCode::Enter, false),
             CommandPaletteAction::Choose(PaletteCommand::Theme)
+        );
+    }
+
+    #[test]
+    fn slash_invocations_parse_and_rewrite() {
+        assert_eq!(
+            parse_slash_invocation("/deploy  to staging "),
+            Some(("deploy", "to staging"))
+        );
+        assert_eq!(parse_slash_invocation("/deploy"), Some(("deploy", "")));
+        assert_eq!(parse_slash_invocation("plain prompt"), None);
+        assert_eq!(parse_slash_invocation("/"), None);
+        assert_eq!(parse_slash_invocation("/etc/passwd is odd"), None);
+        assert_eq!(parse_slash_invocation("/ leading space"), None);
+
+        let prompt = skill_invocation_prompt("deploy", "to staging");
+        assert!(prompt.contains("`skill` tool"), "{prompt}");
+        assert!(prompt.contains("\"deploy\""), "{prompt}");
+        assert!(prompt.contains("to staging"), "{prompt}");
+        assert!(
+            !skill_invocation_prompt("deploy", "").contains("Arguments"),
+            "argless invocations skip the arguments clause"
+        );
+
+        let skills = vec![
+            ("deploy".to_string(), "d".to_string()),
+            ("release-notes".to_string(), "r".to_string()),
+        ];
+        assert_eq!(close_skill_matches(&skills, "rel"), vec!["release-notes"]);
+        assert_eq!(
+            close_skill_matches(&skills, "zzz"),
+            vec!["deploy", "release-notes"],
+            "no match falls back to the full (bounded) list"
         );
     }
 

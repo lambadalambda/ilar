@@ -151,8 +151,10 @@ Skills are Markdown files in `${ILAR_CONFIG_DIR:-~/.config/ilar}/skills/` and
 `./.ilar/skills/`. Project skills override user and built-in skills with the
 same filename. Root sessions list their names and descriptions in the system
 prompt and load full bodies on demand through the `skill` tool. Skill
-frontmatter supports `description`; `triggers` is accepted as reserved metadata
-but is not currently interpreted.
+frontmatter supports `description` and `triggers` (a list of cue phrases
+included in the system-prompt listing so the model invokes the skill when they
+match the task). In the TUI, type `/` on an empty input to pick a skill, or
+`/<skill-name> [arguments]` to invoke one directly.
 
 Built-in subagents are `build` (mutable, serialized per checkout) and `explore`
 (read-only, safe for parallel repository inspection and review).

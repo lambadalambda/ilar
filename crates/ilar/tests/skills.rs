@@ -94,11 +94,19 @@ fn documented_skill_triggers_are_accepted() {
         "---\ndescription = \"Deploy safely\"\ntriggers = [\"deploy\", \"release\"]\n---\nCanary first.\n",
     );
 
-    let skill = store(user.path(), project.path())
+    let store = store(user.path(), project.path());
+    let skill = store
         .load("deploy")
         .unwrap()
         .expect("skill with documented triggers loads");
     assert_eq!(skill.description, "Deploy safely");
+    assert_eq!(skill.triggers, vec!["deploy", "release"]);
+
+    let listing = store.listing_prompt().unwrap();
+    assert!(
+        listing.contains("deploy: Deploy safely (use when: deploy; release)"),
+        "{listing}"
+    );
 }
 
 #[test]
