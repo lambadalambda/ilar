@@ -144,8 +144,11 @@ Custom agents are Markdown files in
 `${ILAR_CONFIG_DIR:-~/.config/ilar}/agents/` and `./.ilar/agents/`. Project
 definitions override user definitions with the same filename, and user
 definitions override built-ins. Agent frontmatter supports `description`,
-`model`, `disabled`, and `read_only`. A file with `disabled = true` is skipped;
-it does not remove a lower-priority definition with the same name.
+`model`, `disabled`, `read_only`, and `tools` (an allowlist of tool names the
+agent may use; unknown names are a load-time error, and the list intersects
+with the read-only set when `read_only = true`). Tool restriction is
+coordination, not a security boundary. A file with `disabled = true` is
+skipped; it does not remove a lower-priority definition with the same name.
 
 Skills are Markdown files in `${ILAR_CONFIG_DIR:-~/.config/ilar}/skills/` and
 `./.ilar/skills/`. Project skills override user and built-in skills with the

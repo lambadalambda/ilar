@@ -521,6 +521,10 @@ impl SubagentSpawner {
                 }
             }
         };
+        let registry = match &agent.tools {
+            Some(tools) => registry.restricted_to(tools),
+            None => registry,
+        };
         let mut workspace_ancestry = ctx.workspace_ancestry.clone();
         if !workspace_ancestry
             .iter()
@@ -1096,6 +1100,10 @@ clearly disjoint work."
                 ToolRegistry::builtin().with_subagents(runtime.clone())?
             }
         };
+        let registry = match &agent.tools {
+            Some(tools) => registry.restricted_to(tools),
+            None => registry,
+        };
         let mut system_prompt =
             match system_prompt_for(&self.user_config_dir, workspace_location.cwd()) {
                 Ok(prompt) => prompt,
@@ -1523,7 +1531,15 @@ impl Tool for TaskTool {
                     AgentWorkspaceMode::Mutable => "mutable",
                     AgentWorkspaceMode::ReadOnly => "read-only",
                 };
-                format!("{} ({mode}): {}", agent.name, agent.description)
+                match &agent.tools {
+                    Some(tools) => format!(
+                        "{} ({mode}, tools: {}): {}",
+                        agent.name,
+                        tools.join("/"),
+                        agent.description
+                    ),
+                    None => format!("{} ({mode}): {}", agent.name, agent.description),
+                }
             })
             .collect::<Vec<_>>()
             .join("; ");

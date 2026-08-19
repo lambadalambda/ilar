@@ -766,10 +766,21 @@ fn parse_agent_md(name: &str, text: &str) -> anyhow::Result<Option<AgentDefiniti
         model: Option<String>,
         disabled: Option<bool>,
         read_only: Option<bool>,
+        tools: Option<Vec<String>>,
     }
     let fm: Frontmatter = toml::from_str(&frontmatter).context("invalid agent frontmatter")?;
     if fm.disabled == Some(true) {
         return Ok(None);
+    }
+    if let Some(tools) = &fm.tools {
+        let known = crate::tools::child_tool_names();
+        for tool in tools {
+            anyhow::ensure!(
+                known.contains(&tool.as_str()),
+                "unknown tool {tool:?} in agent allowlist (known: {})",
+                known.join(", ")
+            );
+        }
     }
     Ok(Some(AgentDefinition {
         name: name.into(),
@@ -781,5 +792,6 @@ fn parse_agent_md(name: &str, text: &str) -> anyhow::Result<Option<AgentDefiniti
         } else {
             super::AgentWorkspaceMode::Mutable
         },
+        tools: fm.tools,
     }))
 }

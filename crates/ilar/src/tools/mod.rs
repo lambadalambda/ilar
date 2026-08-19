@@ -505,6 +505,14 @@ pub struct ToolRegistry {
     tools: Vec<Arc<dyn Tool>>,
 }
 
+/// Tool names an agent `tools:` allowlist may reference — everything a
+/// child registry can contain (builtins plus the task tool).
+pub fn child_tool_names() -> Vec<&'static str> {
+    let mut names = ToolRegistry::builtin().tool_names();
+    names.push("task");
+    names
+}
+
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 #[error("duplicate tool name: {0}")]
 pub struct DuplicateToolError(&'static str);
@@ -545,6 +553,18 @@ impl ToolRegistry {
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
         self.tools.iter().find(|t| t.name() == name).cloned()
+    }
+
+    pub fn tool_names(&self) -> Vec<&'static str> {
+        self.tools.iter().map(|tool| tool.name()).collect()
+    }
+
+    /// Registry reduced to an agent allowlist (intersection: allowlisted
+    /// names absent from this registry are simply not granted).
+    pub fn restricted_to(mut self, allowlist: &[String]) -> Self {
+        self.tools
+            .retain(|tool| allowlist.iter().any(|name| name == tool.name()));
+        self
     }
 
     /// Registry with an extra tool (tests, future custom tools).

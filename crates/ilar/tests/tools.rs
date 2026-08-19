@@ -743,3 +743,33 @@ async fn glob_stops_at_its_match_cap() {
     assert_eq!(out.content.lines().count(), 1001);
     assert!(out.content.contains("truncated at 1000 matches"));
 }
+
+#[test]
+fn restricted_registry_intersects_with_the_base_set() {
+    let restricted =
+        ToolRegistry::builtin().restricted_to(&["grep".to_string(), "read".into(), "edit".into()]);
+    let mut names = restricted.tool_names();
+    names.sort_unstable();
+    assert_eq!(names, ["edit", "grep", "read"]);
+
+    // Intersection: allowlisted tools missing from a read-only base are
+    // simply not granted, and excluded tools are gone.
+    let read_only = ToolRegistry::read_only().restricted_to(&[
+        "grep".to_string(),
+        "edit".into(),
+        "bash".into(),
+    ]);
+    assert_eq!(read_only.tool_names(), ["grep"]);
+    assert!(read_only.get("edit").is_none());
+    assert!(read_only.get("bash").is_none());
+
+    let known = ilar::tools::child_tool_names();
+    for name in [
+        "read", "write", "edit", "bash", "glob", "grep", "webfetch", "task",
+    ] {
+        assert!(
+            known.contains(&name),
+            "{name} missing from child_tool_names"
+        );
+    }
+}

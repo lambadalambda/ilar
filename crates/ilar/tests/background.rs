@@ -177,6 +177,7 @@ fn spawner_for_workspace(
     provider: Arc<dyn Provider>,
     store: &SessionStore,
     workspace_mode: AgentWorkspaceMode,
+    tools: None,
     cwd: std::path::PathBuf,
 ) -> Arc<SubagentSpawner> {
     Arc::new(
@@ -538,6 +539,7 @@ async fn background_subagent_max_iterations_is_error() {
                 model: None,
                 prompt: String::new(),
                 workspace_mode: AgentWorkspaceMode::Mutable,
+                tools: None,
             }],
             std::env::temp_dir(),
             0,
@@ -1087,6 +1089,7 @@ async fn routed_abort_after_append_is_terminal_instead_of_requeued() {
             model: None,
             prompt: String::new(),
             workspace_mode: AgentWorkspaceMode::Mutable,
+            tools: None,
         }],
         std::env::temp_dir(),
         0,

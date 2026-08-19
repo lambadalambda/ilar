@@ -40,6 +40,9 @@ pub struct AgentDefinition {
     pub model: Option<String>,
     pub prompt: String,
     pub workspace_mode: AgentWorkspaceMode,
+    /// Tool allowlist; `None` grants the default set for the workspace
+    /// mode. Coordination only — not a security boundary.
+    pub tools: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -59,6 +62,7 @@ impl AgentDefinition {
                 model: None,
                 prompt: String::new(), // base prompt; TUI supplies the core text
                 workspace_mode: AgentWorkspaceMode::Mutable,
+                tools: None,
             },
             Self {
                 name: "explore".into(),
@@ -67,6 +71,7 @@ impl AgentDefinition {
                 model: None,
                 prompt: "Inspect, analyze, and review without modifying the workspace.".into(),
                 workspace_mode: AgentWorkspaceMode::ReadOnly,
+                tools: None,
             },
         ]
     }

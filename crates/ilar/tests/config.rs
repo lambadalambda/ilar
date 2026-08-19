@@ -231,6 +231,36 @@ fn markdown_agents_parsed_and_merged() {
 }
 
 #[test]
+fn agent_tool_allowlists_parse_and_reject_unknown_names() {
+    let (_g, dir) = tempdir();
+    fs::create_dir_all(dir.join("agents")).unwrap();
+    write(
+        &dir.join("agents/searcher.md"),
+        "---\ndescription = \"Search only\"\ntools = [\"grep\", \"glob\", \"read\"]\n---\nFind things.\n",
+    );
+    let config = Loader::no_env().config_dir(dir.clone()).resolve().unwrap();
+    let agents = config.agents().unwrap();
+    let searcher = agents
+        .iter()
+        .find(|a| a.name == "searcher")
+        .expect("searcher agent present");
+    assert_eq!(
+        searcher.tools.as_deref(),
+        Some(&["grep".to_string(), "glob".into(), "read".into()][..])
+    );
+
+    write(
+        &dir.join("agents/broken.md"),
+        "---\ndescription = \"bad\"\ntools = [\"grep\", \"teleport\"]\n---\nx\n",
+    );
+    let config = Loader::no_env().config_dir(dir).resolve().unwrap();
+    let error = config.agents().unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("teleport"), "{message}");
+    assert!(message.contains("known:"), "{message}");
+}
+
+#[test]
 fn user_and_working_directory_context_are_combined_without_parent_search() {
     let (_g, root) = tempdir();
     let user = root.join("config");
