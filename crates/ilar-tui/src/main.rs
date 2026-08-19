@@ -332,6 +332,9 @@ const TODO_SIDEBAR_MIN_WIDTH: u16 = 121;
 const TODO_SIDEBAR_WIDTH: u16 = 42;
 const TODO_SIDEBAR_MAX_ITEMS: usize = 5;
 const MAX_WHEEL_EVENTS_PER_BATCH: usize = 1024;
+/// Show "no data Ns" in the status line once the stream has been silent
+/// this long during thinking/responding.
+const STREAM_STALL_AFTER: std::time::Duration = std::time::Duration::from_secs(3);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ContentAreas {
@@ -2192,6 +2195,10 @@ struct App {
     latest_usage: Option<ilar::session::Usage>,
     session_usage: ilar::session::Usage,
     session_cost: Option<f64>,
+    /// Bytes of streamed text/thinking received this turn, plus the last
+    /// arrival instant — the status line's stream-liveness indicator.
+    stream_received: u64,
+    stream_last_data: Option<std::time::Instant>,
     scroll_top: usize,
     content_rows: usize,
     viewport_rows: usize,
@@ -2249,6 +2256,8 @@ impl App {
             latest_usage: None,
             session_usage: ilar::session::Usage::default(),
             session_cost: Some(0.0),
+            stream_received: 0,
+            stream_last_data: None,
             scroll_top: 0,
             content_rows: 0,
             viewport_rows: 0,
@@ -2327,6 +2336,11 @@ impl App {
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
     }
 
+    fn note_stream_data(&mut self, bytes: usize) {
+        self.stream_received = self.stream_received.saturating_add(bytes as u64);
+        self.stream_last_data = Some(std::time::Instant::now());
+    }
+
     fn set_activity(&mut self, activity: Activity) {
         if self.activity != activity {
             self.activity = activity;
@@ -2358,9 +2372,12 @@ impl App {
             LoopEvent::TurnStarted => {
                 self.clear_transient_notice();
                 self.status = "thinking…".into();
+                self.stream_received = 0;
+                self.stream_last_data = None;
                 self.set_activity(Activity::Thinking);
             }
             LoopEvent::TextDelta(t) => {
+                self.note_stream_data(t.len());
                 self.status = "responding".into();
                 self.set_activity(Activity::Responding);
                 match self.lines.last_mut() {
@@ -2368,11 +2385,13 @@ impl App {
                     _ => self.lines.push(Line_::Assistant(t.clone())),
                 }
             }
-            LoopEvent::ThinkingDelta(_) => {
+            LoopEvent::ThinkingDelta(delta) => {
+                self.note_stream_data(delta.len());
                 self.status = "thinking".into();
                 self.set_activity(Activity::Thinking);
             }
             LoopEvent::ReasoningSummaryDelta(summary) => {
+                self.note_stream_data(summary.len());
                 self.status = "thinking".into();
                 self.set_activity(Activity::Thinking);
                 match self.lines.last_mut() {
@@ -2436,6 +2455,7 @@ impl App {
                 received_bytes,
                 last_data,
             } => {
+                self.stream_last_data = Some(*last_data);
                 if let Some(progress) = self.lines.iter_mut().rev().find_map(|line| match line {
                     Line_::Tool {
                         id: line_id,
@@ -3006,6 +3026,24 @@ impl App {
             Activity::Paused => ("Ⅱ", "paused", theme::WAITING),
             Activity::Error => ("×", "error", ERROR),
         };
+        // Stream liveness: the spinner animates on wall-clock time, so
+        // only arriving bytes prove the provider is not hanging.
+        let state = match (self.activity, self.stream_last_data) {
+            (Activity::Thinking | Activity::Responding, Some(last)) if width >= 48 => {
+                let since = last.elapsed();
+                if since >= STREAM_STALL_AFTER {
+                    format!(
+                        "{state} · {} · no data {}s",
+                        format_bytes(self.stream_received),
+                        since.as_secs()
+                    )
+                } else {
+                    format!("{state} · {}", format_bytes(self.stream_received))
+                }
+            }
+            _ => state.to_string(),
+        };
+        let state = state.as_str();
         let context = context_usage(
             self.context_used,
             self.context_limit,
@@ -7509,6 +7547,40 @@ mod tests {
         assert_eq!(format_cost(0.004375), "$0.004");
         assert_eq!(format_cost(0.42), "$0.420");
         assert_eq!(format_cost(1.234), "$1.23");
+    }
+
+    #[test]
+    fn thinking_status_shows_stream_liveness() {
+        let mut app = App::new();
+        app.push_loop_event(&LoopEvent::TurnStarted);
+        let plain = rendered_text(&app.status_line(120));
+        assert!(plain.contains("thinking"), "{plain}");
+        assert!(!plain.contains("KiB"), "no bytes before data: {plain}");
+
+        app.push_loop_event(&LoopEvent::ThinkingDelta("x".repeat(2048)));
+        let live = rendered_text(&app.status_line(120));
+        assert!(live.contains("thinking · 2.0 KiB"), "{live}");
+        assert!(
+            !live.contains("no data"),
+            "fresh data is not a stall: {live}"
+        );
+
+        // A silent stream surfaces the stall age instead of spinning forever.
+        app.stream_last_data = Some(std::time::Instant::now() - std::time::Duration::from_secs(10));
+        let stalled = rendered_text(&app.status_line(120));
+        assert!(stalled.contains("no data 10s"), "{stalled}");
+
+        // Responding keeps counting; narrow widths drop the counter.
+        app.push_loop_event(&LoopEvent::TextDelta("y".repeat(1024)));
+        let responding = rendered_text(&app.status_line(120));
+        assert!(responding.contains("responding · 3.0 KiB"), "{responding}");
+        let narrow = rendered_text(&app.status_line(40));
+        assert!(!narrow.contains("KiB"), "{narrow}");
+
+        // A new turn resets the counter.
+        app.push_loop_event(&LoopEvent::TurnStarted);
+        let reset = rendered_text(&app.status_line(120));
+        assert!(!reset.contains("KiB"), "{reset}");
     }
 
     #[test]
