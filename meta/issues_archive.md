@@ -96,3 +96,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Keyless Exa MCP websearch fallback](issues/websearch-exa-fallback.md)
 - [x] [Render diffs for edit/write tool results](issues/render-edit-diffs.md)
 - [x] [Session list + resume-last](issues/session-list-and-resume-last.md)
+- [x] [Prompt history recall](issues/prompt-history-recall.md)

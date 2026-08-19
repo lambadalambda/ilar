@@ -18,7 +18,6 @@
 
 ## Milestone 4 — Daily-driver UX
 
-- [ ] [Prompt history recall](issues/prompt-history-recall.md)
 - [ ] [Cumulative session usage + cost display](issues/cumulative-usage-and-cost.md)
 - [ ] [Help overlay with keybindings](issues/help-overlay.md)
 - [ ] [Readline-style input editing](issues/readline-input-editing.md)
