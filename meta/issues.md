@@ -26,4 +26,3 @@
 - [ ] [Session housekeeping (delete + fork)](issues/session-housekeeping.md)
 - [ ] [Fuzzy session search in the picker](issues/session-picker-fuzzy.md)
 - [ ] [Live bash output tail](issues/bash-live-tail.md)
-- [ ] [Skills inlined in the command palette](issues/palette-inline-skills.md)
