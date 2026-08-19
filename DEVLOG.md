@@ -688,3 +688,22 @@ subagent runtimes. Context is loaded before fresh child-session creation, and
 routed nested failures propagate to the grandparent rather than losing a
 background completion. The README now provides the corresponding complete
 configuration, environment, custom-agent, and skill reference.
+
+## 2026-08-19 — websearch works out of the box (keyless Exa)
+
+Websearch previously registered only with `ILAR_TAVILY_API_KEY` set, so a
+fresh install silently had no search. Investigated how opencode ships OOB
+search: it POSTs a bare JSON-RPC `tools/call` to the hosted Exa and
+Parallel.ai MCP endpoints, keyless by default, and A/B-splits sessions
+between the two providers by session-ID checksum.
+
+Adopted the Exa half: new `ExaBackend` calls `https://mcp.exa.ai/mcp`
+(`web_search_exa`), parses both direct-JSON and SSE `data:` framings, and
+converts the text payload (`Title:`/`URL:` blocks separated by `---`) into
+structured `SearchHit`s, with a raw-text single-hit fallback so results are
+never dropped. `with_web_tools()` now always registers websearch: Tavily
+when its key is set, otherwise Exa (optionally authenticated via
+`ILAR_EXA_API_KEY` as an `exaApiKey` query parameter, same as opencode).
+Keyless access is best-effort on Exa's side — README tells users to bring
+their own key. Live-verified via an `#[ignore]`d smoke test
+(`cargo test -p ilar exa_live -- --ignored`).

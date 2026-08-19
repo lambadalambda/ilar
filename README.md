@@ -77,7 +77,16 @@ Environment variables:
 | `ILAR_STATE_DIR` | Replaces the default `~/.local/state/ilar` session and authentication directory. |
 | `ILAR_OPENAI_API_KEY` | Fallback OpenAI API key. |
 | `ILAR_ZAI_API_KEY` | Fallback z.ai API key. |
-| `ILAR_TAVILY_API_KEY` | Enables Tavily-backed web search. |
+| `ILAR_TAVILY_API_KEY` | Switches web search to the Tavily API (recommended). |
+| `ILAR_EXA_API_KEY` | Authenticates the default Exa web search backend. |
+
+#### Web search
+
+The `websearch` tool works out of the box: without any configuration it calls
+the hosted [Exa](https://exa.ai) MCP endpoint anonymously. Keyless access is
+best-effort and rate-limited by Exa, so for real use you should bring your own
+key — either `ILAR_TAVILY_API_KEY` to use Tavily, or `ILAR_EXA_API_KEY` to
+authenticate against Exa. If both are set, Tavily wins.
 
 ### OpenAI ChatGPT OAuth
 
