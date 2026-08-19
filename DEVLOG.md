@@ -780,3 +780,18 @@ exact shape the strict decoder expects (id+name in the first chunk,
 argument deltas after). The Anthropic flavor already streams properly
 with tools. New ignored live smoke test pins the incremental behavior
 (`live_openai_flavor_glm53_tool_call_streams_incrementally`).
+
+## 2026-08-19 — the real glm-5.3 killer: our own 600s request timeout
+
+The recorded turn error (new diagnostics) plus session timestamps nailed
+it: the turn died at exactly 600s — REQUEST_TIMEOUT — after 117KB of
+healthy streamed thinking. reqwest reports a mid-body timeout as "error
+decoding response body" and its Display hides the source, so it looked
+like a protocol bug. glm-5.3 at effort=max genuinely thinks for 10+
+minutes on hard tasks; opencode sets no total fetch deadline (300s
+header timeout + optional chunk timeout only).
+
+Providers now use connect (15s) + idle (300s) timeouts with no total
+deadline, and transport errors carry their full source chain. Also: live
+thinking now accumulates into an expandable Thought row (click ▸, 64 KiB
+tail bound) so marathon reasoning is inspectable while it runs.
