@@ -20,4 +20,3 @@
 
 ## Milestone 5 — Flow
 
-- [ ] [Pending-state controls](issues/pending-state-controls.md)
