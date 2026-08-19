@@ -1,6 +1,7 @@
 //! ilar TUI: transcript, streaming, tool display, input. Esc aborts.
 
 mod diff;
+mod history;
 mod markdown;
 mod theme;
 
@@ -471,7 +472,6 @@ impl From<String> for InputBuffer {
 }
 
 impl InputBuffer {
-    #[cfg(test)]
     fn text(&self) -> &str {
         &self.text
     }
@@ -2015,6 +2015,7 @@ fn activity_line(
 struct App {
     lines: Vec<Line_>,
     input: InputBuffer,
+    history: history::PromptHistory,
     busy: bool,
     status: String,
     notice: Option<StatusNotice>,
@@ -2064,6 +2065,7 @@ impl App {
                     .into(),
             )],
             input: InputBuffer::default(),
+            history: history::PromptHistory::in_memory(),
             busy: false,
             status: String::new(),
             notice: None,
@@ -5510,6 +5512,7 @@ async fn main() -> Result<()> {
         let context_limit = resolver.context_limit(&model_for_session);
         let mut app = App::new();
         app.theme = active_theme;
+        app.history = history::PromptHistory::load(config.state_dir().join("prompt_history.jsonl"));
         app.session_id = session_id.clone();
         app.todos = todos;
         if let Some(resumed) = &resumed {
@@ -6151,6 +6154,23 @@ async fn run_app(
                     (KeyCode::End, true) => app.scroll_to_tail(),
                     (KeyCode::PageUp, _) => app.scroll_up(app.page_size()),
                     (KeyCode::PageDown, _) => app.scroll_down(app.page_size()),
+                    // History recall wins while browsing or on a blank
+                    // input; transcript scrolling stays on PgUp/wheel/^U.
+                    (KeyCode::Up, _)
+                        if app.history.browsing()
+                            || (!app.input.is_multiline() && app.input.is_blank()) =>
+                    {
+                        if let Some(text) = app.history.previous(app.input.text()) {
+                            app.input = InputBuffer::from(text);
+                        } else if !app.history.browsing() {
+                            app.scroll_up(1);
+                        }
+                    }
+                    (KeyCode::Down, _) if app.history.browsing() => {
+                        if let Some(text) = app.history.next(app.input.text()) {
+                            app.input = InputBuffer::from(text);
+                        }
+                    }
                     (KeyCode::Up, _) if !app.input.is_multiline() => app.scroll_up(1),
                     (KeyCode::Down, _) if !app.input.is_multiline() => app.scroll_down(1),
                     _ => match handle_prompt_key(&mut app.input, key) {
@@ -6158,6 +6178,7 @@ async fn run_app(
                             if turn_handle.is_none() && !app.busy && !app.input.is_blank() =>
                         {
                             let text = app.input.take();
+                            app.history.push(&text);
                             app.clear_notice();
                             app.push_transcript_line(Line_::User(text.clone()));
                             app.follow_tail = true;
