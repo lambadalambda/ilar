@@ -595,6 +595,86 @@ impl InputBuffer {
             .replace_range(self.cursor..self.cursor + grapheme.len(), "");
     }
 
+    /// Kill from the cursor to the end of the visual line; at the line
+    /// end, join with the next line (readline Ctrl-K).
+    fn kill_to_line_end(&mut self) {
+        let line_end = self.text[self.cursor..]
+            .find('\n')
+            .map(|offset| self.cursor + offset)
+            .unwrap_or(self.text.len());
+        if line_end == self.cursor {
+            if self.cursor < self.text.len() {
+                self.text.replace_range(self.cursor..self.cursor + 1, "");
+            }
+        } else {
+            self.text.replace_range(self.cursor..line_end, "");
+        }
+    }
+
+    /// Kill from the start of the visual line to the cursor (Ctrl-U).
+    fn kill_to_line_start(&mut self) {
+        let line_start = self.text[..self.cursor]
+            .rfind('\n')
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        self.text.replace_range(line_start..self.cursor, "");
+        self.cursor = line_start;
+    }
+
+    /// Delete the whitespace-delimited word before the cursor (Ctrl-W).
+    fn delete_word_back(&mut self) {
+        let head = &self.text[..self.cursor];
+        let trimmed = head.trim_end_matches(|character: char| character.is_whitespace());
+        let start = trimmed
+            .rfind(|character: char| character.is_whitespace())
+            .map(|index| index + trimmed[index..].chars().next().map_or(1, char::len_utf8))
+            .unwrap_or(0);
+        self.text.replace_range(start..self.cursor, "");
+        self.cursor = start;
+    }
+
+    fn word_char(character: char) -> bool {
+        character.is_alphanumeric() || character == '_'
+    }
+
+    /// Move to the start of the previous word (Alt-B); words are
+    /// alphanumeric runs, punctuation is skipped like whitespace.
+    fn move_word_left(&mut self) {
+        let head = &self.text[..self.cursor];
+        let mut boundary = head.len();
+        let mut seen_word = false;
+        for (index, character) in head.char_indices().rev() {
+            if Self::word_char(character) {
+                seen_word = true;
+                boundary = index;
+            } else if seen_word {
+                break;
+            } else {
+                boundary = index;
+            }
+        }
+        self.cursor = if seen_word { boundary } else { 0 };
+    }
+
+    /// Move past the end of the next word (Alt-F).
+    fn move_word_right(&mut self) {
+        let tail = &self.text[self.cursor..];
+        let mut seen_word = false;
+        let mut offset = tail.len();
+        for (index, character) in tail.char_indices() {
+            if Self::word_char(character) {
+                seen_word = true;
+            } else if seen_word {
+                offset = index;
+                break;
+            }
+        }
+        if !seen_word {
+            offset = tail.len();
+        }
+        self.cursor += offset;
+    }
+
     fn is_multiline(&self) -> bool {
         self.text.contains('\n')
     }
@@ -662,6 +742,7 @@ enum PromptAction {
 
 fn handle_prompt_key(input: &mut InputBuffer, key: KeyEvent) -> PromptAction {
     let control = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
     match key.code {
         KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
             input.insert("\n");
@@ -670,6 +751,34 @@ fn handle_prompt_key(input: &mut InputBuffer, key: KeyEvent) -> PromptAction {
         KeyCode::Enter => PromptAction::Submit,
         KeyCode::Char('j') if control => {
             input.insert("\n");
+            PromptAction::Edited
+        }
+        KeyCode::Char('a') if control => {
+            input.move_home();
+            PromptAction::Edited
+        }
+        KeyCode::Char('e') if control => {
+            input.move_end();
+            PromptAction::Edited
+        }
+        KeyCode::Char('k') if control => {
+            input.kill_to_line_end();
+            PromptAction::Edited
+        }
+        KeyCode::Char('u') if control => {
+            input.kill_to_line_start();
+            PromptAction::Edited
+        }
+        KeyCode::Char('w') if control => {
+            input.delete_word_back();
+            PromptAction::Edited
+        }
+        KeyCode::Char('b') if alt && !control => {
+            input.move_word_left();
+            PromptAction::Edited
+        }
+        KeyCode::Char('f') if alt && !control => {
+            input.move_word_right();
             PromptAction::Edited
         }
         KeyCode::Left if !control => {
@@ -4143,6 +4252,10 @@ static HELP_SECTIONS: &[HelpSection] = &[
             binding!("Shift-Enter / Ctrl-J", "insert newline"),
             binding!("Esc", "clear input · abort turn · cancel background jobs"),
             binding!("Up / Down", "recall prompt history (blank input)"),
+            binding!("Ctrl-A / Ctrl-E", "start / end of line"),
+            binding!("Ctrl-K / Ctrl-U", "kill to line end / start"),
+            binding!("Ctrl-W", "delete previous word"),
+            binding!("Alt-B / Alt-F", "move by word"),
         ],
     },
     HelpSection {
@@ -6429,7 +6542,9 @@ async fn run_app(
                             app.input.clear();
                         }
                     }
-                    (KeyCode::Char('u'), true) => {
+                    // Ctrl-U edits the input when it has text; the
+                    // half-page scroll needs a blank input.
+                    (KeyCode::Char('u'), true) if app.input.is_blank() => {
                         app.scroll_up(app.page_size().div_ceil(2));
                     }
                     (KeyCode::Char('d'), true) => {
@@ -7026,6 +7141,75 @@ mod tests {
         combining.insert("a");
         combining.backspace();
         assert_eq!(combining.text(), "");
+    }
+
+    #[test]
+    fn readline_chords_edit_the_current_line() {
+        let chord = |input: &mut InputBuffer, code: KeyCode, modifiers: KeyModifiers| {
+            assert_eq!(
+                handle_prompt_key(input, KeyEvent::new(code, modifiers)),
+                PromptAction::Edited
+            );
+        };
+
+        // Ctrl-A / Ctrl-E are line-scoped in multiline input.
+        let mut input = InputBuffer::from("first\nsecond tail");
+        chord(&mut input, KeyCode::Char('a'), KeyModifiers::CONTROL);
+        input.insert(">");
+        assert_eq!(input.text(), "first\n>second tail");
+        chord(&mut input, KeyCode::Char('e'), KeyModifiers::CONTROL);
+        input.insert("<");
+        assert_eq!(input.text(), "first\n>second tail<");
+
+        // Ctrl-K kills to line end; at line end it joins the next line.
+        let mut input = InputBuffer::from("keep-drop\nnext");
+        input.move_vertical(-1);
+        input.move_home();
+        for _ in 0..4 {
+            input.move_right();
+        }
+        chord(&mut input, KeyCode::Char('k'), KeyModifiers::CONTROL);
+        assert_eq!(input.text(), "keep\nnext");
+        chord(&mut input, KeyCode::Char('k'), KeyModifiers::CONTROL);
+        assert_eq!(input.text(), "keepnext");
+
+        // Ctrl-U kills to line start.
+        let mut input = InputBuffer::from("first\nsecond");
+        chord(&mut input, KeyCode::Char('u'), KeyModifiers::CONTROL);
+        assert_eq!(input.text(), "first\n");
+
+        // Ctrl-W deletes the previous whitespace-delimited word.
+        let mut input = InputBuffer::from("alpha beta  ");
+        chord(&mut input, KeyCode::Char('w'), KeyModifiers::CONTROL);
+        assert_eq!(input.text(), "alpha ");
+        chord(&mut input, KeyCode::Char('w'), KeyModifiers::CONTROL);
+        assert_eq!(input.text(), "");
+
+        // Alt-B / Alt-F move by word across punctuation, unicode-safe.
+        let mut input = InputBuffer::from("héllo, wörld");
+        chord(&mut input, KeyCode::Char('b'), KeyModifiers::ALT);
+        input.insert("|");
+        assert_eq!(input.text(), "héllo, |wörld");
+        chord(&mut input, KeyCode::Char('b'), KeyModifiers::ALT);
+        chord(&mut input, KeyCode::Char('b'), KeyModifiers::ALT);
+        input.insert("^");
+        assert_eq!(input.text(), "^héllo, |wörld");
+        chord(&mut input, KeyCode::Char('f'), KeyModifiers::ALT);
+        input.insert("$");
+        assert_eq!(input.text(), "^héllo$, |wörld");
+
+        // Empty-input chords are inert, not panics.
+        let mut empty = InputBuffer::default();
+        for (code, modifiers) in [
+            (KeyCode::Char('k'), KeyModifiers::CONTROL),
+            (KeyCode::Char('u'), KeyModifiers::CONTROL),
+            (KeyCode::Char('w'), KeyModifiers::CONTROL),
+            (KeyCode::Char('b'), KeyModifiers::ALT),
+            (KeyCode::Char('f'), KeyModifiers::ALT),
+        ] {
+            chord(&mut empty, code, modifiers);
+            assert_eq!(empty.text(), "");
+        }
     }
 
     #[test]
