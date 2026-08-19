@@ -105,3 +105,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [MCP via skill (no built-in MCP client)](issues/mcp-via-skill.md)
 - [x] [Per-agent tool restriction](issues/per-agent-tool-restriction.md)
 - [x] [Syntax highlighting in code fences](issues/code-fence-syntax-highlighting.md)
+- [x] [Throughput in the liveness display](issues/liveness-throughput.md)

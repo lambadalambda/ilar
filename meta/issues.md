@@ -27,7 +27,6 @@
 - [ ] [Session housekeeping (delete + fork)](issues/session-housekeeping.md)
 - [ ] [Fuzzy session search in the picker](issues/session-picker-fuzzy.md)
 - [ ] [Export transcript to Markdown](issues/export-transcript-markdown.md)
-- [ ] [Throughput in the liveness display](issues/liveness-throughput.md)
 - [ ] [Live bash output tail](issues/bash-live-tail.md)
 - [ ] [Skills inlined in the command palette](issues/palette-inline-skills.md)
 - [ ] [Plan-billing cost label](issues/plan-billing-label.md)
