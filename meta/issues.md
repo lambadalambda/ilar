@@ -18,7 +18,6 @@
 
 ## Milestone 4 — Daily-driver UX
 
-- [ ] [Session list + resume-last](issues/session-list-and-resume-last.md)
 - [ ] [Prompt history recall](issues/prompt-history-recall.md)
 - [ ] [Cumulative session usage + cost display](issues/cumulative-usage-and-cost.md)
 - [ ] [Help overlay with keybindings](issues/help-overlay.md)
