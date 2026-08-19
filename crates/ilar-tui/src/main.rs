@@ -4842,6 +4842,7 @@ enum PaletteCommand {
     Compact,
     Export,
     Skills,
+    Pending,
     Help,
 }
 
@@ -4910,6 +4911,13 @@ static PALETTE_COMMANDS: &[PaletteCommandDefinition] = &[
         label: "Invoke skill…",
         shortcut: "/",
         search_terms: "skill skills slash command invoke run",
+    },
+    PaletteCommandDefinition {
+        id: PaletteCommand::Pending,
+        section: "General",
+        label: "Pending…",
+        shortcut: "^Q",
+        search_terms: "pending queue queued goal background jobs retry manage",
     },
     PaletteCommandDefinition {
         id: PaletteCommand::Help,
@@ -6131,6 +6139,9 @@ fn activate_palette_command(
                     app.set_notice(format!("export failed: {error}"), NoticeLevel::Error);
                 }
             }
+        }
+        PaletteCommand::Pending => {
+            app.pending_manager = Some(PendingManager::default());
         }
         PaletteCommand::Help => {
             app.help_visible = true;
