@@ -41,7 +41,7 @@ impl ZaiProvider {
             api_key,
             base_url: base_url.unwrap_or_else(|| default_base.into()),
             flavor,
-            http: reqwest::Client::new(),
+            http: transport::streaming_client(),
         }
     }
 
@@ -397,7 +397,7 @@ impl Provider for ZaiProvider {
             Flavor::Anthropic => format!("{}/v1/messages", self.base_url),
             Flavor::OpenAI => format!("{}/chat/completions", self.base_url),
         };
-        let mut request = self.http.post(url).timeout(transport::REQUEST_TIMEOUT);
+        let mut request = self.http.post(url);
         request = match self.flavor {
             Flavor::Anthropic => request
                 .header("x-api-key", &self.api_key)

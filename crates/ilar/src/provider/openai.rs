@@ -39,7 +39,7 @@ impl OpenAIProvider {
             base_url: base_url.unwrap_or_else(|| "https://api.openai.com/v1".into()),
             prompt_cache_key,
             token_url: format!("{}/oauth/token", crate::auth::AUTH_BASE),
-            http: reqwest::Client::new(),
+            http: transport::streaming_client(),
         }
     }
 
@@ -50,7 +50,7 @@ impl OpenAIProvider {
             base_url: base_url.unwrap_or_else(|| "https://chatgpt.com/backend-api/codex".into()),
             prompt_cache_key: false,
             token_url: format!("{}/oauth/token", crate::auth::AUTH_BASE),
-            http: reqwest::Client::new(),
+            http: transport::streaming_client(),
         }
     }
 
@@ -236,11 +236,7 @@ impl Provider for OpenAIProvider {
             let mut refreshed = false;
 
             loop {
-                let mut builder = http
-                    .post(&url)
-                    .bearer_auth(&current_token)
-                    .json(&body)
-                    .timeout(transport::REQUEST_TIMEOUT);
+                let mut builder = http.post(&url).bearer_auth(&current_token).json(&body);
                 if is_chatgpt {
                     builder = builder
                         .header("originator", "codex_cli_rs")

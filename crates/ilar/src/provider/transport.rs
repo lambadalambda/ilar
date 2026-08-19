@@ -9,7 +9,36 @@ use tokio_stream::wrappers::ReceiverStream;
 use super::sse::SseParser;
 use super::{EventStream, ProviderEvent};
 
-pub(super) const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+/// Bound on TCP/TLS connection setup.
+pub(super) const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// Idle bound between reads (awaiting headers or the next stream chunk).
+/// Streams deliberately have NO total deadline: reasoning models
+/// legitimately generate for 10+ minutes (glm-5.3 was killed at exactly
+/// the old 600s total cap after 117KB of healthy thinking). A live stream
+/// keeps delivering deltas; a dead connection trips this instead.
+pub(super) const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Streaming HTTP client: connect + idle timeouts only, by design.
+pub(super) fn streaming_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .read_timeout(IDLE_TIMEOUT)
+        .build()
+        .expect("valid provider HTTP client")
+}
+
+/// Full error chain — reqwest's Display alone hides the cause ("error
+/// decoding response body" for what is actually a timeout or reset).
+fn error_with_sources(error: &dyn std::error::Error) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(current) = source {
+        message.push_str(": ");
+        message.push_str(&current.to_string());
+        source = current.source();
+    }
+    message
+}
 
 pub(super) struct TransportResponse {
     pub response: reqwest::Response,
@@ -52,7 +81,9 @@ where
             let chunk = match chunk {
                 Ok(chunk) => chunk,
                 Err(error) => {
-                    let _ = tx.send(ProviderEvent::Error(error.to_string())).await;
+                    let _ = tx
+                        .send(ProviderEvent::Error(error_with_sources(&error)))
+                        .await;
                     return;
                 }
             };
@@ -259,6 +290,19 @@ mod tests {
         fn finish(&mut self) -> Option<ProviderEvent> {
             None
         }
+    }
+
+    #[test]
+    fn error_chains_include_sources() {
+        #[derive(Debug, thiserror::Error)]
+        #[error("error decoding response body")]
+        struct Outer(#[source] std::io::Error);
+        let error = Outer(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "operation timed out",
+        ));
+        let message = error_with_sources(&error);
+        assert_eq!(message, "error decoding response body: operation timed out");
     }
 
     #[tokio::test]
