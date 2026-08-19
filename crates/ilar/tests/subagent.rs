@@ -115,7 +115,6 @@ fn spawner_with_mode(
     max_concurrent: usize,
     max_depth: usize,
     workspace_mode: AgentWorkspaceMode,
-    tools: None,
 ) -> Arc<SubagentSpawner> {
     Arc::new(SubagentSpawner::new(
         Arc::new(FixedProviderResolver::new(provider)),
@@ -126,6 +125,7 @@ fn spawner_with_mode(
             model: None,
             prompt: "You are an explorer.".into(),
             workspace_mode,
+            tools: None,
         }],
         std::env::temp_dir(),
         0,
@@ -288,7 +288,6 @@ async fn invalid_subagent_context_fails_before_creating_a_child_session() {
 
 async fn run_two_tasks(
     workspace_mode: AgentWorkspaceMode,
-    tools: None,
 ) -> (
     Duration,
     Vec<ChatMessage>,

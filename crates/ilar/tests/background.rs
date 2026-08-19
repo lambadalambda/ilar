@@ -177,7 +177,6 @@ fn spawner_for_workspace(
     provider: Arc<dyn Provider>,
     store: &SessionStore,
     workspace_mode: AgentWorkspaceMode,
-    tools: None,
     cwd: std::path::PathBuf,
 ) -> Arc<SubagentSpawner> {
     Arc::new(
@@ -190,6 +189,7 @@ fn spawner_for_workspace(
                 model: None,
                 prompt: "".into(),
                 workspace_mode,
+                tools: None,
             }],
             cwd,
             0,
