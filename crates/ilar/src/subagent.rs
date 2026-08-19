@@ -73,6 +73,8 @@ pub struct SubagentSpawner {
     loop_config: LoopConfig,
     /// Root session's service manager, shared with mutable child agents.
     services: Option<std::sync::Arc<crate::tools::service::ServiceManager>>,
+    /// Models available for per-task overrides and the models tool.
+    available_models: Vec<&'static crate::model::ModelInfo>,
 }
 
 struct BackgroundTask {
@@ -124,6 +126,7 @@ impl SubagentSpawner {
             background_tool_timeout: std::time::Duration::from_secs(600),
             loop_config: LoopConfig::default(),
             services: None,
+            available_models: Vec::new(),
         }
     }
 
@@ -140,6 +143,11 @@ impl SubagentSpawner {
 
     pub fn with_background_tool_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.background_tool_timeout = timeout;
+        self
+    }
+
+    pub fn with_available_models(mut self, models: Vec<&'static crate::model::ModelInfo>) -> Self {
+        self.available_models = models;
         self
     }
 
@@ -251,6 +259,7 @@ impl SubagentSpawner {
             background_tool_timeout: self.background_tool_timeout,
             loop_config: self.loop_config.clone(),
             services: self.services.clone(),
+            available_models: self.available_models.clone(),
         })
     }
 
@@ -460,10 +469,14 @@ impl SubagentSpawner {
             },
             None => {
                 let id = new_id();
-                let (model, inherited_variant) = match &agent.model {
-                    Some(model) => (model.clone(), None),
-                    None => match self.store.load(&ctx.session_id) {
-                        Ok(parent) => (parent.effective_model(), parent.effective_variant()),
+                let (model, inherited_variant) = match (&input.model, &agent.model) {
+                    (Some(model), _) => (model.clone(), input.reasoning.clone()),
+                    (None, Some(model)) => (model.clone(), input.reasoning.clone()),
+                    (None, None) => match self.store.load(&ctx.session_id) {
+                        Ok(parent) => (
+                            parent.effective_model(),
+                            input.reasoning.clone().or(parent.effective_variant()),
+                        ),
                         Err(error) => {
                             return ToolOutput::error(format!(
                                 "loading parent session {:?}: {error}",
@@ -472,6 +485,24 @@ impl SubagentSpawner {
                         }
                     },
                 };
+                if input.model.is_some() {
+                    let known = self
+                        .available_models
+                        .iter()
+                        .any(|candidate| candidate.full_id() == model)
+                        || (self.available_models.is_empty()
+                            && crate::model::find(&model).is_some());
+                    if !known {
+                        return ToolOutput::error(format!(
+                            "unknown or unavailable model {model:?}; call the models tool for the list"
+                        ));
+                    }
+                    if let Err(error) = self.resolver.resolve_provider(&model) {
+                        return ToolOutput::error(format!(
+                            "no provider configured for {model}: {error:#}"
+                        ));
+                    }
+                }
                 if let Err(error) =
                     crate::model::variant_options(&model, inherited_variant.as_deref())
                 {
@@ -530,7 +561,8 @@ impl SubagentSpawner {
                     .and_then(|registry| match self.services.clone() {
                         Some(services) => registry.with_services(services),
                         None => Ok(registry),
-                    });
+                    })
+                    .and_then(|registry| registry.with_models(self.available_models.clone()));
                 match registry {
                     Ok(registry) => registry,
                     Err(error) => {
@@ -1103,6 +1135,7 @@ clearly disjoint work."
             background_tool_timeout: self.background_tool_timeout,
             loop_config: self.loop_config.clone(),
             services: self.services.clone(),
+            available_models: self.available_models.clone(),
         });
         let Some(_active_session) = self
             .wait_for_session_claim(&notification.parent_session_id, &cancel)
@@ -1118,10 +1151,11 @@ clearly disjoint work."
             AgentWorkspaceMode::ReadOnly => ToolRegistry::read_only(),
             AgentWorkspaceMode::Mutable => {
                 let registry = ToolRegistry::builtin().with_subagents(runtime.clone())?;
-                match runtime.services.clone() {
+                let registry = match runtime.services.clone() {
                     Some(services) => registry.with_services(services)?,
                     None => registry,
-                }
+                };
+                registry.with_models(runtime.available_models.clone())?
             }
         };
         let registry = match &agent.tools {
@@ -1485,6 +1519,13 @@ pub struct TaskInput {
     pub background: Option<bool>,
     #[serde(default)]
     pub workspace: Option<TaskWorkspaceInput>,
+    /// Model override for this task; omit to use the agent definition's
+    /// model or inherit the parent's.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Reasoning variant for the chosen model; omit for its default.
+    #[serde(default)]
+    pub reasoning: Option<String>,
 }
 
 fn deserialize_task_id<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
@@ -1581,6 +1622,14 @@ impl Tool for TaskTool {
                 "task_id": {
                     "type": ["string", "null"],
                     "description": "Existing task session UUID to resume. Set null or omit when starting a new task; never invent a value."
+                },
+                "model": {
+                    "type": ["string", "null"],
+                    "description": "Model override for this task (provider/model-id). Omit to inherit. Call the models tool to see options with pricing — prefer a cheap/fast model for mechanical work."
+                },
+                "reasoning": {
+                    "type": ["string", "null"],
+                    "description": "Reasoning variant for the chosen model (see the models tool). Omit for the model's default."
                 },
                 "background": {"type": "boolean", "description": "Run detached only for intentionally deferred work whose completion should trigger a separate follow-up turn. Do not use when the result is needed for the current answer; call foreground sibling tasks together for parallel current-answer work. Do not poll."}
                 ,"workspace": {

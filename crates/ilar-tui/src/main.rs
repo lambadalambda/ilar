@@ -7278,12 +7278,14 @@ async fn main() -> Result<()> {
                 config.subagents.background_tool_timeout_ms,
             ))
             .with_loop_config(loop_config.clone())
-            .with_services(services.clone()),
+            .with_services(services.clone())
+            .with_available_models(config.available_models()),
         );
         let todos = std::sync::Arc::new(std::sync::Mutex::new(restored_todos(resumed.as_ref())));
         let registry = ToolRegistry::builtin()
             .with_subagents(spawner.clone())?
             .with_services(services.clone())?
+            .with_models(config.available_models())?
             .with_todos(todos.clone())?
             .with_web_tools()?
             .with_skills(skill_store)?;

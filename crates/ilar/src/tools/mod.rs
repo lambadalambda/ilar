@@ -5,6 +5,7 @@ pub mod edit;
 pub mod executor;
 pub mod glob;
 pub mod grep;
+pub mod models;
 pub mod read;
 pub mod service;
 pub mod web;
@@ -537,6 +538,7 @@ pub fn child_tool_names() -> Vec<&'static str> {
     let mut names = ToolRegistry::builtin().tool_names();
     names.push("task");
     names.push("service");
+    names.push("models");
     names
 }
 
@@ -631,6 +633,14 @@ impl ToolRegistry {
             Some(backend) => self.with_search(Box::new(backend)),
             None => self.with_search(Box::new(web::ExaBackend::from_env())),
         }
+    }
+
+    /// Registry with the models listing tool attached.
+    pub fn with_models(
+        self,
+        models: Vec<&'static crate::model::ModelInfo>,
+    ) -> Result<Self, DuplicateToolError> {
+        self.with_tool(std::sync::Arc::new(models::ModelsTool::new(models)))
     }
 
     /// Registry with the service tool attached (shared per-session

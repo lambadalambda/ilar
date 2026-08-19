@@ -195,6 +195,8 @@ async fn foreground_subagent_receives_user_and_exact_workspace_context() {
                 task_id: None,
                 background: None,
                 workspace: None,
+                model: None,
+                reasoning: None,
             },
             &context,
         )
@@ -265,6 +267,8 @@ async fn invalid_subagent_context_fails_before_creating_a_child_session() {
                 task_id: None,
                 background: None,
                 workspace: None,
+                model: None,
+                reasoning: None,
             },
             &context,
         )
@@ -2146,4 +2150,105 @@ async fn unknown_subagent_type_lists_available() {
 
 fn spawner_for(store: &SessionStore) -> Arc<SubagentSpawner> {
     spawner(Arc::new(MockProvider::new(vec![vec![]])), store, 10, 3)
+}
+
+#[tokio::test]
+async fn task_model_override_pins_child_model_and_rejects_unknown() {
+    let (store, session_id) = temp_store();
+    let child: Arc<dyn Provider> = Arc::new(ScriptedDelayProvider {
+        text: "done",
+        delay_ms: 10,
+    });
+    let spawner = spawner(child, &store, 10, 3);
+    let registry = parent_registry(spawner);
+
+    let override_call = |id: &str, model: serde_json::Value| ProviderEvent::ToolCallCompleted {
+        id: id.into(),
+        name: "task".into(),
+        input: serde_json::json!({
+            "description": "cheap grunt work",
+            "prompt": "grep things",
+            "subagent_type": "explore",
+            "model": model,
+            "reasoning": null,
+        }),
+    };
+    let parent = MockProvider::new(vec![
+        vec![
+            ProviderEvent::ToolCallStarted {
+                id: "t1".into(),
+                name: "task".into(),
+            },
+            override_call("t1", serde_json::json!("zai/glm-4.7-flash")),
+            ProviderEvent::ToolCallStarted {
+                id: "t2".into(),
+                name: "task".into(),
+            },
+            override_call("t2", serde_json::json!("zai/not-a-model")),
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+                usage: Default::default(),
+            },
+        ],
+        vec![ProviderEvent::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+            usage: Default::default(),
+        }],
+    ]);
+
+    let (tx, _) = loop_event_channel(LOOP_EVENT_CAPACITY);
+    run_turn(
+        &parent,
+        &registry,
+        &store,
+        &session_id,
+        "go",
+        None,
+        LoopConfig::default(),
+        tx,
+        tokio_util::sync::CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+    )
+    .await
+    .unwrap();
+
+    // The valid override produced a child pinned to the cheap model; the
+    // invalid one produced a tool error naming the models tool.
+    let parent_session = store.load(&session_id).unwrap();
+    let results: Vec<(String, bool)> = parent_session
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            ilar::session::SessionEvent::ToolResult {
+                content, is_error, ..
+            } => Some((content.clone(), *is_error)),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        results.iter().any(|(content, is_error)| *is_error
+            && content.contains("unknown or unavailable model")
+            && content.contains("models tool")),
+        "{results:?}"
+    );
+
+    let sessions_dir = store
+        .session_path(&session_id)
+        .unwrap()
+        .parent()
+        .unwrap()
+        .read_dir()
+        .unwrap();
+    let child_models: Vec<String> = sessions_dir
+        .flatten()
+        .filter(|e| {
+            e.path().extension().is_some_and(|x| x == "jsonl")
+                && e.path().file_stem().and_then(|s| s.to_str()) != Some(session_id.as_str())
+        })
+        .map(|e| {
+            let id = e.path().file_stem().unwrap().to_str().unwrap().to_string();
+            store.load(&id).unwrap().meta().unwrap().model.clone()
+        })
+        .collect();
+    assert_eq!(child_models, vec!["zai/glm-4.7-flash".to_string()]);
 }

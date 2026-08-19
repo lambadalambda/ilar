@@ -195,7 +195,12 @@ skills and built-in commands (Tab or Enter accepts); `/<skill-name>
 entry opens a picker.
 
 Built-in subagents are `build` (mutable, serialized per checkout) and `explore`
-(read-only, safe for parallel repository inspection and review).
+(read-only, safe for parallel repository inspection and review). Tasks can
+override the child's model per invocation (`model` and `reasoning` on the task
+tool — e.g. a cheap flash model for mechanical sweeps); omitted, the child uses
+the agent definition's model or inherits the parent's model and reasoning. The
+read-only `models` tool lists available models with context windows, pricing,
+and reasoning variants so agents can choose informedly.
 
 ### Services
 
