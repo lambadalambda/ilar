@@ -110,3 +110,5 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [One-key turn retry](issues/turn-retry-key.md)
 - [x] [Export transcript to Markdown](issues/export-transcript-markdown.md)
 - [x] [Skills inlined in the command palette](issues/palette-inline-skills.md)
+- [x] [Session housekeeping (delete + fork)](issues/session-housekeeping.md)
+- [x] [Fuzzy session search in the picker](issues/session-picker-fuzzy.md)

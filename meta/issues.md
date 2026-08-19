@@ -23,6 +23,4 @@
 - [ ] [Message queueing during turns](issues/message-queueing.md)
 - [ ] [Transcript search](issues/transcript-search.md)
 - [ ] [Manual compaction + summary visibility](issues/manual-compaction.md)
-- [ ] [Session housekeeping (delete + fork)](issues/session-housekeeping.md)
-- [ ] [Fuzzy session search in the picker](issues/session-picker-fuzzy.md)
 - [ ] [Live bash output tail](issues/bash-live-tail.md)
