@@ -132,6 +132,31 @@ impl Drop for SessionWriter {
     }
 }
 
+/// One entry in the session listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionSummary {
+    pub id: String,
+    /// First user message, whitespace-collapsed and bounded; `None` for
+    /// sessions without one yet.
+    pub title: Option<String>,
+    pub modified: std::time::SystemTime,
+}
+
+const SUMMARY_SCAN_BYTES: u64 = 256 * 1024;
+const SUMMARY_SCAN_EVENTS: usize = 40;
+const SUMMARY_TITLE_CHARS: usize = 80;
+
+fn summary_title(text: &str) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() > SUMMARY_TITLE_CHARS {
+        let mut title: String = collapsed.chars().take(SUMMARY_TITLE_CHARS).collect();
+        title.push('…');
+        title
+    } else {
+        collapsed
+    }
+}
+
 impl SessionStore {
     pub fn new(root: PathBuf) -> Self {
         Self { root }
@@ -227,6 +252,62 @@ impl SessionStore {
             ts: chrono::Utc::now(),
         })?;
         Ok(session)
+    }
+
+    /// List root (non-subagent) sessions, most recently modified first.
+    /// Reads only each file's head; unreadable, foreign, headless, or
+    /// child-session files are skipped — see
+    /// meta/issues/session-list-and-resume-last.md.
+    pub fn list(&self) -> Vec<SessionSummary> {
+        let Ok(entries) = std::fs::read_dir(&self.root) else {
+            return Vec::new();
+        };
+        let mut sessions: Vec<SessionSummary> = entries
+            .flatten()
+            .filter_map(|entry| self.summarize_entry(&entry))
+            .collect();
+        sessions.sort_by(|left, right| {
+            right
+                .modified
+                .cmp(&left.modified)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        sessions
+    }
+
+    /// The most recently modified root session, if any.
+    pub fn latest(&self) -> Option<SessionSummary> {
+        self.list().into_iter().next()
+    }
+
+    fn summarize_entry(&self, entry: &std::fs::DirEntry) -> Option<SessionSummary> {
+        let name = entry.file_name();
+        let id = name.to_str()?.strip_suffix(".jsonl")?.to_string();
+        SessionId::parse(&id).ok()?;
+        let modified = entry.metadata().ok()?.modified().ok()?;
+        let file = File::open(entry.path()).ok()?;
+        let head = std::io::BufReader::new(file.take(SUMMARY_SCAN_BYTES));
+        let mut lines = std::io::BufRead::lines(head);
+        let meta_line = lines.next()?.ok()?;
+        let SessionEvent::Meta { meta, .. } = serde_json::from_str(&meta_line).ok()? else {
+            return None;
+        };
+        if meta.parent_id.is_some() {
+            return None;
+        }
+        let title = lines
+            .take(SUMMARY_SCAN_EVENTS)
+            .map_while(|line| line.ok())
+            .filter_map(|line| serde_json::from_str::<SessionEvent>(&line).ok())
+            .find_map(|event| match event {
+                SessionEvent::UserMessage { text, .. } => Some(summary_title(&text)),
+                _ => None,
+            });
+        Some(SessionSummary {
+            id,
+            title,
+            modified,
+        })
     }
 
     /// Read a session snapshot. Only newline-committed records are parsed;

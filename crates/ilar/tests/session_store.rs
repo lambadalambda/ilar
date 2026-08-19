@@ -1227,3 +1227,104 @@ fn older_metadata_without_workspace_still_deserializes() {
 
     assert_eq!(session.meta().unwrap().workspace, None);
 }
+
+// ---- session listing ----
+
+#[test]
+fn list_returns_root_sessions_most_recent_first_with_titles() {
+    let (store, dir) = temp_store();
+    let meta_a = sample_meta();
+    let mut a = store.create(meta_a.clone()).unwrap();
+    a.append(SessionEvent::UserMessage {
+        id: new_id(),
+        text: "  first   question\nacross lines  ".into(),
+        ts: Utc::now(),
+    })
+    .unwrap();
+    drop(a);
+
+    let meta_b = sample_meta();
+    let mut b = store.create(meta_b.clone()).unwrap();
+    b.append(SessionEvent::UserMessage {
+        id: new_id(),
+        text: "second".into(),
+        ts: Utc::now(),
+    })
+    .unwrap();
+    drop(b);
+
+    // Explicit mtimes: robust against coarse filesystem timestamp granularity.
+    let now = std::time::SystemTime::now();
+    let set_mtime = |id: &str, when: std::time::SystemTime| {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(store.session_path(id).unwrap())
+            .unwrap();
+        file.set_modified(when).unwrap();
+    };
+    set_mtime(
+        &meta_a.session_id,
+        now - std::time::Duration::from_secs(100),
+    );
+    set_mtime(&meta_b.session_id, now);
+
+    let mut child_meta = sample_meta();
+    child_meta.parent_id = Some(meta_a.session_id.clone());
+    drop(store.create(child_meta.clone()).unwrap());
+
+    std::fs::write(dir.path().join("corrupt.jsonl"), "not json\n").unwrap();
+    std::fs::write(dir.path().join("empty.jsonl"), "").unwrap();
+
+    let sessions = store.list();
+    let ids: Vec<_> = sessions.iter().map(|session| session.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        [meta_b.session_id.as_str(), meta_a.session_id.as_str()]
+    );
+    assert_eq!(sessions[0].title.as_deref(), Some("second"));
+    assert_eq!(
+        sessions[1].title.as_deref(),
+        Some("first question across lines")
+    );
+    assert_eq!(
+        store.latest().map(|session| session.id),
+        Some(meta_b.session_id.clone())
+    );
+}
+
+#[test]
+fn list_titles_are_bounded_and_optional() {
+    let (store, _dir) = temp_store();
+    let long_meta = sample_meta();
+    let mut long = store.create(long_meta.clone()).unwrap();
+    long.append(SessionEvent::UserMessage {
+        id: new_id(),
+        text: "x".repeat(500),
+        ts: Utc::now(),
+    })
+    .unwrap();
+    drop(long);
+    let untitled_meta = sample_meta();
+    drop(store.create(untitled_meta.clone()).unwrap());
+
+    let sessions = store.list();
+    assert_eq!(sessions.len(), 2);
+    for session in &sessions {
+        if session.id == long_meta.session_id {
+            let title = session.title.as_deref().unwrap();
+            assert!(title.chars().count() <= 81, "{}", title.chars().count());
+            assert!(title.ends_with('…'), "{title}");
+        } else {
+            assert_eq!(session.id, untitled_meta.session_id);
+            assert_eq!(session.title, None);
+        }
+    }
+}
+
+#[test]
+fn list_of_missing_root_is_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::new(dir.path().join("nonexistent"));
+    assert!(store.list().is_empty());
+    assert!(store.latest().is_none());
+}

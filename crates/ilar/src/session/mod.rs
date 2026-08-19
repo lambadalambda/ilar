@@ -6,4 +6,4 @@ mod store;
 
 pub use event::{SessionEvent, SessionMeta, SessionState, new_id};
 pub use model::{ChatMessage, ContentBlock, InputTokenAccounting, Role, Usage};
-pub use store::{Session, SessionId, SessionReader, SessionStore, SessionWriter};
+pub use store::{Session, SessionId, SessionReader, SessionStore, SessionSummary, SessionWriter};
