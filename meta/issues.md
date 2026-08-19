@@ -18,7 +18,6 @@
 
 ## Milestone 4 — Daily-driver UX
 
-- [ ] [Help overlay with keybindings](issues/help-overlay.md)
 - [ ] [Readline-style input editing](issues/readline-input-editing.md)
 - [ ] [Skill triggers + user skill invocation](issues/skill-triggers-and-user-invocation.md)
 - [ ] [Todo sidebar narrow-terminal fallback](issues/todo-sidebar-narrow-fallback.md)
