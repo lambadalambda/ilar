@@ -426,7 +426,7 @@ async fn mutable_tasks_sharing_a_checkout_are_serialized_and_merge_in_order() {
     );
     assert!(events.iter().any(|event| matches!(
         event,
-        LoopEvent::SubagentConfigured { id, description, agent }
+        LoopEvent::SubagentConfigured { id, description, agent, .. }
             if id == "t1" && description == "explore" && agent == "explore"
     )));
     assert!(activity.iter().any(|activity| {

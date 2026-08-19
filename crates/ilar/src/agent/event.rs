@@ -28,6 +28,8 @@ pub enum LoopEvent {
         id: String,
         description: String,
         agent: String,
+        /// Explicit per-task model override, when the call chose one.
+        model: Option<String>,
     },
     ToolExecutionStarted {
         id: String,

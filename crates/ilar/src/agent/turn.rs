@@ -656,8 +656,10 @@ pub fn summarize_tool_input(name: &str, input: &serde_json::Value) -> String {
             None => format!("/{pattern}/"),
         }),
         "glob" => string("pattern"),
-        "task" => summarize_task_input(input)
-            .map(|(description, agent)| format!("{description} · {agent}")),
+        "task" => summarize_task_input(input).map(|(description, agent, model)| match model {
+            Some(model) => format!("{description} · {agent} @ {model}"),
+            None => format!("{description} · {agent}"),
+        }),
         _ => input.as_object().map(|values| {
             values
                 .iter()
@@ -687,7 +689,8 @@ pub fn summarize_tool_input(name: &str, input: &serde_json::Value) -> String {
         .collect()
 }
 
-pub fn summarize_task_input(input: &serde_json::Value) -> Option<(String, String)> {
+/// (description, agent, explicit model override) from task-tool input.
+pub fn summarize_task_input(input: &serde_json::Value) -> Option<(String, String, Option<String>)> {
     let bounded = |key: &str, limit| {
         input
             .get(key)
@@ -695,7 +698,11 @@ pub fn summarize_task_input(input: &serde_json::Value) -> Option<(String, String
             .map(collapse_whitespace)
             .map(|value| value.chars().take(limit).collect::<String>())
     };
-    Some((bounded("description", 256)?, bounded("subagent_type", 128)?))
+    Some((
+        bounded("description", 256)?,
+        bounded("subagent_type", 128)?,
+        bounded("model", 128),
+    ))
 }
 
 fn bounded_tool_detail(text: &str) -> String {
@@ -1033,7 +1040,7 @@ pub async fn run_turn(
                             .await;
                     }
                     if name == "task"
-                        && let Some((description, agent)) = summarize_task_input(&input)
+                        && let Some((description, agent, model)) = summarize_task_input(&input)
                     {
                         events
                             .publish(
@@ -1041,6 +1048,7 @@ pub async fn run_turn(
                                     id: id.clone(),
                                     description,
                                     agent,
+                                    model,
                                 },
                                 &cancel,
                             )

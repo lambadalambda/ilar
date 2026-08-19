@@ -88,7 +88,11 @@ enum ToolState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ToolKind {
     Tool,
-    Agent { name: String },
+    Agent {
+        name: String,
+        /// Explicit per-task model override, shown next to the agent name.
+        model: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1090,12 +1094,13 @@ fn restored_session_invocation_view(
                         ilar::session::ContentBlock::ToolCall { id, name, input } => {
                             let (kind, arguments) = if name == "task" {
                                 match ilar::agent::summarize_task_input(input) {
-                                    Some((description, agent)) => {
-                                        (ToolKind::Agent { name: agent }, description)
+                                    Some((description, agent, model)) => {
+                                        (ToolKind::Agent { name: agent, model }, description)
                                     }
                                     None => (
                                         ToolKind::Agent {
                                             name: "subagent".into(),
+                                            model: None,
                                         },
                                         ilar::agent::summarize_tool_input(name, input),
                                     ),
@@ -1524,6 +1529,7 @@ fn apply_child_loop_event(lines: &mut Vec<Line_>, group: &mut u64, scope: &str, 
             id,
             description,
             agent,
+            model,
         } => {
             if let Some(Line_::Tool {
                 kind, arguments, ..
@@ -1531,6 +1537,7 @@ fn apply_child_loop_event(lines: &mut Vec<Line_>, group: &mut u64, scope: &str, 
             {
                 *kind = ToolKind::Agent {
                     name: agent.clone(),
+                    model: model.clone(),
                 };
                 *arguments = description.clone();
             }
@@ -2862,6 +2869,7 @@ impl App {
                 id,
                 description,
                 agent,
+                model,
             } => {
                 if let Some((kind, arguments)) =
                     self.lines.iter_mut().rev().find_map(|line| match line {
@@ -2876,6 +2884,7 @@ impl App {
                 {
                     *kind = ToolKind::Agent {
                         name: agent.clone(),
+                        model: model.clone(),
                     };
                     *arguments = description.clone();
                 }
@@ -6727,7 +6736,16 @@ fn tool_line_with_disclosure(
         .join(" ");
     let (label, name, label_color) = match kind {
         ToolKind::Tool => ("tool", tool_name.to_string(), theme::SECONDARY),
-        ToolKind::Agent { name } => ("agent", name.clone(), theme::REASONING),
+        ToolKind::Agent { name, model } => (
+            "agent",
+            match model {
+                // Show explicit model overrides; default-model agents
+                // stay uncluttered.
+                Some(model) => format!("{name}@{}", model.split('/').next_back().unwrap_or(model)),
+                None => name.clone(),
+            },
+            theme::REASONING,
+        ),
     };
     let label = if width >= 72 {
         format!("{label:<6}")
@@ -8602,7 +8620,7 @@ mod tests {
             Line_::Tool {
                 id,
                 name,
-                kind: ToolKind::Agent { name: agent },
+                kind: ToolKind::Agent { name: agent, .. },
                 arguments,
                 state: ToolState::Succeeded,
                 ..
@@ -10822,6 +10840,7 @@ mod tests {
             id: "task-1".into(),
             description: "Inspect rendering".into(),
             agent: "explore".into(),
+            model: None,
         });
 
         let rendered = app
@@ -10851,6 +10870,7 @@ mod tests {
                     id: id.into(),
                     description: "Inspect".into(),
                     agent: "explore".into(),
+                    model: None,
                 });
             }
             app.push_loop_event(&LoopEvent::ToolFinished {
@@ -11090,6 +11110,7 @@ mod tests {
             id: "task-1".into(),
             description: "Inspect rendering".into(),
             agent: "explore".into(),
+            model: None,
         });
         for event in [
             LoopEvent::ReasoningSummaryDelta("Tracing transcript".into()),
@@ -11188,6 +11209,7 @@ mod tests {
             id: "task-early".into(),
             description: "Fast child".into(),
             agent: "explore".into(),
+            model: None,
         });
         app.retry_subagent_activity();
 
@@ -11497,10 +11519,27 @@ mod tests {
             now,
         ));
         assert!(long_queued.contains("queued"), "{long_queued}");
+        // Explicit model overrides render as agent@model (short id).
+        let pinned = rendered_text(&tool_line(
+            "task",
+            &ToolKind::Agent {
+                name: "explore".into(),
+                model: Some("zai/glm-5.3".into()),
+            },
+            "grep the tree",
+            ToolState::Running,
+            120,
+            std::time::Duration::ZERO,
+            ToolProgress::None,
+            std::time::Instant::now(),
+        ));
+        assert!(pinned.contains("explore@glm-5.3"), "{pinned}");
+
         let narrow_agent = rendered_text(&tool_line(
             "task",
             &ToolKind::Agent {
                 name: "repository-reviewer".into(),
+                model: None,
             },
             "inspect every lifecycle path",
             ToolState::Running,
@@ -11556,6 +11595,7 @@ mod tests {
             id: "task-1".into(),
             description: "Review security paths".into(),
             agent: "build · secure".into(),
+            model: None,
         });
         agent_app.push_loop_event(&LoopEvent::ToolInputComplete {
             id: "task-1".into(),
