@@ -305,12 +305,36 @@ const OPENAI_VERSIONED_PRO_VARIANTS: &[ModelVariant] = &[
     },
 ];
 
+/// GLM-5.3 thinking effort levels (https://z.ai/blog/glm-5.3). The server
+/// default is `max`; disabling thinking is not supported by the model.
+const ZAI_EFFORT_VARIANTS: &[ModelVariant] = &[
+    ModelVariant {
+        id: "low",
+        name: "Low",
+    },
+    ModelVariant {
+        id: "high",
+        name: "High",
+    },
+    ModelVariant {
+        id: "max",
+        name: "Max",
+    },
+];
+
 impl ModelInfo {
     pub fn full_id(&self) -> String {
         format!("{}/{}", self.provider, self.id)
     }
 
     pub fn variants(&self) -> &'static [ModelVariant] {
+        if self.provider == "zai" {
+            return if self.id == "glm-5.3" {
+                ZAI_EFFORT_VARIANTS
+            } else {
+                NO_VARIANTS
+            };
+        }
         if self.provider != "openai" {
             return NO_VARIANTS;
         }
@@ -710,6 +734,12 @@ pub fn variant_options(full_id: &str, variant: Option<&str>) -> anyhow::Result<s
     }
     match model.provider {
         "openai" => Ok(serde_json::json!({"reasoning": {"effort": variant}})),
+        // GLM-5.3 thinking levels; `thinking.type` must be "enabled"
+        // (disabling is unsupported and rejected by the API).
+        "zai" => Ok(serde_json::json!({
+            "thinking": {"type": "enabled"},
+            "reasoning_effort": variant,
+        })),
         provider => anyhow::bail!("provider {provider} does not support reasoning variants"),
     }
 }
@@ -785,6 +815,27 @@ mod tests {
         assert!(ids("openai/gpt-5.3-chat-latest").is_empty());
         assert!(ids("openai/gpt-4.1").is_empty());
         assert!(ids("zai/glm-5.2").is_empty());
+    }
+
+    #[test]
+    fn glm53_exposes_thinking_effort_variants() {
+        let ids = |model: &str| {
+            find(model)
+                .unwrap()
+                .variants()
+                .iter()
+                .map(|variant| variant.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids("zai/glm-5.3"), ["low", "high", "max"]);
+        assert!(ids("zai/glm-5.2").is_empty());
+        assert!(ids("zai/glm-4.7").is_empty());
+
+        let options = variant_options("zai/glm-5.3", Some("max")).unwrap();
+        assert_eq!(options["reasoning_effort"], "max");
+        assert_eq!(options["thinking"]["type"], "enabled");
+        assert!(variant_options("zai/glm-5.3", Some("xhigh")).is_err());
+        assert!(variant_options("zai/glm-4.7", Some("max")).is_err());
     }
 
     #[test]
