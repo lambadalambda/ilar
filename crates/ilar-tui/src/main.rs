@@ -2343,6 +2343,13 @@ impl App {
 
     fn set_activity(&mut self, activity: Activity) {
         if self.activity != activity {
+            // Entering a streaming state restarts the liveness clock so a
+            // long tool phase doesn't immediately read as a stalled stream.
+            if matches!(activity, Activity::Thinking | Activity::Responding)
+                && self.stream_last_data.is_some()
+            {
+                self.stream_last_data = Some(std::time::Instant::now());
+            }
             self.activity = activity;
             self.activity_started = std::time::Instant::now();
         }
@@ -2373,7 +2380,10 @@ impl App {
                 self.clear_transient_notice();
                 self.status = "thinking…".into();
                 self.stream_received = 0;
-                self.stream_last_data = None;
+                // Seed liveness at turn start: a provider that hangs
+                // before its first byte must still show "0 B · no data Ns"
+                // instead of a bare spinner.
+                self.stream_last_data = Some(std::time::Instant::now());
                 self.set_activity(Activity::Thinking);
             }
             LoopEvent::TextDelta(t) => {
@@ -7553,9 +7563,14 @@ mod tests {
     fn thinking_status_shows_stream_liveness() {
         let mut app = App::new();
         app.push_loop_event(&LoopEvent::TurnStarted);
+        // Liveness engages immediately: a pre-first-byte hang must be
+        // visible, not a bare spinner.
         let plain = rendered_text(&app.status_line(120));
-        assert!(plain.contains("thinking"), "{plain}");
-        assert!(!plain.contains("KiB"), "no bytes before data: {plain}");
+        assert!(plain.contains("thinking · 0 B"), "{plain}");
+        app.stream_last_data = Some(std::time::Instant::now() - std::time::Duration::from_secs(12));
+        let hung = rendered_text(&app.status_line(120));
+        assert!(hung.contains("0 B · no data 12s"), "{hung}");
+        app.stream_last_data = Some(std::time::Instant::now());
 
         app.push_loop_event(&LoopEvent::ThinkingDelta("x".repeat(2048)));
         let live = rendered_text(&app.status_line(120));
