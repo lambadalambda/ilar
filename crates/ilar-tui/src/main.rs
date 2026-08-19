@@ -2455,6 +2455,9 @@ struct App {
     /// Messages submitted during an active turn, auto-sent in order when
     /// the turn completes.
     queued_messages: Vec<String>,
+    /// Active goal: (description, completed rounds). Turns auto-continue
+    /// until the model emits GOAL_ACHIEVED or the round cap trips.
+    goal: Option<(String, u32)>,
     /// Palette-requested compaction, applied to the next turn's config.
     compact_requested: bool,
     search_active: bool,
@@ -2530,6 +2533,7 @@ impl App {
             last_prompt: None,
             retry_available: false,
             queued_messages: Vec::new(),
+            goal: None,
             compact_requested: false,
             search_active: false,
             search_query: String::new(),
@@ -3960,6 +3964,9 @@ impl App {
         if !self.queued_messages.is_empty() {
             input_title = format!("{}· {} queued ", input_title, self.queued_messages.len());
         }
+        if let Some((_, round)) = &self.goal {
+            input_title = format!("{input_title}· goal {round}/{MAX_GOAL_ROUNDS} ");
+        }
         let input_lines = input_view
             .lines
             .iter()
@@ -4915,6 +4922,17 @@ static HELP_SECTIONS: &[HelpSection] = &[
         ],
     },
     HelpSection {
+        title: "Goal mode",
+        bindings: &[
+            binding!(
+                "/goal <description>",
+                "work until achieved (evidence-based)"
+            ),
+            binding!("/goal", "show or clear the active goal"),
+            binding!("Esc (idle)", "cancel goal mode"),
+        ],
+    },
+    HelpSection {
         title: "Session",
         bindings: &[
             binding!("palette: Resume session", "switch to another session"),
@@ -4998,6 +5016,34 @@ fn render_help(frame: &mut Frame, scroll: usize) {
         .take(inner.height as usize)
         .collect();
     frame.render_widget(Paragraph::new(visible), inner);
+}
+
+/// Rounds after which goal mode gives up (a budget, unlike the
+/// runaway-loop iteration guard).
+const MAX_GOAL_ROUNDS: u32 = 25;
+const GOAL_SENTINEL: &str = "GOAL_ACHIEVED";
+
+/// True when the assistant's final text declares the goal achieved
+/// (sentinel at a line start, so prose mentions don't trigger it).
+fn goal_achieved_in(text: &str) -> bool {
+    text.lines()
+        .any(|line| line.trim_start().starts_with(GOAL_SENTINEL))
+}
+
+fn goal_kickoff_prompt(goal: &str) -> String {
+    format!(
+        "Work toward this goal: {goal}
+
+This is a goal-mode session: after          each of your turns you will be asked to verify progress with          concrete evidence. If no automatic verification exists yet          (tests, a replay harness, a checker script), building one is part          of the goal. Do not claim success without evidence."
+    )
+}
+
+fn goal_continuation_prompt(goal: &str, round: u32) -> String {
+    format!(
+        "Goal check, round {round}/{MAX_GOAL_ROUNDS}. The goal: {goal}
+
+         Verify the current state with concrete evidence by running your          verification (tests, harness, checker) now — do not judge from          memory. If the goal is genuinely achieved, output a line starting          with `{GOAL_SENTINEL}:` followed by the evidence. Otherwise state          what is still missing and continue working toward the goal in          this same turn."
+    )
 }
 
 /// `/name args` parsed from a submitted prompt; `None` when the text is
@@ -7042,6 +7088,49 @@ async fn run_app(
                     if !aborted {
                         notifications_paused = false;
                     }
+                    // Goal mode: verify-and-continue until the sentinel,
+                    // a cap, or user interjections (queue wins below).
+                    if completed
+                        && app.queued_messages.is_empty()
+                        && app.input.is_blank()
+                        && !app.has_modal()
+                        && !app.search_active
+                        && pending_terminal_event.is_none()
+                        && let Some((goal, round)) = app.goal.clone()
+                    {
+                        let achieved = app
+                            .lines
+                            .iter()
+                            .rev()
+                            .find_map(|line| match line {
+                                Line_::Assistant(text) => Some(goal_achieved_in(text)),
+                                _ => None,
+                            })
+                            .unwrap_or(false);
+                        if achieved {
+                            app.goal = None;
+                            let message = format!("goal achieved after {} round(s)", round.max(1));
+                            app.push_transcript_line(Line_::System(message.clone()));
+                            app.set_notice(message, NoticeLevel::Info);
+                        } else if round >= MAX_GOAL_ROUNDS {
+                            app.goal = None;
+                            let message = format!(
+                                "goal round cap ({MAX_GOAL_ROUNDS}) reached without \
+                                 {GOAL_SENTINEL} — stopping"
+                            );
+                            app.push_transcript_line(Line_::System(message.clone()));
+                            app.set_notice(message, NoticeLevel::Warning);
+                        } else {
+                            let next_round = round + 1;
+                            app.goal = Some((goal.clone(), next_round));
+                            app.input =
+                                InputBuffer::from(goal_continuation_prompt(&goal, next_round));
+                            pending_terminal_event = Some(Event::Key(KeyEvent::new(
+                                KeyCode::Enter,
+                                KeyModifiers::NONE,
+                            )));
+                        }
+                    }
                     if !app.queued_messages.is_empty() {
                         // Only dequeue into an idle, modal-free UI: a
                         // synthetic Enter routed into a picker or search
@@ -7575,7 +7664,14 @@ async fn run_app(
                                 app.set_activity(Activity::Aborting);
                             }
                         } else if background == 0 {
-                            if app.input.is_blank() && !app.queued_messages.is_empty() {
+                            if app.input.is_blank() && app.goal.is_some() {
+                                if let Some((goal, round)) = app.goal.take() {
+                                    app.set_notice(
+                                        format!("goal cancelled after {round} round(s): {goal}"),
+                                        NoticeLevel::Info,
+                                    );
+                                }
+                            } else if app.input.is_blank() && !app.queued_messages.is_empty() {
                                 let dropped = app.queued_messages.len();
                                 app.queued_messages.clear();
                                 app.set_notice(
@@ -7656,7 +7752,25 @@ async fn run_app(
                             app.history.push(&text);
                             app.last_prompt = Some(text.clone());
                             app.retry_available = false;
-                            if let Some((name, args)) = parse_slash_invocation(&text) {
+                            if let Some(("goal", goal_text)) = parse_slash_invocation(&text) {
+                                if goal_text.is_empty() {
+                                    let notice = match app.goal.take() {
+                                        Some((goal, round)) => {
+                                            format!("goal cleared after {round} round(s): {goal}")
+                                        }
+                                        None => {
+                                            "no active goal — /goal <description> sets one".into()
+                                        }
+                                    };
+                                    app.set_notice(notice, NoticeLevel::Info);
+                                    continue;
+                                }
+                                app.goal = Some((goal_text.to_string(), 0));
+                                app.push_transcript_line(Line_::System(format!(
+                                    "goal armed (max {MAX_GOAL_ROUNDS} rounds): {goal_text}"
+                                )));
+                                text = goal_kickoff_prompt(goal_text);
+                            } else if let Some((name, args)) = parse_slash_invocation(&text) {
                                 if app.skills.iter().any(|(skill, _)| skill == name) {
                                     text = skill_invocation_prompt(name, args);
                                 } else {
@@ -8595,6 +8709,43 @@ mod tests {
         app.search_refresh();
         assert!(app.search_matches.is_empty());
         assert!(rendered_text(&app.status_line(120)).contains("no matches"));
+    }
+
+    #[test]
+    fn goal_sentinel_detection_requires_line_start() {
+        assert!(goal_achieved_in(
+            "done!\nGOAL_ACHIEVED: 5/5 turns replay at 92%"
+        ));
+        assert!(goal_achieved_in("  GOAL_ACHIEVED: evidence attached"));
+        assert!(!goal_achieved_in(
+            "we still need to reach GOAL_ACHIEVED status later"
+        ));
+        assert!(!goal_achieved_in("no sentinel here"));
+
+        let kickoff = goal_kickoff_prompt("replay 5 turns at 90%");
+        assert!(kickoff.contains("replay 5 turns at 90%"));
+        assert!(kickoff.contains("evidence"), "{kickoff}");
+        let cont = goal_continuation_prompt("replay 5 turns at 90%", 3);
+        assert!(cont.contains("round 3/25"), "{cont}");
+        assert!(cont.contains("GOAL_ACHIEVED"), "{cont}");
+    }
+
+    #[test]
+    fn goal_round_shows_in_the_input_title() {
+        let mut app = App::new();
+        app.goal = Some(("recover the engine".into(), 3));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let screen = (0..24)
+            .map(|row| {
+                (0..80)
+                    .map(|column| terminal.backend().buffer()[(column, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("goal 3/25"), "{screen}");
     }
 
     #[test]

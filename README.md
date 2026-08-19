@@ -195,6 +195,18 @@ match the task). In the TUI, type `/` on an empty input to pick a skill, or
 Built-in subagents are `build` (mutable, serialized per checkout) and `explore`
 (read-only, safe for parallel repository inspection and review).
 
+### Goal mode
+
+`/goal <description>` keeps ilar working until the goal is demonstrably
+achieved: after every completed turn it auto-continues (in the same
+session, so the prompt cache absorbs the cost) with an instruction to
+verify progress using concrete evidence — running tests or a harness,
+building one if none exists — and to keep working otherwise. The loop
+ends when the model outputs an evidenced `GOAL_ACHIEVED:` line, when the
+round cap (25) trips, or when you press Esc on an idle input. `/goal`
+alone shows or clears the active goal. Queued messages you type during
+the loop take precedence over goal continuations.
+
 ### MCP
 
 ilar deliberately ships no built-in MCP client. The built-in `mcp-via-cli`
