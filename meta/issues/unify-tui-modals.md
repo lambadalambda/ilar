@@ -59,12 +59,43 @@ renders and types into the same modal by luck rather than construction.
   modal without wiring both is a compile error.
 - Existing picker behaviour tests still pass unchanged.
 
+## Status
+
+Landed: `Modal` + `App::active_modal()` as the one precedence order,
+with render selecting on an exhaustive match over it; `has_modal()` now
+includes search, which fixes the paste routing, the notification gate,
+and the input keeping a caret it was not receiving; `scroll_active_modal`
+routes the wheel to the front overlay; the two hand-written
+`!app.search_active` companions are gone.
+
+Still open:
+
+- Key dispatch is an `if app.active_modal() == Some(..)` chain, not an
+  exhaustive match. Both sides read the same value so they cannot
+  disagree, but a new `Modal` variant still compiles with no dispatch
+  arm — the compile-time guarantee in the acceptance criteria is only
+  half met.
+- Per-modal state still lives in parallel `Option<T>` fields; the enum
+  names the active overlay rather than owning it. The duplicated
+  list-navigation code and the five bespoke `*Action` enums are
+  untouched.
+- Click-to-select and click-outside-to-dismiss are not implemented; only
+  the wheel is routed.
+- The paste-to-search and notification-gate criteria are verified by
+  reading, not by tests: both live inside `run_app`, which has no
+  harness. That gap is really the `run_app` extraction in
+  [Split the TUI main module](split-tui-main.md).
+
 ## Notes
 
 - This is a refactor with three small behaviour fixes riding along; keep
   it separate from the input-hazard fixes so each commit stays reviewable.
 - Precedence should be decided explicitly and written down once — the
   current de-facto order is an accident, not a design.
+- Search is deliberately *not* fully modal for the mouse: it is a
+  transcript-reading mode, so selection and click-to-expand keep working
+  underneath it. Gating those on `has_modal()` broke them, which review
+  caught.
 
 ## Milestone
 

@@ -309,6 +309,22 @@ impl TranscriptRenderCache {
     }
 }
 
+/// The overlay that owns the keyboard. Render and key dispatch both
+/// derive their precedence from `App::active_modal`, so adding a variant
+/// without wiring both is a compile error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Modal {
+    PendingManager,
+    Help,
+    ThemePicker,
+    SkillPicker,
+    SessionPicker,
+    ModelPicker,
+    VariantPicker,
+    Search,
+    CommandPalette,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Activity {
     Ready,
@@ -2689,15 +2705,76 @@ impl App {
         }
     }
 
+    /// The overlay that owns the keyboard, in one precedence order.
+    ///
+    /// Render and key dispatch both derive from this. They used to keep
+    /// separate, near-opposite orders by hand; nothing opened two
+    /// overlays at once, so the app drew and typed into the same one by
+    /// luck rather than by construction.
+    fn active_modal(&self) -> Option<Modal> {
+        if self.pending_manager.is_some() {
+            Some(Modal::PendingManager)
+        } else if self.help_visible {
+            Some(Modal::Help)
+        } else if self.theme_picker.is_some() {
+            Some(Modal::ThemePicker)
+        } else if self.skill_picker.is_some() {
+            Some(Modal::SkillPicker)
+        } else if self.session_picker.is_some() {
+            Some(Modal::SessionPicker)
+        } else if self.model_picker.is_some() {
+            Some(Modal::ModelPicker)
+        } else if self.variant_picker.is_some() {
+            Some(Modal::VariantPicker)
+        } else if self.search_active {
+            Some(Modal::Search)
+        } else if self.command_palette.is_some() {
+            Some(Modal::CommandPalette)
+        } else {
+            None
+        }
+    }
+
     fn has_modal(&self) -> bool {
-        self.command_palette.is_some()
-            || self.model_picker.is_some()
-            || self.variant_picker.is_some()
-            || self.theme_picker.is_some()
-            || self.session_picker.is_some()
-            || self.help_visible
-            || self.skill_picker.is_some()
-            || self.pending_manager.is_some()
+        self.active_modal().is_some()
+    }
+
+    /// Route a wheel batch to whatever overlay is in front. Returns
+    /// false when nothing consumed it, so the transcript can scroll.
+    fn scroll_active_modal(&mut self, rows: isize) -> bool {
+        // A net-zero batch must fall through: `scroll_wheel` is what
+        // clears a stale transcript selection.
+        if rows == 0 {
+            return false;
+        }
+        // Every `move_selection` wraps with `rem_euclid`, so one call with
+        // the whole delta does what a per-row loop would.
+        match self.active_modal() {
+            Some(Modal::ModelPicker) => self.model_picker.as_mut().unwrap().move_selection(rows),
+            Some(Modal::VariantPicker) => {
+                self.variant_picker.as_mut().unwrap().move_selection(rows);
+            }
+            Some(Modal::ThemePicker) => {
+                self.theme_picker.as_mut().unwrap().move_selection(rows);
+                // The picker previews the highlighted theme live and its
+                // footer advertises it, so the wheel must preview too.
+                self.theme = self.theme_picker.as_ref().unwrap().selected_theme();
+            }
+            Some(Modal::SessionPicker) => {
+                self.session_picker.as_mut().unwrap().move_selection(rows);
+            }
+            Some(Modal::SkillPicker) => self.skill_picker.as_mut().unwrap().move_selection(rows),
+            Some(Modal::CommandPalette) => {
+                self.command_palette.as_mut().unwrap().move_selection(rows);
+            }
+            Some(Modal::Help) => {
+                self.help_scroll = self.help_scroll.saturating_add_signed(rows);
+            }
+            // The pending manager is a handful of rows; search leaves the
+            // wheel to the transcript so results stay browsable.
+            Some(Modal::PendingManager) | Some(Modal::Search) | None => return false,
+        }
+        true
     }
 
     fn configure_runtime(
@@ -4401,22 +4478,32 @@ impl App {
             ));
         }
 
-        if let Some(picker) = &self.model_picker {
-            render_model_picker(frame, picker);
-        } else if let Some(picker) = &self.variant_picker {
-            render_variant_picker(frame, picker);
-        } else if let Some(picker) = &self.theme_picker {
-            render_theme_picker(frame, picker);
-        } else if let Some(picker) = &self.session_picker {
-            render_session_picker(frame, picker);
-        } else if self.help_visible {
-            render_help(frame, self.help_scroll, self.keyboard_enhanced);
-        } else if self.pending_manager.is_some() {
-            render_pending_manager(frame, self);
-        } else if let Some(picker) = &self.skill_picker {
-            render_skill_picker(frame, picker);
-        } else if let Some(palette) = &self.command_palette {
-            render_command_palette(frame, palette);
+        // Same precedence the key dispatcher uses, from the same value:
+        // whatever is drawn on top is whatever is taking the keys.
+        match self.active_modal() {
+            Some(Modal::PendingManager) => render_pending_manager(frame, self),
+            Some(Modal::Help) => render_help(frame, self.help_scroll, self.keyboard_enhanced),
+            Some(Modal::ThemePicker) => {
+                render_theme_picker(frame, self.theme_picker.as_ref().expect("theme picker"));
+            }
+            Some(Modal::SkillPicker) => {
+                render_skill_picker(frame, self.skill_picker.as_ref().expect("skill picker"));
+            }
+            Some(Modal::SessionPicker) => {
+                render_session_picker(frame, self.session_picker.as_ref().expect("session picker"));
+            }
+            Some(Modal::ModelPicker) => {
+                render_model_picker(frame, self.model_picker.as_ref().expect("model picker"));
+            }
+            Some(Modal::VariantPicker) => {
+                render_variant_picker(frame, self.variant_picker.as_ref().expect("variant picker"));
+            }
+            // Search renders into the status line, not an overlay.
+            Some(Modal::Search) => {}
+            Some(Modal::CommandPalette) => {
+                render_command_palette(frame, self.command_palette.as_ref().expect("palette"));
+            }
+            None => {}
         }
         theme::apply(frame.buffer_mut(), self.theme);
     }
@@ -7747,7 +7834,6 @@ async fn run_app(
                         && app.queued_messages.is_empty()
                         && app.input.is_blank()
                         && !app.has_modal()
-                        && !app.search_active
                         && pending_terminal_event.is_none()
                         && let Some((goal, round)) = app.goal.clone()
                     {
@@ -7792,7 +7878,6 @@ async fn run_app(
                         if completed
                             && app.input.is_blank()
                             && !app.has_modal()
-                            && !app.search_active
                             && pending_terminal_event.is_none()
                         {
                             let next = app.queued_messages.remove(0);
@@ -7992,7 +8077,7 @@ async fn run_app(
                     spawner.shutdown().await;
                     return Ok(AppExit::Quit);
                 }
-                if app.pending_manager.is_some() {
+                if app.active_modal() == Some(Modal::PendingManager) {
                     match app.pending_manager_key(code, control) {
                         PendingAction::Stay => {}
                         PendingAction::Close => app.pending_manager = None,
@@ -8058,7 +8143,7 @@ async fn run_app(
                     }
                     continue;
                 }
-                if app.help_visible {
+                if app.active_modal() == Some(Modal::Help) {
                     match code {
                         KeyCode::Up => app.help_scroll = app.help_scroll.saturating_sub(1),
                         KeyCode::Down => app.help_scroll = app.help_scroll.saturating_add(1),
@@ -8072,7 +8157,7 @@ async fn run_app(
                     }
                     continue;
                 }
-                if app.theme_picker.is_some() {
+                if app.active_modal() == Some(Modal::ThemePicker) {
                     let action = {
                         let picker = app.theme_picker.as_mut().unwrap();
                         picker.handle_key(code, control)
@@ -8082,7 +8167,9 @@ async fn run_app(
                     });
                     continue;
                 }
-                if let Some(picker) = app.skill_picker.as_mut() {
+                if app.active_modal() == Some(Modal::SkillPicker)
+                    && let Some(picker) = app.skill_picker.as_mut()
+                {
                     match picker.handle_key(code, control) {
                         PickerAction::Stay => {}
                         PickerAction::Dismiss => {
@@ -8095,7 +8182,9 @@ async fn run_app(
                     }
                     continue;
                 }
-                if let Some(picker) = app.session_picker.as_mut() {
+                if app.active_modal() == Some(Modal::SessionPicker)
+                    && let Some(picker) = app.session_picker.as_mut()
+                {
                     match picker.handle_key(code, control) {
                         SessionPickerAction::Stay => {}
                         SessionPickerAction::Dismiss => {
@@ -8185,7 +8274,9 @@ async fn run_app(
                     }
                     continue;
                 }
-                if let Some(picker) = app.model_picker.as_mut() {
+                if app.active_modal() == Some(Modal::ModelPicker)
+                    && let Some(picker) = app.model_picker.as_mut()
+                {
                     match picker.handle_key(code, control) {
                         PickerAction::Stay => {}
                         PickerAction::Dismiss => {
@@ -8230,7 +8321,7 @@ async fn run_app(
                     }
                     continue;
                 }
-                if app.variant_picker.is_some() {
+                if app.active_modal() == Some(Modal::VariantPicker) {
                     let (action, model) = {
                         let picker = app.variant_picker.as_mut().unwrap();
                         (picker.handle_key(code, control), picker.model.full_id())
@@ -8265,7 +8356,7 @@ async fn run_app(
                     }
                     continue;
                 }
-                if app.search_active {
+                if app.active_modal() == Some(Modal::Search) {
                     match (code, control) {
                         (KeyCode::Esc, _) => app.close_search(true),
                         (KeyCode::Enter, _) => app.close_search(false),
@@ -8284,7 +8375,9 @@ async fn run_app(
                     }
                     continue;
                 }
-                if let Some(palette) = app.command_palette.as_mut() {
+                if app.active_modal() == Some(Modal::CommandPalette)
+                    && let Some(palette) = app.command_palette.as_mut()
+                {
                     match palette.handle_key(code, control) {
                         CommandPaletteAction::Stay => {}
                         CommandPaletteAction::Dismiss => {
@@ -8582,51 +8675,71 @@ async fn run_app(
                     },
                 }
             }
-            Event::Paste(text) if app.command_palette.is_some() => {
+            Event::Paste(text) if app.active_modal() == Some(Modal::CommandPalette) => {
                 app.command_palette.as_mut().unwrap().insert_query(&text);
+            }
+            Event::Paste(text) if app.active_modal() == Some(Modal::Search) => {
+                app.search_query.push_str(text.trim());
+                app.search_refresh();
             }
             Event::Paste(text) if !app.has_modal() => {
                 app.model_key_pending = false;
                 app.clear_transient_notice();
                 app.input.insert(&text);
             }
-            Event::Mouse(mouse) if !app.has_modal() => match mouse.kind {
-                kind @ (MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) => {
-                    let initial_rows = if kind == MouseEventKind::ScrollUp {
-                        -3
+            Event::Mouse(mouse)
+                if matches!(
+                    mouse.kind,
+                    MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                ) =>
+            {
+                let initial_rows = if mouse.kind == MouseEventKind::ScrollUp {
+                    -3
+                } else {
+                    3
+                };
+                let batch = drain_wheel_batch(initial_rows, MAX_WHEEL_EVENTS_PER_BATCH, || {
+                    if crossterm::event::poll(std::time::Duration::ZERO)? {
+                        Ok(Some(crossterm::event::read()?))
                     } else {
-                        3
-                    };
-                    let batch =
-                        drain_wheel_batch(initial_rows, MAX_WHEEL_EVENTS_PER_BATCH, || {
-                            if crossterm::event::poll(std::time::Duration::ZERO)? {
-                                Ok(Some(crossterm::event::read()?))
-                            } else {
-                                Ok(None)
-                            }
-                        })?;
-                    pending_terminal_event = batch.deferred;
+                        Ok(None)
+                    }
+                })?;
+                pending_terminal_event = batch.deferred;
+                // The overlay in front gets first refusal; a 45-entry
+                // model picker should scroll like everything else.
+                if !app.scroll_active_modal(batch.rows) {
                     app.scroll_wheel(batch.rows);
                 }
-                MouseEventKind::Down(MouseButton::Left) => {
-                    app.begin_transcript_selection(mouse.column, mouse.row);
-                }
-                MouseEventKind::Drag(MouseButton::Left) => {
-                    app.drag_transcript_selection(mouse.column, mouse.row);
-                }
-                MouseEventKind::Up(MouseButton::Left) => {
-                    if let Some(text) = app.finish_transcript_selection(mouse.column, mouse.row)
-                        && let Err(error) = app.copy_to_clipboard(&text)
-                    {
-                        let message = format!("clipboard copy failed: {error:#}");
-                        app.set_notice(&message, NoticeLevel::Error);
-                        app.push_transcript_line(Line_::System(message));
-                        app.follow_tail = true;
-                        app.set_activity(Activity::Error);
+            }
+            Event::Mouse(mouse)
+                if app
+                    .active_modal()
+                    .is_none_or(|modal| modal == Modal::Search) =>
+            {
+                // Search is a transcript-reading mode, so selecting and
+                // expanding must keep working underneath it.
+                match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        app.begin_transcript_selection(mouse.column, mouse.row);
                     }
+                    MouseEventKind::Drag(MouseButton::Left) => {
+                        app.drag_transcript_selection(mouse.column, mouse.row);
+                    }
+                    MouseEventKind::Up(MouseButton::Left) => {
+                        if let Some(text) = app.finish_transcript_selection(mouse.column, mouse.row)
+                            && let Err(error) = app.copy_to_clipboard(&text)
+                        {
+                            let message = format!("clipboard copy failed: {error:#}");
+                            app.set_notice(&message, NoticeLevel::Error);
+                            app.push_transcript_line(Line_::System(message));
+                            app.follow_tail = true;
+                            app.set_activity(Activity::Error);
+                        }
+                    }
+                    _ => {}
                 }
-                _ => {}
-            },
+            }
             _ => {}
         }
     }
@@ -8635,6 +8748,94 @@ async fn run_app(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Render precedence and key-dispatch precedence used to be two
+    /// hand-maintained orders that were near-opposite. One value now
+    /// feeds both, so they cannot disagree about which overlay is in
+    /// front of the user.
+    #[test]
+    fn one_precedence_order_decides_the_active_overlay() {
+        let mut app = App::new();
+        assert_eq!(app.active_modal(), None);
+        assert!(!app.has_modal());
+
+        app.model_picker = Some(ModelPicker::new(
+            ilar::model::catalog().iter().collect(),
+            "zai/glm-4.7",
+        ));
+        assert_eq!(app.active_modal(), Some(Modal::ModelPicker));
+
+        // The pending manager is reachable from the palette and outranks
+        // everything: whatever is showing must also be taking the keys.
+        app.pending_manager = Some(PendingManager::default());
+        assert_eq!(app.active_modal(), Some(Modal::PendingManager));
+    }
+
+    /// Search owns the keyboard like any other overlay. It used to sit
+    /// outside `has_modal`, so a paste landed in the message input, the
+    /// input kept a caret it was not receiving, and a background
+    /// notification could start a turn underneath the search bar.
+    #[test]
+    fn search_is_a_modal_like_any_other() {
+        let mut app = App::new();
+        app.open_search();
+        assert_eq!(app.active_modal(), Some(Modal::Search));
+        assert!(app.has_modal());
+        assert!(
+            !input_accepts_keys(false, app.has_modal()),
+            "the prompt must not show a caret while search takes the keys"
+        );
+        app.close_search(true);
+        assert!(!app.has_modal());
+    }
+
+    /// Everything else in the transcript is mouse-driven; a 45-entry
+    /// model picker that cannot be scrolled is the odd one out.
+    #[test]
+    fn the_wheel_scrolls_the_active_picker() {
+        let mut app = App::new();
+        // Pin the entry count so catalog reordering cannot flip this.
+        let models: Vec<_> = ilar::model::catalog().iter().take(10).collect();
+        let first = models[0].full_id();
+        app.model_picker = Some(ModelPicker::new(models, &first));
+        assert_eq!(app.model_picker.as_ref().unwrap().selected, 0);
+
+        assert!(app.scroll_active_modal(3));
+        assert_eq!(app.model_picker.as_ref().unwrap().selected, 3);
+        assert!(app.scroll_active_modal(-3));
+        assert_eq!(app.model_picker.as_ref().unwrap().selected, 0);
+    }
+
+    /// The theme picker previews the highlighted theme across the whole
+    /// UI and its footer says so, so the wheel must preview like the
+    /// arrow keys rather than only moving the marker.
+    #[test]
+    fn the_wheel_previews_themes_like_the_arrow_keys() {
+        let mut app = App::new();
+        app.theme = theme::ThemeId::ALL[0];
+        app.theme_picker = Some(ThemePicker::new(app.theme));
+
+        assert!(app.scroll_active_modal(1));
+        let highlighted = app.theme_picker.as_ref().unwrap().selected_theme();
+        assert_ne!(highlighted, theme::ThemeId::ALL[0]);
+        assert_eq!(
+            app.theme, highlighted,
+            "the wheel moved the marker without previewing the theme"
+        );
+    }
+
+    /// A net-zero wheel batch has to fall through to the transcript:
+    /// `scroll_wheel` is what clears a stale selection.
+    #[test]
+    fn a_net_zero_wheel_batch_is_not_consumed_by_a_modal() {
+        let mut app = App::new();
+        assert!(!app.scroll_active_modal(0));
+        app.open_search();
+        assert!(!app.scroll_active_modal(0));
+        app.close_search(true);
+        app.help_visible = true;
+        assert!(!app.scroll_active_modal(0));
+    }
 
     /// A bare printable key must never trigger an action while the
     /// prompt has focus: after an error, "run the tests" began with `r`
