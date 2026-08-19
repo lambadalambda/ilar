@@ -25,6 +25,11 @@ base_url = "https://api.z.ai/api/anthropic"
 #   flavor = "openai"
 # api_key from ILAR_ZAI_API_KEY (env).
 
+[agent]
+# Max provider calls per user turn — a runaway-loop backstop, not a
+# working limit. Long-thinking models need hundreds on big tasks.
+# max_iterations = 1000
+
 [compaction]
 # Summarize when transcript exceeds this fraction of context window.
 threshold = 0.85

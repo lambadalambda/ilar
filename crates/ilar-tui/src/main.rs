@@ -6779,6 +6779,7 @@ async fn main() -> Result<()> {
 
         let loop_config = LoopConfig {
             compaction_threshold: config.compaction.threshold,
+            max_iterations: config.agent.max_iterations,
             ..LoopConfig::default()
         };
         let spawner = std::sync::Arc::new(

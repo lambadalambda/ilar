@@ -64,6 +64,7 @@ by project files.
 | `providers.zai.base_url` | z.ai endpoint for `flavor` | Override the z.ai API base URL selected by `flavor`. |
 | `providers.zai.api_key` | `ILAR_ZAI_API_KEY` | z.ai API key. |
 | `providers.zai.flavor` | `anthropic` | `anthropic` or `openai`. |
+| `agent.max_iterations` | `1000` | Max provider calls per user turn (runaway-loop backstop). |
 | `compaction.threshold` | `0.85` | Context fraction at which history is summarized; must be between 0 and 1. |
 | `subagents.max_concurrent` | `10` | Maximum concurrent subagents; must be at least 1. |
 | `subagents.max_depth` | `3` | Maximum nested subagent depth; must be at least 1. |

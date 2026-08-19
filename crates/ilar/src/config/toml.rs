@@ -28,6 +28,27 @@ pub struct ProviderConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct AgentConfig {
+    /// Max provider calls per user turn. A runaway-loop backstop, not a
+    /// working limit: long-thinking models routinely need hundreds.
+    #[serde(default = "default_max_iterations")]
+    pub max_iterations: usize,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            max_iterations: default_max_iterations(),
+        }
+    }
+}
+
+fn default_max_iterations() -> usize {
+    1_000
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CompactionConfig {
     #[serde(default = "default_threshold")]
     pub threshold: f64,
@@ -83,8 +104,15 @@ fn default_background_tool_timeout_ms() -> u64 {
 struct FileConfig {
     general: Option<GeneralConfig>,
     providers: Option<HashMap<String, ProviderConfig>>,
+    agent: Option<AgentLayer>,
     compaction: Option<CompactionLayer>,
     subagents: Option<SubagentLayer>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct AgentLayer {
+    max_iterations: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -106,6 +134,7 @@ struct SubagentLayer {
 pub struct Config {
     pub general: GeneralConfigResolved,
     pub providers: HashMap<String, ProviderConfigResolved>,
+    pub agent: AgentConfig,
     pub compaction: CompactionConfig,
     pub subagents: SubagentConfig,
     user_dir: PathBuf,
@@ -311,6 +340,12 @@ impl Config {
                 theme: user_theme.unwrap_or_else(|| "terminal".into()),
             },
             providers,
+            agent: AgentConfig {
+                max_iterations: merged
+                    .agent
+                    .and_then(|config| config.max_iterations)
+                    .unwrap_or_else(default_max_iterations),
+            },
             compaction: CompactionConfig {
                 threshold: merged
                     .compaction
@@ -463,6 +498,7 @@ impl Config {
                 model: "zai/glm-4.7".into(),
                 theme: "terminal".into(),
             },
+            agent: AgentConfig::default(),
             providers,
             compaction: CompactionConfig::default(),
             subagents: SubagentConfig::default(),
@@ -552,6 +588,12 @@ fn merge_file(base: FileConfig, text: &str, origin: &Path) -> anyhow::Result<Fil
             if v.auth.is_some() {
                 current.auth = v.auth;
             }
+        }
+    }
+    if let Some(a) = parsed.agent {
+        let current = merged.agent.get_or_insert_with(AgentLayer::default);
+        if a.max_iterations.is_some() {
+            current.max_iterations = a.max_iterations;
         }
     }
     if let Some(c) = parsed.compaction {
@@ -671,6 +713,13 @@ fn set_general_theme(source: &str, theme: &str) -> anyhow::Result<String> {
 }
 
 fn validate_file(config: &FileConfig, origin: &Path) -> anyhow::Result<()> {
+    if let Some(agent) = &config.agent {
+        anyhow::ensure!(
+            agent.max_iterations != Some(0),
+            "{}: agent.max_iterations must be at least 1",
+            origin.display()
+        );
+    }
     if let Some(threshold) = config.compaction.as_ref().and_then(|c| c.threshold) {
         anyhow::ensure!(
             threshold.is_finite() && threshold > 0.0 && threshold < 1.0,

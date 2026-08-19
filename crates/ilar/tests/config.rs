@@ -694,3 +694,22 @@ fn config_permission_errors_are_not_treated_as_missing() {
         "{error:#}"
     );
 }
+
+#[test]
+fn agent_max_iterations_parses_layers_and_rejects_zero() {
+    let (_g, dir) = tempdir();
+    write(&dir.join("ilar.toml"), "[agent]\nmax_iterations = 400\n");
+    let config = Loader::no_env().config_dir(dir.clone()).resolve().unwrap();
+    assert_eq!(config.agent.max_iterations, 400);
+
+    write(
+        &dir.join("ilar.toml"),
+        "[general]\nmodel = \"zai/glm-4.7\"\n",
+    );
+    let config = Loader::no_env().config_dir(dir.clone()).resolve().unwrap();
+    assert_eq!(config.agent.max_iterations, 1_000, "default");
+
+    write(&dir.join("ilar.toml"), "[agent]\nmax_iterations = 0\n");
+    let error = Loader::no_env().config_dir(dir).resolve().unwrap_err();
+    assert!(format!("{error:#}").contains("max_iterations"), "{error:#}");
+}

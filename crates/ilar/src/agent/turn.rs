@@ -16,7 +16,9 @@ use chrono::Utc;
 /// Loop tuning knobs.
 #[derive(Debug, Clone)]
 pub struct LoopConfig {
-    /// Max provider calls per user turn (tool-loop guard).
+    /// Max provider calls per user turn. A runaway-loop backstop, not a
+    /// working limit — long-thinking models (glm-5.3 at max effort)
+    /// legitimately need hundreds on big tasks.
     pub max_iterations: usize,
     /// Number of server-side paused responses that may be reissued.
     pub max_pause_retries: usize,
@@ -32,7 +34,7 @@ pub struct LoopConfig {
 impl Default for LoopConfig {
     fn default() -> Self {
         Self {
-            max_iterations: 50,
+            max_iterations: 1_000,
             max_pause_retries: 3,
             context_limit: None,
             compaction_threshold: 0.85,
