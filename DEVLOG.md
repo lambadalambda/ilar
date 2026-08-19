@@ -795,3 +795,26 @@ Providers now use connect (15s) + idle (300s) timeouts with no total
 deadline, and transport errors carry their full source chain. Also: live
 thinking now accumulates into an expandable Thought row (click ▸, 64 KiB
 tail bound) so marathon reasoning is inspectable while it runs.
+
+## 2026-08-19 — Milestone 5: flow batch
+
+Eleven more issues, one sitting: throughput rate + per-step live output
+estimate in the liveness display, plan-billing label, one-key turn retry,
+Markdown export, skills inlined in the palette (now dynamic items),
+fzf-style session picker with delete/fork (SessionStore::delete/fork in
+core), message queueing with auto-send, palette-forced compaction with
+the summary shown live, transcript search (Ctrl-F, revision-tracked
+matches), and a live bash output tail via a lossy OutputTailSink on
+ToolContext drained through the loop-event channel.
+
+Review pass caught two real hazards before push: queued auto-send could
+fire a synthetic Enter into an open picker/search (losing the message),
+and search match indices went stale as streaming shifted rows. Both
+fixed, plus lock-file hygiene on delete and force-compaction without a
+context limit.
+
+Deferred nitpicks: bash tail can start mid-UTF-8 sequence (cosmetic
+replacement char), fork doesn't fsync the directory entry, retry after a
+failed forced compaction loses the force flag, and queue order can
+invert if a notification turn starts in the same loop iteration as a
+dequeue.
