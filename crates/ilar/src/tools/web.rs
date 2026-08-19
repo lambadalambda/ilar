@@ -24,6 +24,7 @@ const MAX_SEARCH_URL_CHARS: usize = 2_048;
 const MAX_SEARCH_SNIPPET_CHARS: usize = 4_000;
 const MAX_SEARCH_QUERY_CHARS: usize = 1_000;
 const MAX_SEARCH_OUTPUT_CHARS: usize = 100_000;
+const MAX_SEARCH_ERROR_CHARS: usize = 2_048;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_REDIRECTS: usize = 10;
@@ -758,13 +759,8 @@ impl SearchBackend for TavilyBackend {
                 "query": query,
                 "max_results": limit,
             });
-            validate_url(&endpoint, allow_private_initial)?;
-            let response = http.post(endpoint).json(&body).send().await?;
-            let status = response.status();
-            if !status.is_success() {
-                anyhow::bail!("tavily HTTP {status}");
-            }
-            let bytes = bounded_body(response, MAX_SEARCH_RESPONSE_BYTES).await?;
+            let bytes =
+                search_post(http, endpoint, allow_private_initial, "tavily", None, body).await?;
             let value: TavilyResponse = serde_json::from_slice(&bytes)?;
             let hits = value
                 .results
@@ -776,6 +772,248 @@ impl SearchBackend for TavilyBackend {
                     snippet: result.content,
                 })
                 .collect();
+            Ok(SearchResults { hits })
+        })
+    }
+}
+
+/// Shared hardened POST for search backends: URL validation, bounded
+/// body, and reqwest errors scrubbed of the URL so endpoint secrets (like
+/// Exa's `exaApiKey` query parameter) never reach persisted tool errors.
+async fn search_post(
+    http: reqwest::Client,
+    endpoint: Url,
+    allow_private_initial: bool,
+    provider: &'static str,
+    accept: Option<&'static str>,
+    body: serde_json::Value,
+) -> anyhow::Result<Vec<u8>> {
+    validate_url(&endpoint, allow_private_initial)?;
+    let mut request = http.post(endpoint).json(&body);
+    if let Some(accept) = accept {
+        request = request.header(reqwest::header::ACCEPT, accept);
+    }
+    let response = request.send().await.map_err(|error| {
+        anyhow::anyhow!(
+            "{provider}: {}",
+            safe_reqwest_error(error, MAX_SEARCH_ERROR_CHARS)
+        )
+    })?;
+    let status = response.status();
+    if !status.is_success() {
+        anyhow::bail!("{provider} HTTP {status}");
+    }
+    Ok(bounded_body(response, MAX_SEARCH_RESPONSE_BYTES).await?)
+}
+
+/// Keyless-capable Exa MCP backend (optional ILAR_EXA_API_KEY).
+///
+/// Calls the hosted Exa MCP endpoint with a single JSON-RPC `tools/call`
+/// request. Without a key this relies on Exa's best-effort anonymous
+/// access, so it is the OOB default, not the recommended setup.
+pub struct ExaBackend {
+    http: reqwest::Client,
+    endpoint: Url,
+    allow_private_initial: bool,
+}
+
+const EXA_MCP_URL: &str = "https://mcp.exa.ai/mcp";
+
+impl ExaBackend {
+    pub fn new(api_key: Option<String>) -> Self {
+        let mut endpoint = Url::parse(EXA_MCP_URL).expect("valid Exa URL");
+        if let Some(api_key) = api_key.filter(|api_key| !api_key.trim().is_empty()) {
+            endpoint
+                .query_pairs_mut()
+                .append_pair("exaApiKey", &api_key);
+        }
+        Self {
+            http: http_client(REQUEST_TIMEOUT, false),
+            endpoint,
+            allow_private_initial: false,
+        }
+    }
+
+    pub fn from_env() -> Self {
+        Self::new(std::env::var("ILAR_EXA_API_KEY").ok())
+    }
+
+    #[cfg(test)]
+    fn for_test(endpoint: impl AsRef<str>, timeout: Duration) -> Self {
+        Self {
+            http: http_client(timeout, false),
+            endpoint: Url::parse(endpoint.as_ref()).expect("valid test Exa URL"),
+            allow_private_initial: true,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct McpResponse {
+    result: Option<McpResult>,
+    error: Option<McpError>,
+}
+
+#[derive(Deserialize)]
+struct McpResult {
+    content: Vec<McpContent>,
+    #[serde(default, rename = "isError")]
+    is_error: bool,
+}
+
+#[derive(Deserialize)]
+struct McpContent {
+    #[serde(default)]
+    text: String,
+}
+
+#[derive(Deserialize)]
+struct McpError {
+    message: String,
+}
+
+/// The endpoint answers either with a plain JSON body or SSE-framed
+/// `data:` lines; both carry the same JSON-RPC payload. SSE lines that
+/// parse but carry neither an error nor text (notifications) are skipped;
+/// a parsed error is surfaced, not treated as an unrecognized frame.
+fn exa_payload_text(body: &str) -> anyhow::Result<String> {
+    let trimmed = body.trim();
+    if trimmed.starts_with('{') {
+        return exa_text_from_response(serde_json::from_str(trimmed)?);
+    }
+    for line in body.lines() {
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let Ok(response) = serde_json::from_str::<McpResponse>(data.trim_start()) else {
+            continue;
+        };
+        if response.error.is_some() || exa_response_has_text(&response) {
+            return exa_text_from_response(response);
+        }
+    }
+    anyhow::bail!("exa: unrecognized response framing")
+}
+
+fn exa_response_has_text(response: &McpResponse) -> bool {
+    response
+        .result
+        .as_ref()
+        .is_some_and(|result| result.content.iter().any(|item| !item.text.is_empty()))
+}
+
+fn exa_text_from_response(response: McpResponse) -> anyhow::Result<String> {
+    if let Some(error) = response.error {
+        anyhow::bail!(
+            "exa error: {}",
+            truncate_chars(&error.message, MAX_SEARCH_ERROR_CHARS)
+        );
+    }
+    let no_text = || anyhow::anyhow!("exa: response contained no text content");
+    let result = response.result.ok_or_else(no_text)?;
+    let is_error = result.is_error;
+    let text = result
+        .content
+        .into_iter()
+        .find(|item| !item.text.is_empty())
+        .map(|item| item.text)
+        .ok_or_else(no_text)?;
+    if is_error {
+        anyhow::bail!(
+            "exa error: {}",
+            truncate_chars(&text, MAX_SEARCH_ERROR_CHARS)
+        );
+    }
+    Ok(text)
+}
+
+/// Result blocks are separated by `---` lines and carry `Title:` / `URL:`
+/// headers followed by highlight text.
+fn exa_hits_from_text(text: &str) -> Vec<SearchHit> {
+    let mut hits = Vec::new();
+    let mut block: Vec<&str> = Vec::new();
+    for line in text.lines().chain(std::iter::once("---")) {
+        if line.trim() == "---" {
+            hits.extend(exa_hit_from_block(&block));
+            block.clear();
+        } else {
+            block.push(line);
+        }
+    }
+    hits
+}
+
+fn exa_hit_from_block(lines: &[&str]) -> Option<SearchHit> {
+    let mut title = None;
+    let mut url = None;
+    let mut snippet = Vec::new();
+    for line in lines {
+        let line = line.trim();
+        if let Some(value) = line.strip_prefix("Title:") {
+            title.get_or_insert_with(|| value.trim().to_string());
+        } else if let Some(value) = line.strip_prefix("URL:") {
+            url.get_or_insert_with(|| value.trim().to_string());
+        } else if line.is_empty()
+            || line == "Highlights:"
+            || line.starts_with("Published:")
+            || line.starts_with("Author:")
+        {
+            continue;
+        } else {
+            snippet.push(line);
+        }
+    }
+    Some(SearchHit {
+        title: title?,
+        url: url?,
+        snippet: snippet.join("\n"),
+    })
+}
+
+impl SearchBackend for ExaBackend {
+    fn search(&self, query: &str, limit: usize) -> ToolFutureSearch {
+        if query.trim().is_empty() || query.chars().count() > MAX_SEARCH_QUERY_CHARS {
+            return Box::pin(async { anyhow::bail!("invalid Exa query length") });
+        }
+        let http = self.http.clone();
+        let query = query.to_string();
+        let endpoint = self.endpoint.clone();
+        let allow_private_initial = self.allow_private_initial;
+        let limit = limit.clamp(MIN_SEARCH_RESULTS, MAX_SEARCH_RESULTS);
+        Box::pin(async move {
+            let body = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "web_search_exa",
+                    "arguments": {
+                        "query": query,
+                        "type": "auto",
+                        "numResults": limit,
+                        "livecrawl": "fallback",
+                    },
+                },
+            });
+            let bytes = search_post(
+                http,
+                endpoint,
+                allow_private_initial,
+                "exa",
+                Some("application/json, text/event-stream"),
+                body,
+            )
+            .await?;
+            let text = exa_payload_text(&String::from_utf8_lossy(&bytes))?;
+            let mut hits = exa_hits_from_text(&text);
+            if hits.is_empty() && !text.trim().is_empty() {
+                hits.push(SearchHit {
+                    title: "Exa search results".into(),
+                    url: String::new(),
+                    snippet: text,
+                });
+            }
+            hits.truncate(limit);
             Ok(SearchResults { hits })
         })
     }
@@ -988,6 +1226,161 @@ mod tests {
                 .await
                 .is_err(),
             "credential-bearing redirect reached its target"
+        );
+    }
+
+    const EXA_TEXT: &str = "Title: First result\nURL: https://example.com/one\nPublished: N/A\nAuthor: N/A\nHighlights:\nfirst snippet line\nmore context\n\n---\n\nTitle: Second result\nURL: https://example.com/two\nHighlights:\nsecond snippet";
+
+    fn exa_payload(text: &str) -> String {
+        serde_json::json!({"result": {"content": [{"type": "text", "text": text}]}}).to_string()
+    }
+
+    async fn exa_hits(content_type: &str, body: &str) -> SearchResults {
+        let url = response_url(content_type, body.as_bytes()).await;
+        let backend = ExaBackend::for_test(url, Duration::from_secs(2));
+        backend.search("query", 5).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn exa_parses_sse_framed_results() {
+        let body = format!("event: message\ndata: {}\n\n", exa_payload(EXA_TEXT));
+        let results = exa_hits("text/event-stream", &body).await;
+        assert_eq!(results.hits.len(), 2);
+        assert_eq!(results.hits[0].title, "First result");
+        assert_eq!(results.hits[0].url, "https://example.com/one");
+        assert!(
+            results.hits[0].snippet.contains("first snippet line"),
+            "{}",
+            results.hits[0].snippet
+        );
+        assert!(
+            !results.hits[0].snippet.contains("N/A"),
+            "{}",
+            results.hits[0].snippet
+        );
+        assert_eq!(results.hits[1].title, "Second result");
+        assert_eq!(results.hits[1].url, "https://example.com/two");
+    }
+
+    #[tokio::test]
+    async fn exa_parses_direct_json_results() {
+        let results = exa_hits("application/json", &exa_payload(EXA_TEXT)).await;
+        assert_eq!(results.hits.len(), 2);
+        assert_eq!(results.hits[1].title, "Second result");
+    }
+
+    #[tokio::test]
+    async fn exa_falls_back_to_raw_text_hit() {
+        let body = format!(
+            "event: message\ndata: {}\n\n",
+            exa_payload("free-form answer with no result markers")
+        );
+        let results = exa_hits("text/event-stream", &body).await;
+        assert_eq!(results.hits.len(), 1);
+        assert!(
+            results.hits[0]
+                .snippet
+                .contains("free-form answer with no result markers"),
+            "{}",
+            results.hits[0].snippet
+        );
+    }
+
+    #[tokio::test]
+    async fn exa_reports_http_errors() {
+        let url = spawn_server(
+            "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\n\r\n".into(),
+            Vec::new(),
+            Duration::ZERO,
+            Duration::ZERO,
+        )
+        .await;
+        let backend = ExaBackend::for_test(url, Duration::from_secs(2));
+        let error = backend.search("query", 5).await.unwrap_err();
+        assert!(error.to_string().contains("429"), "{error:#}");
+    }
+
+    #[tokio::test]
+    async fn exa_rejects_oversized_response() {
+        let url = spawn_server(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 99999999\r\n\r\n"
+                .into(),
+            Vec::new(),
+            Duration::ZERO,
+            Duration::ZERO,
+        )
+        .await;
+        let backend = ExaBackend::for_test(url, Duration::from_secs(2));
+        let error = backend.search("query", 5).await.unwrap_err();
+        assert!(error.to_string().contains("too large"), "{error:#}");
+    }
+
+    #[tokio::test]
+    async fn exa_transport_errors_do_not_leak_api_key() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let backend = ExaBackend::for_test(
+            format!("http://{address}/mcp?exaApiKey=key-secret"),
+            Duration::from_millis(200),
+        );
+        let error = backend.search("query", 5).await.unwrap_err();
+        assert!(!format!("{error:#}").contains("key-secret"), "{error:#}");
+    }
+
+    #[tokio::test]
+    async fn exa_surfaces_sse_error_messages() {
+        let payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {"code": -32000, "message": "rate limited, bring a key"},
+        });
+        let body = format!("event: message\ndata: {payload}\n\n");
+        let url = response_url("text/event-stream", body.as_bytes()).await;
+        let backend = ExaBackend::for_test(url, Duration::from_secs(2));
+        let error = backend.search("query", 5).await.unwrap_err();
+        assert!(error.to_string().contains("rate limited"), "{error:#}");
+    }
+
+    #[tokio::test]
+    async fn exa_reports_tool_level_errors_instead_of_hits() {
+        let payload = serde_json::json!({
+            "result": {"isError": true, "content": [{"type": "text", "text": "quota exceeded"}]},
+        });
+        let body = format!("event: message\ndata: {payload}\n\n");
+        let url = response_url("text/event-stream", &body.into_bytes()).await;
+        let backend = ExaBackend::for_test(url, Duration::from_secs(2));
+        let error = backend.search("query", 5).await.unwrap_err();
+        assert!(error.to_string().contains("quota exceeded"), "{error:#}");
+    }
+
+    /// Live smoke test against the real keyless endpoint; run explicitly
+    /// with `cargo test -p ilar exa_live -- --ignored`.
+    #[tokio::test]
+    #[ignore = "hits the network"]
+    async fn exa_live_keyless_search_returns_hits() {
+        let backend = ExaBackend::new(None);
+        let results = backend.search("rust tokio runtime", 3).await.unwrap();
+        assert!(!results.hits.is_empty());
+        assert!(
+            results.hits.iter().any(|hit| hit.url.starts_with("http")),
+            "{:?}",
+            results.hits
+        );
+    }
+
+    #[test]
+    fn exa_endpoint_includes_optional_api_key() {
+        let keyless = ExaBackend::new(None);
+        assert!(!keyless.endpoint.as_str().contains("exaApiKey"));
+        let keyed = ExaBackend::new(Some("secret-key".into()));
+        assert!(
+            keyed
+                .endpoint
+                .query_pairs()
+                .any(|(name, value)| name == "exaApiKey" && value == "secret-key"),
+            "{}",
+            keyed.endpoint
         );
     }
 

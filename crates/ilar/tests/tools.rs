@@ -89,6 +89,15 @@ fn registry_rejects_duplicate_tool_names() {
 }
 
 #[test]
+fn web_tools_always_include_websearch() {
+    let registry = ToolRegistry::builtin().with_web_tools().unwrap();
+    assert!(
+        registry.get("websearch").is_some(),
+        "websearch must register out of the box (keyless Exa fallback)"
+    );
+}
+
+#[test]
 fn composed_web_registry_has_unique_definitions() {
     let registry = ToolRegistry::builtin().with_web_tools().unwrap();
     let definitions = registry.definitions();

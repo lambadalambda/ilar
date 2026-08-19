@@ -576,11 +576,13 @@ impl ToolRegistry {
         self.with_tool(std::sync::Arc::new(web::WebSearchTool::new(backend)))
     }
 
-    /// Registry with optional Tavily websearch. Webfetch is already builtin.
+    /// Registry with websearch attached: Tavily when `ILAR_TAVILY_API_KEY`
+    /// is set, otherwise the keyless Exa MCP endpoint so search works out
+    /// of the box. Webfetch is already builtin.
     pub fn with_web_tools(self) -> Result<Self, DuplicateToolError> {
         match web::TavilyBackend::from_env() {
             Some(backend) => self.with_search(Box::new(backend)),
-            None => Ok(self),
+            None => self.with_search(Box::new(web::ExaBackend::from_env())),
         }
     }
 
