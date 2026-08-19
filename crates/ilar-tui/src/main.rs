@@ -2092,6 +2092,8 @@ struct App {
     session_picker: Option<SessionPicker>,
     /// Set by the palette; run_app opens the picker (it owns the store).
     session_picker_requested: bool,
+    help_visible: bool,
+    help_scroll: usize,
     theme: theme::ThemeId,
     theme_picker: Option<ThemePicker>,
     model_key_pending: bool,
@@ -2143,6 +2145,8 @@ impl App {
             variant_picker: None,
             session_picker: None,
             session_picker_requested: false,
+            help_visible: false,
+            help_scroll: 0,
             theme: theme::ThemeId::Terminal,
             theme_picker: None,
             model_key_pending: false,
@@ -2176,6 +2180,7 @@ impl App {
             || self.variant_picker.is_some()
             || self.theme_picker.is_some()
             || self.session_picker.is_some()
+            || self.help_visible
     }
 
     fn configure_runtime(
@@ -3330,6 +3335,8 @@ impl App {
             render_theme_picker(frame, picker);
         } else if let Some(picker) = &self.session_picker {
             render_session_picker(frame, picker);
+        } else if self.help_visible {
+            render_help(frame, self.help_scroll);
         } else if let Some(palette) = &self.command_palette {
             render_command_palette(frame, palette);
         }
@@ -3951,6 +3958,7 @@ enum PaletteCommand {
     Theme,
     Session,
     Usage,
+    Help,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -3997,6 +4005,13 @@ static PALETTE_COMMANDS: &[PaletteCommandDefinition] = &[
         label: "Session usage",
         shortcut: "",
         search_terms: "usage tokens cost dollars spend total",
+    },
+    PaletteCommandDefinition {
+        id: PaletteCommand::Help,
+        section: "General",
+        label: "Help",
+        shortcut: "F1",
+        search_terms: "help keys keybindings shortcuts bindings",
     },
 ];
 
@@ -4096,6 +4111,145 @@ enum PickerAction {
     Stay,
     Dismiss,
     Choose(String),
+}
+
+struct HelpBinding {
+    keys: &'static str,
+    action: &'static str,
+}
+
+struct HelpSection {
+    title: &'static str,
+    bindings: &'static [HelpBinding],
+}
+
+macro_rules! binding {
+    ($keys:literal, $action:literal) => {
+        HelpBinding {
+            keys: $keys,
+            action: $action,
+        }
+    };
+}
+
+/// Single source for the help overlay. Keep in sync with the key
+/// dispatcher in run_app/handle_prompt_key; the help test spot-checks
+/// load-bearing entries.
+static HELP_SECTIONS: &[HelpSection] = &[
+    HelpSection {
+        title: "Input",
+        bindings: &[
+            binding!("Enter", "send message"),
+            binding!("Shift-Enter / Ctrl-J", "insert newline"),
+            binding!("Esc", "clear input · abort turn · cancel background jobs"),
+            binding!("Up / Down", "recall prompt history (blank input)"),
+        ],
+    },
+    HelpSection {
+        title: "Transcript",
+        bindings: &[
+            binding!("PgUp / PgDn", "scroll page"),
+            binding!("Ctrl-U / Ctrl-D", "scroll half page"),
+            binding!("Ctrl-Home / Ctrl-End", "jump to top / tail"),
+            binding!("Up / Down", "scroll line (while input has text)"),
+            binding!("mouse wheel / drag", "scroll · select and copy"),
+            binding!("click ▸/▾", "fold or expand tool details"),
+        ],
+    },
+    HelpSection {
+        title: "Pickers",
+        bindings: &[
+            binding!("Ctrl-P", "command palette"),
+            binding!("Ctrl-M / F2", "switch model"),
+            binding!("F3", "switch theme"),
+            binding!("Ctrl-X, M / T", "leader: models / themes"),
+            binding!("↑↓ · Enter · Esc", "navigate · choose · dismiss"),
+        ],
+    },
+    HelpSection {
+        title: "Session",
+        bindings: &[
+            binding!("palette: Resume session", "switch to another session"),
+            binding!("palette: Session usage", "token and cost totals"),
+            binding!("ilar --continue", "resume latest session (CLI)"),
+        ],
+    },
+    HelpSection {
+        title: "Help",
+        bindings: &[
+            binding!("F1 / ?", "toggle this overlay"),
+            binding!("Esc", "close"),
+        ],
+    },
+];
+
+fn help_lines(width: usize) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for section in HELP_SECTIONS {
+        if !lines.is_empty() {
+            lines.push(Line::default());
+        }
+        lines.push(Line::styled(
+            truncate_display(section.title, width, Truncation::Right),
+            theme::title(theme::MARKUP),
+        ));
+        for binding in section.bindings {
+            if width < 30 {
+                lines.push(Line::styled(
+                    truncate_display(
+                        &format!("{} {}", binding.keys, binding.action),
+                        width.max(1),
+                        Truncation::Right,
+                    ),
+                    Style::default().fg(theme::SECONDARY),
+                ));
+                continue;
+            }
+            let padded = format!(
+                "  {:<24}",
+                truncate_display(binding.keys, 24, Truncation::Right)
+            );
+            let action_width = width.saturating_sub(UnicodeWidthStr::width(padded.as_str()) + 1);
+            lines.push(Line::from(vec![
+                Span::styled(padded, Style::default().fg(theme::SECONDARY)),
+                Span::styled(
+                    format!(
+                        " {}",
+                        truncate_display(binding.action, action_width.max(1), Truncation::Right)
+                    ),
+                    Style::default().fg(theme::PRIMARY),
+                ),
+            ]));
+        }
+    }
+    lines
+}
+
+fn render_help(frame: &mut Frame, scroll: usize) {
+    let area = centered_rect(frame.area(), 72, 24);
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .border_style(theme::focus_border())
+        .title(Line::styled(" keys ", theme::title(theme::MARKUP)))
+        .title_bottom(
+            Line::styled(" ↑↓ scroll · Esc close ", Style::default().fg(theme::MUTED))
+                .right_aligned(),
+        );
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let lines = help_lines(inner.width as usize);
+    let start = scroll.min(lines.len().saturating_sub(inner.height as usize));
+    let visible: Vec<Line<'static>> = lines
+        .into_iter()
+        .skip(start)
+        .take(inner.height as usize)
+        .collect();
+    frame.render_widget(Paragraph::new(visible), inner);
 }
 
 struct SessionPicker {
@@ -4579,6 +4733,10 @@ fn activate_palette_command(
                 ilar::model::CATALOG_UPDATED,
             )));
             app.follow_tail = true;
+        }
+        PaletteCommand::Help => {
+            app.help_visible = true;
+            app.help_scroll = 0;
         }
     }
 }
@@ -6017,6 +6175,20 @@ async fn run_app(
                     spawner.shutdown().await;
                     return Ok(AppExit::Quit);
                 }
+                if app.help_visible {
+                    match code {
+                        KeyCode::Up => app.help_scroll = app.help_scroll.saturating_sub(1),
+                        KeyCode::Down => app.help_scroll = app.help_scroll.saturating_add(1),
+                        KeyCode::PageUp => app.help_scroll = app.help_scroll.saturating_sub(10),
+                        KeyCode::PageDown => app.help_scroll = app.help_scroll.saturating_add(10),
+                        KeyCode::Esc | KeyCode::F(1) | KeyCode::Char('?' | 'q') => {
+                            app.help_visible = false;
+                            app.help_scroll = 0;
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
                 if app.theme_picker.is_some() {
                     let action = {
                         let picker = app.theme_picker.as_mut().unwrap();
@@ -6211,6 +6383,14 @@ async fn run_app(
                     continue;
                 }
                 match (code, control) {
+                    (KeyCode::F(1), _) => {
+                        app.help_visible = true;
+                        app.help_scroll = 0;
+                    }
+                    (KeyCode::Char('?'), false) if app.input.is_blank() => {
+                        app.help_visible = true;
+                        app.help_scroll = 0;
+                    }
                     (KeyCode::Char('m'), true) | (KeyCode::F(2), false)
                         if !app.busy && !model_choices.is_empty() =>
                     {
@@ -7373,7 +7553,7 @@ mod tests {
     fn command_palette_searches_and_selects_defined_commands() {
         let mut palette = CommandPalette::new();
 
-        assert_eq!(palette.filtered_commands().len(), 5);
+        assert_eq!(palette.filtered_commands().len(), PALETTE_COMMANDS.len());
         assert_eq!(
             palette.handle_key(KeyCode::Enter, false),
             CommandPaletteAction::Choose(PaletteCommand::Model)
@@ -7409,6 +7589,36 @@ mod tests {
             palette.handle_key(KeyCode::Enter, false),
             CommandPaletteAction::Choose(PaletteCommand::Theme)
         );
+    }
+
+    #[test]
+    fn help_overlay_lists_load_bearing_bindings() {
+        let text = help_lines(80)
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        for needle in [
+            "Ctrl-P",
+            "F2",
+            "F3",
+            "F1",
+            "Enter",
+            "Shift-Enter",
+            "PgUp",
+            "Ctrl-U",
+            "Resume session",
+            "history",
+            "--continue",
+        ] {
+            assert!(text.contains(needle), "missing {needle:?} in help:\n{text}");
+        }
+        // Tiny widths must not panic and must stay within bounds.
+        for width in 0..=12 {
+            for line in help_lines(width) {
+                assert!(line.width() <= width.max(1) + 1, "width {width}");
+            }
+        }
     }
 
     #[test]
