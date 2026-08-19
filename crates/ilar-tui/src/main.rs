@@ -47,8 +47,12 @@ enum Line_ {
     Job(String),
     Assistant(String),
     Thought {
+        /// Click-target id; empty for nested subagent previews, which are
+        /// not expandable.
+        id: String,
         text: String,
         complete: bool,
+        expanded: bool,
     },
     Tool {
         id: String,
@@ -134,6 +138,7 @@ impl TranscriptEntry {
 enum TranscriptHitTarget {
     ToolGroup(String),
     Tool(String),
+    Thought(String),
 }
 
 #[derive(Clone)]
@@ -1045,8 +1050,10 @@ fn restored_session_invocation_view(
                             completed: true,
                         } => {
                             lines.push(Line_::Thought {
+                                id: format!("thought:restored:{}", lines.len()),
                                 text: text.clone(),
                                 complete: true,
+                                expanded: false,
                             });
                         }
                         ilar::session::ContentBlock::ReasoningSummary {
@@ -1394,8 +1401,10 @@ fn apply_child_loop_event(lines: &mut Vec<Line_>, group: &mut u64, scope: &str, 
                 })
             ) {
                 lines.push(Line_::Thought {
+                    id: String::new(),
                     text: "reasoning".into(),
                     complete: false,
+                    expanded: false,
                 });
             }
         }
@@ -1403,10 +1412,13 @@ fn apply_child_loop_event(lines: &mut Vec<Line_>, group: &mut u64, scope: &str, 
             Some(Line_::Thought {
                 text,
                 complete: false,
+                ..
             }) => text.push_str(summary),
             _ => lines.push(Line_::Thought {
+                id: String::new(),
                 text: summary.clone(),
                 complete: false,
+                expanded: false,
             }),
         },
         LoopEvent::ReasoningSummaryCompleted => {
@@ -1605,11 +1617,28 @@ fn transcript_entry_rows(
             tool @ Line_::Tool { .. } => {
                 tool_entry_rows(tool, expanded_groups, width, now, activity_started, 0, None)
             }
-            item => transcript_entry_lines(item, width, now, activity_started)
-                .into_iter()
-                .flat_map(|line| wrap_styled_line(line, width as usize))
-                .map(|line| TranscriptRow { line, target: None })
-                .collect(),
+            item => {
+                // Expandable thoughts get a click target on their header row.
+                let thought_target = match item {
+                    Line_::Thought { id, .. } if !id.is_empty() => {
+                        Some(TranscriptHitTarget::Thought(id.clone()))
+                    }
+                    _ => None,
+                };
+                let mut first_line = true;
+                transcript_entry_lines(item, width, now, activity_started)
+                    .into_iter()
+                    .flat_map(|line| wrap_styled_line(line, width as usize))
+                    .map(|line| {
+                        let target = if std::mem::take(&mut first_line) {
+                            thought_target.clone()
+                        } else {
+                            None
+                        };
+                        TranscriptRow { line, target }
+                    })
+                    .collect()
+            }
         },
         TranscriptEntry::ToolGroup {
             id,
@@ -2040,17 +2069,53 @@ fn transcript_entry_lines(
             }
             output
         }
-        Line_::Thought { text, complete } => {
+        Line_::Thought {
+            id,
+            text,
+            complete,
+            expanded,
+        } => {
             let state = if *complete { "Thought" } else { "Thinking" };
-            let title = reasoning_summary_title(text);
-            vec![Line::from(Span::styled(
+            // Reasoning summaries lead with their headline (bold/heading);
+            // raw streamed thinking is most useful tail-first — show the
+            // line currently being written. Completed thoughts show their
+            // lead either way.
+            let summary_style = {
+                let trimmed = text.trim_start();
+                trimmed.starts_with("**") || trimmed.starts_with('#')
+            };
+            let title = if *complete || summary_style {
+                reasoning_summary_title(text)
+            } else {
+                text.lines()
+                    .rev()
+                    .map(str::trim)
+                    .find(|line| !line.is_empty())
+                    .map(|line| line.to_string())
+                    .unwrap_or_else(|| reasoning_summary_title(text))
+            };
+            let disclosure = match (id.is_empty(), expanded) {
+                (true, _) => "+",
+                (false, true) => "▾",
+                (false, false) => "▸",
+            };
+            let mut output = vec![Line::from(Span::styled(
                 truncate_display(
-                    &format!("+ {state}: {title}"),
+                    &format!("{disclosure} {state}: {title}"),
                     width as usize,
                     Truncation::Right,
                 ),
                 Style::default().fg(theme::REASONING),
-            ))]
+            ))];
+            if *expanded {
+                for line in safe_lines(text) {
+                    output.push(Line::from(vec![
+                        Span::styled("  │ ", Style::default().fg(theme::REASONING)),
+                        Span::styled(line, Style::default().fg(MUTED)),
+                    ]));
+                }
+            }
+            output
         }
         Line_::User(text) => safe_lines(text)
             .into_iter()
@@ -2121,6 +2186,23 @@ fn transcript_entry_lines(
                 ])
             })
             .collect(),
+    }
+}
+
+/// Live thinking is kept as a bounded tail: enough to inspect what the
+/// model is doing without letting 100KB+ reasoning bloat the transcript.
+const MAX_THOUGHT_CHARS: usize = 64 * 1024;
+
+fn append_thought_tail(text: &mut String, delta: &str) {
+    text.push_str(delta);
+    if text.len() > MAX_THOUGHT_CHARS {
+        let cut = text.len() - MAX_THOUGHT_CHARS;
+        let cut = text
+            .char_indices()
+            .map(|(index, _)| index)
+            .find(|index| *index >= cut)
+            .unwrap_or(0);
+        *text = format!("…{}", &text[cut..]);
     }
 }
 
@@ -2250,6 +2332,7 @@ struct App {
     transcript_dragged: bool,
     clipboard: Option<arboard::Clipboard>,
     next_tool_group: u64,
+    next_thought: u64,
     expanded_tool_groups: std::collections::HashSet<String>,
     transcript_revision: u64,
     pending_subagent_activity: std::collections::VecDeque<ilar::subagent::SubagentActivity>,
@@ -2307,6 +2390,7 @@ impl App {
             transcript_dragged: false,
             clipboard: None,
             next_tool_group: 0,
+            next_thought: 0,
             expanded_tool_groups: std::collections::HashSet::new(),
             transcript_revision: 0,
             pending_subagent_activity: std::collections::VecDeque::new(),
@@ -2358,6 +2442,27 @@ impl App {
         self.session_usage = restored.total_usage;
         self.session_cost = restored.total_cost;
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
+    }
+
+    fn allocate_thought_id(&mut self) -> String {
+        self.next_thought = self.next_thought.wrapping_add(1);
+        format!("thought:{}", self.next_thought)
+    }
+
+    /// Mark any open thought complete (its phase ended: content or tools
+    /// started arriving).
+    fn close_open_thought(&mut self) {
+        if let Some(Line_::Thought { complete, .. }) = self.lines.iter_mut().rev().find(|line| {
+            matches!(
+                line,
+                Line_::Thought {
+                    complete: false,
+                    ..
+                }
+            )
+        }) {
+            *complete = true;
+        }
     }
 
     fn note_stream_data(&mut self, bytes: usize) {
@@ -2412,6 +2517,7 @@ impl App {
             }
             LoopEvent::TextDelta(t) => {
                 self.note_stream_data(t.len());
+                self.close_open_thought();
                 self.status = "responding".into();
                 self.set_activity(Activity::Responding);
                 match self.lines.last_mut() {
@@ -2421,6 +2527,24 @@ impl App {
             }
             LoopEvent::ThinkingDelta(delta) => {
                 self.note_stream_data(delta.len());
+                // Raw thinking accumulates into an expandable Thought line
+                // (bounded to a tail) so the user can watch it live.
+                match self.lines.last_mut() {
+                    Some(Line_::Thought {
+                        text,
+                        complete: false,
+                        ..
+                    }) => append_thought_tail(text, delta),
+                    _ => {
+                        let id = self.allocate_thought_id();
+                        self.lines.push(Line_::Thought {
+                            id,
+                            text: delta.clone(),
+                            complete: false,
+                            expanded: false,
+                        });
+                    }
+                }
                 self.status = "thinking".into();
                 self.set_activity(Activity::Thinking);
             }
@@ -2432,11 +2556,17 @@ impl App {
                     Some(Line_::Thought {
                         text,
                         complete: false,
-                    }) => text.push_str(summary),
-                    _ => self.lines.push(Line_::Thought {
-                        text: summary.clone(),
-                        complete: false,
-                    }),
+                        ..
+                    }) => append_thought_tail(text, summary),
+                    _ => {
+                        let id = self.allocate_thought_id();
+                        self.lines.push(Line_::Thought {
+                            id,
+                            text: summary.clone(),
+                            complete: false,
+                            expanded: false,
+                        });
+                    }
                 }
             }
             LoopEvent::ReasoningSummaryCompleted => {
@@ -2448,6 +2578,7 @@ impl App {
                 }
             }
             LoopEvent::ToolStarted { id, name } => {
+                self.close_open_thought();
                 self.lines.push(Line_::Tool {
                     id: id.clone(),
                     group_id: format!("live:{}", self.next_tool_group),
@@ -2914,6 +3045,13 @@ impl App {
             }
             TranscriptHitTarget::Tool(id) => {
                 toggle_tool_expansion(&mut self.lines, &id);
+            }
+            TranscriptHitTarget::Thought(id) => {
+                if let Some(Line_::Thought { expanded, .. }) = self.lines.iter_mut().find(
+                    |line| matches!(line, Line_::Thought { id: line_id, .. } if *line_id == id),
+                ) {
+                    *expanded = !*expanded;
+                }
             }
         }
         self.transcript_cache.entries.clear();
@@ -7110,7 +7248,7 @@ mod tests {
         assert!(matches!(&view.lines[1], Line_::Assistant(text) if text == "restored answer"));
         assert!(matches!(
             &view.lines[2],
-            Line_::Thought { text, complete: true }
+            Line_::Thought { text, complete: true, .. }
                 if text.contains("Reviewing restored state")
         ));
         assert!(matches!(
@@ -7842,8 +7980,10 @@ mod tests {
 
         let thought = transcript_entry_lines(
             &Line_::Thought {
+                id: String::new(),
                 text: "Inspecting state".into(),
                 complete: true,
+                expanded: false,
             },
             80,
             now,
@@ -8996,8 +9136,10 @@ mod tests {
         app.lines = vec![
             Line_::User("Question".into()),
             Line_::Thought {
+                id: String::new(),
                 text: "Answering".into(),
                 complete: true,
+                expanded: false,
             },
             Line_::Assistant("Response".into()),
         ];
@@ -9768,6 +9910,100 @@ mod tests {
         app.finish_turn(Ok(TurnOutcome::Completed));
         let complete = app.transcript_lines(80, std::time::Instant::now());
         assert!(!rendered_text(complete.last().unwrap()).contains("responding"));
+    }
+
+    #[test]
+    fn raw_thinking_accumulates_and_expands_on_click() {
+        let mut app = App::new();
+        app.lines.clear();
+        app.push_loop_event(&LoopEvent::TurnStarted);
+        app.push_loop_event(&LoopEvent::ThinkingDelta(
+            "First I will check the parser.\nNow comparing".into(),
+        ));
+        app.push_loop_event(&LoopEvent::ThinkingDelta(" the two branches.".into()));
+
+        // Collapsed: tail-first title shows what it is doing right now.
+        let live = app.transcript_lines(100, std::time::Instant::now());
+        let rendered: Vec<String> = live.iter().map(rendered_text).collect();
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("▸ Thinking: Now comparing the two branches.")),
+            "{rendered:?}"
+        );
+        assert!(
+            !rendered
+                .iter()
+                .any(|line| line.contains("check the parser"))
+        );
+
+        // Click expands to the full (bounded) thinking text. Targets are
+        // computed during render, so draw once first.
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let target = app
+            .transcript_hit_targets
+            .iter()
+            .flatten()
+            .find(|target| matches!(target, TranscriptHitTarget::Thought(_)))
+            .cloned();
+        let Some(target) = target else {
+            panic!(
+                "thought row must be clickable: {:?}",
+                app.transcript_hit_targets
+            )
+        };
+        app.toggle_transcript_target(target.clone());
+        let expanded = app.transcript_lines(100, std::time::Instant::now());
+        let rendered: Vec<String> = expanded.iter().map(rendered_text).collect();
+        assert!(
+            rendered.iter().any(|line| line.contains("▾ Thinking:")),
+            "{rendered:?}"
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("First I will check the parser.")),
+            "{rendered:?}"
+        );
+        app.toggle_transcript_target(target);
+        let collapsed = app.transcript_lines(100, std::time::Instant::now());
+        assert!(
+            !collapsed
+                .iter()
+                .map(rendered_text)
+                .any(|line| line.contains("check the parser")),
+        );
+
+        // Text starting: the thought completes and stays in the transcript.
+        app.push_loop_event(&LoopEvent::TextDelta("The answer".into()));
+        assert!(
+            app.lines
+                .iter()
+                .any(|line| matches!(line, Line_::Thought { complete: true, .. }))
+        );
+        app.push_loop_event(&LoopEvent::TurnDone {
+            outcome: TurnOutcome::Completed,
+        });
+        assert!(
+            app.lines
+                .iter()
+                .any(|line| matches!(line, Line_::Thought { complete: true, .. }))
+        );
+    }
+
+    #[test]
+    fn thought_tails_are_bounded() {
+        let mut text = String::new();
+        append_thought_tail(&mut text, &"x".repeat(MAX_THOUGHT_CHARS + 500));
+        assert!(text.len() <= MAX_THOUGHT_CHARS + '…'.len_utf8());
+        assert!(text.starts_with('…'));
+        // Multi-byte boundary safety.
+        let mut unicode = String::new();
+        append_thought_tail(&mut unicode, &"é".repeat(MAX_THOUGHT_CHARS));
+        assert!(unicode.starts_with('…'));
+        assert!(unicode.ends_with('é'));
     }
 
     #[test]
