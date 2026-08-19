@@ -742,3 +742,23 @@ Caveats: session switching drops background-job tracking (spawner is
 shut down like on quit); mcp-via-cli verified against upstream docs only
 (sandbox blocked installing the CLI); the AppExit::Switch path has no
 automated test — smoke-test manually.
+
+## 2026-08-19 — glm-5.3 decode failures: post-mortem debuggability
+
+Investigated a glm-5.3 (zai, openai flavor) session whose turns died
+with stop_reason "error" after ~80-120KB of thinking. Root cause was
+undeterminable from the session: ilar showed the decode error only as a
+transient TUI notice, and error turns without completed tool calls
+persisted no error text. A minimal repro against the coding-plan
+endpoint decoded fine (id+name+arguments arrive in one tool_call chunk);
+the failure needs the real long-thinking + giant-write shape, which
+exceeds interactive repro time.
+
+Added the missing observability instead of guessing: decode errors now
+carry a bounded, secret-scrubbed snippet of the offending SSE event
+(single choke point in transport.rs covers all providers/flavors), and
+every errored turn persists the message as a provider-invisible
+Diagnostic block in the session JSONL. Next occurrence will name the
+exact wire event. Suspects to check when it does: the 1 MiB tool
+argument cap vs. giant single-file write calls, unknown finish_reason
+values, and post-finish usage chunks.
