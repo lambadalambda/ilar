@@ -2340,6 +2340,9 @@ struct App {
     /// last completed window's bytes/sec.
     stream_rate_anchor: Option<(std::time::Instant, u64)>,
     stream_rate: Option<f64>,
+    /// Last submitted prompt, offered for one-key retry after a turn error.
+    last_prompt: Option<String>,
+    retry_available: bool,
     scroll_top: usize,
     content_rows: usize,
     viewport_rows: usize,
@@ -2402,6 +2405,8 @@ impl App {
             stream_last_data: None,
             stream_rate_anchor: None,
             stream_rate: None,
+            last_prompt: None,
+            retry_available: false,
             scroll_top: 0,
             content_rows: 0,
             viewport_rows: 0,
@@ -2956,9 +2961,13 @@ impl App {
                     *state = ToolState::Failed;
                 }
             }
-            let message = format!("error: {error:#}");
+            let mut message = format!("error: {error:#}");
+            self.lines.push(Line_::System(message.clone()));
+            if self.last_prompt.is_some() {
+                self.retry_available = true;
+                message.push_str(" — press r to retry");
+            }
             self.set_notice(&message, NoticeLevel::Error);
-            self.lines.push(Line_::System(message));
             self.status = "error".into();
             self.set_activity(Activity::Error);
         }
@@ -7070,6 +7079,24 @@ async fn run_app(
                     }
                     (KeyCode::Up, _) if !app.input.is_multiline() => app.scroll_up(1),
                     (KeyCode::Down, _) if !app.input.is_multiline() => app.scroll_down(1),
+                    (KeyCode::Char('r'), false)
+                        if app.retry_available
+                            && !app.busy
+                            && turn_handle.is_none()
+                            && app.input.is_blank() =>
+                    {
+                        if let Some(prompt) = app.last_prompt.clone() {
+                            app.retry_available = false;
+                            app.clear_notice();
+                            app.input = InputBuffer::from(prompt);
+                            // Reuse the ordinary submit path via a
+                            // synthetic Enter on the next loop pass.
+                            pending_terminal_event = Some(Event::Key(KeyEvent::new(
+                                KeyCode::Enter,
+                                KeyModifiers::NONE,
+                            )));
+                        }
+                    }
                     (KeyCode::Char('/'), false)
                         if app.input.is_blank()
                             && !app.skills.is_empty()
@@ -7085,6 +7112,8 @@ async fn run_app(
                         {
                             let mut text = app.input.take();
                             app.history.push(&text);
+                            app.last_prompt = Some(text.clone());
+                            app.retry_available = false;
                             if let Some((name, args)) = parse_slash_invocation(&text) {
                                 if app.skills.iter().any(|(skill, _)| skill == name) {
                                     text = skill_invocation_prompt(name, args);
@@ -7922,6 +7951,25 @@ mod tests {
             .as_deref(),
             Some("0 B · no data 7s")
         );
+    }
+
+    #[test]
+    fn turn_errors_offer_retry_only_with_a_known_prompt() {
+        let mut app = App::new();
+        app.finish_turn(Err(anyhow::anyhow!("api down")));
+        assert!(!app.retry_available, "no prompt, nothing to retry");
+
+        let mut app = App::new();
+        app.last_prompt = Some("do the thing".into());
+        app.finish_turn(Err(anyhow::anyhow!("api down")));
+        assert!(app.retry_available);
+        let (notice, _) = app.operational_notice().expect("error notice");
+        assert!(notice.contains("press r to retry"), "{notice}");
+
+        // A fresh successful turn clears nothing prematurely.
+        app.retry_available = false;
+        app.finish_turn(Ok(TurnOutcome::Completed));
+        assert!(!app.retry_available);
     }
 
     #[test]
