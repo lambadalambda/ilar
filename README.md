@@ -189,8 +189,10 @@ same filename. Root sessions list their names and descriptions in the system
 prompt and load full bodies on demand through the `skill` tool. Skill
 frontmatter supports `description` and `triggers` (a list of cue phrases
 included in the system-prompt listing so the model invokes the skill when they
-match the task). In the TUI, type `/` on an empty input to pick a skill, or
-`/<skill-name> [arguments]` to invoke one directly.
+match the task). In the TUI, typing `/` shows inline completion for
+skills and built-in commands (Tab or Enter accepts); `/<skill-name>
+[arguments]` invokes a skill directly, and the palette's "Invoke skill…"
+entry opens a picker.
 
 Built-in subagents are `build` (mutable, serialized per checkout) and `explore`
 (read-only, safe for parallel repository inspection and review).

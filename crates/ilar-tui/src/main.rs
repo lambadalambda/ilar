@@ -2458,6 +2458,8 @@ struct App {
     /// Active goal: (description, completed rounds). Turns auto-continue
     /// until the model emits GOAL_ACHIEVED or the round cap trips.
     goal: Option<(String, u32)>,
+    /// Selection inside the inline slash-completion popup.
+    slash_selected: usize,
     /// Palette-requested compaction, applied to the next turn's config.
     compact_requested: bool,
     search_active: bool,
@@ -2534,6 +2536,7 @@ impl App {
             retry_available: false,
             queued_messages: Vec::new(),
             goal: None,
+            slash_selected: 0,
             compact_requested: false,
             search_active: false,
             search_query: String::new(),
@@ -3994,6 +3997,58 @@ impl App {
             .block(input_block);
         frame.render_widget(input, chunks[2]);
 
+        // Inline slash-completion popup anchored above the input.
+        let candidates = slash_candidates(self.input.text(), &self.skills);
+        if !candidates.is_empty() && !self.has_modal() {
+            let rows = candidates.len().min(6) as u16;
+            let height = rows + 2;
+            let width = chunks[2].width.clamp(20, 64);
+            let popup = Rect::new(
+                chunks[2].x,
+                chunks[2].y.saturating_sub(height),
+                width,
+                height.min(chunks[2].y),
+            );
+            if popup.height > 2 {
+                frame.render_widget(Clear, popup);
+                let block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(theme::focus_border())
+                    .title(Line::styled(" commands ", theme::title(theme::MARKUP)))
+                    .title_bottom(
+                        Line::styled(" ↑↓ · Tab/↵ complete ", Style::default().fg(theme::MUTED))
+                            .right_aligned(),
+                    );
+                let inner = block.inner(popup);
+                frame.render_widget(block, popup);
+                let selected = self.slash_selected.min(candidates.len() - 1);
+                let lines: Vec<Line<'static>> = candidates
+                    .iter()
+                    .enumerate()
+                    .skip(selected.saturating_sub(inner.height as usize - 1))
+                    .take(inner.height as usize)
+                    .map(|(index, (name, description))| {
+                        let marker = if index == selected { "> " } else { "  " };
+                        let text = truncate_display(
+                            &format!("{marker}/{name} — {description}"),
+                            inner.width as usize,
+                            Truncation::Right,
+                        );
+                        let style = if index == selected {
+                            theme::selected()
+                        } else {
+                            Style::default().fg(theme::PRIMARY)
+                        };
+                        Line::styled(
+                            format!("{text:<width$}", width = inner.width as usize),
+                            style,
+                        )
+                    })
+                    .collect();
+                frame.render_widget(Paragraph::new(lines), inner);
+            }
+        }
+
         let transcript_cells = transcript_cells(frame.buffer_mut(), transcript_text_area);
         if self.transcript_selection.is_some_and(|selection| {
             self.transcript_text_area != transcript_text_area
@@ -4917,7 +4972,7 @@ static HELP_SECTIONS: &[HelpSection] = &[
     HelpSection {
         title: "Skills",
         bindings: &[
-            binding!("/", "skill picker (blank input)"),
+            binding!("/", "autocomplete commands and skills"),
             binding!("/<name> [args]", "invoke a skill directly"),
         ],
     },
@@ -5018,6 +5073,33 @@ fn render_help(frame: &mut Frame, scroll: usize) {
     frame.render_widget(Paragraph::new(visible), inner);
 }
 
+/// Inline completion candidates for a slash input: built-in commands
+/// plus skills, fuzzy-ranked. Empty once the name is finished (whitespace)
+/// or the input is not a slash command.
+fn slash_candidates(input: &str, skills: &[(String, String)]) -> Vec<(String, String)> {
+    let Some(token) = input.strip_prefix('/') else {
+        return Vec::new();
+    };
+    if token.contains(char::is_whitespace) {
+        return Vec::new();
+    }
+    let mut candidates: Vec<(String, String)> = vec![(
+        "goal".to_string(),
+        "work until the goal is achieved (evidence-based)".to_string(),
+    )];
+    candidates.extend(skills.iter().cloned());
+    let mut scored: Vec<(i64, (String, String))> = candidates
+        .into_iter()
+        .filter_map(|(name, description)| {
+            fuzzy_score(token, &name).map(|score| (score, (name, description)))
+        })
+        .collect();
+    scored.sort_by(|(score_a, (name_a, _)), (score_b, (name_b, _))| {
+        score_b.cmp(score_a).then_with(|| name_a.cmp(name_b))
+    });
+    scored.into_iter().map(|(_, candidate)| candidate).collect()
+}
+
 /// Rounds after which goal mode gives up (a budget, unlike the
 /// runaway-loop iteration guard).
 const MAX_GOAL_ROUNDS: u32 = 25;
@@ -5091,14 +5173,11 @@ fn close_skill_matches(skills: &[(String, String)], name: &str) -> Vec<String> {
 struct SkillPicker {
     skills: Vec<(String, String)>,
     selected: usize,
-    /// Opened by typing `/`; Esc then restores that character.
-    from_slash: bool,
 }
 
 impl SkillPicker {
     fn new(skills: Vec<(String, String)>) -> Self {
         Self {
-            from_slash: false,
             skills,
             selected: 0,
         }
@@ -7360,14 +7439,7 @@ async fn run_app(
                     match picker.handle_key(code, control) {
                         PickerAction::Stay => {}
                         PickerAction::Dismiss => {
-                            let from_slash = app
-                                .skill_picker
-                                .take()
-                                .is_some_and(|picker| picker.from_slash);
-                            if from_slash {
-                                // The user typed `/` to get here; give it back.
-                                app.input.insert("/");
-                            }
+                            app.skill_picker = None;
                         }
                         PickerAction::Choose(name) => {
                             app.skill_picker = None;
@@ -7735,14 +7807,32 @@ async fn run_app(
                             )));
                         }
                     }
-                    (KeyCode::Char('/'), false)
-                        if app.input.is_blank()
-                            && !app.skills.is_empty()
-                            && !key.modifiers.contains(KeyModifiers::ALT) =>
+                    // Inline slash completion: navigate/accept while the
+                    // command name is being typed.
+                    (KeyCode::Up | KeyCode::Down | KeyCode::Tab | KeyCode::Enter, false)
+                        if !slash_candidates(app.input.text(), &app.skills).is_empty()
+                            && !key.modifiers.contains(KeyModifiers::SHIFT) =>
                     {
-                        let mut picker = SkillPicker::new(app.skills.clone());
-                        picker.from_slash = true;
-                        app.skill_picker = Some(picker);
+                        let candidates = slash_candidates(app.input.text(), &app.skills);
+                        app.slash_selected = app.slash_selected.min(candidates.len() - 1);
+                        match code {
+                            KeyCode::Up => {
+                                app.slash_selected =
+                                    (app.slash_selected + candidates.len() - 1) % candidates.len();
+                            }
+                            KeyCode::Down => {
+                                app.slash_selected = (app.slash_selected + 1) % candidates.len();
+                            }
+                            // Tab and Enter both accept the selection; the
+                            // completed input ("/name ") hides the popup, so
+                            // a second Enter submits as usual.
+                            KeyCode::Tab | KeyCode::Enter => {
+                                let (name, _) = &candidates[app.slash_selected];
+                                app.input = InputBuffer::from(format!("/{name} "));
+                                app.slash_selected = 0;
+                            }
+                            _ => {}
+                        }
                     }
                     _ => match handle_prompt_key(&mut app.input, key) {
                         PromptAction::Submit
@@ -8712,6 +8802,44 @@ mod tests {
     }
 
     #[test]
+    fn slash_input_shows_inline_completion_including_goal() {
+        let skills = vec![
+            ("deploy".to_string(), "Deploy things".to_string()),
+            ("greptile".to_string(), "Review comments".to_string()),
+        ];
+        // All candidates on bare slash, fuzzy-filtered as the name grows.
+        let all = slash_candidates("/", &skills);
+        assert_eq!(all.len(), 3);
+        assert!(all.iter().any(|(name, _)| name == "goal"));
+        let filtered = slash_candidates("/go", &skills);
+        assert_eq!(
+            filtered.first().map(|(name, _)| name.as_str()),
+            Some("goal")
+        );
+        // Finished name (whitespace) or non-slash input: no popup.
+        assert!(slash_candidates("/goal recover", &skills).is_empty());
+        assert!(slash_candidates("plain text", &skills).is_empty());
+        assert!(slash_candidates("/zzz", &skills).is_empty());
+
+        // The popup renders above the input.
+        let mut app = App::new();
+        app.skills = skills;
+        app.input = InputBuffer::from("/go");
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let screen = (0..24)
+            .map(|row| {
+                (0..80)
+                    .map(|column| terminal.backend().buffer()[(column, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("/goal — work until"), "{screen}");
+    }
+
+    #[test]
     fn goal_sentinel_detection_requires_line_start() {
         assert!(goal_achieved_in(
             "done!\nGOAL_ACHIEVED: 5/5 turns replay at 92%"
@@ -9400,7 +9528,6 @@ mod tests {
         );
         let picker = app.skill_picker.as_ref().expect("skill picker opens");
         assert_eq!(picker.skills.len(), 1);
-        assert!(!picker.from_slash, "palette-opened picker owes no slash");
         assert!(app.command_palette.is_none());
     }
 
