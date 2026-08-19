@@ -1,4 +1,5 @@
 //! TOML config loading with project > user > defaults precedence.
+//! TUI theme is a user preference and is not overridden per project.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -12,6 +13,7 @@ use super::AgentDefinition;
 #[serde(deny_unknown_fields)]
 pub struct GeneralConfig {
     pub model: Option<String>,
+    pub theme: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -114,6 +116,7 @@ pub struct Config {
 #[derive(Debug, Clone)]
 pub struct GeneralConfigResolved {
     pub model: String,
+    pub theme: String,
 }
 
 #[derive(Debug, Clone)]
@@ -232,10 +235,18 @@ impl Config {
         state_dir: PathBuf,
         env: &Loader,
     ) -> anyhow::Result<Self> {
-        // User file first, then project file layered on top.
+        // User file first, then project files layered on top. Theme stays user-scoped
+        // so an in-app selection has the same effective value after restart.
         let mut merged = FileConfig::default();
+        let user_path = user_dir.join("ilar.toml");
+        if let Some(text) = read_config_file(&user_path)? {
+            merged = merge_file(merged, &text, &user_path)?;
+        }
+        let user_theme = merged
+            .general
+            .as_ref()
+            .and_then(|general| general.theme.clone());
         for path in [
-            user_dir.join("ilar.toml"),
             project_dir.join("ilar.toml"),
             project_dir.join(".ilar/ilar.toml"),
         ] {
@@ -294,8 +305,10 @@ impl Config {
             general: GeneralConfigResolved {
                 model: merged
                     .general
-                    .and_then(|g| g.model)
+                    .as_ref()
+                    .and_then(|general| general.model.clone())
                     .unwrap_or_else(|| "zai/glm-4.7".into()),
+                theme: user_theme.unwrap_or_else(|| "terminal".into()),
             },
             providers,
             compaction: CompactionConfig {
@@ -448,6 +461,7 @@ impl Config {
         Self {
             general: GeneralConfigResolved {
                 model: "zai/glm-4.7".into(),
+                theme: "terminal".into(),
             },
             providers,
             compaction: CompactionConfig::default(),
@@ -518,6 +532,9 @@ fn merge_file(base: FileConfig, text: &str, origin: &Path) -> anyhow::Result<Fil
         if g.model.is_some() {
             current.model = g.model;
         }
+        if g.theme.is_some() {
+            current.theme = g.theme;
+        }
     }
     if let Some(p) = parsed.providers {
         let map = merged.providers.get_or_insert_with(HashMap::new);
@@ -558,6 +575,99 @@ fn merge_file(base: FileConfig, text: &str, origin: &Path) -> anyhow::Result<Fil
         }
     }
     Ok(merged)
+}
+
+/// Result of publishing a selected TUI theme to user configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ThemePersistOutcome {
+    Saved,
+    DurabilityUncertain(String),
+}
+
+/// Persist a user-selected TUI theme while preserving unrelated config text.
+pub fn persist_general_theme(path: &Path, theme: &str) -> anyhow::Result<ThemePersistOutcome> {
+    anyhow::ensure!(
+        !theme.is_empty()
+            && theme
+                .chars()
+                .all(|character| character.is_ascii_lowercase() || character == '-'),
+        "invalid theme id {theme:?}"
+    );
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("config path has no parent: {}", path.display()))?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("creating config directory {}", parent.display()))?;
+
+    for _ in 0..3 {
+        let source = read_config_file(path)?.unwrap_or_default();
+        if !source.is_empty() {
+            merge_file(FileConfig::default(), &source, path)?;
+        }
+        let updated = set_general_theme(&source, theme)?;
+        let parsed = merge_file(FileConfig::default(), &updated, path)?;
+        anyhow::ensure!(
+            parsed.general.and_then(|general| general.theme).as_deref() == Some(theme),
+            "theme update did not produce the requested value"
+        );
+
+        if read_config_file(path)?.unwrap_or_default() != source {
+            continue;
+        }
+        match crate::atomic_file::replace(
+            path,
+            updated.as_bytes(),
+            crate::atomic_file::Mode::Preserve,
+        ) {
+            Ok(()) => return Ok(ThemePersistOutcome::Saved),
+            Err(error) if persisted_general_theme(path).as_deref() == Some(theme) => {
+                return Ok(ThemePersistOutcome::DurabilityUncertain(error.to_string()));
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("persisting theme in {}", path.display()));
+            }
+        }
+    }
+
+    anyhow::bail!("config changed repeatedly while saving theme")
+}
+
+fn persisted_general_theme(path: &Path) -> Option<String> {
+    read_config_file(path)
+        .ok()
+        .flatten()
+        .and_then(|text| toml::from_str::<FileConfig>(&text).ok())
+        .and_then(|config| config.general)
+        .and_then(|general| general.theme)
+}
+
+fn set_general_theme(source: &str, theme: &str) -> anyhow::Result<String> {
+    use toml_edit::{DocumentMut, Item, Table, Value, value};
+
+    let mut document = if source.is_empty() {
+        DocumentMut::new()
+    } else {
+        source
+            .parse::<DocumentMut>()
+            .context("parsing editable config")?
+    };
+    let general = document
+        .entry("general")
+        .or_insert_with(|| Item::Table(Table::new()));
+    match general {
+        Item::Table(table) => table["theme"] = value(theme),
+        Item::Value(Value::InlineTable(table)) => {
+            table.insert("theme", Value::from(theme));
+        }
+        _ => anyhow::bail!("general config must be a table"),
+    }
+    let updated = document.to_string();
+    if source.contains("\r\n") && !source.replace("\r\n", "").contains('\n') {
+        Ok(updated.replace("\r\n", "\n").replace('\n', "\r\n"))
+    } else {
+        Ok(updated)
+    }
 }
 
 fn validate_file(config: &FileConfig, origin: &Path) -> anyhow::Result<()> {

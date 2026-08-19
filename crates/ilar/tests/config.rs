@@ -1,7 +1,8 @@
 use std::fs;
 
 use ilar::config::{
-    AgentWorkspaceMode, CompactionConfig, Config, Loader, SubagentConfig, system_prompt_for,
+    AgentWorkspaceMode, CompactionConfig, Config, Loader, SubagentConfig, ThemePersistOutcome,
+    persist_general_theme, system_prompt_for,
 };
 use ilar::provider::ProviderResolver;
 
@@ -26,6 +27,7 @@ fn defaults_when_no_config_exists() {
         .resolve()
         .unwrap();
     assert_eq!(config.general.model, "zai/glm-4.7");
+    assert_eq!(config.general.theme, "terminal");
     assert_eq!(config.providers.len(), 2); // openai + zai defaults
     assert!(config.providers.contains_key("zai"));
     assert_eq!(
@@ -37,6 +39,82 @@ fn defaults_when_no_config_exists() {
     assert_eq!(config.subagents.max_concurrent, 10);
     assert_eq!(config.subagents.max_depth, 3);
     assert_eq!(config.subagents.background_tool_timeout_ms, 600_000);
+}
+
+#[test]
+fn confirmed_theme_is_persisted_without_discarding_user_config() {
+    let (_guard, dir) = tempdir();
+    let path = dir.join("ilar.toml");
+    write(
+        &path,
+        "# keep this comment\n[general]\nmodel = \"openai/gpt-5.2\"\n\n[providers.openai]\nauth = \"chatgpt\"\n",
+    );
+
+    assert_eq!(
+        persist_general_theme(&path, "carbon").unwrap(),
+        ThemePersistOutcome::Saved
+    );
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(text.contains("# keep this comment"), "{text}");
+    assert!(text.contains("model = \"openai/gpt-5.2\""), "{text}");
+    assert!(text.contains("theme = \"carbon\""), "{text}");
+    assert!(text.contains("[providers.openai]"), "{text}");
+
+    persist_general_theme(&path, "frost").unwrap();
+    let text = fs::read_to_string(&path).unwrap();
+    assert_eq!(text.matches("theme =").count(), 1, "{text}");
+    assert!(text.contains("theme = \"frost\""), "{text}");
+
+    let config = Loader::no_env().config_dir(dir).resolve().unwrap();
+    assert_eq!(config.general.theme, "frost");
+}
+
+#[test]
+fn theme_persistence_edits_toml_without_matching_multiline_string_contents() {
+    let (_guard, dir) = tempdir();
+    let path = dir.join("ilar.toml");
+    let source = concat!(
+        "[providers.openai]\r\n",
+        "api_key = \"\"\"not-a-secret\r\n",
+        "[general]\r\n",
+        "theme = \\\"text-only\\\"\r\n",
+        "\"\"\"\r\n",
+        "\r\n",
+        "[general] # preserve this header\r\n",
+        "model = \"openai/gpt-5.2\"\r\n",
+    );
+    write(&path, source);
+
+    persist_general_theme(&path, "parchment").unwrap();
+
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(text.contains("theme = \\\"text-only\\\""), "{text}");
+    assert!(text.contains("[general] # preserve this header"), "{text}");
+    assert!(text.contains("theme = \"parchment\""), "{text}");
+    assert!(
+        !text.replace("\r\n", "").contains('\n'),
+        "line endings changed: {text:?}"
+    );
+}
+
+#[test]
+fn theme_is_a_user_preference_not_a_project_override() {
+    let (_user_guard, user) = tempdir();
+    write(&user.join("ilar.toml"), "[general]\ntheme = \"frost\"\n");
+    let (_project_guard, project) = tempdir();
+    write(
+        &project.join("ilar.toml"),
+        "[general]\nmodel = \"openai/gpt-5.2\"\ntheme = \"carbon\"\n",
+    );
+
+    let config = Loader::no_env()
+        .config_dir(user)
+        .project_dir(project)
+        .resolve()
+        .unwrap();
+
+    assert_eq!(config.general.model, "openai/gpt-5.2");
+    assert_eq!(config.general.theme, "frost");
 }
 
 #[test]

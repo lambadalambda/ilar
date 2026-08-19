@@ -1,6 +1,8 @@
 [general]
 # Default model: provider/model-id
 model = "zai/glm-4.7"
+# User-scoped TUI theme: terminal, carbon, parchment, frost, or high-contrast
+theme = "terminal"
 
 [providers.openai]
 # api_key from ILAR_OPENAI_API_KEY (env) by default; can be set here.

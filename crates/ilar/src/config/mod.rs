@@ -6,7 +6,10 @@ mod toml;
 
 pub use agents_md::system_prompt_for;
 pub(crate) use toml::markdown_files;
-pub use toml::{CompactionConfig, Config, Loader, ProviderConfig, SubagentConfig, load};
+pub use toml::{
+    CompactionConfig, Config, Loader, ProviderConfig, SubagentConfig, ThemePersistOutcome, load,
+    persist_general_theme,
+};
 
 pub(crate) fn split_frontmatter(text: &str) -> anyhow::Result<(String, String)> {
     let text = text.trim_start_matches('\u{feff}').replace("\r\n", "\n");

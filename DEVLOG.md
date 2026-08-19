@@ -659,3 +659,18 @@ usage parsing accepts both Responses `input_tokens_details.cached_tokens` and
 Chat Completions `prompt_tokens_details.cached_tokens` shapes. The TUI now labels
 cache reads and writes separately for the latest request rather than implying a
 cumulative session counter.
+
+## 2026-08-19 — Previewable TUI themes
+
+The TUI now offers Terminal Adaptive, Carbon, Parchment, Frost, and High
+Contrast themes through `F3`, `Ctrl-X T`, and the command palette. Picker
+navigation transforms the rendered buffer immediately, Escape restores the
+saved theme, and Enter confirms it without invalidating semantic transcript
+caches or threading palette state through every renderer.
+
+Themes are a user-scoped preference so project configuration cannot make a
+successful in-app save disappear after restart. Confirmation updates the user
+TOML with a syntax-aware, comment-preserving editor, retains CRLF line endings,
+retries concurrent changes, and publishes through the existing atomic-file
+path. Modal handling is centralized so queued notifications, paste, and mouse
+input cannot leak through the picker.

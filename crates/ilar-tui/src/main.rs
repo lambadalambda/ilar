@@ -1954,6 +1954,8 @@ struct App {
     command_palette: Option<CommandPalette>,
     model_picker: Option<ModelPicker>,
     variant_picker: Option<VariantPicker>,
+    theme: theme::ThemeId,
+    theme_picker: Option<ThemePicker>,
     model_key_pending: bool,
     transcript_text_area: Rect,
     transcript_cache: TranscriptRenderCache,
@@ -1998,6 +2000,8 @@ impl App {
             command_palette: None,
             model_picker: None,
             variant_picker: None,
+            theme: theme::ThemeId::Terminal,
+            theme_picker: None,
             model_key_pending: false,
             transcript_text_area: Rect::default(),
             transcript_cache: TranscriptRenderCache::default(),
@@ -2016,11 +2020,18 @@ impl App {
     }
 
     fn open_command_palette(&mut self) {
-        if !self.busy && self.model_picker.is_none() && self.variant_picker.is_none() {
+        if !self.busy && !self.has_modal() {
             self.model_key_pending = false;
             self.clear_transient_notice();
             self.command_palette = Some(CommandPalette::new());
         }
+    }
+
+    fn has_modal(&self) -> bool {
+        self.command_palette.is_some()
+            || self.model_picker.is_some()
+            || self.variant_picker.is_some()
+            || self.theme_picker.is_some()
     }
 
     fn configure_runtime(
@@ -3059,10 +3070,7 @@ impl App {
 
         frame.render_widget(Paragraph::new(self.status_line(chunks[1].width)), chunks[1]);
 
-        let input_focused = !self.busy
-            && self.command_palette.is_none()
-            && self.model_picker.is_none()
-            && self.variant_picker.is_none();
+        let input_focused = !self.busy && !self.has_modal();
         let input_block = Block::default()
             .borders(Borders::ALL)
             .border_type(if input_focused {
@@ -3132,13 +3140,7 @@ impl App {
             );
         }
 
-        if !self.busy
-            && self.command_palette.is_none()
-            && self.model_picker.is_none()
-            && self.variant_picker.is_none()
-            && input_area.width > 0
-            && input_area.height > 0
-        {
+        if !self.busy && !self.has_modal() && input_area.width > 0 && input_area.height > 0 {
             frame.set_cursor_position((
                 input_area.x.saturating_add(input_view.cursor_x),
                 input_area.y.saturating_add(input_view.cursor_y),
@@ -3149,9 +3151,12 @@ impl App {
             render_model_picker(frame, picker);
         } else if let Some(picker) = &self.variant_picker {
             render_variant_picker(frame, picker);
+        } else if let Some(picker) = &self.theme_picker {
+            render_theme_picker(frame, picker);
         } else if let Some(palette) = &self.command_palette {
             render_command_palette(frame, palette);
         }
+        theme::apply(frame.buffer_mut(), self.theme);
     }
 }
 
@@ -3764,8 +3769,9 @@ fn text_field_view_at(value: &str, cursor: usize, width: u16) -> (String, u16) {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PaletteCommand {
-    SwitchModel,
-    SwitchReasoning,
+    Model,
+    Reasoning,
+    Theme,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -3779,18 +3785,25 @@ struct PaletteCommandDefinition {
 
 static PALETTE_COMMANDS: &[PaletteCommandDefinition] = &[
     PaletteCommandDefinition {
-        id: PaletteCommand::SwitchModel,
+        id: PaletteCommand::Model,
         section: "General",
         label: "Switch model",
         shortcut: "F2",
         search_terms: "model provider",
     },
     PaletteCommandDefinition {
-        id: PaletteCommand::SwitchReasoning,
+        id: PaletteCommand::Reasoning,
         section: "General",
         label: "Switch reasoning",
         shortcut: "",
         search_terms: "variant thinking effort level",
+    },
+    PaletteCommandDefinition {
+        id: PaletteCommand::Theme,
+        section: "General",
+        label: "Switch theme",
+        shortcut: "F3",
+        search_terms: "theme appearance colors palette",
     },
 ];
 
@@ -4098,6 +4111,102 @@ impl VariantPicker {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThemePickerAction {
+    Preview(theme::ThemeId),
+    Dismiss,
+    Choose(theme::ThemeId),
+}
+
+struct ThemePicker {
+    active_theme: theme::ThemeId,
+    selected: usize,
+    error: Option<String>,
+}
+
+impl ThemePicker {
+    fn new(active_theme: theme::ThemeId) -> Self {
+        let selected = theme::ThemeId::ALL
+            .iter()
+            .position(|candidate| *candidate == active_theme)
+            .unwrap_or_default();
+        Self {
+            active_theme,
+            selected,
+            error: None,
+        }
+    }
+
+    fn selected_theme(&self) -> theme::ThemeId {
+        theme::ThemeId::ALL[self.selected.min(theme::ThemeId::ALL.len() - 1)]
+    }
+
+    fn select(&mut self, selected: usize) -> ThemePickerAction {
+        self.selected = selected.min(theme::ThemeId::ALL.len() - 1);
+        self.error = None;
+        ThemePickerAction::Preview(self.selected_theme())
+    }
+
+    fn move_selection(&mut self, delta: isize) -> ThemePickerAction {
+        let count = theme::ThemeId::ALL.len() as isize;
+        self.selected = (self.selected as isize + delta).rem_euclid(count) as usize;
+        self.error = None;
+        ThemePickerAction::Preview(self.selected_theme())
+    }
+
+    fn handle_key(&mut self, code: KeyCode, control: bool) -> ThemePickerAction {
+        match (code, control) {
+            (KeyCode::Esc, _) => ThemePickerAction::Dismiss,
+            (KeyCode::Enter, _) => ThemePickerAction::Choose(self.selected_theme()),
+            (KeyCode::Up, _) | (KeyCode::Char('p'), true) => self.move_selection(-1),
+            (KeyCode::Down, _) | (KeyCode::Char('n'), true) => self.move_selection(1),
+            (KeyCode::Home, _) => self.select(0),
+            (KeyCode::End, _) => self.select(theme::ThemeId::ALL.len() - 1),
+            _ => ThemePickerAction::Preview(self.selected_theme()),
+        }
+    }
+}
+
+fn apply_theme_picker_action(
+    app: &mut App,
+    action: ThemePickerAction,
+    persist: impl FnOnce(theme::ThemeId) -> Result<ilar::config::ThemePersistOutcome>,
+) {
+    match action {
+        ThemePickerAction::Preview(preview) => app.theme = preview,
+        ThemePickerAction::Dismiss => {
+            if let Some(picker) = app.theme_picker.take() {
+                app.theme = picker.active_theme;
+            }
+            app.status = "ready".into();
+            app.clear_transient_notice();
+        }
+        ThemePickerAction::Choose(selected) => match persist(selected) {
+            Ok(outcome) => {
+                app.theme = selected;
+                app.theme_picker = None;
+                app.status = format!("theme: {}", selected.label());
+                match outcome {
+                    ilar::config::ThemePersistOutcome::Saved => app.set_notice(
+                        format!("theme saved: {}", selected.label()),
+                        NoticeLevel::Info,
+                    ),
+                    ilar::config::ThemePersistOutcome::DurabilityUncertain(error) => app
+                        .set_notice(
+                            format!("theme updated, but durability is uncertain: {error}"),
+                            NoticeLevel::Warning,
+                        ),
+                }
+            }
+            Err(error) => {
+                if let Some(picker) = app.theme_picker.as_mut() {
+                    picker.error = Some(format!("cannot save theme: {error}"));
+                }
+            }
+        },
+    }
+}
+
 fn activate_palette_command(
     app: &mut App,
     command: PaletteCommand,
@@ -4105,11 +4214,11 @@ fn activate_palette_command(
 ) {
     app.command_palette = None;
     match command {
-        PaletteCommand::SwitchModel if !model_choices.is_empty() => {
+        PaletteCommand::Model if !model_choices.is_empty() => {
             app.model_picker = Some(ModelPicker::new(model_choices, &app.current_model));
         }
-        PaletteCommand::SwitchModel => {}
-        PaletteCommand::SwitchReasoning => {
+        PaletteCommand::Model => {}
+        PaletteCommand::Reasoning => {
             if let Some(model) = ilar::model::find(&app.current_model)
                 && !model.variants().is_empty()
             {
@@ -4122,6 +4231,9 @@ fn activate_palette_command(
                     NoticeLevel::Warning,
                 );
             }
+        }
+        PaletteCommand::Theme => {
+            app.theme_picker = Some(ThemePicker::new(app.theme));
         }
     }
 }
@@ -4139,7 +4251,7 @@ fn centered_rect(area: Rect, max_width: u16, max_height: u16) -> Rect {
 }
 
 fn render_command_palette(frame: &mut Frame, palette: &CommandPalette) {
-    let area = centered_rect(frame.area(), 72, 7);
+    let area = centered_rect(frame.area(), 72, 8);
     frame.render_widget(Clear, area);
 
     let footer = if area.width < 44 {
@@ -4321,6 +4433,105 @@ fn render_variant_picker(frame: &mut Frame, picker: &VariantPicker) {
             Style::default()
         };
         lines.push(Line::styled(text, style));
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn render_theme_picker(frame: &mut Frame, picker: &ThemePicker) {
+    let area = centered_rect(frame.area(), 58, 12);
+    frame.render_widget(Clear, area);
+
+    let footer = if area.width < 32 {
+        " ↵ save · Esc undo "
+    } else if area.width < 48 {
+        " Enter save · Esc undo "
+    } else {
+        " ↑↓ preview · Enter save · Esc undo · saved "
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .border_style(theme::focus_border())
+        .title(Line::styled(" themes ", theme::title(theme::MARKUP)))
+        .title_bottom(Line::styled(footer, Style::default().fg(theme::MUTED)).right_aligned());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let selected = picker.selected.min(theme::ThemeId::ALL.len() - 1);
+    let mut lines = Vec::new();
+    if let Some(error) = &picker.error {
+        lines.push(Line::styled(
+            truncate_display(error, inner.width as usize, Truncation::Right),
+            Style::default().fg(ERROR),
+        ));
+    } else {
+        lines.push(Line::styled(
+            truncate_display(
+                theme::ThemeId::ALL[selected].description(),
+                inner.width as usize,
+                Truncation::Right,
+            ),
+            Style::default().fg(MUTED),
+        ));
+    }
+
+    let show_sample = inner.height as usize > theme::ThemeId::ALL.len() + 1;
+    let row_count = inner
+        .height
+        .saturating_sub(lines.len() as u16)
+        .saturating_sub(u16::from(show_sample)) as usize;
+    let start = selected
+        .saturating_add(1)
+        .saturating_sub(row_count)
+        .min(theme::ThemeId::ALL.len().saturating_sub(row_count));
+    for (index, choice) in theme::ThemeId::ALL
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(row_count)
+    {
+        let active = *choice == picker.active_theme;
+        let marker = if index == selected { "> " } else { "  " };
+        let suffix = if active {
+            "  saved".to_string()
+        } else if inner.width >= 34 {
+            format!("  {}", choice.id())
+        } else {
+            String::new()
+        };
+        let label_width = (inner.width as usize)
+            .saturating_sub(UnicodeWidthStr::width(marker))
+            .saturating_sub(UnicodeWidthStr::width(suffix.as_str()))
+            .saturating_sub(1);
+        let text = format!(
+            "{marker} {}{suffix}",
+            truncate_display(choice.label(), label_width, Truncation::Right)
+        );
+        let text = truncate_display(&text, inner.width as usize, Truncation::Right);
+        let text = format!("{text:<width$}", width = inner.width as usize);
+        lines.push(Line::styled(
+            text,
+            if index == selected {
+                theme::selected()
+            } else if active {
+                Style::default().fg(theme::SUCCESS)
+            } else {
+                Style::default()
+            },
+        ));
+    }
+    if show_sample {
+        lines.push(Line::from(vec![
+            Span::styled("you ", theme::title(theme::USER)),
+            Span::styled("ilar ", theme::title(theme::ASSISTANT)),
+            Span::styled("thought ", Style::default().fg(theme::REASONING)),
+            Span::styled("tool ", Style::default().fg(theme::RUNNING)),
+            Span::styled("✓ ", Style::default().fg(theme::SUCCESS)),
+            Span::styled("×", Style::default().fg(theme::ERROR)),
+        ]));
     }
     frame.render_widget(Paragraph::new(lines), inner);
 }
@@ -4873,7 +5084,6 @@ fn restored_todos(resumed: Option<&ilar::session::SessionReader>) -> ilar::todo:
 async fn main() -> Result<()> {
     let args = Args::parse();
     let config = Loader::new().resolve().context("loading config")?;
-
     if let Some(Command::Login) = args.command {
         let store = ilar::auth::AuthStore::open(config.state_dir().to_path_buf());
         let tokens = ilar::auth::login_flow(&store, std::time::Duration::from_secs(300), true)
@@ -4889,6 +5099,18 @@ async fn main() -> Result<()> {
         println!("Tokens stored at {}", store.tokens_path().display());
         return Ok(());
     }
+
+    let configured_theme = theme::ThemeId::parse(&config.general.theme).with_context(|| {
+        format!(
+            "unknown theme {:?}; expected one of: {}",
+            config.general.theme,
+            theme::ThemeId::ALL
+                .iter()
+                .map(|theme| theme.id())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })?;
 
     let store = SessionStore::new(config.state_dir().join("sessions"));
     let resumed = args
@@ -5007,11 +5229,13 @@ async fn main() -> Result<()> {
     let subagent_activity = spawner.subscribe_activity();
     let tool_ctx = ToolContext::root(cwd.clone()).with_subagents(spawner.clone());
     let model_choices = config.available_models();
+    let user_config_path = config.dirs().0.join("ilar.toml");
 
     let (context_used, context_estimated) =
         session_context_tokens(&store, &session_id, &system_prompt, &registry)?;
     let context_limit = resolver.context_limit(&model_for_session);
     let mut app = App::new();
+    app.theme = configured_theme;
     app.session_id = session_id.clone();
     app.todos = todos;
     if let Some(resumed) = &resumed {
@@ -5032,6 +5256,7 @@ async fn main() -> Result<()> {
     run_app(
         &mut terminal,
         &mut app,
+        &user_config_path,
         resolver,
         &store,
         &session_id,
@@ -5171,6 +5396,7 @@ fn is_command_palette_shortcut(event: &Event) -> bool {
 async fn run_app(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
+    user_config_path: &std::path::Path,
     resolver: Arc<dyn ProviderResolver>,
     store: &SessionStore,
     session_id: &str,
@@ -5281,9 +5507,7 @@ async fn run_app(
         }
 
         // Let a buffered Ctrl-P open the palette before starting queued work.
-        let mut modal_open = app.command_palette.is_some()
-            || app.model_picker.is_some()
-            || app.variant_picker.is_some();
+        let mut modal_open = app.has_modal();
         if turn_handle.is_none()
             && !notifications_paused
             && !modal_open
@@ -5299,7 +5523,7 @@ async fn run_app(
             pending_terminal_event = None;
             app.model_key_pending = false;
             app.open_command_palette();
-            modal_open = app.command_palette.is_some();
+            modal_open = app.has_modal();
         }
         // Background completions re-invoke their declared parent while idle.
         if let Some(notification) = next_notification(
@@ -5395,6 +5619,16 @@ async fn run_app(
                     }
                     spawner.shutdown().await;
                     return Ok(());
+                }
+                if app.theme_picker.is_some() {
+                    let action = {
+                        let picker = app.theme_picker.as_mut().unwrap();
+                        picker.handle_key(code, control)
+                    };
+                    apply_theme_picker_action(app, action, |selected| {
+                        ilar::config::persist_general_theme(user_config_path, selected.id())
+                    });
+                    continue;
                 }
                 if let Some(picker) = app.model_picker.as_mut() {
                     match picker.handle_key(code, control) {
@@ -5509,13 +5743,18 @@ async fn run_app(
                             Some(ModelPicker::new(model_choices.clone(), &app.current_model));
                         continue;
                     }
+                    if matches!(code, KeyCode::Char('t' | 'T')) && !app.busy {
+                        app.clear_transient_notice();
+                        app.theme_picker = Some(ThemePicker::new(app.theme));
+                        continue;
+                    }
                     app.status = "ready".into();
                     app.clear_transient_notice();
                 }
                 if matches!((code, control), (KeyCode::Char('x'), true)) && !app.busy {
                     app.model_key_pending = true;
-                    app.status = "Ctrl-X: press M for models".into();
-                    app.set_notice("Ctrl-X: press M for models", NoticeLevel::Info);
+                    app.status = "Ctrl-X: M models · T themes".into();
+                    app.set_notice("Ctrl-X: M models · T themes", NoticeLevel::Info);
                     continue;
                 }
                 match (code, control) {
@@ -5525,6 +5764,10 @@ async fn run_app(
                         app.clear_transient_notice();
                         app.model_picker =
                             Some(ModelPicker::new(model_choices.clone(), &app.current_model));
+                    }
+                    (KeyCode::F(3), false) if !app.busy => {
+                        app.clear_transient_notice();
+                        app.theme_picker = Some(ThemePicker::new(app.theme));
                     }
                     (KeyCode::Esc, _) => {
                         let background = spawner.running_background();
@@ -5614,54 +5857,48 @@ async fn run_app(
             Event::Paste(text) if app.command_palette.is_some() => {
                 app.command_palette.as_mut().unwrap().insert_query(&text);
             }
-            Event::Paste(text) if app.model_picker.is_none() && app.variant_picker.is_none() => {
+            Event::Paste(text) if !app.has_modal() => {
                 app.model_key_pending = false;
                 app.clear_transient_notice();
                 app.input.insert(&text);
             }
-            Event::Mouse(mouse)
-                if app.command_palette.is_none()
-                    && app.model_picker.is_none()
-                    && app.variant_picker.is_none() =>
-            {
-                match mouse.kind {
-                    kind @ (MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) => {
-                        let initial_rows = if kind == MouseEventKind::ScrollUp {
-                            -3
-                        } else {
-                            3
-                        };
-                        let batch =
-                            drain_wheel_batch(initial_rows, MAX_WHEEL_EVENTS_PER_BATCH, || {
-                                if crossterm::event::poll(std::time::Duration::ZERO)? {
-                                    Ok(Some(crossterm::event::read()?))
-                                } else {
-                                    Ok(None)
-                                }
-                            })?;
-                        pending_terminal_event = batch.deferred;
-                        app.scroll_wheel(batch.rows);
-                    }
-                    MouseEventKind::Down(MouseButton::Left) => {
-                        app.begin_transcript_selection(mouse.column, mouse.row);
-                    }
-                    MouseEventKind::Drag(MouseButton::Left) => {
-                        app.drag_transcript_selection(mouse.column, mouse.row);
-                    }
-                    MouseEventKind::Up(MouseButton::Left) => {
-                        if let Some(text) = app.finish_transcript_selection(mouse.column, mouse.row)
-                            && let Err(error) = app.copy_to_clipboard(&text)
-                        {
-                            let message = format!("clipboard copy failed: {error:#}");
-                            app.set_notice(&message, NoticeLevel::Error);
-                            app.push_transcript_line(Line_::System(message));
-                            app.follow_tail = true;
-                            app.set_activity(Activity::Error);
-                        }
-                    }
-                    _ => {}
+            Event::Mouse(mouse) if !app.has_modal() => match mouse.kind {
+                kind @ (MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) => {
+                    let initial_rows = if kind == MouseEventKind::ScrollUp {
+                        -3
+                    } else {
+                        3
+                    };
+                    let batch =
+                        drain_wheel_batch(initial_rows, MAX_WHEEL_EVENTS_PER_BATCH, || {
+                            if crossterm::event::poll(std::time::Duration::ZERO)? {
+                                Ok(Some(crossterm::event::read()?))
+                            } else {
+                                Ok(None)
+                            }
+                        })?;
+                    pending_terminal_event = batch.deferred;
+                    app.scroll_wheel(batch.rows);
                 }
-            }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    app.begin_transcript_selection(mouse.column, mouse.row);
+                }
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    app.drag_transcript_selection(mouse.column, mouse.row);
+                }
+                MouseEventKind::Up(MouseButton::Left) => {
+                    if let Some(text) = app.finish_transcript_selection(mouse.column, mouse.row)
+                        && let Err(error) = app.copy_to_clipboard(&text)
+                    {
+                        let message = format!("clipboard copy failed: {error:#}");
+                        app.set_notice(&message, NoticeLevel::Error);
+                        app.push_transcript_line(Line_::System(message));
+                        app.follow_tail = true;
+                        app.set_activity(Activity::Error);
+                    }
+                }
+                _ => {}
+            },
             _ => {}
         }
     }
@@ -6545,10 +6782,10 @@ mod tests {
     fn command_palette_searches_and_selects_defined_commands() {
         let mut palette = CommandPalette::new();
 
-        assert_eq!(palette.filtered_commands().len(), 2);
+        assert_eq!(palette.filtered_commands().len(), 3);
         assert_eq!(
             palette.handle_key(KeyCode::Enter, false),
-            CommandPaletteAction::Choose(PaletteCommand::SwitchModel)
+            CommandPaletteAction::Choose(PaletteCommand::Model)
         );
 
         palette.handle_key(KeyCode::Char('s'), false);
@@ -6569,6 +6806,14 @@ mod tests {
         assert_eq!(palette.query, "model 🚀");
         palette.handle_key(KeyCode::Backspace, false);
         assert_eq!(palette.query, "model ");
+
+        let mut palette = CommandPalette::new();
+        palette.insert_query("theme");
+        assert_eq!(palette.filtered_commands().len(), 1);
+        assert_eq!(
+            palette.handle_key(KeyCode::Enter, false),
+            CommandPaletteAction::Choose(PaletteCommand::Theme)
+        );
     }
 
     #[test]
@@ -6601,7 +6846,7 @@ mod tests {
 
         activate_palette_command(
             &mut app,
-            PaletteCommand::SwitchModel,
+            PaletteCommand::Model,
             ilar::model::catalog().iter().collect(),
         );
         assert!(app.command_palette.is_none());
@@ -6614,11 +6859,125 @@ mod tests {
         app.command_palette = Some(CommandPalette::new());
         activate_palette_command(
             &mut app,
-            PaletteCommand::SwitchReasoning,
+            PaletteCommand::Reasoning,
             ilar::model::catalog().iter().collect(),
         );
         assert!(app.command_palette.is_none());
         assert!(app.variant_picker.is_some());
+
+        app.variant_picker = None;
+        app.command_palette = Some(CommandPalette::new());
+        activate_palette_command(
+            &mut app,
+            PaletteCommand::Theme,
+            ilar::model::catalog().iter().collect(),
+        );
+        assert!(app.command_palette.is_none());
+        assert!(app.theme_picker.is_some());
+    }
+
+    #[test]
+    fn theme_picker_previews_navigation_and_distinguishes_commit_from_cancel() {
+        let mut picker = ThemePicker::new(theme::ThemeId::Terminal);
+
+        assert_eq!(picker.selected_theme(), theme::ThemeId::Terminal);
+        assert_eq!(
+            picker.handle_key(KeyCode::Down, false),
+            ThemePickerAction::Preview(theme::ThemeId::Carbon)
+        );
+        assert_eq!(picker.active_theme, theme::ThemeId::Terminal);
+        assert_eq!(
+            picker.handle_key(KeyCode::Esc, false),
+            ThemePickerAction::Dismiss
+        );
+
+        assert_eq!(
+            picker.handle_key(KeyCode::End, false),
+            ThemePickerAction::Preview(theme::ThemeId::HighContrast)
+        );
+        assert_eq!(
+            picker.handle_key(KeyCode::Enter, false),
+            ThemePickerAction::Choose(theme::ThemeId::HighContrast)
+        );
+
+        let mut app = App::new();
+        app.theme_picker = Some(ThemePicker::new(theme::ThemeId::Terminal));
+        apply_theme_picker_action(
+            &mut app,
+            ThemePickerAction::Preview(theme::ThemeId::Carbon),
+            |_| unreachable!(),
+        );
+        assert_eq!(app.theme, theme::ThemeId::Carbon);
+        apply_theme_picker_action(&mut app, ThemePickerAction::Dismiss, |_| unreachable!());
+        assert_eq!(app.theme, theme::ThemeId::Terminal);
+        assert!(app.theme_picker.is_none());
+
+        app.theme_picker = Some(ThemePicker::new(theme::ThemeId::Terminal));
+        app.theme = theme::ThemeId::Frost;
+        let mut persisted = None;
+        apply_theme_picker_action(
+            &mut app,
+            ThemePickerAction::Choose(theme::ThemeId::Frost),
+            |theme| {
+                persisted = Some(theme);
+                Ok(ilar::config::ThemePersistOutcome::Saved)
+            },
+        );
+        assert_eq!(persisted, Some(theme::ThemeId::Frost));
+        assert_eq!(app.theme, theme::ThemeId::Frost);
+        assert!(app.theme_picker.is_none());
+
+        app.theme_picker = Some(ThemePicker::new(theme::ThemeId::Frost));
+        apply_theme_picker_action(
+            &mut app,
+            ThemePickerAction::Choose(theme::ThemeId::Parchment),
+            |_| {
+                Ok(ilar::config::ThemePersistOutcome::DurabilityUncertain(
+                    "directory sync failed".into(),
+                ))
+            },
+        );
+        assert_eq!(app.theme, theme::ThemeId::Parchment);
+        assert!(app.theme_picker.is_none());
+        let notice = app.notice.as_ref().unwrap();
+        assert_eq!(notice.level, NoticeLevel::Warning);
+        assert!(notice.text.contains("durability is uncertain"));
+    }
+
+    #[test]
+    fn theme_picker_blocks_events_for_the_underlying_interface() {
+        let mut app = App::new();
+        assert!(!app.has_modal());
+
+        app.theme_picker = Some(ThemePicker::new(theme::ThemeId::Terminal));
+
+        assert!(app.has_modal());
+    }
+
+    #[test]
+    fn theme_picker_renders_a_full_preview_on_narrow_terminals() {
+        let backend = ratatui::backend::TestBackend::new(28, 10);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.theme = theme::ThemeId::Carbon;
+        app.theme_picker = Some(ThemePicker::new(theme::ThemeId::Terminal));
+
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(0, 0)].bg, theme::canvas(theme::ThemeId::Carbon));
+        let screen = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("themes"), "{screen}");
+        assert!(screen.contains("Carbon"), "{screen}");
+        assert!(screen.contains("save"), "{screen}");
+        assert!(screen.contains("undo"), "{screen}");
     }
 
     #[test]
