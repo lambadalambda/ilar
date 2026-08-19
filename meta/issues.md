@@ -20,4 +20,3 @@
 
 ## Milestone 5 — Flow
 
-- [ ] [Live bash output tail](issues/bash-live-tail.md)

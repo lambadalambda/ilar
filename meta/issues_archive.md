@@ -115,3 +115,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Message queueing during turns](issues/message-queueing.md)
 - [x] [Manual compaction + summary visibility](issues/manual-compaction.md)
 - [x] [Transcript search](issues/transcript-search.md)
+- [x] [Live bash output tail](issues/bash-live-tail.md)
