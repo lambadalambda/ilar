@@ -26,6 +26,189 @@ pub struct ModelVariant {
     pub name: &'static str,
 }
 
+/// USD per million tokens, from the models.dev snapshot above.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ModelPricing {
+    pub input: f64,
+    pub output: f64,
+    /// Absent when the provider offers no cache-read rate; such tokens
+    /// are billed at the input rate.
+    pub cache_read: Option<f64>,
+    /// Absent when cache writes are not billed separately.
+    pub cache_write: Option<f64>,
+}
+
+impl ModelPricing {
+    /// Estimated dollars for a usage total.
+    pub fn cost(&self, usage: &crate::session::Usage) -> f64 {
+        let per_token = |rate: f64| rate / 1_000_000.0;
+        per_token(self.input) * usage.input_tokens as f64
+            + per_token(self.output) * usage.output_tokens as f64
+            + per_token(self.cache_read.unwrap_or(self.input))
+                * usage.cache_read_input_tokens as f64
+            + per_token(self.cache_write.unwrap_or(self.input))
+                * usage.cache_creation_input_tokens as f64
+    }
+}
+
+macro_rules! pricing {
+    ($input:expr, $output:expr, $read:expr, $write:expr) => {
+        ModelPricing {
+            input: $input,
+            output: $output,
+            cache_read: $read,
+            cache_write: $write,
+        }
+    };
+}
+
+/// API list prices keyed by (provider, model id). Coding-plan-only models
+/// (subscription-billed: glm-5.2-highspeed, glm-5.3) are intentionally
+/// absent — their effective token price depends on the plan, so the UI
+/// shows tokens without dollars.
+static PRICING: &[(&str, &str, ModelPricing)] = &[
+    ("openai", "gpt-4.1", pricing!(2.0, 8.0, Some(0.5), None)),
+    (
+        "openai",
+        "gpt-4.1-mini",
+        pricing!(0.4, 1.6, Some(0.1), None),
+    ),
+    ("openai", "gpt-4o", pricing!(2.5, 10.0, Some(1.25), None)),
+    (
+        "openai",
+        "gpt-4o-2024-08-06",
+        pricing!(2.5, 10.0, Some(1.25), None),
+    ),
+    (
+        "openai",
+        "gpt-4o-2024-11-20",
+        pricing!(2.5, 10.0, Some(1.25), None),
+    ),
+    (
+        "openai",
+        "gpt-4o-mini",
+        pricing!(0.15, 0.6, Some(0.075), None),
+    ),
+    ("openai", "gpt-5", pricing!(1.25, 10.0, Some(0.125), None)),
+    (
+        "openai",
+        "gpt-5-mini",
+        pricing!(0.25, 2.0, Some(0.025), None),
+    ),
+    (
+        "openai",
+        "gpt-5-nano",
+        pricing!(0.05, 0.4, Some(0.005), None),
+    ),
+    ("openai", "gpt-5-pro", pricing!(15.0, 120.0, None, None)),
+    ("openai", "gpt-5.1", pricing!(1.25, 10.0, Some(0.125), None)),
+    ("openai", "gpt-5.2", pricing!(1.75, 14.0, Some(0.175), None)),
+    (
+        "openai",
+        "gpt-5.2-chat-latest",
+        pricing!(1.75, 14.0, Some(0.175), None),
+    ),
+    ("openai", "gpt-5.2-pro", pricing!(21.0, 168.0, None, None)),
+    (
+        "openai",
+        "gpt-5.3-chat-latest",
+        pricing!(1.75, 14.0, Some(0.175), None),
+    ),
+    (
+        "openai",
+        "gpt-5.3-codex",
+        pricing!(1.75, 14.0, Some(0.175), None),
+    ),
+    (
+        "openai",
+        "gpt-5.3-codex-spark",
+        pricing!(1.75, 14.0, Some(0.175), None),
+    ),
+    ("openai", "gpt-5.4", pricing!(2.5, 15.0, Some(0.25), None)),
+    (
+        "openai",
+        "gpt-5.4-mini",
+        pricing!(0.75, 4.5, Some(0.075), None),
+    ),
+    (
+        "openai",
+        "gpt-5.4-nano",
+        pricing!(0.2, 1.25, Some(0.02), None),
+    ),
+    ("openai", "gpt-5.4-pro", pricing!(30.0, 180.0, None, None)),
+    ("openai", "gpt-5.5", pricing!(5.0, 30.0, Some(0.5), None)),
+    ("openai", "gpt-5.5-pro", pricing!(30.0, 180.0, None, None)),
+    (
+        "openai",
+        "gpt-5.6",
+        pricing!(5.0, 30.0, Some(0.5), Some(6.25)),
+    ),
+    (
+        "openai",
+        "gpt-5.6-luna",
+        pricing!(0.2, 1.2, Some(0.02), Some(0.25)),
+    ),
+    (
+        "openai",
+        "gpt-5.6-sol",
+        pricing!(5.0, 30.0, Some(0.5), Some(6.25)),
+    ),
+    (
+        "openai",
+        "gpt-5.6-terra",
+        pricing!(2.0, 12.0, Some(0.2), Some(2.5)),
+    ),
+    ("openai", "o3", pricing!(2.0, 8.0, Some(0.5), None)),
+    ("openai", "o3-pro", pricing!(20.0, 80.0, None, None)),
+    ("zai", "glm-4.5", pricing!(0.6, 2.2, Some(0.11), Some(0.0))),
+    (
+        "zai",
+        "glm-4.5-air",
+        pricing!(0.2, 1.1, Some(0.03), Some(0.0)),
+    ),
+    (
+        "zai",
+        "glm-4.5-flash",
+        pricing!(0.0, 0.0, Some(0.0), Some(0.0)),
+    ),
+    ("zai", "glm-4.5v", pricing!(0.6, 1.8, None, None)),
+    ("zai", "glm-4.6", pricing!(0.6, 2.2, Some(0.11), Some(0.0))),
+    ("zai", "glm-4.6v", pricing!(0.3, 0.9, None, None)),
+    ("zai", "glm-4.7", pricing!(0.6, 2.2, Some(0.11), Some(0.0))),
+    (
+        "zai",
+        "glm-4.7-flash",
+        pricing!(0.0, 0.0, Some(0.0), Some(0.0)),
+    ),
+    (
+        "zai",
+        "glm-4.7-flashx",
+        pricing!(0.07, 0.4, Some(0.01), Some(0.0)),
+    ),
+    ("zai", "glm-5", pricing!(1.0, 3.2, Some(0.2), Some(0.0))),
+    (
+        "zai",
+        "glm-5-turbo",
+        pricing!(1.2, 4.0, Some(0.24), Some(0.0)),
+    ),
+    ("zai", "glm-5.1", pricing!(1.4, 4.4, Some(0.26), Some(0.0))),
+    ("zai", "glm-5.2", pricing!(1.4, 4.4, Some(0.26), Some(0.0))),
+    (
+        "zai",
+        "glm-5v-turbo",
+        pricing!(1.2, 4.0, Some(0.24), Some(0.0)),
+    ),
+];
+
+/// Pricing for a `provider/model-id` string, if known.
+pub fn pricing_for(full_id: &str) -> Option<ModelPricing> {
+    let (provider, id) = full_id.split_once('/')?;
+    PRICING
+        .iter()
+        .find(|(entry_provider, entry_id, _)| *entry_provider == provider && *entry_id == id)
+        .map(|(_, _, pricing)| *pricing)
+}
+
 const NO_VARIANTS: &[ModelVariant] = &[];
 const OPENAI_WIDE_VARIANTS: &[ModelVariant] = &[
     ModelVariant {
@@ -534,6 +717,48 @@ pub fn variant_options(full_id: &str, variant: Option<&str>) -> anyhow::Result<s
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pricing_lookup_and_cost_arithmetic() {
+        let pricing = pricing_for("zai/glm-4.7").unwrap();
+        assert_eq!(pricing.input, 0.6);
+        let usage = crate::session::Usage {
+            input_tokens: 1_000_000,
+            output_tokens: 500_000,
+            cache_read_input_tokens: 2_000_000,
+            cache_creation_input_tokens: 0,
+            input_token_accounting: None,
+        };
+        let cost = pricing.cost(&usage);
+        // 1M * 0.6 + 0.5M * 2.2 + 2M * 0.11 = 0.6 + 1.1 + 0.22
+        assert!((cost - 1.92).abs() < 1e-9, "{cost}");
+
+        // Providers without a cache-read rate bill reads at the input rate.
+        let pro = pricing_for("openai/gpt-5-pro").unwrap();
+        let cached = crate::session::Usage {
+            cache_read_input_tokens: 1_000_000,
+            ..Default::default()
+        };
+        assert!((pro.cost(&cached) - 15.0).abs() < 1e-9);
+
+        assert!(pricing_for("openai/unknown-model").is_none());
+        assert!(pricing_for("no-slash").is_none());
+        // Coding-plan-only models intentionally have no API pricing.
+        assert!(pricing_for("zai/glm-5.3").is_none());
+    }
+
+    #[test]
+    fn every_catalog_model_with_api_access_has_pricing_or_is_plan_only() {
+        for model in CATALOG {
+            let priced = pricing_for(&model.full_id()).is_some();
+            let plan_only = matches!(model.access, ModelAccess::ZaiCodingPlan);
+            assert!(
+                priced || plan_only,
+                "{} lacks pricing and is not coding-plan-only",
+                model.full_id()
+            );
+        }
+    }
 
     #[test]
     fn openai_reasoning_variants_are_model_specific() {
