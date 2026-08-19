@@ -2124,11 +2124,27 @@ fn transcript_entry_lines(
     }
 }
 
+/// "12.3 KiB" while data flows, "12.3 KiB · no data Ns" once the stream
+/// has been silent past the stall threshold. `None` before any turn.
+fn stream_liveness(
+    received: u64,
+    last_data: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> Option<String> {
+    let since = now.saturating_duration_since(last_data?);
+    Some(if since >= STREAM_STALL_AFTER {
+        format!("{} · no data {}s", format_bytes(received), since.as_secs())
+    } else {
+        format_bytes(received)
+    })
+}
+
 fn activity_line(
     busy: bool,
     activity: Activity,
     now: std::time::Instant,
     activity_started: std::time::Instant,
+    liveness: Option<&str>,
 ) -> Option<Line<'static>> {
     if !busy
         || !matches!(
@@ -2165,6 +2181,14 @@ fn activity_line(
             )
         }
         _ => unreachable!(),
+    };
+    let label = match liveness {
+        // Tool rows carry their own progress; liveness belongs to the
+        // provider-stream states only.
+        Some(liveness) if !matches!(activity, Activity::Tools) => {
+            format!("{label} · {liveness}")
+        }
+        _ => label.to_string(),
     };
     Some(Line::from(vec![
         Span::styled(
@@ -2930,8 +2954,13 @@ impl App {
                 .map(|row| row.line),
             );
         }
-        if let Some(activity) = activity_line(self.busy, self.activity, now, self.activity_started)
-        {
+        if let Some(activity) = activity_line(
+            self.busy,
+            self.activity,
+            now,
+            self.activity_started,
+            stream_liveness(self.stream_received, self.stream_last_data, now).as_deref(),
+        ) {
             if !output.is_empty() {
                 output.push(Line::default());
             }
@@ -3038,19 +3067,14 @@ impl App {
         };
         // Stream liveness: the spinner animates on wall-clock time, so
         // only arriving bytes prove the provider is not hanging.
-        let state = match (self.activity, self.stream_last_data) {
-            (Activity::Thinking | Activity::Responding, Some(last)) if width >= 48 => {
-                let since = last.elapsed();
-                if since >= STREAM_STALL_AFTER {
-                    format!(
-                        "{state} · {} · no data {}s",
-                        format_bytes(self.stream_received),
-                        since.as_secs()
-                    )
-                } else {
-                    format!("{state} · {}", format_bytes(self.stream_received))
-                }
-            }
+        let state = match self.activity {
+            Activity::Thinking | Activity::Responding if width >= 48 => stream_liveness(
+                self.stream_received,
+                self.stream_last_data,
+                std::time::Instant::now(),
+            )
+            .map(|liveness| format!("{state} · {liveness}"))
+            .unwrap_or_else(|| state.to_string()),
             _ => state.to_string(),
         };
         let state = state.as_str();
@@ -3306,10 +3330,16 @@ impl App {
             now,
             self.activity_started,
         );
-        let mut activity_rows = activity_line(self.busy, self.activity, now, self.activity_started)
-            .into_iter()
-            .flat_map(|line| wrap_styled_line(line, text_width as usize))
-            .collect::<Vec<_>>();
+        let mut activity_rows = activity_line(
+            self.busy,
+            self.activity,
+            now,
+            self.activity_started,
+            stream_liveness(self.stream_received, self.stream_last_data, now).as_deref(),
+        )
+        .into_iter()
+        .flat_map(|line| wrap_styled_line(line, text_width as usize))
+        .collect::<Vec<_>>();
         if !activity_rows.is_empty() && self.transcript_cache.row_count() > 0 {
             activity_rows.insert(0, Line::default());
         }
@@ -5063,8 +5093,27 @@ fn centered_rect(area: Rect, max_width: u16, max_height: u16) -> Rect {
     )
 }
 
+/// Visible window into the command list: `(start, rows)`. When the list
+/// doesn't fit, two rows are reserved for the ↑/↓ overflow markers and
+/// the window tracks the selection.
+fn palette_window(total: usize, available: usize, selected: usize) -> (usize, usize) {
+    if total <= available {
+        return (0, total);
+    }
+    let rows = available.saturating_sub(2).max(1);
+    let start = selected
+        .saturating_add(1)
+        .saturating_sub(rows)
+        .min(total.saturating_sub(rows));
+    (start, rows)
+}
+
 fn render_command_palette(frame: &mut Frame, palette: &CommandPalette) {
-    let area = centered_rect(frame.area(), 72, 8);
+    // Size to the full command list (query + blank + section + rows +
+    // borders); centered_rect caps it on short terminals, where explicit
+    // overflow markers take over.
+    let desired_height = (PALETTE_COMMANDS.len() as u16).saturating_add(5);
+    let area = centered_rect(frame.area(), 72, desired_height);
     frame.render_widget(Clear, area);
 
     let footer = if area.width < 44 {
@@ -5122,12 +5171,15 @@ fn render_command_palette(frame: &mut Frame, palette: &CommandPalette) {
                     .add_modifier(Modifier::BOLD),
             ));
         }
-        let row_count = inner.height.saturating_sub(lines.len() as u16) as usize;
+        let available = inner.height.saturating_sub(lines.len() as u16) as usize;
         let selected = palette.selected.min(commands.len().saturating_sub(1));
-        let start = selected
-            .saturating_add(1)
-            .saturating_sub(row_count)
-            .min(commands.len().saturating_sub(row_count));
+        let (start, row_count) = palette_window(commands.len(), available, selected);
+        if start > 0 {
+            lines.push(Line::styled(
+                format!("  ↑ {start} more"),
+                Style::default().fg(MUTED),
+            ));
+        }
         for (index, command) in commands.iter().enumerate().skip(start).take(row_count) {
             let marker = if index == selected { "> " } else { "  " };
             let shortcut =
@@ -5159,6 +5211,13 @@ fn render_command_palette(frame: &mut Frame, palette: &CommandPalette) {
                 Style::default()
             };
             lines.push(Line::styled(text, style));
+        }
+        let below = commands.len().saturating_sub(start + row_count);
+        if below > 0 {
+            lines.push(Line::styled(
+                format!("  ↓ {below} more"),
+                Style::default().fg(MUTED),
+            ));
         }
     }
 
@@ -7557,6 +7616,81 @@ mod tests {
         assert_eq!(format_cost(0.004375), "$0.004");
         assert_eq!(format_cost(0.42), "$0.420");
         assert_eq!(format_cost(1.234), "$1.23");
+    }
+
+    #[test]
+    fn palette_window_fits_or_reserves_marker_rows() {
+        // Everything fits: no window.
+        assert_eq!(palette_window(6, 10, 0), (0, 6));
+        assert_eq!(palette_window(6, 6, 5), (0, 6));
+        // Clipped: two rows reserved for markers, window tracks selection.
+        assert_eq!(palette_window(6, 5, 0), (0, 3));
+        assert_eq!(palette_window(6, 5, 5), (3, 3));
+        assert_eq!(palette_window(6, 1, 3), (3, 1));
+    }
+
+    #[test]
+    fn command_palette_sizes_to_show_every_command() {
+        let mut app = App::new();
+        app.command_palette = Some(CommandPalette::new());
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let screen = (0..24)
+            .map(|row| {
+                (0..80)
+                    .map(|column| terminal.backend().buffer()[(column, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        for definition in PALETTE_COMMANDS {
+            assert!(
+                screen.contains(definition.label),
+                "missing {:?}:\n{screen}",
+                definition.label
+            );
+        }
+        assert!(
+            !screen.contains("more"),
+            "nothing should be clipped:\n{screen}"
+        );
+    }
+
+    #[test]
+    fn activity_line_carries_stream_liveness() {
+        let now = std::time::Instant::now();
+        let started = now - std::time::Duration::from_secs(1);
+        let fresh = activity_line(true, Activity::Thinking, now, started, Some("2.0 KiB"))
+            .expect("busy thinking renders");
+        let fresh = rendered_text(&fresh);
+        assert!(fresh.contains("thinking… · 2.0 KiB"), "{fresh}");
+
+        let stalled = activity_line(
+            true,
+            Activity::Thinking,
+            now,
+            started,
+            Some("2.0 KiB · no data 7s"),
+        )
+        .expect("busy thinking renders");
+        assert!(rendered_text(&stalled).contains("no data 7s"));
+
+        // Tool activity keeps its own label; liveness is not appended.
+        let tools = activity_line(true, Activity::Tools, now, started, Some("2.0 KiB"))
+            .expect("busy tools renders");
+        assert!(!rendered_text(&tools).contains("KiB"));
+
+        // The helper itself: fresh vs stalled vs absent.
+        assert_eq!(stream_liveness(2048, None, now), None);
+        assert_eq!(
+            stream_liveness(2048, Some(now), now).as_deref(),
+            Some("2.0 KiB")
+        );
+        assert_eq!(
+            stream_liveness(0, Some(now - std::time::Duration::from_secs(7)), now).as_deref(),
+            Some("0 B · no data 7s")
+        );
     }
 
     #[test]
