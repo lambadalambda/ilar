@@ -52,6 +52,7 @@ pub enum LoopEvent {
     /// The transcript was compacted before this turn's provider call.
     Compacted {
         context_tokens: u64,
+        summary: String,
     },
     TurnDone {
         outcome: crate::agent::TurnOutcome,

@@ -19,6 +19,8 @@ can continue immediately.";
 pub struct CompactionOptions<'a> {
     pub context_limit: u64,
     pub threshold: f64,
+    /// Compact regardless of the threshold (user-requested).
+    pub force: bool,
     pub system_prompt: Option<&'a str>,
     pub tools: &'a [ToolDefinition],
     pub cancel: &'a CancellationToken,
@@ -140,9 +142,9 @@ pub async fn compact_if_needed(
     store: &SessionStore,
     session_id: &str,
     options: CompactionOptions<'_>,
-) -> Result<bool> {
+) -> Result<Option<String>> {
     if options.cancel.is_cancelled() {
-        return Ok(false);
+        return Ok(None);
     }
     let mut session = store.acquire_writer(session_id)?.load()?;
     let model = session.effective_model();
@@ -150,19 +152,21 @@ pub async fn compact_if_needed(
     compact_if_needed_locked(provider.as_provider(), &model, &mut session, options).await
 }
 
+/// Returns the compaction summary when one was performed.
 pub(crate) async fn compact_if_needed_locked(
     provider: &dyn Provider,
     model: &str,
     session: &mut Session,
     options: CompactionOptions<'_>,
-) -> Result<bool> {
+) -> Result<Option<String>> {
     if options.cancel.is_cancelled() {
-        return Ok(false);
+        return Ok(None);
     }
-    if estimate_tokens_with_request(session, options.system_prompt, options.tools)
-        <= (options.context_limit as f64 * options.threshold) as u64
+    if !options.force
+        && estimate_tokens_with_request(session, options.system_prompt, options.tools)
+            <= (options.context_limit as f64 * options.threshold) as u64
     {
-        return Ok(false);
+        return Ok(None);
     }
 
     // Cut at the current turn's user message (last UserMessage event).
@@ -183,7 +187,7 @@ pub(crate) async fn compact_if_needed_locked(
     // Build the older transcript for summarization.
     let older = Session::from_events_for_compaction(session.events(), cut);
     if older.transcript().is_empty() {
-        return Ok(false);
+        return Ok(None);
     }
 
     let request = Request {
@@ -200,7 +204,7 @@ pub(crate) async fn compact_if_needed_locked(
     loop {
         let next = tokio::select! {
             biased;
-            _ = options.cancel.cancelled() => return Ok(false),
+            _ = options.cancel.cancelled() => return Ok(None),
             next = stream.next() => next,
         };
         let Some(event) = next else {
@@ -223,14 +227,14 @@ pub(crate) async fn compact_if_needed_locked(
         anyhow::bail!("compaction produced an empty summary");
     }
     if options.cancel.is_cancelled() {
-        return Ok(false);
+        return Ok(None);
     }
 
     session.append(SessionEvent::Compaction {
         id: new_id(),
-        summary,
+        summary: summary.clone(),
         kept_from: cut,
         ts: Utc::now(),
     })?;
-    Ok(true)
+    Ok(Some(summary))
 }

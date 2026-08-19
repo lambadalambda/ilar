@@ -2401,6 +2401,8 @@ struct App {
     /// Messages submitted during an active turn, auto-sent in order when
     /// the turn completes.
     queued_messages: Vec<String>,
+    /// Palette-requested compaction, applied to the next turn's config.
+    compact_requested: bool,
     scroll_top: usize,
     content_rows: usize,
     viewport_rows: usize,
@@ -2466,6 +2468,7 @@ impl App {
             last_prompt: None,
             retry_available: false,
             queued_messages: Vec::new(),
+            compact_requested: false,
             scroll_top: 0,
             content_rows: 0,
             viewport_rows: 0,
@@ -2932,11 +2935,14 @@ impl App {
                     usage.cache_creation_input_tokens
                 );
             }
-            LoopEvent::Compacted { context_tokens } => {
+            LoopEvent::Compacted {
+                context_tokens,
+                summary,
+            } => {
                 self.context_used = *context_tokens;
                 self.context_estimated = true;
                 self.lines
-                    .push(Line_::System("transcript compacted".into()));
+                    .push(Line_::System(format!("transcript compacted\n{summary}")));
             }
             LoopEvent::TurnDone { outcome } => {
                 self.lines.retain(|line| {
@@ -3398,15 +3404,31 @@ impl App {
         } else {
             context.clone()
         };
-        let compact_latest_usage = self.latest_usage.map(|latest| {
-            format!(
+        // While a step streams, the provider hasn't reported usage yet —
+        // tick the output figure live from streamed bytes (~4 bytes/token)
+        // instead of showing the previous step's stale numbers.
+        let live_out = (self.busy
+            && matches!(self.activity, Activity::Thinking | Activity::Responding)
+            && self.stream_received > 0)
+            .then_some(self.stream_received / 4);
+        let compact_latest_usage = match (self.latest_usage, live_out) {
+            (Some(latest), Some(out)) => Some(format!(
+                "i{}/o~{} req-cache r{}/w{} {percent}",
+                format_tokens_compact(latest.input_tokens),
+                format_tokens_compact(out),
+                format_tokens_compact(latest.cache_read_input_tokens),
+                format_tokens_compact(latest.cache_creation_input_tokens)
+            )),
+            (Some(latest), None) => Some(format!(
                 "i{}/o{} req-cache r{}/w{} {percent}",
                 format_tokens_compact(latest.input_tokens),
                 format_tokens_compact(latest.output_tokens),
                 format_tokens_compact(latest.cache_read_input_tokens),
                 format_tokens_compact(latest.cache_creation_input_tokens)
-            )
-        });
+            )),
+            (None, Some(out)) => Some(format!("o~{} {percent}", format_tokens_compact(out))),
+            (None, None) => None,
+        };
         if width < 64 {
             let usage = compact_latest_usage
                 .clone()
@@ -3498,10 +3520,13 @@ impl App {
                 .as_deref()
                 .map(|total| format!("{total} · "))
                 .unwrap_or_default();
+            let out = match live_out {
+                Some(out) => format!("~{out}"),
+                None => latest.output_tokens.to_string(),
+            };
             format!(
-                "in {} · out {} · req cache r{}/w{} · {session}{context_display}",
+                "in {} · out {out} · req cache r{}/w{} · {session}{context_display}",
                 latest.input_tokens,
-                latest.output_tokens,
                 latest.cache_read_input_tokens,
                 latest.cache_creation_input_tokens
             )
@@ -4422,6 +4447,7 @@ enum PaletteCommand {
     Theme,
     Session,
     Usage,
+    Compact,
     Export,
     Help,
 }
@@ -4470,6 +4496,13 @@ static PALETTE_COMMANDS: &[PaletteCommandDefinition] = &[
         label: "Session usage",
         shortcut: "",
         search_terms: "usage tokens cost dollars spend total",
+    },
+    PaletteCommandDefinition {
+        id: PaletteCommand::Compact,
+        section: "General",
+        label: "Compact session",
+        shortcut: "",
+        search_terms: "compact summarize context shrink history",
     },
     PaletteCommandDefinition {
         id: PaletteCommand::Export,
@@ -5491,6 +5524,13 @@ fn activate_palette_command(
                 ilar::model::CATALOG_UPDATED,
             )));
             app.follow_tail = true;
+        }
+        PaletteCommand::Compact => {
+            app.compact_requested = true;
+            app.set_notice(
+                "compaction will run before your next message",
+                NoticeLevel::Info,
+            );
         }
         PaletteCommand::Export => {
             let prefix: String = app.session_id.chars().take(8).collect();
@@ -7419,7 +7459,10 @@ async fn run_app(
                             let system_prompt = system_prompt.to_string();
                             let registry = registry.clone();
                             let turn_ctx = tool_ctx.clone();
-                            let loop_config = loop_config.clone();
+                            let mut loop_config = loop_config.clone();
+                            if std::mem::take(&mut app.compact_requested) {
+                                loop_config.force_compaction = true;
+                            }
                             ring_on_turn_completion = true;
                             turn_handle = Some(tokio::spawn(async move {
                                 TurnCompletion::Root(

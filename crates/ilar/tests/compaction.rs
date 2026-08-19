@@ -568,3 +568,74 @@ async fn compaction_falls_back_to_chars_estimate_without_usage() {
         "chars/4 fallback did not trigger"
     );
 }
+
+#[tokio::test]
+async fn forced_compaction_runs_below_the_threshold_and_reports_its_summary() {
+    let (store, session_id) = temp_session();
+    {
+        let mut session = store.acquire_writer(&session_id).unwrap().load().unwrap();
+        session
+            .append(SessionEvent::UserMessage {
+                id: new_id(),
+                text: "earlier question".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        session
+            .append(SessionEvent::AssistantMessage {
+                id: new_id(),
+                model: "zai/glm-4.7".into(),
+                content: vec![ilar::session::ContentBlock::Text {
+                    text: "earlier answer".into(),
+                }],
+                usage: Usage::default(),
+                stop_reason: "end_turn".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+    }
+    let provider = MockProvider::new(vec![
+        text_turn("SUMMARY: one earlier exchange."),
+        text_turn("fresh answer"),
+    ]);
+    let registry = ToolRegistry::builtin();
+
+    let (tx, mut rx) = loop_event_channel(LOOP_EVENT_CAPACITY);
+    let outcome = run_turn(
+        &provider,
+        &registry,
+        &store,
+        &session_id,
+        "new question",
+        None,
+        LoopConfig {
+            context_limit: Some(1_000_000),
+            force_compaction: true,
+            ..LoopConfig::default()
+        },
+        tx,
+        tokio_util::sync::CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome, TurnOutcome::Completed);
+
+    // The tiny transcript compacted anyway, and the event carries the summary.
+    let session = store.load(&session_id).unwrap();
+    assert!(
+        session
+            .events()
+            .iter()
+            .any(|e| matches!(e, SessionEvent::Compaction { summary, .. }
+                if summary.contains("one earlier exchange")))
+    );
+    let mut saw_summary = false;
+    while let Ok(event) = rx.try_recv() {
+        if let ilar::agent::LoopEvent::Compacted { summary, .. } = event {
+            assert!(summary.contains("one earlier exchange"), "{summary}");
+            saw_summary = true;
+        }
+    }
+    assert!(saw_summary, "Compacted event with summary published");
+}

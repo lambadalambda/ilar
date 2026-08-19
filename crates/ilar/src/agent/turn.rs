@@ -25,6 +25,8 @@ pub struct LoopConfig {
     /// model-specific default, or disables compaction if it has none.
     pub context_limit: Option<u64>,
     pub compaction_threshold: f64,
+    /// Compact before this turn regardless of the threshold (user-requested).
+    pub force_compaction: bool,
 }
 
 impl Default for LoopConfig {
@@ -34,6 +36,7 @@ impl Default for LoopConfig {
             max_pause_retries: 3,
             context_limit: None,
             compaction_threshold: 0.85,
+            force_compaction: false,
         }
     }
 }
@@ -867,14 +870,15 @@ pub async fn run_turn(
     let context_limit = config
         .context_limit
         .or_else(|| resolver.context_limit(&model));
-    if let (Some(limit), threshold) = (context_limit, config.compaction_threshold)
-        && crate::compaction::compact_if_needed_locked(
+    if let Some(limit) = context_limit
+        && let Some(summary) = crate::compaction::compact_if_needed_locked(
             provider.as_provider(),
             &model,
             &mut session,
             crate::compaction::CompactionOptions {
                 context_limit: limit,
-                threshold,
+                threshold: config.compaction_threshold,
+                force: config.force_compaction,
                 system_prompt,
                 tools: &tools,
                 cancel: &cancel,
@@ -890,6 +894,7 @@ pub async fn run_turn(
                         system_prompt,
                         &tools,
                     ),
+                    summary,
                 },
                 &cancel,
             )
