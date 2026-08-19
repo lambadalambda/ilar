@@ -153,11 +153,24 @@ impl ZaiProvider {
                     "stream_options".into(),
                     serde_json::json!({"include_usage": true}),
                 );
+                // Without this, z.ai buffers the entire response server-side
+                // whenever tools are present (nothing streams until the whole
+                // turn is generated — verified against glm-5.3), which shows
+                // as minutes of dead air and gateway-timeout failures on
+                // long generations.
+                body.insert("tool_stream".into(), serde_json::json!(true));
             }
         }
         let reserved: &[&str] = match self.flavor {
             Flavor::Anthropic => &["model", "system", "messages", "tools", "stream"],
-            Flavor::OpenAI => &["model", "messages", "tools", "stream", "stream_options"],
+            Flavor::OpenAI => &[
+                "model",
+                "messages",
+                "tools",
+                "stream",
+                "stream_options",
+                "tool_stream",
+            ],
         };
         merge_options(&mut body, &req.options, reserved)?;
         Ok(serde_json::Value::Object(body))

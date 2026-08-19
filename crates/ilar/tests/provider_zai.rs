@@ -840,6 +840,10 @@ fn openai_flavor_serializes_system_and_tool_results_in_protocol_order() {
     assert_eq!(messages[5]["role"], "user");
     assert_eq!(messages[5]["content"], "continue with this context");
     assert_eq!(body["stream_options"]["include_usage"], true);
+    // Without tool_stream, z.ai buffers entire tool-call responses
+    // server-side (verified against glm-5.3: first byte arrived only when
+    // the whole response was done). Must always be requested.
+    assert_eq!(body["tool_stream"], true);
     assert!(body.get("system").is_none());
 }
 
@@ -865,7 +869,14 @@ async fn reserved_options_are_rejected_before_zai_network_io() {
         let provider = ZaiProvider::new("k".into(), Some("http://127.0.0.1:1".into()), flavor);
         let keys: &[&str] = match flavor {
             Flavor::Anthropic => &["model", "messages", "tools", "stream"],
-            Flavor::OpenAI => &["model", "messages", "tools", "stream", "stream_options"],
+            Flavor::OpenAI => &[
+                "model",
+                "messages",
+                "tools",
+                "stream",
+                "stream_options",
+                "tool_stream",
+            ],
         };
         for key in keys {
             let mut request = request();
