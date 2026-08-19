@@ -1,7 +1,22 @@
 # ilar
 
-A personal coding agent in Rust. Single binary, TUI-first, no permissions layer
-(runs inside a kernel-restricted sandbox).
+A personal coding agent in Rust. Single binary, TUI-first.
+
+## Safety
+
+> [!WARNING]
+> ilar does **not** provide a sandbox, permission prompts, or an access-control
+> boundary. It can run shell commands and read, modify, or delete anything that
+> its process can access, including credentials and files outside the current
+> repository.
+
+Run ilar only inside an external, OS-enforced sandbox with appropriately scoped
+filesystem, network, process, and credential access. Options include
+[Agent Safehouse](https://agent-safehouse.dev/), [nono](https://nono.sh/), a
+locked-down container, or a dedicated virtual machine.
+
+Git worktrees and ilar's read-only/mutating tool scheduling are coordination
+mechanisms, not security boundaries.
 
 ## Design principles
 
@@ -14,7 +29,8 @@ A personal coding agent in Rust. Single binary, TUI-first, no permissions layer
   Mutating tools form a barrier; read-only tools run concurrently
   (the Claude Code `isConcurrencySafe` model).
 - **JSONL sessions:** append-only, human-readable, resumable.
-- **No permission system.** The sandbox is the permission system.
+- **No built-in permission system.** An external sandbox is the security
+  boundary; ilar itself does not create or enforce one.
 - **Skills over features:** anything exotic (e.g. git worktree isolation)
   is a markdown skill, not core code.
 
