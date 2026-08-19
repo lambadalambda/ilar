@@ -46,18 +46,9 @@ impl Default for Limits {
 ///
 /// Errors when the pattern is absolute or contains `..`, which would
 /// walk outside the workspace.
-fn literal_prefix(pattern: &str) -> Result<PathBuf, String> {
+fn literal_prefix(pattern: &str) -> Result<PathBuf, ToolOutput> {
+    super::ensure_workspace_relative(pattern, "glob")?;
     let path = Path::new(pattern);
-    for component in path.components() {
-        match component {
-            Component::Normal(_) | Component::CurDir => {}
-            _ => {
-                return Err(
-                    "glob: pattern must stay within the workspace (no leading / or ..)".into(),
-                );
-            }
-        }
-    }
     let mut prefix = PathBuf::new();
     for component in path.components() {
         let Component::Normal(part) = component else {
@@ -84,7 +75,7 @@ fn scan(
     };
     let prefix = match literal_prefix(pattern) {
         Ok(prefix) => prefix,
-        Err(error) => return ToolOutput::error(error),
+        Err(error) => return error,
     };
     let options = glob::MatchOptions {
         case_sensitive: true,

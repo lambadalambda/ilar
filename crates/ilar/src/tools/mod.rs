@@ -690,6 +690,48 @@ pub fn parse_input<T: serde::de::DeserializeOwned>(
         .map_err(|e| ToolOutput::error(format!("invalid input for {tool_name}: {e}")))
 }
 
+/// Run filesystem work on the blocking pool while holding the workspace
+/// lease, so a dropped tool future cannot release the lease before the
+/// I/O it authorised has actually stopped.
+pub(crate) async fn run_blocking_io<T, F>(
+    lease: std::sync::Arc<WorkspaceLease>,
+    operation: F,
+) -> std::io::Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> std::io::Result<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let _lease = lease;
+        operation()
+    })
+    .await
+    .map_err(|error| std::io::Error::other(format!("blocking io task failed: {error}")))?
+}
+
+/// Reject a user-supplied path or pattern that would leave the directory
+/// the tool was pointed at. `Path::join` on an absolute path silently
+/// replaces the base, so without this a `path` of `/` walks the disk.
+///
+/// This is a blast-radius guard for accidents, not a security boundary —
+/// ilar has no sandbox by design (see the README).
+pub(crate) fn ensure_workspace_relative(requested: &str, tool: &str) -> Result<(), ToolOutput> {
+    let escapes = std::path::Path::new(requested)
+        .components()
+        .any(|component| {
+            !matches!(
+                component,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        });
+    if escapes {
+        return Err(ToolOutput::error(format!(
+            "{tool}: {requested:?} must stay within the workspace (no leading / or ..)"
+        )));
+    }
+    Ok(())
+}
+
 struct CancelBlockingScan(std::sync::Arc<std::sync::atomic::AtomicBool>);
 
 impl Drop for CancelBlockingScan {

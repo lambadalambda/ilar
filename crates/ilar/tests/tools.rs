@@ -276,6 +276,50 @@ async fn edit_replaces_unique_match() {
 }
 
 #[tokio::test]
+async fn edit_rejects_files_above_the_size_cap_without_loading_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("huge.txt");
+    // One byte over the 16 MiB cap.
+    let content = "x".repeat(16 * 1024 * 1024 + 1);
+    std::fs::write(&path, &content).unwrap();
+    let out = run(
+        &registry(),
+        "edit",
+        serde_json::json!({"path": "huge.txt", "old_string": "x", "new_string": "y"}),
+        &ctx(dir.path()),
+    )
+    .await;
+    assert!(out.is_error, "{}", out.content);
+    assert!(out.content.contains("too large"), "{}", out.content);
+    assert_eq!(std::fs::read_to_string(&path).unwrap().len(), content.len());
+}
+
+#[tokio::test]
+async fn cancelled_edit_preserves_the_original_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("existing.txt");
+    std::fs::write(&path, "original").unwrap();
+    let context = ctx(dir.path());
+    context.cancel.cancel();
+
+    let out = run(
+        &registry(),
+        "edit",
+        serde_json::json!({
+            "path": "existing.txt",
+            "old_string": "original",
+            "new_string": "replacement"
+        }),
+        &context,
+    )
+    .await;
+
+    assert!(out.is_error, "{}", out.content);
+    assert!(out.content.contains("cancelled"), "{}", out.content);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "original");
+}
+
+#[tokio::test]
 async fn edit_ambiguous_match_errors_without_replace_all() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("a.txt"), "x x x\n").unwrap();
@@ -696,6 +740,91 @@ async fn grep_finds_matches_with_file_and_line() {
     assert!(!out.is_error, "{}", out.content);
     assert!(out.content.contains("src/a.rs:2"), "{}", out.content);
     assert!(!out.content.contains("b.rs"));
+}
+
+#[tokio::test]
+async fn grep_and_glob_agree_on_which_files_exist() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".github/workflows")).unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::create_dir_all(dir.path().join("ignored")).unwrap();
+    std::fs::write(dir.path().join(".gitignore"), "ignored/\n").unwrap();
+    std::fs::write(dir.path().join(".github/workflows/ci.yml"), "on: NEEDLE\n").unwrap();
+    std::fs::write(dir.path().join(".env"), "SECRET=NEEDLE\n").unwrap();
+    std::fs::write(dir.path().join("src/a.rs"), "// NEEDLE\n").unwrap();
+    std::fs::write(dir.path().join("ignored/x.rs"), "// NEEDLE\n").unwrap();
+
+    let out = run(
+        &registry(),
+        "grep",
+        serde_json::json!({"pattern": "NEEDLE"}),
+        &ctx(dir.path()),
+    )
+    .await;
+    assert!(!out.is_error, "{}", out.content);
+    // Dotted paths are where CI config and env files live.
+    assert!(
+        out.content.contains(".github/workflows/ci.yml:1"),
+        "{}",
+        out.content
+    );
+    assert!(out.content.contains(".env:1"), "{}", out.content);
+    assert!(out.content.contains("src/a.rs:1"), "{}", out.content);
+    // The docstring promises gitignored files are skipped.
+    assert!(!out.content.contains("ignored/x.rs"), "{}", out.content);
+
+    let all = run(
+        &registry(),
+        "grep",
+        serde_json::json!({"pattern": "NEEDLE", "include_ignored": true}),
+        &ctx(dir.path()),
+    )
+    .await;
+    assert!(all.content.contains("ignored/x.rs:1"), "{}", all.content);
+}
+
+#[tokio::test]
+async fn grep_orders_results_by_path_then_line() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/b.rs"), "NEEDLE\n").unwrap();
+    std::fs::write(dir.path().join("src/a.rs"), "x\nNEEDLE\nNEEDLE\n").unwrap();
+    let out = run(
+        &registry(),
+        "grep",
+        serde_json::json!({"pattern": "NEEDLE"}),
+        &ctx(dir.path()),
+    )
+    .await;
+    assert!(!out.is_error, "{}", out.content);
+    let lines: Vec<&str> = out.content.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "src/a.rs:2:NEEDLE",
+            "src/a.rs:3:NEEDLE",
+            "src/b.rs:1:NEEDLE"
+        ],
+        "{}",
+        out.content
+    );
+}
+
+#[tokio::test]
+async fn grep_rejects_paths_that_escape_the_workspace() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "hello\n").unwrap();
+    for path in ["..", "/etc", "a/../.."] {
+        let out = run(
+            &registry(),
+            "grep",
+            serde_json::json!({"pattern": "hello", "path": path}),
+            &ctx(dir.path()),
+        )
+        .await;
+        assert!(out.is_error, "{path} should be rejected: {}", out.content);
+        assert!(out.content.contains("workspace"), "{}", out.content);
+    }
 }
 
 #[tokio::test]
