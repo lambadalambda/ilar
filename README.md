@@ -60,7 +60,7 @@ by project files.
 | `general.theme` | `terminal` | `terminal`, `carbon`, `parchment`, `frost`, or `high-contrast`. |
 | `providers.openai.base_url` | API or ChatGPT endpoint | Override the Responses API base URL selected by `auth`. |
 | `providers.openai.api_key` | `ILAR_OPENAI_API_KEY` | OpenAI API key. |
-| `providers.openai.auth` | `api_key` | `api_key` or `chatgpt`; run `ilar login` before using `chatgpt`. |
+| `providers.openai.auth` | `api_key` | `api_key` or `chatgpt`; see [OpenAI ChatGPT OAuth](#openai-chatgpt-oauth). |
 | `providers.zai.base_url` | z.ai endpoint for `flavor` | Override the z.ai API base URL selected by `flavor`. |
 | `providers.zai.api_key` | `ILAR_ZAI_API_KEY` | z.ai API key. |
 | `providers.zai.flavor` | `anthropic` | `anthropic` or `openai`. |
@@ -78,6 +78,44 @@ Environment variables:
 | `ILAR_OPENAI_API_KEY` | Fallback OpenAI API key. |
 | `ILAR_ZAI_API_KEY` | Fallback z.ai API key. |
 | `ILAR_TAVILY_API_KEY` | Enables Tavily-backed web search. |
+
+### OpenAI ChatGPT OAuth
+
+ilar can use a ChatGPT account through the same PKCE browser flow as Codex CLI;
+an OpenAI API key is not required in this mode.
+
+1. Run the login command:
+
+   ```sh
+   ilar login
+   ```
+
+2. Complete authorization in the browser. ilar also prints the URL in case the
+   browser does not open automatically. The process waits up to five minutes
+   for the callback on `http://localhost:1455/auth/callback`, so the external
+   sandbox must allow that loopback listener and callback.
+
+3. Select ChatGPT authentication and a compatible model in
+   `${ILAR_CONFIG_DIR:-~/.config/ilar}/ilar.toml`:
+
+   ```toml
+   [general]
+   model = "openai/gpt-5.6-sol"
+
+   [providers.openai]
+   auth = "chatgpt"
+   ```
+
+   ChatGPT uses its Codex model catalog rather than the standard API-key model
+   catalog. `openai/gpt-5.6-sol` is one supported example; the in-app model
+   picker lists the models available for the active authentication mode. Leave
+   `providers.openai.base_url` unset to use the built-in ChatGPT backend.
+
+Tokens are stored with owner-only permissions in
+`${ILAR_STATE_DIR:-~/.local/state/ilar}/auth.json` and refresh automatically.
+Treat that file as a credential. To return to API-key authentication, set
+`auth = "api_key"` (or remove `auth`) and provide `ILAR_OPENAI_API_KEY` or
+`providers.openai.api_key`.
 
 ### Project instructions
 

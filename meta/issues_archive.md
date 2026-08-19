@@ -92,3 +92,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Add theme picker](issues/add-theme-picker.md)
 - [x] [Bound project context discovery](issues/bound-project-context-discovery.md)
 - [x] [Clarify external sandbox requirement](issues/clarify-external-sandbox-requirement.md)
+- [x] [Document OpenAI OAuth setup](issues/document-openai-oauth-setup.md)
