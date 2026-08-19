@@ -8584,6 +8584,44 @@ async fn run_app(
 mod tests {
     use super::*;
 
+    /// The meter must not show the whole window while compaction is
+    /// measuring against the input cap — that reads as comfortable
+    /// headroom when the request is already too big to send.
+    #[test]
+    fn context_meter_uses_the_same_limit_as_compaction() {
+        struct SplitLimits;
+        impl ProviderResolver for SplitLimits {
+            fn resolve_provider(&self, _: &str) -> Result<ilar::provider::ProviderHandle<'_>> {
+                anyhow::bail!("unused")
+            }
+            fn context_limit(&self, _: &str) -> Option<u64> {
+                Some(128_000)
+            }
+            fn input_limit(&self, _: &str) -> Option<u64> {
+                Some(100_000)
+            }
+        }
+        assert_eq!(
+            display_context_limit(&SplitLimits, "openai/gpt-5.3-codex-spark"),
+            Some(100_000),
+            "meter showed the full window instead of the input cap"
+        );
+
+        struct WindowOnly;
+        impl ProviderResolver for WindowOnly {
+            fn resolve_provider(&self, _: &str) -> Result<ilar::provider::ProviderHandle<'_>> {
+                anyhow::bail!("unused")
+            }
+            fn context_limit(&self, _: &str) -> Option<u64> {
+                Some(64_000)
+            }
+        }
+        assert_eq!(
+            display_context_limit(&WindowOnly, "custom/model"),
+            Some(64_000)
+        );
+    }
+
     #[test]
     fn startup_selection_respects_cli_and_persisted_precedence() {
         assert_eq!(selected_agent_name(None, None), "build");

@@ -88,6 +88,7 @@ impl Tool for GrepTool {
                     &root,
                     &input.pattern,
                     input.include_ignored,
+                    MAX_ENTRIES,
                     &cancelled,
                 )
             })
@@ -172,6 +173,7 @@ fn grep_files(
     root: &std::path::Path,
     pattern: &str,
     include_ignored: bool,
+    max_entries: usize,
     cancelled: &std::sync::atomic::AtomicBool,
 ) -> ToolOutput {
     let regex = match regex::Regex::new(pattern) {
@@ -212,7 +214,7 @@ fn grep_files(
             if !entry.file_type().is_some_and(|kind| kind.is_file()) {
                 return ignore::WalkState::Continue;
             }
-            if scanned.fetch_add(1, Ordering::Relaxed) >= MAX_ENTRIES {
+            if scanned.fetch_add(1, Ordering::Relaxed) >= max_entries {
                 capped_entries.store(true, Ordering::Release);
                 return ignore::WalkState::Quit;
             }
@@ -258,7 +260,7 @@ fn grep_files(
     }
     if capped_entries.load(Ordering::Acquire) {
         out.push_str(&format!(
-            "…(truncated: scanned {MAX_ENTRIES} files without finishing; narrow the path)\n"
+            "…(truncated: scanned {max_entries} files without finishing; narrow the path)\n"
         ));
     } else if truncated {
         const MARKER: &str = "…(truncated)\n";
@@ -278,4 +280,37 @@ fn truncate_utf8(value: &mut String, max_bytes: usize) {
     }
     value.truncate(end);
     value.push('…');
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The match cap only short-circuits when matches exist; a rare or
+    /// no-match search over a monorepo needs its own bound, and it must
+    /// be distinguishable from "capped at 200 matches".
+    #[test]
+    fn entry_budget_truncation_is_distinct_from_the_match_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        for index in 0..20 {
+            std::fs::write(
+                dir.path().join(format!("f{index}.txt")),
+                "no needles here\n",
+            )
+            .unwrap();
+        }
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        let out = grep_files(dir.path(), dir.path(), "zzz-absent", false, 5, &cancelled);
+        assert!(!out.is_error, "{}", out.content);
+        assert!(
+            out.content.contains("scanned 5 files"),
+            "expected an entry-budget notice: {}",
+            out.content
+        );
+        assert!(
+            !out.content.contains("truncated)"),
+            "must not read as a match-cap truncation: {}",
+            out.content
+        );
+    }
 }

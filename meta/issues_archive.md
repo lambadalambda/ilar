@@ -120,3 +120,10 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Pending-state controls](issues/pending-state-controls.md)
 - [x] [Service tool](issues/service-tool.md)
 - [x] [Per-task model override + models tool](issues/task-model-override.md)
+
+## Milestone 6 — Hardening
+
+- [x] [Compact against the input limit, and inside the turn](issues/compaction-input-limit-and-in-turn.md)
+- [x] [Bound and parallelize the glob walk](issues/glob-walk-scoping-and-speed.md)
+- [x] [Bring grep to parity with glob](issues/grep-parity-with-glob.md)
+- [x] [edit blocks the async runtime](issues/edit-blocking-io.md)
