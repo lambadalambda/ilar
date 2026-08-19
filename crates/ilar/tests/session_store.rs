@@ -1328,3 +1328,65 @@ fn list_of_missing_root_is_empty() {
     assert!(store.list().is_empty());
     assert!(store.latest().is_none());
 }
+
+#[test]
+fn delete_removes_session_files_and_refuses_active_sessions() {
+    let (store, dir) = temp_store();
+    let meta = sample_meta();
+    let mut session = store.create(meta.clone()).unwrap();
+    session
+        .append(SessionEvent::UserMessage {
+            id: new_id(),
+            text: "hello".into(),
+            ts: Utc::now(),
+        })
+        .unwrap();
+
+    // Active (writer held): refused.
+    let error = store.delete(&meta.session_id).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    drop(session);
+
+    store.delete(&meta.session_id).unwrap();
+    assert!(store.load(&meta.session_id).is_err());
+    let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains(&meta.session_id))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+#[test]
+fn fork_copies_history_under_a_new_id() {
+    let (store, _dir) = temp_store();
+    let meta = sample_meta();
+    let mut session = store.create(meta.clone()).unwrap();
+    for event in sample_log(&meta).into_iter().skip(1) {
+        session.append(event).unwrap();
+    }
+    drop(session);
+
+    let fork_id = store.fork(&meta.session_id).unwrap();
+    assert_ne!(fork_id, meta.session_id);
+    let original = store.load(&meta.session_id).unwrap();
+    let fork = store.load(&fork_id).unwrap();
+    assert_eq!(fork.meta().unwrap().session_id, fork_id);
+    assert_eq!(fork.events().len(), original.events().len());
+    assert_eq!(fork.transcript().len(), original.transcript().len());
+    // The fork is independently writable.
+    let mut fork_session = store.acquire_writer(&fork_id).unwrap().load().unwrap();
+    fork_session
+        .append(SessionEvent::UserMessage {
+            id: new_id(),
+            text: "diverge".into(),
+            ts: Utc::now(),
+        })
+        .unwrap();
+    drop(fork_session);
+    assert_eq!(
+        store.load(&fork_id).unwrap().events().len(),
+        original.events().len() + 1
+    );
+}

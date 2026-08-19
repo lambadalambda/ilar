@@ -310,6 +310,57 @@ impl SessionStore {
         })
     }
 
+    /// Delete a session's files. Refuses sessions whose writer lease is
+    /// held (active in some turn) with `WouldBlock`.
+    pub fn delete(&self, id: &str) -> std::io::Result<()> {
+        let parsed = SessionId::parse(id)?;
+        let lock_path = self.root.join(format!("{parsed}.lock"));
+        {
+            let _writer = self.acquire_writer_id(parsed.clone())?;
+            let _ = std::fs::remove_file(self.replay_index_path_for(&parsed));
+            std::fs::remove_file(self.session_path_for(&parsed))?;
+        }
+        let _ = std::fs::remove_file(lock_path);
+        Ok(())
+    }
+
+    /// Fork a session: copy its validated history under a fresh id (the
+    /// Meta event is rewritten; everything else is verbatim). Returns the
+    /// new session id.
+    pub fn fork(&self, id: &str) -> std::io::Result<String> {
+        let source = self.load(id)?;
+        let mut events = source.events().to_vec();
+        let new_id = crate::session::new_id();
+        match events.first_mut() {
+            Some(SessionEvent::Meta { meta, .. }) => {
+                meta.session_id = new_id.clone();
+            }
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("session {id} does not start with a Meta event"),
+                ));
+            }
+        }
+        let parsed = SessionId::parse(&new_id)?;
+        let mut output = String::new();
+        for event in &events {
+            output
+                .push_str(&serde_json::to_string(event).map_err(|error| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, error)
+                })?);
+            output.push('\n');
+        }
+        std::fs::create_dir_all(&self.root)?;
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(self.session_path_for(&parsed))?;
+        std::io::Write::write_all(&mut file, output.as_bytes())?;
+        file.sync_data()?;
+        Ok(new_id)
+    }
+
     /// Read a session snapshot. Only newline-committed records are parsed;
     /// committed corruption is rejected and an in-progress tail is ignored.
     pub fn load(&self, id: &str) -> std::io::Result<SessionReader> {

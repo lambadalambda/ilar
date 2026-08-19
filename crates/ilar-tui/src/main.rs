@@ -4899,21 +4899,83 @@ fn render_skill_picker(frame: &mut Frame, picker: &SkillPicker) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+/// fzf-style subsequence score; higher ranks better, `None` = no match.
+/// Greedy leftmost matching with bonuses for consecutive runs and word
+/// starts, and a mild gap penalty.
+fn fuzzy_score(needle: &str, haystack: &str) -> Option<i64> {
+    if needle.trim().is_empty() {
+        return Some(0);
+    }
+    let haystack: Vec<char> = haystack.to_lowercase().chars().collect();
+    let mut score = 0i64;
+    let mut previous: Option<usize> = None;
+    let mut position = 0usize;
+    for needle_char in needle.to_lowercase().chars().filter(|c| !c.is_whitespace()) {
+        let found = (position..haystack.len()).find(|&i| haystack[i] == needle_char)?;
+        if previous == Some(found.wrapping_sub(1)) {
+            score += 8;
+        }
+        if found == 0 || !haystack[found - 1].is_alphanumeric() {
+            score += 4;
+        }
+        score -= ((found - position) as i64) / 4;
+        previous = Some(found);
+        position = found + 1;
+    }
+    Some(score)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SessionPickerAction {
+    Stay,
+    Dismiss,
+    Resume(String),
+    Delete(String),
+    Fork(String),
+}
+
 struct SessionPicker {
     sessions: Vec<ilar::session::SessionSummary>,
+    query: String,
     selected: usize,
+    /// Session id armed for deletion; the next Ctrl-D confirms.
+    pending_delete: Option<String>,
 }
 
 impl SessionPicker {
     fn new(sessions: Vec<ilar::session::SessionSummary>) -> Self {
         Self {
             sessions,
+            query: String::new(),
             selected: 0,
+            pending_delete: None,
         }
     }
 
+    /// Sessions matching the query, best fuzzy score first (stable, so
+    /// equal scores keep recency order).
+    fn filtered(&self) -> Vec<&ilar::session::SessionSummary> {
+        let mut scored: Vec<(i64, &ilar::session::SessionSummary)> = self
+            .sessions
+            .iter()
+            .filter_map(|session| {
+                let haystack = format!("{} {}", session.title.as_deref().unwrap_or(""), session.id);
+                fuzzy_score(&self.query, &haystack).map(|score| (score, session))
+            })
+            .collect();
+        scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+        scored.into_iter().map(|(_, session)| session).collect()
+    }
+
+    fn selected_id(&self) -> Option<String> {
+        self.filtered()
+            .get(self.selected)
+            .map(|session| session.id.clone())
+    }
+
     fn move_selection(&mut self, delta: isize) {
-        let count = self.sessions.len();
+        self.pending_delete = None;
+        let count = self.filtered().len();
         if count == 0 {
             self.selected = 0;
         } else {
@@ -4921,31 +4983,46 @@ impl SessionPicker {
         }
     }
 
-    fn handle_key(&mut self, code: KeyCode, control: bool) -> PickerAction {
+    fn handle_key(&mut self, code: KeyCode, control: bool) -> SessionPickerAction {
         match (code, control) {
-            (KeyCode::Esc, _) => PickerAction::Dismiss,
+            (KeyCode::Esc, _) => SessionPickerAction::Dismiss,
             (KeyCode::Enter, _) => self
-                .sessions
-                .get(self.selected)
-                .map(|session| PickerAction::Choose(session.id.clone()))
-                .unwrap_or(PickerAction::Dismiss),
+                .selected_id()
+                .map(SessionPickerAction::Resume)
+                .unwrap_or(SessionPickerAction::Dismiss),
             (KeyCode::Up, _) | (KeyCode::Char('p'), true) => {
                 self.move_selection(-1);
-                PickerAction::Stay
+                SessionPickerAction::Stay
             }
             (KeyCode::Down, _) | (KeyCode::Char('n'), true) => {
                 self.move_selection(1);
-                PickerAction::Stay
+                SessionPickerAction::Stay
             }
-            (KeyCode::Home, _) => {
+            (KeyCode::Char('d'), true) => match (self.selected_id(), self.pending_delete.take()) {
+                (Some(id), Some(pending)) if pending == id => SessionPickerAction::Delete(id),
+                (Some(id), _) => {
+                    self.pending_delete = Some(id);
+                    SessionPickerAction::Stay
+                }
+                (None, _) => SessionPickerAction::Stay,
+            },
+            (KeyCode::Char('y'), true) => self
+                .selected_id()
+                .map(SessionPickerAction::Fork)
+                .unwrap_or(SessionPickerAction::Stay),
+            (KeyCode::Backspace, _) => {
+                self.query.pop();
                 self.selected = 0;
-                PickerAction::Stay
+                self.pending_delete = None;
+                SessionPickerAction::Stay
             }
-            (KeyCode::End, _) => {
-                self.selected = self.sessions.len().saturating_sub(1);
-                PickerAction::Stay
+            (KeyCode::Char(character), false) if !character.is_control() => {
+                self.query.push(character);
+                self.selected = 0;
+                self.pending_delete = None;
+                SessionPickerAction::Stay
             }
-            _ => PickerAction::Stay,
+            _ => SessionPickerAction::Stay,
         }
     }
 }
@@ -4961,12 +5038,12 @@ fn session_age(modified: std::time::SystemTime, now: std::time::SystemTime) -> S
 }
 
 fn render_session_picker(frame: &mut Frame, picker: &SessionPicker) {
-    let area = centered_rect(frame.area(), 72, 14);
+    let area = centered_rect(frame.area(), 72, 16);
     frame.render_widget(Clear, area);
-    let footer = if area.width < 40 {
-        " ↵ resume · Esc "
+    let footer = if area.width < 44 {
+        " ↵ resume · ^D del · ^Y fork "
     } else {
-        " ↑↓ select · Enter resume · Esc cancel "
+        " type to filter · ↵ resume · ^D delete ×2 · ^Y fork · Esc "
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -4979,33 +5056,50 @@ fn render_session_picker(frame: &mut Frame, picker: &SessionPicker) {
     if inner.width == 0 || inner.height == 0 {
         return;
     }
-    if picker.sessions.is_empty() {
-        frame.render_widget(
-            Paragraph::new(Line::styled(
-                "no other sessions",
-                Style::default().fg(MUTED),
-            )),
-            inner,
-        );
+    let mut lines = vec![Line::from(vec![
+        Span::styled("filter ", Style::default().fg(MUTED)),
+        Span::raw(truncate_display(
+            &picker.query,
+            (inner.width as usize).saturating_sub(8),
+            Truncation::Middle,
+        )),
+    ])];
+    let sessions = picker.filtered();
+    if sessions.is_empty() {
+        lines.push(Line::styled(
+            if picker.sessions.is_empty() {
+                "no other sessions"
+            } else {
+                "no matches"
+            },
+            Style::default().fg(MUTED),
+        ));
+        frame.render_widget(Paragraph::new(lines), inner);
         return;
     }
     let now = std::time::SystemTime::now();
-    let selected = picker.selected.min(picker.sessions.len() - 1);
-    let row_count = inner.height as usize;
+    let selected = picker.selected.min(sessions.len() - 1);
+    let row_count = (inner.height as usize).saturating_sub(lines.len()).max(1);
     let start = selected
         .saturating_add(1)
         .saturating_sub(row_count)
-        .min(picker.sessions.len().saturating_sub(row_count));
-    let mut lines = Vec::new();
-    for (index, session) in picker
-        .sessions
-        .iter()
-        .enumerate()
-        .skip(start)
-        .take(row_count)
-    {
-        let marker = if index == selected { "> " } else { "  " };
-        let age = session_age(session.modified, now);
+        .min(sessions.len().saturating_sub(row_count));
+    for (index, session) in sessions.iter().enumerate().skip(start).take(row_count) {
+        let marker = if index == selected {
+            if picker.pending_delete.as_deref() == Some(session.id.as_str()) {
+                "✗ "
+            } else {
+                "> "
+            }
+        } else {
+            "  "
+        };
+        let age =
+            if picker.pending_delete.as_deref() == Some(session.id.as_str()) && index == selected {
+                "^D deletes".to_string()
+            } else {
+                session_age(session.modified, now)
+            };
         let title = session.title.as_deref().unwrap_or("(no messages yet)");
         let label_width = (inner.width as usize)
             .saturating_sub(UnicodeWidthStr::width(marker))
@@ -6921,12 +7015,54 @@ async fn run_app(
                 }
                 if let Some(picker) = app.session_picker.as_mut() {
                     match picker.handle_key(code, control) {
-                        PickerAction::Stay => {}
-                        PickerAction::Dismiss => {
+                        SessionPickerAction::Stay => {}
+                        SessionPickerAction::Dismiss => {
                             app.session_picker = None;
                             app.clear_transient_notice();
                         }
-                        PickerAction::Choose(new_session) => {
+                        SessionPickerAction::Delete(id) => match store.delete(&id) {
+                            Ok(()) => {
+                                if let Some(picker) = app.session_picker.as_mut() {
+                                    picker.sessions.retain(|session| session.id != id);
+                                    picker.selected = 0;
+                                }
+                                app.set_notice(format!("deleted session {id}"), NoticeLevel::Info);
+                            }
+                            Err(error) => {
+                                app.set_notice(
+                                    format!("cannot delete {id}: {error}"),
+                                    NoticeLevel::Error,
+                                );
+                            }
+                        },
+                        SessionPickerAction::Fork(id) => {
+                            let blocked = if turn_handle.is_some() {
+                                Some("finish or abort the current turn before switching sessions")
+                            } else if spawner.running_background() > 0 {
+                                Some("background agents are running; wait or abort them first")
+                            } else if !app.input.is_blank() {
+                                Some("input has an unsent draft; send or clear it first")
+                            } else {
+                                None
+                            };
+                            if let Some(reason) = blocked {
+                                app.set_notice(reason, NoticeLevel::Warning);
+                                continue;
+                            }
+                            match store.fork(&id) {
+                                Ok(fork_id) => {
+                                    spawner.shutdown().await;
+                                    return Ok(AppExit::Switch(fork_id));
+                                }
+                                Err(error) => {
+                                    app.set_notice(
+                                        format!("cannot fork {id}: {error}"),
+                                        NoticeLevel::Error,
+                                    );
+                                }
+                            }
+                        }
+                        SessionPickerAction::Resume(new_session) => {
                             let blocked = if turn_handle.is_some() {
                                 Some("finish or abort the current turn before switching sessions")
                             } else if spawner.running_background() > 0 {
@@ -8742,26 +8878,100 @@ mod tests {
             },
         ];
         let mut picker = SessionPicker::new(sessions);
-        assert_eq!(picker.handle_key(KeyCode::Down, false), PickerAction::Stay);
+        assert_eq!(
+            picker.handle_key(KeyCode::Down, false),
+            SessionPickerAction::Stay
+        );
         assert_eq!(
             picker.handle_key(KeyCode::Enter, false),
-            PickerAction::Choose("older".into())
+            SessionPickerAction::Resume("older".into())
         );
         picker.move_selection(1); // wraps back to the first entry
         assert_eq!(
             picker.handle_key(KeyCode::Enter, false),
-            PickerAction::Choose("recent".into())
+            SessionPickerAction::Resume("recent".into())
         );
         assert_eq!(
             picker.handle_key(KeyCode::Esc, false),
-            PickerAction::Dismiss
+            SessionPickerAction::Dismiss
         );
 
         let mut empty = SessionPicker::new(Vec::new());
         assert_eq!(
             empty.handle_key(KeyCode::Enter, false),
-            PickerAction::Dismiss
+            SessionPickerAction::Dismiss
         );
+    }
+
+    #[test]
+    fn session_picker_fuzzy_filters_and_arms_deletion() {
+        let now = std::time::SystemTime::now();
+        let session = |id: &str, title: &str| ilar::session::SessionSummary {
+            id: id.into(),
+            title: Some(title.into()),
+            modified: now,
+        };
+        let mut picker = SessionPicker::new(vec![
+            session("aaa", "fix websearch fallback"),
+            session("bbb", "voxel pagoda benchmark"),
+            session("ccc", "readline editing chords"),
+        ]);
+        // fzf-style: subsequence, not substring.
+        for character in "vxl".chars() {
+            picker.handle_key(KeyCode::Char(character), false);
+        }
+        assert_eq!(
+            picker.handle_key(KeyCode::Enter, false),
+            SessionPickerAction::Resume("bbb".into())
+        );
+        // Backspace edits the query; no match reported gracefully.
+        for character in "zzz".chars() {
+            picker.handle_key(KeyCode::Char(character), false);
+        }
+        assert!(picker.filtered().is_empty());
+        for _ in 0..6 {
+            picker.handle_key(KeyCode::Backspace, false);
+        }
+        assert_eq!(picker.filtered().len(), 3);
+
+        // Delete requires a confirming second Ctrl-D on the same entry.
+        assert_eq!(
+            picker.handle_key(KeyCode::Char('d'), true),
+            SessionPickerAction::Stay
+        );
+        assert_eq!(
+            picker.handle_key(KeyCode::Char('d'), true),
+            SessionPickerAction::Delete("aaa".into())
+        );
+        // Moving the selection disarms a pending delete.
+        picker.handle_key(KeyCode::Char('d'), true);
+        picker.move_selection(1);
+        assert_eq!(
+            picker.handle_key(KeyCode::Char('d'), true),
+            SessionPickerAction::Stay
+        );
+        // Fork is single-press.
+        assert_eq!(
+            picker.handle_key(KeyCode::Char('y'), true),
+            SessionPickerAction::Fork("bbb".into())
+        );
+    }
+
+    #[test]
+    fn fuzzy_score_prefers_word_starts_and_runs() {
+        assert!(fuzzy_score("abc", "xyz").is_none());
+        assert_eq!(fuzzy_score("", "anything"), Some(0));
+        // Consecutive run beats scattered.
+        let run = fuzzy_score("web", "websearch fallback").unwrap();
+        let scattered = fuzzy_score("web", "wide event bus").unwrap();
+        assert!(run > scattered, "{run} vs {scattered}");
+        // Word-start match beats mid-word.
+        let start = fuzzy_score("fall", "websearch fallback").unwrap();
+        let mid = fuzzy_score("fall", "pitfalls").unwrap();
+        assert!(start > mid, "{start} vs {mid}");
+        // Case-insensitive, unicode-safe.
+        assert!(fuzzy_score("PAGODA", "Voxel Pagoda").is_some());
+        assert!(fuzzy_score("héllo", "saying héllo world").is_some());
     }
 
     #[test]
