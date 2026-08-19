@@ -870,7 +870,10 @@ pub async fn run_turn(
     let context_limit = config
         .context_limit
         .or_else(|| resolver.context_limit(&model));
-    if let Some(limit) = context_limit
+    // A forced compaction must run even when the model has no known
+    // context limit (the limit only feeds the threshold check).
+    let compaction_limit = context_limit.or_else(|| config.force_compaction.then_some(0));
+    if let Some(limit) = compaction_limit
         && let Some(summary) = crate::compaction::compact_if_needed_locked(
             provider.as_provider(),
             &model,

@@ -2442,6 +2442,9 @@ struct App {
     /// arrival instant — the status line's stream-liveness indicator.
     stream_received: u64,
     stream_last_data: Option<std::time::Instant>,
+    /// Bytes already attributed to completed steps; the live output
+    /// estimate uses only the current step's bytes.
+    stream_step_base: u64,
     /// Windowed transfer rate: anchor of the current >=1s window and the
     /// last completed window's bytes/sec.
     stream_rate_anchor: Option<(std::time::Instant, u64)>,
@@ -2460,6 +2463,7 @@ struct App {
     search_current: usize,
     /// (scroll_top, follow_tail) before the search opened; Esc restores.
     search_saved: Option<(usize, bool)>,
+    search_computed_revision: Option<u64>,
     scroll_top: usize,
     content_rows: usize,
     viewport_rows: usize,
@@ -2520,6 +2524,7 @@ impl App {
             session_cost: Some(0.0),
             stream_received: 0,
             stream_last_data: None,
+            stream_step_base: 0,
             stream_rate_anchor: None,
             stream_rate: None,
             last_prompt: None,
@@ -2531,6 +2536,7 @@ impl App {
             search_matches: Vec::new(),
             search_current: 0,
             search_saved: None,
+            search_computed_revision: None,
             scroll_top: 0,
             content_rows: 0,
             viewport_rows: 0,
@@ -2679,6 +2685,7 @@ impl App {
                 self.clear_transient_notice();
                 self.status = "thinking…".into();
                 self.stream_received = 0;
+                self.stream_step_base = 0;
                 self.stream_rate_anchor = None;
                 self.stream_rate = None;
                 // Seed liveness at turn start: a provider that hangs
@@ -2988,6 +2995,7 @@ impl App {
                 }
             }
             LoopEvent::StepComplete { stop_reason, usage } => {
+                self.stream_step_base = self.stream_received;
                 self.next_tool_group = self.next_tool_group.saturating_add(1);
                 self.latest_usage = Some(*usage);
                 let model = self.current_model.clone();
@@ -3127,6 +3135,7 @@ impl App {
     /// Recompute matches against the cached rows and jump to the first.
     fn search_refresh(&mut self) {
         self.search_matches = self.transcript_cache.matching_rows(&self.search_query);
+        self.search_computed_revision = Some(self.transcript_revision);
         self.search_current = 0;
         if !self.search_matches.is_empty() {
             self.search_scroll_to_current();
@@ -3565,8 +3574,8 @@ impl App {
         // instead of showing the previous step's stale numbers.
         let live_out = (self.busy
             && matches!(self.activity, Activity::Thinking | Activity::Responding)
-            && self.stream_received > 0)
-            .then_some(self.stream_received / 4);
+            && self.stream_received > self.stream_step_base)
+            .then_some((self.stream_received - self.stream_step_base) / 4);
         let compact_latest_usage = match (self.latest_usage, live_out) {
             (Some(latest), Some(out)) => Some(format!(
                 "i{}/o~{} req-cache r{}/w{} {percent}",
@@ -3770,6 +3779,15 @@ impl App {
             now,
             self.activity_started,
         );
+        // Streaming shifts row indices; keep search matches in sync with
+        // the rows actually on screen.
+        if self.search_active && self.search_computed_revision != Some(self.transcript_revision) {
+            self.search_matches = self.transcript_cache.matching_rows(&self.search_query);
+            self.search_current = self
+                .search_current
+                .min(self.search_matches.len().saturating_sub(1));
+            self.search_computed_revision = Some(self.transcript_revision);
+        }
         let mut activity_rows = activity_line(
             self.busy,
             self.activity,
@@ -7029,7 +7047,16 @@ async fn run_app(
                         notifications_paused = false;
                     }
                     if !app.queued_messages.is_empty() {
-                        if completed && app.input.is_blank() {
+                        // Only dequeue into an idle, modal-free UI: a
+                        // synthetic Enter routed into a picker or search
+                        // bar would misfire (or lose the message), and a
+                        // pending real event must not be clobbered.
+                        if completed
+                            && app.input.is_blank()
+                            && !app.has_modal()
+                            && !app.search_active
+                            && pending_terminal_event.is_none()
+                        {
                             let next = app.queued_messages.remove(0);
                             app.input = InputBuffer::from(next);
                             // Send through the ordinary submit path.
@@ -7040,7 +7067,7 @@ async fn run_app(
                         } else {
                             app.set_notice(
                                 format!(
-                                    "{} queued message(s) held until a turn succeeds (Esc drops)",
+                                    "{} queued message(s) held (Esc on empty input drops)",
                                     app.queued_messages.len()
                                 ),
                                 NoticeLevel::Warning,
@@ -7119,6 +7146,9 @@ async fn run_app(
         {
             pending_terminal_event = None;
             app.model_key_pending = false;
+            if app.search_active {
+                app.close_search(false);
+            }
             app.open_command_palette();
             modal_open = app.has_modal();
         }

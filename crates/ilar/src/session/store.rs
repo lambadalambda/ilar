@@ -315,11 +315,11 @@ impl SessionStore {
     pub fn delete(&self, id: &str) -> std::io::Result<()> {
         let parsed = SessionId::parse(id)?;
         let lock_path = self.root.join(format!("{parsed}.lock"));
-        {
-            let _writer = self.acquire_writer_id(parsed.clone())?;
-            let _ = std::fs::remove_file(self.replay_index_path_for(&parsed));
-            std::fs::remove_file(self.session_path_for(&parsed))?;
-        }
+        // Unlink everything while the lease is held: removing the lock
+        // after release would race a new holder of the same path.
+        let _writer = self.acquire_writer_id(parsed.clone())?;
+        let _ = std::fs::remove_file(self.replay_index_path_for(&parsed));
+        std::fs::remove_file(self.session_path_for(&parsed))?;
         let _ = std::fs::remove_file(lock_path);
         Ok(())
     }
