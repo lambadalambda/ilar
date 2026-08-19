@@ -4,7 +4,7 @@ use serde::Deserialize;
 
 use super::{
     Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, WorkspaceAccess, WorkspaceCoverage,
-    WorkspaceLease, parse_input,
+    parse_input, run_blocking_io,
 };
 
 pub struct WriteTool;
@@ -100,22 +100,6 @@ impl Tool for WriteTool {
             }
         })
     }
-}
-
-async fn run_blocking_io<T, F>(
-    lease: std::sync::Arc<WorkspaceLease>,
-    operation: F,
-) -> std::io::Result<T>
-where
-    T: Send + 'static,
-    F: FnOnce() -> std::io::Result<T> + Send + 'static,
-{
-    tokio::task::spawn_blocking(move || {
-        let _lease = lease;
-        operation()
-    })
-    .await
-    .map_err(|error| std::io::Error::other(format!("blocking write task failed: {error}")))?
 }
 
 #[cfg(test)]

@@ -537,3 +537,56 @@ async fn empty_calls_returns_empty() {
     .await;
     assert!(outcomes.is_empty());
 }
+
+/// The real mutating tools go through the executor's workspace protocol.
+/// A tool whose `manages_workspace_access` / `accepts_executor_workspace_lease`
+/// flags disagree takes the executor's *permit* branch and then awaits a
+/// *lease* on the same workspace lock, deadlocking forever. Calling
+/// `tool.run()` directly (as the tool tests do) cannot catch that, so
+/// drive them through `execute_calls` here.
+#[tokio::test]
+async fn real_mutating_tools_complete_through_the_executor() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "original\n").unwrap();
+    let registry = ilar::tools::ToolRegistry::builtin();
+    let context = ToolContext::root(dir.path().to_path_buf());
+
+    let outcomes = tokio::time::timeout(
+        Duration::from_secs(10),
+        execute_calls(
+            vec![
+                ToolCall {
+                    id: "edit-1".into(),
+                    name: "edit".into(),
+                    input: serde_json::json!({
+                        "path": "a.txt",
+                        "old_string": "original",
+                        "new_string": "edited"
+                    }),
+                },
+                ToolCall {
+                    id: "write-1".into(),
+                    name: "write".into(),
+                    input: serde_json::json!({"path": "b.txt", "content": "new"}),
+                },
+            ],
+            |name| registry.get(name),
+            context,
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("mutating tools deadlocked in the executor workspace protocol");
+
+    for outcome in &outcomes {
+        assert!(!outcome.output.is_error, "{}", outcome.output.content);
+    }
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+        "edited\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("b.txt")).unwrap(),
+        "new"
+    );
+}
