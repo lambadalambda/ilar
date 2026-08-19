@@ -1934,9 +1934,36 @@ fn tool_entry_rows(
     rows
 }
 
+/// Last couple of lines of a streaming child reply — enough to see it is
+/// alive without flooding the parent transcript; the full reply is one
+/// expansion away (and the parent distills it anyway).
+fn preview_tail(text: &str) -> String {
+    const PREVIEW_LINES: usize = 2;
+    const PREVIEW_CHARS: usize = 240;
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let tail_start = lines.len().saturating_sub(PREVIEW_LINES);
+    let mut tail = lines[tail_start..].join("\n");
+    if tail.len() > PREVIEW_CHARS {
+        let cut = tail
+            .char_indices()
+            .map(|(index, _)| index)
+            .find(|index| *index >= tail.len() - PREVIEW_CHARS)
+            .unwrap_or(0);
+        tail = tail[cut..].to_string();
+    }
+    if tail_start > 0 || tail.len() < text.trim().len() {
+        format!("… {tail}")
+    } else {
+        tail
+    }
+}
+
 fn agent_live_preview(lines: &[Line_]) -> Vec<Line_> {
-    let mut preview = if let Some(response @ Line_::Assistant(_)) = lines.last() {
-        vec![response.clone()]
+    let mut preview = if let Some(Line_::Assistant(text)) = lines.last() {
+        vec![Line_::Assistant(preview_tail(text))]
     } else {
         lines
             .iter()
@@ -9321,6 +9348,29 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(screen.contains("/goal — work until"), "{screen}");
+    }
+
+    #[test]
+    fn agent_reply_previews_are_bounded_tails() {
+        // Short replies pass through untouched.
+        assert_eq!(preview_tail("done"), "done");
+        // Long replies show only the last lines, marked truncated.
+        let long: String = (0..30)
+            .map(|index| format!("finding number {index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let preview = preview_tail(&long);
+        assert!(preview.starts_with("… "), "{preview}");
+        assert!(preview.contains("finding number 29"), "{preview}");
+        assert!(!preview.contains("finding number 5"), "{preview}");
+
+        // A live child with a long reply previews bounded in the parent.
+        let child = vec![Line_::Assistant(long.clone())];
+        let previewed = agent_live_preview(&child);
+        let Some(Line_::Assistant(text)) = previewed.first() else {
+            panic!("assistant preview expected: {previewed:?}");
+        };
+        assert!(text.lines().count() <= 3, "{text}");
     }
 
     #[test]
