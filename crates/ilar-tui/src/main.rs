@@ -2211,14 +2211,45 @@ fn append_thought_tail(text: &mut String, delta: &str) {
 fn stream_liveness(
     received: u64,
     last_data: Option<std::time::Instant>,
+    rate: Option<f64>,
     now: std::time::Instant,
 ) -> Option<String> {
     let since = now.saturating_duration_since(last_data?);
     Some(if since >= STREAM_STALL_AFTER {
         format!("{} · no data {}s", format_bytes(received), since.as_secs())
     } else {
-        format_bytes(received)
+        match rate {
+            Some(rate) if rate >= 1.0 => format!(
+                "{} · {}/s",
+                format_bytes(received),
+                format_bytes(rate as u64)
+            ),
+            _ => format_bytes(received),
+        }
     })
+}
+
+/// Advance a >=1s measurement window; returns the completed window's
+/// bytes/sec when one elapses.
+fn windowed_rate(
+    anchor: &mut Option<(std::time::Instant, u64)>,
+    received: u64,
+    now: std::time::Instant,
+) -> Option<f64> {
+    match *anchor {
+        None => {
+            *anchor = Some((now, received));
+            None
+        }
+        Some((window_start, window_bytes)) => {
+            let elapsed = now.saturating_duration_since(window_start);
+            if elapsed < std::time::Duration::from_secs(1) {
+                return None;
+            }
+            *anchor = Some((now, received));
+            Some(received.saturating_sub(window_bytes) as f64 / elapsed.as_secs_f64())
+        }
+    }
 }
 
 fn activity_line(
@@ -2305,6 +2336,10 @@ struct App {
     /// arrival instant — the status line's stream-liveness indicator.
     stream_received: u64,
     stream_last_data: Option<std::time::Instant>,
+    /// Windowed transfer rate: anchor of the current >=1s window and the
+    /// last completed window's bytes/sec.
+    stream_rate_anchor: Option<(std::time::Instant, u64)>,
+    stream_rate: Option<f64>,
     scroll_top: usize,
     content_rows: usize,
     viewport_rows: usize,
@@ -2365,6 +2400,8 @@ impl App {
             session_cost: Some(0.0),
             stream_received: 0,
             stream_last_data: None,
+            stream_rate_anchor: None,
+            stream_rate: None,
             scroll_top: 0,
             content_rows: 0,
             viewport_rows: 0,
@@ -2466,8 +2503,12 @@ impl App {
     }
 
     fn note_stream_data(&mut self, bytes: usize) {
+        let now = std::time::Instant::now();
         self.stream_received = self.stream_received.saturating_add(bytes as u64);
-        self.stream_last_data = Some(std::time::Instant::now());
+        self.stream_last_data = Some(now);
+        if let Some(rate) = windowed_rate(&mut self.stream_rate_anchor, self.stream_received, now) {
+            self.stream_rate = Some(rate);
+        }
     }
 
     fn set_activity(&mut self, activity: Activity) {
@@ -2509,6 +2550,8 @@ impl App {
                 self.clear_transient_notice();
                 self.status = "thinking…".into();
                 self.stream_received = 0;
+                self.stream_rate_anchor = None;
+                self.stream_rate = None;
                 // Seed liveness at turn start: a provider that hangs
                 // before its first byte must still show "0 B · no data Ns"
                 // instead of a bare spinner.
@@ -3097,7 +3140,13 @@ impl App {
             self.activity,
             now,
             self.activity_started,
-            stream_liveness(self.stream_received, self.stream_last_data, now).as_deref(),
+            stream_liveness(
+                self.stream_received,
+                self.stream_last_data,
+                self.stream_rate,
+                now,
+            )
+            .as_deref(),
         ) {
             if !output.is_empty() {
                 output.push(Line::default());
@@ -3209,6 +3258,7 @@ impl App {
             Activity::Thinking | Activity::Responding if width >= 48 => stream_liveness(
                 self.stream_received,
                 self.stream_last_data,
+                self.stream_rate,
                 std::time::Instant::now(),
             )
             .map(|liveness| format!("{state} · {liveness}"))
@@ -3473,7 +3523,13 @@ impl App {
             self.activity,
             now,
             self.activity_started,
-            stream_liveness(self.stream_received, self.stream_last_data, now).as_deref(),
+            stream_liveness(
+                self.stream_received,
+                self.stream_last_data,
+                self.stream_rate,
+                now,
+            )
+            .as_deref(),
         )
         .into_iter()
         .flat_map(|line| wrap_styled_line(line, text_width as usize))
@@ -7841,15 +7897,58 @@ mod tests {
         assert!(!rendered_text(&tools).contains("KiB"));
 
         // The helper itself: fresh vs stalled vs absent.
-        assert_eq!(stream_liveness(2048, None, now), None);
+        assert_eq!(stream_liveness(2048, None, None, now), None);
         assert_eq!(
-            stream_liveness(2048, Some(now), now).as_deref(),
+            stream_liveness(2048, Some(now), None, now).as_deref(),
             Some("2.0 KiB")
         );
         assert_eq!(
-            stream_liveness(0, Some(now - std::time::Duration::from_secs(7)), now).as_deref(),
+            stream_liveness(2048, Some(now), Some(512.0), now).as_deref(),
+            Some("2.0 KiB · 512 B/s")
+        );
+        assert_eq!(
+            stream_liveness(
+                0,
+                Some(now - std::time::Duration::from_secs(7)),
+                Some(512.0),
+                now
+            )
+            .as_deref(),
             Some("0 B · no data 7s")
         );
+    }
+
+    #[test]
+    fn windowed_rate_measures_per_second_windows() {
+        let start = std::time::Instant::now();
+        let mut anchor = None;
+        // First observation opens the window.
+        assert_eq!(windowed_rate(&mut anchor, 1_000, start), None);
+        // Within the window: no reading yet.
+        assert_eq!(
+            windowed_rate(
+                &mut anchor,
+                3_000,
+                start + std::time::Duration::from_millis(500)
+            ),
+            None
+        );
+        // Window closes: (5000 - 1000) bytes over 2s = 2000 B/s.
+        let rate = windowed_rate(
+            &mut anchor,
+            5_000,
+            start + std::time::Duration::from_secs(2),
+        )
+        .unwrap();
+        assert!((rate - 2_000.0).abs() < 1.0, "{rate}");
+        // Anchor advanced: the next window measures fresh bytes.
+        let rate = windowed_rate(
+            &mut anchor,
+            5_000,
+            start + std::time::Duration::from_secs(3),
+        )
+        .unwrap();
+        assert!(rate.abs() < 1.0, "{rate}");
     }
 
     #[test]
