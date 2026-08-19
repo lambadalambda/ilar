@@ -67,7 +67,11 @@ where
                 let events = match mapper.map(&data) {
                     Ok(events) => events,
                     Err(error) => {
-                        let _ = tx.send(ProviderEvent::Error(error)).await;
+                        // Include the offending wire event so decode
+                        // failures are diagnosable from the session alone.
+                        let _ = tx
+                            .send(ProviderEvent::Error(decode_error(error, &data, &secrets)))
+                            .await;
                         return;
                     }
                 };
@@ -104,6 +108,23 @@ where
         stream: ReceiverStream::new(rx),
         handle: Some(handle),
     })
+}
+
+const MAX_EVENT_SNIPPET_CHARS: usize = 600;
+
+/// Decode error annotated with a bounded, secret-scrubbed snippet of the
+/// SSE event that failed to map.
+fn decode_error(error: String, data: &str, secrets: &[String]) -> String {
+    let mut snippet: String = data.chars().take(MAX_EVENT_SNIPPET_CHARS).collect();
+    if data.chars().count() > MAX_EVENT_SNIPPET_CHARS {
+        snippet.push('…');
+    }
+    for secret in secrets {
+        if !secret.is_empty() {
+            snippet = snippet.replace(secret, "<redacted>");
+        }
+    }
+    format!("{error} · offending event: {snippet}")
 }
 
 fn is_terminal(event: &ProviderEvent) -> bool {
@@ -226,6 +247,57 @@ mod tests {
         assert!(
             matches!(events.as_slice(), [ProviderEvent::Error(error)] if error == "internal error: transport boom")
         );
+    }
+
+    struct FailingMapper;
+
+    impl EventMapper for FailingMapper {
+        fn map(&mut self, _data: &str) -> Result<Vec<ProviderEvent>, String> {
+            Err("unknown delta type".into())
+        }
+
+        fn finish(&mut self) -> Option<ProviderEvent> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn decode_errors_carry_a_scrubbed_event_snippet() {
+        let response = response("data: {\"delta\":\"weird\",\"token\":\"sk-secret\"}\n\n").await;
+        let events = stream(
+            async {
+                Ok(TransportResponse {
+                    response,
+                    secrets: vec!["sk-secret".into()],
+                })
+            },
+            FailingMapper,
+        )
+        .collect::<Vec<_>>()
+        .await;
+
+        let [ProviderEvent::Error(error)] = events.as_slice() else {
+            panic!("expected a single terminal error: {events:?}");
+        };
+        assert!(error.contains("unknown delta type"), "{error}");
+        assert!(
+            error.contains("offending event") && error.contains("\"weird\""),
+            "{error}"
+        );
+        assert!(!error.contains("sk-secret"), "{error}");
+        assert!(error.contains("<redacted>"), "{error}");
+    }
+
+    #[test]
+    fn decode_error_snippets_are_bounded() {
+        let long = "x".repeat(MAX_EVENT_SNIPPET_CHARS * 4);
+        let error = decode_error("boom".into(), &long, &[]);
+        assert!(
+            error.chars().count() < MAX_EVENT_SNIPPET_CHARS + 50,
+            "{}",
+            error.len()
+        );
+        assert!(error.ends_with('…'), "{error}");
     }
 
     #[tokio::test]

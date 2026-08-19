@@ -1182,7 +1182,17 @@ async fn interrupted_reasoning_summary_is_not_persisted() {
     .unwrap_err();
 
     assert!(error.to_string().contains("connection lost"));
-    assert_eq!(store.load(&session_id).unwrap().transcript().len(), 1);
+    // The half-written reasoning summary is dropped; only the user turn
+    // and the error-diagnostic assistant turn (provider-invisible) remain.
+    let transcript = store.load(&session_id).unwrap().transcript();
+    assert_eq!(transcript.len(), 2, "{transcript:?}");
+    assert!(
+        transcript[1]
+            .content
+            .iter()
+            .all(|block| matches!(block, ContentBlock::Diagnostic { text } if text.contains("turn error"))),
+        "{transcript:?}"
+    );
 }
 
 #[tokio::test]
@@ -1725,6 +1735,73 @@ async fn provider_error_mid_stream_persists_partial_step() {
         &transcript[1].content[0],
         ContentBlock::Text { text } if text == "half an answ"
     ));
+    // The error itself is recorded in the session log (as a diagnostic
+    // block, which never flows back to providers) so stream failures are
+    // diagnosable after the fact.
+    let recorded = session
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            ilar::session::SessionEvent::AssistantMessage {
+                content,
+                stop_reason,
+                ..
+            } if stop_reason == "error" => Some(content),
+            _ => None,
+        })
+        .flatten()
+        .find_map(|block| match block {
+            ContentBlock::Diagnostic { text } => Some(text.clone()),
+            _ => None,
+        })
+        .expect("error turn records a diagnostic block");
+    assert!(
+        recorded.contains("turn error: connection reset"),
+        "{recorded}"
+    );
+}
+
+#[tokio::test]
+async fn provider_error_with_no_content_still_persists_the_error() {
+    // A turn that dies before any visible content (e.g. a decode error
+    // right after thinking) must still leave a diagnosable trace.
+    let (store, session_id) = temp_session("build");
+    let registry = ToolRegistry::builtin();
+    let provider = MockProvider::new(vec![vec![ProviderEvent::Error(
+        "unknown OpenAI-compatible finish reason \"weird\" · offending event: {…}".into(),
+    )]]);
+
+    let (tx, _rx) = events_channel();
+    let result = run_turn(
+        &provider,
+        &registry,
+        &store,
+        &session_id,
+        "hello",
+        None,
+        LoopConfig::default(),
+        tx,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+    )
+    .await;
+
+    assert!(result.is_err());
+    let session = store.load(&session_id).unwrap();
+    let error_turns: Vec<_> = session
+        .events()
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                ilar::session::SessionEvent::AssistantMessage { stop_reason, .. }
+                    if stop_reason == "error"
+            )
+        })
+        .collect();
+    assert_eq!(error_turns.len(), 1, "{error_turns:?}");
+    let rendered = format!("{error_turns:?}");
+    assert!(rendered.contains("offending event"), "{rendered}");
 }
 
 #[tokio::test]

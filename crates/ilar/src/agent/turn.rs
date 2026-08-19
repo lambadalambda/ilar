@@ -1081,19 +1081,22 @@ pub async fn run_turn(
 
         if let Some(message) = errored {
             // Persist the partial step so the UI's already-shown deltas
-            // don't evaporate from the transcript.
+            // don't evaporate from the transcript — and record the error
+            // itself so failures stay diagnosable from the session log
+            // (see meta/issues: provider decode errors were lost before).
             let mut blocks = paused_content.clone();
             blocks.extend(acc.content_blocks());
-            if !blocks.is_empty() {
-                session.append(SessionEvent::AssistantMessage {
-                    id: new_id(),
-                    model: model.clone(),
-                    content: blocks,
-                    usage: acc.usage,
-                    stop_reason: "error".into(),
-                    ts: Utc::now(),
-                })?;
-            }
+            blocks.push(crate::session::ContentBlock::Diagnostic {
+                text: format!("turn error: {message}"),
+            });
+            session.append(SessionEvent::AssistantMessage {
+                id: new_id(),
+                model: model.clone(),
+                content: blocks,
+                usage: acc.usage,
+                stop_reason: "error".into(),
+                ts: Utc::now(),
+            })?;
             let calls = acc.tool_calls();
             let completed_ids: std::collections::HashSet<&str> =
                 calls.iter().map(|(id, _, _, _)| id.as_str()).collect();
