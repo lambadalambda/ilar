@@ -99,3 +99,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Prompt history recall](issues/prompt-history-recall.md)
 - [x] [Cumulative session usage + cost display](issues/cumulative-usage-and-cost.md)
 - [x] [Help overlay with keybindings](issues/help-overlay.md)
+- [x] [Readline-style input editing](issues/readline-input-editing.md)
