@@ -90,3 +90,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Polish transcript hierarchy](issues/polish-transcript-hierarchy.md)
 - [x] [Stabilize OpenAI prompt caching](issues/stabilize-openai-prompt-caching.md)
 - [x] [Add theme picker](issues/add-theme-picker.md)
+- [x] [Bound project context discovery](issues/bound-project-context-discovery.md)

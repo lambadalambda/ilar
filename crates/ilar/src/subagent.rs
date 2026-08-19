@@ -15,6 +15,7 @@ use crate::tools::{
     Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, ToolRegistry, ToolStartObserver,
     WorkspaceAccess,
 };
+use anyhow::Context;
 use serde::Deserialize;
 
 const NOTIFICATION_CAPACITY: usize = 64;
@@ -51,6 +52,7 @@ pub struct SubagentSpawner {
     resolver: Arc<dyn ProviderResolver>,
     store: SessionStore,
     agents: Vec<AgentDefinition>,
+    user_config_dir: std::path::PathBuf,
     workspace_location: crate::tools::WorkspaceLocation,
     depth: usize,
     max_concurrent: usize,
@@ -104,6 +106,7 @@ impl SubagentSpawner {
             resolver,
             store,
             agents,
+            user_config_dir: std::path::PathBuf::from("/nonexistent"),
             workspace_location,
             depth,
             max_concurrent,
@@ -124,6 +127,11 @@ impl SubagentSpawner {
     /// Override the background stall watchdog timeout (tests).
     pub fn with_stall_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.stall_timeout = timeout;
+        self
+    }
+
+    pub fn with_user_config_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.user_config_dir = dir;
         self
     }
 
@@ -215,6 +223,7 @@ impl SubagentSpawner {
             resolver: self.resolver.clone(),
             store: self.store.clone(),
             agents: self.agents.clone(),
+            user_config_dir: self.user_config_dir.clone(),
             workspace_location,
             depth: self.depth + 1,
             max_concurrent: self.max_concurrent,
@@ -333,6 +342,19 @@ impl SubagentSpawner {
             None
         };
         let child_workspace = ctx.workspace.scoped(&child_location);
+        let mut system_prompt = match system_prompt_for(&self.user_config_dir, child_location.cwd())
+        {
+            Ok(prompt) => prompt,
+            Err(error) => {
+                return ToolOutput::error(format!("loading subagent context: {error:#}"));
+            }
+        };
+        if !agent.prompt.is_empty() {
+            system_prompt = format!(
+                "{system_prompt}\n\n# Agent: {}\n\n{}",
+                agent.name, agent.prompt
+            );
+        }
 
         let mut active_session = match &input.task_id {
             Some(id) => match self.claim_session(id) {
@@ -486,14 +508,6 @@ impl SubagentSpawner {
         }
         let _active_session = active_session.expect("new session id must be unique");
         let parent_call_id = ctx.call_id.clone().unwrap_or_default();
-
-        let mut system_prompt = system_prompt_for(child_location.cwd());
-        if !agent.prompt.is_empty() {
-            system_prompt = format!(
-                "{system_prompt}\n\n# Agent: {}\n\n{}",
-                agent.name, agent.prompt
-            );
-        }
 
         let child_spawner = self.child_spawner(child_location.clone(), child_workspace.clone());
         let registry = match agent.workspace_mode {
@@ -1049,6 +1063,7 @@ clearly disjoint work."
             resolver: self.resolver.clone(),
             store: self.store.clone(),
             agents: self.agents.clone(),
+            user_config_dir: self.user_config_dir.clone(),
             workspace_location: workspace_location.clone(),
             depth,
             max_concurrent: self.max_concurrent,
@@ -1081,7 +1096,11 @@ clearly disjoint work."
                 ToolRegistry::builtin().with_subagents(runtime.clone())?
             }
         };
-        let mut system_prompt = system_prompt_for(workspace_location.cwd());
+        let mut system_prompt =
+            match system_prompt_for(&self.user_config_dir, workspace_location.cwd()) {
+                Ok(prompt) => prompt,
+                Err(error) => return context_route_failure(&meta, notification, error),
+            };
         if !agent.prompt.is_empty() {
             system_prompt = format!(
                 "{system_prompt}\n\n# Agent: {}\n\n{}",
@@ -1296,6 +1315,24 @@ fn workspace_route_failure(
         description: notification.description,
         text: format!(
             "<task-notification>\nNested task failed because its workspace could not be restored.\n<result>\n{error:#}\n</result>\n</task-notification>"
+        ),
+        is_error: true,
+    }))
+}
+
+fn context_route_failure(
+    meta: &SessionMeta,
+    notification: Notification,
+    error: anyhow::Error,
+) -> anyhow::Result<RouteOutcome> {
+    let Some(grandparent_id) = &meta.parent_id else {
+        return Err(error).context("loading routed subagent context");
+    };
+    Ok(RouteOutcome::Propagate(Notification {
+        parent_session_id: grandparent_id.clone(),
+        description: notification.description,
+        text: format!(
+            "<task-notification>\nNested task failed while loading its context.\n<result>\n{error:#}\n</result>\n</task-notification>"
         ),
         is_error: true,
     }))
@@ -1574,5 +1611,30 @@ mod tests {
         publish_reserved_notification(&mut permit, notification("first"));
         assert_eq!(receiver.recv().await.unwrap().description, "first");
         assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn nested_context_failure_propagates_to_the_grandparent() {
+        let meta = SessionMeta {
+            session_id: "parent".into(),
+            parent_id: Some("grandparent".into()),
+            agent: "build".into(),
+            model: "zai/glm-4.7".into(),
+            workspace: None,
+        };
+
+        let outcome = context_route_failure(
+            &meta,
+            notification("nested"),
+            anyhow::anyhow!("bad AGENTS.md"),
+        )
+        .unwrap();
+
+        let RouteOutcome::Propagate(notification) = outcome else {
+            panic!("expected propagated failure");
+        };
+        assert_eq!(notification.parent_session_id, "grandparent");
+        assert!(notification.is_error);
+        assert!(notification.text.contains("bad AGENTS.md"));
     }
 }

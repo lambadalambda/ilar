@@ -231,47 +231,67 @@ fn markdown_agents_parsed_and_merged() {
 }
 
 #[test]
-fn agents_md_discovered_up_the_tree() {
+fn user_and_working_directory_context_are_combined_without_parent_search() {
     let (_g, root) = tempdir();
-    fs::create_dir_all(root.join("a/b/c")).unwrap();
-    write(&root.join("a/AGENTS.md"), "# Project rules\nUse tabs.\n");
+    let user = root.join("config");
+    let parent = root.join("project");
+    let cwd = parent.join("nested");
+    fs::create_dir_all(&cwd).unwrap();
+    write(&user.join("AGENTS.md"), "global rules\n");
+    write(&parent.join("AGENTS.md"), "parent rules\n");
+    write(&cwd.join("CLAUDE.md"), "working rules\n");
 
-    let prompt = system_prompt_for(&root.join("a/b/c"));
-    assert!(
-        prompt.to_lowercase().contains("use tabs"),
-        "AGENTS.md not injected: {prompt}"
-    );
+    let prompt = system_prompt_for(&user, &cwd).unwrap();
 
-    // CLAUDE.md fallback.
-    fs::remove_file(root.join("a/AGENTS.md")).unwrap();
-    write(&root.join("a/CLAUDE.md"), "# Legacy rules\nUse spaces.\n");
-    let prompt = system_prompt_for(&root.join("a/b/c"));
+    assert!(prompt.contains("global rules"), "{prompt}");
+    assert!(prompt.contains("working rules"), "{prompt}");
+    assert!(!prompt.contains("parent rules"), "{prompt}");
     assert!(
-        prompt.to_lowercase().contains("use spaces"),
-        "CLAUDE.md fallback broken: {prompt}"
+        prompt.find("global rules") < prompt.find("working rules"),
+        "working-directory rules should be last: {prompt}"
     );
 }
 
 #[test]
 fn no_agents_md_yields_base_prompt() {
-    let (_g, root) = tempdir();
-    let prompt = system_prompt_for(&root);
+    let (_user_guard, user) = tempdir();
+    let (_cwd_guard, cwd) = tempdir();
+    let prompt = system_prompt_for(&user, &cwd).unwrap();
     assert!(!prompt.to_lowercase().contains("agents.md"));
+    assert!(!prompt.to_lowercase().contains("claude.md"));
 }
 
 #[test]
-fn closest_agents_md_wins() {
+fn agents_md_wins_over_claude_md_in_each_context_location() {
     let (_g, root) = tempdir();
-    fs::create_dir_all(root.join("a/b")).unwrap();
-    write(&root.join("AGENTS.md"), "root rules\n");
-    write(&root.join("a/AGENTS.md"), "middle rules\n");
+    let user = root.join("config");
+    let cwd = root.join("project");
+    write(&user.join("AGENTS.md"), "user agents\n");
+    write(&user.join("CLAUDE.md"), "user claude\n");
+    write(&cwd.join("AGENTS.md"), "project agents\n");
+    write(&cwd.join("CLAUDE.md"), "project claude\n");
 
-    let prompt = system_prompt_for(&root.join("a/b"));
-    assert!(
-        prompt.contains("middle rules"),
-        "nearest should win: {prompt}"
-    );
-    assert!(!prompt.contains("root rules"), "parent leaked: {prompt}");
+    let prompt = system_prompt_for(&user, &cwd).unwrap();
+
+    assert!(prompt.contains("user agents"), "{prompt}");
+    assert!(prompt.contains("project agents"), "{prompt}");
+    assert!(!prompt.contains("user claude"), "{prompt}");
+    assert!(!prompt.contains("project claude"), "{prompt}");
+}
+
+#[test]
+fn invalid_agents_md_is_reported_instead_of_falling_back() {
+    let (_guard, root) = tempdir();
+    let user = root.join("config");
+    let cwd = root.join("project");
+    fs::create_dir_all(&user).unwrap();
+    fs::create_dir_all(&cwd).unwrap();
+    fs::write(user.join("AGENTS.md"), [0xff]).unwrap();
+    write(&user.join("CLAUDE.md"), "must not be used\n");
+
+    let error = system_prompt_for(&user, &cwd).unwrap_err().to_string();
+
+    assert!(error.contains("AGENTS.md"), "{error}");
 }
 
 #[test]

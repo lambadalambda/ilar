@@ -674,3 +674,17 @@ TOML with a syntax-aware, comment-preserving editor, retains CRLF line endings,
 retries concurrent changes, and publishes through the existing atomic-file
 path. Modal handling is centralized so queued notifications, paste, and mouse
 input cannot leak through the picker.
+
+## 2026-08-19 — Bounded project context discovery
+
+Project instructions no longer walk arbitrary ancestor directories. Root and
+subagent prompts combine `AGENTS.md` (or `CLAUDE.md` as a fallback) from the
+resolved user config directory and exact runtime working directory, with local
+instructions last. Non-missing read failures are surfaced instead of silently
+dropping policy or falling through to a legacy file.
+
+The user config directory is carried through nested, isolated, and routed
+subagent runtimes. Context is loaded before fresh child-session creation, and
+routed nested failures propagate to the grandparent rather than losing a
+background completion. The README now provides the corresponding complete
+configuration, environment, custom-agent, and skill reference.

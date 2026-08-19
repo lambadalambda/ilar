@@ -13,7 +13,7 @@ use ilar::provider::{
 use ilar::session::{
     ChatMessage, ContentBlock, SessionEvent, SessionMeta, SessionStore, Usage, new_id,
 };
-use ilar::subagent::SubagentSpawner;
+use ilar::subagent::{SubagentSpawner, TaskInput};
 use ilar::tools::{ToolContext, ToolRegistry};
 
 fn temp_store() -> (SessionStore, String) {
@@ -147,6 +147,140 @@ fn task_call(id: &str, prompt: &str) -> ProviderEvent {
             "subagent_type": "explore",
         }),
     }
+}
+
+#[tokio::test]
+async fn foreground_subagent_receives_user_and_exact_workspace_context() {
+    let user = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(user.path().join("AGENTS.md"), "user context\n").unwrap();
+    std::fs::write(workspace.path().join("AGENTS.md"), "workspace context\n").unwrap();
+    let provider = Arc::new(MockProvider::new(vec![vec![
+        ProviderEvent::TextDelta("done".into()),
+        ProviderEvent::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        },
+    ]]));
+    let (store, parent_id) = temp_store();
+    let spawner = Arc::new(
+        SubagentSpawner::new(
+            Arc::new(FixedProviderResolver::new(provider.clone())),
+            store,
+            vec![AgentDefinition {
+                name: "explore".into(),
+                description: "explores things".into(),
+                model: None,
+                prompt: String::new(),
+                workspace_mode: AgentWorkspaceMode::ReadOnly,
+            }],
+            workspace.path().to_path_buf(),
+            0,
+            1,
+            1,
+        )
+        .with_user_config_dir(user.path().to_path_buf()),
+    );
+    let mut context = ToolContext::root(workspace.path().to_path_buf());
+    context.session_id = parent_id;
+
+    let output = spawner
+        .run_task(
+            TaskInput {
+                description: "inspect".into(),
+                prompt: "inspect this workspace".into(),
+                subagent_type: "explore".into(),
+                task_id: None,
+                background: None,
+                workspace: None,
+            },
+            &context,
+        )
+        .await;
+
+    assert!(!output.is_error, "{}", output.content);
+    let requests = provider.requests();
+    let prompt = requests[0].system_prompt.as_deref().unwrap();
+    assert!(prompt.contains("user context"), "{prompt}");
+    assert!(prompt.contains("workspace context"), "{prompt}");
+    assert!(
+        prompt.find("user context") < prompt.find("workspace context"),
+        "{prompt}"
+    );
+}
+
+#[tokio::test]
+async fn invalid_subagent_context_fails_before_creating_a_child_session() {
+    let user = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(user.path().join("AGENTS.md"), [0xff]).unwrap();
+    let provider = Arc::new(MockProvider::new(vec![vec![]]));
+    let (store, parent_id) = temp_store();
+    let sessions_dir = store
+        .session_path(&parent_id)
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let session_count = std::fs::read_dir(&sessions_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "jsonl")
+        })
+        .count();
+    let spawner = Arc::new(
+        SubagentSpawner::new(
+            Arc::new(FixedProviderResolver::new(provider.clone())),
+            store,
+            vec![AgentDefinition {
+                name: "explore".into(),
+                description: "explores things".into(),
+                model: None,
+                prompt: String::new(),
+                workspace_mode: AgentWorkspaceMode::ReadOnly,
+            }],
+            workspace.path().to_path_buf(),
+            0,
+            1,
+            1,
+        )
+        .with_user_config_dir(user.path().to_path_buf()),
+    );
+    let mut context = ToolContext::root(workspace.path().to_path_buf());
+    context.session_id = parent_id;
+
+    let output = spawner
+        .run_task(
+            TaskInput {
+                description: "inspect".into(),
+                prompt: "inspect this workspace".into(),
+                subagent_type: "explore".into(),
+                task_id: None,
+                background: None,
+                workspace: None,
+            },
+            &context,
+        )
+        .await;
+
+    assert!(output.is_error);
+    assert!(output.content.contains("AGENTS.md"), "{}", output.content);
+    let final_session_count = std::fs::read_dir(sessions_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "jsonl")
+        })
+        .count();
+    assert_eq!(final_session_count, session_count);
+    assert!(provider.requests().is_empty());
 }
 
 async fn run_two_tasks(

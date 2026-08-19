@@ -32,6 +32,8 @@ threshold = 0.85
 [subagents]
 max_concurrent = 10
 max_depth = 3
+# Background bash/tool timeout in milliseconds.
+background_tool_timeout_ms = 600000
 
 # Custom agents live in ~/.config/ilar/agents/*.md or .ilar/agents/*.md.
 # See examples/agents/explorer.md for supported frontmatter.

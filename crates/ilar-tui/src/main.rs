@@ -5153,7 +5153,8 @@ async fn main() -> Result<()> {
     let skill_listing = skill_store
         .listing_prompt()
         .context("loading skill definitions")?;
-    let mut system_prompt = system_prompt_for(&cwd);
+    let mut system_prompt =
+        system_prompt_for(config.dirs().0, &cwd).context("loading project instructions")?;
     if !skill_listing.is_empty() {
         system_prompt = format!("{system_prompt}\n\n{skill_listing}");
     }
@@ -5214,6 +5215,7 @@ async fn main() -> Result<()> {
             config.subagents.max_concurrent,
             config.subagents.max_depth,
         )
+        .with_user_config_dir(config.dirs().0.to_path_buf())
         .with_background_tool_timeout(std::time::Duration::from_millis(
             config.subagents.background_tool_timeout_ms,
         ))
