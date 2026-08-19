@@ -20,3 +20,4 @@
 
 ## Milestone 5 — Flow
 
+- [ ] [Goal mode](issues/goal-mode.md)
