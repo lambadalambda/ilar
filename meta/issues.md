@@ -18,7 +18,6 @@
 
 ## Milestone 4 — Daily-driver UX
 
-- [ ] [Render diffs for edit/write tool results](issues/render-edit-diffs.md)
 - [ ] [Session list + resume-last](issues/session-list-and-resume-last.md)
 - [ ] [Prompt history recall](issues/prompt-history-recall.md)
 - [ ] [Cumulative session usage + cost display](issues/cumulative-usage-and-cost.md)
