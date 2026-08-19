@@ -6,6 +6,7 @@ pub mod executor;
 pub mod glob;
 pub mod grep;
 pub mod read;
+pub mod service;
 pub mod web;
 pub mod write;
 
@@ -535,6 +536,7 @@ pub struct ToolRegistry {
 pub fn child_tool_names() -> Vec<&'static str> {
     let mut names = ToolRegistry::builtin().tool_names();
     names.push("task");
+    names.push("service");
     names
 }
 
@@ -629,6 +631,15 @@ impl ToolRegistry {
             Some(backend) => self.with_search(Box::new(backend)),
             None => self.with_search(Box::new(web::ExaBackend::from_env())),
         }
+    }
+
+    /// Registry with the service tool attached (shared per-session
+    /// manager: services die when it drops).
+    pub fn with_services(
+        self,
+        manager: std::sync::Arc<service::ServiceManager>,
+    ) -> Result<Self, DuplicateToolError> {
+        self.with_tool(std::sync::Arc::new(service::ServiceTool::new(manager)))
     }
 
     /// Registry with the todo tool attached (shared list for TUI display).

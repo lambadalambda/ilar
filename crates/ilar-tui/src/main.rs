@@ -2463,6 +2463,10 @@ struct App {
     pending_manager: Option<PendingManager>,
     /// Snapshot of spawner.running_background() for rendering.
     background_running: usize,
+    /// Snapshot of the service manager's running count for rendering.
+    services_running: usize,
+    /// (name, running, detail) rows for the sidebar.
+    services_view: Vec<(String, bool, String)>,
     /// Palette-requested compaction, applied to the next turn's config.
     compact_requested: bool,
     search_active: bool,
@@ -2542,6 +2546,8 @@ impl App {
             slash_selected: 0,
             pending_manager: None,
             background_running: 0,
+            services_running: 0,
+            services_view: Vec::new(),
             compact_requested: false,
             search_active: false,
             search_query: String::new(),
@@ -3147,6 +3153,9 @@ impl App {
         if self.background_running > 0 {
             items.push(PendingItem::BackgroundJobs);
         }
+        if self.services_running > 0 {
+            items.push(PendingItem::Services);
+        }
         if self.retry_available {
             items.push(PendingItem::Retry);
         }
@@ -3191,6 +3200,7 @@ impl App {
                             match armed_item {
                                 PendingItem::Goal => PendingAction::AbortGoal,
                                 PendingItem::BackgroundJobs => PendingAction::CancelBackground,
+                                PendingItem::Services => PendingAction::StopServices,
                                 _ => PendingAction::Stay,
                             }
                         } else {
@@ -3204,7 +3214,7 @@ impl App {
                 PendingItem::Queued(index) => PendingAction::EditQueued(index),
                 PendingItem::Goal => PendingAction::EditGoal,
                 PendingItem::Retry => PendingAction::RetryNow,
-                PendingItem::BackgroundJobs => PendingAction::Stay,
+                PendingItem::BackgroundJobs | PendingItem::Services => PendingAction::Stay,
             },
             _ => PendingAction::Stay,
         }
@@ -4042,6 +4052,67 @@ impl App {
                             theme::title(theme::REASONING),
                         )));
                     frame.render_widget(Paragraph::new(lines).block(goal_block), goal_area);
+                }
+            }
+            if !self.services_view.is_empty() {
+                let text_width = todo_area
+                    .width
+                    .saturating_sub(2 + CONTENT_HORIZONTAL_PADDING * 2)
+                    .max(1) as usize;
+                let shown = self.services_view.len().min(4);
+                let mut lines: Vec<Line<'static>> = self
+                    .services_view
+                    .iter()
+                    .take(shown)
+                    .map(|(name, running, detail)| {
+                        let (marker, color) = if *running {
+                            ("● ", theme::SUCCESS)
+                        } else {
+                            ("○ ", MUTED)
+                        };
+                        Line::from(vec![
+                            Span::styled(marker, Style::default().fg(color)),
+                            Span::styled(
+                                truncate_display(
+                                    &format!("{name} · {detail}"),
+                                    text_width.saturating_sub(2),
+                                    Truncation::Right,
+                                ),
+                                Style::default().fg(if *running { theme::PRIMARY } else { MUTED }),
+                            ),
+                        ])
+                    })
+                    .collect();
+                if self.services_view.len() > shown {
+                    lines.push(Line::styled(
+                        format!("  +{} more", self.services_view.len() - shown),
+                        Style::default().fg(MUTED),
+                    ));
+                }
+                let height = (lines.len() as u16 + 2).min(todo_area.height / 2);
+                if height > 2 {
+                    let service_area = Rect::new(todo_area.x, todo_area.y, todo_area.width, height);
+                    todo_area = Rect::new(
+                        todo_area.x,
+                        todo_area.y + height,
+                        todo_area.width,
+                        todo_area.height - height,
+                    );
+                    let service_block = Block::default()
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .border_style(theme::panel_border())
+                        .padding(Padding::new(
+                            CONTENT_HORIZONTAL_PADDING,
+                            CONTENT_HORIZONTAL_PADDING,
+                            0,
+                            0,
+                        ))
+                        .title(Line::from(Span::styled(
+                            format!("services ({})", self.services_running),
+                            theme::title(TOOL_ACTIVE),
+                        )));
+                    frame.render_widget(Paragraph::new(lines).block(service_block), service_area);
                 }
             }
             let todo_block = Block::default()
@@ -5260,6 +5331,16 @@ fn render_pending_manager(frame: &mut Frame, app: &App) {
                         format!("background jobs: {} running", app.background_running)
                     }
                 }
+                PendingItem::Services => {
+                    if armed {
+                        format!(
+                            "services ({}): press d again to stop all",
+                            app.services_running
+                        )
+                    } else {
+                        format!("services: {} running", app.services_running)
+                    }
+                }
                 PendingItem::Retry => format!(
                     "retry: {}",
                     app.last_prompt.as_deref().unwrap_or("").replace('\n', " ")
@@ -5349,6 +5430,7 @@ enum PendingItem {
     Queued(usize),
     Goal,
     BackgroundJobs,
+    Services,
     Retry,
 }
 
@@ -5361,6 +5443,7 @@ enum PendingAction {
     AbortGoal,
     EditGoal,
     CancelBackground,
+    StopServices,
     DismissRetry,
     RetryNow,
 }
@@ -7179,6 +7262,7 @@ async fn main() -> Result<()> {
             max_iterations: config.agent.max_iterations,
             ..LoopConfig::default()
         };
+        let services = ilar::tools::service::ServiceManager::new();
         let spawner = std::sync::Arc::new(
             SubagentSpawner::new(
                 resolver.clone(),
@@ -7193,11 +7277,13 @@ async fn main() -> Result<()> {
             .with_background_tool_timeout(std::time::Duration::from_millis(
                 config.subagents.background_tool_timeout_ms,
             ))
-            .with_loop_config(loop_config.clone()),
+            .with_loop_config(loop_config.clone())
+            .with_services(services.clone()),
         );
         let todos = std::sync::Arc::new(std::sync::Mutex::new(restored_todos(resumed.as_ref())));
         let registry = ToolRegistry::builtin()
             .with_subagents(spawner.clone())?
+            .with_services(services.clone())?
             .with_todos(todos.clone())?
             .with_web_tools()?
             .with_skills(skill_store)?;
@@ -7249,6 +7335,7 @@ async fn main() -> Result<()> {
             subagent_activity,
             loop_config,
             model_choices,
+            services,
         )
         .await?;
         active_theme = app.theme;
@@ -7401,6 +7488,7 @@ async fn run_app(
     mut subagent_activity: tokio::sync::broadcast::Receiver<ilar::subagent::SubagentActivity>,
     loop_config: LoopConfig,
     model_choices: Vec<&'static ilar::model::ModelInfo>,
+    services: std::sync::Arc<ilar::tools::service::ServiceManager>,
 ) -> Result<AppExit> {
     let mut events_rx: Option<LoopEventReceiver> = None;
     let mut pending_notification = None;
@@ -7663,6 +7751,12 @@ async fn run_app(
         );
 
         app.background_running = spawner.running_background();
+        app.services_view = services.snapshot();
+        app.services_running = app
+            .services_view
+            .iter()
+            .filter(|(_, running, _)| *running)
+            .count();
         terminal.draw(|frame| app.render(frame))?;
 
         // Poll terminal input (fast while busy so streaming keeps rendering).
@@ -7741,6 +7835,11 @@ async fn run_app(
                                 "background jobs cancelled; notifications paused; send a message to resume",
                                 NoticeLevel::Warning,
                             );
+                        }
+                        PendingAction::StopServices => {
+                            services.stop_all();
+                            app.services_running = 0;
+                            app.set_notice("services stopped", NoticeLevel::Info);
                         }
                         PendingAction::DismissRetry => {
                             app.retry_available = false;
@@ -9270,6 +9369,31 @@ mod tests {
             app.pending_manager_key(KeyCode::Esc, false),
             PendingAction::Close
         );
+    }
+
+    #[test]
+    fn services_show_in_the_sidebar() {
+        let mut app = App::new();
+        app.services_view = vec![
+            ("web".into(), true, "up 3m2s".into()),
+            ("worker".into(), false, "exit 1".into()),
+        ];
+        app.services_running = 1;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let screen = (0..30)
+            .map(|row| {
+                (0..140)
+                    .map(|column| terminal.backend().buffer()[(column, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("services (1)"), "{screen}");
+        assert!(screen.contains("web · up 3m2s"), "{screen}");
+        assert!(screen.contains("worker · exit 1"), "{screen}");
+        assert!(screen.contains("todos"), "{screen}");
     }
 
     #[test]

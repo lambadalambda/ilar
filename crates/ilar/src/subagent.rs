@@ -71,6 +71,8 @@ pub struct SubagentSpawner {
     workspace: crate::tools::WorkspaceScheduler,
     background_tool_timeout: std::time::Duration,
     loop_config: LoopConfig,
+    /// Root session's service manager, shared with mutable child agents.
+    services: Option<std::sync::Arc<crate::tools::service::ServiceManager>>,
 }
 
 struct BackgroundTask {
@@ -121,6 +123,7 @@ impl SubagentSpawner {
             workspace,
             background_tool_timeout: std::time::Duration::from_secs(600),
             loop_config: LoopConfig::default(),
+            services: None,
         }
     }
 
@@ -137,6 +140,14 @@ impl SubagentSpawner {
 
     pub fn with_background_tool_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.background_tool_timeout = timeout;
+        self
+    }
+
+    pub fn with_services(
+        mut self,
+        services: std::sync::Arc<crate::tools::service::ServiceManager>,
+    ) -> Self {
+        self.services = Some(services);
         self
     }
 
@@ -239,6 +250,7 @@ impl SubagentSpawner {
             workspace,
             background_tool_timeout: self.background_tool_timeout,
             loop_config: self.loop_config.clone(),
+            services: self.services.clone(),
         })
     }
 
@@ -513,7 +525,13 @@ impl SubagentSpawner {
         let registry = match agent.workspace_mode {
             AgentWorkspaceMode::ReadOnly => ToolRegistry::read_only(),
             AgentWorkspaceMode::Mutable => {
-                match ToolRegistry::builtin().with_subagents(child_spawner.clone()) {
+                let registry = ToolRegistry::builtin()
+                    .with_subagents(child_spawner.clone())
+                    .and_then(|registry| match self.services.clone() {
+                        Some(services) => registry.with_services(services),
+                        None => Ok(registry),
+                    });
+                match registry {
                     Ok(registry) => registry,
                     Err(error) => {
                         return ToolOutput::error(format!("building child tool registry: {error}"));
@@ -1084,6 +1102,7 @@ clearly disjoint work."
             workspace: workspace.clone(),
             background_tool_timeout: self.background_tool_timeout,
             loop_config: self.loop_config.clone(),
+            services: self.services.clone(),
         });
         let Some(_active_session) = self
             .wait_for_session_claim(&notification.parent_session_id, &cancel)
@@ -1098,7 +1117,11 @@ clearly disjoint work."
         let registry = match agent.workspace_mode {
             AgentWorkspaceMode::ReadOnly => ToolRegistry::read_only(),
             AgentWorkspaceMode::Mutable => {
-                ToolRegistry::builtin().with_subagents(runtime.clone())?
+                let registry = ToolRegistry::builtin().with_subagents(runtime.clone())?;
+                match runtime.services.clone() {
+                    Some(services) => registry.with_services(services)?,
+                    None => registry,
+                }
             }
         };
         let registry = match &agent.tools {

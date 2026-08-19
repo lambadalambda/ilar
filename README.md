@@ -197,6 +197,18 @@ entry opens a picker.
 Built-in subagents are `build` (mutable, serialized per checkout) and `explore`
 (read-only, safe for parallel repository inspection and review).
 
+### Services
+
+The `service` tool manages long-running processes (dev servers,
+watchers): `start {name, command}`, `status`, `logs`, `stop`. Services
+keep running between tool calls, their combined output is retained in a
+bounded buffer, and **everything is killed when the session ends or
+switches** — no orphaned servers. Running services appear in the sidebar
+and in the pending manager (Ctrl-Q), where a confirmed `d d` stops them
+all. Subagents share the session's services. Note that foreground bash
+deliberately kills its process group on completion, so this tool is the
+supported way to keep a server alive.
+
 ### Goal mode
 
 `/goal <description>` keeps ilar working until the goal is demonstrably
