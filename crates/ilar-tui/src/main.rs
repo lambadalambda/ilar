@@ -232,6 +232,32 @@ impl TranscriptRenderCache {
         self.entries.iter().map(|entry| entry.rows.len()).sum()
     }
 
+    /// Absolute indices of rows whose text contains `query`
+    /// (case-insensitive), in row order.
+    fn matching_rows(&self, query: &str) -> Vec<usize> {
+        if query.trim().is_empty() {
+            return Vec::new();
+        }
+        let needle = query.to_lowercase();
+        let mut matches = Vec::new();
+        let mut index = 0usize;
+        for entry in &self.entries {
+            for row in &entry.rows {
+                let text: String = row
+                    .line
+                    .spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect();
+                if text.to_lowercase().contains(&needle) {
+                    matches.push(index);
+                }
+                index += 1;
+            }
+        }
+        matches
+    }
+
     fn visible_rows(
         &self,
         start: usize,
@@ -2403,6 +2429,12 @@ struct App {
     queued_messages: Vec<String>,
     /// Palette-requested compaction, applied to the next turn's config.
     compact_requested: bool,
+    search_active: bool,
+    search_query: String,
+    search_matches: Vec<usize>,
+    search_current: usize,
+    /// (scroll_top, follow_tail) before the search opened; Esc restores.
+    search_saved: Option<(usize, bool)>,
     scroll_top: usize,
     content_rows: usize,
     viewport_rows: usize,
@@ -2469,6 +2501,11 @@ impl App {
             retry_available: false,
             queued_messages: Vec::new(),
             compact_requested: false,
+            search_active: false,
+            search_query: String::new(),
+            search_matches: Vec::new(),
+            search_current: 0,
+            search_saved: None,
             scroll_top: 0,
             content_rows: 0,
             viewport_rows: 0,
@@ -3039,6 +3076,56 @@ impl App {
         self.busy = false;
     }
 
+    fn open_search(&mut self) {
+        self.search_active = true;
+        if self.search_saved.is_none() {
+            self.search_saved = Some((self.scroll_top, self.follow_tail));
+        }
+        self.search_refresh();
+    }
+
+    /// Recompute matches against the cached rows and jump to the first.
+    fn search_refresh(&mut self) {
+        self.search_matches = self.transcript_cache.matching_rows(&self.search_query);
+        self.search_current = 0;
+        if !self.search_matches.is_empty() {
+            self.search_scroll_to_current();
+        }
+    }
+
+    fn search_jump(&mut self, delta: isize) {
+        let count = self.search_matches.len();
+        if count == 0 {
+            return;
+        }
+        self.search_current =
+            (self.search_current as isize + delta).rem_euclid(count as isize) as usize;
+        self.search_scroll_to_current();
+    }
+
+    fn search_scroll_to_current(&mut self) {
+        let Some(&row) = self.search_matches.get(self.search_current) else {
+            return;
+        };
+        self.follow_tail = false;
+        self.scroll_top = row
+            .saturating_sub(self.viewport_rows / 3)
+            .min(self.max_scroll());
+    }
+
+    fn close_search(&mut self, restore_scroll: bool) {
+        self.search_active = false;
+        if let Some((scroll_top, follow_tail)) = self.search_saved.take()
+            && restore_scroll
+        {
+            self.scroll_top = scroll_top.min(self.max_scroll());
+            self.follow_tail = follow_tail;
+        }
+        if !restore_scroll {
+            self.search_matches.clear();
+        }
+    }
+
     fn max_scroll(&self) -> usize {
         self.content_rows.saturating_sub(self.viewport_rows)
     }
@@ -3315,6 +3402,35 @@ impl App {
 
     fn status_line(&self, width: u16) -> Line<'static> {
         let width = width as usize;
+        if self.search_active {
+            let counter = if self.search_matches.is_empty() {
+                "no matches".to_string()
+            } else {
+                format!("{}/{}", self.search_current + 1, self.search_matches.len())
+            };
+            let hints = if width >= 64 {
+                " · ↑↓ jump · ↵ keep · Esc back"
+            } else {
+                ""
+            };
+            return Line::from(vec![
+                Span::styled(" /", Style::default().fg(theme::WAITING)),
+                Span::raw(truncate_display(
+                    &self.search_query,
+                    width.saturating_sub(24).max(4),
+                    Truncation::Middle,
+                )),
+                Span::styled("▏", Style::default().fg(theme::WAITING)),
+                Span::styled(
+                    truncate_display(
+                        &format!(" {counter}{hints}"),
+                        width.saturating_sub(4),
+                        Truncation::Right,
+                    ),
+                    Style::default().fg(MUTED),
+                ),
+            ]);
+        }
         let (icon, state, state_color) = match self.activity {
             Activity::Ready => ("●", "ready", theme::SUCCESS),
             Activity::Thinking => ("○", "thinking", theme::REASONING),
@@ -3686,7 +3802,31 @@ impl App {
             self.transcript_cache
                 .visible_rows(self.scroll_top, viewport_rows, &activity_rows);
         self.transcript_hit_targets = visible.iter().map(|row| row.target.clone()).collect();
-        let text = visible.into_iter().map(|row| row.line).collect::<Vec<_>>();
+        let text = visible
+            .into_iter()
+            .enumerate()
+            .map(|(offset, row)| {
+                let mut line = row.line;
+                if self.search_active
+                    && !self.search_query.is_empty()
+                    && self
+                        .search_matches
+                        .binary_search(&(self.scroll_top + offset))
+                        .is_ok()
+                {
+                    let current = self.search_matches.get(self.search_current)
+                        == Some(&(self.scroll_top + offset));
+                    for span in &mut line.spans {
+                        span.style = span.style.add_modifier(if current {
+                            Modifier::REVERSED | Modifier::BOLD
+                        } else {
+                            Modifier::REVERSED
+                        });
+                    }
+                }
+                line
+            })
+            .collect::<Vec<_>>();
         let paragraph = Paragraph::new(text).block(transcript_block);
         frame.render_widget(paragraph, transcript_area);
 
@@ -4692,6 +4832,7 @@ static HELP_SECTIONS: &[HelpSection] = &[
     HelpSection {
         title: "Transcript",
         bindings: &[
+            binding!("Ctrl-F", "search transcript"),
             binding!("PgUp / PgDn", "scroll page"),
             binding!("Ctrl-U / Ctrl-D", "scroll half page"),
             binding!("Ctrl-Home / Ctrl-End", "jump to top / tail"),
@@ -7250,6 +7391,25 @@ async fn run_app(
                     }
                     continue;
                 }
+                if app.search_active {
+                    match (code, control) {
+                        (KeyCode::Esc, _) => app.close_search(true),
+                        (KeyCode::Enter, _) => app.close_search(false),
+                        (KeyCode::Up, _) | (KeyCode::Char('p'), true) => app.search_jump(-1),
+                        (KeyCode::Down, _) | (KeyCode::Char('n'), true) => app.search_jump(1),
+                        (KeyCode::Char('f'), true) => app.close_search(false),
+                        (KeyCode::Backspace, _) => {
+                            app.search_query.pop();
+                            app.search_refresh();
+                        }
+                        (KeyCode::Char(character), false) if !character.is_control() => {
+                            app.search_query.push(character);
+                            app.search_refresh();
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
                 if let Some(palette) = app.command_palette.as_mut() {
                     match palette.handle_key(code, control) {
                         CommandPaletteAction::Stay => {}
@@ -7392,6 +7552,9 @@ async fn run_app(
                     }
                     (KeyCode::Up, _) if !app.input.is_multiline() => app.scroll_up(1),
                     (KeyCode::Down, _) if !app.input.is_multiline() => app.scroll_down(1),
+                    (KeyCode::Char('f'), true) => {
+                        app.open_search();
+                    }
                     (KeyCode::Char('r'), false)
                         if app.retry_available
                             && !app.busy
@@ -8322,6 +8485,49 @@ mod tests {
         assert!(markdown.contains("```\nall green\n```"));
         assert!(markdown.contains("## ilar\n\nFixed it."));
         assert!(markdown.contains("*switched to zai/glm-5.3*"));
+    }
+
+    #[test]
+    fn transcript_search_finds_jumps_and_restores() {
+        let mut app = App::new();
+        app.lines = (0..40)
+            .map(|index| Line_::User(format!("message number {index}")))
+            .chain(std::iter::once(Line_::Assistant(
+                "the special needle answer".into(),
+            )))
+            .collect();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 12)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let scroll_before = app.scroll_top;
+
+        app.open_search();
+        for character in "needle".chars() {
+            app.search_query.push(character);
+        }
+        app.search_refresh();
+        assert_eq!(app.search_matches.len(), 1, "{:?}", app.search_matches);
+        assert!(!app.follow_tail);
+
+        // Status line reflects the query and counter.
+        let bar = rendered_text(&app.status_line(120));
+        assert!(bar.contains("/needle"), "{bar}");
+        assert!(bar.contains("1/1"), "{bar}");
+
+        // Esc restores the pre-search view.
+        app.close_search(true);
+        assert!(!app.search_active);
+        assert_eq!(app.scroll_top, scroll_before.min(app.max_scroll()));
+
+        // Case-insensitive; no matches reported gracefully.
+        app.open_search();
+        app.search_query = "NEEDLE".into();
+        app.search_refresh();
+        assert_eq!(app.search_matches.len(), 1);
+        app.search_query = "zzz-not-there".into();
+        app.search_refresh();
+        assert!(app.search_matches.is_empty());
+        assert!(rendered_text(&app.status_line(120)).contains("no matches"));
     }
 
     #[test]
