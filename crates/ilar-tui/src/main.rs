@@ -3419,6 +3419,9 @@ impl App {
                 Some(cost) => {
                     format!("Σ {} {}", format_tokens_compact(tokens), format_cost(cost))
                 }
+                None if ilar::model::plan_billed(&self.current_model) => {
+                    format!("Σ {} plan", format_tokens_compact(tokens))
+                }
                 None => format!("Σ {}", format_tokens_compact(tokens)),
             })
         };
@@ -5267,6 +5270,9 @@ fn activate_palette_command(
             let total = app.session_usage;
             let cost = match app.session_cost {
                 Some(cost) => format_cost(cost),
+                None if ilar::model::plan_billed(&app.current_model) => {
+                    "subscription plan (no per-token cost)".into()
+                }
                 None => "unknown (model without pricing)".into(),
             };
             app.push_transcript_line(Line_::System(format!(

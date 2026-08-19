@@ -200,6 +200,11 @@ static PRICING: &[(&str, &str, ModelPricing)] = &[
     ),
 ];
 
+/// Models billed by subscription (coding plan) rather than per token.
+pub fn plan_billed(full_id: &str) -> bool {
+    find(full_id).is_some_and(|model| matches!(model.access, ModelAccess::ZaiCodingPlan))
+}
+
 /// Pricing for a `provider/model-id` string, if known.
 pub fn pricing_for(full_id: &str) -> Option<ModelPricing> {
     let (provider, id) = full_id.split_once('/')?;
@@ -775,6 +780,10 @@ mod tests {
         assert!(pricing_for("no-slash").is_none());
         // Coding-plan-only models intentionally have no API pricing.
         assert!(pricing_for("zai/glm-5.3").is_none());
+        assert!(plan_billed("zai/glm-5.3"));
+        assert!(!plan_billed("zai/glm-4.7"));
+        assert!(!plan_billed("openai/gpt-5.6-sol"));
+        assert!(!plan_billed("custom/unknown"));
     }
 
     #[test]
