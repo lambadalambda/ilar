@@ -707,3 +707,38 @@ when its key is set, otherwise Exa (optionally authenticated via
 Keyless access is best-effort on Exa's side — README tells users to bring
 their own key. Live-verified via an `#[ignore]`d smoke test
 (`cargo test -p ilar exa_live -- --ignored`).
+
+## 2026-08-19 — Milestone 4: daily-driver UX batch
+
+Eleven-issue batch making the TUI comfortable for daily work, worked
+issue-by-issue with per-feature commits and subagent reviews on the two
+biggest changes:
+
+- **Edit diffs**: LCS line diff (dependency-free, bounded 400 lines /
+  256 KiB) replaces raw old/new JSON in edit tool rows, themed ± colors,
+  across live/child/restore paths. Review caught a byte-cap gap and a
+  changeless-diff fallback suppression; both fixed.
+- **Session resume**: `SessionStore::list()` head-scans JSONL for
+  (id, title, mtime); `--continue` resumes the latest; a palette picker
+  switches sessions in-app by restarting the whole runtime (main is now
+  a session loop) for full agent/model/prompt fidelity. Switch validates
+  the target and refuses during turns/background jobs/drafts.
+- **Prompt history**: persisted JSONL ring (1000 entries), Up/Down
+  recall with readline draft stash.
+- **Usage + cost**: models.dev pricing table in core (list prices,
+  snapshot-dated); per-step accrual with per-event-model pricing on
+  restore; Σ tokens + $ in the status line, breakdown via palette.
+  Unpriced models poison dollars, never guess.
+- **Help overlay** (F1/?), **readline chords** (^A/^E/^K/^U/^W, Alt-B/F),
+  **skill triggers** (frontmatter now feeds prompt cues) + `/skill`
+  invocation with a `/` picker, **per-agent `tools:` allowlists**
+  (load-time validation, intersection with read-only), built-in
+  **mcp-via-cli skill** (decision: no core MCP client), and hand-rolled
+  **fence syntax highlighting** (six language families, no syntect).
+- Todo narrow-terminal fallback issue closed as already implemented
+  (border-chrome summary line predates the issue).
+
+Caveats: session switching drops background-job tracking (spawner is
+shut down like on quit); mcp-via-cli verified against upstream docs only
+(sandbox blocked installing the CLI); the AppExit::Switch path has no
+automated test — smoke-test manually.
