@@ -723,6 +723,45 @@ fn handle_prompt_key(input: &mut InputBuffer, key: KeyEvent) -> PromptAction {
 struct RestoredSessionView {
     lines: Vec<Line_>,
     latest_usage: Option<ilar::session::Usage>,
+    total_usage: ilar::session::Usage,
+    /// `None` once any step lacked pricing (custom or plan-only model).
+    total_cost: Option<f64>,
+}
+
+/// Fold one step's usage into session totals; unknown pricing poisons the
+/// dollar total (tokens keep accumulating).
+fn accrue_usage(
+    total: &mut ilar::session::Usage,
+    cost: &mut Option<f64>,
+    model: &str,
+    usage: &ilar::session::Usage,
+) {
+    total.input_tokens = total.input_tokens.saturating_add(usage.input_tokens);
+    total.output_tokens = total.output_tokens.saturating_add(usage.output_tokens);
+    total.cache_read_input_tokens = total
+        .cache_read_input_tokens
+        .saturating_add(usage.cache_read_input_tokens);
+    total.cache_creation_input_tokens = total
+        .cache_creation_input_tokens
+        .saturating_add(usage.cache_creation_input_tokens);
+    if let Some(current) = cost.as_mut() {
+        match ilar::model::pricing_for(model) {
+            Some(pricing) => *current += pricing.cost(usage),
+            None => *cost = None,
+        }
+    }
+}
+
+fn format_cost(cost: f64) -> String {
+    if cost >= 0.995 {
+        format!("${cost:.2}")
+    } else if cost >= 0.0005 {
+        format!("${cost:.3}")
+    } else if cost > 0.0 {
+        "$<0.001".into()
+    } else {
+        "$0.00".into()
+    }
 }
 
 fn task_notification_display(text: &str) -> Option<String> {
@@ -801,6 +840,8 @@ fn restored_session_invocation_view(
                 return RestoredSessionView {
                     lines: Vec::new(),
                     latest_usage: None,
+                    total_usage: ilar::session::Usage::default(),
+                    total_cost: Some(0.0),
                 };
             };
             let end = all_events[start + 1..]
@@ -841,6 +882,14 @@ fn restored_session_invocation_view(
         }
         _ => None,
     });
+    // Session totals span the whole log, including compacted-away turns.
+    let mut total_usage = ilar::session::Usage::default();
+    let mut total_cost = Some(0.0);
+    for event in events {
+        if let ilar::session::SessionEvent::AssistantMessage { model, usage, .. } = event {
+            accrue_usage(&mut total_usage, &mut total_cost, model, usage);
+        }
+    }
     let mut lines = summary
         .map(|summary| vec![Line_::System(format!("transcript compacted\n{summary}"))])
         .unwrap_or_default();
@@ -984,6 +1033,8 @@ fn restored_session_invocation_view(
     RestoredSessionView {
         lines,
         latest_usage,
+        total_usage,
+        total_cost,
     }
 }
 
@@ -2029,6 +2080,8 @@ struct App {
     context_limit: Option<u64>,
     context_estimated: bool,
     latest_usage: Option<ilar::session::Usage>,
+    session_usage: ilar::session::Usage,
+    session_cost: Option<f64>,
     scroll_top: usize,
     content_rows: usize,
     viewport_rows: usize,
@@ -2079,6 +2132,8 @@ impl App {
             context_limit: None,
             context_estimated: true,
             latest_usage: None,
+            session_usage: ilar::session::Usage::default(),
+            session_cost: Some(0.0),
             scroll_top: 0,
             content_rows: 0,
             viewport_rows: 0,
@@ -2146,6 +2201,8 @@ impl App {
         let restored = restored_session_view_with_store(session, store);
         self.lines.extend(restored.lines);
         self.latest_usage = restored.latest_usage;
+        self.session_usage = restored.total_usage;
+        self.session_cost = restored.total_cost;
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
     }
 
@@ -2440,6 +2497,13 @@ impl App {
             LoopEvent::StepComplete { stop_reason, usage } => {
                 self.next_tool_group = self.next_tool_group.saturating_add(1);
                 self.latest_usage = Some(*usage);
+                let model = self.current_model.clone();
+                accrue_usage(
+                    &mut self.session_usage,
+                    &mut self.session_cost,
+                    &model,
+                    usage,
+                );
                 let reported = usage.context_tokens();
                 if reported > 0 {
                     self.context_used = reported;
@@ -2964,9 +3028,26 @@ impl App {
         }
         let state_width = UnicodeWidthStr::width(state) + 3;
         let separators = 7;
+        let session_total = {
+            let total = self.session_usage;
+            let tokens = total.input_tokens
+                + total.output_tokens
+                + total.cache_read_input_tokens
+                + total.cache_creation_input_tokens;
+            (tokens > 0).then(|| match self.session_cost {
+                Some(cost) => {
+                    format!("Σ {} {}", format_tokens_compact(tokens), format_cost(cost))
+                }
+                None => format!("Σ {}", format_tokens_compact(tokens)),
+            })
+        };
         let detailed_usage = self.latest_usage.map(|latest| {
+            let session = session_total
+                .as_deref()
+                .map(|total| format!("{total} · "))
+                .unwrap_or_default();
             format!(
-                "in {} · out {} · req cache r{}/w{} · {context_display}",
+                "in {} · out {} · req cache r{}/w{} · {session}{context_display}",
                 latest.input_tokens,
                 latest.output_tokens,
                 latest.cache_read_input_tokens,
@@ -3869,6 +3950,7 @@ enum PaletteCommand {
     Reasoning,
     Theme,
     Session,
+    Usage,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -3908,6 +3990,13 @@ static PALETTE_COMMANDS: &[PaletteCommandDefinition] = &[
         label: "Resume session",
         shortcut: "",
         search_terms: "session resume continue switch history recent",
+    },
+    PaletteCommandDefinition {
+        id: PaletteCommand::Usage,
+        section: "General",
+        label: "Session usage",
+        shortcut: "",
+        search_terms: "usage tokens cost dollars spend total",
     },
 ];
 
@@ -4474,6 +4563,22 @@ fn activate_palette_command(
             // Sessions are loaded by the caller (needs the store); the
             // palette only records the request.
             app.session_picker_requested = true;
+        }
+        PaletteCommand::Usage => {
+            let total = app.session_usage;
+            let cost = match app.session_cost {
+                Some(cost) => format_cost(cost),
+                None => "unknown (model without pricing)".into(),
+            };
+            app.push_transcript_line(Line_::System(format!(
+                "session usage\ninput {} · output {} · cache read {} · cache write {}\nestimated cost {cost} (list prices, {})",
+                total.input_tokens,
+                total.output_tokens,
+                total.cache_read_input_tokens,
+                total.cache_creation_input_tokens,
+                ilar::model::CATALOG_UPDATED,
+            )));
+            app.follow_tail = true;
         }
     }
 }
@@ -6809,6 +6914,46 @@ mod tests {
     }
 
     #[test]
+    fn session_usage_accumulates_across_steps_and_poisons_on_unknown_pricing() {
+        let mut app = App::new();
+        app.current_model = "zai/glm-4.7".into();
+        let step = ilar::session::Usage {
+            input_tokens: 1_000_000,
+            output_tokens: 0,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            input_token_accounting: None,
+        };
+        for _ in 0..2 {
+            app.push_loop_event(&LoopEvent::StepComplete {
+                stop_reason: "end_turn".into(),
+                usage: step,
+            });
+        }
+        assert_eq!(app.session_usage.input_tokens, 2_000_000);
+        let cost = app.session_cost.unwrap();
+        assert!((cost - 1.2).abs() < 1e-9, "{cost}");
+
+        // A step on an unpriced model keeps tokens but drops the dollars.
+        app.current_model = "custom/self-hosted".into();
+        app.push_loop_event(&LoopEvent::StepComplete {
+            stop_reason: "end_turn".into(),
+            usage: step,
+        });
+        assert_eq!(app.session_usage.input_tokens, 3_000_000);
+        assert_eq!(app.session_cost, None);
+    }
+
+    #[test]
+    fn format_cost_buckets() {
+        assert_eq!(format_cost(0.0), "$0.00");
+        assert_eq!(format_cost(0.0001), "$<0.001");
+        assert_eq!(format_cost(0.004375), "$0.004");
+        assert_eq!(format_cost(0.42), "$0.420");
+        assert_eq!(format_cost(1.234), "$1.23");
+    }
+
+    #[test]
     fn idle_status_keeps_model_and_latest_step_usage() {
         let mut app = App::new();
         app.configure_runtime(
@@ -6834,11 +6979,13 @@ mod tests {
         });
         app.finish_turn(Ok(TurnOutcome::Completed));
 
-        let status = rendered_text(&app.status_line(120));
+        let status = rendered_text(&app.status_line(140));
         assert!(status.contains("openai/gpt-5.6-sol@high"), "{status}");
         assert!(status.contains("in 300"), "{status}");
         assert!(status.contains("out 50"), "{status}");
         assert!(status.contains("req cache r1500/w20"), "{status}");
+        assert!(status.contains("Σ 1k"), "{status}");
+        assert!(status.contains("$0.004"), "{status}");
         let narrow = rendered_text(&app.status_line(60));
         assert!(narrow.contains("gpt-5.6"), "{narrow}");
         assert!(narrow.contains("high"), "{narrow}");
@@ -7226,7 +7373,7 @@ mod tests {
     fn command_palette_searches_and_selects_defined_commands() {
         let mut palette = CommandPalette::new();
 
-        assert_eq!(palette.filtered_commands().len(), 4);
+        assert_eq!(palette.filtered_commands().len(), 5);
         assert_eq!(
             palette.handle_key(KeyCode::Enter, false),
             CommandPaletteAction::Choose(PaletteCommand::Model)
