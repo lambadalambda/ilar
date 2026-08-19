@@ -602,6 +602,82 @@ async fn glob_matches_nested_patterns() {
     assert!(!out.content.contains("README.md"));
 }
 
+#[tokio::test]
+async fn glob_skips_ignored_paths_by_default_and_can_include_them() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::create_dir_all(dir.path().join("build")).unwrap();
+    std::fs::create_dir_all(dir.path().join(".git")).unwrap();
+    std::fs::write(dir.path().join(".gitignore"), "build/\n").unwrap();
+    std::fs::write(dir.path().join("src/a.js"), "").unwrap();
+    std::fs::write(dir.path().join("build/out.js"), "").unwrap();
+    std::fs::write(dir.path().join(".git/hook.js"), "").unwrap();
+
+    let out = run(
+        &registry(),
+        "glob",
+        serde_json::json!({"pattern": "**/*.js"}),
+        &ctx(dir.path()),
+    )
+    .await;
+    assert!(!out.is_error, "{}", out.content);
+    assert!(out.content.contains("src/a.js"), "{}", out.content);
+    assert!(!out.content.contains("build/out.js"), "{}", out.content);
+    assert!(!out.content.contains("hook.js"), "{}", out.content);
+
+    let all = run(
+        &registry(),
+        "glob",
+        serde_json::json!({"pattern": "**/*.js", "include_ignored": true}),
+        &ctx(dir.path()),
+    )
+    .await;
+    assert!(!all.is_error, "{}", all.content);
+    assert!(all.content.contains("src/a.js"), "{}", all.content);
+    assert!(all.content.contains("build/out.js"), "{}", all.content);
+}
+
+#[tokio::test]
+async fn glob_still_matches_dotted_paths_the_pattern_asks_for() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".github/workflows")).unwrap();
+    std::fs::write(dir.path().join(".github/workflows/ci.yml"), "").unwrap();
+    let out = run(
+        &registry(),
+        "glob",
+        serde_json::json!({"pattern": ".github/workflows/*.yml"}),
+        &ctx(dir.path()),
+    )
+    .await;
+    assert!(!out.is_error, "{}", out.content);
+    assert!(
+        out.content.contains(".github/workflows/ci.yml"),
+        "{}",
+        out.content
+    );
+}
+
+#[tokio::test]
+async fn glob_rejects_patterns_that_escape_the_workspace() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    for pattern in ["../*.rs", "/etc/*", "src/../../*.rs"] {
+        let out = run(
+            &registry(),
+            "glob",
+            serde_json::json!({ "pattern": pattern }),
+            &ctx(dir.path()),
+        )
+        .await;
+        assert!(
+            out.is_error,
+            "{pattern} should be rejected: {}",
+            out.content
+        );
+        assert!(out.content.contains("workspace"), "{}", out.content);
+    }
+}
+
 // ---- grep ----
 
 #[tokio::test]

@@ -818,3 +818,47 @@ replacement char), fork doesn't fsync the directory entry, retry after a
 failed forced compaction loses the force flag, and queue order can
 invert if a notification turn starts in the same loop iteration as a
 dequeue.
+
+## 2026-08-19 — glob walked 24.7M entries to answer a 34-entry question
+
+Three concurrent `glob` calls sat at "executing" past 1m24s while a
+`grep` in the same turn finished. Not a hang — a full enumeration of
+`~/repos/yodl` (186 worktrees, 407+ node_modules): **24,683,808
+entries**, three times over, for the pattern
+`worktrees/manteca-manual-withdrawal/*` against a directory holding 34.
+
+Four compounding causes, all in glob and none in grep: the walk always
+started at `ctx.cwd` and matched afterwards, so the pattern's literal
+prefix bought nothing; every ignore filter was explicitly disabled
+(`hidden`, `ignore`, `git_ignore`, `git_global`, `git_exclude`); the
+1000-item cap counted *matches*, not entries scanned, so a narrow
+pattern never short-circuited and the more precise the query the longer
+it ran; and the walker was single-threaded with a per-directory
+collect-and-sort. grep had none of these — it takes a `path` to scope
+the root and builds with `.hidden(true).git_ignore(true)` — which is
+exactly why it completed.
+
+Target came from ripgrep on the same tree with the same `ignore` crate:
+`rg --files` lists 95,027 files in 1.03s at 935% CPU. Filtering alone is
+a 260× reduction (24.7M → 95k); parallelism covers the rest.
+
+Now: walk rooted at the pattern's literal prefix (rejecting `..` and
+absolute patterns so it cannot leave the workspace), ignore files
+honoured by default with `include_ignored` as the escape hatch,
+`.git` always dropped, hidden entries kept so `.github/workflows/*.yml`
+still resolves, `build_parallel()` across up to 8 threads, and a 500k
+entry budget that truncates with a distinct message instead of grinding.
+
+Measured after: the pattern that hung, 0.01s. Full-workspace walk with
+no possible match (worst case, cannot short-circuit), 0.65s — under the
+ripgrep baseline. Unfiltered whole-tree walk hits the entry budget at
+0.83s and says so.
+
+Known trade-off: which 1000 results survive truncation is now
+non-deterministic across runs, since threads race to fill the cap.
+Untruncated output is fully sorted and stable as before.
+
+Also found and left alone: the `glob` crate has no brace expansion, so
+the turn's third pattern (`**/{route,client}/*`) matched nothing and
+reported it as a legitimate empty result after paying for the full walk.
+Models write brace patterns routinely. Recorded in the issue.
