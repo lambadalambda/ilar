@@ -371,6 +371,10 @@ struct Args {
     #[arg(long)]
     session: Option<String>,
 
+    /// Resume the most recently modified session.
+    #[arg(long = "continue", conflicts_with = "session")]
+    continue_last: bool,
+
     /// Agent name from config (markdown agents).
     #[arg(long)]
     agent: Option<String>,
@@ -2031,6 +2035,9 @@ struct App {
     command_palette: Option<CommandPalette>,
     model_picker: Option<ModelPicker>,
     variant_picker: Option<VariantPicker>,
+    session_picker: Option<SessionPicker>,
+    /// Set by the palette; run_app opens the picker (it owns the store).
+    session_picker_requested: bool,
     theme: theme::ThemeId,
     theme_picker: Option<ThemePicker>,
     model_key_pending: bool,
@@ -2077,6 +2084,8 @@ impl App {
             command_palette: None,
             model_picker: None,
             variant_picker: None,
+            session_picker: None,
+            session_picker_requested: false,
             theme: theme::ThemeId::Terminal,
             theme_picker: None,
             model_key_pending: false,
@@ -2109,6 +2118,7 @@ impl App {
             || self.model_picker.is_some()
             || self.variant_picker.is_some()
             || self.theme_picker.is_some()
+            || self.session_picker.is_some()
     }
 
     fn configure_runtime(
@@ -3235,6 +3245,8 @@ impl App {
             render_variant_picker(frame, picker);
         } else if let Some(picker) = &self.theme_picker {
             render_theme_picker(frame, picker);
+        } else if let Some(picker) = &self.session_picker {
+            render_session_picker(frame, picker);
         } else if let Some(palette) = &self.command_palette {
             render_command_palette(frame, palette);
         }
@@ -3854,6 +3866,7 @@ enum PaletteCommand {
     Model,
     Reasoning,
     Theme,
+    Session,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -3886,6 +3899,13 @@ static PALETTE_COMMANDS: &[PaletteCommandDefinition] = &[
         label: "Switch theme",
         shortcut: "F3",
         search_terms: "theme appearance colors palette",
+    },
+    PaletteCommandDefinition {
+        id: PaletteCommand::Session,
+        section: "General",
+        label: "Resume session",
+        shortcut: "",
+        search_terms: "session resume continue switch history recent",
     },
 ];
 
@@ -3985,6 +4005,137 @@ enum PickerAction {
     Stay,
     Dismiss,
     Choose(String),
+}
+
+struct SessionPicker {
+    sessions: Vec<ilar::session::SessionSummary>,
+    selected: usize,
+}
+
+impl SessionPicker {
+    fn new(sessions: Vec<ilar::session::SessionSummary>) -> Self {
+        Self {
+            sessions,
+            selected: 0,
+        }
+    }
+
+    fn move_selection(&mut self, delta: isize) {
+        let count = self.sessions.len();
+        if count == 0 {
+            self.selected = 0;
+        } else {
+            self.selected = (self.selected as isize + delta).rem_euclid(count as isize) as usize;
+        }
+    }
+
+    fn handle_key(&mut self, code: KeyCode, control: bool) -> PickerAction {
+        match (code, control) {
+            (KeyCode::Esc, _) => PickerAction::Dismiss,
+            (KeyCode::Enter, _) => self
+                .sessions
+                .get(self.selected)
+                .map(|session| PickerAction::Choose(session.id.clone()))
+                .unwrap_or(PickerAction::Dismiss),
+            (KeyCode::Up, _) | (KeyCode::Char('p'), true) => {
+                self.move_selection(-1);
+                PickerAction::Stay
+            }
+            (KeyCode::Down, _) | (KeyCode::Char('n'), true) => {
+                self.move_selection(1);
+                PickerAction::Stay
+            }
+            (KeyCode::Home, _) => {
+                self.selected = 0;
+                PickerAction::Stay
+            }
+            (KeyCode::End, _) => {
+                self.selected = self.sessions.len().saturating_sub(1);
+                PickerAction::Stay
+            }
+            _ => PickerAction::Stay,
+        }
+    }
+}
+
+fn session_age(modified: std::time::SystemTime, now: std::time::SystemTime) -> String {
+    let seconds = now.duration_since(modified).unwrap_or_default().as_secs();
+    match seconds {
+        0..=59 => "now".into(),
+        60..=3_599 => format!("{}m", seconds / 60),
+        3_600..=86_399 => format!("{}h", seconds / 3_600),
+        _ => format!("{}d", seconds / 86_400),
+    }
+}
+
+fn render_session_picker(frame: &mut Frame, picker: &SessionPicker) {
+    let area = centered_rect(frame.area(), 72, 14);
+    frame.render_widget(Clear, area);
+    let footer = if area.width < 40 {
+        " ↵ resume · Esc "
+    } else {
+        " ↑↓ select · Enter resume · Esc cancel "
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .border_style(theme::focus_border())
+        .title(Line::styled(" sessions ", theme::title(theme::MARKUP)))
+        .title_bottom(Line::styled(footer, Style::default().fg(theme::MUTED)).right_aligned());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    if picker.sessions.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                "no other sessions",
+                Style::default().fg(MUTED),
+            )),
+            inner,
+        );
+        return;
+    }
+    let now = std::time::SystemTime::now();
+    let selected = picker.selected.min(picker.sessions.len() - 1);
+    let row_count = inner.height as usize;
+    let start = selected
+        .saturating_add(1)
+        .saturating_sub(row_count)
+        .min(picker.sessions.len().saturating_sub(row_count));
+    let mut lines = Vec::new();
+    for (index, session) in picker
+        .sessions
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(row_count)
+    {
+        let marker = if index == selected { "> " } else { "  " };
+        let age = session_age(session.modified, now);
+        let title = session.title.as_deref().unwrap_or("(no messages yet)");
+        let label_width = (inner.width as usize)
+            .saturating_sub(UnicodeWidthStr::width(marker))
+            .saturating_sub(UnicodeWidthStr::width(age.as_str()))
+            .saturating_sub(1);
+        let label = truncate_display(title, label_width, Truncation::Right);
+        let text = format!(
+            "{marker}{label:<label_width$} {age}",
+            label_width = label_width
+        );
+        let text = truncate_display(&text, inner.width as usize, Truncation::Right);
+        let style = if index == selected {
+            theme::selected()
+        } else {
+            Style::default().fg(theme::PRIMARY)
+        };
+        lines.push(Line::styled(
+            format!("{text:<width$}", width = inner.width as usize),
+            style,
+        ));
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 struct ModelPicker {
@@ -4316,6 +4467,11 @@ fn activate_palette_command(
         }
         PaletteCommand::Theme => {
             app.theme_picker = Some(ThemePicker::new(app.theme));
+        }
+        PaletteCommand::Session => {
+            // Sessions are loaded by the caller (needs the store); the
+            // palette only records the request.
+            app.session_picker_requested = true;
         }
     }
 }
@@ -5195,165 +5351,208 @@ async fn main() -> Result<()> {
     })?;
 
     let store = SessionStore::new(config.state_dir().join("sessions"));
-    let resumed = args
-        .session
-        .as_deref()
-        .map(|id| {
-            store
-                .load(id)
-                .with_context(|| format!("resuming session {id}"))
-        })
-        .transpose()?;
-    ensure_direct_resume_allowed(resumed.as_ref().and_then(|session| session.meta()))?;
-    let persisted_agent = resumed
-        .as_ref()
-        .and_then(|session| session.meta())
-        .map(|meta| meta.agent.clone());
-    let agent_name = selected_agent_name(args.agent.as_deref(), persisted_agent.as_deref());
-    let agents = config.agents().context("loading agent definitions")?;
-    let agent = agents
-        .iter()
-        .find(|a| a.name == agent_name)
-        .cloned()
-        .with_context(|| format!("unknown agent {agent_name:?}"))?;
-    let persisted_model = resumed.as_ref().map(|session| session.effective_model());
-    let persisted_variant = resumed
-        .as_ref()
-        .and_then(|session| session.effective_variant());
-    let model_for_session = selected_model(
-        args.model.as_deref(),
-        persisted_model.as_deref(),
-        agent.model.as_deref(),
-        &config.general.model,
-    );
+    // The whole runtime (agent, model, prompt, registry) is rebuilt per
+    // session so switching via the picker restarts with full fidelity.
+    let mut session_override: Option<String> = None;
+    let mut first_run = true;
+    let mut terminal_hold: Option<(ratatui::DefaultTerminal, TerminalSession)> = None;
+    let mut active_theme = configured_theme;
 
-    let cwd = std::env::current_dir().context("no cwd")?;
-    let skill_store = std::sync::Arc::new(ilar::skill::SkillStore::new(
-        config.dirs().0.to_path_buf(),
-        config.dirs().1.to_path_buf(),
-    ));
-    let skill_listing = skill_store
-        .listing_prompt()
-        .context("loading skill definitions")?;
-    let mut system_prompt =
-        system_prompt_for(config.dirs().0, &cwd).context("loading project instructions")?;
-    if !skill_listing.is_empty() {
-        system_prompt = format!("{system_prompt}\n\n{skill_listing}");
-    }
-    if !agent.prompt.is_empty() {
-        system_prompt = format!(
-            "{system_prompt}\n\n# Agent: {}\n\n{}",
-            agent.name, agent.prompt
+    loop {
+        let resume_target = if first_run {
+            if args.continue_last {
+                Some(
+                    store
+                        .latest()
+                        .map(|session| session.id)
+                        .context("no sessions to continue (session directory is empty)")?,
+                )
+            } else {
+                args.session.clone()
+            }
+        } else {
+            session_override.clone()
+        };
+        // CLI overrides apply to the launch session only, not picker switches.
+        let cli_model = if first_run {
+            args.model.as_deref()
+        } else {
+            None
+        };
+        let cli_agent = if first_run {
+            args.agent.as_deref()
+        } else {
+            None
+        };
+        first_run = false;
+
+        let resumed = resume_target
+            .as_deref()
+            .map(|id| {
+                store
+                    .load(id)
+                    .with_context(|| format!("resuming session {id}"))
+            })
+            .transpose()?;
+        ensure_direct_resume_allowed(resumed.as_ref().and_then(|session| session.meta()))?;
+        let persisted_agent = resumed
+            .as_ref()
+            .and_then(|session| session.meta())
+            .map(|meta| meta.agent.clone());
+        let agent_name = selected_agent_name(cli_agent, persisted_agent.as_deref());
+        let agents = config.agents().context("loading agent definitions")?;
+        let agent = agents
+            .iter()
+            .find(|a| a.name == agent_name)
+            .cloned()
+            .with_context(|| format!("unknown agent {agent_name:?}"))?;
+        let persisted_model = resumed.as_ref().map(|session| session.effective_model());
+        let persisted_variant = resumed
+            .as_ref()
+            .and_then(|session| session.effective_variant());
+        let model_for_session = selected_model(
+            cli_model,
+            persisted_model.as_deref(),
+            agent.model.as_deref(),
+            &config.general.model,
         );
-    }
-    if args.print_prompt {
-        println!("{system_prompt}");
-        return Ok(());
-    }
 
-    let resolver: Arc<dyn ProviderResolver> = Arc::new(config.clone());
-    drop(
+        let cwd = std::env::current_dir().context("no cwd")?;
+        let skill_store = std::sync::Arc::new(ilar::skill::SkillStore::new(
+            config.dirs().0.to_path_buf(),
+            config.dirs().1.to_path_buf(),
+        ));
+        let skill_listing = skill_store
+            .listing_prompt()
+            .context("loading skill definitions")?;
+        let mut system_prompt =
+            system_prompt_for(config.dirs().0, &cwd).context("loading project instructions")?;
+        if !skill_listing.is_empty() {
+            system_prompt = format!("{system_prompt}\n\n{skill_listing}");
+        }
+        if !agent.prompt.is_empty() {
+            system_prompt = format!(
+                "{system_prompt}\n\n# Agent: {}\n\n{}",
+                agent.name, agent.prompt
+            );
+        }
+        if args.print_prompt {
+            println!("{system_prompt}");
+            return Ok(());
+        }
+
+        let resolver: Arc<dyn ProviderResolver> = Arc::new(config.clone());
+        drop(
         resolver
             .resolve_provider(&model_for_session)
             .with_context(|| format!("no provider configured for {model_for_session} (set ILAR_ZAI_API_KEY / ILAR_OPENAI_API_KEY)"))?,
     );
 
-    let session_id = match &args.session {
-        Some(id) => {
-            if args.model.is_some()
-                && persisted_model.as_deref() != Some(model_for_session.as_str())
-            {
-                persist_model_change(resolver.as_ref(), &store, id, &model_for_session, None)
-                    .with_context(|| format!("persisting model override {model_for_session}"))?;
+        let session_id = match &resume_target {
+            Some(id) => {
+                if cli_model.is_some()
+                    && persisted_model.as_deref() != Some(model_for_session.as_str())
+                {
+                    persist_model_change(resolver.as_ref(), &store, id, &model_for_session, None)
+                        .with_context(|| format!("persisting model override {model_for_session}"))?;
+                }
+                id.clone()
             }
-            id.clone()
-        }
-        None => {
-            let id = new_id();
-            store
-                .create(SessionMeta {
-                    session_id: id.clone(),
-                    parent_id: None,
-                    agent: agent.name.clone(),
-                    model: model_for_session.clone(),
-                    workspace: None,
-                })
-                .context("creating session")?;
-            id
-        }
-    };
+            None => {
+                let id = new_id();
+                store
+                    .create(SessionMeta {
+                        session_id: id.clone(),
+                        parent_id: None,
+                        agent: agent.name.clone(),
+                        model: model_for_session.clone(),
+                        workspace: None,
+                    })
+                    .context("creating session")?;
+                id
+            }
+        };
 
-    let loop_config = LoopConfig {
-        compaction_threshold: config.compaction.threshold,
-        ..LoopConfig::default()
-    };
-    let spawner = std::sync::Arc::new(
-        SubagentSpawner::new(
-            resolver.clone(),
-            store.clone(),
-            agents,
+        let loop_config = LoopConfig {
+            compaction_threshold: config.compaction.threshold,
+            ..LoopConfig::default()
+        };
+        let spawner = std::sync::Arc::new(
+            SubagentSpawner::new(
+                resolver.clone(),
+                store.clone(),
+                agents,
+                cwd.clone(),
+                0,
+                config.subagents.max_concurrent,
+                config.subagents.max_depth,
+            )
+            .with_user_config_dir(config.dirs().0.to_path_buf())
+            .with_background_tool_timeout(std::time::Duration::from_millis(
+                config.subagents.background_tool_timeout_ms,
+            ))
+            .with_loop_config(loop_config.clone()),
+        );
+        let todos = std::sync::Arc::new(std::sync::Mutex::new(restored_todos(resumed.as_ref())));
+        let registry = ToolRegistry::builtin()
+            .with_subagents(spawner.clone())?
+            .with_todos(todos.clone())?
+            .with_web_tools()?
+            .with_skills(skill_store)?;
+        let notifications = spawner.subscribe();
+        let subagent_activity = spawner.subscribe_activity();
+        let tool_ctx = ToolContext::root(cwd.clone()).with_subagents(spawner.clone());
+        let model_choices = config.available_models();
+        let user_config_path = config.dirs().0.join("ilar.toml");
+
+        let (context_used, context_estimated) =
+            session_context_tokens(&store, &session_id, &system_prompt, &registry)?;
+        let context_limit = resolver.context_limit(&model_for_session);
+        let mut app = App::new();
+        app.theme = active_theme;
+        app.session_id = session_id.clone();
+        app.todos = todos;
+        if let Some(resumed) = &resumed {
+            app.restore_session(resumed, &store);
+        }
+        app.configure_runtime(
+            model_for_session.clone(),
+            (persisted_model.as_deref() == Some(model_for_session.as_str()))
+                .then_some(persisted_variant)
+                .flatten(),
             cwd.clone(),
-            0,
-            config.subagents.max_concurrent,
-            config.subagents.max_depth,
+            context_used,
+            context_limit,
+            context_estimated,
+        );
+
+        if terminal_hold.is_none() {
+            terminal_hold = Some(TerminalSession::start()?);
+        }
+        let terminal = &mut terminal_hold.as_mut().expect("terminal started").0;
+        let exit = run_app(
+            terminal,
+            &mut app,
+            &user_config_path,
+            resolver,
+            &store,
+            &session_id,
+            &system_prompt,
+            &registry,
+            tool_ctx,
+            spawner,
+            notifications,
+            subagent_activity,
+            loop_config,
+            model_choices,
         )
-        .with_user_config_dir(config.dirs().0.to_path_buf())
-        .with_background_tool_timeout(std::time::Duration::from_millis(
-            config.subagents.background_tool_timeout_ms,
-        ))
-        .with_loop_config(loop_config.clone()),
-    );
-    let todos = std::sync::Arc::new(std::sync::Mutex::new(restored_todos(resumed.as_ref())));
-    let registry = ToolRegistry::builtin()
-        .with_subagents(spawner.clone())?
-        .with_todos(todos.clone())?
-        .with_web_tools()?
-        .with_skills(skill_store)?;
-    let notifications = spawner.subscribe();
-    let subagent_activity = spawner.subscribe_activity();
-    let tool_ctx = ToolContext::root(cwd.clone()).with_subagents(spawner.clone());
-    let model_choices = config.available_models();
-    let user_config_path = config.dirs().0.join("ilar.toml");
-
-    let (context_used, context_estimated) =
-        session_context_tokens(&store, &session_id, &system_prompt, &registry)?;
-    let context_limit = resolver.context_limit(&model_for_session);
-    let mut app = App::new();
-    app.theme = configured_theme;
-    app.session_id = session_id.clone();
-    app.todos = todos;
-    if let Some(resumed) = &resumed {
-        app.restore_session(resumed, &store);
-    }
-    app.configure_runtime(
-        model_for_session.clone(),
-        (persisted_model.as_deref() == Some(model_for_session.as_str()))
-            .then_some(persisted_variant)
-            .flatten(),
-        cwd.clone(),
-        context_used,
-        context_limit,
-        context_estimated,
-    );
-
-    let (mut terminal, _terminal_session) = TerminalSession::start()?;
-    run_app(
-        &mut terminal,
-        &mut app,
-        &user_config_path,
-        resolver,
-        &store,
-        &session_id,
-        &system_prompt,
-        &registry,
-        tool_ctx,
-        spawner,
-        notifications,
-        subagent_activity,
-        loop_config,
-        model_choices,
-    )
-    .await
+        .await?;
+        active_theme = app.theme;
+        match exit {
+            AppExit::Quit => return Ok(()),
+            AppExit::Switch(next) => session_override = Some(next),
+        }
+    } // session loop
 }
 
 fn session_context_tokens(
@@ -5476,6 +5675,12 @@ fn is_command_palette_shortcut(event: &Event) -> bool {
     )
 }
 
+/// How run_app ended: quit the program, or restart against another session.
+enum AppExit {
+    Quit,
+    Switch(String),
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_app(
     terminal: &mut ratatui::DefaultTerminal,
@@ -5492,7 +5697,7 @@ async fn run_app(
     mut subagent_activity: tokio::sync::broadcast::Receiver<ilar::subagent::SubagentActivity>,
     loop_config: LoopConfig,
     model_choices: Vec<&'static ilar::model::ModelInfo>,
-) -> Result<()> {
+) -> Result<AppExit> {
     let mut events_rx: Option<LoopEventReceiver> = None;
     let mut pending_notification = None;
     let mut notifications_paused = false;
@@ -5702,7 +5907,7 @@ async fn run_app(
                         cancel.cancel();
                     }
                     spawner.shutdown().await;
-                    return Ok(());
+                    return Ok(AppExit::Quit);
                 }
                 if app.theme_picker.is_some() {
                     let action = {
@@ -5712,6 +5917,54 @@ async fn run_app(
                     apply_theme_picker_action(app, action, |selected| {
                         ilar::config::persist_general_theme(user_config_path, selected.id())
                     });
+                    continue;
+                }
+                if let Some(picker) = app.session_picker.as_mut() {
+                    match picker.handle_key(code, control) {
+                        PickerAction::Stay => {}
+                        PickerAction::Dismiss => {
+                            app.session_picker = None;
+                            app.clear_transient_notice();
+                        }
+                        PickerAction::Choose(new_session) => {
+                            let blocked = if turn_handle.is_some() {
+                                Some("finish or abort the current turn before switching sessions")
+                            } else if spawner.running_background() > 0 {
+                                Some("background agents are running; wait or abort them first")
+                            } else if !app.input.is_blank() {
+                                Some("input has an unsent draft; send or clear it first")
+                            } else {
+                                None
+                            };
+                            if let Some(reason) = blocked {
+                                app.set_notice(reason, NoticeLevel::Warning);
+                                continue;
+                            }
+                            // Validate now so a bad entry degrades to a
+                            // notice instead of exiting the app later.
+                            match store
+                                .load(&new_session)
+                                .map(|session| ensure_direct_resume_allowed(session.meta()))
+                            {
+                                Ok(Ok(())) => {
+                                    spawner.shutdown().await;
+                                    return Ok(AppExit::Switch(new_session));
+                                }
+                                Ok(Err(error)) => {
+                                    app.set_notice(
+                                        format!("cannot resume {new_session}: {error}"),
+                                        NoticeLevel::Error,
+                                    );
+                                }
+                                Err(error) => {
+                                    app.set_notice(
+                                        format!("cannot resume {new_session}: {error}"),
+                                        NoticeLevel::Error,
+                                    );
+                                }
+                            }
+                        }
+                    }
                     continue;
                 }
                 if let Some(picker) = app.model_picker.as_mut() {
@@ -5802,6 +6055,14 @@ async fn run_app(
                         }
                         CommandPaletteAction::Choose(command) => {
                             activate_palette_command(app, command, model_choices.clone());
+                            if std::mem::take(&mut app.session_picker_requested) {
+                                let sessions = store
+                                    .list()
+                                    .into_iter()
+                                    .filter(|session| session.id != app.session_id)
+                                    .collect();
+                                app.session_picker = Some(SessionPicker::new(sessions));
+                            }
                         }
                     }
                     continue;
@@ -6944,15 +7205,19 @@ mod tests {
     fn command_palette_searches_and_selects_defined_commands() {
         let mut palette = CommandPalette::new();
 
-        assert_eq!(palette.filtered_commands().len(), 3);
+        assert_eq!(palette.filtered_commands().len(), 4);
         assert_eq!(
             palette.handle_key(KeyCode::Enter, false),
             CommandPaletteAction::Choose(PaletteCommand::Model)
         );
 
-        palette.handle_key(KeyCode::Char('s'), false);
-        palette.handle_key(KeyCode::Char('e'), false);
-        palette.handle_key(KeyCode::Char('s'), false);
+        palette.insert_query("sessio");
+        assert_eq!(
+            palette.handle_key(KeyCode::Enter, false),
+            CommandPaletteAction::Choose(PaletteCommand::Session)
+        );
+
+        palette.insert_query("nomatchhere");
         assert!(palette.filtered_commands().is_empty());
         assert_eq!(
             palette.handle_key(KeyCode::Enter, false),
@@ -6975,6 +7240,59 @@ mod tests {
         assert_eq!(
             palette.handle_key(KeyCode::Enter, false),
             CommandPaletteAction::Choose(PaletteCommand::Theme)
+        );
+    }
+
+    #[test]
+    fn session_picker_navigates_and_chooses() {
+        let now = std::time::SystemTime::now();
+        let sessions = vec![
+            ilar::session::SessionSummary {
+                id: "recent".into(),
+                title: Some("latest work".into()),
+                modified: now,
+            },
+            ilar::session::SessionSummary {
+                id: "older".into(),
+                title: None,
+                modified: now - std::time::Duration::from_secs(3_600),
+            },
+        ];
+        let mut picker = SessionPicker::new(sessions);
+        assert_eq!(picker.handle_key(KeyCode::Down, false), PickerAction::Stay);
+        assert_eq!(
+            picker.handle_key(KeyCode::Enter, false),
+            PickerAction::Choose("older".into())
+        );
+        picker.move_selection(1); // wraps back to the first entry
+        assert_eq!(
+            picker.handle_key(KeyCode::Enter, false),
+            PickerAction::Choose("recent".into())
+        );
+        assert_eq!(
+            picker.handle_key(KeyCode::Esc, false),
+            PickerAction::Dismiss
+        );
+
+        let mut empty = SessionPicker::new(Vec::new());
+        assert_eq!(
+            empty.handle_key(KeyCode::Enter, false),
+            PickerAction::Dismiss
+        );
+    }
+
+    #[test]
+    fn session_age_buckets() {
+        let now = std::time::SystemTime::now();
+        let at = |seconds: u64| now - std::time::Duration::from_secs(seconds);
+        assert_eq!(session_age(at(5), now), "now");
+        assert_eq!(session_age(at(90), now), "1m");
+        assert_eq!(session_age(at(7_200), now), "2h");
+        assert_eq!(session_age(at(200_000), now), "2d");
+        // Clock skew (mtime in the future) must not panic.
+        assert_eq!(
+            session_age(now + std::time::Duration::from_secs(60), now),
+            "now"
         );
     }
 
