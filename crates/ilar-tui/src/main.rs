@@ -4292,6 +4292,7 @@ enum PaletteCommand {
     Theme,
     Session,
     Usage,
+    Skills,
     Help,
 }
 
@@ -4339,6 +4340,13 @@ static PALETTE_COMMANDS: &[PaletteCommandDefinition] = &[
         label: "Session usage",
         shortcut: "",
         search_terms: "usage tokens cost dollars spend total",
+    },
+    PaletteCommandDefinition {
+        id: PaletteCommand::Skills,
+        section: "Skills",
+        label: "Invoke skill…",
+        shortcut: "/",
+        search_terms: "skill skills slash command invoke run",
     },
     PaletteCommandDefinition {
         id: PaletteCommand::Help,
@@ -4642,11 +4650,14 @@ fn close_skill_matches(skills: &[(String, String)], name: &str) -> Vec<String> {
 struct SkillPicker {
     skills: Vec<(String, String)>,
     selected: usize,
+    /// Opened by typing `/`; Esc then restores that character.
+    from_slash: bool,
 }
 
 impl SkillPicker {
     fn new(skills: Vec<(String, String)>) -> Self {
         Self {
+            from_slash: false,
             skills,
             selected: 0,
         }
@@ -5211,6 +5222,9 @@ fn activate_palette_command(
                 ilar::model::CATALOG_UPDATED,
             )));
             app.follow_tail = true;
+        }
+        PaletteCommand::Skills => {
+            app.skill_picker = Some(SkillPicker::new(app.skills.clone()));
         }
         PaletteCommand::Help => {
             app.help_visible = true;
@@ -6717,9 +6731,14 @@ async fn run_app(
                     match picker.handle_key(code, control) {
                         PickerAction::Stay => {}
                         PickerAction::Dismiss => {
-                            app.skill_picker = None;
-                            // The user typed `/` to get here; give it back.
-                            app.input.insert("/");
+                            let from_slash = app
+                                .skill_picker
+                                .take()
+                                .is_some_and(|picker| picker.from_slash);
+                            if from_slash {
+                                // The user typed `/` to get here; give it back.
+                                app.input.insert("/");
+                            }
                         }
                         PickerAction::Choose(name) => {
                             app.skill_picker = None;
@@ -6994,7 +7013,9 @@ async fn run_app(
                             && !app.skills.is_empty()
                             && !key.modifiers.contains(KeyModifiers::ALT) =>
                     {
-                        app.skill_picker = Some(SkillPicker::new(app.skills.clone()));
+                        let mut picker = SkillPicker::new(app.skills.clone());
+                        picker.from_slash = true;
+                        app.skill_picker = Some(picker);
                     }
                     _ => match handle_prompt_key(&mut app.input, key) {
                         PromptAction::Submit
@@ -8391,6 +8412,23 @@ mod tests {
                 assert!(line.width() <= width.max(1) + 1, "width {width}");
             }
         }
+    }
+
+    #[test]
+    fn palette_opens_the_skill_picker_and_escape_restores_slash_only_when_typed() {
+        let mut app = App::new();
+        app.skills = vec![("deploy".into(), "Deploy things".into())];
+        activate_palette_command(&mut app, PaletteCommand::Skills, Vec::new());
+        let picker = app.skill_picker.as_ref().expect("picker opens");
+        assert!(!picker.from_slash, "palette-opened picker owes no slash");
+        assert_eq!(picker.skills.len(), 1);
+
+        let mut palette = CommandPalette::new();
+        palette.insert_query("skill");
+        assert_eq!(
+            palette.handle_key(KeyCode::Enter, false),
+            CommandPaletteAction::Choose(PaletteCommand::Skills)
+        );
     }
 
     #[test]
