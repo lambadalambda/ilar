@@ -29,3 +29,11 @@ consistent with the "skills over features" principle.
 
 - Candidate CLIs evolve quickly; the skill should teach the pattern and
   name a default rather than hardcoding flags likely to rot.
+
+## Resolution
+
+Shipped as the built-in `mcp-via-cli` skill (mcptools CLI; stdio + HTTP,
+config discovery, session caveats). Command syntax was verified against
+upstream mcptools documentation; a live end-to-end run against a real
+server was not possible in the sandboxed environment (package installs
+blocked) and remains a manual follow-up.
