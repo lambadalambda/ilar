@@ -2398,6 +2398,9 @@ struct App {
     /// Last submitted prompt, offered for one-key retry after a turn error.
     last_prompt: Option<String>,
     retry_available: bool,
+    /// Messages submitted during an active turn, auto-sent in order when
+    /// the turn completes.
+    queued_messages: Vec<String>,
     scroll_top: usize,
     content_rows: usize,
     viewport_rows: usize,
@@ -2462,6 +2465,7 @@ impl App {
             stream_rate: None,
             last_prompt: None,
             retry_available: false,
+            queued_messages: Vec::new(),
             scroll_top: 0,
             content_rows: 0,
             viewport_rows: 0,
@@ -3722,7 +3726,7 @@ impl App {
         let input_view = self
             .input
             .multiline_view(input_area.width, input_area.height);
-        let input_title = if input_view.line_count > 1 {
+        let mut input_title = if input_view.line_count > 1 {
             format!(
                 " input {}/{} ",
                 input_view.cursor_line, input_view.line_count
@@ -3730,6 +3734,9 @@ impl App {
         } else {
             " input ".into()
         };
+        if !self.queued_messages.is_empty() {
+            input_title = format!("{}· {} queued ", input_title, self.queued_messages.len());
+        }
         let input_lines = input_view
             .lines
             .iter()
@@ -6795,9 +6802,29 @@ async fn run_app(
             match handle.await {
                 Ok(TurnCompletion::Root(result)) => {
                     let aborted = matches!(result, Ok(TurnOutcome::Aborted));
+                    let completed = matches!(result, Ok(TurnOutcome::Completed));
                     app.finish_turn(result);
                     if !aborted {
                         notifications_paused = false;
+                    }
+                    if !app.queued_messages.is_empty() {
+                        if completed && app.input.is_blank() {
+                            let next = app.queued_messages.remove(0);
+                            app.input = InputBuffer::from(next);
+                            // Send through the ordinary submit path.
+                            pending_terminal_event = Some(Event::Key(KeyEvent::new(
+                                KeyCode::Enter,
+                                KeyModifiers::NONE,
+                            )));
+                        } else {
+                            app.set_notice(
+                                format!(
+                                    "{} queued message(s) held until a turn succeeds (Esc drops)",
+                                    app.queued_messages.len()
+                                ),
+                                NoticeLevel::Warning,
+                            );
+                        }
                     }
                 }
                 Ok(TurnCompletion::Routed(Ok(ilar::subagent::RouteOutcome::Propagate(
@@ -7282,7 +7309,16 @@ async fn run_app(
                                 app.set_activity(Activity::Aborting);
                             }
                         } else if background == 0 {
-                            app.input.clear();
+                            if app.input.is_blank() && !app.queued_messages.is_empty() {
+                                let dropped = app.queued_messages.len();
+                                app.queued_messages.clear();
+                                app.set_notice(
+                                    format!("dropped {dropped} queued message(s)"),
+                                    NoticeLevel::Info,
+                                );
+                            } else {
+                                app.input.clear();
+                            }
                         }
                     }
                     // Ctrl-U edits the input when it has text; the
@@ -7402,6 +7438,20 @@ async fn run_app(
                                     .await,
                                 )
                             }));
+                        }
+                        PromptAction::Submit
+                            if (turn_handle.is_some() || app.busy) && !app.input.is_blank() =>
+                        {
+                            let text = app.input.take();
+                            app.history.push(&text);
+                            app.queued_messages.push(text);
+                            app.set_notice(
+                                format!(
+                                    "queued ({} waiting) — sends when the turn completes",
+                                    app.queued_messages.len()
+                                ),
+                                NoticeLevel::Info,
+                            );
                         }
                         PromptAction::Edited => app.clear_transient_notice(),
                         PromptAction::Unhandled | PromptAction::Submit => {}
@@ -8229,6 +8279,24 @@ mod tests {
         assert!(markdown.contains("```\nall green\n```"));
         assert!(markdown.contains("## ilar\n\nFixed it."));
         assert!(markdown.contains("*switched to zai/glm-5.3*"));
+    }
+
+    #[test]
+    fn queued_messages_show_in_the_input_title() {
+        let mut app = App::new();
+        app.queued_messages = vec!["next thing".into(), "after that".into()];
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let screen = (0..24)
+            .map(|row| {
+                (0..80)
+                    .map(|column| terminal.backend().buffer()[(column, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("2 queued"), "{screen}");
     }
 
     #[test]
