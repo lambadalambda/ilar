@@ -97,3 +97,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Render diffs for edit/write tool results](issues/render-edit-diffs.md)
 - [x] [Session list + resume-last](issues/session-list-and-resume-last.md)
 - [x] [Prompt history recall](issues/prompt-history-recall.md)
+- [x] [Cumulative session usage + cost display](issues/cumulative-usage-and-cost.md)

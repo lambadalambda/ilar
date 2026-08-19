@@ -18,7 +18,6 @@
 
 ## Milestone 4 — Daily-driver UX
 
-- [ ] [Cumulative session usage + cost display](issues/cumulative-usage-and-cost.md)
 - [ ] [Help overlay with keybindings](issues/help-overlay.md)
 - [ ] [Readline-style input editing](issues/readline-input-editing.md)
 - [ ] [Skill triggers + user skill invocation](issues/skill-triggers-and-user-invocation.md)
