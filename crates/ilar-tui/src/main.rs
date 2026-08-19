@@ -1,5 +1,6 @@
 //! ilar TUI: transcript, streaming, tool display, input. Esc aborts.
 
+mod diff;
 mod markdown;
 mod theme;
 
@@ -54,6 +55,7 @@ enum Line_ {
         kind: ToolKind,
         arguments: String,
         argument_detail: String,
+        diff: Vec<diff::DiffLine>,
         result: Option<String>,
         state: ToolState,
         progress: ToolProgress,
@@ -910,6 +912,7 @@ fn restored_session_invocation_view(
                                 kind,
                                 arguments,
                                 argument_detail: ilar::agent::tool_argument_detail(name, input),
+                                diff: diff::tool_diff_value(name, input),
                                 result: None,
                                 state: ToolState::Running,
                                 progress: ToolProgress::None,
@@ -1253,6 +1256,7 @@ fn apply_child_loop_event(lines: &mut Vec<Line_>, group: &mut u64, scope: &str, 
             kind: ToolKind::Tool,
             arguments: String::new(),
             argument_detail: String::new(),
+            diff: Vec::new(),
             result: None,
             state: ToolState::Running,
             progress: ToolProgress::None,
@@ -1294,13 +1298,16 @@ fn apply_child_loop_event(lines: &mut Vec<Line_>, group: &mut u64, scope: &str, 
         }
         LoopEvent::ToolInputComplete { id, arguments } => {
             if let Some(Line_::Tool {
+                name,
                 progress,
                 argument_detail,
+                diff,
                 ..
             }) = direct_tool_mut(lines, id)
             {
                 *progress = ToolProgress::Queued;
                 *argument_detail = bounded_detail(arguments);
+                *diff = diff::tool_diff(name, arguments);
             }
         }
         LoopEvent::SubagentConfigured {
@@ -1558,6 +1565,7 @@ fn tool_entry_rows(
         kind,
         arguments,
         argument_detail,
+        diff,
         result,
         state,
         progress,
@@ -1601,14 +1609,23 @@ fn tool_entry_rows(
         target: Some(TranscriptHitTarget::Tool(id.clone())),
     }];
     if *expanded {
-        rows.extend(tool_detail_rows(
-            "args",
-            argument_detail,
-            width,
-            indent + 4,
-            if *full { usize::MAX } else { 4 },
-            false,
-        ));
+        if diff.is_empty() {
+            rows.extend(tool_detail_rows(
+                "args",
+                argument_detail,
+                width,
+                indent + 4,
+                if *full { usize::MAX } else { 4 },
+                false,
+            ));
+        } else {
+            rows.extend(tool_diff_rows(
+                diff,
+                width,
+                indent + 4,
+                if *full { usize::MAX } else { 8 },
+            ));
+        }
         if matches!(kind, ToolKind::Tool) || child_lines.is_empty() || *state == ToolState::Failed {
             rows.extend(tool_detail_rows(
                 "result",
@@ -1697,47 +1714,50 @@ fn hierarchy_prefix(indent: usize, branch: &str) -> String {
     format!("{}{branch}", " ".repeat(indent - 2))
 }
 
-fn tool_detail_rows(
-    label: &str,
-    text: &str,
-    width: u16,
+/// Indent/label/content column split shared by the labeled detail rows.
+struct DetailLayout {
     indent: usize,
-    limit: usize,
-    error: bool,
-) -> Vec<TranscriptRow> {
-    let width = width as usize;
-    if width == 0 {
-        return vec![TranscriptRow {
-            line: Line::default(),
-            target: None,
-        }];
-    }
+    label_width: usize,
+    content_width: usize,
+}
+
+fn detail_layout(width: usize, indent: usize) -> DetailLayout {
     let indent = indent.min(width.saturating_sub(1));
     let remaining = width - indent;
     let label_width = 8usize.min(remaining.saturating_sub(1));
-    let content_width = remaining.saturating_sub(label_width).max(1);
-    let mut content = safe_lines(text)
-        .into_iter()
-        .flat_map(|line| wrap_styled_line(Line::raw(line), content_width))
-        .collect::<Vec<_>>();
+    DetailLayout {
+        indent,
+        label_width,
+        content_width: remaining.saturating_sub(label_width).max(1),
+    }
+}
+
+fn labeled_rows(
+    label: &str,
+    mut content: Vec<Line<'static>>,
+    layout: &DetailLayout,
+    limit: usize,
+    error: bool,
+) -> Vec<TranscriptRow> {
     let truncated = content.len() > limit;
     content.truncate(limit);
     if truncated && let Some(last) = content.last_mut() {
         *last = Line::styled(
-            truncate_display("… more", content_width, Truncation::Right),
+            truncate_display("… more", layout.content_width, Truncation::Right),
             Style::default().fg(MUTED),
         );
     }
     if content.is_empty() {
         content.push(Line::default());
     }
+    let label_width = layout.label_width;
     let label_style = Style::default().fg(if error { ERROR } else { MUTED });
     content
         .into_iter()
         .enumerate()
         .map(|(index, mut line)| {
             let mut spans = vec![
-                Span::raw(" ".repeat(indent)),
+                Span::raw(" ".repeat(layout.indent)),
                 Span::styled(
                     if index == 0 {
                         format!(
@@ -1757,6 +1777,63 @@ fn tool_detail_rows(
             }
         })
         .collect()
+}
+
+fn tool_detail_rows(
+    label: &str,
+    text: &str,
+    width: u16,
+    indent: usize,
+    limit: usize,
+    error: bool,
+) -> Vec<TranscriptRow> {
+    let width = width as usize;
+    if width == 0 {
+        return vec![TranscriptRow {
+            line: Line::default(),
+            target: None,
+        }];
+    }
+    let layout = detail_layout(width, indent);
+    let content = safe_lines(text)
+        .into_iter()
+        .flat_map(|line| wrap_styled_line(Line::raw(line), layout.content_width))
+        .collect::<Vec<_>>();
+    labeled_rows(label, content, &layout, limit, error)
+}
+
+fn tool_diff_rows(
+    diff: &[diff::DiffLine],
+    width: u16,
+    indent: usize,
+    limit: usize,
+) -> Vec<TranscriptRow> {
+    let width = width as usize;
+    if width == 0 {
+        return vec![TranscriptRow {
+            line: Line::default(),
+            target: None,
+        }];
+    }
+    let layout = detail_layout(width, indent);
+    let content = diff
+        .iter()
+        .flat_map(|line| {
+            let (marker, color) = match line.kind {
+                diff::DiffKind::Added => ("+", theme::SUCCESS),
+                diff::DiffKind::Removed => ("-", ERROR),
+                diff::DiffKind::Context => (" ", MUTED),
+            };
+            wrap_styled_line(
+                Line::from(Span::styled(
+                    format!("{marker} {}", safe_text(&line.text)),
+                    Style::default().fg(color),
+                )),
+                layout.content_width,
+            )
+        })
+        .collect::<Vec<_>>();
+    labeled_rows("diff", content, &layout, limit, false)
 }
 
 fn transcript_entry_lines(
@@ -2135,6 +2212,7 @@ impl App {
                     kind: ToolKind::Tool,
                     arguments: String::new(),
                     argument_detail: String::new(),
+                    diff: Vec::new(),
                     result: None,
                     state: ToolState::Running,
                     progress: ToolProgress::None,
@@ -2187,20 +2265,23 @@ impl App {
                 }
             }
             LoopEvent::ToolInputComplete { id, arguments } => {
-                if let Some((progress, detail)) =
+                if let Some((name, progress, detail, diff)) =
                     self.lines.iter_mut().rev().find_map(|line| match line {
                         Line_::Tool {
                             id: line_id,
+                            name,
                             state: ToolState::Running,
                             progress,
                             argument_detail,
+                            diff,
                             ..
-                        } if line_id == id => Some((progress, argument_detail)),
+                        } if line_id == id => Some((name, progress, argument_detail, diff)),
                         _ => None,
                     })
                 {
                     *progress = ToolProgress::Queued;
                     *detail = bounded_detail(arguments);
+                    *diff = diff::tool_diff(name, arguments);
                 }
             }
             LoopEvent::SubagentConfigured {
@@ -2306,6 +2387,7 @@ impl App {
                         kind: ToolKind::Tool,
                         arguments: String::new(),
                         argument_detail: String::new(),
+                        diff: Vec::new(),
                         result: Some(bounded_detail(result)),
                         state: if *is_error {
                             ToolState::Failed
@@ -6076,6 +6158,84 @@ mod tests {
     }
 
     #[test]
+    fn restored_edit_tools_carry_a_diff() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf());
+        let session_id = new_id();
+        let mut session = store
+            .create(SessionMeta {
+                session_id: session_id.clone(),
+                parent_id: None,
+                agent: "build".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+            })
+            .unwrap();
+        session
+            .append(ilar::session::SessionEvent::AssistantMessage {
+                id: new_id(),
+                model: "zai/glm-4.7".into(),
+                content: vec![ilar::session::ContentBlock::ToolCall {
+                    id: "edit-1".into(),
+                    name: "edit".into(),
+                    input: serde_json::json!({
+                        "path": "src/lib.rs",
+                        "old_string": "keep\nold",
+                        "new_string": "keep\nnew",
+                    }),
+                }],
+                usage: ilar::session::Usage::default(),
+                stop_reason: "tool_use".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        drop(session);
+
+        let view = restored_session_view(&store.load(&session_id).unwrap());
+        let Some(Line_::Tool { diff, .. }) = view.lines.first() else {
+            panic!("expected restored edit tool: {:?}", view.lines);
+        };
+        assert_eq!(
+            diff.iter().map(|line| line.kind).collect::<Vec<_>>(),
+            vec![
+                diff::DiffKind::Context,
+                diff::DiffKind::Removed,
+                diff::DiffKind::Added
+            ]
+        );
+    }
+
+    #[test]
+    fn tool_diff_rows_truncate_and_expand() {
+        let diff: Vec<diff::DiffLine> = (0..12)
+            .map(|index| diff::DiffLine {
+                kind: diff::DiffKind::Added,
+                text: format!("added line {index}"),
+            })
+            .collect();
+        let limited = tool_diff_rows(&diff, 80, 4, 8);
+        assert_eq!(limited.len(), 8);
+        assert!(rendered_text(&limited.last().unwrap().line).contains("… more"));
+        assert!(
+            !limited
+                .iter()
+                .any(|row| rendered_text(&row.line).contains("added line 11"))
+        );
+
+        let full = tool_diff_rows(&diff, 80, 4, usize::MAX);
+        assert_eq!(full.len(), 12);
+        assert!(
+            full.iter()
+                .any(|row| rendered_text(&row.line).contains("added line 11"))
+        );
+        assert!(
+            !full
+                .iter()
+                .any(|row| rendered_text(&row.line).contains("… more"))
+        );
+    }
+
+    #[test]
     fn resumed_unfinished_tools_are_marked_failed() {
         let dir = tempfile::tempdir().unwrap();
         let store = SessionStore::new(dir.path().to_path_buf());
@@ -7598,6 +7758,78 @@ mod tests {
     }
 
     #[test]
+    fn expanded_edit_tool_shows_colored_diff_instead_of_args() {
+        let mut app = App::new();
+        app.lines.clear();
+        app.push_loop_event(&LoopEvent::ToolStarted {
+            id: "edit-1".into(),
+            name: "edit".into(),
+        });
+        app.push_loop_event(&LoopEvent::ToolInputComplete {
+            id: "edit-1".into(),
+            arguments: serde_json::json!({
+                "path": "src/lib.rs",
+                "old_string": "shared\nbefore\nshared tail",
+                "new_string": "shared\nafter\nshared tail",
+            })
+            .to_string(),
+        });
+        app.push_loop_event(&LoopEvent::ToolFinished {
+            id: "edit-1".into(),
+            name: "edit".into(),
+            is_error: false,
+            result: "edited src/lib.rs: 1 replacement".into(),
+            child_session_id: None,
+        });
+        app.toggle_transcript_target(TranscriptHitTarget::ToolGroup("live:0:edit-1".into()));
+        app.toggle_transcript_target(TranscriptHitTarget::Tool("edit-1".into()));
+
+        let lines = app.transcript_lines(60, std::time::Instant::now());
+        let rendered = lines.iter().map(rendered_text).collect::<Vec<_>>();
+        assert!(
+            rendered.iter().any(|line| line.contains("diff")),
+            "{rendered:?}"
+        );
+        assert!(
+            rendered.iter().any(|line| line.contains("- before")),
+            "{rendered:?}"
+        );
+        assert!(
+            rendered.iter().any(|line| line.contains("+ after")),
+            "{rendered:?}"
+        );
+        assert!(
+            !rendered.iter().any(|line| line.contains("old_string")),
+            "raw args JSON must be replaced by the diff: {rendered:?}"
+        );
+        let colors: Vec<_> = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .filter_map(|span| span.style.fg.map(|color| (span.content.to_string(), color)))
+            .collect();
+        assert!(
+            colors
+                .iter()
+                .any(|(text, color)| text.contains("+ after") && *color == theme::SUCCESS),
+            "{colors:?}"
+        );
+        assert!(
+            colors
+                .iter()
+                .any(|(text, color)| text.contains("- before") && *color == ERROR),
+            "{colors:?}"
+        );
+
+        for width in 0..=20 {
+            let narrow = app.transcript_lines(width, std::time::Instant::now());
+            assert!(
+                narrow.iter().all(|line| line.width() <= width as usize),
+                "width {width}"
+            );
+        }
+    }
+
+    #[test]
     fn agent_shows_live_children_and_expands_completed_timeline() {
         let mut app = App::new();
         app.lines.clear();
@@ -8695,6 +8927,7 @@ mod tests {
                 kind: ToolKind::Tool,
                 arguments: "src/main.rs".into(),
                 argument_detail: String::new(),
+                diff: Vec::new(),
                 result: None,
                 state: ToolState::Succeeded,
                 progress: ToolProgress::None,
