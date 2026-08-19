@@ -3914,6 +3914,57 @@ impl App {
         }
 
         if let Some(todo_area) = content_areas.todos {
+            let mut todo_area = todo_area;
+            if let Some((goal, round)) = &self.goal {
+                let text_width = todo_area
+                    .width
+                    .saturating_sub(2 + CONTENT_HORIZONTAL_PADDING * 2)
+                    .max(1) as usize;
+                let mut lines: Vec<Line<'static>> = safe_lines(goal)
+                    .into_iter()
+                    .flat_map(|line| wrap_styled_line(Line::raw(line), text_width))
+                    .take(5)
+                    .map(|mut line| {
+                        for span in &mut line.spans {
+                            span.style = span.style.fg(theme::PRIMARY);
+                        }
+                        line
+                    })
+                    .collect();
+                lines.push(Line::styled(
+                    truncate_display(
+                        "Esc (idle) aborts · /goal edits",
+                        text_width,
+                        Truncation::Right,
+                    ),
+                    Style::default().fg(MUTED),
+                ));
+                let height = (lines.len() as u16 + 2).min(todo_area.height / 2);
+                if height > 2 {
+                    let goal_area = Rect::new(todo_area.x, todo_area.y, todo_area.width, height);
+                    todo_area = Rect::new(
+                        todo_area.x,
+                        todo_area.y + height,
+                        todo_area.width,
+                        todo_area.height - height,
+                    );
+                    let goal_block = Block::default()
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .border_style(theme::panel_border())
+                        .padding(Padding::new(
+                            CONTENT_HORIZONTAL_PADDING,
+                            CONTENT_HORIZONTAL_PADDING,
+                            0,
+                            0,
+                        ))
+                        .title(Line::from(Span::styled(
+                            format!("goal {round}/{MAX_GOAL_ROUNDS}"),
+                            theme::title(theme::REASONING),
+                        )));
+                    frame.render_widget(Paragraph::new(lines).block(goal_block), goal_area);
+                }
+            }
             let todo_block = Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
@@ -7844,15 +7895,35 @@ async fn run_app(
                             app.retry_available = false;
                             if let Some(("goal", goal_text)) = parse_slash_invocation(&text) {
                                 if goal_text.is_empty() {
-                                    let notice = match app.goal.take() {
-                                        Some((goal, round)) => {
-                                            format!("goal cleared after {round} round(s): {goal}")
+                                    match &app.goal {
+                                        Some((goal, _)) => {
+                                            // Prefill for editing; Esc on an
+                                            // emptied input aborts instead.
+                                            app.input = InputBuffer::from(format!("/goal {goal}"));
+                                            app.set_notice(
+                                                "edit the goal and press Enter — Esc on an empty input aborts it",
+                                                NoticeLevel::Info,
+                                            );
                                         }
-                                        None => {
-                                            "no active goal — /goal <description> sets one".into()
-                                        }
-                                    };
-                                    app.set_notice(notice, NoticeLevel::Info);
+                                        None => app.set_notice(
+                                            "no active goal — /goal <description> sets one",
+                                            NoticeLevel::Info,
+                                        ),
+                                    }
+                                    continue;
+                                }
+                                if let Some((goal, round)) = &mut app.goal {
+                                    // Editing mid-loop keeps the round
+                                    // budget; the next continuation carries
+                                    // the new wording.
+                                    if goal != goal_text {
+                                        *goal = goal_text.to_string();
+                                        let round = *round;
+                                        app.push_transcript_line(Line_::System(format!(
+                                            "goal updated (round {round}/{MAX_GOAL_ROUNDS}): {goal_text}"
+                                        )));
+                                    }
+                                    app.clear_transient_notice();
                                     continue;
                                 }
                                 app.goal = Some((goal_text.to_string(), 0));
@@ -8856,6 +8927,33 @@ mod tests {
         let cont = goal_continuation_prompt("replay 5 turns at 90%", 3);
         assert!(cont.contains("round 3/25"), "{cont}");
         assert!(cont.contains("GOAL_ACHIEVED"), "{cont}");
+    }
+
+    #[test]
+    fn goal_shows_in_the_sidebar_on_wide_terminals() {
+        let mut app = App::new();
+        app.goal = Some((
+            "recover the engine until 5 turns replay at 90% accuracy".into(),
+            4,
+        ));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let screen = (0..30)
+            .map(|row| {
+                (0..140)
+                    .map(|column| terminal.backend().buffer()[(column, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("goal 4/25"), "{screen}");
+        assert!(screen.contains("recover the engine"), "{screen}");
+        assert!(screen.contains("Esc (idle) aborts"), "{screen}");
+        assert!(
+            screen.contains("todos"),
+            "todos panel still present: {screen}"
+        );
     }
 
     #[test]
