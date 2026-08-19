@@ -40,6 +40,43 @@ edits in the main checkout. This is cooperative scheduling, not a sandbox:
 tools can still access paths outside the worktree.
 "#;
 
+/// The built-in MCP bridge skill: drive MCP servers through an external
+/// CLI instead of a core MCP client — see meta/issues/mcp-via-skill.md.
+const MCP_VIA_CLI: &str = r#"---
+description = "Call MCP server tools through the mcptools CLI (no built-in MCP client)"
+triggers = ["MCP server", "model context protocol", "mcp.json", "call an MCP tool"]
+---
+# MCP via CLI
+
+ilar has no built-in MCP client by design. Reach MCP servers through an
+external CLI with the bash tool. Default choice: `mcptools`
+(https://github.com/f/mcptools) — install with
+`brew install f/mcptools/mcptools` or `go install github.com/f/mcptools/cmd/mcptools@latest`.
+
+1. Discover configured servers. Check, in order: `./.mcp.json`,
+   `~/.claude/mcp.json`, `~/.cursor/mcp.json`. Entries follow the common
+   `{"mcpServers": {"<name>": {"command": ..., "args": [...], "env": {...}}}}`
+   shape (HTTP servers use a `url` field instead).
+2. List a server's tools:
+   - stdio: `mcp tools <command> <args...>` (e.g. `mcp tools npx -y @modelcontextprotocol/server-filesystem /tmp`)
+   - HTTP/SSE: `mcp tools <url>`
+3. Call a tool with JSON parameters:
+   `mcp call <tool-name> --params '<json>' <command-or-url>`
+   Quote the JSON with single quotes; use `--format json` for
+   machine-readable output.
+4. Set any `env` values from the server entry inline:
+   `FOO=bar mcp call ...`.
+
+Notes:
+- Each `mcp call` starts a fresh stdio server; that is fine for
+  stateless tools. For servers that need a session, use
+  `mcp shell <command>` interactively via a background bash job.
+- Servers run with whatever access the surrounding sandbox grants; ilar
+  adds no credential handling or extra isolation.
+- If `mcp` is not installed, say so and show the install commands
+  instead of guessing at flags.
+"#;
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Frontmatter {
@@ -76,6 +113,7 @@ impl SkillStore {
     pub fn list(&self) -> anyhow::Result<Vec<Skill>> {
         let mut skills = vec![
             parse_skill_md("worktree-isolation", WORKTREE_ISOLATION).expect("builtin skill parses"),
+            parse_skill_md("mcp-via-cli", MCP_VIA_CLI).expect("builtin skill parses"),
         ];
         for (dir, sub) in [
             (&self.user_dir, "skills"),

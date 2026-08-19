@@ -158,3 +158,12 @@ match the task). In the TUI, type `/` on an empty input to pick a skill, or
 
 Built-in subagents are `build` (mutable, serialized per checkout) and `explore`
 (read-only, safe for parallel repository inspection and review).
+
+### MCP
+
+ilar deliberately ships no built-in MCP client. The built-in `mcp-via-cli`
+skill teaches the agent to drive MCP servers through the external
+[`mcptools`](https://github.com/f/mcptools) CLI instead (stdio and HTTP
+servers, config discovery from common `mcp.json` locations). MCP servers run
+outside ilar with whatever access your sandbox grants; ilar adds no credential
+handling.

@@ -163,6 +163,27 @@ fn builtin_worktree_isolation_skill_present() {
     assert!(wt.body.contains("git_worktree"), "{}", wt.body);
 }
 
+#[test]
+fn builtin_mcp_via_cli_skill_present() {
+    let user = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let store = store(user.path(), project.path());
+    let skill = store
+        .load("mcp-via-cli")
+        .unwrap()
+        .expect("builtin mcp-via-cli skill");
+    assert!(skill.body.contains("mcp tools"), "{}", skill.body);
+    assert!(skill.body.contains("mcp call"), "{}", skill.body);
+    assert!(skill.body.contains("--params"), "{}", skill.body);
+    assert!(
+        skill.triggers.iter().any(|t| t.contains("MCP")),
+        "{:?}",
+        skill.triggers
+    );
+    let listing = store.listing_prompt().unwrap();
+    assert!(listing.contains("mcp-via-cli"), "{listing}");
+}
+
 #[tokio::test]
 async fn skill_tool_loads_body_on_invocation() {
     let user = tempfile::tempdir().unwrap();
