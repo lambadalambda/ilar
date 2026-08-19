@@ -762,3 +762,21 @@ Diagnostic block in the session JSONL. Next occurrence will name the
 exact wire event. Suspects to check when it does: the 1 MiB tool
 argument cap vs. giant single-file write calls, unknown finish_reason
 values, and post-finish usage chunks.
+
+## 2026-08-19 — glm-5.3 root cause: z.ai buffers tool responses without tool_stream
+
+Manual endpoint probing (6 small, 3 thinking-heavy, 4 ilar-shaped
+requests) found the smoking gun: with tools in the request, the
+OpenAI-compatible z.ai endpoint sends NOTHING until the entire response
+is generated — first byte == total duration on every tools request,
+while tool-free requests stream normally. Long agentic turns (huge
+thinking + big write calls) therefore sit in dead air for minutes and
+die at gateway limits with zero bytes, which is exactly the earlier
+"error after 120KB thinking" session and the hit-or-miss feel.
+
+Fix: always send `tool_stream: true` on the OpenAI flavor. Verified live
+that glm-5.3 and glm-4.7 then stream tool arguments incrementally in the
+exact shape the strict decoder expects (id+name in the first chunk,
+argument deltas after). The Anthropic flavor already streams properly
+with tools. New ignored live smoke test pins the incremental behavior
+(`live_openai_flavor_glm53_tool_call_streams_incrementally`).
