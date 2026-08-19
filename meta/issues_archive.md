@@ -119,3 +119,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Goal mode](issues/goal-mode.md)
 - [x] [Pending-state controls](issues/pending-state-controls.md)
 - [x] [Service tool](issues/service-tool.md)
+- [x] [Per-task model override + models tool](issues/task-model-override.md)
