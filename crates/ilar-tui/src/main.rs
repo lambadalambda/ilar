@@ -862,6 +862,12 @@ fn handle_prompt_key(input: &mut InputBuffer, key: KeyEvent) -> PromptAction {
             input.delete();
             PromptAction::Edited
         }
+        // Reachable only on a non-blank input; the dispatcher keeps
+        // Ctrl-D as half-page scroll while the prompt is empty.
+        KeyCode::Char('d') if control => {
+            input.delete();
+            PromptAction::Edited
+        }
         KeyCode::Char(character)
             if !key.modifiers.intersects(
                 KeyModifiers::CONTROL
@@ -2531,7 +2537,7 @@ struct App {
     /// last completed window's bytes/sec.
     stream_rate_anchor: Option<(std::time::Instant, u64)>,
     stream_rate: Option<f64>,
-    /// Last submitted prompt, offered for one-key retry after a turn error.
+    /// Last submitted prompt, offered for Ctrl-R retry after a turn error.
     last_prompt: Option<String>,
     retry_available: bool,
     /// Messages submitted during an active turn, auto-sent in order when
@@ -2575,6 +2581,10 @@ struct App {
     skills: Vec<(String, String)>,
     theme: theme::ThemeId,
     theme_picker: Option<ThemePicker>,
+    /// Whether the terminal speaks the kitty keyboard protocol. Without
+    /// it Ctrl-M is indistinguishable from Enter, so the help overlay
+    /// must not advertise it.
+    keyboard_enhanced: bool,
     model_key_pending: bool,
     transcript_text_area: Rect,
     transcript_cache: TranscriptRenderCache,
@@ -2652,6 +2662,7 @@ impl App {
             skills: Vec::new(),
             theme: theme::ThemeId::Terminal,
             theme_picker: None,
+            keyboard_enhanced: false,
             model_key_pending: false,
             transcript_text_area: Rect::default(),
             transcript_cache: TranscriptRenderCache::default(),
@@ -3228,7 +3239,7 @@ impl App {
             self.lines.push(Line_::System(message.clone()));
             if self.last_prompt.is_some() {
                 self.retry_available = true;
-                message.push_str(" — press r to retry");
+                message.push_str(" — Ctrl-R to retry");
             }
             self.set_notice(&message, NoticeLevel::Error);
             self.status = "error".into();
@@ -4252,7 +4263,7 @@ impl App {
 
         frame.render_widget(Paragraph::new(self.status_line(chunks[1].width)), chunks[1]);
 
-        let input_focused = !self.busy && !self.has_modal();
+        let input_focused = input_accepts_keys(self.busy, self.has_modal());
         let input_block = Block::default()
             .borders(Borders::ALL)
             .border_type(if input_focused {
@@ -4380,7 +4391,10 @@ impl App {
             );
         }
 
-        if !self.busy && !self.has_modal() && input_area.width > 0 && input_area.height > 0 {
+        if input_accepts_keys(self.busy, self.has_modal())
+            && input_area.width > 0
+            && input_area.height > 0
+        {
             frame.set_cursor_position((
                 input_area.x.saturating_add(input_view.cursor_x),
                 input_area.y.saturating_add(input_view.cursor_y),
@@ -4396,7 +4410,7 @@ impl App {
         } else if let Some(picker) = &self.session_picker {
             render_session_picker(frame, picker);
         } else if self.help_visible {
-            render_help(frame, self.help_scroll);
+            render_help(frame, self.help_scroll, self.keyboard_enhanced);
         } else if self.pending_manager.is_some() {
             render_pending_manager(frame, self);
         } else if let Some(picker) = &self.skill_picker {
@@ -5237,6 +5251,9 @@ enum PickerAction {
 struct HelpBinding {
     keys: &'static str,
     action: &'static str,
+    /// Shown instead of `keys` when the terminal cannot report the
+    /// chord (Ctrl-M is plain Enter without the kitty protocol).
+    portable_keys: Option<&'static str>,
 }
 
 struct HelpSection {
@@ -5249,6 +5266,14 @@ macro_rules! binding {
         HelpBinding {
             keys: $keys,
             action: $action,
+            portable_keys: None,
+        }
+    };
+    ($keys:literal, $action:literal, portable = $portable:literal) => {
+        HelpBinding {
+            keys: $keys,
+            action: $action,
+            portable_keys: Some($portable),
         }
     };
 }
@@ -5264,6 +5289,7 @@ static HELP_SECTIONS: &[HelpSection] = &[
             binding!("Shift-Enter / Ctrl-J", "insert newline"),
             binding!("Esc", "abort running turn · clear input (nothing else)"),
             binding!("Ctrl-Q", "pending manager: queue, goal, jobs, retry"),
+            binding!("Ctrl-R", "retry the last prompt after an error"),
             binding!("Up / Down", "recall prompt history (blank input)"),
             binding!("Ctrl-A / Ctrl-E", "start / end of line"),
             binding!("Ctrl-K / Ctrl-U", "kill to line end / start"),
@@ -5276,7 +5302,7 @@ static HELP_SECTIONS: &[HelpSection] = &[
         bindings: &[
             binding!("Ctrl-F", "search transcript"),
             binding!("PgUp / PgDn", "scroll page"),
-            binding!("Ctrl-U / Ctrl-D", "scroll half page"),
+            binding!("Ctrl-U / Ctrl-D", "scroll half page (blank input)"),
             binding!("Ctrl-Home / Ctrl-End", "jump to top / tail"),
             binding!("Up / Down", "scroll line (while input has text)"),
             binding!("mouse wheel / drag", "scroll · select and copy"),
@@ -5287,7 +5313,7 @@ static HELP_SECTIONS: &[HelpSection] = &[
         title: "Pickers",
         bindings: &[
             binding!("Ctrl-P", "command palette"),
-            binding!("Ctrl-M / F2", "switch model"),
+            binding!("Ctrl-M / F2", "switch model", portable = "F2"),
             binding!("F3", "switch theme"),
             binding!("Ctrl-X, M / T", "leader: models / themes"),
             binding!("↑↓ · Enter · Esc", "navigate · choose · dismiss"),
@@ -5322,13 +5348,50 @@ static HELP_SECTIONS: &[HelpSection] = &[
     HelpSection {
         title: "Help",
         bindings: &[
-            binding!("F1 / ?", "toggle this overlay"),
+            binding!("F1", "toggle this overlay"),
             binding!("Esc", "close"),
         ],
     },
 ];
 
-fn help_lines(width: usize) -> Vec<Line<'static>> {
+/// Retry is a modifier chord, never a bare letter: the prompt has focus,
+/// so any printable key must reach the input buffer.
+fn retry_requested(code: KeyCode, control: bool) -> bool {
+    control && matches!(code, KeyCode::Char('r' | 'R'))
+}
+
+/// Load the last prompt and return the synthetic Enter that resubmits it
+/// through the ordinary path.
+///
+/// Declines when the input holds a draft: overwriting it would discard
+/// text the user typed but never submitted, and an unsubmitted draft is
+/// not in the history, so it would be unrecoverable.
+fn begin_retry(app: &mut App) -> Option<Event> {
+    if !app.input.is_blank() {
+        app.set_notice(
+            "input has an unsent draft — send or clear it before retrying",
+            NoticeLevel::Warning,
+        );
+        return None;
+    }
+    let prompt = app.last_prompt.clone()?;
+    app.retry_available = false;
+    app.clear_notice();
+    app.input = InputBuffer::from(prompt);
+    Some(Event::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    )))
+}
+
+/// Whether keystrokes reach the input buffer, and so whether the caret
+/// and focused border should be shown. Typing during a turn is allowed —
+/// it queues — so `busy` must not hide the caret.
+fn input_accepts_keys(_busy: bool, has_modal: bool) -> bool {
+    !has_modal
+}
+
+fn help_lines(width: usize, keyboard_enhanced: bool) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     for section in HELP_SECTIONS {
         if !lines.is_empty() {
@@ -5339,10 +5402,17 @@ fn help_lines(width: usize) -> Vec<Line<'static>> {
             theme::title(theme::MARKUP),
         ));
         for binding in section.bindings {
+            // Crossterm resolves CR to Enter before the control-character
+            // branch, so without the kitty protocol Ctrl-M is literally
+            // Enter and would send the draft. Offer only the portable key.
+            let keys = match binding.portable_keys {
+                Some(portable) if !keyboard_enhanced => portable,
+                _ => binding.keys,
+            };
             if width < 30 {
                 lines.push(Line::styled(
                     truncate_display(
-                        &format!("{} {}", binding.keys, binding.action),
+                        &format!("{} {}", keys, binding.action),
                         width.max(1),
                         Truncation::Right,
                     ),
@@ -5350,10 +5420,7 @@ fn help_lines(width: usize) -> Vec<Line<'static>> {
                 ));
                 continue;
             }
-            let padded = format!(
-                "  {:<24}",
-                truncate_display(binding.keys, 24, Truncation::Right)
-            );
+            let padded = format!("  {:<24}", truncate_display(keys, 24, Truncation::Right));
             let action_width = width.saturating_sub(UnicodeWidthStr::width(padded.as_str()) + 1);
             lines.push(Line::from(vec![
                 Span::styled(padded, Style::default().fg(theme::SECONDARY)),
@@ -5481,7 +5548,7 @@ fn render_pending_manager(frame: &mut Frame, app: &App) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-fn render_help(frame: &mut Frame, scroll: usize) {
+fn render_help(frame: &mut Frame, scroll: usize, keyboard_enhanced: bool) {
     let area = centered_rect(frame.area(), 72, 24);
     frame.render_widget(Clear, area);
     let block = Block::default()
@@ -5498,7 +5565,7 @@ fn render_help(frame: &mut Frame, scroll: usize) {
     if inner.width == 0 || inner.height == 0 {
         return;
     }
-    let lines = help_lines(inner.width as usize);
+    let lines = help_lines(inner.width as usize, keyboard_enhanced);
     let start = scroll.min(lines.len().saturating_sub(inner.height as usize));
     let visible: Vec<Line<'static>> = lines
         .into_iter()
@@ -7442,6 +7509,9 @@ async fn main() -> Result<()> {
         if terminal_hold.is_none() {
             terminal_hold = Some(TerminalSession::start()?);
         }
+        app.keyboard_enhanced = terminal_hold
+            .as_ref()
+            .is_some_and(|(_, session)| session.keyboard_enhanced);
         let terminal = &mut terminal_hold.as_mut().expect("terminal started").0;
         let exit = run_app(
             terminal,
@@ -7978,18 +8048,11 @@ async fn run_app(
                             app.clear_transient_notice();
                         }
                         PendingAction::RetryNow => {
-                            if !app.busy
-                                && turn_handle.is_none()
-                                && let Some(prompt) = app.last_prompt.clone()
-                            {
-                                app.retry_available = false;
-                                app.pending_manager = None;
-                                app.clear_notice();
-                                app.input = InputBuffer::from(prompt);
-                                pending_terminal_event = Some(Event::Key(KeyEvent::new(
-                                    KeyCode::Enter,
-                                    KeyModifiers::NONE,
-                                )));
+                            if !app.busy && turn_handle.is_none() {
+                                pending_terminal_event = begin_retry(app);
+                                if pending_terminal_event.is_some() {
+                                    app.pending_manager = None;
+                                }
                             }
                         }
                     }
@@ -8281,10 +8344,9 @@ async fn run_app(
                         app.help_visible = true;
                         app.help_scroll = 0;
                     }
-                    (KeyCode::Char('?'), false) if app.input.is_blank() => {
-                        app.help_visible = true;
-                        app.help_scroll = 0;
-                    }
+                    // Ctrl-M is simply unreachable without keyboard
+                    // enhancement (the terminal reports it as Enter);
+                    // the arm stays for terminals that do report it.
                     (KeyCode::Char('m'), true) | (KeyCode::F(2), false)
                         if !app.busy && !model_choices.is_empty() =>
                     {
@@ -8317,7 +8379,7 @@ async fn run_app(
                     (KeyCode::Char('u'), true) if app.input.is_blank() => {
                         app.scroll_up(app.page_size().div_ceil(2));
                     }
-                    (KeyCode::Char('d'), true) => {
+                    (KeyCode::Char('d'), true) if app.input.is_blank() => {
                         app.scroll_down(app.page_size().div_ceil(2));
                     }
                     (KeyCode::Home, true) => app.scroll_to_top(),
@@ -8349,23 +8411,13 @@ async fn run_app(
                     (KeyCode::Char('q'), true) => {
                         app.pending_manager = Some(PendingManager::default());
                     }
-                    (KeyCode::Char('r'), false)
-                        if app.retry_available
+                    (code, control)
+                        if retry_requested(code, control)
+                            && app.retry_available
                             && !app.busy
-                            && turn_handle.is_none()
-                            && app.input.is_blank() =>
+                            && turn_handle.is_none() =>
                     {
-                        if let Some(prompt) = app.last_prompt.clone() {
-                            app.retry_available = false;
-                            app.clear_notice();
-                            app.input = InputBuffer::from(prompt);
-                            // Reuse the ordinary submit path via a
-                            // synthetic Enter on the next loop pass.
-                            pending_terminal_event = Some(Event::Key(KeyEvent::new(
-                                KeyCode::Enter,
-                                KeyModifiers::NONE,
-                            )));
-                        }
+                        pending_terminal_event = begin_retry(app);
                     }
                     // Inline slash completion: navigate/accept while the
                     // command name is being typed.
@@ -8583,6 +8635,51 @@ async fn run_app(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A bare printable key must never trigger an action while the
+    /// prompt has focus: after an error, "run the tests" began with `r`
+    /// and silently resent the previous prompt as a whole new turn.
+    #[test]
+    fn retry_needs_a_modifier_so_letters_stay_literal() {
+        assert!(retry_requested(KeyCode::Char('r'), true));
+        assert!(
+            !retry_requested(KeyCode::Char('r'), false),
+            "a bare letter must reach the input buffer"
+        );
+    }
+
+    /// Crossterm maps CR to Enter before the control-character branch, so
+    /// without the kitty protocol Ctrl-M *is* Enter and would fire off the
+    /// draft. Do not advertise it there.
+    #[test]
+    fn help_only_offers_ctrl_m_when_the_terminal_can_report_it() {
+        let rendered = |enhanced| {
+            help_lines(80, enhanced)
+                .iter()
+                .map(rendered_text)
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert!(rendered(true).contains("Ctrl-M"));
+        assert!(
+            !rendered(false).contains("Ctrl-M"),
+            "Ctrl-M is indistinguishable from Enter without keyboard enhancement"
+        );
+        // F2 is portable and must always be offered.
+        assert!(rendered(false).contains("F2"));
+    }
+
+    #[test]
+    fn control_d_deletes_forward_like_readline() {
+        let mut input = InputBuffer::from("abc");
+        input.cursor = 0;
+        let action = handle_prompt_key(
+            &mut input,
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(action, PromptAction::Edited);
+        assert_eq!(input.text(), "bc");
+    }
 
     /// The meter must not show the whole window while compaction is
     /// measuring against the input cap — that reads as comfortable
@@ -9689,7 +9786,7 @@ mod tests {
         app.finish_turn(Err(anyhow::anyhow!("api down")));
         assert!(app.retry_available);
         let (notice, _) = app.operational_notice().expect("error notice");
-        assert!(notice.contains("press r to retry"), "{notice}");
+        assert!(notice.contains("Ctrl-R to retry"), "{notice}");
 
         // A fresh successful turn clears nothing prematurely.
         app.retry_available = false;
@@ -10264,7 +10361,7 @@ mod tests {
 
     #[test]
     fn help_overlay_lists_load_bearing_bindings() {
-        let text = help_lines(80)
+        let text = help_lines(80, true)
             .iter()
             .map(rendered_text)
             .collect::<Vec<_>>()
@@ -10286,7 +10383,7 @@ mod tests {
         }
         // Tiny widths must not panic and must stay within bounds.
         for width in 0..=12 {
-            for line in help_lines(width) {
+            for line in help_lines(width, true) {
                 assert!(line.width() <= width.max(1) + 1, "width {width}");
             }
         }
@@ -10729,6 +10826,21 @@ mod tests {
             ratatui::layout::Position::new(4, 8)
         );
 
+        // Typing during a turn queues the message, so the caret must
+        // track it. The text has to change too: TestBackend keeps the
+        // last position, so an unset cursor is otherwise indistinguishable
+        // from a correctly placed one.
+        app.busy = true;
+        app.input = "abcdefgh".into();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert_eq!(
+            terminal.get_cursor_position().unwrap(),
+            ratatui::layout::Position::new(9, 8),
+            "the caret stopped tracking the input while a turn was running"
+        );
+        app.busy = false;
+        app.input = "abc".into();
+
         let mut picker = ModelPicker::new(
             ilar::model::catalog().iter().collect(),
             "openai/gpt-5.6-sol",
@@ -10740,6 +10852,25 @@ mod tests {
             terminal.get_cursor_position().unwrap(),
             ratatui::layout::Position::new(12, 2)
         );
+    }
+
+    /// Ctrl-R must not clobber a draft: an unsubmitted draft is not in
+    /// the history, so overwriting it loses the text for good.
+    #[test]
+    fn retry_declines_rather_than_discarding_an_unsent_draft() {
+        let mut app = App::new();
+        app.last_prompt = Some("previous prompt".into());
+        app.retry_available = true;
+        app.input = "half-written thought".into();
+
+        assert!(begin_retry(&mut app).is_none());
+        assert_eq!(app.input.text(), "half-written thought");
+        assert!(app.retry_available, "retry stays on offer");
+
+        app.input.clear();
+        assert!(begin_retry(&mut app).is_some());
+        assert_eq!(app.input.text(), "previous prompt");
+        assert!(!app.retry_available);
     }
 
     #[test]
