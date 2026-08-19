@@ -15,3 +15,10 @@ of Ctrl-P.
 ## Acceptance Criteria
 
 - Tests: skills appear and filter; choosing inserts the prefix.
+
+## Resolution (revised)
+
+Shipped initially as inline rows, then reverted on user feedback: the
+palette now has a single "Invoke skill…" entry (Skills section, `/`
+shortcut hint) that opens the skill picker as a submenu. Individual
+skills are not mixed into the main command list.
