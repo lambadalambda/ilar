@@ -717,6 +717,25 @@ pub fn catalog() -> &'static [ModelInfo] {
     CATALOG
 }
 
+/// The limit compaction must measure against. Providers reject a request
+/// on its *input* size, not on the whole window, so measuring against
+/// `context_limit` fires after the request is already unsendable — that
+/// is what let a gpt-5.3-codex-spark session run to 127k of a 100k input
+/// cap with the trigger sitting at 108.8k.
+///
+/// This is deliberately the conservative reading. For models with an
+/// explicitly declared cap (`model_input!`, and OpenAI's 272k of 400k)
+/// it is exactly right. For models where `input_limit` is merely
+/// `context_limit - output_limit` it assumes a maximum-length reply and
+/// so triggers earlier than strictly necessary — GLM-4.7 compacts around
+/// 63k of its 205k window. Erring this way costs extra summaries; erring
+/// the other way loses the session. Separating "hard cap" from "shared
+/// budget" needs an explicit catalog marker, since the two are
+/// arithmetically identical today.
+pub fn compaction_limit(model: &ModelInfo) -> u64 {
+    model.input_limit.min(model.context_limit)
+}
+
 pub fn find(full_id: &str) -> Option<&'static ModelInfo> {
     CATALOG.iter().find(|model| {
         full_id

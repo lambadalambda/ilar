@@ -538,6 +538,16 @@ impl crate::provider::ProviderResolver for Config {
             })
             .or_else(|| fallback_context_limit(model))
     }
+
+    fn compaction_limit(&self, model: &str) -> Option<u64> {
+        crate::model::find(model)
+            .map(crate::model::compaction_limit)
+            // Never exceed a provider-specific input cap (the z.ai
+            // Anthropic flavour reserves its own output headroom).
+            .zip(self.input_limit(model))
+            .map(|(compaction, input)| compaction.min(input))
+            .or_else(|| fallback_context_limit(model))
+    }
 }
 
 fn fallback_context_limit(model: &str) -> Option<u64> {

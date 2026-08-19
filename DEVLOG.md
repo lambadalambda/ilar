@@ -862,3 +862,52 @@ Also found and left alone: the `glob` crate has no brace expansion, so
 the turn's third pattern (`**/{route,client}/*`) matched nothing and
 reported it as a legitimate empty result after paying for the full walk.
 Models write brace patterns routinely. Recorded in the issue.
+
+## 2026-08-19 — compaction: right limit, wrong time
+
+Two independent defects, either enough to lose a session.
+
+The threshold was measured against `context_limit`, but providers reject
+on *input* size. gpt-5.3-codex-spark is 128k total with a 100k input cap,
+so the trigger sat at 108.8k — 8.8k past unsendable. A catalog audit
+found the inversion in 26 of 45 models.
+
+Worse, compaction only ran at turn start, before the provider loop. One
+agentic turn runs many steps per user message, and context was never
+re-checked across them. Session 4466f66d: 3 user messages, 44 assistant
+steps, 1.5k -> 127k tokens, sailed past its own 108.8k trigger at step
+32, died at 127k with zero compactions. The threshold fix alone would not
+have saved it; the mid-turn check alone would have.
+
+Now: thresholds resolve through `ProviderResolver::compaction_limit`
+(input cap, not window), and the loop re-checks before every step, gated
+on `continuations.is_empty() && paused_content.is_empty()` so a paused
+mid-continuation response never gets cut out from under its replay state.
+
+Mid-turn needs a different cut. The existing one lands on the last
+UserMessage, which mid-turn *is* this turn's prompt — it would summarize
+nothing. `CompactionCut::RecentSteps` walks back from the end keeping
+roughly a third of the budget, then snaps back to the message opening
+that step. Any index is a safe cut: assistant messages precede their
+results, so keeping a message keeps its results, and `transcript_of`
+already drops orphaned results leading the kept region.
+
+One guard earned its place the hard way: with a single huge step, the
+cut lands before it, so compaction would summarize only the tiny prefix
+— dropping the user's task to keep the bulk, for no saving. It now
+requires the summarized portion to be worth at least a quarter of the
+trigger, otherwise it declines and spends no provider call.
+
+Verified against the recorded trace: spark's trigger moves 108.8k ->
+85k, and compaction fires at the step reaching 90,698 tokens instead of
+never.
+
+Deliberately conservative and worth revisiting: `compaction_limit` is
+`min(input_limit, context_limit)`. For explicit caps (spark's 100k,
+OpenAI's 272k of 400k) that is exact. Where `input_limit` is merely
+`context - output_limit` it assumes a maximum-length reply, so GLM-4.7
+now compacts near 63k of its 205k window. An arithmetic discriminator
+does not work — OpenAI's real 272k cap is *also* exactly
+`context - output` — so telling the two apart needs an explicit catalog
+marker. Erring conservative costs summaries; erring the other way costs
+the session.

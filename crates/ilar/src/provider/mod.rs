@@ -75,6 +75,13 @@ pub trait ProviderResolver: Send + Sync {
     fn input_limit(&self, model: &str) -> Option<u64> {
         self.context_limit(model)
     }
+
+    /// Budget compaction measures against, and the budget the context
+    /// meter displays. Must stay at or below `input_limit`, since that
+    /// is what the provider actually rejects on.
+    fn compaction_limit(&self, model: &str) -> Option<u64> {
+        self.input_limit(model)
+    }
 }
 
 impl<T: Provider> ProviderResolver for T {

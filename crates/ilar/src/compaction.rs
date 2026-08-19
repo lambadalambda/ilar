@@ -21,9 +21,99 @@ pub struct CompactionOptions<'a> {
     pub threshold: f64,
     /// Compact regardless of the threshold (user-requested).
     pub force: bool,
+    pub cut: CompactionCut,
     pub system_prompt: Option<&'a str>,
     pub tools: &'a [ToolDefinition],
     pub cancel: &'a CancellationToken,
+}
+
+/// Where to cut the history when compacting.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CompactionCut {
+    /// At the current turn's user message: everything before it is
+    /// summarized, the turn itself is untouched. The turn-start default.
+    TurnBoundary,
+    /// Inside the current turn, keeping only the most recent steps.
+    /// A single agentic turn can outgrow the window on its own, and
+    /// `TurnBoundary` cannot help there — mid-turn the last user message
+    /// *is* this turn's prompt, so it would summarize nothing.
+    RecentSteps,
+}
+
+/// Tokens at which compaction should fire for a given limit.
+pub fn trigger_tokens(limit: u64, threshold: f64) -> u64 {
+    (limit as f64 * threshold) as u64
+}
+
+/// Rough token cost of one event, mirroring `estimate_tokens_from`'s
+/// chars/4 accounting closely enough to size a recency window.
+fn event_tokens(event: &SessionEvent) -> u64 {
+    let chars = match event {
+        SessionEvent::UserMessage { text, .. } => text.chars().count(),
+        SessionEvent::AssistantMessage { content, .. } => content
+            .iter()
+            .map(|block| match block {
+                crate::session::ContentBlock::Text { text }
+                | crate::session::ContentBlock::Thinking { text, .. } => text.chars().count(),
+                crate::session::ContentBlock::ToolCall { input, .. } => {
+                    input.to_string().chars().count()
+                }
+                crate::session::ContentBlock::ToolResult { content, .. } => content.chars().count(),
+                crate::session::ContentBlock::Reasoning { item } => {
+                    item.to_string().chars().count()
+                }
+                crate::session::ContentBlock::ProviderReplay { content, .. } => {
+                    content.to_string().chars().count()
+                }
+                crate::session::ContentBlock::ReasoningSummary { .. }
+                | crate::session::ContentBlock::Diagnostic { .. } => 0,
+            })
+            .sum(),
+        SessionEvent::ToolResult { content, .. } => content.chars().count(),
+        _ => 0,
+    };
+    (chars / 4) as u64 + 2
+}
+
+/// Cut that keeps the most recent `keep` tokens of history.
+///
+/// Any index is a safe cut: assistant messages precede their results, so
+/// keeping a message keeps its results, and `transcript_of` drops the
+/// orphaned results that lead the kept region. Returns `None` when there
+/// is nothing before the recency window worth summarizing.
+fn recent_steps_cut(
+    events: &[SessionEvent],
+    floor: usize,
+    keep: u64,
+    min_savings: u64,
+) -> Option<usize> {
+    let mut kept = 0_u64;
+    let mut cut = events.len();
+    for index in (floor..events.len()).rev() {
+        if kept >= keep {
+            break;
+        }
+        kept = kept.saturating_add(event_tokens(&events[index]));
+        cut = index;
+    }
+    // Snap back to the message that opens this step, so the window
+    // starts on a complete step rather than on dangling tool results.
+    while cut > floor
+        && !matches!(
+            events[cut],
+            SessionEvent::AssistantMessage { .. } | SessionEvent::UserMessage { .. }
+        )
+    {
+        cut -= 1;
+    }
+    if cut <= floor || cut >= events.len() {
+        return None;
+    }
+    // When the bulk sits in the recency window there is nothing worth
+    // summarizing — compacting would drop the task and save nothing, so
+    // don't spend a provider call on it.
+    let savings: u64 = events[floor..cut].iter().map(event_tokens).sum();
+    (savings >= min_savings).then_some(cut)
 }
 
 /// Rough active-context estimate: max(latest post-boundary provider usage,
@@ -164,24 +254,57 @@ pub(crate) async fn compact_if_needed_locked(
     }
     if !options.force
         && estimate_tokens_with_request(session, options.system_prompt, options.tools)
-            <= (options.context_limit as f64 * options.threshold) as u64
+            <= trigger_tokens(options.context_limit, options.threshold)
     {
         return Ok(None);
     }
 
-    // Cut at the current turn's user message (last UserMessage event).
-    let mut cut = session
+    let previous_cut = session
         .events()
         .iter()
-        .rposition(|e| matches!(e, SessionEvent::UserMessage { .. }))
+        .enumerate()
+        .filter_map(|(index, event)| match event {
+            SessionEvent::Compaction { kept_from, .. } => Some((*kept_from).min(index)),
+            _ => None,
+        })
+        .max()
         .unwrap_or(0);
-    if cut > 0
-        && matches!(
-            session.events()[cut - 1],
-            SessionEvent::SubagentInvocation { .. }
-        )
-    {
-        cut -= 1;
+
+    let cut = match options.cut {
+        CompactionCut::TurnBoundary => {
+            // Cut at the current turn's user message (last UserMessage).
+            let mut cut = session
+                .events()
+                .iter()
+                .rposition(|e| matches!(e, SessionEvent::UserMessage { .. }))
+                .unwrap_or(0);
+            if cut > 0
+                && matches!(
+                    session.events()[cut - 1],
+                    SessionEvent::SubagentInvocation { .. }
+                )
+            {
+                cut -= 1;
+            }
+            cut
+        }
+        CompactionCut::RecentSteps => {
+            // Keep a recency window of roughly a third of the budget, so
+            // the compacted transcript has room to grow again.
+            let trigger = trigger_tokens(options.context_limit, options.threshold);
+            match recent_steps_cut(
+                session.events(),
+                previous_cut,
+                (trigger / 3).max(1),
+                (trigger / 4).max(1),
+            ) {
+                Some(cut) => cut,
+                None => return Ok(None),
+            }
+        }
+    };
+    if cut <= previous_cut {
+        return Ok(None);
     }
 
     // Build the older transcript for summarization.

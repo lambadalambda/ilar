@@ -639,3 +639,141 @@ async fn forced_compaction_runs_below_the_threshold_and_reports_its_summary() {
     }
     assert!(saw_summary, "Compacted event with summary published");
 }
+
+/// A single agentic turn can outgrow the window on its own: the loop
+/// runs many provider steps per user message, and compaction that only
+/// fires at turn start never gets a chance. This is the shape that
+/// killed session 4466f66d (3 user messages, 44 assistant steps,
+/// 1.5k -> 127k tokens, no compaction).
+#[tokio::test]
+async fn context_growing_between_steps_compacts_without_a_new_user_message() {
+    let (store, session_id) = temp_session();
+    let workspace = tempfile::tempdir().unwrap();
+    // A file large enough that reading it blows past the tiny threshold.
+    for (name, marker) in [("big1.txt", "alpha-marker"), ("big2.txt", "beta-marker")] {
+        std::fs::write(
+            workspace.path().join(name),
+            format!("{marker} dolor sit amet consectetur\n").repeat(400),
+        )
+        .unwrap();
+    }
+
+    let read_call = |id: &str, file: &str| {
+        vec![
+            ProviderEvent::ToolCallStarted {
+                id: id.into(),
+                name: "read".into(),
+            },
+            ProviderEvent::ToolCallCompleted {
+                id: id.into(),
+                name: "read".into(),
+                input: serde_json::json!({ "path": file }),
+            },
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+                usage: Usage::default(),
+            },
+        ]
+    };
+
+    let resolver = RoutingResolver {
+        zai: MockProvider::new(vec![
+            read_call("call-1", "big1.txt"),
+            read_call("call-2", "big2.txt"),
+            // Loop re-enters: context is now over the threshold, so the
+            // next provider call must be the compaction summary.
+            text_turn("SUMMARY: read big1.txt while investigating."),
+            text_turn("done investigating"),
+        ]),
+        openai: MockProvider::error("wrong provider"),
+    };
+    let registry = ToolRegistry::builtin();
+    let (tx, _) = loop_event_channel(LOOP_EVENT_CAPACITY);
+    let outcome = run_turn(
+        &resolver,
+        &registry,
+        &store,
+        &session_id,
+        "investigate big.txt",
+        None,
+        LoopConfig {
+            context_limit: Some(400),
+            compaction_threshold: 0.5,
+            ..LoopConfig::default()
+        },
+        tx,
+        tokio_util::sync::CancellationToken::new(),
+        ToolContext::root(workspace.path().to_path_buf()),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, TurnOutcome::Completed);
+    let requests = resolver.zai.requests();
+    assert_eq!(
+        requests.len(),
+        4,
+        "expected step, step, mid-turn compaction, step; got {}",
+        requests.len()
+    );
+    // The third call is the summarizer: no tools, summarizer prompt.
+    assert!(
+        requests[2]
+            .system_prompt
+            .as_deref()
+            .unwrap_or("")
+            .to_lowercase()
+            .contains("summar"),
+        "third call was not a compaction: {:?}",
+        requests[2].system_prompt
+    );
+    assert!(requests[2].tools.is_empty());
+
+    let session = store.load(&session_id).unwrap();
+    assert!(
+        session
+            .events()
+            .iter()
+            .any(|e| matches!(e, SessionEvent::Compaction { .. })),
+        "no compaction event persisted"
+    );
+    // The final step ran on the compacted transcript.
+    let rendered = format!("{:?}", requests[3].messages);
+    assert!(rendered.contains("SUMMARY: read big1.txt"), "{rendered}");
+    assert!(
+        !rendered.contains("alpha-marker"),
+        "the older bulky result should have been summarized away"
+    );
+    assert!(
+        rendered.contains("beta-marker"),
+        "the recency window must keep the most recent step"
+    );
+    for pair in session.transcript().windows(2) {
+        assert_ne!(pair[0].role, pair[1].role);
+    }
+}
+
+/// Providers reject on input tokens, not total context. Compaction must
+/// trigger below the input cap, not below the whole window.
+#[test]
+fn every_catalog_model_compacts_below_its_input_cap() {
+    let threshold = LoopConfig::default().compaction_threshold;
+    let offenders: Vec<String> = ilar::model::catalog()
+        .iter()
+        .filter_map(|model| {
+            let trigger =
+                ilar::compaction::trigger_tokens(ilar::model::compaction_limit(model), threshold);
+            (trigger > model.input_limit).then(|| {
+                format!(
+                    "{}/{}: fires at {trigger} but input cap is {}",
+                    model.provider, model.id, model.input_limit
+                )
+            })
+        })
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "compaction fires above the provider's input cap:\n{}",
+        offenders.join("\n")
+    );
+}

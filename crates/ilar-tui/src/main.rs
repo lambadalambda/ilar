@@ -7186,7 +7186,7 @@ fn adopt_model_selection(
     persist_model_change(resolver, store, session_id, &model, variant.as_deref())?;
     app.current_model = model.clone();
     app.current_variant = variant.clone();
-    app.context_limit = resolver.context_limit(&model);
+    app.context_limit = display_context_limit(resolver, &model);
     if let Ok((used, estimated)) =
         session_context_tokens(store, session_id, system_prompt, registry)
     {
@@ -7418,7 +7418,7 @@ async fn main() -> Result<()> {
 
         let (context_used, context_estimated) =
             session_context_tokens(&store, &session_id, &system_prompt, &registry)?;
-        let context_limit = resolver.context_limit(&model_for_session);
+        let context_limit = display_context_limit(resolver.as_ref(), &model_for_session);
         let mut app = App::new();
         app.theme = active_theme;
         app.history = history::PromptHistory::load(config.state_dir().join("prompt_history.jsonl"));
@@ -7467,6 +7467,15 @@ async fn main() -> Result<()> {
             AppExit::Switch(next) => session_override = Some(next),
         }
     } // session loop
+}
+
+/// The meter must show the limit compaction actually measures against —
+/// the provider's input cap, not the whole window. Showing the window
+/// reads as comfortable headroom while the request is already too big.
+fn display_context_limit(resolver: &dyn ProviderResolver, model: &str) -> Option<u64> {
+    resolver
+        .compaction_limit(model)
+        .or_else(|| resolver.context_limit(model))
 }
 
 fn session_context_tokens(

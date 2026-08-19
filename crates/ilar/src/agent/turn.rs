@@ -875,9 +875,11 @@ pub async fn run_turn(
 
     let tools = registry.definitions();
 
-    // Compaction runs once per user turn, before the provider loop.
+    // Providers reject on input size, not the whole window, so the
+    // threshold is measured against the input cap.
     let context_limit = config
         .context_limit
+        .or_else(|| resolver.compaction_limit(&model))
         .or_else(|| resolver.context_limit(&model));
     // A forced compaction must run even when the model has no known
     // context limit (the limit only feeds the threshold check).
@@ -891,6 +893,7 @@ pub async fn run_turn(
                 context_limit: limit,
                 threshold: config.compaction_threshold,
                 force: config.force_compaction,
+                cut: crate::compaction::CompactionCut::TurnBoundary,
                 system_prompt,
                 tools: &tools,
                 cancel: &cancel,
@@ -937,6 +940,45 @@ pub async fn run_turn(
                 outcome: TurnOutcome::Aborted,
             });
             return Ok(TurnOutcome::Aborted);
+        }
+
+        // A single agentic turn can outgrow the window on its own, so the
+        // threshold is re-checked before every step, not only at turn
+        // start. Only safe between settled steps: a paused response is
+        // mid-continuation and its replay state must not be cut away.
+        if iterations > 0
+            && continuations.is_empty()
+            && paused_content.is_empty()
+            && let Some(limit) = context_limit
+            && let Some(summary) = crate::compaction::compact_if_needed_locked(
+                provider.as_provider(),
+                &model,
+                &mut session,
+                crate::compaction::CompactionOptions {
+                    context_limit: limit,
+                    threshold: config.compaction_threshold,
+                    force: false,
+                    cut: crate::compaction::CompactionCut::RecentSteps,
+                    system_prompt,
+                    tools: &tools,
+                    cancel: &cancel,
+                },
+            )
+            .await?
+        {
+            events
+                .publish(
+                    LoopEvent::Compacted {
+                        context_tokens: crate::compaction::estimate_tokens_with_request(
+                            &session,
+                            system_prompt,
+                            &tools,
+                        ),
+                        summary,
+                    },
+                    &cancel,
+                )
+                .await;
         }
 
         let request = Request {
