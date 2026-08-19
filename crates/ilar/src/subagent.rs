@@ -543,6 +543,7 @@ impl SubagentSpawner {
             workspace_lease: None,
             workspace_ancestry,
             cancel: ctx.cancel.clone(),
+            output_tail: None,
         };
 
         if input.background == Some(true) {
@@ -1161,6 +1162,7 @@ clearly disjoint work."
                     workspace_lease: Some(lease.clone()),
                     workspace_ancestry: vec![workspace_location.id().clone()],
                     cancel: cancel.clone(),
+                    output_tail: None,
                 },
             )
             .await;

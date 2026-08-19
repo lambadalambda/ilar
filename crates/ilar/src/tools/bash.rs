@@ -204,10 +204,13 @@ impl Tool for BashTool {
                     format!("bash: {command_preview}")
                 };
                 let parent_session_id = ctx.session_id.clone();
+                // Background jobs surface through notifications, not
+                // live tool rows; no tail reporter.
                 let future = run_command(
                     input.command,
                     ctx.cwd,
                     timeout + std::time::Duration::from_secs(1),
+                    None,
                 );
                 return spawner
                     .spawn_background_tool(
@@ -222,8 +225,23 @@ impl Tool for BashTool {
             }
             let timeout =
                 std::time::Duration::from_millis(input.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
-            run_command(input.command, ctx.cwd, timeout).await
+            let tail_reporter = ctx.call_id.clone().zip(ctx.output_tail.clone());
+            run_command(input.command, ctx.cwd, timeout, tail_reporter).await
         })
+    }
+}
+
+/// Last chunk of combined live output for the running-tool display.
+fn live_tail(stdout: &DrainTask, stderr: &DrainTask) -> String {
+    const TAIL_BYTES: usize = 480;
+    let mut bytes = stdout.captured.lock().unwrap().retained.clone();
+    bytes.extend_from_slice(&stderr.captured.lock().unwrap().retained);
+    let start = bytes.len().saturating_sub(TAIL_BYTES);
+    let text = String::from_utf8_lossy(&bytes[start..]);
+    if start > 0 {
+        format!("…{text}")
+    } else {
+        text.into_owned()
     }
 }
 
@@ -231,6 +249,7 @@ fn run_command(
     command_text: String,
     cwd: std::path::PathBuf,
     timeout: std::time::Duration,
+    tail_reporter: Option<(String, crate::tools::OutputTailSink)>,
 ) -> ToolFuture {
     Box::pin(async move {
         let mut command = tokio::process::Command::new("sh");
@@ -252,21 +271,35 @@ fn run_command(
         let mut stdout = DrainTask::spawn(child.stdout.take().unwrap());
         let mut stderr = DrainTask::spawn(child.stderr.take().unwrap());
         let drain_grace = std::time::Duration::from_secs(1);
-        let status = tokio::select! {
-            status = child.wait() => status,
-            _ = tokio::time::sleep(timeout) => {
-                group.terminate();
-                child.start_kill().ok();
-                let _ = child.wait().await;
-                let out = stdout.finish(drain_grace).await;
-                let err = stderr.finish(drain_grace).await;
-                group.disarm();
-                return ToolOutput::error(format!(
-                    "bash: timed out after {}ms\ncommand: {}\n{}",
-                    timeout.as_millis(),
-                    command_text,
-                    render_output(out, err),
-                ));
+        let deadline = tokio::time::sleep(timeout);
+        tokio::pin!(deadline);
+        let mut ticker = tokio::time::interval(std::time::Duration::from_millis(500));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let status = loop {
+            tokio::select! {
+                status = child.wait() => break status,
+                _ = &mut deadline => {
+                    group.terminate();
+                    child.start_kill().ok();
+                    let _ = child.wait().await;
+                    let out = stdout.finish(drain_grace).await;
+                    let err = stderr.finish(drain_grace).await;
+                    group.disarm();
+                    return ToolOutput::error(format!(
+                        "bash: timed out after {}ms\ncommand: {}\n{}",
+                        timeout.as_millis(),
+                        command_text,
+                        render_output(out, err),
+                    ));
+                }
+                _ = ticker.tick() => {
+                    if let Some((call_id, sink)) = &tail_reporter {
+                        let tail = live_tail(&stdout, &stderr);
+                        if !tail.is_empty() {
+                            sink.report(call_id, tail);
+                        }
+                    }
+                }
             }
         };
         // A shell can exit after daemonizing children; do not let those

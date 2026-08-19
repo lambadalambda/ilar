@@ -902,6 +902,7 @@ pub async fn run_turn(
     }
 
     tool_ctx.session_id = session_id.to_string();
+    tool_ctx.output_tail = Some(events.output_tail_sink());
 
     let mut pause_retries = 0;
     let mut iterations = 0;

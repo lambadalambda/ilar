@@ -301,6 +301,28 @@ impl Default for WorkspaceScheduler {
     }
 }
 
+/// Lossy sink for live tool-output tails: the latest value per call id
+/// wins, drained by the loop-event receiver alongside input progress.
+#[derive(Clone)]
+pub struct OutputTailSink {
+    tails: std::sync::Arc<std::sync::Mutex<HashMap<String, String>>>,
+    wake: tokio::sync::mpsc::Sender<()>,
+}
+
+impl OutputTailSink {
+    pub fn new(
+        tails: std::sync::Arc<std::sync::Mutex<HashMap<String, String>>>,
+        wake: tokio::sync::mpsc::Sender<()>,
+    ) -> Self {
+        Self { tails, wake }
+    }
+
+    pub fn report(&self, call_id: &str, tail: String) {
+        self.tails.lock().unwrap().insert(call_id.to_string(), tail);
+        let _ = self.wake.try_send(());
+    }
+}
+
 /// Per-invocation context. No permission checks — the sandbox is the
 /// permission system.
 #[derive(Clone)]
@@ -320,6 +342,8 @@ pub struct ToolContext {
     /// Workspace IDs whose leases are held by this child call stack.
     pub workspace_ancestry: Vec<WorkspaceId>,
     pub cancel: tokio_util::sync::CancellationToken,
+    /// Live-output reporter for long-running tools, when a UI is listening.
+    pub output_tail: Option<OutputTailSink>,
 }
 
 impl ToolContext {
@@ -337,6 +361,7 @@ impl ToolContext {
             workspace_lease: None,
             workspace_ancestry: Vec::new(),
             cancel: tokio_util::sync::CancellationToken::new(),
+            output_tail: None,
         }
     }
 

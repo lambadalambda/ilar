@@ -62,6 +62,8 @@ enum Line_ {
         arguments: String,
         argument_detail: String,
         diff: Vec<diff::DiffLine>,
+        /// Live output tail while the tool runs (bash builds etc.).
+        tail: String,
         result: Option<String>,
         state: ToolState,
         progress: ToolProgress,
@@ -1112,6 +1114,7 @@ fn restored_session_invocation_view(
                                 arguments,
                                 argument_detail: ilar::agent::tool_argument_detail(name, input),
                                 diff: diff::tool_diff_value(name, input),
+                                tail: String::new(),
                                 result: None,
                                 state: ToolState::Running,
                                 progress: ToolProgress::None,
@@ -1463,6 +1466,7 @@ fn apply_child_loop_event(lines: &mut Vec<Line_>, group: &mut u64, scope: &str, 
             arguments: String::new(),
             argument_detail: String::new(),
             diff: Vec::new(),
+            tail: String::new(),
             result: None,
             state: ToolState::Running,
             progress: ToolProgress::None,
@@ -1550,6 +1554,16 @@ fn apply_child_loop_event(lines: &mut Vec<Line_>, group: &mut u64, scope: &str, 
             {
                 *state = ToolState::Complete;
                 *progress = ToolProgress::None;
+            }
+        }
+        LoopEvent::ToolOutputTail { id, tail } => {
+            if let Some(Line_::Tool {
+                state: ToolState::Running,
+                tail: current,
+                ..
+            }) = direct_tool_mut(lines, id)
+            {
+                *current = tail.clone();
             }
         }
         LoopEvent::ToolFinished {
@@ -1789,6 +1803,7 @@ fn tool_entry_rows(
         arguments,
         argument_detail,
         diff,
+        tail,
         result,
         state,
         progress,
@@ -1847,6 +1862,16 @@ fn tool_entry_rows(
                 width,
                 indent + 4,
                 if *full { usize::MAX } else { 8 },
+            ));
+        }
+        if *state == ToolState::Running && !tail.is_empty() {
+            rows.extend(tool_detail_rows(
+                "tail",
+                tail,
+                width,
+                indent + 4,
+                if *full { usize::MAX } else { 6 },
+                false,
             ));
         }
         if matches!(kind, ToolKind::Tool) || child_lines.is_empty() || *state == ToolState::Failed {
@@ -2734,6 +2759,7 @@ impl App {
                     arguments: String::new(),
                     argument_detail: String::new(),
                     diff: Vec::new(),
+                    tail: String::new(),
                     result: None,
                     state: ToolState::Running,
                     progress: ToolProgress::None,
@@ -2848,6 +2874,19 @@ impl App {
                     };
                 }
             }
+            LoopEvent::ToolOutputTail { id, tail } => {
+                if let Some(current) = self.lines.iter_mut().rev().find_map(|line| match line {
+                    Line_::Tool {
+                        id: line_id,
+                        state: ToolState::Running,
+                        tail,
+                        ..
+                    } if line_id == id => Some(tail),
+                    _ => None,
+                }) {
+                    *current = tail.clone();
+                }
+            }
             LoopEvent::ToolExecutionCompleted { id } => {
                 if let Some((state, progress)) =
                     self.lines.iter_mut().rev().find_map(|line| match line {
@@ -2910,6 +2949,7 @@ impl App {
                         arguments: String::new(),
                         argument_detail: String::new(),
                         diff: Vec::new(),
+                        tail: String::new(),
                         result: Some(bounded_detail(result)),
                         state: if *is_error {
                             ToolState::Failed
@@ -8464,6 +8504,7 @@ mod tests {
                 arguments: "cargo test".into(),
                 argument_detail: String::new(),
                 diff: Vec::new(),
+                tail: String::new(),
                 result: Some("all green".into()),
                 state: ToolState::Succeeded,
                 progress: ToolProgress::None,
@@ -11352,6 +11393,7 @@ mod tests {
                 arguments: "src/main.rs".into(),
                 argument_detail: String::new(),
                 diff: Vec::new(),
+                tail: String::new(),
                 result: None,
                 state: ToolState::Succeeded,
                 progress: ToolProgress::None,

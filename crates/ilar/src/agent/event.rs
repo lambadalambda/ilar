@@ -37,6 +37,11 @@ pub enum LoopEvent {
     ToolExecutionCompleted {
         id: String,
     },
+    /// Lossy live-output tail for a running tool (latest value wins).
+    ToolOutputTail {
+        id: String,
+        tail: String,
+    },
     ToolFinished {
         id: String,
         name: String,
@@ -67,6 +72,7 @@ pub struct LoopEventSender {
     terminal: Option<tokio::sync::mpsc::OwnedPermit<LoopEvent>>,
     progress:
         std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, ToolProgressSnapshot>>>,
+    tails: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
     progress_wake: tokio::sync::mpsc::Sender<()>,
 }
 
@@ -75,6 +81,7 @@ pub struct LoopEventReceiver {
     pending: Option<LoopEvent>,
     progress:
         std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, ToolProgressSnapshot>>>,
+    tails: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
     progress_wake: tokio::sync::mpsc::Receiver<()>,
     ready_progress: std::collections::VecDeque<LoopEvent>,
 }
@@ -93,18 +100,21 @@ pub fn loop_event_channel(capacity: usize) -> (LoopEventSender, LoopEventReceive
         .try_reserve_owned()
         .expect("new loop event channel has terminal capacity");
     let progress = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let tails = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     let (progress_wake, progress_receiver) = tokio::sync::mpsc::channel(1);
     (
         LoopEventSender {
             sender,
             terminal: Some(terminal),
             progress: progress.clone(),
+            tails: tails.clone(),
             progress_wake,
         },
         LoopEventReceiver {
             receiver,
             pending: None,
             progress,
+            tails,
             progress_wake: progress_receiver,
             ready_progress: std::collections::VecDeque::new(),
         },
@@ -131,6 +141,12 @@ impl LoopEventSender {
             },
         );
         let _ = self.progress_wake.try_send(());
+    }
+
+    /// Lossy sink handle for live tool-output tails, shared with tools
+    /// through ToolContext.
+    pub fn output_tail_sink(&self) -> crate::tools::OutputTailSink {
+        crate::tools::OutputTailSink::new(self.tails.clone(), self.progress_wake.clone())
     }
 
     /// Publish the single terminal event through capacity reserved at construction.
@@ -238,6 +254,14 @@ impl LoopEventReceiver {
 
     fn drain_progress(&mut self) {
         while self.progress_wake.try_recv().is_ok() {}
+        let tails = std::mem::take(&mut *self.tails.lock().unwrap());
+        let mut tails = tails.into_iter().collect::<Vec<_>>();
+        tails.sort_by(|(left, _), (right, _)| left.cmp(right));
+        self.ready_progress.extend(
+            tails
+                .into_iter()
+                .map(|(id, tail)| LoopEvent::ToolOutputTail { id, tail }),
+        );
         let updates = std::mem::take(&mut *self.progress.lock().unwrap());
         let mut updates = updates.into_iter().collect::<Vec<_>>();
         updates.sort_by(|(left, _), (right, _)| left.cmp(right));

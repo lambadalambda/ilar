@@ -935,6 +935,7 @@ async fn stall_watchdog_fires_on_silent_child() {
                 workspace_lease: None,
                 workspace_ancestry: Vec::new(),
                 cancel: tokio_util::sync::CancellationToken::new(),
+                output_tail: None,
             },
         )
         .await;

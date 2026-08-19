@@ -773,3 +773,38 @@ fn restricted_registry_intersects_with_the_base_set() {
         );
     }
 }
+
+#[tokio::test]
+async fn running_bash_reports_a_live_output_tail() {
+    let dir = tempfile::tempdir().unwrap();
+    let (sender, mut receiver) = ilar::agent::loop_event_channel(16);
+    let mut ctx = ctx(dir.path());
+    ctx.call_id = Some("bash-tail-1".into());
+    ctx.output_tail = Some(sender.output_tail_sink());
+
+    let reg = registry();
+    let output = run(
+        &reg,
+        "bash",
+        serde_json::json!({"command": "echo progress-marker; sleep 1.4; echo done"}),
+        &ctx,
+    )
+    .await;
+    assert!(!output.is_error, "{}", output.content);
+
+    let mut tails = Vec::new();
+    while let Ok(event) = receiver.try_recv() {
+        if let ilar::agent::LoopEvent::ToolOutputTail { id, tail } = event {
+            assert_eq!(id, "bash-tail-1");
+            tails.push(tail);
+        }
+    }
+    assert!(
+        tails.iter().any(|tail| tail.contains("progress-marker")),
+        "expected a live tail before completion: {tails:?}"
+    );
+    assert!(
+        !tails.iter().any(|tail| tail.contains("done")) || tails.len() > 1,
+        "tail should have been reported while the command was still running"
+    );
+}
