@@ -205,9 +205,18 @@ session, so the prompt cache absorbs the cost) with an instruction to
 verify progress using concrete evidence — running tests or a harness,
 building one if none exists — and to keep working otherwise. The loop
 ends when the model outputs an evidenced `GOAL_ACHIEVED:` line, when the
-round cap (25) trips, or when you press Esc on an idle input. `/goal`
-alone shows or clears the active goal. Queued messages you type during
-the loop take precedence over goal continuations.
+round cap (25) trips, or when you abort it explicitly (`/goal abort` or
+the pending manager). `/goal` alone prefills the input for editing the
+goal in place, keeping the round budget. Aborting a running turn pauses
+the loop; it resumes after your next completed turn. Queued messages you
+type during the loop take precedence over goal continuations.
+
+Standing state — queued messages, the goal, background jobs, a retry
+offer — is managed in the pending manager (**Ctrl-Q** or the palette):
+delete one queued message, pull it back into the input for editing,
+abort the goal or cancel background jobs (both confirmed with a second
+press). **Esc is strictly immediate-scope**: it aborts the running turn
+or clears the input, and never touches the queue or the goal.
 
 ### MCP
 

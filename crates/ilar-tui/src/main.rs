@@ -2460,6 +2460,9 @@ struct App {
     goal: Option<(String, u32)>,
     /// Selection inside the inline slash-completion popup.
     slash_selected: usize,
+    pending_manager: Option<PendingManager>,
+    /// Snapshot of spawner.running_background() for rendering.
+    background_running: usize,
     /// Palette-requested compaction, applied to the next turn's config.
     compact_requested: bool,
     search_active: bool,
@@ -2537,6 +2540,8 @@ impl App {
             queued_messages: Vec::new(),
             goal: None,
             slash_selected: 0,
+            pending_manager: None,
+            background_running: 0,
             compact_requested: false,
             search_active: false,
             search_query: String::new(),
@@ -2593,6 +2598,7 @@ impl App {
             || self.session_picker.is_some()
             || self.help_visible
             || self.skill_picker.is_some()
+            || self.pending_manager.is_some()
     }
 
     fn configure_runtime(
@@ -3129,6 +3135,79 @@ impl App {
             self.set_activity(Activity::Error);
         }
         self.busy = false;
+    }
+
+    fn pending_items(&self) -> Vec<PendingItem> {
+        let mut items: Vec<PendingItem> = (0..self.queued_messages.len())
+            .map(PendingItem::Queued)
+            .collect();
+        if self.goal.is_some() {
+            items.push(PendingItem::Goal);
+        }
+        if self.background_running > 0 {
+            items.push(PendingItem::BackgroundJobs);
+        }
+        if self.retry_available {
+            items.push(PendingItem::Retry);
+        }
+        items
+    }
+
+    fn pending_manager_key(&mut self, code: KeyCode, control: bool) -> PendingAction {
+        let items = self.pending_items();
+        let Some(manager) = self.pending_manager.as_mut() else {
+            return PendingAction::Stay;
+        };
+        if items.is_empty() {
+            return match code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => PendingAction::Close,
+                _ => PendingAction::Stay,
+            };
+        }
+        manager.selected = manager.selected.min(items.len() - 1);
+        let selected = items[manager.selected];
+        match (code, control) {
+            (KeyCode::Esc, _) | (KeyCode::Char('q'), true | false) => PendingAction::Close,
+            (KeyCode::Up, _) | (KeyCode::Char('p'), true) => {
+                manager.selected = (manager.selected + items.len() - 1) % items.len();
+                manager.armed = None;
+                PendingAction::Stay
+            }
+            (KeyCode::Down, _) | (KeyCode::Char('n'), true) => {
+                manager.selected = (manager.selected + 1) % items.len();
+                manager.armed = None;
+                PendingAction::Stay
+            }
+            (KeyCode::Delete | KeyCode::Backspace | KeyCode::Char('d'), _) => {
+                match selected {
+                    // Removing one queued message is targeted enough to
+                    // fire immediately.
+                    PendingItem::Queued(index) => PendingAction::DeleteQueued(index),
+                    PendingItem::Retry => PendingAction::DismissRetry,
+                    // Goal and background jobs are investments: confirm.
+                    armed_item => {
+                        if manager.armed == Some(armed_item) {
+                            manager.armed = None;
+                            match armed_item {
+                                PendingItem::Goal => PendingAction::AbortGoal,
+                                PendingItem::BackgroundJobs => PendingAction::CancelBackground,
+                                _ => PendingAction::Stay,
+                            }
+                        } else {
+                            manager.armed = Some(armed_item);
+                            PendingAction::Stay
+                        }
+                    }
+                }
+            }
+            (KeyCode::Enter, _) => match selected {
+                PendingItem::Queued(index) => PendingAction::EditQueued(index),
+                PendingItem::Goal => PendingAction::EditGoal,
+                PendingItem::Retry => PendingAction::RetryNow,
+                PendingItem::BackgroundJobs => PendingAction::Stay,
+            },
+            _ => PendingAction::Stay,
+        }
     }
 
     fn open_search(&mut self) {
@@ -3933,7 +4012,7 @@ impl App {
                     .collect();
                 lines.push(Line::styled(
                     truncate_display(
-                        "Esc (idle) aborts · /goal edits",
+                        "Ctrl-Q manage · /goal edit · /goal abort",
                         text_width,
                         Truncation::Right,
                     ),
@@ -4135,6 +4214,8 @@ impl App {
             render_session_picker(frame, picker);
         } else if self.help_visible {
             render_help(frame, self.help_scroll);
+        } else if self.pending_manager.is_some() {
+            render_pending_manager(frame, self);
         } else if let Some(picker) = &self.skill_picker {
             render_skill_picker(frame, picker);
         } else if let Some(palette) = &self.command_palette {
@@ -4990,7 +5071,8 @@ static HELP_SECTIONS: &[HelpSection] = &[
         bindings: &[
             binding!("Enter", "send message"),
             binding!("Shift-Enter / Ctrl-J", "insert newline"),
-            binding!("Esc", "clear input · abort turn · cancel background jobs"),
+            binding!("Esc", "abort running turn · clear input (nothing else)"),
+            binding!("Ctrl-Q", "pending manager: queue, goal, jobs, retry"),
             binding!("Up / Down", "recall prompt history (blank input)"),
             binding!("Ctrl-A / Ctrl-E", "start / end of line"),
             binding!("Ctrl-K / Ctrl-U", "kill to line end / start"),
@@ -5034,8 +5116,8 @@ static HELP_SECTIONS: &[HelpSection] = &[
                 "/goal <description>",
                 "work until achieved (evidence-based)"
             ),
-            binding!("/goal", "show or clear the active goal"),
-            binding!("Esc (idle)", "cancel goal mode"),
+            binding!("/goal", "edit the active goal"),
+            binding!("/goal abort", "end goal mode"),
         ],
     },
     HelpSection {
@@ -5097,6 +5179,107 @@ fn help_lines(width: usize) -> Vec<Line<'static>> {
     lines
 }
 
+fn render_pending_manager(frame: &mut Frame, app: &App) {
+    let Some(manager) = &app.pending_manager else {
+        return;
+    };
+    let area = centered_rect(frame.area(), 76, 14);
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .border_style(theme::focus_border())
+        .title(Line::styled(" pending ", theme::title(theme::MARKUP)))
+        .title_bottom(
+            Line::styled(
+                " ↑↓ · Enter edit/act · d delete (×2 for goal/jobs) · Esc ",
+                Style::default().fg(theme::MUTED),
+            )
+            .right_aligned(),
+        );
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let items = app.pending_items();
+    if items.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                "nothing pending — queued messages, the goal, background jobs, and retry offers appear here",
+                Style::default().fg(MUTED),
+            )),
+            inner,
+        );
+        return;
+    }
+    let selected = manager.selected.min(items.len() - 1);
+    let lines: Vec<Line<'static>> = items
+        .iter()
+        .enumerate()
+        .take(inner.height as usize)
+        .map(|(index, item)| {
+            let armed = manager.armed == Some(*item) && index == selected;
+            let marker = if index == selected {
+                if armed { "✗ " } else { "> " }
+            } else {
+                "  "
+            };
+            let label = match item {
+                PendingItem::Queued(queue_index) => format!(
+                    "message {}: {}",
+                    queue_index + 1,
+                    app.queued_messages
+                        .get(*queue_index)
+                        .map(|message| message.replace('\n', " "))
+                        .unwrap_or_default()
+                ),
+                PendingItem::Goal => {
+                    let (goal, round) = app.goal.as_ref().expect("goal item implies goal");
+                    if armed {
+                        format!("goal (round {round}/{MAX_GOAL_ROUNDS}): press d again to abort")
+                    } else {
+                        format!("goal (round {round}/{MAX_GOAL_ROUNDS}): {goal}")
+                    }
+                }
+                PendingItem::BackgroundJobs => {
+                    if armed {
+                        format!(
+                            "background jobs ({}): press d again to cancel all",
+                            app.background_running
+                        )
+                    } else {
+                        format!("background jobs: {} running", app.background_running)
+                    }
+                }
+                PendingItem::Retry => format!(
+                    "retry: {}",
+                    app.last_prompt.as_deref().unwrap_or("").replace('\n', " ")
+                ),
+            };
+            let text = truncate_display(
+                &format!("{marker}{label}"),
+                inner.width as usize,
+                Truncation::Right,
+            );
+            let style = if index == selected {
+                if armed {
+                    Style::default().fg(ERROR).add_modifier(Modifier::REVERSED)
+                } else {
+                    theme::selected()
+                }
+            } else {
+                Style::default().fg(theme::PRIMARY)
+            };
+            Line::styled(
+                format!("{text:<width$}", width = inner.width as usize),
+                style,
+            )
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
 fn render_help(frame: &mut Frame, scroll: usize) {
     let area = centered_rect(frame.area(), 72, 24);
     frame.render_widget(Clear, area);
@@ -5149,6 +5332,38 @@ fn slash_candidates(input: &str, skills: &[(String, String)]) -> Vec<(String, St
         score_b.cmp(score_a).then_with(|| name_a.cmp(name_b))
     });
     scored.into_iter().map(|(_, candidate)| candidate).collect()
+}
+
+/// One latent thing the user may want to inspect, edit, or cancel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingItem {
+    /// Index into the message queue.
+    Queued(usize),
+    Goal,
+    BackgroundJobs,
+    Retry,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PendingAction {
+    Stay,
+    Close,
+    DeleteQueued(usize),
+    EditQueued(usize),
+    AbortGoal,
+    EditGoal,
+    CancelBackground,
+    DismissRetry,
+    RetryNow,
+}
+
+/// Modal listing all standing state: queued messages, the goal,
+/// background jobs, and the retry offer. Destructive actions arm on the
+/// first press and fire on the second.
+#[derive(Default)]
+struct PendingManager {
+    selected: usize,
+    armed: Option<PendingItem>,
 }
 
 /// Rounds after which goal mode gives up (a budget, unlike the
@@ -7218,6 +7433,13 @@ async fn run_app(
                     if !aborted {
                         notifications_paused = false;
                     }
+                    if aborted && let Some((_, round)) = &app.goal {
+                        let message = format!(
+                            "goal paused (round {round}/{MAX_GOAL_ROUNDS}) — resumes after your next completed turn; Ctrl-Q to manage"
+                        );
+                        app.push_transcript_line(Line_::System(message.clone()));
+                        app.set_notice(message, NoticeLevel::Warning);
+                    }
                     // Goal mode: verify-and-continue until the sentinel,
                     // a cap, or user interjections (queue wins below).
                     if completed
@@ -7282,7 +7504,7 @@ async fn run_app(
                         } else {
                             app.set_notice(
                                 format!(
-                                    "{} queued message(s) held (Esc on empty input drops)",
+                                    "{} queued message(s) held — Ctrl-Q to review",
                                     app.queued_messages.len()
                                 ),
                                 NoticeLevel::Warning,
@@ -7429,6 +7651,7 @@ async fn run_app(
             turn_handle.is_some(),
         );
 
+        app.background_running = spawner.running_background();
         terminal.draw(|frame| app.render(frame))?;
 
         // Poll terminal input (fast while busy so streaming keeps rendering).
@@ -7461,6 +7684,74 @@ async fn run_app(
                     }
                     spawner.shutdown().await;
                     return Ok(AppExit::Quit);
+                }
+                if app.pending_manager.is_some() {
+                    match app.pending_manager_key(code, control) {
+                        PendingAction::Stay => {}
+                        PendingAction::Close => app.pending_manager = None,
+                        PendingAction::DeleteQueued(index) => {
+                            if index < app.queued_messages.len() {
+                                let removed = app.queued_messages.remove(index);
+                                app.set_notice(
+                                    format!(
+                                        "removed queued message: {}",
+                                        removed.lines().next().unwrap_or("")
+                                    ),
+                                    NoticeLevel::Info,
+                                );
+                            }
+                        }
+                        PendingAction::EditQueued(index) => {
+                            if index < app.queued_messages.len() {
+                                let message = app.queued_messages.remove(index);
+                                app.input = InputBuffer::from(message);
+                                app.pending_manager = None;
+                            }
+                        }
+                        PendingAction::AbortGoal => {
+                            if let Some((goal, round)) = app.goal.take() {
+                                let message =
+                                    format!("goal aborted after {round} round(s): {goal}");
+                                app.push_transcript_line(Line_::System(message.clone()));
+                                app.set_notice(message, NoticeLevel::Info);
+                            }
+                        }
+                        PendingAction::EditGoal => {
+                            if let Some((goal, _)) = &app.goal {
+                                app.input = InputBuffer::from(format!("/goal {goal}"));
+                                app.pending_manager = None;
+                            }
+                        }
+                        PendingAction::CancelBackground => {
+                            spawner.abort_all();
+                            notifications_paused = true;
+                            app.background_running = 0;
+                            app.set_persistent_notice(
+                                "background jobs cancelled; notifications paused; send a message to resume",
+                                NoticeLevel::Warning,
+                            );
+                        }
+                        PendingAction::DismissRetry => {
+                            app.retry_available = false;
+                            app.clear_transient_notice();
+                        }
+                        PendingAction::RetryNow => {
+                            if !app.busy
+                                && turn_handle.is_none()
+                                && let Some(prompt) = app.last_prompt.clone()
+                            {
+                                app.retry_available = false;
+                                app.pending_manager = None;
+                                app.clear_notice();
+                                app.input = InputBuffer::from(prompt);
+                                pending_terminal_event = Some(Event::Key(KeyEvent::new(
+                                    KeyCode::Enter,
+                                    KeyModifiers::NONE,
+                                )));
+                            }
+                        }
+                    }
+                    continue;
                 }
                 if app.help_visible {
                     match code {
@@ -7764,21 +8055,10 @@ async fn run_app(
                         app.theme_picker = Some(ThemePicker::new(app.theme));
                     }
                     (KeyCode::Esc, _) => {
-                        let background = spawner.running_background();
-                        if background > 0 {
-                            spawner.abort_all();
-                            notifications_paused = true;
-                            app.status = "background notifications paused".into();
-                            app.set_persistent_notice(
-                                "background jobs cancelled; notifications paused; send a message to resume",
-                                NoticeLevel::Warning,
-                            );
-                            app.set_activity(if app.busy {
-                                Activity::Aborting
-                            } else {
-                                Activity::Paused
-                            });
-                        }
+                        // Esc is strictly immediate-scope: abort the running
+                        // turn or clear the input. Standing state (goal,
+                        // queue, background jobs) lives in the pending
+                        // manager (Ctrl-Q) and explicit commands.
                         if app.busy {
                             if let Some(cancel) = &cancel {
                                 cancel.cancel();
@@ -7786,24 +8066,8 @@ async fn run_app(
                                 app.set_notice("aborting turn…", NoticeLevel::Warning);
                                 app.set_activity(Activity::Aborting);
                             }
-                        } else if background == 0 {
-                            if app.input.is_blank() && app.goal.is_some() {
-                                if let Some((goal, round)) = app.goal.take() {
-                                    app.set_notice(
-                                        format!("goal cancelled after {round} round(s): {goal}"),
-                                        NoticeLevel::Info,
-                                    );
-                                }
-                            } else if app.input.is_blank() && !app.queued_messages.is_empty() {
-                                let dropped = app.queued_messages.len();
-                                app.queued_messages.clear();
-                                app.set_notice(
-                                    format!("dropped {dropped} queued message(s)"),
-                                    NoticeLevel::Info,
-                                );
-                            } else {
-                                app.input.clear();
-                            }
+                        } else if !app.input.is_blank() {
+                            app.input.clear();
                         }
                     }
                     // Ctrl-U edits the input when it has text; the
@@ -7839,6 +8103,9 @@ async fn run_app(
                     (KeyCode::Down, _) if !app.input.is_multiline() => app.scroll_down(1),
                     (KeyCode::Char('f'), true) => {
                         app.open_search();
+                    }
+                    (KeyCode::Char('q'), true) => {
+                        app.pending_manager = Some(PendingManager::default());
                     }
                     (KeyCode::Char('r'), false)
                         if app.retry_available
@@ -7901,7 +8168,7 @@ async fn run_app(
                                             // emptied input aborts instead.
                                             app.input = InputBuffer::from(format!("/goal {goal}"));
                                             app.set_notice(
-                                                "edit the goal and press Enter — Esc on an empty input aborts it",
+                                                "edit the goal and press Enter — /goal abort ends it",
                                                 NoticeLevel::Info,
                                             );
                                         }
@@ -7910,6 +8177,22 @@ async fn run_app(
                                             NoticeLevel::Info,
                                         ),
                                     }
+                                    continue;
+                                }
+                                if goal_text == "abort" {
+                                    let notice = match app.goal.take() {
+                                        Some((goal, round)) => {
+                                            let message = format!(
+                                                "goal aborted after {round} round(s): {goal}"
+                                            );
+                                            app.push_transcript_line(Line_::System(
+                                                message.clone(),
+                                            ));
+                                            message
+                                        }
+                                        None => "no active goal".into(),
+                                    };
+                                    app.set_notice(notice, NoticeLevel::Info);
                                     continue;
                                 }
                                 if let Some((goal, round)) = &mut app.goal {
@@ -8930,6 +9213,55 @@ mod tests {
     }
 
     #[test]
+    fn pending_manager_lists_and_mutates_standing_state() {
+        let mut app = App::new();
+        app.queued_messages = vec!["first".into(), "second".into()];
+        app.goal = Some(("recover the engine".into(), 2));
+        app.background_running = 1;
+        app.retry_available = true;
+        app.last_prompt = Some("previous prompt".into());
+        app.pending_manager = Some(PendingManager::default());
+        assert_eq!(app.pending_items().len(), 5);
+
+        // Deleting a queued message is immediate and targeted.
+        assert_eq!(
+            app.pending_manager_key(KeyCode::Char('d'), false),
+            PendingAction::DeleteQueued(0)
+        );
+        app.queued_messages.remove(0);
+        assert_eq!(app.pending_items().len(), 4);
+
+        // Enter on a queued message edits it into the input.
+        assert_eq!(
+            app.pending_manager_key(KeyCode::Enter, false),
+            PendingAction::EditQueued(0)
+        );
+
+        // Goal abort requires arming: first d stays, second fires.
+        app.pending_manager_key(KeyCode::Down, false);
+        assert_eq!(
+            app.pending_manager_key(KeyCode::Char('d'), false),
+            PendingAction::Stay
+        );
+        assert_eq!(
+            app.pending_manager_key(KeyCode::Char('d'), false),
+            PendingAction::AbortGoal
+        );
+        // Moving the selection disarms.
+        app.pending_manager_key(KeyCode::Char('d'), false);
+        app.pending_manager_key(KeyCode::Down, false);
+        assert_eq!(
+            app.pending_manager_key(KeyCode::Char('d'), false),
+            PendingAction::Stay,
+            "background cancel must re-arm after selection moved"
+        );
+        assert_eq!(
+            app.pending_manager_key(KeyCode::Esc, false),
+            PendingAction::Close
+        );
+    }
+
+    #[test]
     fn goal_shows_in_the_sidebar_on_wide_terminals() {
         let mut app = App::new();
         app.goal = Some((
@@ -8949,7 +9281,7 @@ mod tests {
             .join("\n");
         assert!(screen.contains("goal 4/25"), "{screen}");
         assert!(screen.contains("recover the engine"), "{screen}");
-        assert!(screen.contains("Esc (idle) aborts"), "{screen}");
+        assert!(screen.contains("Ctrl-Q manage"), "{screen}");
         assert!(
             screen.contains("todos"),
             "todos panel still present: {screen}"
