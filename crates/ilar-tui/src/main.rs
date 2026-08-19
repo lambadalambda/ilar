@@ -1,6 +1,7 @@
 //! ilar TUI: transcript, streaming, tool display, input. Esc aborts.
 
 mod diff;
+mod highlight;
 mod history;
 mod markdown;
 mod theme;

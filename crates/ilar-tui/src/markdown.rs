@@ -17,6 +17,17 @@ struct MarkdownTable {
     rows: Vec<Vec<String>>,
 }
 
+fn highlight_color(class: crate::highlight::Class) -> ratatui::style::Color {
+    use crate::highlight::Class;
+    match class {
+        Class::Keyword => theme::MARKUP,
+        Class::String => theme::SUCCESS,
+        Class::Comment => theme::MUTED,
+        Class::Number => theme::REASONING,
+        Class::Plain => theme::PRIMARY,
+    }
+}
+
 /// Render the Markdown subset used in agent responses into terminal-native
 /// lines while constraining tables to `width` cells. Incomplete delimiters
 /// remain literal, which keeps streaming output readable.
@@ -25,6 +36,8 @@ pub fn render(source: &str, width: usize) -> Vec<Line<'static>> {
     let source_lines = source.lines().collect::<Vec<_>>();
     let mut lines = Vec::new();
     let mut code_fence: Option<(char, usize)> = None;
+    let mut code_language: Option<crate::highlight::Language> = None;
+    let mut code_state = crate::highlight::BlockState::default();
     let mut pending_separator = false;
     let mut index = 0;
 
@@ -37,10 +50,13 @@ pub fn render(source: &str, width: usize) -> Vec<Line<'static>> {
             if let Some((open_fence, open_length)) = code_fence {
                 if fence == open_fence && length >= open_length && suffix.trim().is_empty() {
                     code_fence = None;
+                    code_language = None;
                     continue;
                 }
             } else {
                 code_fence = Some((fence, length));
+                code_language = crate::highlight::language_for(suffix.trim());
+                code_state = crate::highlight::BlockState::default();
                 flush_separator(&mut lines, &mut pending_separator);
                 let language = suffix.trim();
                 if !language.is_empty() {
@@ -54,10 +70,25 @@ pub fn render(source: &str, width: usize) -> Vec<Line<'static>> {
         }
 
         if code_fence.is_some() {
-            lines.push(Line::from(vec![
-                Span::styled("│ ", Style::default().fg(theme::CODE)),
-                Span::styled(expand_tabs(raw), Style::default().fg(theme::PRIMARY)),
-            ]));
+            let mut spans = vec![Span::styled("│ ", Style::default().fg(theme::CODE))];
+            match code_language {
+                Some(language) => {
+                    let expanded = expand_tabs(raw);
+                    for (class, text) in
+                        crate::highlight::highlight_line(language, &expanded, &mut code_state)
+                    {
+                        spans.push(Span::styled(
+                            text,
+                            Style::default().fg(highlight_color(class)),
+                        ));
+                    }
+                }
+                None => spans.push(Span::styled(
+                    expand_tabs(raw),
+                    Style::default().fg(theme::PRIMARY),
+                )),
+            }
+            lines.push(Line::from(spans));
             continue;
         }
 
@@ -731,7 +762,38 @@ mod tests {
         assert_eq!(rendered[2], "│ ");
         assert_eq!(rendered[3], "│     println!(\"hi\");");
         assert_eq!(lines[1].spans[0].style.fg, Some(theme::CODE));
-        assert_eq!(lines[1].spans[1].style.fg, Some(theme::PRIMARY));
+        // `fn` is highlighted as a keyword; the rest of the signature is plain.
+        assert_eq!(lines[1].spans[1].style.fg, Some(theme::MARKUP));
+        assert_eq!(lines[1].spans[1].content, "fn");
+        assert_eq!(lines[1].spans[2].style.fg, Some(theme::PRIMARY));
+    }
+
+    #[test]
+    fn fenced_code_highlights_by_language_and_stays_plain_otherwise() {
+        let lines = render("```rust\nlet s = \"text\"; // note\n```");
+        let code = &lines[1];
+        let span_for = |needle: &str| {
+            code.spans
+                .iter()
+                .find(|span| span.content.contains(needle))
+                .unwrap_or_else(|| panic!("missing {needle:?}: {code:?}"))
+                .style
+                .fg
+        };
+        assert_eq!(span_for("let"), Some(theme::MARKUP));
+        assert_eq!(span_for("\"text\""), Some(theme::SUCCESS));
+        assert_eq!(span_for("// note"), Some(theme::MUTED));
+        assert_eq!(text(code), "│ let s = \"text\"; // note");
+
+        // Unknown language: single plain span as before.
+        let plain = render("```brainfuck\n+[----->+++<]\n```");
+        assert_eq!(plain[1].spans.len(), 2);
+        assert_eq!(plain[1].spans[1].style.fg, Some(theme::PRIMARY));
+
+        // Streaming: an unclosed fence still renders highlighted lines.
+        let streaming = render("```rust\nlet x = 1;");
+        assert_eq!(text(&streaming[1]), "│ let x = 1;");
+        assert_eq!(streaming[1].spans[1].style.fg, Some(theme::MARKUP));
     }
 
     #[test]
