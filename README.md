@@ -46,6 +46,38 @@ mechanisms, not security boundaries.
 Pre-alpha. See `meta/issues.md` for the roadmap and
 [DEVLOG.md](DEVLOG.md) for design notes and research findings.
 
+## Status line
+
+During a turn the status line reads like:
+
+```
+○ thinking · 84.2 KiB · 12.3 KiB/s   zai/glm-5.3   in 300 · out ~8.4k · req cache r1838/w0 · Σ 1.2M $0.42 · ctx [██░░░░░░] 24%
+```
+
+- **Activity + liveness** — `thinking · 84.2 KiB · 12.3 KiB/s`: bytes
+  streamed this turn and the current transfer rate. A silent stream shows
+  `· no data Ns` after 3 seconds; `0 B · no data Ns` means the provider
+  has not sent a single byte. The spinner alone proves nothing — only
+  these numbers do.
+- **`in` / `out`** — the last provider request's token usage. While a
+  step streams, `out ~N` is a live estimate from streamed bytes
+  (~4 bytes/token) and snaps to the exact reported value when the step
+  completes.
+- **`req cache rN/wM`** — prompt-cache accounting for the last request:
+  `r` tokens were read from the provider's prompt cache (billed at the
+  cheap cache-read rate), `w` tokens were written as new cache entries
+  (an Anthropic-style charge; OpenAI-compatible endpoints report 0).
+  A healthy agentic session shows a large, growing `r`; a sudden drop to
+  0 means the cached prefix was invalidated (model switch, prompt change,
+  or provider eviction) and per-step cost/latency just went up.
+- **`Σ tokens $cost`** — session-cumulative totals across all turns,
+  priced per-step at each model's list rates (cache reads at the cache
+  rate). Coding-plan models show `plan` instead of dollars; unknown
+  models show tokens only. The palette's "Session usage" entry has the
+  full breakdown.
+- **`ctx …%`** — estimated context usage against the model's window
+  (`~` marks estimates); compaction triggers at `compaction.threshold`.
+
 ## Configuration
 
 The user configuration is `${ILAR_CONFIG_DIR:-~/.config/ilar}/ilar.toml`; see
