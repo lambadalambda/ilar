@@ -15,3 +15,17 @@
 ## Stabilization
 
 (all complete — see issues_archive.md)
+
+## Milestone 4 — Daily-driver UX
+
+- [ ] [Render diffs for edit/write tool results](issues/render-edit-diffs.md)
+- [ ] [Session list + resume-last](issues/session-list-and-resume-last.md)
+- [ ] [Prompt history recall](issues/prompt-history-recall.md)
+- [ ] [Cumulative session usage + cost display](issues/cumulative-usage-and-cost.md)
+- [ ] [Help overlay with keybindings](issues/help-overlay.md)
+- [ ] [Readline-style input editing](issues/readline-input-editing.md)
+- [ ] [Skill triggers + user skill invocation](issues/skill-triggers-and-user-invocation.md)
+- [ ] [Todo sidebar narrow-terminal fallback](issues/todo-sidebar-narrow-fallback.md)
+- [ ] [MCP via skill (no built-in MCP client)](issues/mcp-via-skill.md)
+- [ ] [Per-agent tool restriction](issues/per-agent-tool-restriction.md)
+- [ ] [Syntax highlighting in code fences](issues/code-fence-syntax-highlighting.md)
