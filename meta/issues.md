@@ -18,4 +18,3 @@
 
 ## Milestone 4 — Daily-driver UX
 
-- [ ] [Syntax highlighting in code fences](issues/code-fence-syntax-highlighting.md)

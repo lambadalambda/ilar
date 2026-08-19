@@ -104,3 +104,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Todo sidebar narrow-terminal fallback](issues/todo-sidebar-narrow-fallback.md)
 - [x] [MCP via skill (no built-in MCP client)](issues/mcp-via-skill.md)
 - [x] [Per-agent tool restriction](issues/per-agent-tool-restriction.md)
+- [x] [Syntax highlighting in code fences](issues/code-fence-syntax-highlighting.md)
