@@ -18,5 +18,4 @@
 
 ## Milestone 4 — Daily-driver UX
 
-- [ ] [Per-agent tool restriction](issues/per-agent-tool-restriction.md)
 - [ ] [Syntax highlighting in code fences](issues/code-fence-syntax-highlighting.md)
