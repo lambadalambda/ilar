@@ -22,3 +22,11 @@ lose todo visibility entirely.
 ## Notes
 
 - Truncate the item title with an ellipsis to fit.
+
+## Resolution
+
+Already implemented before this issue was filed: below the sidebar
+threshold, `todo_summary` renders a one-line strip (status marker,
+current item, `+N` hidden count) as the transcript block's bottom border
+title, covered by `narrow_todos_use_border_chrome_instead_of_transcript_rows`.
+Closed with no code change.
