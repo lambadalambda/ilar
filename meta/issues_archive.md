@@ -118,3 +118,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Live bash output tail](issues/bash-live-tail.md)
 - [x] [Goal mode](issues/goal-mode.md)
 - [x] [Pending-state controls](issues/pending-state-controls.md)
+- [x] [Service tool](issues/service-tool.md)
