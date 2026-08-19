@@ -43,8 +43,16 @@ use ilar::tools::{ToolContext, ToolRegistry};
 #[allow(clippy::large_enum_variant)] // Tool entries own bounded detail and nested agent activity.
 enum Line_ {
     User(String),
-    Task(String),
-    Job(String),
+    Task {
+        id: String,
+        text: String,
+        expanded: bool,
+    },
+    Job {
+        id: String,
+        text: String,
+        expanded: bool,
+    },
     Assistant(String),
     Thought {
         /// Click-target id; empty for nested subagent previews, which are
@@ -1049,9 +1057,17 @@ fn restored_session_invocation_view(
             ilar::session::SessionEvent::SubagentInvocation { .. } => {}
             ilar::session::SessionEvent::UserMessage { text, .. } => {
                 match task_notification_display(text) {
-                    Some(text) => lines.push(Line_::Task(text)),
+                    Some(text) => lines.push(Line_::Task {
+                        id: format!("note:restored:{}", lines.len()),
+                        text,
+                        expanded: false,
+                    }),
                     None => match tool_notification_display(text) {
-                        Some(text) => lines.push(Line_::Job(text)),
+                        Some(text) => lines.push(Line_::Job {
+                            id: format!("note:restored:{}", lines.len()),
+                            text,
+                            expanded: false,
+                        }),
                         None => lines.push(Line_::User(text.clone())),
                     },
                 }
@@ -1238,6 +1254,56 @@ fn restore_child_activity(
         restore_child_activity(&mut restored, store, session_id, depth + 1);
         *child_lines = restored;
     }
+}
+
+/// Background-task/job notifications render like subagent rows: a
+/// one-line headline with a disclosure, the body only when expanded.
+fn notification_lines(
+    text: &str,
+    expanded: bool,
+    label: &str,
+    color: ratatui::style::Color,
+    width: u16,
+) -> Vec<Line<'static>> {
+    let mut lines = safe_lines(text).into_iter();
+    let headline = lines.next().unwrap_or_default();
+    let body: Vec<String> = lines.collect();
+    let disclosure = if body.is_empty() {
+        "  "
+    } else if expanded {
+        "▾ "
+    } else {
+        "▸ "
+    };
+    let mut output = vec![Line::from(vec![
+        Span::styled(label.to_string(), theme::title(color)),
+        Span::styled(disclosure.to_string(), Style::default().fg(color)),
+        Span::styled(
+            truncate_display(
+                &headline,
+                (width as usize).saturating_sub(label.len() + 2),
+                Truncation::Right,
+            ),
+            Style::default().fg(theme::PRIMARY),
+        ),
+    ])];
+    if expanded {
+        for line in body {
+            output.push(Line::from(vec![
+                Span::raw("     ".to_string()),
+                Span::styled(line, Style::default().fg(MUTED)),
+            ]));
+        }
+    } else if !body.is_empty() {
+        output.push(Line::from(vec![
+            Span::raw("     ".to_string()),
+            Span::styled(
+                format!("… {} more line(s) — click to expand", body.len()),
+                Style::default().fg(MUTED),
+            ),
+        ]));
+    }
+    output
 }
 
 fn reasoning_summary_title(summary: &str) -> String {
@@ -1667,7 +1733,9 @@ fn transcript_entry_rows(
             item => {
                 // Expandable thoughts get a click target on their header row.
                 let thought_target = match item {
-                    Line_::Thought { id, .. } if !id.is_empty() => {
+                    Line_::Thought { id, .. } | Line_::Task { id, .. } | Line_::Job { id, .. }
+                        if !id.is_empty() =>
+                    {
                         Some(TranscriptHitTarget::Thought(id.clone()))
                     }
                     _ => None,
@@ -2215,32 +2283,12 @@ fn transcript_entry_lines(
                 ])
             })
             .collect(),
-        Line_::Task(text) => safe_lines(text)
-            .into_iter()
-            .enumerate()
-            .map(|(index, text)| {
-                Line::from(vec![
-                    Span::styled(
-                        if index == 0 { "task " } else { "     " },
-                        theme::title(theme::REASONING),
-                    ),
-                    Span::styled(text, Style::default().fg(theme::PRIMARY)),
-                ])
-            })
-            .collect(),
-        Line_::Job(text) => safe_lines(text)
-            .into_iter()
-            .enumerate()
-            .map(|(index, text)| {
-                Line::from(vec![
-                    Span::styled(
-                        if index == 0 { "job  " } else { "     " },
-                        theme::title(theme::WAITING),
-                    ),
-                    Span::styled(text, Style::default().fg(theme::PRIMARY)),
-                ])
-            })
-            .collect(),
+        Line_::Task { text, expanded, .. } => {
+            notification_lines(text, *expanded, "task ", theme::REASONING, width)
+        }
+        Line_::Job { text, expanded, .. } => {
+            notification_lines(text, *expanded, "job  ", theme::WAITING, width)
+        }
         Line_::Tool {
             name,
             kind,
@@ -2321,7 +2369,7 @@ fn transcript_markdown(session_id: &str, lines: &[Line_]) -> String {
                     output.push_str("```\n");
                 }
             }
-            Line_::Task(text) | Line_::Job(text) | Line_::System(text) => {
+            Line_::Task { text, .. } | Line_::Job { text, .. } | Line_::System(text) => {
                 output.push_str(&format!("\n*{}*\n", text.lines().next().unwrap_or("")));
             }
         }
@@ -2721,9 +2769,19 @@ impl App {
     fn push_notification(&mut self, description: &str, text: &str) {
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
         if let Some(text) = task_notification_display(text) {
-            self.lines.push(Line_::Task(text));
+            let id = self.allocate_thought_id();
+            self.lines.push(Line_::Task {
+                id,
+                text,
+                expanded: false,
+            });
         } else if let Some(text) = tool_notification_display(text) {
-            self.lines.push(Line_::Job(text));
+            let id = self.allocate_thought_id();
+            self.lines.push(Line_::Job {
+                id,
+                text,
+                expanded: false,
+            });
         } else {
             self.lines
                 .push(Line_::System(format!("task notification: {description}")));
@@ -3432,10 +3490,28 @@ impl App {
                 toggle_tool_expansion(&mut self.lines, &id);
             }
             TranscriptHitTarget::Thought(id) => {
-                if let Some(Line_::Thought { expanded, .. }) = self.lines.iter_mut().find(
-                    |line| matches!(line, Line_::Thought { id: line_id, .. } if *line_id == id),
-                ) {
-                    *expanded = !*expanded;
+                for line in &mut self.lines {
+                    match line {
+                        Line_::Thought {
+                            id: line_id,
+                            expanded,
+                            ..
+                        }
+                        | Line_::Task {
+                            id: line_id,
+                            expanded,
+                            ..
+                        }
+                        | Line_::Job {
+                            id: line_id,
+                            expanded,
+                            ..
+                        } if *line_id == id => {
+                            *expanded = !*expanded;
+                            break;
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
@@ -8831,12 +8907,18 @@ mod tests {
 
         assert!(rendered.contains("you  hello"), "{rendered}");
         assert!(
-            rendered.contains("task Assess architecture and risks completed."),
+            rendered.contains("task ▸ Assess architecture and risks completed."),
             "{rendered}"
         );
+        // The body is collapsed behind the disclosure.
+        assert!(
+            !rendered.contains("Repository review"),
+            "body must be collapsed: {rendered}"
+        );
+        assert!(rendered.contains("more line(s)"), "{rendered}");
         assert!(!rendered.contains("you  Task"), "{rendered}");
         assert!(
-            rendered.contains("job  job-1 (\"Run checks\") completed."),
+            rendered.contains("job  ▸ job-1 (\"Run checks\") completed."),
             "{rendered}"
         );
         assert!(!rendered.contains("you  Background job"), "{rendered}");
@@ -8856,9 +8938,29 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            rendered.contains("task Live review completed."),
+            rendered.contains("task ▸ Live review completed."),
             "{rendered}"
         );
+        assert!(!rendered.contains("\nDone"), "collapsed body: {rendered}");
+        // Clicking the header expands the body, a second click collapses.
+        let task_id = app
+            .lines
+            .iter()
+            .find_map(|line| match line {
+                Line_::Task { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .expect("task line present");
+        let target = TranscriptHitTarget::Thought(task_id);
+        app.toggle_transcript_target(target.clone());
+        let expanded = app
+            .transcript_lines(100, now)
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(expanded.contains("Done"), "{expanded}");
+        app.toggle_transcript_target(target);
         assert!(!rendered.contains("you  "), "{rendered}");
         assert!(!rendered.contains("<result>"), "{rendered}");
 
