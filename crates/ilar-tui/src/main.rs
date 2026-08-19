@@ -2189,6 +2189,61 @@ fn transcript_entry_lines(
     }
 }
 
+/// Render the transcript to shareable Markdown (palette: Export).
+fn transcript_markdown(session_id: &str, lines: &[Line_]) -> String {
+    let mut output = format!("# ilar session {session_id}\n");
+    for line in lines {
+        match line {
+            Line_::User(text) => {
+                output.push_str("\n## You\n\n");
+                output.push_str(text);
+                output.push('\n');
+            }
+            Line_::Assistant(text) => {
+                output.push_str("\n## ilar\n\n");
+                output.push_str(text);
+                output.push('\n');
+            }
+            Line_::Thought { text, .. } => {
+                output.push_str("\n**Thought:**\n\n");
+                for line in text.lines() {
+                    output.push_str("> ");
+                    output.push_str(line);
+                    output.push('\n');
+                }
+            }
+            Line_::Tool {
+                name,
+                arguments,
+                result,
+                state,
+                ..
+            } => {
+                let outcome = match state {
+                    ToolState::Failed => " (failed)",
+                    _ => "",
+                };
+                output.push_str(&format!("\n- `{name}` {arguments}{outcome}\n"));
+                if let Some(result) = result {
+                    output.push_str("\n```\n");
+                    for line in result.lines().take(40) {
+                        output.push_str(line);
+                        output.push('\n');
+                    }
+                    if result.lines().count() > 40 {
+                        output.push_str("… (truncated)\n");
+                    }
+                    output.push_str("```\n");
+                }
+            }
+            Line_::Task(text) | Line_::Job(text) | Line_::System(text) => {
+                output.push_str(&format!("\n*{}*\n", text.lines().next().unwrap_or("")));
+            }
+        }
+    }
+    output
+}
+
 /// Live thinking is kept as a bounded tail: enough to inspect what the
 /// model is doing without letting 100KB+ reasoning bloat the transcript.
 const MAX_THOUGHT_CHARS: usize = 64 * 1024;
@@ -4361,6 +4416,7 @@ enum PaletteCommand {
     Session,
     Usage,
     Skills,
+    Export,
     Help,
 }
 
@@ -4415,6 +4471,13 @@ static PALETTE_COMMANDS: &[PaletteCommandDefinition] = &[
         label: "Invoke skill…",
         shortcut: "/",
         search_terms: "skill skills slash command invoke run",
+    },
+    PaletteCommandDefinition {
+        id: PaletteCommand::Export,
+        section: "General",
+        label: "Export transcript",
+        shortcut: "",
+        search_terms: "export markdown save share transcript write file",
     },
     PaletteCommandDefinition {
         id: PaletteCommand::Help,
@@ -5296,6 +5359,21 @@ fn activate_palette_command(
         }
         PaletteCommand::Skills => {
             app.skill_picker = Some(SkillPicker::new(app.skills.clone()));
+        }
+        PaletteCommand::Export => {
+            let prefix: String = app.session_id.chars().take(8).collect();
+            let path = app.cwd.join(format!("ilar-transcript-{prefix}.md"));
+            let markdown = transcript_markdown(&app.session_id, &app.lines);
+            match std::fs::write(&path, markdown) {
+                Ok(()) => {
+                    let message = format!("transcript exported to {}", path.display());
+                    app.set_notice(&message, NoticeLevel::Info);
+                    app.push_transcript_line(Line_::System(message));
+                }
+                Err(error) => {
+                    app.set_notice(format!("export failed: {error}"), NoticeLevel::Error);
+                }
+            }
         }
         PaletteCommand::Help => {
             app.help_visible = true;
@@ -7951,6 +8029,47 @@ mod tests {
             .as_deref(),
             Some("0 B · no data 7s")
         );
+    }
+
+    #[test]
+    fn transcript_markdown_renders_all_line_kinds() {
+        let lines = vec![
+            Line_::User("fix the bug".into()),
+            Line_::Thought {
+                id: "thought:1".into(),
+                text: "check the parser\nthen the lexer".into(),
+                complete: true,
+                expanded: false,
+            },
+            Line_::Tool {
+                id: "t1".into(),
+                group_id: "g".into(),
+                name: "bash".into(),
+                kind: ToolKind::Tool,
+                arguments: "cargo test".into(),
+                argument_detail: String::new(),
+                diff: Vec::new(),
+                result: Some("all green".into()),
+                state: ToolState::Succeeded,
+                progress: ToolProgress::None,
+                expanded: false,
+                full: false,
+                child_lines: Vec::new(),
+                child_group: 0,
+                child_running: false,
+                child_session_id: None,
+            },
+            Line_::Assistant("Fixed it.".into()),
+            Line_::System("switched to zai/glm-5.3".into()),
+        ];
+        let markdown = transcript_markdown("abcd1234-rest", &lines);
+        assert!(markdown.starts_with("# ilar session abcd1234-rest"));
+        assert!(markdown.contains("## You\n\nfix the bug"), "{markdown}");
+        assert!(markdown.contains("> check the parser\n> then the lexer"));
+        assert!(markdown.contains("- `bash` cargo test\n"));
+        assert!(markdown.contains("```\nall green\n```"));
+        assert!(markdown.contains("## ilar\n\nFixed it."));
+        assert!(markdown.contains("*switched to zai/glm-5.3*"));
     }
 
     #[test]
