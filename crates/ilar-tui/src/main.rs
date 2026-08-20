@@ -226,7 +226,9 @@ fn prepare_prompt(app: &mut App, text: String) -> Option<String> {
     }
     if let Some((name, args)) = parse_slash_invocation(&text) {
         match resolve_slash(app, name, args) {
-            SlashResolution::Prompt(expanded) => return Some(expanded),
+            SlashResolution::Prompt(expanded, overrides) => {
+                return apply_command_overrides(app, name, &text, expanded, overrides);
+            }
             SlashResolution::Skill(prompt) => return Some(prompt),
             SlashResolution::Empty => {
                 app.input = InputBuffer::from(text.as_str());
@@ -247,6 +249,61 @@ fn prepare_prompt(app: &mut App, text: String) -> Option<String> {
         }
     }
     Some(text)
+}
+
+/// A command's frontmatter, applied. Returns the prompt for a plain or
+/// model-overridden invocation; `None` when the command runs as a
+/// subtask (armed on the app) or the overrides do not validate (the
+/// input is restored for editing, like an unknown `/name`).
+fn apply_command_overrides(
+    app: &mut App,
+    name: &str,
+    typed: &str,
+    expanded: String,
+    overrides: CommandOverrides,
+) -> Option<String> {
+    // `agent` only means anything as a subagent type, so it implies
+    // subtask; opencode's primary-agent switching has no counterpart
+    // here.
+    if overrides.subtask || overrides.agent.is_some() {
+        app.pending_subtask = Some(crate::app::SubtaskRequest {
+            description: format!("/{name}"),
+            prompt: expanded,
+            agent: overrides.agent.unwrap_or_else(|| "build".into()),
+            model: overrides.model,
+            variant: overrides.variant,
+        });
+        return None;
+    }
+    if overrides.model.is_none() && overrides.variant.is_none() {
+        return Some(expanded);
+    }
+    // Validate at invocation, not load: a foreign command file with an
+    // unknown model must still list, but must not silently run the
+    // turn under the wrong model. Same available-set rule as the task
+    // tool: an empty set (tests, bare configs) falls back to the
+    // catalog.
+    let target = overrides
+        .model
+        .clone()
+        .unwrap_or_else(|| app.current_model.clone());
+    let known = app.available_models.contains(&target)
+        || (app.available_models.is_empty() && ilar::model::find(&target).is_some());
+    if overrides.model.is_some() && !known {
+        app.input = InputBuffer::from(typed);
+        app.set_notice(
+            format!("/{name}: unknown or unavailable model {target:?} — F2 lists them"),
+            NoticeLevel::Warning,
+        );
+        return None;
+    }
+    if let Err(error) = ilar::model::variant_options(&target, overrides.variant.as_deref()) {
+        app.input = InputBuffer::from(typed);
+        app.set_notice(format!("/{name}: {error:#}"), NoticeLevel::Warning);
+        return None;
+    }
+    app.pending_model_override = Some((overrides.model, overrides.variant));
+    Some(expanded)
 }
 
 /// Apply one intent to the app. Returns the prompt when the intent
@@ -438,13 +495,23 @@ fn observe(
     }
 }
 
+/// The frontmatter a command carries into its invocation — see
+/// meta/issues/honour-command-frontmatter.md for the semantics.
+#[derive(Debug, PartialEq, Default, Clone)]
+struct CommandOverrides {
+    model: Option<String>,
+    variant: Option<String>,
+    agent: Option<String>,
+    subtask: bool,
+}
+
 /// What `/name args` means. Extracted from the key handler so the
 /// precedence between commands, skills and the built-in is testable
 /// without a running event loop.
 #[derive(Debug, PartialEq)]
 enum SlashResolution {
     /// A command's body, arguments already substituted.
-    Prompt(String),
+    Prompt(String, CommandOverrides),
     /// A request for the model to load a skill.
     Skill(String),
     /// Nothing by that name; near matches to suggest.
@@ -461,7 +528,15 @@ fn resolve_slash(app: &App, name: &str, args: &str) -> SlashResolution {
         if expanded.trim().is_empty() {
             return SlashResolution::Empty;
         }
-        return SlashResolution::Prompt(expanded);
+        return SlashResolution::Prompt(
+            expanded,
+            CommandOverrides {
+                model: command.model.clone(),
+                variant: command.variant.clone(),
+                agent: command.agent.clone(),
+                subtask: command.subtask,
+            },
+        );
     }
     if app.skills.iter().any(|(skill, _)| skill == name) {
         return SlashResolution::Skill(skill_invocation_prompt(name, args));
@@ -780,6 +855,7 @@ async fn main() -> Result<()> {
         app.history = history::PromptHistory::load(config.state_dir().join("prompt_history.jsonl"));
         app.skills = skill_inventory;
         app.commands = command_inventory;
+        app.available_models = model_choices.iter().map(|model| model.full_id()).collect();
         app.session_id = session_id.clone();
         app.todos = todos;
         if let Some(resumed) = &resumed {
@@ -1123,6 +1199,32 @@ async fn run_app(
                     NoticeLevel::Warning,
                 );
             }
+            // A command's model override ends with its turn — however
+            // the turn ended. Hand-rolled rather than through
+            // adopt_model_selection because a revert must not clear an
+            // error notice the turn just set.
+            if let Some((model, variant)) = app.model_revert.take() {
+                match persist_model_change(
+                    resolver.as_ref(),
+                    store,
+                    session_id,
+                    &model,
+                    variant.as_deref(),
+                ) {
+                    Ok(()) => {
+                        app.current_model = model.clone();
+                        app.current_variant = variant;
+                        app.context_limit = display_context_limit(resolver.as_ref(), &model);
+                        app.push_transcript_line(Line_::System(format!(
+                            "model reverted to {model}"
+                        )));
+                    }
+                    Err(error) => app.set_notice(
+                        format!("reverting the model to {model} failed: {error:#}"),
+                        NoticeLevel::Error,
+                    ),
+                }
+            }
         }
 
         // Perform what was decided. `apply_intent` owns the state
@@ -1140,6 +1242,33 @@ async fn run_app(
                 turn_handle.is_none(),
                 "starting a turn while one is already running"
             );
+            // A command's one-turn model override, validated by
+            // prepare_prompt; the provider check happens in the adopt.
+            // On failure the turn still runs — its prompt is already in
+            // the transcript — just under the session's own model.
+            if let Some((model, variant)) = app.pending_model_override.take() {
+                let target = model.unwrap_or_else(|| app.current_model.clone());
+                let revert = (app.current_model.clone(), app.current_variant.clone());
+                match adopt_model_selection(
+                    app,
+                    resolver.as_ref(),
+                    store,
+                    session_id,
+                    system_prompt,
+                    registry,
+                    target,
+                    variant,
+                ) {
+                    Ok(()) => app.model_revert = Some(revert),
+                    Err(error) => app.set_notice(
+                        format!(
+                            "command model override failed ({error:#}) — running with {}",
+                            revert.0
+                        ),
+                        NoticeLevel::Warning,
+                    ),
+                }
+            }
             let (tx, rx) = loop_event_channel(LOOP_EVENT_CAPACITY);
             events_rx = Some(rx);
             let token = CancellationToken::new();
@@ -1175,6 +1304,52 @@ async fn run_app(
                     .await,
                 )
             }));
+        }
+
+        // A subtask command spawns detached; its completion arrives as
+        // a notification like any background task's. `run_task` with
+        // background only sets the session up, so awaiting it inline is
+        // brief; it validates the agent name and model itself.
+        if let Some(request) = app.pending_subtask.take() {
+            let description = request.description.clone();
+            // The root ToolContext carries no session id — run_turn
+            // fills it per turn, and this call bypasses run_turn. An
+            // empty id here creates an unroutable completion
+            // notification that wedges the pipeline.
+            let mut task_ctx = tool_ctx.clone();
+            task_ctx.session_id = session_id.to_string();
+            let output = spawner
+                .run_task(
+                    ilar::subagent::TaskInput {
+                        description: request.description,
+                        prompt: request.prompt,
+                        subagent_type: request.agent.clone(),
+                        task_id: None,
+                        background: Some(true),
+                        workspace: None,
+                        model: request.model,
+                        reasoning: request.variant,
+                    },
+                    &task_ctx,
+                )
+                .await;
+            if output.is_error {
+                app.set_notice(
+                    format!("{description}: {}", output.content),
+                    NoticeLevel::Error,
+                );
+                app.push_transcript_line(Line_::System(format!(
+                    "{description} failed to start: {}",
+                    output.content
+                )));
+            } else {
+                let line = format!(
+                    "{description} running in the background as {} — completion arrives as a notification",
+                    request.agent
+                );
+                app.set_notice(&line, NoticeLevel::Info);
+                app.push_transcript_line(Line_::System(line));
+            }
         }
 
         // Let a buffered Ctrl-P open the palette before starting queued work.

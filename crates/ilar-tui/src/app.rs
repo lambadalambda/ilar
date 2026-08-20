@@ -52,6 +52,18 @@ use crate::transcript::{
 };
 use crate::{Activity, ERROR, MAX_GOAL_ROUNDS, MUTED, NoticeLevel, history, theme};
 
+/// A command invocation that runs as a background subagent — the
+/// `subtask`/`agent` half of command frontmatter.
+#[derive(Debug, PartialEq)]
+pub(crate) struct SubtaskRequest {
+    /// Shown in the task listing; the `/name` that started it.
+    pub(crate) description: String,
+    pub(crate) prompt: String,
+    pub(crate) agent: String,
+    pub(crate) model: Option<String>,
+    pub(crate) variant: Option<String>,
+}
+
 pub(crate) struct App {
     pub(crate) lines: Vec<Line_>,
     pub(crate) input: InputBuffer,
@@ -101,6 +113,17 @@ pub(crate) struct App {
     /// Where the active modal's rows were drawn last frame; how a click
     /// finds the item it landed on. Rebuilt by every render.
     pub(crate) modal_hit: Option<crate::modals::ModalHit>,
+    /// Full ids of models with a configured provider; empty means
+    /// unrestricted (tests, bare configs fall back to the catalog).
+    pub(crate) available_models: Vec<String>,
+    /// A command's one-turn model override `(model, variant)`, armed by
+    /// `prepare_prompt` and applied by the spawn block, which is where
+    /// resolver and store live. `None` in a pair means "keep current".
+    pub(crate) pending_model_override: Option<(Option<String>, Option<String>)>,
+    /// What to switch back to when the overridden turn ends.
+    pub(crate) model_revert: Option<(String, Option<String>)>,
+    /// A command that runs as a background subagent instead of a turn.
+    pub(crate) pending_subtask: Option<SubtaskRequest>,
     /// Snapshot of spawner.running_background() for rendering.
     pub(crate) background_running: usize,
     /// Snapshot of the service manager's running count for rendering.
@@ -194,6 +217,10 @@ impl App {
             slash_selected: 0,
             pending_manager: None,
             modal_hit: None,
+            available_models: Vec::new(),
+            pending_model_override: None,
+            model_revert: None,
+            pending_subtask: None,
             background_running: 0,
             services_running: 0,
             services_view: Vec::new(),
@@ -888,6 +915,11 @@ impl App {
     pub(crate) fn push_subagent_activity(&mut self, activity: &ilar::subagent::SubagentActivity) {
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
         if !apply_subagent_activity(&mut self.lines, &self.session_id, activity)
+            // A UI-spawned subtask has no parent tool call, so its
+            // activity can never attach to a Tool row; buffering it
+            // would fill the retry queue with entries that stay
+            // forever and crowd out ones that could still attach.
+            && !activity.parent_call_id.is_empty()
             && self.pending_subagent_activity.len() < 256
         {
             self.pending_subagent_activity.push_back(activity.clone());
@@ -5326,7 +5358,111 @@ mod tests {
             agent: None,
             model: None,
             variant: None,
+            subtask: false,
         }
+    }
+
+    /// A command's `model` becomes a one-turn override, armed for the
+    /// spawn block to apply; an unknown model declines the send and
+    /// restores the input, like an unknown `/name` does.
+    #[test]
+    fn a_command_model_override_arms_or_declines() {
+        let mut app = App::new();
+        app.available_models = vec!["openai/gpt-4.1".into(), "zai/glm-4.7".into()];
+        let mut fast = command("fast", "Fast pass", "Do $ARGUMENTS");
+        fast.model = Some("zai/glm-4.7".into());
+        app.commands = vec![fast];
+
+        let sent = crate::prepare_prompt(&mut app, "/fast the sweep".into());
+        assert_eq!(sent.as_deref(), Some("Do the sweep"));
+        assert_eq!(
+            app.pending_model_override,
+            Some((Some("zai/glm-4.7".into()), None))
+        );
+
+        // A model outside the available set declines: no override, no
+        // send, input restored for editing.
+        app.pending_model_override = None;
+        let mut bad = command("bad", "Bad model", "Body");
+        bad.model = Some("nope/absent".into());
+        app.commands = vec![bad];
+        let sent = crate::prepare_prompt(&mut app, "/bad x".into());
+        assert!(sent.is_none());
+        assert!(app.pending_model_override.is_none());
+        assert_eq!(app.input.text(), "/bad x");
+
+        // An invalid variant for a known model declines the same way.
+        let mut wrong = command("wrong", "Bad variant", "Body");
+        wrong.model = Some("zai/glm-4.7".into());
+        wrong.variant = Some("no-such-variant".into());
+        app.commands = vec![wrong];
+        assert!(crate::prepare_prompt(&mut app, "/wrong x".into()).is_none());
+        assert!(app.pending_model_override.is_none());
+
+        // A command without overrides arms nothing.
+        app.commands = vec![command("plain", "Plain", "Body")];
+        assert_eq!(
+            crate::prepare_prompt(&mut app, "/plain".into()).as_deref(),
+            Some("Body")
+        );
+        assert!(app.pending_model_override.is_none());
+    }
+
+    /// Activity from a UI-spawned subtask carries no parent call id and
+    /// can never attach to a Tool row; it must be dropped, not
+    /// buffered, or one subtask fills the retry queue for the rest of
+    /// the session and evicts activity that could still attach.
+    #[test]
+    fn orphan_subtask_activity_is_dropped_not_buffered() {
+        let mut app = App::new();
+        for _ in 0..3 {
+            app.push_subagent_activity(&ilar::subagent::SubagentActivity {
+                parent_session_id: "root".into(),
+                parent_call_id: String::new(),
+                child_session_id: "child".into(),
+                event: LoopEvent::TextDelta("orphan".into()),
+            });
+        }
+        assert!(
+            app.pending_subagent_activity.is_empty(),
+            "orphan activity must not occupy the retry buffer"
+        );
+
+        // Activity with a real call id that has not rendered yet still
+        // buffers, as before.
+        app.push_subagent_activity(&ilar::subagent::SubagentActivity {
+            parent_session_id: "root".into(),
+            parent_call_id: "task-9".into(),
+            child_session_id: "child".into(),
+            event: LoopEvent::TextDelta("early".into()),
+        });
+        assert_eq!(app.pending_subagent_activity.len(), 1);
+    }
+
+    /// `agent` or `subtask: true` runs the command as a background
+    /// subagent: no main-session turn, the request carries the expanded
+    /// body and the overrides.
+    #[test]
+    fn a_subtask_command_becomes_a_task_request_not_a_turn() {
+        let mut app = App::new();
+        let mut scout = command("scout", "Scout it", "Investigate $ARGUMENTS");
+        scout.agent = Some("explore".into());
+        scout.model = Some("zai/glm-4.7".into());
+        app.commands = vec![scout];
+
+        assert!(crate::prepare_prompt(&mut app, "/scout the crash".into()).is_none());
+        let request = app.pending_subtask.take().expect("a task request");
+        assert_eq!(request.agent, "explore");
+        assert_eq!(request.prompt, "Investigate the crash");
+        assert_eq!(request.model.as_deref(), Some("zai/glm-4.7"));
+        assert!(!app.busy, "the main session stays idle");
+
+        // subtask: true without an agent defaults to build.
+        let mut chore = command("chore", "Chore", "Do the chore");
+        chore.subtask = true;
+        app.commands = vec![chore];
+        assert!(crate::prepare_prompt(&mut app, "/chore".into()).is_none());
+        assert_eq!(app.pending_subtask.take().expect("request").agent, "build");
     }
 
     /// A command's body is the prompt. A skill's invocation is a request
@@ -5344,7 +5480,7 @@ mod tests {
         app.skills = vec![("repo-issues".into(), "Manage issues".into())];
 
         match crate::resolve_slash(&app, "greptile", "PR 41") {
-            crate::SlashResolution::Prompt(text) => {
+            crate::SlashResolution::Prompt(text, _) => {
                 assert!(text.contains("Command arguments: PR 41"), "{text}");
                 assert!(!text.contains("skill` tool"), "{text}");
             }
@@ -5369,7 +5505,7 @@ mod tests {
 
         assert!(matches!(
             crate::resolve_slash(&app, "review", ""),
-            crate::SlashResolution::Prompt(text) if text == "Command body"
+            crate::SlashResolution::Prompt(text, _) if text == "Command body"
         ));
         let inventory = app.slash_inventory();
         assert_eq!(
@@ -5396,7 +5532,7 @@ mod tests {
         );
         assert!(matches!(
             crate::resolve_slash(&app, "echo", "something"),
-            crate::SlashResolution::Prompt(text) if text == "something"
+            crate::SlashResolution::Prompt(text, _) if text == "something"
         ));
     }
 
