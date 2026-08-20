@@ -45,12 +45,7 @@ pub(crate) fn carve_panel(area: &mut Rect, content_rows: usize) -> Option<Rect> 
         return None;
     }
     let panel = Rect::new(area.x, area.y, area.width, height);
-    *area = Rect::new(
-        area.x,
-        area.y + height,
-        area.width,
-        area.height - height,
-    );
+    *area = Rect::new(area.x, area.y + height, area.width, area.height - height);
     Some(panel)
 }
 

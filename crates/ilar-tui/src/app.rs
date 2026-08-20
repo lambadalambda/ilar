@@ -21,6 +21,7 @@ use ilar::agent::{LoopEvent, TurnOutcome};
 use ilar::session::SessionStore;
 
 use crate::diff;
+use crate::input::slash_candidates;
 use crate::input::{InputBuffer, input_accepts_keys};
 use crate::modals::{
     CommandPalette, Modal, ModelPicker, PaletteAction, PaletteCommand, PendingAction, PendingItem,
@@ -49,7 +50,6 @@ use crate::transcript::{
     Line_, ToolKind, ToolProgress, ToolState, TranscriptHitTarget, TranscriptRenderCache,
     append_thought_tail, apply_subagent_activity, toggle_tool_expansion, transcript_markdown,
 };
-use crate::input::slash_candidates;
 use crate::{Activity, ERROR, MAX_GOAL_ROUNDS, MUTED, NoticeLevel, history, theme};
 
 pub(crate) struct App {
@@ -2468,13 +2468,13 @@ mod tests {
         .unwrap();
         assert!(rate.abs() < 1.0, "{rate}");
     }
+    use crate::drain_wheel_batch;
+    use crate::input::slash_candidates;
     use crate::modals::{CommandPaletteAction, PALETTE_COMMANDS, is_command_palette_shortcut};
     use crate::selection::SelectionPoint;
     use crate::session_view::restored_session_view;
     use crate::text::tests::rendered_text;
     use crate::transcript::{reasoning_summary_title, tool_line, transcript_entry_lines};
-    use crate::drain_wheel_batch;
-    use crate::input::slash_candidates;
     use crossterm::event::{Event, KeyEvent, KeyModifiers, MouseEventKind};
     use ilar::session::{SessionMeta, new_id};
 
