@@ -135,3 +135,7 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Unify the TUI modal layer](issues/unify-tui-modals.md)
 - [x] [Make the event loop testable](issues/testable-event-loop.md)
 - [x] [TUI module follow-ups](issues/tui-module-follow-ups.md)
+
+## Milestone 7 — Unscheduled
+
+- [x] [Honour command frontmatter](issues/honour-command-frontmatter.md)

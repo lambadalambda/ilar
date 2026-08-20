@@ -31,5 +31,4 @@
 ## Milestone 7 — Unscheduled
 
 - [ ] [A harness for the event loop's schedule](issues/loop-schedule-harness.md)
-- [ ] [Honour command frontmatter](issues/honour-command-frontmatter.md)
 
