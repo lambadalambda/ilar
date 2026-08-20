@@ -20,6 +20,46 @@ use crate::text::{
 use crate::theme;
 use crate::theme::{ERROR, MUTED};
 
+/// Where the active modal's rows landed this frame, so a click can be
+/// mapped back to the item it shows. Rebuilt by every render pass;
+/// stale by definition the moment the modal changes, which is why the
+/// renderers return it instead of anything storing it long-term.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct ModalHit {
+    /// The inner (borderless) area the rows were drawn into.
+    pub(crate) area: Rect,
+    /// For each drawn row, the index of the item it shows. `None` for
+    /// headers, footers and overflow markers.
+    pub(crate) rows: Vec<Option<usize>>,
+}
+
+impl ModalHit {
+    pub(crate) fn item_at(&self, column: u16, row: u16) -> Option<usize> {
+        if column < self.area.x
+            || column >= self.area.right()
+            || row < self.area.y
+            || row >= self.area.bottom()
+        {
+            return None;
+        }
+        self.rows
+            .get((row - self.area.y) as usize)
+            .copied()
+            .flatten()
+    }
+}
+
+/// The one definition of which keys move a list selection. Every modal
+/// list answers the same keys because they all ask this; before, each
+/// carried its own copy of these two arms.
+pub(crate) fn nav_delta(code: KeyCode, control: bool) -> Option<isize> {
+    match (code, control) {
+        (KeyCode::Up, _) | (KeyCode::Char('p'), true) => Some(-1),
+        (KeyCode::Down, _) | (KeyCode::Char('n'), true) => Some(1),
+        _ => None,
+    }
+}
+
 /// The overlay that owns the keyboard. Render and key dispatch both
 /// derive their precedence from `App::active_modal`, so adding a variant
 /// without wiring both is a compile error.
@@ -193,6 +233,11 @@ impl CommandPalette {
             .collect()
     }
 
+    /// Click-to-select: the index is into the filtered list.
+    pub(crate) fn select(&mut self, index: usize) {
+        self.selected = index.min(self.filtered_commands().len().saturating_sub(1));
+    }
+
     pub(crate) fn move_selection(&mut self, delta: isize) {
         let count = self.filtered_commands().len();
         if count == 0 {
@@ -209,6 +254,10 @@ impl CommandPalette {
     }
 
     pub(crate) fn handle_key(&mut self, code: KeyCode, control: bool) -> CommandPaletteAction {
+        if let Some(delta) = nav_delta(code, control) {
+            self.move_selection(delta);
+            return CommandPaletteAction::Stay;
+        }
         match (code, control) {
             (KeyCode::Esc, _) => CommandPaletteAction::Dismiss,
             (KeyCode::Enter, _) => self
@@ -216,14 +265,6 @@ impl CommandPalette {
                 .get(self.selected)
                 .map(|item| CommandPaletteAction::Choose(item.action.clone()))
                 .unwrap_or(CommandPaletteAction::Stay),
-            (KeyCode::Up, _) | (KeyCode::Char('p'), true) => {
-                self.move_selection(-1);
-                CommandPaletteAction::Stay
-            }
-            (KeyCode::Down, _) | (KeyCode::Char('n'), true) => {
-                self.move_selection(1);
-                CommandPaletteAction::Stay
-            }
             (KeyCode::Home, _) => {
                 self.selected = 0;
                 CommandPaletteAction::Stay
@@ -416,7 +457,7 @@ pub(crate) struct PendingSnapshot {
     pub(crate) rows: Vec<String>,
 }
 
-pub(crate) fn render_pending_manager(frame: &mut Frame, snapshot: &PendingSnapshot) {
+pub(crate) fn render_pending_manager(frame: &mut Frame, snapshot: &PendingSnapshot) -> ModalHit {
     let area = centered_rect(frame.area(), 76, 14);
     frame.render_widget(Clear, area);
     let block = Block::default()
@@ -434,7 +475,7 @@ pub(crate) fn render_pending_manager(frame: &mut Frame, snapshot: &PendingSnapsh
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
-        return;
+        return ModalHit::default();
     }
     if snapshot.rows.is_empty() {
         frame.render_widget(
@@ -444,7 +485,7 @@ pub(crate) fn render_pending_manager(frame: &mut Frame, snapshot: &PendingSnapsh
             )),
             inner,
         );
-        return;
+        return ModalHit::default();
     }
     let lines: Vec<Line<'static>> = snapshot
         .rows
@@ -478,7 +519,12 @@ pub(crate) fn render_pending_manager(frame: &mut Frame, snapshot: &PendingSnapsh
             )
         })
         .collect();
+    let hit_rows = (0..lines.len()).map(Some).collect();
     frame.render_widget(Paragraph::new(lines), inner);
+    ModalHit {
+        area: inner,
+        rows: hit_rows,
+    }
 }
 
 pub(crate) fn render_help(frame: &mut Frame, scroll: usize, keyboard_enhanced: bool) {
@@ -555,6 +601,11 @@ impl SkillPicker {
         }
     }
 
+    /// Click-to-select: the index comes from the frame's hit map.
+    pub(crate) fn select(&mut self, index: usize) {
+        self.selected = index.min(self.skills.len().saturating_sub(1));
+    }
+
     pub(crate) fn move_selection(&mut self, delta: isize) {
         let count = self.skills.len();
         if count == 0 {
@@ -565,6 +616,10 @@ impl SkillPicker {
     }
 
     pub(crate) fn handle_key(&mut self, code: KeyCode, control: bool) -> PickerAction {
+        if let Some(delta) = nav_delta(code, control) {
+            self.move_selection(delta);
+            return PickerAction::Stay;
+        }
         match (code, control) {
             (KeyCode::Esc, _) => PickerAction::Dismiss,
             (KeyCode::Enter, _) => self
@@ -572,20 +627,12 @@ impl SkillPicker {
                 .get(self.selected)
                 .map(|(name, _)| PickerAction::Choose(name.clone()))
                 .unwrap_or(PickerAction::Dismiss),
-            (KeyCode::Up, _) | (KeyCode::Char('p'), true) => {
-                self.move_selection(-1);
-                PickerAction::Stay
-            }
-            (KeyCode::Down, _) | (KeyCode::Char('n'), true) => {
-                self.move_selection(1);
-                PickerAction::Stay
-            }
             _ => PickerAction::Stay,
         }
     }
 }
 
-pub(crate) fn render_skill_picker(frame: &mut Frame, picker: &SkillPicker) {
+pub(crate) fn render_skill_picker(frame: &mut Frame, picker: &SkillPicker) -> ModalHit {
     let area = centered_rect(frame.area(), 72, 14);
     frame.render_widget(Clear, area);
     let block = Block::default()
@@ -603,7 +650,7 @@ pub(crate) fn render_skill_picker(frame: &mut Frame, picker: &SkillPicker) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
-        return;
+        return ModalHit::default();
     }
     let selected = picker.selected.min(picker.skills.len().saturating_sub(1));
     let row_count = inner.height as usize;
@@ -630,7 +677,11 @@ pub(crate) fn render_skill_picker(frame: &mut Frame, picker: &SkillPicker) {
             style,
         ));
     }
+    let rows = (start..start.saturating_add(lines.len()))
+        .map(Some)
+        .collect();
     frame.render_widget(Paragraph::new(lines), inner);
+    ModalHit { area: inner, rows }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -681,6 +732,13 @@ impl SessionPicker {
             .map(|session| session.id.clone())
     }
 
+    /// Click-to-select. Disarms a pending delete, like any other
+    /// selection move.
+    pub(crate) fn select(&mut self, index: usize) {
+        self.pending_delete = None;
+        self.selected = index.min(self.filtered().len().saturating_sub(1));
+    }
+
     pub(crate) fn move_selection(&mut self, delta: isize) {
         self.pending_delete = None;
         let count = self.filtered().len();
@@ -692,20 +750,16 @@ impl SessionPicker {
     }
 
     pub(crate) fn handle_key(&mut self, code: KeyCode, control: bool) -> SessionPickerAction {
+        if let Some(delta) = nav_delta(code, control) {
+            self.move_selection(delta);
+            return SessionPickerAction::Stay;
+        }
         match (code, control) {
             (KeyCode::Esc, _) => SessionPickerAction::Dismiss,
             (KeyCode::Enter, _) => self
                 .selected_id()
                 .map(SessionPickerAction::Resume)
                 .unwrap_or(SessionPickerAction::Dismiss),
-            (KeyCode::Up, _) | (KeyCode::Char('p'), true) => {
-                self.move_selection(-1);
-                SessionPickerAction::Stay
-            }
-            (KeyCode::Down, _) | (KeyCode::Char('n'), true) => {
-                self.move_selection(1);
-                SessionPickerAction::Stay
-            }
             (KeyCode::Char('d'), true) => match (self.selected_id(), self.pending_delete.take()) {
                 (Some(id), Some(pending)) if pending == id => SessionPickerAction::Delete(id),
                 (Some(id), _) => {
@@ -745,7 +799,7 @@ fn session_age(modified: std::time::SystemTime, now: std::time::SystemTime) -> S
     }
 }
 
-pub(crate) fn render_session_picker(frame: &mut Frame, picker: &SessionPicker) {
+pub(crate) fn render_session_picker(frame: &mut Frame, picker: &SessionPicker) -> ModalHit {
     let area = centered_rect(frame.area(), 72, 16);
     frame.render_widget(Clear, area);
     let footer = if area.width < 44 {
@@ -762,7 +816,7 @@ pub(crate) fn render_session_picker(frame: &mut Frame, picker: &SessionPicker) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
-        return;
+        return ModalHit::default();
     }
     let mut lines = vec![Line::from(vec![
         Span::styled("filter ", Style::default().fg(MUTED)),
@@ -783,7 +837,7 @@ pub(crate) fn render_session_picker(frame: &mut Frame, picker: &SessionPicker) {
             Style::default().fg(MUTED),
         ));
         frame.render_widget(Paragraph::new(lines), inner);
-        return;
+        return ModalHit::default();
     }
     let now = std::time::SystemTime::now();
     let selected = picker.selected.min(sessions.len() - 1);
@@ -829,7 +883,10 @@ pub(crate) fn render_session_picker(frame: &mut Frame, picker: &SessionPicker) {
             style,
         ));
     }
+    let mut rows = vec![None];
+    rows.extend((start..start.saturating_add(lines.len() - 1)).map(Some));
     frame.render_widget(Paragraph::new(lines), inner);
+    ModalHit { area: inner, rows }
 }
 
 pub(crate) struct ModelPicker {
@@ -880,6 +937,12 @@ impl ModelPicker {
         self.selected
     }
 
+    /// Click-to-select: the index is into the filtered list, which is
+    /// what the hit map was built from.
+    pub(crate) fn select(&mut self, index: usize) {
+        self.selected = index.min(self.filtered_models().len().saturating_sub(1));
+    }
+
     pub(crate) fn move_selection(&mut self, delta: isize) {
         let count = self.filtered_models().len();
         if count == 0 {
@@ -898,6 +961,10 @@ impl ModelPicker {
     }
 
     pub(crate) fn handle_key(&mut self, code: KeyCode, control: bool) -> PickerAction {
+        if let Some(delta) = nav_delta(code, control) {
+            self.move_selection(delta);
+            return PickerAction::Stay;
+        }
         match (code, control) {
             (KeyCode::Esc, _) => PickerAction::Dismiss,
             (KeyCode::Enter, _) => self
@@ -912,14 +979,6 @@ impl ModelPicker {
                     }
                 })
                 .unwrap_or(PickerAction::Stay),
-            (KeyCode::Up, _) | (KeyCode::Char('p'), true) => {
-                self.move_selection(-1);
-                PickerAction::Stay
-            }
-            (KeyCode::Down, _) | (KeyCode::Char('n'), true) => {
-                self.move_selection(1);
-                PickerAction::Stay
-            }
             (KeyCode::PageUp, _) => {
                 self.move_selection(-10);
                 PickerAction::Stay
@@ -996,6 +1055,12 @@ impl VariantPicker {
         self.selected
     }
 
+    /// Click-to-select. Clears the error like a selection move does.
+    pub(crate) fn select(&mut self, index: usize) {
+        self.selected = index.min(self.model.variants().len());
+        self.error = None;
+    }
+
     pub(crate) fn move_selection(&mut self, delta: isize) {
         let count = self.model.variants().len() + 1;
         self.selected = (self.selected as isize + delta).rem_euclid(count as isize) as usize;
@@ -1010,6 +1075,10 @@ impl VariantPicker {
     }
 
     pub(crate) fn handle_key(&mut self, code: KeyCode, control: bool) -> VariantPickerAction {
+        if let Some(delta) = nav_delta(code, control) {
+            self.move_selection(delta);
+            return VariantPickerAction::Stay;
+        }
         match (code, control) {
             (KeyCode::Esc, _) => VariantPickerAction::Dismiss,
             (KeyCode::Enter, _) => {
@@ -1019,14 +1088,6 @@ impl VariantPicker {
                 } else {
                     VariantPickerAction::Choose(selected)
                 }
-            }
-            (KeyCode::Up, _) | (KeyCode::Char('p'), true) => {
-                self.move_selection(-1);
-                VariantPickerAction::Stay
-            }
-            (KeyCode::Down, _) | (KeyCode::Char('n'), true) => {
-                self.move_selection(1);
-                VariantPickerAction::Stay
             }
             (KeyCode::Home, _) => {
                 self.selected = 0;
@@ -1071,7 +1132,7 @@ impl ThemePicker {
         theme::ThemeId::ALL[self.selected.min(theme::ThemeId::ALL.len() - 1)]
     }
 
-    fn select(&mut self, selected: usize) -> ThemePickerAction {
+    pub(crate) fn select(&mut self, selected: usize) -> ThemePickerAction {
         self.selected = selected.min(theme::ThemeId::ALL.len() - 1);
         self.error = None;
         ThemePickerAction::Preview(self.selected_theme())
@@ -1085,11 +1146,12 @@ impl ThemePicker {
     }
 
     pub(crate) fn handle_key(&mut self, code: KeyCode, control: bool) -> ThemePickerAction {
+        if let Some(delta) = nav_delta(code, control) {
+            return self.move_selection(delta);
+        }
         match (code, control) {
             (KeyCode::Esc, _) => ThemePickerAction::Dismiss,
             (KeyCode::Enter, _) => ThemePickerAction::Choose(self.selected_theme()),
-            (KeyCode::Up, _) | (KeyCode::Char('p'), true) => self.move_selection(-1),
-            (KeyCode::Down, _) | (KeyCode::Char('n'), true) => self.move_selection(1),
             (KeyCode::Home, _) => self.select(0),
             (KeyCode::End, _) => self.select(theme::ThemeId::ALL.len() - 1),
             _ => ThemePickerAction::Preview(self.selected_theme()),
@@ -1124,7 +1186,7 @@ fn palette_window(total: usize, available: usize, selected: usize) -> (usize, us
     (start, rows)
 }
 
-pub(crate) fn render_command_palette(frame: &mut Frame, palette: &CommandPalette) {
+pub(crate) fn render_command_palette(frame: &mut Frame, palette: &CommandPalette) -> ModalHit {
     // Size to the full command list (query + blank + section + rows +
     // borders); centered_rect caps it on short terminals, where explicit
     // overflow markers take over.
@@ -1146,7 +1208,7 @@ pub(crate) fn render_command_palette(frame: &mut Frame, palette: &CommandPalette
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
-        return;
+        return ModalHit::default();
     }
 
     let query_area_width = inner.width.saturating_sub(7);
@@ -1168,6 +1230,7 @@ pub(crate) fn render_command_palette(frame: &mut Frame, palette: &CommandPalette
         query,
     ])];
     let commands = palette.filtered_commands();
+    let mut rows: Vec<Option<usize>> = Vec::new();
     if commands.is_empty() {
         if inner.height > 1 {
             lines.push(Line::styled(
@@ -1188,6 +1251,8 @@ pub(crate) fn render_command_palette(frame: &mut Frame, palette: &CommandPalette
                 Style::default().fg(MUTED),
             ));
         }
+        rows = vec![None; lines.len()];
+        rows.extend((start..commands.len().min(start.saturating_add(row_count))).map(Some));
         for (index, command) in commands.iter().enumerate().skip(start).take(row_count) {
             let marker = if index == selected { "> " } else { "  " };
             let shortcut = (inner.width >= 32 && !command.shortcut.is_empty())
@@ -1234,9 +1299,10 @@ pub(crate) fn render_command_palette(frame: &mut Frame, palette: &CommandPalette
         .saturating_add(query_cursor_offset as usize)
         .min(inner.width.saturating_sub(1) as usize) as u16;
     frame.set_cursor_position((inner.x.saturating_add(offset), inner.y));
+    ModalHit { area: inner, rows }
 }
 
-pub(crate) fn render_variant_picker(frame: &mut Frame, picker: &VariantPicker) {
+pub(crate) fn render_variant_picker(frame: &mut Frame, picker: &VariantPicker) -> ModalHit {
     let area = centered_rect(frame.area(), 54, 10);
     frame.render_widget(Clear, area);
 
@@ -1254,7 +1320,7 @@ pub(crate) fn render_variant_picker(frame: &mut Frame, picker: &VariantPicker) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
-        return;
+        return ModalHit::default();
     }
 
     let mut lines = Vec::new();
@@ -1269,6 +1335,7 @@ pub(crate) fn render_variant_picker(frame: &mut Frame, picker: &VariantPicker) {
             Style::default().fg(MUTED),
         ));
     }
+    let mut rows: Vec<Option<usize>> = vec![None; lines.len()];
 
     let row_count = inner.height.saturating_sub(lines.len() as u16) as usize;
     let choice_count = picker.model.variants().len() + 1;
@@ -1312,12 +1379,14 @@ pub(crate) fn render_variant_picker(frame: &mut Frame, picker: &VariantPicker) {
         } else {
             Style::default()
         };
+        rows.push(Some(index));
         lines.push(Line::styled(text, style));
     }
     frame.render_widget(Paragraph::new(lines), inner);
+    ModalHit { area: inner, rows }
 }
 
-pub(crate) fn render_theme_picker(frame: &mut Frame, picker: &ThemePicker) {
+pub(crate) fn render_theme_picker(frame: &mut Frame, picker: &ThemePicker) -> ModalHit {
     let area = centered_rect(frame.area(), 58, 12);
     frame.render_widget(Clear, area);
 
@@ -1337,7 +1406,7 @@ pub(crate) fn render_theme_picker(frame: &mut Frame, picker: &ThemePicker) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
-        return;
+        return ModalHit::default();
     }
 
     let selected = picker.selected.min(theme::ThemeId::ALL.len() - 1);
@@ -1367,12 +1436,14 @@ pub(crate) fn render_theme_picker(frame: &mut Frame, picker: &ThemePicker) {
         .saturating_add(1)
         .saturating_sub(row_count)
         .min(theme::ThemeId::ALL.len().saturating_sub(row_count));
+    let mut rows: Vec<Option<usize>> = vec![None; lines.len()];
     for (index, choice) in theme::ThemeId::ALL
         .iter()
         .enumerate()
         .skip(start)
         .take(row_count)
     {
+        rows.push(Some(index));
         let active = *choice == picker.active_theme;
         let marker = if index == selected { "> " } else { "  " };
         let suffix = if active {
@@ -1414,9 +1485,10 @@ pub(crate) fn render_theme_picker(frame: &mut Frame, picker: &ThemePicker) {
         ]));
     }
     frame.render_widget(Paragraph::new(lines), inner);
+    ModalHit { area: inner, rows }
 }
 
-pub(crate) fn render_model_picker(frame: &mut Frame, picker: &ModelPicker) {
+pub(crate) fn render_model_picker(frame: &mut Frame, picker: &ModelPicker) -> ModalHit {
     let area = centered_rect(frame.area(), 78, 20);
     frame.render_widget(Clear, area);
 
@@ -1434,7 +1506,7 @@ pub(crate) fn render_model_picker(frame: &mut Frame, picker: &ModelPicker) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
-        return;
+        return ModalHit::default();
     }
 
     let models = picker.filtered_models();
@@ -1491,6 +1563,7 @@ pub(crate) fn render_model_picker(frame: &mut Frame, picker: &ModelPicker) {
         ));
     }
     let row_count = inner.height.saturating_sub(lines.len() as u16) as usize;
+    let mut rows: Vec<Option<usize>> = vec![None; lines.len()];
     if models.is_empty() && row_count > 0 {
         lines.push(Line::styled(
             " no matching models",
@@ -1502,6 +1575,7 @@ pub(crate) fn render_model_picker(frame: &mut Frame, picker: &ModelPicker) {
             .saturating_add(1)
             .saturating_sub(row_count)
             .min(models.len().saturating_sub(row_count));
+        rows.extend((start..models.len().min(start.saturating_add(row_count))).map(Some));
         for (index, model) in models.iter().enumerate().skip(start).take(row_count) {
             let full_id = model.full_id();
             let active = full_id == picker.active_model;
@@ -1546,6 +1620,7 @@ pub(crate) fn render_model_picker(frame: &mut Frame, picker: &ModelPicker) {
         .saturating_add(query_cursor_offset as usize)
         .min(inner.width.saturating_sub(1) as usize) as u16;
     frame.set_cursor_position((inner.x.saturating_add(offset), inner.y));
+    ModalHit { area: inner, rows }
 }
 
 pub(crate) fn is_command_palette_shortcut(event: &Event) -> bool {
@@ -1564,6 +1639,22 @@ pub(crate) fn is_command_palette_shortcut(event: &Event) -> bool {
 mod tests {
     use super::*;
     use crate::text::tests::rendered_text;
+
+    #[test]
+    fn a_hit_map_answers_only_inside_its_area() {
+        let hit = ModalHit {
+            area: Rect::new(10, 5, 40, 4),
+            rows: vec![None, Some(7), Some(8)],
+        };
+        assert_eq!(hit.item_at(10, 5), None, "header row");
+        assert_eq!(hit.item_at(10, 6), Some(7));
+        assert_eq!(hit.item_at(49, 7), Some(8), "last column still hits");
+        assert_eq!(hit.item_at(9, 6), None, "left of the area");
+        assert_eq!(hit.item_at(50, 6), None, "right of the area");
+        assert_eq!(hit.item_at(10, 8), None, "a drawn-short row");
+        assert_eq!(hit.item_at(10, 4), None, "above");
+        assert_eq!(ModalHit::default().item_at(0, 0), None);
+    }
 
     /// Crossterm maps CR to Enter before the control-character branch, so
     /// without the kitty protocol Ctrl-M *is* Enter and would fire off the

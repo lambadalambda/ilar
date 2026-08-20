@@ -23,7 +23,7 @@ use clap::Parser;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseButton,
-    MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    MouseEvent, MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::supports_keyboard_enhancement;
 use decide::{Intent, LoopState, after_turn, may_route_notification, retry as retry_intents};
@@ -1603,11 +1603,13 @@ async fn run_app(
                                 }
                             }
                         }
+                        Modal::Search if modals::nav_delta(code, control).is_some() => {
+                            let delta = modals::nav_delta(code, control).expect("guard");
+                            app.search_jump(delta);
+                        }
                         Modal::Search => match (code, control) {
                             (KeyCode::Esc, _) => app.close_search(true),
                             (KeyCode::Enter, _) => app.close_search(false),
-                            (KeyCode::Up, _) | (KeyCode::Char('p'), true) => app.search_jump(-1),
-                            (KeyCode::Down, _) | (KeyCode::Char('n'), true) => app.search_jump(1),
                             (KeyCode::Char('f'), true) => app.close_search(false),
                             (KeyCode::Backspace, _) => {
                                 app.search_query.pop();
@@ -1851,6 +1853,19 @@ async fn run_app(
                 if !app.scroll_active_modal(batch.rows) {
                     app.scroll_wheel(batch.rows);
                 }
+            }
+            // A modal in front owns the mouse: a click on one of its
+            // rows selects that row, anywhere else is consumed.
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column,
+                row,
+                ..
+            }) if app
+                .active_modal()
+                .is_some_and(|modal| modal != Modal::Search) =>
+            {
+                app.click_active_modal(column, row);
             }
             Event::Mouse(mouse)
                 if app

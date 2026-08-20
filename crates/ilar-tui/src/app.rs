@@ -98,6 +98,9 @@ pub(crate) struct App {
     /// Selection inside the inline slash-completion popup.
     pub(crate) slash_selected: usize,
     pub(crate) pending_manager: Option<PendingManager>,
+    /// Where the active modal's rows were drawn last frame; how a click
+    /// finds the item it landed on. Rebuilt by every render.
+    pub(crate) modal_hit: Option<crate::modals::ModalHit>,
     /// Snapshot of spawner.running_background() for rendering.
     pub(crate) background_running: usize,
     /// Snapshot of the service manager's running count for rendering.
@@ -190,6 +193,7 @@ impl App {
             goal: None,
             slash_selected: 0,
             pending_manager: None,
+            modal_hit: None,
             background_running: 0,
             services_running: 0,
             services_view: Vec::new(),
@@ -330,6 +334,47 @@ impl App {
             // The pending manager is a handful of rows; search leaves the
             // wheel to the transcript so results stay browsable.
             Some(Modal::PendingManager) | Some(Modal::Search) | None => return false,
+        }
+        true
+    }
+
+    /// Route a left click to the overlay in front. Selection only:
+    /// activation stays on Enter and dismissal on Esc, because their
+    /// cleanup lives in the dispatch arms a mouse event cannot reach.
+    /// Returns true when a modal owns the mouse — a miss inside or
+    /// outside it is consumed, not passed to the transcript.
+    pub(crate) fn click_active_modal(&mut self, column: u16, row: u16) -> bool {
+        let Some(modal) = self.active_modal() else {
+            return false;
+        };
+        // Search is a transcript-reading mode; the mouse stays live
+        // underneath it.
+        if modal == Modal::Search {
+            return false;
+        }
+        if let Some(index) = self
+            .modal_hit
+            .as_ref()
+            .and_then(|hit| hit.item_at(column, row))
+        {
+            match modal {
+                Modal::ModelPicker => self.model_picker.as_mut().unwrap().select(index),
+                Modal::VariantPicker => self.variant_picker.as_mut().unwrap().select(index),
+                Modal::ThemePicker => {
+                    // Like the wheel: the highlighted theme previews live.
+                    self.theme_picker.as_mut().unwrap().select(index);
+                    self.theme = self.theme_picker.as_ref().unwrap().selected_theme();
+                }
+                Modal::SessionPicker => self.session_picker.as_mut().unwrap().select(index),
+                Modal::SkillPicker => self.skill_picker.as_mut().unwrap().select(index),
+                Modal::CommandPalette => self.command_palette.as_mut().unwrap().select(index),
+                Modal::PendingManager => {
+                    let manager = self.pending_manager.as_mut().expect("pending manager");
+                    manager.selected = index;
+                    manager.armed = None;
+                }
+                Modal::Help | Modal::Search => {}
+            }
         }
         true
     }
@@ -993,18 +1038,14 @@ impl App {
         }
         manager.selected = manager.selected.min(items.len() - 1);
         let selected = items[manager.selected];
+        if let Some(delta) = crate::modals::nav_delta(code, control) {
+            manager.selected =
+                (manager.selected as isize + delta).rem_euclid(items.len() as isize) as usize;
+            manager.armed = None;
+            return PendingAction::Stay;
+        }
         match (code, control) {
             (KeyCode::Esc, _) | (KeyCode::Char('q'), true | false) => PendingAction::Close,
-            (KeyCode::Up, _) | (KeyCode::Char('p'), true) => {
-                manager.selected = (manager.selected + items.len() - 1) % items.len();
-                manager.armed = None;
-                PendingAction::Stay
-            }
-            (KeyCode::Down, _) | (KeyCode::Char('n'), true) => {
-                manager.selected = (manager.selected + 1) % items.len();
-                manager.armed = None;
-                PendingAction::Stay
-            }
             (KeyCode::Delete | KeyCode::Backspace | KeyCode::Char('d'), _) => {
                 match selected {
                     // Removing one queued message is targeted enough to
@@ -2104,36 +2145,45 @@ impl App {
         }
 
         // Same precedence the key dispatcher uses, from the same value:
-        // whatever is drawn on top is whatever is taking the keys.
-        match self.active_modal() {
-            Some(Modal::PendingManager) => {
-                if let Some(snapshot) = self.pending_snapshot() {
-                    render_pending_manager(frame, &snapshot);
-                }
+        // whatever is drawn on top is whatever is taking the keys. The
+        // renderer hands back where its rows landed, so a click can be
+        // mapped to the item it names.
+        self.modal_hit = match self.active_modal() {
+            Some(Modal::PendingManager) => self
+                .pending_snapshot()
+                .map(|snapshot| render_pending_manager(frame, &snapshot)),
+            Some(Modal::Help) => {
+                render_help(frame, self.help_scroll, self.keyboard_enhanced);
+                None
             }
-            Some(Modal::Help) => render_help(frame, self.help_scroll, self.keyboard_enhanced),
-            Some(Modal::ThemePicker) => {
-                render_theme_picker(frame, self.theme_picker.as_ref().expect("theme picker"));
-            }
-            Some(Modal::SkillPicker) => {
-                render_skill_picker(frame, self.skill_picker.as_ref().expect("skill picker"));
-            }
-            Some(Modal::SessionPicker) => {
-                render_session_picker(frame, self.session_picker.as_ref().expect("session picker"));
-            }
-            Some(Modal::ModelPicker) => {
-                render_model_picker(frame, self.model_picker.as_ref().expect("model picker"));
-            }
-            Some(Modal::VariantPicker) => {
-                render_variant_picker(frame, self.variant_picker.as_ref().expect("variant picker"));
-            }
+            Some(Modal::ThemePicker) => Some(render_theme_picker(
+                frame,
+                self.theme_picker.as_ref().expect("theme picker"),
+            )),
+            Some(Modal::SkillPicker) => Some(render_skill_picker(
+                frame,
+                self.skill_picker.as_ref().expect("skill picker"),
+            )),
+            Some(Modal::SessionPicker) => Some(render_session_picker(
+                frame,
+                self.session_picker.as_ref().expect("session picker"),
+            )),
+            Some(Modal::ModelPicker) => Some(render_model_picker(
+                frame,
+                self.model_picker.as_ref().expect("model picker"),
+            )),
+            Some(Modal::VariantPicker) => Some(render_variant_picker(
+                frame,
+                self.variant_picker.as_ref().expect("variant picker"),
+            )),
             // Search renders into the status line, not an overlay.
-            Some(Modal::Search) => {}
-            Some(Modal::CommandPalette) => {
-                render_command_palette(frame, self.command_palette.as_ref().expect("palette"));
-            }
-            None => {}
-        }
+            Some(Modal::Search) => None,
+            Some(Modal::CommandPalette) => Some(render_command_palette(
+                frame,
+                self.command_palette.as_ref().expect("palette"),
+            )),
+            None => None,
+        };
         theme::apply(frame.buffer_mut(), self.theme);
     }
 }
@@ -2551,6 +2601,95 @@ mod tests {
             app.theme, highlighted,
             "the wheel moved the marker without previewing the theme"
         );
+    }
+
+    /// A click on a picker row selects that row: the render pass
+    /// records where the rows landed, and the click maps back through
+    /// it. The click coordinates come from the *rendered buffer*, not
+    /// from the hit map being validated, so a row map that drifts from
+    /// what is actually drawn fails here.
+    #[test]
+    fn a_click_selects_the_picker_row_it_lands_on() {
+        let mut app = App::new();
+        let models: Vec<_> = ilar::model::catalog().iter().take(5).collect();
+        let first = models[0].full_id();
+        let expected = models[3].full_id();
+        app.model_picker = Some(ModelPicker::new(models, &first));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let screen_row = |terminal: &ratatui::Terminal<ratatui::backend::TestBackend>,
+                          needle: &str| {
+            (0..30u16)
+                .find(|row| {
+                    (0..100u16)
+                        .map(|column| terminal.backend().buffer()[(column, *row)].symbol())
+                        .collect::<String>()
+                        .contains(needle)
+                })
+                .unwrap_or_else(|| panic!("{needle:?} is on screen"))
+        };
+        let hit = app.modal_hit.clone().expect("picker records a hit map");
+
+        // Click the row the buffer shows the target model on.
+        let target_row = screen_row(&terminal, &expected);
+        assert!(app.click_active_modal(hit.area.x, target_row));
+        assert_eq!(app.model_picker.as_ref().unwrap().selected, 3);
+        assert_eq!(
+            app.model_picker
+                .as_mut()
+                .unwrap()
+                .handle_key(KeyCode::Enter, false),
+            crate::modals::PickerAction::Choose(expected),
+            "Enter must act on the clicked row"
+        );
+
+        // A click on the search header, located the same way, moves
+        // nothing.
+        let header_row = screen_row(&terminal, "type to filter");
+        assert!(app.click_active_modal(hit.area.x, header_row));
+        assert_eq!(app.model_picker.as_ref().unwrap().selected, 3);
+
+        // A click outside the modal is consumed, not passed through to
+        // the transcript underneath.
+        assert!(app.click_active_modal(0, 0));
+        assert_eq!(app.model_picker.as_ref().unwrap().selected, 3);
+
+        // The clamp is the stale-map defence: an index past the list
+        // must land on the last entry, not panic or run off.
+        app.model_picker.as_mut().unwrap().select(999);
+        assert_eq!(app.model_picker.as_ref().unwrap().selected, 4);
+    }
+
+    /// Clicking a theme previews it, exactly like the wheel and the
+    /// arrow keys: the footer advertises live preview.
+    #[test]
+    fn a_click_previews_the_theme_it_selects() {
+        let mut app = App::new();
+        app.theme = theme::ThemeId::ALL[0];
+        app.theme_picker = Some(ThemePicker::new(app.theme));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let hit = app.modal_hit.clone().expect("hit map");
+        let target_row = hit
+            .rows
+            .iter()
+            .position(|item| *item == Some(1))
+            .expect("second theme drawn") as u16;
+        assert!(app.click_active_modal(hit.area.x, hit.area.y + target_row));
+        assert_eq!(
+            app.theme,
+            theme::ThemeId::ALL[1],
+            "the click moved the marker without previewing"
+        );
+
+        // With search open the transcript keeps the mouse.
+        app.theme_picker = None;
+        app.open_search();
+        assert!(!app.click_active_modal(10, 10));
     }
 
     /// A net-zero wheel batch has to fall through to the transcript:
