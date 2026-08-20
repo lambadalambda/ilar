@@ -8,6 +8,7 @@ mod history;
 mod input;
 mod markdown;
 mod modals;
+mod schedule;
 mod selection;
 mod session_view;
 mod sidebar;
@@ -26,7 +27,7 @@ use crossterm::event::{
     MouseEvent, MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::supports_keyboard_enhancement;
-use decide::{Intent, LoopState, after_turn, may_route_notification, retry as retry_intents};
+use decide::{Intent, LoopState, after_turn, retry as retry_intents};
 use input::slash_candidates;
 use input::{InputBuffer, PromptAction, handle_prompt_key, retry_requested};
 use modals::{
@@ -964,6 +965,211 @@ enum TurnCompletion {
     Routed(Result<ilar::subagent::RouteOutcome>),
 }
 
+/// `settle`'s effectful edges over tokio and crossterm — see
+/// schedule.rs for the order it is driven in. Constructed fresh each
+/// iteration around mutable borrows of the loop's state, so a spawn
+/// here is a spawn the rest of the iteration observes.
+struct LoopRuntime<'a> {
+    turn_handle: &'a mut Option<tokio::task::JoinHandle<TurnCompletion>>,
+    events_rx: &'a mut Option<LoopEventReceiver>,
+    cancel: &'a mut Option<CancellationToken>,
+    steer_tx: &'a mut Option<ilar::agent::SteerSender>,
+    pending_terminal_event: &'a mut Option<Event>,
+    pending_notification: &'a mut Option<PendingNotification>,
+    notifications: &'a mut tokio::sync::mpsc::Receiver<ilar::subagent::Notification>,
+    ring_on_turn_completion: &'a mut bool,
+    notifications_paused: bool,
+    resolver: &'a Arc<dyn ProviderResolver>,
+    store: &'a SessionStore,
+    session_id: &'a str,
+    system_prompt: &'a str,
+    registry: &'a ToolRegistry,
+    tool_ctx: &'a ToolContext,
+    loop_config: &'a LoopConfig,
+    spawner: &'a std::sync::Arc<ilar::subagent::SubagentSpawner>,
+}
+
+impl schedule::Runtime for LoopRuntime<'_> {
+    fn observe(&self, app: &App) -> LoopState {
+        observe(
+            app,
+            self.turn_handle,
+            self.pending_terminal_event,
+            self.steer_tx,
+            self.notifications_paused,
+        )
+    }
+
+    fn perform(&mut self, app: &mut App, intent: Intent) -> Result<()> {
+        let Some(text) = apply_intent(app, intent, self.steer_tx.as_ref()) else {
+            return Ok(());
+        };
+        // Every push site is guarded against starting a turn while
+        // one runs. If that ever slips, the running turn would be
+        // orphaned — its cancellation token dropped without firing,
+        // still writing to the same session.
+        debug_assert!(
+            self.turn_handle.is_none(),
+            "starting a turn while one is already running"
+        );
+        // A command's one-turn model override, validated by
+        // prepare_prompt; the provider check happens in the adopt.
+        // On failure the turn still runs — its prompt is already in
+        // the transcript — just under the session's own model.
+        if let Some((model, variant)) = app.pending_model_override.take() {
+            let target = model.unwrap_or_else(|| app.current_model.clone());
+            let revert = (app.current_model.clone(), app.current_variant.clone());
+            match adopt_model_selection(
+                app,
+                self.resolver.as_ref(),
+                self.store,
+                self.session_id,
+                self.system_prompt,
+                self.registry,
+                target,
+                variant,
+            ) {
+                Ok(()) => app.model_revert = Some(revert),
+                Err(error) => app.set_notice(
+                    format!(
+                        "command model override failed ({error:#}) — running with {}",
+                        revert.0
+                    ),
+                    NoticeLevel::Warning,
+                ),
+            }
+        }
+        let (tx, rx) = loop_event_channel(LOOP_EVENT_CAPACITY);
+        *self.events_rx = Some(rx);
+        let token = CancellationToken::new();
+        *self.cancel = Some(token.clone());
+        let resolver = self.resolver.clone();
+        let store = self.store.clone();
+        let session_id = self.session_id.to_string();
+        let system_prompt = self.system_prompt.to_string();
+        let registry = self.registry.clone();
+        let turn_ctx = self.tool_ctx.clone();
+        let mut loop_config = self.loop_config.clone();
+        if std::mem::take(&mut app.compact_requested) {
+            loop_config.force_compaction = true;
+        }
+        *self.ring_on_turn_completion = true;
+        let (tx_steer, steer_rx) = ilar::agent::steer_channel();
+        *self.steer_tx = Some(tx_steer);
+        *self.turn_handle = Some(tokio::spawn(async move {
+            TurnCompletion::Root(
+                run_turn(
+                    resolver.as_ref(),
+                    &registry,
+                    &store,
+                    &session_id,
+                    &text,
+                    Some(&system_prompt),
+                    loop_config,
+                    tx,
+                    token,
+                    turn_ctx,
+                    Some(steer_rx),
+                )
+                .await,
+            )
+        }));
+        Ok(())
+    }
+
+    fn peek_palette(&mut self, app: &mut App) -> Result<()> {
+        // Let a buffered Ctrl-P open the palette before the gate can
+        // hand the keyboard to a notification turn.
+        let modal_open = app.has_modal();
+        if self.turn_handle.is_none()
+            && !self.notifications_paused
+            && !modal_open
+            && self.pending_terminal_event.is_none()
+            && crossterm::event::poll(std::time::Duration::ZERO)?
+        {
+            *self.pending_terminal_event = Some(crossterm::event::read()?);
+        }
+        if self
+            .pending_terminal_event
+            .as_ref()
+            .is_some_and(is_command_palette_shortcut)
+        {
+            *self.pending_terminal_event = None;
+            app.model_key_pending = false;
+            if app.search_active {
+                app.close_search(false);
+            }
+            app.open_command_palette();
+        }
+        Ok(())
+    }
+
+    fn next_notification(&mut self, held: bool) -> Option<ilar::subagent::Notification> {
+        next_notification(held, self.pending_notification, self.notifications)
+    }
+
+    fn route(&mut self, app: &mut App, notification: ilar::subagent::Notification) {
+        let token = CancellationToken::new();
+        *self.cancel = Some(token.clone());
+        app.busy = true;
+        app.status = format!("routing task to {}", notification.parent_session_id);
+        app.clear_transient_notice();
+        app.set_activity(Activity::Thinking);
+        let spawner = self.spawner.clone();
+        *self.turn_handle = Some(tokio::spawn(async move {
+            TurnCompletion::Routed(spawner.route_notification(notification, token).await)
+        }));
+    }
+
+    fn start_notification_turn(
+        &mut self,
+        app: &mut App,
+        notification: ilar::subagent::Notification,
+    ) {
+        let text = notification.text;
+        app.push_notification(&notification.description, &text);
+        let (tx, rx) = loop_event_channel(LOOP_EVENT_CAPACITY);
+        *self.events_rx = Some(rx);
+        let token = CancellationToken::new();
+        *self.cancel = Some(token.clone());
+        app.busy = true;
+        app.status = "thinking".into();
+        app.clear_transient_notice();
+        app.set_activity(Activity::Thinking);
+        let resolver = self.resolver.clone();
+        let store = self.store.clone();
+        let session_id = self.session_id.to_string();
+        let system_prompt = self.system_prompt.to_string();
+        let registry = self.registry.clone();
+        let turn_ctx = self.tool_ctx.clone();
+        let loop_config = self.loop_config.clone();
+        let (tx_steer, steer_rx) = ilar::agent::steer_channel();
+        *self.steer_tx = Some(tx_steer);
+        *self.turn_handle = Some(tokio::spawn(async move {
+            TurnCompletion::Root(
+                run_turn(
+                    resolver.as_ref(),
+                    &registry,
+                    &store,
+                    &session_id,
+                    &text,
+                    Some(&system_prompt),
+                    loop_config,
+                    tx,
+                    token,
+                    turn_ctx,
+                    Some(steer_rx),
+                )
+                .await,
+            )
+        }));
+    }
+
+    fn session_id(&self) -> &str {
+        self.session_id
+    }
+}
+
 fn ring_terminal_bell_if_idle(
     writer: &mut impl std::io::Write,
     pending: &mut bool,
@@ -1227,84 +1433,33 @@ async fn run_app(
             }
         }
 
-        // Perform what was decided. `apply_intent` owns the state
-        // changes and is testable on an App alone; spawning is the only
-        // thing that needs the runtime, so it stays here.
-        for intent in std::mem::take(&mut intents) {
-            let Some(text) = apply_intent(app, intent, steer_tx.as_ref()) else {
-                continue;
-            };
-            // Every push site is guarded against starting a turn while
-            // one runs. If that ever slips, the running turn would be
-            // orphaned — its cancellation token dropped without firing,
-            // still writing to the same session.
-            debug_assert!(
-                turn_handle.is_none(),
-                "starting a turn while one is already running"
-            );
-            // A command's one-turn model override, validated by
-            // prepare_prompt; the provider check happens in the adopt.
-            // On failure the turn still runs — its prompt is already in
-            // the transcript — just under the session's own model.
-            if let Some((model, variant)) = app.pending_model_override.take() {
-                let target = model.unwrap_or_else(|| app.current_model.clone());
-                let revert = (app.current_model.clone(), app.current_variant.clone());
-                match adopt_model_selection(
-                    app,
-                    resolver.as_ref(),
-                    store,
-                    session_id,
-                    system_prompt,
-                    registry,
-                    target,
-                    variant,
-                ) {
-                    Ok(()) => app.model_revert = Some(revert),
-                    Err(error) => app.set_notice(
-                        format!(
-                            "command model override failed ({error:#}) — running with {}",
-                            revert.0
-                        ),
-                        NoticeLevel::Warning,
-                    ),
-                }
-            }
-            let (tx, rx) = loop_event_channel(LOOP_EVENT_CAPACITY);
-            events_rx = Some(rx);
-            let token = CancellationToken::new();
-            cancel = Some(token.clone());
-            let resolver = resolver.clone();
-            let store = store.clone();
-            let session_id = session_id.to_string();
-            let system_prompt = system_prompt.to_string();
-            let registry = registry.clone();
-            let turn_ctx = tool_ctx.clone();
-            let mut loop_config = loop_config.clone();
-            if std::mem::take(&mut app.compact_requested) {
-                loop_config.force_compaction = true;
-            }
-            ring_on_turn_completion = true;
-            let (tx_steer, steer_rx) = ilar::agent::steer_channel();
-            steer_tx = Some(tx_steer);
-            turn_handle = Some(tokio::spawn(async move {
-                TurnCompletion::Root(
-                    run_turn(
-                        resolver.as_ref(),
-                        &registry,
-                        &store,
-                        &session_id,
-                        &text,
-                        Some(&system_prompt),
-                        loop_config,
-                        tx,
-                        token,
-                        turn_ctx,
-                        Some(steer_rx),
-                    )
-                    .await,
-                )
-            }));
-        }
+        // The stretch whose ordering is the schedule — drain the
+        // decided intents, let a buffered palette shortcut open, gate
+        // notifications on the result — lives in schedule::settle so
+        // tests can drive it. Only the effects live here.
+        let settled = schedule::settle(
+            app,
+            std::mem::take(&mut intents),
+            &mut LoopRuntime {
+                turn_handle: &mut turn_handle,
+                events_rx: &mut events_rx,
+                cancel: &mut cancel,
+                steer_tx: &mut steer_tx,
+                pending_terminal_event: &mut pending_terminal_event,
+                pending_notification: &mut pending_notification,
+                notifications: &mut notifications,
+                ring_on_turn_completion: &mut ring_on_turn_completion,
+                notifications_paused,
+                resolver: &resolver,
+                store,
+                session_id,
+                system_prompt,
+                registry,
+                tool_ctx: &tool_ctx,
+                loop_config: &loop_config,
+                spawner: &spawner,
+            },
+        )?;
 
         // A subtask command spawns detached; its completion arrives as
         // a notification like any background task's. `run_task` with
@@ -1352,90 +1507,11 @@ async fn run_app(
             }
         }
 
-        // Let a buffered Ctrl-P open the palette before starting queued work.
-        let modal_open = app.has_modal();
-        if turn_handle.is_none()
-            && !notifications_paused
-            && !modal_open
-            && pending_terminal_event.is_none()
-            && crossterm::event::poll(std::time::Duration::ZERO)?
-        {
-            pending_terminal_event = Some(crossterm::event::read()?);
-        }
-        if pending_terminal_event
-            .as_ref()
-            .is_some_and(is_command_palette_shortcut)
-        {
-            pending_terminal_event = None;
-            app.model_key_pending = false;
-            if app.search_active {
-                app.close_search(false);
-            }
-            app.open_command_palette();
-        }
-        // Background completions re-invoke their declared parent while idle.
-        let state = observe(
-            app,
-            &turn_handle,
-            &pending_terminal_event,
-            &steer_tx,
-            notifications_paused,
-        );
-        if let Some(notification) = next_notification(
-            !may_route_notification(&state),
-            &mut pending_notification,
-            &mut notifications,
-        ) {
-            if notification.parent_session_id != session_id {
-                let token = CancellationToken::new();
-                cancel = Some(token.clone());
-                app.busy = true;
-                app.status = format!("routing task to {}", notification.parent_session_id);
-                app.clear_transient_notice();
-                app.set_activity(Activity::Thinking);
-                let spawner = spawner.clone();
-                turn_handle = Some(tokio::spawn(async move {
-                    TurnCompletion::Routed(spawner.route_notification(notification, token).await)
-                }));
-                continue;
-            }
-            let text = notification.text;
-            app.push_notification(&notification.description, &text);
-            let (tx, rx) = loop_event_channel(LOOP_EVENT_CAPACITY);
-            events_rx = Some(rx);
-            let token = CancellationToken::new();
-            cancel = Some(token.clone());
-            app.busy = true;
-            app.status = "thinking".into();
-            app.clear_transient_notice();
-            app.set_activity(Activity::Thinking);
-            let resolver = resolver.clone();
-            let store = store.clone();
-            let session_id = session_id.to_string();
-            let system_prompt = system_prompt.to_string();
-            let registry = registry.clone();
-            let turn_ctx = tool_ctx.clone();
-            let loop_config = loop_config.clone();
-            let (tx_steer, steer_rx) = ilar::agent::steer_channel();
-            steer_tx = Some(tx_steer);
-            turn_handle = Some(tokio::spawn(async move {
-                TurnCompletion::Root(
-                    run_turn(
-                        resolver.as_ref(),
-                        &registry,
-                        &store,
-                        &session_id,
-                        &text,
-                        Some(&system_prompt),
-                        loop_config,
-                        tx,
-                        token,
-                        turn_ctx,
-                        Some(steer_rx),
-                    )
-                    .await,
-                )
-            }));
+        // A routed notification restarts the iteration so its
+        // completion is awaited before anything else happens — the
+        // `continue` the gate always had, now spelled out.
+        if settled == schedule::Settled::Restart {
+            continue;
         }
 
         let _ = ring_terminal_bell_if_idle(
