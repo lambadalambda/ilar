@@ -410,6 +410,38 @@ pub(crate) fn input_accepts_keys(_busy: bool, has_modal: bool) -> bool {
     !has_modal
 }
 
+/// Inline completion candidates for a slash input: built-in commands
+/// plus skills, fuzzy-ranked. Empty once the name is finished (whitespace)
+/// or the input is not a slash command.
+pub(crate) fn slash_candidates(
+    input: &str,
+    inventory: &[(String, String)],
+) -> Vec<(String, String)> {
+    let Some(token) = input.strip_prefix('/') else {
+        return Vec::new();
+    };
+    if token.contains(char::is_whitespace) {
+        return Vec::new();
+    }
+    let mut candidates: Vec<(String, String)> = vec![(
+        "goal".to_string(),
+        "work until the goal is achieved (evidence-based)".to_string(),
+    )];
+    // `goal` is built in and outranks everything, so drop anything that
+    // would render as a second row with the same name.
+    candidates.extend(inventory.iter().filter(|(name, _)| name != "goal").cloned());
+    let mut scored: Vec<(i64, (String, String))> = candidates
+        .into_iter()
+        .filter_map(|(name, description)| {
+            crate::text::fuzzy_score(token, &name).map(|score| (score, (name, description)))
+        })
+        .collect();
+    scored.sort_by(|(score_a, (name_a, _)), (score_b, (name_b, _))| {
+        score_b.cmp(score_a).then_with(|| name_a.cmp(name_b))
+    });
+    scored.into_iter().map(|(_, candidate)| candidate).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
