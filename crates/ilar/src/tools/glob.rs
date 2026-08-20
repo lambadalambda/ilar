@@ -54,12 +54,102 @@ fn literal_prefix(pattern: &str) -> Result<PathBuf, ToolOutput> {
         let Component::Normal(part) = component else {
             continue;
         };
-        if part.to_string_lossy().contains(['*', '?', '[', ']']) {
+        if part
+            .to_string_lossy()
+            .contains(['*', '?', '[', ']', '{', '}'])
+        {
             break;
         }
         prefix.push(part);
     }
     Ok(prefix)
+}
+
+/// A runaway like `{a,b}{a,b}{a,b}...` multiplies; far above anything a
+/// model writes by hand, far below anything that hurts.
+const MAX_BRACE_EXPANSIONS: usize = 64;
+
+/// Expand `{a,b}` alternation, which `glob::Pattern` lacks: without
+/// this, `**/{route,client}/*.ts` pays for the whole walk and then
+/// reports "(no matches)" because nothing contains a literal brace.
+/// Nested groups expand recursively; a brace inside a `[...]` class
+/// stays literal.
+fn expand_braces(pattern: &str) -> Result<Vec<String>, String> {
+    /// Byte range of the first top-level group, if any.
+    fn first_group(pattern: &str) -> Result<Option<(usize, usize)>, String> {
+        let bytes = pattern.as_bytes();
+        let mut index = 0;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'[' => {
+                    // Skip the class: `[!]x]` may open with a negation
+                    // and a literal `]` before the closing one.
+                    index += 1;
+                    if bytes.get(index) == Some(&b'!') {
+                        index += 1;
+                    }
+                    if bytes.get(index) == Some(&b']') {
+                        index += 1;
+                    }
+                    while index < bytes.len() && bytes[index] != b']' {
+                        index += 1;
+                    }
+                }
+                b'{' => {
+                    let open = index;
+                    let mut depth = 1usize;
+                    index += 1;
+                    while index < bytes.len() && depth > 0 {
+                        match bytes[index] {
+                            b'{' => depth += 1,
+                            b'}' => depth -= 1,
+                            _ => {}
+                        }
+                        index += 1;
+                    }
+                    if depth > 0 {
+                        return Err("unbalanced braces in pattern".into());
+                    }
+                    return Ok(Some((open, index - 1)));
+                }
+                _ => {}
+            }
+            index += 1;
+        }
+        Ok(None)
+    }
+
+    let Some((open, close)) = first_group(pattern)? else {
+        return Ok(vec![pattern.to_string()]);
+    };
+    let prefix = &pattern[..open];
+    let suffix = &pattern[close + 1..];
+    let body = &pattern[open + 1..close];
+    let mut alternatives = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (index, byte) in body.bytes().enumerate() {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => depth -= 1,
+            b',' if depth == 0 => {
+                alternatives.push(&body[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    alternatives.push(&body[start..]);
+    let mut expanded = Vec::new();
+    for alternative in alternatives {
+        expanded.extend(expand_braces(&format!("{prefix}{alternative}{suffix}"))?);
+        if expanded.len() > MAX_BRACE_EXPANSIONS {
+            return Err(format!(
+                "brace expansion exceeds {MAX_BRACE_EXPANSIONS} patterns"
+            ));
+        }
+    }
+    Ok(expanded)
 }
 
 fn scan(
@@ -69,7 +159,15 @@ fn scan(
     limits: Limits,
     cancelled: &AtomicBool,
 ) -> ToolOutput {
-    let compiled = match glob::Pattern::new(pattern) {
+    let expanded = match expand_braces(pattern) {
+        Ok(expanded) => expanded,
+        Err(error) => return ToolOutput::error(format!("glob: {error}")),
+    };
+    let compiled = match expanded
+        .iter()
+        .map(|pattern| glob::Pattern::new(pattern))
+        .collect::<Result<Vec<_>, _>>()
+    {
         Ok(compiled) => compiled,
         Err(error) => return ToolOutput::error(format!("glob: invalid pattern: {error}")),
     };
@@ -124,7 +222,11 @@ fn scan(
             let Ok(relative) = entry.path().strip_prefix(cwd) else {
                 return ignore::WalkState::Continue;
             };
-            if relative.as_os_str().is_empty() || !compiled.matches_path_with(relative, options) {
+            if relative.as_os_str().is_empty()
+                || !compiled
+                    .iter()
+                    .any(|pattern| pattern.matches_path_with(relative, options))
+            {
                 return ignore::WalkState::Continue;
             }
             let mut matches = matches.lock().unwrap();
@@ -164,7 +266,8 @@ impl Tool for GlobTool {
     }
 
     fn description(&self) -> &'static str {
-        "Find files by glob pattern (e.g. src/**/*.rs), relative to cwd. \
+        "Find files by glob pattern (e.g. src/**/*.{rs,toml}), relative to cwd. \
+         Supports {a,b} alternation. \
          Gitignored paths are skipped unless include_ignored is set."
     }
 
@@ -232,6 +335,7 @@ mod tests {
             Path::new("src/main.rs")
         );
         assert_eq!(literal_prefix("./src/*.rs").unwrap(), Path::new("src"));
+        assert_eq!(literal_prefix("src/{a,b}/x").unwrap(), Path::new("src"));
     }
 
     #[test]
@@ -239,6 +343,46 @@ mod tests {
         for pattern in ["../*.rs", "/etc/*", "src/../../*.rs"] {
             assert!(literal_prefix(pattern).is_err(), "{pattern}");
         }
+    }
+
+    #[test]
+    fn brace_alternation_expands_to_plain_patterns() {
+        assert_eq!(
+            expand_braces("**/{route,client}/*.ts").unwrap(),
+            vec!["**/route/*.ts", "**/client/*.ts"]
+        );
+        assert_eq!(expand_braces("*.{ts,tsx}").unwrap(), vec!["*.ts", "*.tsx"]);
+        assert_eq!(expand_braces("{a,b{c,d}}").unwrap(), vec!["a", "bc", "bd"]);
+        assert_eq!(
+            expand_braces("no/braces/*.rs").unwrap(),
+            vec!["no/braces/*.rs"]
+        );
+        // A brace inside a character class is literal, not a group.
+        assert_eq!(expand_braces("a[{]b").unwrap(), vec!["a[{]b"]);
+        assert!(expand_braces("src/{a,b").is_err());
+    }
+
+    #[test]
+    fn scan_matches_brace_alternation() {
+        let dir = tempfile::tempdir().unwrap();
+        for sub in ["route", "client", "other"] {
+            std::fs::create_dir(dir.path().join(sub)).unwrap();
+            std::fs::write(dir.path().join(sub).join("x.ts"), "").unwrap();
+        }
+        let cancelled = AtomicBool::new(false);
+        let out = scan(
+            dir.path(),
+            "{route,client}/*.ts",
+            false,
+            Limits::default(),
+            &cancelled,
+        );
+        assert!(!out.is_error, "{}", out.content);
+        assert_eq!(out.content, "client/x.ts\nroute/x.ts");
+
+        let out = scan(dir.path(), "{route,", false, Limits::default(), &cancelled);
+        assert!(out.is_error);
+        assert!(out.content.contains("unbalanced"), "{}", out.content);
     }
 
     #[test]
