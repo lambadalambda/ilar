@@ -1732,6 +1732,9 @@ mod tests {
     use super::*;
     use crate::text::tests::rendered_text;
 
+    /// Crossterm maps CR to Enter before the control-character branch, so
+    /// without the kitty protocol Ctrl-M *is* Enter and would fire off the
+    /// draft. Do not advertise it there.
     #[test]
     fn help_only_offers_ctrl_m_when_the_terminal_can_report_it() {
         let rendered = |enhanced| {
