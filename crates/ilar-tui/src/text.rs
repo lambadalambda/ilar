@@ -393,9 +393,48 @@ pub(crate) fn bounded_detail(text: &str) -> String {
     }
     detail
 }
+pub(crate) fn fuzzy_score(needle: &str, haystack: &str) -> Option<i64> {
+    if needle.trim().is_empty() {
+        return Some(0);
+    }
+    let haystack: Vec<char> = haystack.to_lowercase().chars().collect();
+    let mut score = 0i64;
+    let mut previous: Option<usize> = None;
+    let mut position = 0usize;
+    for needle_char in needle.to_lowercase().chars().filter(|c| !c.is_whitespace()) {
+        let found = (position..haystack.len()).find(|&i| haystack[i] == needle_char)?;
+        if previous == Some(found.wrapping_sub(1)) {
+            score += 8;
+        }
+        if found == 0 || !haystack[found - 1].is_alphanumeric() {
+            score += 4;
+        }
+        score -= ((found - position) as i64) / 4;
+        previous = Some(found);
+        position = found + 1;
+    }
+    Some(score)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    #[test]
+    fn fuzzy_score_prefers_word_starts_and_runs() {
+        assert!(fuzzy_score("abc", "xyz").is_none());
+        assert_eq!(fuzzy_score("", "anything"), Some(0));
+        // Consecutive run beats scattered.
+        let run = fuzzy_score("web", "websearch fallback").unwrap();
+        let scattered = fuzzy_score("web", "wide event bus").unwrap();
+        assert!(run > scattered, "{run} vs {scattered}");
+        // Word-start match beats mid-word.
+        let start = fuzzy_score("fall", "websearch fallback").unwrap();
+        let mid = fuzzy_score("fall", "pitfalls").unwrap();
+        assert!(start > mid, "{start} vs {mid}");
+        // Case-insensitive, unicode-safe.
+        assert!(fuzzy_score("PAGODA", "Voxel Pagoda").is_some());
+        assert!(fuzzy_score("héllo", "saying héllo world").is_some());
+    }
 
     /// Flatten a styled line to plain text. Shared with main.rs's tests.
     pub(crate) fn rendered_text(line: &Line<'_>) -> String {
