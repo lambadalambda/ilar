@@ -1600,6 +1600,7 @@ fn notification_lines(
     }
     output
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
