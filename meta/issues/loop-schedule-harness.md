@@ -64,14 +64,37 @@ Acceptance criteria met by it:
   routes and restarts the iteration, preserving the gate's old
   `continue`).
 
-Not covered, so the issue stays open: the completion block's position
-(await, `finish_turn`, `after_turn`, the undelivered-steer splice and
-the model revert all sit before `settle` in run_app, unpinned); the
-render and event-poll positions; and cross-iteration sequences (an
-event-half intent surviving into the next pass's drain). Those need
-the full `tick()` — the remaining shape is now visible: completion
-handling in, then the poll/dispatch half, then run_app is a loop over
-`tick` plus I/O.
+Phase two folded the completion in. `schedule::pass(app, completion,
+carried_intents, runtime)` is the iteration's spine: completion
+bookkeeping and its `after_turn` decisions, then the drain, the
+palette peek and the gate — one function, one order. Of the
+completion machinery, run_app keeps only the join at the edge
+(`handle.await` mapped into a `Completion` value); the subtask spawn,
+bell, bookkeeping, render and the whole dispatch half remain outside
+the seam. The trait grew the completion edges: pause/resume
+notifications, hold propagate/requeue, end_turn, revert_model.
+
+Newly pinned (the first two verified by performing the mutation):
+
+- Completion decides *before* the drain and the gate: folding it in
+  after the settle fails
+  `a_completion_decides_before_the_drain_and_the_gate`.
+- A queued turn starts under the *reverted* model — the revert sits
+  between the completion and the drain; deleting it fails
+  `a_queued_turn_starts_under_the_reverted_model`.
+- An abort resumes nothing (notifications stay paused, the queue
+  holds); a completed turn resumes the flow and the freed gate admits
+  a waiting notification in the same pass.
+- Undelivered steers return to the queue and wait for the user —
+  `after_turn` observes before the splice.
+- A goal round continues through the whole pass; a requeued routing
+  pauses the gate and is held rather than delivered.
+
+Still not covered, so the issue stays open: the render and event-poll
+positions, the event dispatch half, and cross-iteration sequences (an
+event-half intent surviving into the next pass's drain). The
+remaining shape: fold the poll/dispatch half in and run_app is a loop
+over `tick` plus I/O.
 
 One deliberate reorder, judged inert: the subtask spawn used to sit
 between the drain and the gate and now runs after `settle` (it touches
