@@ -36,6 +36,27 @@ stopped being true at 123 tests.
 - No module retains a majority of the original file's length.
 - `AGENTS.md` describes the TUI crate's actual test story.
 
+## Outcome
+
+Seven move-only commits, one seam each, each independently green:
+text, transcript, session_view, modals, input, selection + sidebar, app.
+main.rs 13,362 -> 2,131 lines (startup and the event loop); largest
+module app.rs at 5,078, two thirds of it tests. 172 tests throughout,
+clippy clean.
+
+`scripts/split_module.py` chunks Rust on column-0 item boundaries so
+moved text is byte-identical, which made review "did the right blocks
+move" rather than "was anything rewritten". Review verified that claim
+independently on every seam.
+
+`scripts/minimize_visibility.py` came later, after three consecutive
+reviews found the `pub(crate)` regex over-exporting (24 of 51, 4 of 14,
+46 of 113). It strips every marker and re-adds only what rustc's privacy
+diagnostics demand.
+
+Deferred to [TUI module follow-ups](tui-module-follow-ups.md) and
+[Make the event loop testable](testable-event-loop.md).
+
 ## Notes
 
 - Mechanical but repo-wide, so it should not be tangled with behaviour

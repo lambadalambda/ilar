@@ -911,3 +911,51 @@ does not work — OpenAI's real 272k cap is *also* exactly
 `context - output` — so telling the two apart needs an explicit catalog
 marker. Erring conservative costs summaries; erring the other way costs
 the session.
+
+## 2026-08-20 — splitting a 13k-line main.rs without breaking it
+
+Seven move-only commits, one seam each: text, transcript, session_view,
+modals, input, selection + sidebar, app. main.rs 13,362 -> 2,131 lines,
+now startup and the event loop. 172 tests throughout, clippy clean.
+
+The method mattered more than the seams. `scripts/split_module.py`
+chunks Rust on column-0 item boundaries and moves whole blocks by name,
+so moved text is byte-identical and review becomes "did the right blocks
+move" rather than "was anything rewritten" — which every review then
+verified mechanically by diffing against `git show HEAD:`.
+
+Two tool defects surfaced the same way, both silent-wrongness paths:
+the chunker's depth counter is blind to braces inside strings, chars,
+raw strings and comments, and a skewed count merges the following items
+into one block where only the first name is read — so over-moving was
+invisible while under-moving already failed loudly. And the first
+visibility pass used a blind whole-file replace that ate `pub(crate) `
+inside string literals. Both now refuse rather than guess.
+
+The recurring finding was visibility. Applying `pub(crate)` with a regex
+over-exported every time — 24 of 51, then 4 of 14, then 46 of 113,
+including all 11 moved test functions in one seam. The fix is to stop
+guessing: `scripts/minimize_visibility.py` strips every marker and
+re-adds only what rustc's privacy diagnostics demand. It has one
+prerequisite worth knowing — with a glob import a private item reads as
+"cannot find" rather than "is private", so the signal never appears; it
+now refuses when its target is glob-imported.
+
+Import pruning was the one place a purely textual approach kept biting:
+checking whether an imported name appears in the body cannot see a trait
+used through method syntax, so `anyhow::Context` was silently dropped
+three times. The compiler caught it each time, but it is exactly the
+class of edit that makes a "move-only" claim false. It also exposed
+markdown.rs reaching `wrap_styled_line` through a crate-root re-export
+rather than its real home.
+
+Moving App's 76 tests into app.rs retired 27 `pub(crate)` markers that
+existed only so a test module in another file could reach render
+internals. Worth doing for its own sake: it is a decent signal that when
+a module needs a wide public surface, the tests may simply be on the
+wrong side of the boundary.
+
+What the split did not fix, and was never going to: `run_app` is still
+~980 lines with decision and effect fused in every match arm, so the
+loop remains untestable. Moving a function does not make it testable.
+Recorded as its own issue.
