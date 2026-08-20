@@ -10,6 +10,7 @@ Names are the item's identifier (fn/struct/enum/impl target/const/static).
 `impl X` moves every `impl ... for X` / `impl X` block.
 """
 
+import os
 import re
 import sys
 
@@ -109,8 +110,13 @@ def main():
         sys.exit(f"not found: {', '.join(sorted(missing))}")
 
     open(src_path, "w").write("\n".join(kept))
+    # A block carries its own leading blank line. Appending to a non-empty
+    # file consumes that blank as the newline closing the previous item,
+    # silently welding the two together, so put it back.
+    existing = open(dst_path).read() if os.path.exists(dst_path) else ""
+    separator = "\n" if existing.strip() and not existing.endswith("\n\n") else ""
     with open(dst_path, "a") as out:
-        out.write("\n".join(moved))
+        out.write(separator + "\n".join(moved))
     print(f"moved {len(moved)} blocks -> {dst_path}")
 
 

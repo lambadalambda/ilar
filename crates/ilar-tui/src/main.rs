@@ -6,7 +6,9 @@ mod history;
 mod input;
 mod markdown;
 mod modals;
+mod selection;
 mod session_view;
+mod sidebar;
 mod text;
 mod theme;
 mod transcript;
@@ -30,6 +32,7 @@ use modals::{
     render_model_picker, render_pending_manager, render_session_picker, render_skill_picker,
     render_theme_picker, render_variant_picker,
 };
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -37,15 +40,22 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Clear, Padding, Paragraph, Scrollbar, ScrollbarOrientation,
     ScrollbarState,
 };
-use ratatui::{Frame, buffer::Buffer};
+use selection::{
+    RenderedRow, TranscriptSelection, highlight_transcript_selection, selected_rows_unchanged,
+    selected_transcript_text, selection_point, transcript_cells,
+};
 use session_view::{
     accrue_usage, restored_session_view_with_store, task_notification_display,
     tool_notification_display,
 };
+use sidebar::{
+    content_areas, render_todo_sidebar_snapshot, todo_render_snapshot, todo_sidebar_snapshot,
+    todo_summary,
+};
 use text::{
     Truncation, abbreviated_path, bounded_detail, context_meter, context_usage, format_bytes,
-    format_cost, format_tokens_compact, fuzzy_score, safe_lines, safe_text, styled_graphemes,
-    styled_line, truncate_display, wrap_styled_line,
+    format_cost, format_tokens_compact, fuzzy_score, safe_lines, safe_text, truncate_display,
+    wrap_styled_line,
 };
 use tokio_util::sync::CancellationToken;
 use transcript::{
@@ -91,71 +101,15 @@ struct StatusNotice {
     persistent: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct SelectionPoint {
-    row: usize,
-    column: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct TranscriptSelection {
-    anchor: SelectionPoint,
-    focus: SelectionPoint,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum RenderedCell {
-    Character(char),
-    Text(String),
-    Space,
-    Continuation { lead: usize },
-}
-
-type RenderedRow = Vec<RenderedCell>;
-
-impl TranscriptSelection {
-    fn ordered(self) -> (SelectionPoint, SelectionPoint) {
-        if self.anchor <= self.focus {
-            (self.anchor, self.focus)
-        } else {
-            (self.focus, self.anchor)
-        }
-    }
-}
-
 const MUTED: Color = theme::MUTED;
 const ASSISTANT: Color = theme::ASSISTANT;
 const TOOL_ACTIVE: Color = theme::RUNNING;
 const ERROR: Color = theme::ERROR;
 const CONTENT_HORIZONTAL_PADDING: u16 = 2;
-const TODO_SIDEBAR_MIN_WIDTH: u16 = 121;
-const TODO_SIDEBAR_WIDTH: u16 = 42;
-const TODO_SIDEBAR_MAX_ITEMS: usize = 5;
 const MAX_WHEEL_EVENTS_PER_BATCH: usize = 1024;
 /// Show "no data Ns" in the status line once the stream has been silent
 /// this long during thinking/responding.
 const STREAM_STALL_AFTER: std::time::Duration = std::time::Duration::from_secs(3);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ContentAreas {
-    transcript: Rect,
-    todos: Option<Rect>,
-}
-
-fn content_areas(area: Rect) -> ContentAreas {
-    if area.width < TODO_SIDEBAR_MIN_WIDTH {
-        return ContentAreas {
-            transcript: area,
-            todos: None,
-        };
-    }
-    let areas = Layout::horizontal([Constraint::Min(3), Constraint::Length(TODO_SIDEBAR_WIDTH)])
-        .split(area);
-    ContentAreas {
-        transcript: areas[0],
-        todos: Some(areas[1]),
-    }
-}
 
 #[derive(clap::Subcommand, Debug)]
 enum Command {
@@ -2348,412 +2302,6 @@ impl App {
     }
 }
 
-struct TodoRenderSnapshot {
-    items: Vec<ilar::todo::TodoItem>,
-    hidden: usize,
-}
-
-fn todo_render_snapshot(list: &ilar::todo::TodoList, cap: usize) -> TodoRenderSnapshot {
-    let indices = visible_todo_indices(list, cap);
-    TodoRenderSnapshot {
-        hidden: list.items.len().saturating_sub(indices.len()),
-        items: indices
-            .into_iter()
-            .map(|index| list.items[index].clone())
-            .collect(),
-    }
-}
-
-fn todo_sidebar_snapshot(list: &ilar::todo::TodoList, height: usize) -> TodoRenderSnapshot {
-    todo_render_snapshot(list, TODO_SIDEBAR_MAX_ITEMS.min(height))
-}
-
-#[cfg(test)]
-fn render_todo_sidebar_lines(
-    list: &ilar::todo::TodoList,
-    width: u16,
-    height: u16,
-) -> Vec<Line<'static>> {
-    let snapshot = todo_sidebar_snapshot(list, height as usize);
-    render_todo_sidebar_snapshot(&snapshot, width, height)
-}
-
-fn render_todo_sidebar_snapshot(
-    snapshot: &TodoRenderSnapshot,
-    width: u16,
-    height: u16,
-) -> Vec<Line<'static>> {
-    if width == 0 || height == 0 {
-        return Vec::new();
-    }
-    if snapshot.items.is_empty() {
-        return vec![Line::from(Span::styled(
-            "— no todos",
-            Style::default().fg(MUTED),
-        ))];
-    }
-    let rendered = snapshot
-        .items
-        .iter()
-        .map(|item| {
-            let (marker, marker_style, content_style) = match item.status {
-                ilar::todo::Status::Completed => (
-                    "✓ ",
-                    Style::default().fg(theme::SUCCESS),
-                    Style::default().fg(theme::SECONDARY),
-                ),
-                ilar::todo::Status::InProgress => (
-                    "▸ ",
-                    Style::default().fg(theme::WAITING),
-                    Style::default()
-                        .fg(theme::PRIMARY)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                ilar::todo::Status::Pending => (
-                    "○ ",
-                    Style::default().fg(MUTED),
-                    Style::default().fg(theme::SECONDARY),
-                ),
-            };
-            let remaining = width as usize;
-            let marker = truncate_display(marker, remaining, Truncation::Right);
-            let remaining = remaining.saturating_sub(UnicodeWidthStr::width(marker.as_str()));
-            let content = item
-                .content
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
-            let content = safe_text(&content);
-            let body = Line::from(Span::styled(content, content_style));
-            wrap_styled_line(body, remaining)
-                .into_iter()
-                .enumerate()
-                .map(move |(line_index, mut body)| {
-                    let prefix = if line_index == 0 {
-                        Span::styled(marker.clone(), marker_style)
-                    } else {
-                        Span::raw(" ".repeat(UnicodeWidthStr::width(marker.as_str())))
-                    };
-                    let mut spans = vec![prefix];
-                    spans.append(&mut body.spans);
-                    Line::from(spans)
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-
-    let height = height as usize;
-    let mut output = Vec::new();
-    let mut shown_items = 0usize;
-    for rows in &rendered {
-        if output.len().saturating_add(rows.len()) > height {
-            break;
-        }
-        output.extend(rows.iter().cloned());
-        shown_items += 1;
-    }
-
-    let mut partial_item = false;
-    if shown_items == 0
-        && let Some(rows) = rendered.first()
-    {
-        output.extend(rows.iter().take(height).cloned());
-        partial_item = rows.len() > height;
-        shown_items = 1;
-    }
-
-    let hidden = snapshot.hidden + rendered.len().saturating_sub(shown_items);
-    if output.len() < height && (partial_item || hidden > 0) {
-        let message = match (partial_item, hidden) {
-            (true, 0) => "…".to_string(),
-            (true, hidden) => format!("… · +{hidden} hidden"),
-            (false, hidden) => format!("+{hidden} hidden"),
-        };
-        output.push(Line::from(Span::styled(
-            truncate_display(&message, width as usize, Truncation::Right),
-            Style::default().fg(MUTED),
-        )));
-    } else if partial_item || hidden > 0 {
-        let message = match (partial_item, hidden) {
-            (true, 0) => " · …".to_string(),
-            (true, hidden) => format!(" · … · +{hidden} hidden"),
-            (false, hidden) => format!(" · +{hidden} hidden"),
-        };
-        if let Some(last) = output.pop() {
-            output.push(append_todo_note(last, width as usize, &message));
-        }
-    }
-    output
-}
-
-fn append_todo_note(line: Line<'static>, width: usize, note: &str) -> Line<'static> {
-    let note = truncate_display(note, width, Truncation::Right);
-    let cells = styled_graphemes(line);
-    let mut available = width.saturating_sub(UnicodeWidthStr::width(note.as_str()));
-    let mut end = 0usize;
-    let mut used = 0usize;
-    while end < cells.len() && used.saturating_add(cells[end].width) <= available {
-        used = used.saturating_add(cells[end].width);
-        end += 1;
-    }
-    let shortened = end < cells.len() && !note.contains('…') && available > 0;
-    if shortened {
-        available -= 1;
-        end = 0;
-        used = 0;
-        while end < cells.len() && used.saturating_add(cells[end].width) <= available {
-            used = used.saturating_add(cells[end].width);
-            end += 1;
-        }
-    }
-    let mut line = styled_line(&cells[..end]);
-    if shortened {
-        line.spans
-            .push(Span::styled("…", Style::default().fg(MUTED)));
-    }
-    line.spans
-        .push(Span::styled(note, Style::default().fg(MUTED)));
-    line
-}
-
-fn todo_summary(snapshot: &TodoRenderSnapshot, width: u16) -> Option<Line<'static>> {
-    let item = snapshot.items.first()?;
-    if width == 0 {
-        return None;
-    }
-    let (marker, marker_style) = match item.status {
-        ilar::todo::Status::Completed => ("✓ ", Style::default().fg(theme::SUCCESS)),
-        ilar::todo::Status::InProgress => ("▸ ", Style::default().fg(TOOL_ACTIVE)),
-        ilar::todo::Status::Pending => ("○ ", Style::default().fg(MUTED)),
-    };
-    let prefix = "todos ";
-    let suffix = if snapshot.hidden > 0 {
-        format!(" · +{}", snapshot.hidden)
-    } else {
-        String::new()
-    };
-    let fixed_width = UnicodeWidthStr::width(prefix)
-        + UnicodeWidthStr::width(marker)
-        + UnicodeWidthStr::width(suffix.as_str());
-    let content = safe_text(
-        &item
-            .content
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" "),
-    );
-    let content = truncate_display(
-        &content,
-        (width as usize).saturating_sub(fixed_width),
-        Truncation::Right,
-    );
-    let text = format!("{prefix}{marker}{content}{suffix}");
-    Some(Line::from(Span::styled(
-        truncate_display(&text, width as usize, Truncation::Right),
-        marker_style,
-    )))
-}
-
-fn visible_todo_indices(list: &ilar::todo::TodoList, cap: usize) -> Vec<usize> {
-    if cap == 0 {
-        return Vec::new();
-    }
-    if list.items.len() <= cap {
-        return (0..list.items.len()).collect();
-    }
-    let mut selected = std::collections::BTreeSet::new();
-    if let Some(index) = list
-        .items
-        .iter()
-        .position(|item| item.status == ilar::todo::Status::InProgress)
-    {
-        selected.insert(index);
-    }
-    if selected.len() < cap
-        && let Some(index) = list
-            .items
-            .iter()
-            .position(|item| item.status == ilar::todo::Status::Pending)
-    {
-        selected.insert(index);
-    }
-    if selected.len() < cap
-        && let Some(index) = list
-            .items
-            .iter()
-            .rposition(|item| item.status == ilar::todo::Status::Completed)
-    {
-        selected.insert(index);
-    }
-    for index in 0..list.items.len() {
-        if selected.len() == cap {
-            break;
-        }
-        selected.insert(index);
-    }
-    selected.into_iter().collect()
-}
-
-fn selection_point(area: Rect, column: u16, row: u16, clamp: bool) -> Option<SelectionPoint> {
-    if area.width == 0 || area.height == 0 {
-        return None;
-    }
-    if !clamp && (column < area.x || column >= area.right() || row < area.y || row >= area.bottom())
-    {
-        return None;
-    }
-    let column = column.clamp(area.x, area.right().saturating_sub(1));
-    let row = row.clamp(area.y, area.bottom().saturating_sub(1));
-    Some(SelectionPoint {
-        row: row.saturating_sub(area.y) as usize,
-        column: column.saturating_sub(area.x) as usize,
-    })
-}
-
-fn selected_columns(
-    selection: TranscriptSelection,
-    row: usize,
-    width: usize,
-) -> Option<std::ops::RangeInclusive<usize>> {
-    if width == 0 || selection.anchor == selection.focus {
-        return None;
-    }
-    let (start, end) = selection.ordered();
-    if row < start.row || row > end.row {
-        return None;
-    }
-    let first = if row == start.row { start.column } else { 0 }.min(width - 1);
-    let last = if row == end.row {
-        end.column
-    } else {
-        width - 1
-    }
-    .min(width - 1);
-    (first <= last).then_some(first..=last)
-}
-
-fn grapheme_columns(
-    row: &RenderedRow,
-    columns: std::ops::RangeInclusive<usize>,
-) -> std::ops::RangeInclusive<usize> {
-    let mut first = *columns.start();
-    let mut last = *columns.end();
-    if let Some(RenderedCell::Continuation { lead }) = row.get(first) {
-        first = *lead;
-    }
-    if let Some(RenderedCell::Continuation { lead }) = row.get(last) {
-        last = *lead;
-    }
-    while matches!(row.get(last + 1), Some(RenderedCell::Continuation { lead }) if *lead == last) {
-        last += 1;
-    }
-    first..=last
-}
-
-fn selected_transcript_text(
-    rows: &[RenderedRow],
-    selection: TranscriptSelection,
-) -> Option<String> {
-    if selection.anchor == selection.focus || rows.is_empty() {
-        return None;
-    }
-    let (start, end) = selection.ordered();
-    let last_row = end.row.min(rows.len().saturating_sub(1));
-    if start.row > last_row {
-        return None;
-    }
-    let selected = (start.row..=last_row)
-        .map(|row| {
-            let cells = &rows[row];
-            selected_columns(selection, row, cells.len())
-                .map(|columns| {
-                    let mut text = String::new();
-                    for column in grapheme_columns(cells, columns) {
-                        match cells.get(column) {
-                            Some(RenderedCell::Character(value)) => text.push(*value),
-                            Some(RenderedCell::Text(value)) => text.push_str(value),
-                            Some(RenderedCell::Space) => text.push(' '),
-                            Some(RenderedCell::Continuation { .. }) | None => {}
-                        }
-                    }
-                    text.trim_end_matches(' ').to_string()
-                })
-                .unwrap_or_default()
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    (!selected.is_empty()).then_some(selected)
-}
-
-fn selected_rows_unchanged(
-    previous: &[RenderedRow],
-    current: &[RenderedRow],
-    selection: TranscriptSelection,
-) -> bool {
-    let (start, end) = selection.ordered();
-    (start.row..=end.row).all(|row| previous.get(row) == current.get(row))
-}
-
-fn transcript_cells(buffer: &Buffer, area: Rect) -> Vec<RenderedRow> {
-    (area.y..area.bottom())
-        .map(|row| {
-            let mut rendered = Vec::with_capacity(area.width as usize);
-            let mut column = area.x;
-            while column < area.right() {
-                let symbol = buffer
-                    .cell((column, row))
-                    .map(|cell| cell.symbol())
-                    .unwrap_or(" ");
-                if symbol == " " {
-                    rendered.push(RenderedCell::Space);
-                    column += 1;
-                    continue;
-                }
-                let lead = rendered.len();
-                let width = UnicodeWidthStr::width(symbol)
-                    .max(1)
-                    .min(area.right().saturating_sub(column) as usize);
-                let mut characters = symbol.chars();
-                match (characters.next(), characters.next()) {
-                    (Some(character), None) => {
-                        rendered.push(RenderedCell::Character(character));
-                    }
-                    _ => rendered.push(RenderedCell::Text(symbol.to_string())),
-                }
-                for _ in 1..width {
-                    rendered.push(RenderedCell::Continuation { lead });
-                }
-                column = column.saturating_add(width as u16);
-            }
-            rendered
-        })
-        .collect()
-}
-
-fn highlight_transcript_selection(
-    buffer: &mut Buffer,
-    area: Rect,
-    selection: TranscriptSelection,
-    rows: &[RenderedRow],
-) {
-    for row in 0..area.height as usize {
-        let Some(rendered) = rows.get(row) else {
-            continue;
-        };
-        let Some(columns) = selected_columns(selection, row, rendered.len()) else {
-            continue;
-        };
-        for column in grapheme_columns(rendered, columns) {
-            if let Some(cell) = buffer.cell_mut((
-                area.x.saturating_add(column as u16),
-                area.y.saturating_add(row as u16),
-            )) {
-                cell.set_style(Style::default().add_modifier(Modifier::REVERSED));
-            }
-        }
-    }
-}
-
 /// Load the last prompt and return the synthetic Enter that resubmits it
 /// through the ordinary path.
 ///
@@ -4318,6 +3866,7 @@ async fn run_app(
 mod tests {
     use super::*;
     use crate::modals::{PALETTE_COMMANDS, PaletteAction, PaletteCommand, ThemePickerAction};
+    use crate::selection::SelectionPoint;
     use crate::session_view::restored_session_view;
     use crate::text::tests::rendered_text;
     use crate::transcript::*;
@@ -7045,80 +6594,10 @@ mod tests {
         assert_eq!(app.transcript_selection, None);
     }
 
-    fn cells(rows: &[&str], width: usize) -> Vec<RenderedRow> {
-        rows.iter()
-            .map(|row| {
-                row.chars()
-                    .map(|character| match character {
-                        ' ' => RenderedCell::Space,
-                        _ => RenderedCell::Character(character),
-                    })
-                    .chain(std::iter::repeat(RenderedCell::Space))
-                    .take(width)
-                    .collect()
-            })
-            .collect()
-    }
-
-    #[test]
-    fn transcript_selection_copies_multiline_text_in_display_order() {
-        let rows = cells(&["abc", "wxyz"], 6);
-        let forward = TranscriptSelection {
-            anchor: SelectionPoint { row: 0, column: 1 },
-            focus: SelectionPoint { row: 1, column: 2 },
-        };
-        let reverse = TranscriptSelection {
-            anchor: forward.focus,
-            focus: forward.anchor,
-        };
-
-        assert_eq!(
-            selected_transcript_text(&rows, forward).as_deref(),
-            Some("bc\nwxy")
-        );
-        assert_eq!(
-            selected_transcript_text(&rows, reverse).as_deref(),
-            Some("bc\nwxy")
-        );
-    }
-
-    #[test]
-    fn transcript_selection_ignores_clicks_and_trailing_viewport_padding() {
-        let rows = cells(&["ilar hello"], 16);
-        let click = TranscriptSelection {
-            anchor: SelectionPoint { row: 0, column: 3 },
-            focus: SelectionPoint { row: 0, column: 3 },
-        };
-        let drag = TranscriptSelection {
-            anchor: SelectionPoint { row: 0, column: 5 },
-            focus: SelectionPoint { row: 0, column: 15 },
-        };
-
-        assert_eq!(selected_transcript_text(&rows, click), None);
-        assert_eq!(
-            selected_transcript_text(&rows, drag).as_deref(),
-            Some("hello")
-        );
-    }
-
-    #[test]
-    fn transcript_mouse_points_are_clamped_to_the_visible_text_area() {
-        let area = Rect::new(10, 4, 8, 3);
-        assert_eq!(
-            selection_point(area, 12, 5, false),
-            Some(SelectionPoint { row: 1, column: 2 })
-        );
-        assert_eq!(selection_point(area, 9, 5, false), None);
-        assert_eq!(
-            selection_point(area, 30, 20, true),
-            Some(SelectionPoint { row: 2, column: 7 })
-        );
-    }
-
     #[test]
     fn transcript_selection_highlights_cells_and_scrolling_clears_it() {
         let area = Rect::new(0, 0, 4, 2);
-        let mut buffer = Buffer::empty(area);
+        let mut buffer = ratatui::buffer::Buffer::empty(area);
         buffer.set_string(0, 0, "abcd", Style::default());
         buffer.set_string(0, 1, "efgh", Style::default());
         let selection = TranscriptSelection {
@@ -7146,40 +6625,6 @@ mod tests {
     }
 
     #[test]
-    fn transcript_selection_preserves_wide_graphemes_without_phantom_spaces() {
-        let area = Rect::new(0, 0, 4, 1);
-        let mut buffer = Buffer::empty(area);
-        buffer.set_string(0, 0, "界B", Style::default());
-        let rows = transcript_cells(&buffer, area);
-        let selection = TranscriptSelection {
-            anchor: SelectionPoint { row: 0, column: 1 },
-            focus: SelectionPoint { row: 0, column: 2 },
-        };
-
-        assert_eq!(
-            selected_transcript_text(&rows, selection).as_deref(),
-            Some("界B")
-        );
-        highlight_transcript_selection(&mut buffer, area, selection, &rows);
-        for column in 0..=2 {
-            assert!(buffer[(column, 0)].modifier.contains(Modifier::REVERSED));
-        }
-    }
-
-    #[test]
-    fn transcript_selection_does_not_copy_vertical_viewport_padding() {
-        let rows = cells(&["hello"], 8);
-        let selection = TranscriptSelection {
-            anchor: SelectionPoint { row: 0, column: 0 },
-            focus: SelectionPoint { row: 4, column: 7 },
-        };
-        assert_eq!(
-            selected_transcript_text(&rows, selection).as_deref(),
-            Some("hello")
-        );
-    }
-
-    #[test]
     fn transcript_selection_is_cancelled_when_visible_output_changes() {
         let backend = ratatui::backend::TestBackend::new(40, 9);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
@@ -7198,78 +6643,6 @@ mod tests {
         assert_ne!(previous, app.transcript_cells);
         assert_eq!(app.transcript_selection, None);
         assert!(!app.selecting_transcript);
-    }
-
-    #[test]
-    fn transcript_selection_ignores_changes_outside_selected_rows() {
-        let previous = cells(&["stable", "thinking one"], 16);
-        let current = cells(&["stable", "thinking two"], 16);
-        let stable_selection = TranscriptSelection {
-            anchor: SelectionPoint { row: 0, column: 0 },
-            focus: SelectionPoint { row: 0, column: 3 },
-        };
-        let volatile_selection = TranscriptSelection {
-            anchor: SelectionPoint { row: 1, column: 0 },
-            focus: SelectionPoint { row: 1, column: 3 },
-        };
-
-        assert!(selected_rows_unchanged(
-            &previous,
-            &current,
-            stable_selection
-        ));
-        assert!(!selected_rows_unchanged(
-            &previous,
-            &current,
-            volatile_selection
-        ));
-    }
-
-    #[test]
-    fn current_todos_render_all_statuses_and_live_replacements() {
-        let todos = std::sync::Arc::new(std::sync::Mutex::new(ilar::todo::TodoList {
-            items: vec![
-                ilar::todo::TodoItem {
-                    content: "done thing".into(),
-                    status: ilar::todo::Status::Completed,
-                },
-                ilar::todo::TodoItem {
-                    content: "active thing".into(),
-                    status: ilar::todo::Status::InProgress,
-                },
-                ilar::todo::TodoItem {
-                    content: "later thing".into(),
-                    status: ilar::todo::Status::Pending,
-                },
-            ],
-        }));
-        let rendered = render_todo_sidebar_lines(&todos.lock().unwrap(), 26, 5)
-            .iter()
-            .map(rendered_text)
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(rendered.contains("✓ done thing"), "{rendered}");
-        assert!(rendered.contains("▸ active thing"), "{rendered}");
-        assert!(rendered.contains("○ later thing"), "{rendered}");
-        assert!(
-            render_todo_sidebar_lines(&todos.lock().unwrap(), 26, 5)[0]
-                .spans
-                .iter()
-                .any(|span| span.content.contains("done thing")
-                    && span.style.fg == Some(theme::SECONDARY))
-        );
-
-        todos.lock().unwrap().items = vec![ilar::todo::TodoItem {
-            content: "replacement".into(),
-            status: ilar::todo::Status::Pending,
-        }];
-        let replaced = render_todo_sidebar_lines(&todos.lock().unwrap(), 26, 5)
-            .iter()
-            .map(rendered_text)
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(replaced.contains("○ replacement"), "{replaced}");
-        assert!(!replaced.contains("done thing"), "{replaced}");
     }
 
     #[test]
@@ -7403,158 +6776,6 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn todo_rendering_is_bounded_and_preserves_each_present_status() {
-        let list = ilar::todo::TodoList {
-            items: vec![
-                ilar::todo::TodoItem {
-                    content: "old completed item".into(),
-                    status: ilar::todo::Status::Completed,
-                },
-                ilar::todo::TodoItem {
-                    content: "another completed item".into(),
-                    status: ilar::todo::Status::Completed,
-                },
-                ilar::todo::TodoItem {
-                    content: "current \u{1b} active\nitem".into(),
-                    status: ilar::todo::Status::InProgress,
-                },
-                ilar::todo::TodoItem {
-                    content: "next pending item".into(),
-                    status: ilar::todo::Status::Pending,
-                },
-                ilar::todo::TodoItem {
-                    content: "extra \u{1b} pending\nitem".into(),
-                    status: ilar::todo::Status::Pending,
-                },
-            ],
-        };
-        let lines = render_todo_sidebar_lines(&list, 26, 3);
-        let text = lines
-            .iter()
-            .map(rendered_text)
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert_eq!(lines.len(), 3);
-        assert!(text.contains('✓'), "{text}");
-        assert!(text.contains('▸'), "{text}");
-        assert!(text.contains('○'), "{text}");
-        assert!(text.contains("+2 hidden"), "{text}");
-        assert!(!text.contains('\u{1b}'), "{text:?}");
-        assert!(lines.iter().all(|line| !rendered_text(line).contains('\n')));
-        assert!(lines.iter().all(|line| line.width() <= 26));
-    }
-
-    #[test]
-    fn todo_sidebar_wraps_with_a_hanging_status_indent() {
-        let list = ilar::todo::TodoList {
-            items: vec![ilar::todo::TodoItem {
-                content: "active task with readable wrapping".into(),
-                status: ilar::todo::Status::InProgress,
-            }],
-        };
-
-        let lines = render_todo_sidebar_lines(&list, 20, 4);
-        let text = lines.iter().map(rendered_text).collect::<Vec<_>>();
-
-        assert_eq!(text, ["▸ active task with", "  readable wrapping"]);
-        assert!(lines.iter().all(|line| line.width() <= 20));
-    }
-
-    #[test]
-    fn todo_sidebar_reports_items_displaced_by_wrapping() {
-        let list = ilar::todo::TodoList {
-            items: vec![
-                ilar::todo::TodoItem {
-                    content: "first todo needs multiple rows to render".into(),
-                    status: ilar::todo::Status::InProgress,
-                },
-                ilar::todo::TodoItem {
-                    content: "later todo".into(),
-                    status: ilar::todo::Status::Pending,
-                },
-            ],
-        };
-
-        let lines = render_todo_sidebar_lines(&list, 20, 2);
-        let text = lines.iter().map(rendered_text).collect::<Vec<_>>();
-
-        assert_eq!(lines.len(), 2);
-        assert!(text[0].starts_with("▸ first todo"), "{text:?}");
-        assert!(text[1].contains("+1 hidden"), "{text:?}");
-    }
-
-    #[test]
-    fn todo_sidebar_wraps_the_last_visible_item_before_hidden_count() {
-        let mut items = (0..4)
-            .map(|index| ilar::todo::TodoItem {
-                content: format!("short todo {index}"),
-                status: ilar::todo::Status::Pending,
-            })
-            .collect::<Vec<_>>();
-        items.push(ilar::todo::TodoItem {
-            content: "final selected todo wraps with visible ending".into(),
-            status: ilar::todo::Status::Pending,
-        });
-        items.push(ilar::todo::TodoItem {
-            content: "hidden todo".into(),
-            status: ilar::todo::Status::Pending,
-        });
-
-        let lines = render_todo_sidebar_lines(&ilar::todo::TodoList { items }, 20, 10);
-        let text = lines.iter().map(rendered_text).collect::<Vec<_>>();
-
-        assert!(
-            text.iter().any(|line| line.contains("visible ending")),
-            "{text:?}"
-        );
-        assert!(
-            text.iter().any(|line| line.contains("+1 hidden")),
-            "{text:?}"
-        );
-    }
-
-    #[test]
-    fn inline_hidden_count_marks_shortened_todo_content() {
-        let list = ilar::todo::TodoList {
-            items: vec![
-                ilar::todo::TodoItem {
-                    content: "first".into(),
-                    status: ilar::todo::Status::Pending,
-                },
-                ilar::todo::TodoItem {
-                    content: "second".into(),
-                    status: ilar::todo::Status::Pending,
-                },
-                ilar::todo::TodoItem {
-                    content: "third item nearly".into(),
-                    status: ilar::todo::Status::Pending,
-                },
-                ilar::todo::TodoItem {
-                    content: "hidden".into(),
-                    status: ilar::todo::Status::Pending,
-                },
-            ],
-        };
-
-        let lines = render_todo_sidebar_lines(&list, 20, 3);
-        let last = rendered_text(lines.last().unwrap());
-
-        assert!(last.contains("… · +1 hidden"), "{last}");
-        assert!(lines.iter().all(|line| line.width() <= 20));
-    }
-
-    #[test]
-    fn wide_content_reserves_a_fixed_right_sidebar() {
-        let wide = content_areas(Rect::new(0, 0, 121, 8));
-        assert_eq!(wide.transcript, Rect::new(0, 0, 79, 8));
-        assert_eq!(wide.todos, Some(Rect::new(79, 0, 42, 8)));
-
-        let narrow = content_areas(Rect::new(0, 0, 120, 8));
-        assert_eq!(narrow.transcript, Rect::new(0, 0, 120, 8));
-        assert_eq!(narrow.todos, None);
     }
 
     #[test]

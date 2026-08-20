@@ -6,10 +6,16 @@ visibility with a regex over-exports badly (46 of 113 in one seam). The
 reliable method is to strip every marker and let the compiler name what
 it actually needs, so do exactly that.
 
+Requires the module to be imported by name, not by glob: with
+`use thing::*` a private item reads as "cannot find" rather than "is
+private", so the signal this relies on never appears. Converting to an
+explicit list first also makes the result exact rather than approximate.
+
 Usage: minimize_visibility.py <module.rs>
 """
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -93,6 +99,15 @@ def promote_field(source, struct, field):
 
 def main():
     path = sys.argv[1]
+    stem = os.path.basename(path).removesuffix(".rs")
+    glob = subprocess.run(
+        ["grep", "-rn", f"use {stem}::\\*;", "--include=*.rs", "."], capture_output=True, text=True
+    ).stdout.strip()
+    if glob:
+        sys.exit(
+            f"{stem} is glob-imported, which hides privacy errors behind "
+            f"'cannot find' — convert to an explicit list first:\n  {glob}"
+        )
     original = open(path).read()
     open(path, "w").write(STRIP.sub(r"\1", original))
 
