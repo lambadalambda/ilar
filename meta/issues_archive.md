@@ -132,3 +132,6 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Input key hazards and busy-state affordances](issues/input-key-hazards.md)
 - [x] [Load Claude and opencode style skills](issues/portable-skill-formats.md)
 - [x] [User-invoked commands](issues/user-invoked-commands.md)
+- [x] [Unify the TUI modal layer](issues/unify-tui-modals.md)
+- [x] [Make the event loop testable](issues/testable-event-loop.md)
+- [x] [TUI module follow-ups](issues/tui-module-follow-ups.md)

@@ -59,32 +59,49 @@ renders and types into the same modal by luck rather than construction.
   modal without wiring both is a compile error.
 - Existing picker behaviour tests still pass unchanged.
 
-## Status
+## Outcome
 
-Landed: `Modal` + `App::active_modal()` as the one precedence order,
-with render selecting on an exhaustive match over it; `has_modal()` now
-includes search, which fixes the paste routing, the notification gate,
-and the input keeping a caret it was not receiving; `scroll_active_modal`
-routes the wheel to the front overlay; the two hand-written
-`!app.search_active` companions are gone.
+Landed across three passes:
 
-Still open:
+- `Modal` + `App::active_modal()` as the one precedence order;
+  `has_modal()` includes search, fixing the paste routing, the
+  notification gate, and the caret; the hand-written
+  `!app.search_active` companions are gone.
+- **Key dispatch is an exhaustive `match`**, like render: a new `Modal`
+  variant without a dispatch arm is now a compile error. Bodies were
+  moved, not changed.
+- **Click selects.** Each renderer returns a `ModalHit` — the area its
+  rows landed in and which item each row shows — and
+  `App::click_active_modal` maps a left click back through it.
+  Selection only, with the theme picker previewing like the wheel;
+  clicks anywhere else are consumed while a modal is open. Tested
+  end-to-end through a real render pass, headers and misses included.
+- **The wheel** routes via `scroll_active_modal` (tested), and the
+  up/down keys have one definition: `nav_delta` is consulted by every
+  picker, the pending manager and search, replacing eight copies of the
+  same two match arms.
+- The paste-to-search and notification-gate criteria are real tests at
+  the decision-and-effect level (`decide::paste` + `apply_intent`,
+  `may_route_notification`), mutation-verified. Only the one-line
+  consultations in `run_app` remain reading-verified — that residue is
+  [A harness for the event loop's schedule](loop-schedule-harness.md).
 
-- Key dispatch is an `if app.active_modal() == Some(..)` chain, not an
-  exhaustive match. Both sides read the same value so they cannot
-  disagree, but a new `Modal` variant still compiles with no dispatch
-  arm — the compile-time guarantee in the acceptance criteria is only
-  half met.
-- Per-modal state still lives in parallel `Option<T>` fields; the enum
-  names the active overlay rather than owning it. The duplicated
-  list-navigation code and the five bespoke `*Action` enums are
-  untouched.
-- Click-to-select and click-outside-to-dismiss are not implemented; only
-  the wheel is routed.
-- The paste-to-search and notification-gate criteria are verified by
-  reading, not by tests: both live inside `run_app`, which has no
-  harness. That gap is really the `run_app` extraction in
-  [Split the TUI main module](split-tui-main.md).
+Declined, with reasons:
+
+- **Click-outside-to-dismiss.** Each modal's dismissal cleanup lives in
+  its dispatch arm (session clears a notice, model resets the status,
+  theme restores the saved theme). Reaching that from a mouse handler
+  on `App` would mean either duplicating the cleanup or feeding a
+  synthetic Esc through the dispatcher — the exact pattern phase two
+  of the loop work deleted. Revisit after the harness exists.
+- **Moving per-modal state into the enum.** The enum names the overlay
+  and the fields own the state; both derive from one value, so the
+  disagreement the requirement guarded against cannot happen. The
+  ownership move is large mechanical churn with no observed defect
+  behind it.
+- **Collapsing the `*Action` enums.** They name genuinely different
+  verbs (`Fork`/`Delete`/`Resume` vs `Preview`/`Choose`); a shared enum
+  would trade five small exhaustive matches for one wide optional one.
 
 ## Notes
 
