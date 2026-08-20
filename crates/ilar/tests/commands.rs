@@ -98,6 +98,30 @@ fn yaml_command_files_load_unchanged() {
 }
 
 #[test]
+fn subtask_parses_from_both_formats_and_defaults_off() {
+    let user = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    write(
+        &user.path().join("commands/yaml-task.md"),
+        "---\ndescription: In yaml\nsubtask: true\n---\nBody\n",
+    );
+    write(
+        &user.path().join("commands/toml-task.md"),
+        "---\ndescription = \"In toml\"\nsubtask = true\n---\nBody\n",
+    );
+    write(
+        &user.path().join("commands/plain.md"),
+        "---\ndescription: No field\n---\nBody\n",
+    );
+
+    let commands = store(user.path(), project.path()).list().unwrap();
+    let by_name = |name: &str| commands.iter().find(|c| c.name == name).unwrap();
+    assert!(by_name("yaml-task").subtask);
+    assert!(by_name("toml-task").subtask);
+    assert!(!by_name("plain").subtask);
+}
+
+#[test]
 fn apostrophes_and_quotes_split_the_way_a_reader_expects() {
     // An apostrophe mid-word is an apostrophe, not an unterminated
     // quote that swallows every later argument.

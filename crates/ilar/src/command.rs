@@ -15,11 +15,12 @@ pub struct Command {
     pub description: String,
     /// The prompt, before argument substitution.
     pub template: String,
-    /// Optional overrides. Parsed and carried; honouring them is
-    /// separate work.
+    /// Optional overrides — see meta/issues/honour-command-frontmatter.md.
     pub agent: Option<String>,
     pub model: Option<String>,
     pub variant: Option<String>,
+    /// Run as a background subagent instead of a main-session turn.
+    pub subtask: bool,
 }
 
 /// Split arguments the way a shell would for `$1`, `$2`: whitespace
@@ -132,6 +133,10 @@ fn parse_command_md(name: &str, text: &str) -> anyhow::Result<Command> {
         agent: fm.extras.get("agent").cloned(),
         model: fm.extras.get("model").cloned(),
         variant: fm.extras.get("variant").cloned(),
+        subtask: fm
+            .extras
+            .get("subtask")
+            .is_some_and(|value| value == "true"),
     })
 }
 
