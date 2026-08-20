@@ -2,9 +2,11 @@
 //! meta/issues/config-and-agents-md.md.
 
 mod agents_md;
+mod frontmatter;
 mod toml;
 
 pub use agents_md::system_prompt_for;
+pub(crate) use frontmatter::parse as parse_frontmatter;
 pub(crate) use toml::markdown_files;
 pub use toml::{
     CompactionConfig, Config, Loader, ProviderConfig, SubagentConfig, ThemePersistOutcome, load,

@@ -51,6 +51,39 @@ it.
   disagreement is not silently confusing.
 - Test fixtures copied verbatim from `~/.config/opencode/skills/` load.
 
+## Outcome
+
+Landed. All nine skills in `~/.config/opencode/skills/` load unchanged,
+with full-length descriptions; two of them are checked in verbatim under
+`crates/ilar/tests/fixtures/skills/` so that stays true.
+
+The YAML subset lives in `crates/ilar/src/config/frontmatter.rs` with its
+own unit tests, and returns an `extras` map so a command's `model` or a
+skill's `allowed-tools` survives the parse before anything honours it.
+
+Review caught three silent wrong-value paths, all of which real Claude
+Code frontmatter hits: a block scalar was truncated at the first blank
+line, `|+` and `|2` style indicators made the description literally
+`"|+"`, and a plain value wrapped across lines lost everything after the
+first. All fixed and covered.
+
+Two things deliberately left:
+
+- **A `name:` that collides is silent.** Two directories declaring the
+  same name collapse to one, and a foreign skill can shadow a built-in.
+  Reporting it needs a warning channel `SkillStore::list` does not have —
+  it returns `Vec<Skill>` and callers treat any `Err` as fatal.
+- **One malformed file still fails the whole load**, which now also
+  takes down the TUI at startup. That was already the policy and there
+  is a test pinning it, but pointing ilar at a third-party collection
+  makes it much likelier to bite. Worth deciding between fail-fast and
+  skip-and-warn; both want the same warning channel as above.
+
+`deny_unknown_fields` on the TOML side is gone, so a typo'd key in one of
+our own skills now falls back to the filename instead of erroring. That
+is the direct cost of the issue's own "unknown keys are
+preserved-and-ignored" requirement, which foreign files need.
+
 ## Notes
 
 - Deliberately one-way: read foreign formats, keep writing our own. No

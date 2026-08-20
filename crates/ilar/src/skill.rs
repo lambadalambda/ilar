@@ -77,22 +77,51 @@ Notes:
   instead of guessing at flags.
 "#;
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Frontmatter {
-    description: Option<String>,
-    triggers: Option<Vec<String>>,
-}
-
 fn parse_skill_md(name: &str, text: &str) -> anyhow::Result<Skill> {
     let (frontmatter, body) = crate::config::split_frontmatter(text)?;
-    let fm: Frontmatter = toml::from_str(&frontmatter).context("invalid skill frontmatter")?;
+    let fm = crate::config::parse_frontmatter(&frontmatter).context("invalid skill frontmatter")?;
     Ok(Skill {
-        name: name.into(),
+        // A `name` field wins over the filename, so renaming a folder
+        // does not silently change how the skill is invoked.
+        name: fm.name.unwrap_or_else(|| name.into()),
         description: fm.description.unwrap_or_else(|| name.into()),
-        triggers: fm.triggers.unwrap_or_default(),
+        triggers: fm.triggers,
         body: body.trim_start_matches('\n').trim().to_string(),
     })
+}
+
+/// Skill files in both layouts: our flat `<name>.md`, and the
+/// `<name>/SKILL.md` directory Claude Code and opencode write.
+fn skill_files(dir: &std::path::Path) -> anyhow::Result<Vec<(String, PathBuf)>> {
+    let mut found: Vec<(String, PathBuf)> = crate::config::markdown_files(dir)?
+        .into_iter()
+        .filter_map(|path| {
+            let name = path.file_stem()?.to_str()?.to_string();
+            Some((name, path))
+        })
+        .collect();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(found),
+        Err(error) => {
+            return Err(error).with_context(|| format!("reading skills in {}", dir.display()));
+        }
+    };
+    for entry in entries {
+        let path = entry
+            .with_context(|| format!("reading skills in {}", dir.display()))?
+            .path();
+        let manifest = path.join("SKILL.md");
+        if path.is_dir() && manifest.is_file() {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .with_context(|| format!("skill directory is not UTF-8: {}", path.display()))?;
+            found.push((name.to_string(), manifest));
+        }
+    }
+    found.sort();
+    Ok(found)
 }
 
 pub struct SkillStore {
@@ -120,14 +149,10 @@ impl SkillStore {
             (&self.project_dir, ".ilar/skills"),
         ] {
             let dir = dir.join(sub);
-            for path in crate::config::markdown_files(&dir)? {
-                let name = path
-                    .file_stem()
-                    .and_then(|name| name.to_str())
-                    .with_context(|| format!("skill filename is not UTF-8: {}", path.display()))?;
+            for (name, path) in skill_files(&dir)? {
                 let text = std::fs::read_to_string(&path)
                     .with_context(|| format!("reading skill definition {}", path.display()))?;
-                let skill = parse_skill_md(name, &text)
+                let skill = parse_skill_md(&name, &text)
                     .with_context(|| format!("parsing skill definition {}", path.display()))?;
                 skills.retain(|existing| existing.name != skill.name);
                 skills.push(skill);
