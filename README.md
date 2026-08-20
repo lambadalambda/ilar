@@ -225,8 +225,17 @@ ends when the model outputs an evidenced `GOAL_ACHIEVED:` line, when the
 round cap (25) trips, or when you abort it explicitly (`/goal abort` or
 the pending manager). `/goal` alone prefills the input for editing the
 goal in place, keeping the round budget. Aborting a running turn pauses
-the loop; it resumes after your next completed turn. Queued messages you
-type during the loop take precedence over goal continuations.
+the loop; it resumes after your next completed turn.
+
+Type while a turn is running and the message **steers** it: the loop
+delivers it at the next step boundary rather than after the whole task,
+and a steer arriving as the model stops reopens the turn instead of
+stranding the message. The transcript line appears when the model
+actually receives it, and the input title shows how many are in flight.
+If a turn ends without delivering one — you aborted, or it errored — the
+undelivered steers move to the queue rather than vanishing. Turns with
+no steer channel (a notification routed from another session) still
+queue as before.
 
 Standing state — queued messages, the goal, background jobs, a retry
 offer — is managed in the pending manager (**Ctrl-Q** or the palette):

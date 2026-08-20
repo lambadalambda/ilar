@@ -136,6 +136,7 @@ async fn estimate_ignores_usage_before_latest_compaction_boundary() {
         tx,
         tokio_util::sync::CancellationToken::new(),
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await
     .unwrap();
@@ -270,6 +271,7 @@ async fn oversize_transcript_triggers_compaction() {
         tx,
         tokio_util::sync::CancellationToken::new(),
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await
     .unwrap();
@@ -343,6 +345,7 @@ async fn compaction_rejects_partial_summary_at_eof() {
         tx,
         tokio_util::sync::CancellationToken::new(),
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await
     .unwrap_err();
@@ -389,6 +392,7 @@ async fn compaction_rejects_non_end_turn_terminal_states() {
             tx,
             tokio_util::sync::CancellationToken::new(),
             ToolContext::root(std::env::temp_dir()),
+            None,
         )
         .await
         .unwrap_err();
@@ -442,6 +446,7 @@ async fn cancellation_stops_in_flight_compaction_without_persisting() {
             tx,
             turn_cancel,
             ToolContext::root(std::env::temp_dir()),
+            None,
         )
         .await;
         (outcome, store, session_id)
@@ -488,6 +493,7 @@ async fn small_transcript_skips_compaction() {
         tx,
         tokio_util::sync::CancellationToken::new(),
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await
     .unwrap();
@@ -524,6 +530,7 @@ async fn no_context_limit_disables_compaction() {
         tx,
         tokio_util::sync::CancellationToken::new(),
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await
     .unwrap();
@@ -559,6 +566,7 @@ async fn compaction_falls_back_to_chars_estimate_without_usage() {
         tx,
         tokio_util::sync::CancellationToken::new(),
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await
     .unwrap();
@@ -616,6 +624,7 @@ async fn forced_compaction_runs_below_the_threshold_and_reports_its_summary() {
         tx,
         tokio_util::sync::CancellationToken::new(),
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await
     .unwrap();
@@ -704,6 +713,7 @@ async fn context_growing_between_steps_compacts_without_a_new_user_message() {
         tx,
         tokio_util::sync::CancellationToken::new(),
         ToolContext::root(workspace.path().to_path_buf()),
+        None,
     )
     .await
     .unwrap();

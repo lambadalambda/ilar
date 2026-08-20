@@ -89,6 +89,10 @@ pub(crate) struct App {
     /// Messages submitted during an active turn, auto-sent in order when
     /// the turn completes.
     pub(crate) queued_messages: Vec<String>,
+    /// Steers handed to a running turn but not yet delivered. Steering
+    /// is fire-and-forget, so an aborted turn drops its receiver and
+    /// would lose them silently; these get moved back to the queue.
+    pub(crate) pending_steers: Vec<String>,
     /// Active goal: (description, completed rounds). Turns auto-continue
     /// until the model emits GOAL_ACHIEVED or the round cap trips.
     pub(crate) goal: Option<(String, u32)>,
@@ -180,6 +184,7 @@ impl App {
             last_prompt: None,
             retry_available: false,
             queued_messages: Vec::new(),
+            pending_steers: Vec::new(),
             goal: None,
             slash_selected: 0,
             pending_manager: None,
@@ -414,6 +419,15 @@ impl App {
     pub(crate) fn push_loop_event(&mut self, event: &LoopEvent) {
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
         match event {
+            // Shown when the loop delivers it, not when it was typed —
+            // the transcript reflects what the model actually saw.
+            LoopEvent::Steered { text } => {
+                if let Some(index) = self.pending_steers.iter().position(|held| held == text) {
+                    self.pending_steers.remove(index);
+                }
+                self.push_transcript_line(Line_::User(text.clone()));
+                self.follow_tail = true;
+            }
             LoopEvent::TurnStarted => {
                 self.clear_transient_notice();
                 self.status = "thinking…".into();
@@ -1901,6 +1915,9 @@ impl App {
         } else {
             " input ".into()
         };
+        if !self.pending_steers.is_empty() {
+            input_title = format!("{}· {} steering ", input_title, self.pending_steers.len());
+        }
         if !self.queued_messages.is_empty() {
             input_title = format!("{}· {} queued ", input_title, self.queued_messages.len());
         }

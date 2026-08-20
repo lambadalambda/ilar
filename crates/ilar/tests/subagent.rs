@@ -354,6 +354,7 @@ async fn run_two_tasks(
         tx,
         tokio_util::sync::CancellationToken::new(),
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await
     .unwrap();
@@ -586,6 +587,7 @@ async fn mutable_tasks_in_distinct_validated_worktrees_may_overlap() {
             tx,
             tokio_util::sync::CancellationToken::new(),
             ToolContext::root(root).with_subagents(spawner),
+            None,
         ),
     )
     .await
@@ -875,6 +877,7 @@ async fn concurrency_cap_errors_with_guidance() {
         tx,
         tokio_util::sync::CancellationToken::new(),
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await
     .unwrap();
@@ -1959,6 +1962,7 @@ async fn child_session_created_with_parent_link() {
         tx,
         tokio_util::sync::CancellationToken::new(),
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await
     .unwrap();
@@ -2208,6 +2212,7 @@ async fn task_model_override_pins_child_model_and_rejects_unknown() {
         tx,
         tokio_util::sync::CancellationToken::new(),
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await
     .unwrap();

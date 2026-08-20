@@ -770,6 +770,8 @@ impl SubagentSpawner {
                     tx,
                     cancel.clone(),
                     child_ctx,
+                    // Subagents have no interactive user to steer them.
+                    None,
                 );
                 let (outcome, was_cancelled) = tokio::select! {
                     outcome = turn => (Some(outcome), false),
@@ -923,6 +925,8 @@ clearly disjoint work."
             tx,
             ctx.cancel.clone(),
             child_ctx,
+            // Subagents have no interactive user to steer them.
+            None,
         );
         tokio::pin!(turn);
         let outcome = loop {
@@ -1221,6 +1225,8 @@ clearly disjoint work."
                     cancel: cancel.clone(),
                     output_tail: None,
                 },
+                // Subagents have no interactive user to steer them.
+                None,
             )
             .await;
             match result {

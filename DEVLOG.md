@@ -959,3 +959,46 @@ What the split did not fix, and was never going to: `run_app` is still
 ~980 lines with decision and effect fused in every match arm, so the
 loop remains untestable. Moving a function does not make it testable.
 Recorded as its own issue.
+
+## 2026-08-20 — steering a running turn
+
+Typing during a turn used to queue the message until the whole turn
+finished — `TurnOutcome::Completed`, meaning the model stopped calling
+tools. On a forty-step task that is many minutes, and Esc was the only
+way to redirect, which throws the work away.
+
+Followed opencode's shape (`session/runner/llm.ts:383-406`): steers are
+promoted into the history before the next request is built, so they land
+at the next step boundary, and a steer arriving as the model stops
+reopens the turn. Injection sits at the same settled point mid-turn
+compaction uses — `continuations.is_empty() && paused_content.is_empty()`
+— because between an assistant message carrying tool calls and its
+results the transcript is incomplete.
+
+Review verified the merge across all three wire shapes: the steer lands
+in the same user message as the tool results, with the results first,
+which is what Anthropic requires and what both OpenAI shapes render
+correctly. Compaction is safe too, since `recent_steps_cut` walks
+backwards and a just-appended steer is always inside the kept window.
+
+Two defects it caught. The reopen check asked the channel whether it was
+empty, but `drain_steers` filters whitespace — so a blank steer counted
+as pending, reopened the turn with nothing to add, and appended a second
+assistant message with no user message between. That leaves consecutive
+assistant messages, which Anthropic rejects on every subsequent turn:
+an unrecoverable session from one stray keystroke. Unreachable from the
+TUI today only because two `trim().is_empty()` predicates in two crates
+happen to agree. The drain now makes the decision, so they cannot
+disagree.
+
+The other was a straight regression: steering is fire-and-forget, and
+`run_turn` drops its receiver on any non-completed exit. Esc during a
+turn leaves `busy` set, so the obvious next keystrokes — type the
+correction, hit Enter — reported "steering" and then silently destroyed
+the message. Previously it would have queued. The TUI now shadows
+in-flight steers and moves undelivered ones back to the queue, which
+also gives the input title something to show.
+
+Also took opencode's detail of resetting the step budget when a steer
+lands: new instructions get a fresh budget rather than inheriting what
+the interrupted work had left.

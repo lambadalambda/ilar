@@ -763,6 +763,10 @@ async fn run_app(
     let mut pending_notification = None;
     let mut notifications_paused = false;
     let mut cancel: Option<CancellationToken> = None;
+    // Live only while a root turn runs, so a message typed during that
+    // turn is steered into it. Cross-session routed turns have no
+    // channel and still queue.
+    let mut steer_tx: Option<ilar::agent::SteerSender> = None;
     let mut turn_handle: Option<tokio::task::JoinHandle<TurnCompletion>> = None;
     let mut ring_on_turn_completion = false;
     let mut bell_pending = false;
@@ -931,6 +935,19 @@ async fn run_app(
             }
             events_rx = None;
             cancel = None;
+            steer_tx = None;
+            // The turn dropped its receiver. Anything it never delivered
+            // (an abort, an error) would otherwise vanish with no
+            // transcript line and no way to get it back.
+            if !app.pending_steers.is_empty() {
+                let undelivered = std::mem::take(&mut app.pending_steers);
+                let count = undelivered.len();
+                app.queued_messages.splice(0..0, undelivered);
+                app.set_notice(
+                    format!("{count} undelivered steer(s) moved to the queue — Ctrl-Q to review"),
+                    NoticeLevel::Warning,
+                );
+            }
         }
 
         // Let a buffered Ctrl-P open the palette before starting queued work.
@@ -992,6 +1009,8 @@ async fn run_app(
             let registry = registry.clone();
             let turn_ctx = tool_ctx.clone();
             let loop_config = loop_config.clone();
+            let (tx_steer, steer_rx) = ilar::agent::steer_channel();
+            steer_tx = Some(tx_steer);
             turn_handle = Some(tokio::spawn(async move {
                 TurnCompletion::Root(
                     run_turn(
@@ -1005,6 +1024,7 @@ async fn run_app(
                         tx,
                         token,
                         turn_ctx,
+                        Some(steer_rx),
                     )
                     .await,
                 )
@@ -1618,6 +1638,8 @@ async fn run_app(
                                 loop_config.force_compaction = true;
                             }
                             ring_on_turn_completion = true;
+                            let (tx_steer, steer_rx) = ilar::agent::steer_channel();
+                            steer_tx = Some(tx_steer);
                             turn_handle = Some(tokio::spawn(async move {
                                 TurnCompletion::Root(
                                     run_turn(
@@ -1631,6 +1653,7 @@ async fn run_app(
                                         tx,
                                         token,
                                         turn_ctx,
+                                        Some(steer_rx),
                                     )
                                     .await,
                                 )
@@ -1641,14 +1664,28 @@ async fn run_app(
                         {
                             let text = app.input.take();
                             app.history.push(&text);
-                            app.queued_messages.push(text);
-                            app.set_notice(
-                                format!(
-                                    "queued ({} waiting) — sends when the turn completes",
-                                    app.queued_messages.len()
-                                ),
-                                NoticeLevel::Info,
-                            );
+                            // Steer the running turn when one is live;
+                            // the transcript line appears when the loop
+                            // delivers it, not on submit.
+                            match steer_tx.as_ref().filter(|tx| !tx.is_closed()) {
+                                Some(tx) if tx.send(text.clone()).is_ok() => {
+                                    app.pending_steers.push(text);
+                                    app.set_notice(
+                                        "steering — reaches the model at the next step",
+                                        NoticeLevel::Info,
+                                    );
+                                }
+                                _ => {
+                                    app.queued_messages.push(text);
+                                    app.set_notice(
+                                        format!(
+                                            "queued ({} waiting) — sends when the turn completes",
+                                            app.queued_messages.len()
+                                        ),
+                                        NoticeLevel::Info,
+                                    );
+                                }
+                            }
                         }
                         PromptAction::Edited => app.clear_transient_notice(),
                         PromptAction::Unhandled | PromptAction::Submit => {}

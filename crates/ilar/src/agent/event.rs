@@ -51,6 +51,10 @@ pub enum LoopEvent {
         result: String,
         child_session_id: Option<String>,
     },
+    /// A message the user sent mid-turn, now delivered to the model.
+    Steered {
+        text: String,
+    },
     /// One provider call completed (stop reason + usage).
     StepComplete {
         stop_reason: String,

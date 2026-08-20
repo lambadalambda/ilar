@@ -470,6 +470,8 @@ pub(crate) fn apply_subagent_activity(
 
 fn apply_child_loop_event(lines: &mut Vec<Line_>, group: &mut u64, scope: &str, event: &LoopEvent) {
     match event {
+        // Subagents have no interactive user, so they are never steered.
+        LoopEvent::Steered { .. } => {}
         LoopEvent::TextDelta(text) => match lines.last_mut() {
             Some(Line_::Assistant(current)) => current.push_str(text),
             _ => lines.push(Line_::Assistant(text.clone())),

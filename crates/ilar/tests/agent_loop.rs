@@ -118,6 +118,7 @@ async fn every_provider_step_uses_the_stable_session_cache_key() {
         events_channel().0,
         CancellationToken::new(),
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await
     .unwrap();
@@ -168,6 +169,7 @@ async fn streamed_write_path_is_published_before_arguments_complete() {
         tx,
         cancel.clone(),
         ToolContext::root(std::env::temp_dir()),
+        None,
     );
     tokio::pin!(turn);
 
@@ -250,6 +252,7 @@ async fn completed_write_arguments_transition_from_receiving_to_execution() {
         tx,
         CancellationToken::new(),
         ToolContext::root(dir.path().to_path_buf()),
+        None,
     )
     .await
     .unwrap();
@@ -328,6 +331,7 @@ async fn cancellation_during_final_event_backpressure_aborts_the_turn() {
             tx,
             turn_cancel,
             ToolContext::root(std::env::temp_dir()),
+            None,
         )
         .await
         .unwrap()
@@ -378,6 +382,7 @@ async fn cancellation_during_tool_step_backpressure_closes_persisted_calls() {
             tx,
             turn_cancel,
             ToolContext::root(std::env::temp_dir()),
+            None,
         )
         .await
         .unwrap()
@@ -447,6 +452,7 @@ async fn todo_replacements_persist_in_provider_call_order() {
         tx,
         CancellationToken::new(),
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await
     .unwrap();
@@ -515,6 +521,7 @@ async fn truncated_null_input_never_invokes_custom_tool() {
         tx,
         CancellationToken::new(),
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await
     .unwrap();
@@ -575,6 +582,7 @@ async fn paused_turn_is_reissued_without_persisting_an_assistant_step() {
         tx,
         CancellationToken::new(),
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await
     .unwrap();
@@ -621,6 +629,7 @@ async fn paused_turn_retry_cap_is_finite() {
         tx,
         CancellationToken::new(),
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await
     .unwrap_err();
@@ -670,6 +679,7 @@ async fn resumed_max_tokens_does_not_require_complete_replay_content() {
         tx,
         CancellationToken::new(),
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await
     .unwrap();
@@ -752,6 +762,7 @@ async fn resumed_tool_use_persists_replay_before_tool_results() {
         tx,
         CancellationToken::new(),
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await
     .unwrap();
@@ -804,6 +815,7 @@ async fn duplicate_tool_completion_is_rejected_before_execution() {
         tx,
         CancellationToken::new(),
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await
     .unwrap_err();
@@ -866,6 +878,7 @@ async fn multi_turn_tool_conversation_end_to_end() {
         tx,
         cancel,
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await
     .unwrap();
@@ -1016,6 +1029,7 @@ async fn multiple_thinking_runs_preserve_order_and_signatures() {
         tx,
         CancellationToken::new(),
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await
     .unwrap();
@@ -1081,6 +1095,7 @@ async fn opaque_reasoning_is_persisted_and_replayed_with_tool_continuation() {
         tx,
         CancellationToken::new(),
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await
     .unwrap();
@@ -1131,6 +1146,7 @@ async fn public_reasoning_summary_is_persisted_without_becoming_replay_input() {
         tx,
         CancellationToken::new(),
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await
     .unwrap();
@@ -1177,6 +1193,7 @@ async fn interrupted_reasoning_summary_is_not_persisted() {
         tx,
         CancellationToken::new(),
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await
     .unwrap_err();
@@ -1220,6 +1237,7 @@ async fn unsigned_thinking_is_persisted_as_diagnostic_text() {
         tx,
         CancellationToken::new(),
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await
     .unwrap();
@@ -1260,6 +1278,7 @@ async fn started_tool_call_without_completion_is_rejected() {
         tx,
         CancellationToken::new(),
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await
     .unwrap_err();
@@ -1317,6 +1336,7 @@ async fn tool_finished_means_call_and_result_are_already_on_disk() {
         tx,
         cancel.clone(),
         ToolContext::root(std::env::temp_dir()),
+        None,
     );
     tokio::pin!(turn);
 
@@ -1364,6 +1384,7 @@ async fn provider_error_surfaces_and_session_stays_resumable() {
         tx,
         CancellationToken::new(),
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await;
 
@@ -1415,6 +1436,7 @@ async fn concurrent_turn_on_same_session_is_rejected_before_append() {
                 tx,
                 cancel,
                 ToolContext::root(std::env::temp_dir()),
+                None,
             )
             .await
         })
@@ -1433,6 +1455,7 @@ async fn concurrent_turn_on_same_session_is_rejected_before_append() {
         tx,
         CancellationToken::new(),
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await
     .unwrap_err();
@@ -1478,6 +1501,7 @@ async fn provider_error_after_tool_call_closes_tool_in_session_and_ui() {
         tx,
         CancellationToken::new(),
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await;
 
@@ -1559,6 +1583,7 @@ async fn abort_mid_stream_leaves_resumable_session() {
         tx,
         cancel,
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await
     .unwrap();
@@ -1614,6 +1639,7 @@ async fn max_iterations_guard_stops_loop() {
         tx,
         CancellationToken::new(),
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await
     .unwrap();
@@ -1680,6 +1706,7 @@ async fn abort_after_tool_call_keeps_transcript_valid() {
         tx,
         cancel,
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await
     .unwrap();
@@ -1723,6 +1750,7 @@ async fn provider_error_mid_stream_persists_partial_step() {
         tx,
         CancellationToken::new(),
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await;
 
@@ -1783,6 +1811,7 @@ async fn provider_error_with_no_content_still_persists_the_error() {
         tx,
         CancellationToken::new(),
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await;
 
@@ -1831,6 +1860,7 @@ async fn stream_ending_without_terminal_event_is_error() {
         tx,
         CancellationToken::new(),
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await;
 
@@ -1841,4 +1871,281 @@ async fn stream_ending_without_terminal_event_is_error() {
             .to_string()
             .contains("stream ended before completion")
     );
+}
+
+// ---- steering ----
+
+fn echo_call(id: &str, msg: &str) -> Vec<ProviderEvent> {
+    vec![
+        ProviderEvent::ToolCallStarted {
+            id: id.into(),
+            name: "echo".into(),
+        },
+        ProviderEvent::ToolCallCompleted {
+            id: id.into(),
+            name: "echo".into(),
+            input: serde_json::json!({ "msg": msg }),
+        },
+        ProviderEvent::TurnComplete {
+            stop_reason: StopReason::ToolUse,
+            usage: Default::default(),
+        },
+    ]
+}
+
+fn plain_turn(text: &str) -> Vec<ProviderEvent> {
+    vec![
+        ProviderEvent::TextDelta(text.into()),
+        ProviderEvent::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+            usage: Default::default(),
+        },
+    ]
+}
+
+/// Sends a steer the moment it is invoked, standing in for the user
+/// typing while a tool runs.
+struct SteerOnCallTool {
+    steer: ilar::agent::SteerSender,
+}
+
+impl Tool for SteerOnCallTool {
+    fn name(&self) -> &'static str {
+        "slow_work"
+    }
+    fn description(&self) -> &'static str {
+        "test tool that steers mid-turn"
+    }
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::Barrier
+    }
+    fn workspace_access(&self) -> WorkspaceAccess {
+        WorkspaceAccess::None
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    fn run(&self, _input: serde_json::Value, _ctx: ToolContext) -> ToolFuture {
+        let _ = self.steer.send("actually, look at the other file".into());
+        Box::pin(async move { ToolOutput::text("worked") })
+    }
+}
+
+/// Emits one steer while producing its first response, standing in for
+/// the user typing as the model is wrapping up.
+struct SteerWhileRespondingProvider {
+    steer: ilar::agent::SteerSender,
+    calls: AtomicUsize,
+    text: String,
+}
+
+impl Provider for SteerWhileRespondingProvider {
+    fn stream(&self, _req: Request) -> anyhow::Result<EventStream> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            let _ = self.steer.send(self.text.clone());
+        }
+        Ok(Box::pin(futures::stream::iter(plain_turn("done"))))
+    }
+}
+
+/// A message sent while the model is mid-tool-loop must reach it at the
+/// next step, not after the whole turn ends. Waiting for the turn is the
+/// behaviour steering exists to replace.
+#[tokio::test]
+async fn a_steer_reaches_the_model_at_the_next_step() {
+    let (store, session_id) = temp_session("build");
+    let (steer, steer_rx) = ilar::agent::steer_channel();
+    let provider = MockProvider::new(vec![
+        vec![
+            ProviderEvent::ToolCallStarted {
+                id: "call-1".into(),
+                name: "slow_work".into(),
+            },
+            ProviderEvent::ToolCallCompleted {
+                id: "call-1".into(),
+                name: "slow_work".into(),
+                input: serde_json::json!({}),
+            },
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+                usage: Default::default(),
+            },
+        ],
+        echo_call("call-2", "second"),
+        plain_turn("done"),
+    ]);
+    let registry = ToolRegistry::builtin()
+        .with_tool(Arc::new(SteerOnCallTool {
+            steer: steer.clone(),
+        }))
+        .unwrap()
+        .with_tool(Arc::new(EchoTool {
+            calls: Arc::new(Mutex::new(Vec::new())),
+        }))
+        .unwrap();
+
+    let outcome = run_turn(
+        &provider,
+        &registry,
+        &store,
+        &session_id,
+        "start the task",
+        None,
+        LoopConfig::default(),
+        events_channel().0,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+        Some(steer_rx),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, TurnOutcome::Completed);
+    let requests = provider.requests();
+    let first = format!("{:?}", requests[0].messages);
+    let second = format!("{:?}", requests[1].messages);
+    assert!(
+        !first.contains("actually, look at the other file"),
+        "the steer had not been sent yet: {first}"
+    );
+    assert!(
+        second.contains("actually, look at the other file"),
+        "the steer should reach the very next step: {second}"
+    );
+    // The steer merges into the tool-result user message, so block order
+    // is the real invariant: providers require tool results to lead.
+    let transcript = store.load(&session_id).unwrap().transcript();
+    for pair in transcript.windows(2) {
+        assert_ne!(pair[0].role, pair[1].role);
+    }
+    let merged = transcript
+        .iter()
+        .find(|message| {
+            message
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+        })
+        .expect("a user message carrying tool results");
+    let kinds: Vec<&str> = merged
+        .content
+        .iter()
+        .map(|block| match block {
+            ContentBlock::ToolResult { .. } => "tool_result",
+            ContentBlock::Text { .. } => "text",
+            _ => "other",
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        vec!["tool_result", "text"],
+        "the steer must follow the tool results, not precede them"
+    );
+}
+
+/// The reopen decision must come from the drain, not from asking the
+/// channel whether it is empty: a whitespace-only steer is counted as
+/// pending but then discarded, which reopened the turn with nothing to
+/// add and appended a second assistant message with no user message
+/// between them — permanently breaking role alternation.
+#[tokio::test]
+async fn a_steer_that_drains_to_nothing_does_not_reopen_the_turn() {
+    let (store, session_id) = temp_session("build");
+    let (steer, steer_rx) = ilar::agent::steer_channel();
+    let provider = SteerWhileRespondingProvider {
+        steer: steer.clone(),
+        calls: AtomicUsize::new(0),
+        text: "   ".into(),
+    };
+
+    let outcome = run_turn(
+        &provider,
+        &ToolRegistry::builtin(),
+        &store,
+        &session_id,
+        "do the thing",
+        None,
+        LoopConfig::default(),
+        events_channel().0,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+        Some(steer_rx),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, TurnOutcome::Completed);
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        1,
+        "a steer with no content must not reopen the turn"
+    );
+    for pair in store.load(&session_id).unwrap().transcript().windows(2) {
+        assert_ne!(pair[0].role, pair[1].role);
+    }
+}
+
+/// A steer arriving as the model stops should reopen the turn rather
+/// than being stranded until the user sends something else.
+#[tokio::test]
+async fn a_steer_reopens_a_finishing_turn() {
+    let (store, session_id) = temp_session("build");
+    let (steer, steer_rx) = ilar::agent::steer_channel();
+    let provider = SteerWhileRespondingProvider {
+        steer,
+        calls: AtomicUsize::new(0),
+        text: "one more thing".into(),
+    };
+
+    let outcome = run_turn(
+        &provider,
+        &ToolRegistry::builtin(),
+        &store,
+        &session_id,
+        "do the thing",
+        None,
+        LoopConfig::default(),
+        events_channel().0,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+        Some(steer_rx),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, TurnOutcome::Completed);
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        2,
+        "the steer arriving as the model stopped should have reopened the turn"
+    );
+    let rendered = format!("{:?}", store.load(&session_id).unwrap().transcript());
+    assert!(rendered.contains("one more thing"), "{rendered}");
+}
+
+/// Without a steer, a turn that stops stays stopped.
+#[tokio::test]
+async fn no_steer_leaves_turn_completion_alone() {
+    let (store, session_id) = temp_session("build");
+    let provider = MockProvider::new(vec![plain_turn("done")]);
+    let (_steer, steer_rx) = ilar::agent::steer_channel();
+
+    let outcome = run_turn(
+        &provider,
+        &ToolRegistry::builtin(),
+        &store,
+        &session_id,
+        "do the thing",
+        None,
+        LoopConfig::default(),
+        events_channel().0,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+        Some(steer_rx),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, TurnOutcome::Completed);
+    assert_eq!(provider.requests().len(), 1);
 }

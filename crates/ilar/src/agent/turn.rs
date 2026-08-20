@@ -13,6 +13,31 @@ use crate::tools::ToolRegistry;
 use crate::tools::executor::{CallOutcome, ToolCall, execute_calls_observed};
 use chrono::Utc;
 
+/// Messages the user sends while a turn is running, delivered to the
+/// model at the next step boundary rather than after the turn ends.
+///
+/// Unbounded on purpose: a steer that blocks the UI thread would defeat
+/// the point, and the volume is bounded by how fast a person types.
+pub type SteerSender = tokio::sync::mpsc::UnboundedSender<String>;
+pub type SteerReceiver = tokio::sync::mpsc::UnboundedReceiver<String>;
+
+pub fn steer_channel() -> (SteerSender, SteerReceiver) {
+    tokio::sync::mpsc::unbounded_channel()
+}
+
+/// Take everything pending without waiting.
+fn drain_steers(steer: Option<&mut SteerReceiver>) -> Vec<String> {
+    let mut pending = Vec::new();
+    if let Some(steer) = steer {
+        while let Ok(text) = steer.try_recv() {
+            if !text.trim().is_empty() {
+                pending.push(text);
+            }
+        }
+    }
+    pending
+}
+
 /// Loop tuning knobs.
 #[derive(Debug, Clone)]
 pub struct LoopConfig {
@@ -853,6 +878,7 @@ pub async fn run_turn(
     mut events: LoopEventSender,
     cancel: CancellationToken,
     mut tool_ctx: crate::tools::ToolContext,
+    mut steer: Option<SteerReceiver>,
 ) -> Result<TurnOutcome> {
     let mut session = store.acquire_writer(session_id)?.load()?;
     let model = session.effective_model();
@@ -924,6 +950,9 @@ pub async fn run_turn(
     let mut continuations = Vec::new();
     let mut continuation_provider: Option<String> = None;
     let mut paused_content = Vec::new();
+    // Steers drained at the end of a step, waiting to be appended at the
+    // top of the next one.
+    let mut pending_steers: Vec<String> = Vec::new();
     while iterations < config.max_iterations {
         if cancel.is_cancelled() {
             if !paused_content.is_empty() {
@@ -940,6 +969,28 @@ pub async fn run_turn(
                 outcome: TurnOutcome::Aborted,
             });
             return Ok(TurnOutcome::Aborted);
+        }
+
+        // Deliver anything the user sent while this turn was running.
+        // Same settled-step requirement as compaction below: between an
+        // assistant message carrying tool calls and its results the
+        // transcript is incomplete, and a user message inserted there
+        // would break the pairing.
+        if continuations.is_empty() && paused_content.is_empty() {
+            pending_steers.extend(drain_steers(steer.as_mut()));
+            if !pending_steers.is_empty() {
+                for text in pending_steers.drain(..) {
+                    session.append(SessionEvent::UserMessage {
+                        id: new_id(),
+                        text: text.clone(),
+                        ts: Utc::now(),
+                    })?;
+                    events.publish(LoopEvent::Steered { text }, &cancel).await;
+                }
+                // New instructions get a fresh step budget rather than
+                // inheriting whatever the interrupted work had left.
+                iterations = 0;
+            }
         }
 
         // A single agentic turn can outgrow the window on its own, so the
@@ -1359,6 +1410,15 @@ pub async fn run_turn(
         paused_content.clear();
 
         if !had_tool_calls {
+            // The model is done, but the user may have said something
+            // since. Let the drain decide: asking the channel whether it
+            // is empty would count messages the drain then discards,
+            // reopening the turn with nothing to add and appending a
+            // second assistant message with no user message between.
+            pending_steers = drain_steers(steer.as_mut());
+            if !pending_steers.is_empty() {
+                continue;
+            }
             events.publish_terminal(LoopEvent::TurnDone {
                 outcome: TurnOutcome::Completed,
             });

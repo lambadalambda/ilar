@@ -128,3 +128,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Bring grep to parity with glob](issues/grep-parity-with-glob.md)
 - [x] [edit blocks the async runtime](issues/edit-blocking-io.md)
 - [x] [Split the TUI main module](issues/split-tui-main.md)
+- [x] [Steer a running turn](issues/steer-a-running-turn.md)

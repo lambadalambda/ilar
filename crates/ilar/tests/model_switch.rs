@@ -85,6 +85,7 @@ async fn reasoning_variant_is_persisted_and_applied_to_the_next_turn() {
         tx,
         tokio_util::sync::CancellationToken::new(),
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await
     .unwrap();
@@ -127,6 +128,7 @@ async fn invalid_persisted_variant_fails_before_user_append() {
         tx,
         tokio_util::sync::CancellationToken::new(),
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await
     .unwrap_err();
@@ -171,6 +173,7 @@ async fn model_change_applies_from_next_provider_call() {
         tx,
         tokio_util::sync::CancellationToken::new(),
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await
     .unwrap();
@@ -203,6 +206,7 @@ async fn model_change_applies_from_next_provider_call() {
         tx,
         tokio_util::sync::CancellationToken::new(),
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await
     .unwrap();
@@ -259,6 +263,7 @@ async fn turn_resolves_provider_from_persisted_effective_model() {
         tx,
         tokio_util::sync::CancellationToken::new(),
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await
     .unwrap();
@@ -290,6 +295,7 @@ async fn provider_resolution_failure_does_not_append_user_message() {
         tx,
         tokio_util::sync::CancellationToken::new(),
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await
     .unwrap_err();
@@ -316,6 +322,7 @@ async fn concrete_provider_prefix_mismatch_fails_before_user_append() {
         tx,
         tokio_util::sync::CancellationToken::new(),
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await
     .unwrap_err();

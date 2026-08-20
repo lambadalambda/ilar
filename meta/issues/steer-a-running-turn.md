@@ -77,6 +77,26 @@ both in the core and retired queue-only from the UI.
   preserved.
 - Existing queue tests pass unchanged.
 
+## Outcome
+
+Landed. The core half is covered by four tests in
+`crates/ilar/tests/agent_loop.rs`; the UI half is not, because `run_app`
+still has no harness — see
+[Make the event loop testable](testable-event-loop.md).
+
+Two acceptance criteria as written turned out to be wrong:
+
+- "Starting a turn from the queue also drains pending steers" is moot.
+  The steer channel is created fresh at each turn spawn, so nothing can
+  be pending at turn start; anything typed while idle goes to the queue
+  by definition.
+- "Steers outrank queued messages" holds, but by a different mechanism
+  than anticipated — a steer lands mid-turn and queued messages drain
+  after, rather than one being promoted ahead of the other.
+
+Deferred: reopening on the very last allowed iteration returns
+`MaxIterations` and drops the steer. Needs a 1000-step turn to reach.
+
 ## Notes
 
 - `run_turn` currently owns a one-way channel (`LoopEventSender`, loop

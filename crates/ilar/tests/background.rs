@@ -855,6 +855,7 @@ async fn background_task_returns_immediately_and_notifies_once() {
         tx,
         tokio_util::sync::CancellationToken::new(),
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await
     .unwrap();
@@ -1817,6 +1818,7 @@ async fn notification_reinvokes_parent_loop_as_synthetic_user_turn() {
         tx,
         tokio_util::sync::CancellationToken::new(),
         ToolContext::root(std::env::temp_dir()),
+        None,
     )
     .await
     .unwrap();
