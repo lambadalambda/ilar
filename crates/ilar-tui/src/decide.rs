@@ -57,6 +57,16 @@ pub(crate) enum Intent {
     StartTurn(String),
     /// Take the head of the queue and send it.
     SendQueued,
+    /// Steer the running turn; falls back to the queue when the
+    /// channel is gone, because the turn ending mid-submit must not
+    /// lose the message.
+    Steer(String),
+    /// Hold until the running turn completes.
+    Queue(String),
+    /// Pasted text, routed to whichever surface owned the keyboard.
+    PastePalette(String),
+    PasteSearch(String),
+    PasteInput(String),
     /// Drop the goal, having finished or run out of rounds.
     ClearGoal,
     /// Advance the goal to this round.
@@ -217,6 +227,29 @@ pub(crate) fn after_turn(
         )),
     }
     intents
+}
+
+/// What a submitted prompt becomes. The decision (`submit_target`) and
+/// the payload travel together, so a call site cannot route the text
+/// one way while believing it decided another.
+pub(crate) fn submit(state: &LoopState, busy: bool, text: String) -> Vec<Intent> {
+    match submit_target(state, busy) {
+        SubmitTarget::StartTurn => vec![Intent::StartTurn(text)],
+        SubmitTarget::Steer => vec![Intent::Steer(text)],
+        SubmitTarget::Queue => vec![Intent::Queue(text)],
+    }
+}
+
+/// What pasted text becomes. A picker returns nothing: it has nowhere
+/// to put text, and falling through to the prompt behind it would edit
+/// something the user cannot see.
+pub(crate) fn paste(state: &LoopState, text: String) -> Vec<Intent> {
+    match paste_target(state) {
+        PasteTarget::Palette => vec![Intent::PastePalette(text)],
+        PasteTarget::Search => vec![Intent::PasteSearch(text)],
+        PasteTarget::Input => vec![Intent::PasteInput(text)],
+        PasteTarget::Discard => Vec::new(),
+    }
 }
 
 /// Retry the last prompt, or explain why not.
@@ -452,6 +485,63 @@ mod tests {
             intents.last(),
             Some(Intent::Notice(text, NoticeLevel::Warning)) if text.contains("2 queued")
         ));
+    }
+
+    /// The decision and the payload travel together: submitted text
+    /// becomes exactly one intent, carrying the text.
+    #[test]
+    fn submitted_text_becomes_one_intent_carrying_it() {
+        assert_eq!(
+            submit(&idle(), false, "hi".into()),
+            vec![Intent::StartTurn("hi".into())]
+        );
+        let steerable = LoopState {
+            turn_running: true,
+            steerable: true,
+            ..idle()
+        };
+        assert_eq!(
+            submit(&steerable, true, "go left".into()),
+            vec![Intent::Steer("go left".into())]
+        );
+        let routed = LoopState {
+            turn_running: true,
+            steerable: false,
+            ..idle()
+        };
+        assert_eq!(
+            submit(&routed, true, "later".into()),
+            vec![Intent::Queue("later".into())]
+        );
+    }
+
+    #[test]
+    fn pasted_text_becomes_the_owning_surfaces_intent_or_nothing() {
+        assert_eq!(
+            paste(&idle(), "text".into()),
+            vec![Intent::PasteInput("text".into())]
+        );
+        let searching = LoopState {
+            modal: Some(Modal::Search),
+            ..idle()
+        };
+        assert_eq!(
+            paste(&searching, "needle".into()),
+            vec![Intent::PasteSearch("needle".into())]
+        );
+        let palette = LoopState {
+            modal: Some(Modal::CommandPalette),
+            ..idle()
+        };
+        assert_eq!(
+            paste(&palette, "query".into()),
+            vec![Intent::PastePalette("query".into())]
+        );
+        let picker = LoopState {
+            modal: Some(Modal::ModelPicker),
+            ..idle()
+        };
+        assert_eq!(paste(&picker, "text".into()), Vec::new());
     }
 
     /// Retry must not overwrite a draft — an unsubmitted one is not in

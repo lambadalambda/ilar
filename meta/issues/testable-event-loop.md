@@ -91,16 +91,33 @@ fails a test. Still green under mutation, and therefore still untested:
 - paste routing, the notification gate, and the start/steer/queue branch
 
 So the two criteria in [Unify the TUI modal layer](unify-tui-modals.md)
-remain verified by reading. Phase three is `decide(event, &state) ->
-Vec<Intent>` for the key and paste paths, which brings those three under
-test and makes the drain covered by construction.
+remain verified by reading after phase two. Phase three is
+`decide(event, &state) -> Vec<Intent>` for the key and paste paths.
 
-Two things a `decide()` still would not cover, worth stating so the
-issue is not closed on a false claim: the spawn block, which needs a
-provider and a session store; and the loop *schedule* — where the drain
-sits relative to the notification gate and the render. The bug above
-lived in that ordering and no `decide()` test would have seen it. That
-needs an extracted `tick()` or a harness with a fake terminal.
+Phase three landed. Submitting and pasting are decisions now:
+`decide::submit(state, busy, text)` returns `StartTurn`/`Steer`/`Queue`
+carrying the text, `decide::paste(state, text)` returns the owning
+surface's intent (or nothing, for a picker), and `apply_intent` owns
+the effects — including the steer-channel send with its fall-back to
+the queue when the channel closed mid-submit. Event-side intents apply
+immediately via `apply_event_intents` rather than deferring to the
+central drain: a steer deferred one tick can miss its turn, and a
+queue push deferred past the completion check strands the message.
+
+Coverage, measured by mutation as before. Newly failing under
+mutation: the submit and paste routing (swapping the search and input
+arms now fails a test — the phase-one gap that produced no warning at
+all), the steer fallback (deleting it fails), the paste effects
+(deleting `search_refresh` fails), and the queue→send sequence is
+composed end to end in `a_message_submitted_mid_turn_queues_and_then_sends`.
+
+Still green under mutation, and therefore the honest boundary of this
+issue: the per-event-class call sites in `run_app` (one
+`apply_event_intents` line each) and the notification gate's one-line
+consultation. Those are the loop's *schedule*, which no `decide()`
+test can see — the spawn block likewise needs a provider and a session
+store. Both are filed as
+[A harness for the event loop's schedule](loop-schedule-harness.md).
 
 ## Notes
 

@@ -26,10 +26,7 @@ use crossterm::event::{
     MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::supports_keyboard_enhancement;
-use decide::{
-    Intent, LoopState, PasteTarget, SubmitTarget, after_turn, may_route_notification, paste_target,
-    retry as retry_intents, submit_target,
-};
+use decide::{Intent, LoopState, after_turn, may_route_notification, retry as retry_intents};
 use input::{InputBuffer, PromptAction, handle_prompt_key, retry_requested};
 use modals::{
     CommandPaletteAction, Modal, ModelPicker, PendingAction, PendingManager, PickerAction,
@@ -255,7 +252,11 @@ fn prepare_prompt(app: &mut App, text: String) -> Option<String> {
 /// Apply one intent to the app. Returns the prompt when the intent
 /// starts a turn — spawning needs the runtime, everything else does
 /// not, and keeping the split here is what makes the wiring testable.
-fn apply_intent(app: &mut App, intent: Intent) -> Option<String> {
+fn apply_intent(
+    app: &mut App,
+    intent: Intent,
+    steer: Option<&ilar::agent::SteerSender>,
+) -> Option<String> {
     match intent {
         Intent::Notice(text, level) => {
             app.set_notice(text, level);
@@ -275,9 +276,53 @@ fn apply_intent(app: &mut App, intent: Intent) -> Option<String> {
             }
             None
         }
+        Intent::Steer(text) => {
+            // The channel can close between the decision and here — the
+            // turn ending is exactly when that happens — and the message
+            // must not be lost with it.
+            match steer {
+                Some(tx) if tx.send(text.clone()).is_ok() => {
+                    app.pending_steers.push(text);
+                    app.set_notice(
+                        "steering — reaches the model at the next step",
+                        NoticeLevel::Info,
+                    );
+                    None
+                }
+                _ => apply_intent(app, Intent::Queue(text), steer),
+            }
+        }
+        Intent::Queue(text) => {
+            app.queued_messages.push(text);
+            app.set_notice(
+                format!(
+                    "queued ({} waiting) — sends when the turn completes",
+                    app.queued_messages.len()
+                ),
+                NoticeLevel::Info,
+            );
+            None
+        }
+        Intent::PastePalette(text) => {
+            if let Some(palette) = app.command_palette.as_mut() {
+                palette.insert_query(&text);
+            }
+            None
+        }
+        Intent::PasteSearch(text) => {
+            app.search_query.push_str(text.trim());
+            app.search_refresh();
+            None
+        }
+        Intent::PasteInput(text) => {
+            app.model_key_pending = false;
+            app.clear_transient_notice();
+            app.input.insert(&text);
+            None
+        }
         Intent::SendQueued => {
             let next = (!app.queued_messages.is_empty()).then(|| app.queued_messages.remove(0))?;
-            apply_intent(app, Intent::StartTurn(next))
+            apply_intent(app, Intent::StartTurn(next), steer)
         }
         Intent::StartTurn(text) => {
             // Recorded before expansion, so a retry replays what the
@@ -292,6 +337,28 @@ fn apply_intent(app: &mut App, intent: Intent) -> Option<String> {
             app.status = "thinking".into();
             app.set_activity(Activity::Thinking);
             Some(text)
+        }
+    }
+}
+
+/// Apply event-side intents now, deferring only turn starts to the
+/// central drain where spawning lives. Applying immediately matters: a
+/// steer deferred by one loop tick can miss the turn it was aimed at,
+/// and a queue push deferred past the completion check strands the
+/// message instead of auto-sending it.
+fn apply_event_intents(
+    app: &mut App,
+    decided: Vec<Intent>,
+    deferred: &mut Vec<Intent>,
+    steer: Option<&ilar::agent::SteerSender>,
+) {
+    for intent in decided {
+        match intent {
+            Intent::StartTurn(_) => deferred.push(intent),
+            other => {
+                let started = apply_intent(app, other, steer);
+                debug_assert!(started.is_none(), "only StartTurn yields a prompt");
+            }
         }
     }
 }
@@ -1062,7 +1129,7 @@ async fn run_app(
         // changes and is testable on an App alone; spawning is the only
         // thing that needs the runtime, so it stays here.
         for intent in std::mem::take(&mut intents) {
-            let Some(text) = apply_intent(app, intent) else {
+            let Some(text) = apply_intent(app, intent, steer_tx.as_ref()) else {
                 continue;
             };
             // Every push site is guarded against starting a turn while
@@ -1721,23 +1788,6 @@ async fn run_app(
                         }
                     }
                     _ => match handle_prompt_key(&mut app.input, key) {
-                        PromptAction::Submit
-                            if !app.input.is_blank()
-                                && submit_target(
-                                    &observe(
-                                        app,
-                                        &turn_handle,
-                                        &pending_terminal_event,
-                                        &steer_tx,
-                                        notifications_paused,
-                                    ),
-                                    app.busy,
-                                ) == SubmitTarget::StartTurn =>
-                        {
-                            let text = app.input.take();
-                            app.history.push(&text);
-                            intents.push(Intent::StartTurn(text));
-                        }
                         PromptAction::Submit if !app.input.is_blank() => {
                             // Observe before taking the text: the
                             // decision is about the state the user
@@ -1751,30 +1801,10 @@ async fn run_app(
                             );
                             let text = app.input.take();
                             app.history.push(&text);
-                            // Steer the running turn when one is live;
-                            // the transcript line appears when the loop
-                            // delivers it, not on submit.
-                            match (submit_target(&state, app.busy), steer_tx.as_ref()) {
-                                (SubmitTarget::Steer, Some(tx))
-                                    if tx.send(text.clone()).is_ok() =>
-                                {
-                                    app.pending_steers.push(text);
-                                    app.set_notice(
-                                        "steering — reaches the model at the next step",
-                                        NoticeLevel::Info,
-                                    );
-                                }
-                                _ => {
-                                    app.queued_messages.push(text);
-                                    app.set_notice(
-                                        format!(
-                                            "queued ({} waiting) — sends when the turn completes",
-                                            app.queued_messages.len()
-                                        ),
-                                        NoticeLevel::Info,
-                                    );
-                                }
-                            }
+                            // The transcript line for a steer appears
+                            // when the loop delivers it, not on submit.
+                            let decided = decide::submit(&state, app.busy, text);
+                            apply_event_intents(app, decided, &mut intents, steer_tx.as_ref());
                         }
                         PromptAction::Edited => app.clear_transient_notice(),
                         PromptAction::Unhandled | PromptAction::Submit => {}
@@ -1789,21 +1819,8 @@ async fn run_app(
                     &steer_tx,
                     notifications_paused,
                 );
-                match paste_target(&state) {
-                    PasteTarget::Palette => {
-                        app.command_palette.as_mut().unwrap().insert_query(&text);
-                    }
-                    PasteTarget::Search => {
-                        app.search_query.push_str(text.trim());
-                        app.search_refresh();
-                    }
-                    PasteTarget::Input => {
-                        app.model_key_pending = false;
-                        app.clear_transient_notice();
-                        app.input.insert(&text);
-                    }
-                    PasteTarget::Discard => {}
-                }
+                let decided = decide::paste(&state, text);
+                apply_event_intents(app, decided, &mut intents, steer_tx.as_ref());
             }
             Event::Mouse(mouse)
                 if matches!(

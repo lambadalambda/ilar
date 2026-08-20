@@ -5291,7 +5291,7 @@ mod tests {
         app.queued_messages = vec!["first".into(), "second".into()];
 
         // Sending from the queue takes the head and becomes a turn.
-        let sent = apply_intent(&mut app, Intent::SendQueued);
+        let sent = apply_intent(&mut app, Intent::SendQueued, None);
         assert_eq!(sent.as_deref(), Some("first"));
         assert_eq!(app.queued_messages, vec!["second"]);
         assert!(app.busy, "a started turn marks the app busy");
@@ -5303,19 +5303,19 @@ mod tests {
 
         // An empty queue starts nothing.
         app.queued_messages.clear();
-        assert_eq!(apply_intent(&mut app, Intent::SendQueued), None);
+        assert_eq!(apply_intent(&mut app, Intent::SendQueued, None), None);
 
         // Goal bookkeeping does not start a turn.
         app.goal = Some(("ship it".into(), 3));
-        assert_eq!(apply_intent(&mut app, Intent::AdvanceGoal(4)), None);
+        assert_eq!(apply_intent(&mut app, Intent::AdvanceGoal(4), None), None);
         assert_eq!(app.goal.as_ref().map(|(_, round)| *round), Some(4));
-        assert_eq!(apply_intent(&mut app, Intent::ClearGoal), None);
+        assert_eq!(apply_intent(&mut app, Intent::ClearGoal, None), None);
         assert!(app.goal.is_none());
 
         // Starting a turn withdraws the retry offer.
         app.retry_available = true;
         app.queued_messages = vec!["again".into()];
-        assert!(apply_intent(&mut app, Intent::SendQueued).is_some());
+        assert!(apply_intent(&mut app, Intent::SendQueued, None).is_some());
         assert!(!app.retry_available);
     }
 
@@ -5340,7 +5340,7 @@ mod tests {
 
         let mut started = None;
         for intent in intents {
-            started = started.or(apply_intent(&mut app, intent));
+            started = started.or(apply_intent(&mut app, intent, None));
         }
         assert_eq!(started.as_deref(), Some("do the next thing"));
         assert!(app.queued_messages.is_empty());
@@ -5357,7 +5357,7 @@ mod tests {
         app.commands = vec![command("greptile", "Greptile", "Review $ARGUMENTS")];
         app.queued_messages = vec!["/goal ship the parser".into()];
 
-        let sent = apply_intent(&mut app, Intent::SendQueued).expect("the goal kickoff");
+        let sent = apply_intent(&mut app, Intent::SendQueued, None).expect("the goal kickoff");
         assert!(
             app.goal
                 .as_ref()
@@ -5377,7 +5377,108 @@ mod tests {
 
         // Same for a queued command.
         app.queued_messages = vec!["/greptile PR 41".into()];
-        let sent = apply_intent(&mut app, Intent::SendQueued).expect("the command body");
+        let sent = apply_intent(&mut app, Intent::SendQueued, None).expect("the command body");
         assert_eq!(sent, "Review PR 41");
+    }
+
+    /// A steer reaches the channel while it lives and falls back to the
+    /// queue when it does not — the turn ending mid-submit is exactly
+    /// when the channel closes, and the message must survive it.
+    #[test]
+    fn a_steer_reaches_the_channel_or_falls_back_to_the_queue() {
+        use crate::{Intent, apply_intent};
+
+        let mut app = App::new();
+        let (tx, mut rx) = ilar::agent::steer_channel();
+        assert_eq!(
+            apply_intent(&mut app, Intent::Steer("go left".into()), Some(&tx)),
+            None
+        );
+        assert_eq!(rx.try_recv().ok().as_deref(), Some("go left"));
+        assert_eq!(app.pending_steers, vec!["go left"]);
+        assert!(app.queued_messages.is_empty());
+
+        // Receiver gone: the same intent queues instead of vanishing.
+        drop(rx);
+        apply_intent(&mut app, Intent::Steer("too late".into()), Some(&tx));
+        assert_eq!(app.queued_messages, vec!["too late"]);
+
+        // No channel at all — a routed notification turn.
+        apply_intent(&mut app, Intent::Steer("no channel".into()), None);
+        assert_eq!(app.queued_messages, vec!["too late", "no channel"]);
+        assert_eq!(app.pending_steers, vec!["go left"]);
+    }
+
+    /// Paste intents land in the surface the decision named.
+    #[test]
+    fn paste_intents_land_in_their_surfaces() {
+        use crate::{Intent, apply_intent};
+
+        let mut app = App::new();
+        apply_intent(&mut app, Intent::PasteInput("hello ".into()), None);
+        apply_intent(&mut app, Intent::PasteInput("world".into()), None);
+        assert_eq!(app.input.text(), "hello world");
+
+        app.push_transcript_line(Line_::System("needle in here".into()));
+        // The search cache fills during a render pass.
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 12)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        app.open_search();
+        apply_intent(&mut app, Intent::PasteSearch(" needle ".into()), None);
+        assert_eq!(app.search_query, "needle");
+        assert!(!app.search_matches.is_empty(), "the paste searched");
+        app.close_search(false);
+
+        app.open_command_palette();
+        apply_intent(&mut app, Intent::PastePalette("pending".into()), None);
+        let palette = app.command_palette.as_mut().expect("palette open");
+        assert_eq!(
+            palette.handle_key(KeyCode::Enter, false),
+            crate::modals::CommandPaletteAction::Choose(PaletteAction::Command(
+                PaletteCommand::Pending
+            )),
+            "the pasted query should filter the palette"
+        );
+        // A palette paste with no palette open is dropped, not a panic.
+        app.command_palette = None;
+        assert_eq!(
+            apply_intent(&mut app, Intent::PastePalette("text".into()), None),
+            None
+        );
+    }
+
+    /// The whole path a mid-turn submit takes: decided as a queue,
+    /// applied, then sent by the completion's intents. This is the
+    /// sequence the loop performs, driven without the loop.
+    #[test]
+    fn a_message_submitted_mid_turn_queues_and_then_sends() {
+        use crate::decide::{self, LoopState, after_turn};
+        use crate::{Intent, apply_intent};
+
+        let mut app = App::new();
+        let running = LoopState {
+            turn_running: true,
+            steerable: false,
+            input_blank: true,
+            ..LoopState::default()
+        };
+        for intent in decide::submit(&running, true, "next thing".into()) {
+            assert!(!matches!(intent, Intent::StartTurn(_)), "mid-turn submit");
+            apply_intent(&mut app, intent, None);
+        }
+        assert_eq!(app.queued_messages, vec!["next thing"]);
+
+        let idle = LoopState {
+            input_blank: true,
+            queued: app.queued_messages.len(),
+            ..LoopState::default()
+        };
+        let mut started = None;
+        for intent in after_turn(&idle, true, None, false, 25) {
+            started = started.or(apply_intent(&mut app, intent, None));
+        }
+        assert_eq!(started.as_deref(), Some("next thing"));
+        assert!(app.queued_messages.is_empty());
     }
 }
