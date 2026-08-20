@@ -27,7 +27,7 @@ use crossterm::event::{
     MouseEvent, MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::supports_keyboard_enhancement;
-use decide::{Intent, LoopState, after_turn, retry as retry_intents};
+use decide::{Intent, LoopState, retry as retry_intents};
 use input::slash_candidates;
 use input::{InputBuffer, PromptAction, handle_prompt_key, retry_requested};
 use modals::{
@@ -978,7 +978,7 @@ struct LoopRuntime<'a> {
     pending_notification: &'a mut Option<PendingNotification>,
     notifications: &'a mut tokio::sync::mpsc::Receiver<ilar::subagent::Notification>,
     ring_on_turn_completion: &'a mut bool,
-    notifications_paused: bool,
+    notifications_paused: &'a mut bool,
     resolver: &'a Arc<dyn ProviderResolver>,
     store: &'a SessionStore,
     session_id: &'a str,
@@ -996,7 +996,7 @@ impl schedule::Runtime for LoopRuntime<'_> {
             self.turn_handle,
             self.pending_terminal_event,
             self.steer_tx,
-            self.notifications_paused,
+            *self.notifications_paused,
         )
     }
 
@@ -1082,7 +1082,7 @@ impl schedule::Runtime for LoopRuntime<'_> {
         // hand the keyboard to a notification turn.
         let modal_open = app.has_modal();
         if self.turn_handle.is_none()
-            && !self.notifications_paused
+            && !*self.notifications_paused
             && !modal_open
             && self.pending_terminal_event.is_none()
             && crossterm::event::poll(std::time::Duration::ZERO)?
@@ -1167,6 +1167,58 @@ impl schedule::Runtime for LoopRuntime<'_> {
 
     fn session_id(&self) -> &str {
         self.session_id
+    }
+
+    fn resume_notifications(&mut self) {
+        *self.notifications_paused = false;
+    }
+
+    fn pause_notifications(&mut self) {
+        *self.notifications_paused = true;
+    }
+
+    fn hold_propagate(&mut self, notification: ilar::subagent::Notification) {
+        *self.pending_notification = Some(PendingNotification {
+            notification,
+            queued_ahead: self.notifications.len(),
+        });
+    }
+
+    fn hold_requeue(&mut self, notification: ilar::subagent::Notification) {
+        *self.pending_notification = Some(PendingNotification {
+            notification,
+            queued_ahead: 0,
+        });
+    }
+
+    fn end_turn(&mut self) {
+        *self.events_rx = None;
+        *self.cancel = None;
+        *self.steer_tx = None;
+    }
+
+    fn revert_model(&mut self, app: &mut App, model: String, variant: Option<String>) {
+        // Hand-rolled rather than through adopt_model_selection
+        // because a revert must not clear an error notice the turn
+        // just set.
+        match persist_model_change(
+            self.resolver.as_ref(),
+            self.store,
+            self.session_id,
+            &model,
+            variant.as_deref(),
+        ) {
+            Ok(()) => {
+                app.current_model = model.clone();
+                app.current_variant = variant;
+                app.context_limit = display_context_limit(self.resolver.as_ref(), &model);
+                app.push_transcript_line(Line_::System(format!("model reverted to {model}")));
+            }
+            Err(error) => app.set_notice(
+                format!("reverting the model to {model} failed: {error:#}"),
+                NoticeLevel::Error,
+            ),
+        }
     }
 }
 
@@ -1281,7 +1333,9 @@ async fn run_app(
             };
             app.push_subagent_activity(&activity);
         }
-        // Turn finished? Join and clean up.
+        // Turn finished? Join at the edge; schedule::pass folds the
+        // completion into the same pass as the drain and the gate.
+        let mut completion = None;
         if let Some(handle) = turn_handle.as_mut()
             && handle.is_finished()
         {
@@ -1292,153 +1346,21 @@ async fn run_app(
                     app.push_loop_event(&event);
                 }
             }
-            match handle.await {
-                Ok(TurnCompletion::Root(result)) => {
-                    let aborted = matches!(result, Ok(TurnOutcome::Aborted));
-                    let completed = matches!(result, Ok(TurnOutcome::Completed));
-                    app.finish_turn(result);
-                    if !aborted {
-                        notifications_paused = false;
-                    }
-                    if aborted && let Some((_, round)) = &app.goal {
-                        let message = format!(
-                            "goal paused (round {round}/{MAX_GOAL_ROUNDS}) — resumes after your next completed turn; Ctrl-Q to manage"
-                        );
-                        app.push_transcript_line(Line_::System(message.clone()));
-                        app.set_notice(message, NoticeLevel::Warning);
-                    }
-                    let state = observe(
-                        app,
-                        &turn_handle,
-                        &pending_terminal_event,
-                        &steer_tx,
-                        notifications_paused,
-                    );
-                    let round = app.goal.as_ref().map(|(_, round)| *round);
-                    // Only scan the transcript when there is a goal to
-                    // satisfy; every other turn pays nothing.
-                    let achieved = round.is_some()
-                        && app
-                            .lines
-                            .iter()
-                            .rev()
-                            .find_map(|line| match line {
-                                Line_::Assistant(text) => Some(goal_achieved_in(text)),
-                                _ => None,
-                            })
-                            .unwrap_or(false);
-                    let goal = app
-                        .goal
-                        .as_ref()
-                        .map(|(goal, round)| (goal.clone(), *round));
-                    intents.extend(after_turn(
-                        &state,
-                        completed,
-                        goal.as_ref().map(|(goal, round)| (goal.as_str(), *round)),
-                        achieved,
-                        MAX_GOAL_ROUNDS,
-                    ));
-                }
-                Ok(TurnCompletion::Routed(Ok(ilar::subagent::RouteOutcome::Propagate(
-                    notification,
-                )))) => {
-                    app.busy = false;
-                    app.status = "ready".into();
-                    app.clear_transient_notice();
-                    app.set_activity(Activity::Ready);
-                    pending_notification = Some(PendingNotification {
-                        notification,
-                        queued_ahead: notifications.len(),
-                    });
-                }
-                Ok(TurnCompletion::Routed(Ok(ilar::subagent::RouteOutcome::Requeue(
-                    notification,
-                )))) => {
-                    app.busy = false;
-                    app.status = "notification paused; send a message to resume".into();
-                    app.set_persistent_notice(
-                        "notification paused; send a message to resume",
-                        NoticeLevel::Warning,
-                    );
-                    app.set_activity(Activity::Paused);
-                    pending_notification = Some(PendingNotification {
-                        notification,
-                        queued_ahead: 0,
-                    });
-                    notifications_paused = true;
-                }
-                Ok(TurnCompletion::Routed(Ok(ilar::subagent::RouteOutcome::Complete))) => {
-                    app.busy = false;
-                    app.status = "ready".into();
-                    app.clear_transient_notice();
-                    app.set_activity(Activity::Ready);
-                }
-                Ok(TurnCompletion::Routed(Err(error))) => {
-                    app.busy = false;
-                    app.status = "error".into();
-                    app.set_activity(Activity::Error);
-                    let message = format!("notification routing failed: {error}");
-                    app.set_notice(&message, NoticeLevel::Error);
-                    app.push_transcript_line(Line_::System(message));
-                }
-                Err(error) => {
-                    app.busy = false;
-                    app.status = "error".into();
-                    app.set_activity(Activity::Error);
-                    let message = format!("notification routing failed: {error}");
-                    app.set_notice(&message, NoticeLevel::Error);
-                    app.push_transcript_line(Line_::System(message));
-                }
-            }
-            events_rx = None;
-            cancel = None;
-            steer_tx = None;
-            // The turn dropped its receiver. Anything it never delivered
-            // (an abort, an error) would otherwise vanish with no
-            // transcript line and no way to get it back.
-            if !app.pending_steers.is_empty() {
-                let undelivered = std::mem::take(&mut app.pending_steers);
-                let count = undelivered.len();
-                app.queued_messages.splice(0..0, undelivered);
-                app.set_notice(
-                    format!("{count} undelivered steer(s) moved to the queue — Ctrl-Q to review"),
-                    NoticeLevel::Warning,
-                );
-            }
-            // A command's model override ends with its turn — however
-            // the turn ended. Hand-rolled rather than through
-            // adopt_model_selection because a revert must not clear an
-            // error notice the turn just set.
-            if let Some((model, variant)) = app.model_revert.take() {
-                match persist_model_change(
-                    resolver.as_ref(),
-                    store,
-                    session_id,
-                    &model,
-                    variant.as_deref(),
-                ) {
-                    Ok(()) => {
-                        app.current_model = model.clone();
-                        app.current_variant = variant;
-                        app.context_limit = display_context_limit(resolver.as_ref(), &model);
-                        app.push_transcript_line(Line_::System(format!(
-                            "model reverted to {model}"
-                        )));
-                    }
-                    Err(error) => app.set_notice(
-                        format!("reverting the model to {model} failed: {error:#}"),
-                        NoticeLevel::Error,
-                    ),
-                }
-            }
+            completion = Some(match handle.await {
+                Ok(TurnCompletion::Root(result)) => schedule::Completion::Root(result),
+                Ok(TurnCompletion::Routed(result)) => schedule::Completion::Routed(result),
+                Err(error) => schedule::Completion::Crashed(error.to_string()),
+            });
         }
 
-        // The stretch whose ordering is the schedule — drain the
-        // decided intents, let a buffered palette shortcut open, gate
-        // notifications on the result — lives in schedule::settle so
-        // tests can drive it. Only the effects live here.
-        let settled = schedule::settle(
+        // The iteration's spine — completion bookkeeping and its
+        // after_turn decisions, then the intent drain, the palette
+        // peek and the notification gate — lives in schedule::pass so
+        // tests can drive the whole sequence. Only the effects live
+        // here.
+        let settled = schedule::pass(
             app,
+            completion,
             std::mem::take(&mut intents),
             &mut LoopRuntime {
                 turn_handle: &mut turn_handle,
@@ -1449,7 +1371,7 @@ async fn run_app(
                 pending_notification: &mut pending_notification,
                 notifications: &mut notifications,
                 ring_on_turn_completion: &mut ring_on_turn_completion,
-                notifications_paused,
+                notifications_paused: &mut notifications_paused,
                 resolver: &resolver,
                 store,
                 session_id,
