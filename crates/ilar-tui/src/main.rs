@@ -1,6 +1,7 @@
 //! ilar TUI: transcript, streaming, tool display, input. Esc aborts.
 
 mod app;
+mod decide;
 mod diff;
 mod highlight;
 mod history;
@@ -25,6 +26,10 @@ use crossterm::event::{
     MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::supports_keyboard_enhancement;
+use decide::{
+    GoalStep, LoopState, PasteTarget, QueueStep, SubmitTarget, goal_step, may_route_notification,
+    paste_target, queue_step, submit_target,
+};
 use input::{InputBuffer, PromptAction, handle_prompt_key, retry_requested};
 use modals::{
     CommandPaletteAction, Modal, ModelPicker, PendingAction, PendingManager, PickerAction,
@@ -268,6 +273,28 @@ fn skill_invocation_prompt(name: &str, args: &str) -> String {
         format!(
             "Use the `skill` tool to load the skill \"{name}\" and follow its instructions. Arguments: {args}"
         )
+    }
+}
+
+/// Observe the loop, completely. Every field is read from the real
+/// source, so a decision cannot be fed a plausible-looking default for
+/// something the caller did not bother to compute — which is how a
+/// snapshot type quietly becomes a lie.
+fn observe(
+    app: &App,
+    turn_handle: &Option<tokio::task::JoinHandle<TurnCompletion>>,
+    pending_terminal_event: &Option<Event>,
+    steer_tx: &Option<ilar::agent::SteerSender>,
+    notifications_paused: bool,
+) -> LoopState {
+    LoopState {
+        turn_running: turn_handle.is_some(),
+        modal: app.active_modal(),
+        input_blank: app.input.is_blank(),
+        pending_event: pending_terminal_event.is_some(),
+        queued: app.queued_messages.len(),
+        steerable: steer_tx.as_ref().is_some_and(|tx| !tx.is_closed()),
+        notifications_paused,
     }
 }
 
@@ -692,12 +719,11 @@ struct PendingNotification {
 }
 
 fn next_notification(
-    turn_active: bool,
-    paused: bool,
+    blocked: bool,
     pending: &mut Option<PendingNotification>,
     notifications: &mut tokio::sync::mpsc::Receiver<ilar::subagent::Notification>,
 ) -> Option<ilar::subagent::Notification> {
-    if turn_active || paused {
+    if blocked {
         return None;
     }
     if pending
@@ -858,14 +884,18 @@ async fn run_app(
                     }
                     // Goal mode: verify-and-continue until the sentinel,
                     // a cap, or user interjections (queue wins below).
-                    if completed
-                        && app.queued_messages.is_empty()
-                        && app.input.is_blank()
-                        && !app.has_modal()
-                        && pending_terminal_event.is_none()
-                        && let Some((goal, round)) = app.goal.clone()
-                    {
-                        let achieved = app
+                    let state = observe(
+                        app,
+                        &turn_handle,
+                        &pending_terminal_event,
+                        &steer_tx,
+                        notifications_paused,
+                    );
+                    let round = app.goal.as_ref().map(|(_, round)| *round);
+                    // Only scan the transcript when there is a goal to
+                    // satisfy; every other turn pays nothing.
+                    let achieved = round.is_some()
+                        && app
                             .lines
                             .iter()
                             .rev()
@@ -874,12 +904,16 @@ async fn run_app(
                                 _ => None,
                             })
                             .unwrap_or(false);
-                        if achieved {
+                    match goal_step(&state, completed, round, achieved, MAX_GOAL_ROUNDS) {
+                        GoalStep::Idle => {}
+                        GoalStep::Achieved => {
+                            let round = round.unwrap_or(0).max(1);
                             app.goal = None;
-                            let message = format!("goal achieved after {} round(s)", round.max(1));
+                            let message = format!("goal achieved after {round} round(s)");
                             app.push_transcript_line(Line_::System(message.clone()));
                             app.set_notice(message, NoticeLevel::Info);
-                        } else if round >= MAX_GOAL_ROUNDS {
+                        }
+                        GoalStep::CapReached => {
                             app.goal = None;
                             let message = format!(
                                 "goal round cap ({MAX_GOAL_ROUNDS}) reached without \
@@ -887,27 +921,34 @@ async fn run_app(
                             );
                             app.push_transcript_line(Line_::System(message.clone()));
                             app.set_notice(message, NoticeLevel::Warning);
-                        } else {
-                            let next_round = round + 1;
-                            app.goal = Some((goal.clone(), next_round));
-                            app.input =
-                                InputBuffer::from(goal_continuation_prompt(&goal, next_round));
-                            pending_terminal_event = Some(Event::Key(KeyEvent::new(
-                                KeyCode::Enter,
-                                KeyModifiers::NONE,
-                            )));
+                        }
+                        GoalStep::Continue(next_round) => {
+                            // `Continue` implies a goal; update in place
+                            // rather than reconstructing it.
+                            if let Some((goal, round)) = app.goal.as_mut() {
+                                *round = next_round;
+                                let prompt = goal_continuation_prompt(goal, next_round);
+                                app.input = InputBuffer::from(prompt);
+                                pending_terminal_event = Some(Event::Key(KeyEvent::new(
+                                    KeyCode::Enter,
+                                    KeyModifiers::NONE,
+                                )));
+                            }
                         }
                     }
-                    if !app.queued_messages.is_empty() {
-                        // Only dequeue into an idle, modal-free UI: a
-                        // synthetic Enter routed into a picker or search
-                        // bar would misfire (or lose the message), and a
-                        // pending real event must not be clobbered.
-                        if completed
-                            && app.input.is_blank()
-                            && !app.has_modal()
-                            && pending_terminal_event.is_none()
-                        {
+                    // Rebuilt, not patched: the goal round may have put
+                    // a continuation prompt in the input, and a stale
+                    // `input_blank` here would dequeue over it.
+                    let state = observe(
+                        app,
+                        &turn_handle,
+                        &pending_terminal_event,
+                        &steer_tx,
+                        notifications_paused,
+                    );
+                    match queue_step(&state, completed) {
+                        QueueStep::Idle => {}
+                        QueueStep::Send => {
                             let next = app.queued_messages.remove(0);
                             app.input = InputBuffer::from(next);
                             // Send through the ordinary submit path.
@@ -915,12 +956,10 @@ async fn run_app(
                                 KeyCode::Enter,
                                 KeyModifiers::NONE,
                             )));
-                        } else {
+                        }
+                        QueueStep::Hold(count) => {
                             app.set_notice(
-                                format!(
-                                    "{} queued message(s) held — Ctrl-Q to review",
-                                    app.queued_messages.len()
-                                ),
+                                format!("{count} queued message(s) held — Ctrl-Q to review"),
                                 NoticeLevel::Warning,
                             );
                         }
@@ -995,7 +1034,7 @@ async fn run_app(
         }
 
         // Let a buffered Ctrl-P open the palette before starting queued work.
-        let mut modal_open = app.has_modal();
+        let modal_open = app.has_modal();
         if turn_handle.is_none()
             && !notifications_paused
             && !modal_open
@@ -1014,12 +1053,17 @@ async fn run_app(
                 app.close_search(false);
             }
             app.open_command_palette();
-            modal_open = app.has_modal();
         }
         // Background completions re-invoke their declared parent while idle.
+        let state = observe(
+            app,
+            &turn_handle,
+            &pending_terminal_event,
+            &steer_tx,
+            notifications_paused,
+        );
         if let Some(notification) = next_notification(
-            turn_handle.is_some(),
-            notifications_paused || modal_open,
+            !may_route_notification(&state),
             &mut pending_notification,
             &mut notifications,
         ) {
@@ -1586,7 +1630,17 @@ async fn run_app(
                     }
                     _ => match handle_prompt_key(&mut app.input, key) {
                         PromptAction::Submit
-                            if turn_handle.is_none() && !app.busy && !app.input.is_blank() =>
+                            if !app.input.is_blank()
+                                && submit_target(
+                                    &observe(
+                                        app,
+                                        &turn_handle,
+                                        &pending_terminal_event,
+                                        &steer_tx,
+                                        notifications_paused,
+                                    ),
+                                    app.busy,
+                                ) == SubmitTarget::StartTurn =>
                         {
                             let mut text = app.input.take();
                             app.history.push(&text);
@@ -1715,16 +1769,26 @@ async fn run_app(
                                 )
                             }));
                         }
-                        PromptAction::Submit
-                            if (turn_handle.is_some() || app.busy) && !app.input.is_blank() =>
-                        {
+                        PromptAction::Submit if !app.input.is_blank() => {
+                            // Observe before taking the text: the
+                            // decision is about the state the user
+                            // submitted into.
+                            let state = observe(
+                                app,
+                                &turn_handle,
+                                &pending_terminal_event,
+                                &steer_tx,
+                                notifications_paused,
+                            );
                             let text = app.input.take();
                             app.history.push(&text);
                             // Steer the running turn when one is live;
                             // the transcript line appears when the loop
                             // delivers it, not on submit.
-                            match steer_tx.as_ref().filter(|tx| !tx.is_closed()) {
-                                Some(tx) if tx.send(text.clone()).is_ok() => {
+                            match (submit_target(&state, app.busy), steer_tx.as_ref()) {
+                                (SubmitTarget::Steer, Some(tx))
+                                    if tx.send(text.clone()).is_ok() =>
+                                {
                                     app.pending_steers.push(text);
                                     app.set_notice(
                                         "steering — reaches the model at the next step",
@@ -1748,17 +1812,29 @@ async fn run_app(
                     },
                 }
             }
-            Event::Paste(text) if app.active_modal() == Some(Modal::CommandPalette) => {
-                app.command_palette.as_mut().unwrap().insert_query(&text);
-            }
-            Event::Paste(text) if app.active_modal() == Some(Modal::Search) => {
-                app.search_query.push_str(text.trim());
-                app.search_refresh();
-            }
-            Event::Paste(text) if !app.has_modal() => {
-                app.model_key_pending = false;
-                app.clear_transient_notice();
-                app.input.insert(&text);
+            Event::Paste(text) => {
+                let state = observe(
+                    app,
+                    &turn_handle,
+                    &pending_terminal_event,
+                    &steer_tx,
+                    notifications_paused,
+                );
+                match paste_target(&state) {
+                    PasteTarget::Palette => {
+                        app.command_palette.as_mut().unwrap().insert_query(&text);
+                    }
+                    PasteTarget::Search => {
+                        app.search_query.push_str(text.trim());
+                        app.search_refresh();
+                    }
+                    PasteTarget::Input => {
+                        app.model_key_pending = false;
+                        app.clear_transient_notice();
+                        app.input.insert(&text);
+                    }
+                    PasteTarget::Discard => {}
+                }
             }
             Event::Mouse(mouse)
                 if matches!(
@@ -2170,18 +2246,19 @@ mod tests {
         }
 
         let mut pending = None;
-        assert!(next_notification(true, false, &mut pending, &mut rx).is_none());
-        assert_eq!(rx.len(), 2);
-        assert!(next_notification(false, true, &mut pending, &mut rx).is_none());
-        assert_eq!(rx.len(), 2);
+        // Blocked for any reason: a running turn, a pause, or an
+        // overlay owning the keyboard. `may_route_notification` decides
+        // which; this only checks the gate is honoured.
+        assert!(next_notification(true, &mut pending, &mut rx).is_none());
+        assert_eq!(rx.len(), 2, "a blocked gate must not consume the backlog");
         assert_eq!(
-            next_notification(false, false, &mut pending, &mut rx)
+            next_notification(false, &mut pending, &mut rx)
                 .unwrap()
                 .description,
             "first"
         );
         assert_eq!(
-            next_notification(false, false, &mut pending, &mut rx)
+            next_notification(false, &mut pending, &mut rx)
                 .unwrap()
                 .description,
             "second"
@@ -2209,13 +2286,13 @@ mod tests {
         });
 
         assert_eq!(
-            next_notification(false, false, &mut pending, &mut rx)
+            next_notification(false, &mut pending, &mut rx)
                 .unwrap()
                 .description,
             "queued"
         );
         assert_eq!(
-            next_notification(false, false, &mut pending, &mut rx)
+            next_notification(false, &mut pending, &mut rx)
                 .unwrap()
                 .description,
             "propagated"

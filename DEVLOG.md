@@ -1044,3 +1044,32 @@ event-loop issue is about, arrived at from the other direction.
 literal, but `$` plus a digit is always a placeholder, so `costs $5`
 with fewer args empties. Consistency beats guessing which `$5` was
 meant, and there is no escape today.
+
+## 2026-08-20 — loop decisions, before the loop rewrite
+
+`run_app` fuses "what should happen" with "make it happen" in every
+match arm, so paste routing, the notification gate, the queue drain and
+goal continuation had no coverage at all — each needs a terminal, a
+provider and a session store to observe.
+
+Took the incremental step first, deliberately: extract those decisions
+as pure functions over one `LoopState` snapshot, each returning a value
+the caller acts on. The condition that makes it worth doing before the
+full rewrite is that nothing mutates — so `decide(event, state) ->
+Vec<Intent>` becomes an assembly of functions that already exist rather
+than a rewrite of them. The alternative, helpers that mutate, is how an
+incremental step quietly becomes the permanent state.
+
+Review was blunt about the limit, and measured it rather than asserting
+it: gutting every call site simultaneously — swapping the paste targets,
+deleting the notification gate, no-oping the queue drain — left the
+entire suite green, and the paste swap produced no warning at all. The
+logic is covered; the wiring is not. Recorded on the issue instead of
+letting the commit imply otherwise.
+
+The finding that mattered was subtler. Three of four snapshot sites were
+filling fields with plausible defaults the consumers happened to ignore
+— `..LoopState::default()`, a hardcoded `steerable: false`,
+`input_blank: true` recorded after the input had been emptied. Inert
+today, poison later, since `decide()` will read the whole struct. One
+`observe()` builds it honestly everywhere now.

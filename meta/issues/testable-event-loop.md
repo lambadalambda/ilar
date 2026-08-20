@@ -46,6 +46,31 @@ lifted out of the loop.
   [Unify the TUI modal layer](unify-tui-modals.md) become real tests.
 - No behaviour change: the full suite passes before and after.
 
+## Progress
+
+Phase one landed: the decisions that had no coverage are extracted into
+`crates/ilar-tui/src/decide.rs` as pure functions over one `LoopState`
+snapshot — `paste_target`, `submit_target`, `queue_step`, `goal_step`,
+`may_route_notification`. Each returns a value and the caller acts, and
+`observe()` builds the snapshot the same way at every site so a decision
+cannot be handed a plausible default for something the caller did not
+compute.
+
+They are shaped to compose: `decide(event, state) -> Vec<Intent>` should
+be an assembly of these rather than a rewrite of them.
+
+**What phase one does not buy, stated plainly.** The decision *logic* is
+covered; the *wiring* is not. Review demonstrated this by gutting every
+call site at once — swapping the paste targets, deleting the
+notification gate, making the queue drain a no-op — and the whole suite
+stayed green, with the paste swap producing no warning at all. So the
+two criteria in [Unify the TUI modal layer](unify-tui-modals.md) are
+still verified by reading; what changed is that the reading is three
+lines of match arm instead of a forty-line block.
+
+Phase two is what earns those: `decide()` returning intents that
+`run_app` interprets in one place a test can drive.
+
 ## Notes
 
 - This is a behavioural refactor, not a move, so it should not be
