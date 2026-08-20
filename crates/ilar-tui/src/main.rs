@@ -27,6 +27,7 @@ use crossterm::event::{
 };
 use crossterm::terminal::supports_keyboard_enhancement;
 use decide::{Intent, LoopState, after_turn, may_route_notification, retry as retry_intents};
+use input::slash_candidates;
 use input::{InputBuffer, PromptAction, handle_prompt_key, retry_requested};
 use modals::{
     CommandPaletteAction, Modal, ModelPicker, PendingAction, PendingManager, PickerAction,
@@ -34,7 +35,6 @@ use modals::{
     is_command_palette_shortcut,
 };
 use ratatui::style::Color;
-use input::slash_candidates;
 use tokio_util::sync::CancellationToken;
 use transcript::Line_;
 
@@ -1309,329 +1309,334 @@ async fn run_app(
                     spawner.shutdown().await;
                     return Ok(AppExit::Quit);
                 }
-                if app.active_modal() == Some(Modal::PendingManager) {
-                    match app.pending_manager_key(code, control) {
-                        PendingAction::Stay => {}
-                        PendingAction::Close => app.pending_manager = None,
-                        PendingAction::DeleteQueued(index) => {
-                            if index < app.queued_messages.len() {
-                                let removed = app.queued_messages.remove(index);
-                                app.set_notice(
-                                    format!(
-                                        "removed queued message: {}",
-                                        removed.lines().next().unwrap_or("")
-                                    ),
-                                    NoticeLevel::Info,
-                                );
+                // One exhaustive match over the active overlay: adding a
+                // `Modal` variant without a dispatch arm is a compile
+                // error, which the old `if` chain could not promise.
+                if let Some(modal) = app.active_modal() {
+                    match modal {
+                        Modal::PendingManager => match app.pending_manager_key(code, control) {
+                            PendingAction::Stay => {}
+                            PendingAction::Close => app.pending_manager = None,
+                            PendingAction::DeleteQueued(index) => {
+                                if index < app.queued_messages.len() {
+                                    let removed = app.queued_messages.remove(index);
+                                    app.set_notice(
+                                        format!(
+                                            "removed queued message: {}",
+                                            removed.lines().next().unwrap_or("")
+                                        ),
+                                        NoticeLevel::Info,
+                                    );
+                                }
                             }
-                        }
-                        PendingAction::EditQueued(index) => {
-                            if index < app.queued_messages.len() {
-                                let message = app.queued_messages.remove(index);
-                                app.input = InputBuffer::from(message);
-                                app.pending_manager = None;
+                            PendingAction::EditQueued(index) => {
+                                if index < app.queued_messages.len() {
+                                    let message = app.queued_messages.remove(index);
+                                    app.input = InputBuffer::from(message);
+                                    app.pending_manager = None;
+                                }
                             }
-                        }
-                        PendingAction::AbortGoal => {
-                            if let Some((goal, round)) = app.goal.take() {
-                                let message =
-                                    format!("goal aborted after {round} round(s): {goal}");
-                                app.push_transcript_line(Line_::System(message.clone()));
-                                app.set_notice(message, NoticeLevel::Info);
+                            PendingAction::AbortGoal => {
+                                if let Some((goal, round)) = app.goal.take() {
+                                    let message =
+                                        format!("goal aborted after {round} round(s): {goal}");
+                                    app.push_transcript_line(Line_::System(message.clone()));
+                                    app.set_notice(message, NoticeLevel::Info);
+                                }
                             }
-                        }
-                        PendingAction::EditGoal => {
-                            if let Some((goal, _)) = &app.goal {
-                                app.input = InputBuffer::from(format!("/goal {goal}"));
-                                app.pending_manager = None;
+                            PendingAction::EditGoal => {
+                                if let Some((goal, _)) = &app.goal {
+                                    app.input = InputBuffer::from(format!("/goal {goal}"));
+                                    app.pending_manager = None;
+                                }
                             }
-                        }
-                        PendingAction::CancelBackground => {
-                            spawner.abort_all();
-                            notifications_paused = true;
-                            app.background_running = 0;
-                            app.set_persistent_notice(
+                            PendingAction::CancelBackground => {
+                                spawner.abort_all();
+                                notifications_paused = true;
+                                app.background_running = 0;
+                                app.set_persistent_notice(
                                 "background jobs cancelled; notifications paused; send a message to resume",
                                 NoticeLevel::Warning,
                             );
-                        }
-                        PendingAction::StopServices => {
-                            services.stop_all();
-                            app.services_running = 0;
-                            app.set_notice("services stopped", NoticeLevel::Info);
-                        }
-                        PendingAction::DismissRetry => {
-                            app.retry_available = false;
-                            app.clear_transient_notice();
-                        }
-                        PendingAction::RetryNow => {
-                            if !app.busy && turn_handle.is_none() {
-                                let state = observe(
-                                    app,
-                                    &turn_handle,
-                                    &pending_terminal_event,
-                                    &steer_tx,
-                                    notifications_paused,
-                                );
-                                let decided = retry_intents(&state, app.last_prompt.as_deref());
-                                if decided.iter().any(|i| matches!(i, Intent::StartTurn(_))) {
-                                    app.pending_manager = None;
-                                }
-                                intents.extend(decided);
                             }
-                        }
-                    }
-                    continue;
-                }
-                if app.active_modal() == Some(Modal::Help) {
-                    match code {
-                        KeyCode::Up => app.help_scroll = app.help_scroll.saturating_sub(1),
-                        KeyCode::Down => app.help_scroll = app.help_scroll.saturating_add(1),
-                        KeyCode::PageUp => app.help_scroll = app.help_scroll.saturating_sub(10),
-                        KeyCode::PageDown => app.help_scroll = app.help_scroll.saturating_add(10),
-                        KeyCode::Esc | KeyCode::F(1) | KeyCode::Char('?' | 'q') => {
-                            app.help_visible = false;
-                            app.help_scroll = 0;
-                        }
-                        _ => {}
-                    }
-                    continue;
-                }
-                if app.active_modal() == Some(Modal::ThemePicker) {
-                    let action = {
-                        let picker = app.theme_picker.as_mut().unwrap();
-                        picker.handle_key(code, control)
-                    };
-                    apply_theme_picker_action(app, action, |selected| {
-                        ilar::config::persist_general_theme(user_config_path, selected.id())
-                    });
-                    continue;
-                }
-                if app.active_modal() == Some(Modal::SkillPicker)
-                    && let Some(picker) = app.skill_picker.as_mut()
-                {
-                    match picker.handle_key(code, control) {
-                        PickerAction::Stay => {}
-                        PickerAction::Dismiss => {
-                            app.skill_picker = None;
-                        }
-                        PickerAction::Choose(name) => {
-                            app.skill_picker = None;
-                            app.input = InputBuffer::from(format!("/{name} "));
-                        }
-                    }
-                    continue;
-                }
-                if app.active_modal() == Some(Modal::SessionPicker)
-                    && let Some(picker) = app.session_picker.as_mut()
-                {
-                    match picker.handle_key(code, control) {
-                        SessionPickerAction::Stay => {}
-                        SessionPickerAction::Dismiss => {
-                            app.session_picker = None;
-                            app.clear_transient_notice();
-                        }
-                        SessionPickerAction::Delete(id) => match store.delete(&id) {
-                            Ok(()) => {
-                                if let Some(picker) = app.session_picker.as_mut() {
-                                    picker.sessions.retain(|session| session.id != id);
-                                    picker.selected = 0;
-                                }
-                                app.set_notice(format!("deleted session {id}"), NoticeLevel::Info);
+                            PendingAction::StopServices => {
+                                services.stop_all();
+                                app.services_running = 0;
+                                app.set_notice("services stopped", NoticeLevel::Info);
                             }
-                            Err(error) => {
-                                app.set_notice(
-                                    format!("cannot delete {id}: {error}"),
-                                    NoticeLevel::Error,
-                                );
+                            PendingAction::DismissRetry => {
+                                app.retry_available = false;
+                                app.clear_transient_notice();
+                            }
+                            PendingAction::RetryNow => {
+                                if !app.busy && turn_handle.is_none() {
+                                    let state = observe(
+                                        app,
+                                        &turn_handle,
+                                        &pending_terminal_event,
+                                        &steer_tx,
+                                        notifications_paused,
+                                    );
+                                    let decided = retry_intents(&state, app.last_prompt.as_deref());
+                                    if decided.iter().any(|i| matches!(i, Intent::StartTurn(_))) {
+                                        app.pending_manager = None;
+                                    }
+                                    intents.extend(decided);
+                                }
                             }
                         },
-                        SessionPickerAction::Fork(id) => {
-                            let blocked = if turn_handle.is_some() {
-                                Some("finish or abort the current turn before switching sessions")
-                            } else if spawner.running_background() > 0 {
-                                Some("background agents are running; wait or abort them first")
-                            } else if !app.input.is_blank() {
-                                Some("input has an unsent draft; send or clear it first")
-                            } else {
-                                None
+                        Modal::Help => match code {
+                            KeyCode::Up => app.help_scroll = app.help_scroll.saturating_sub(1),
+                            KeyCode::Down => app.help_scroll = app.help_scroll.saturating_add(1),
+                            KeyCode::PageUp => {
+                                app.help_scroll = app.help_scroll.saturating_sub(10);
+                            }
+                            KeyCode::PageDown => {
+                                app.help_scroll = app.help_scroll.saturating_add(10);
+                            }
+                            KeyCode::Esc | KeyCode::F(1) | KeyCode::Char('?' | 'q') => {
+                                app.help_visible = false;
+                                app.help_scroll = 0;
+                            }
+                            _ => {}
+                        },
+                        Modal::ThemePicker => {
+                            let action = {
+                                let picker = app.theme_picker.as_mut().unwrap();
+                                picker.handle_key(code, control)
                             };
-                            if let Some(reason) = blocked {
-                                app.set_notice(reason, NoticeLevel::Warning);
-                                continue;
-                            }
-                            match store.fork(&id) {
-                                Ok(fork_id) => {
-                                    spawner.shutdown().await;
-                                    return Ok(AppExit::Switch(fork_id));
+                            apply_theme_picker_action(app, action, |selected| {
+                                ilar::config::persist_general_theme(user_config_path, selected.id())
+                            });
+                        }
+                        Modal::SkillPicker => {
+                            let picker = app.skill_picker.as_mut().unwrap();
+                            match picker.handle_key(code, control) {
+                                PickerAction::Stay => {}
+                                PickerAction::Dismiss => {
+                                    app.skill_picker = None;
                                 }
-                                Err(error) => {
-                                    app.set_notice(
-                                        format!("cannot fork {id}: {error}"),
-                                        NoticeLevel::Error,
-                                    );
+                                PickerAction::Choose(name) => {
+                                    app.skill_picker = None;
+                                    app.input = InputBuffer::from(format!("/{name} "));
                                 }
                             }
                         }
-                        SessionPickerAction::Resume(new_session) => {
-                            let blocked = if turn_handle.is_some() {
-                                Some("finish or abort the current turn before switching sessions")
-                            } else if spawner.running_background() > 0 {
-                                Some("background agents are running; wait or abort them first")
-                            } else if !app.input.is_blank() {
-                                Some("input has an unsent draft; send or clear it first")
-                            } else {
-                                None
-                            };
-                            if let Some(reason) = blocked {
-                                app.set_notice(reason, NoticeLevel::Warning);
-                                continue;
-                            }
-                            // Validate now so a bad entry degrades to a
-                            // notice instead of exiting the app later.
-                            match store
-                                .load(&new_session)
-                                .map(|session| ensure_direct_resume_allowed(session.meta()))
-                            {
-                                Ok(Ok(())) => {
-                                    spawner.shutdown().await;
-                                    return Ok(AppExit::Switch(new_session));
+                        Modal::SessionPicker => {
+                            let picker = app.session_picker.as_mut().unwrap();
+                            match picker.handle_key(code, control) {
+                                SessionPickerAction::Stay => {}
+                                SessionPickerAction::Dismiss => {
+                                    app.session_picker = None;
+                                    app.clear_transient_notice();
                                 }
-                                Ok(Err(error)) => {
-                                    app.set_notice(
-                                        format!("cannot resume {new_session}: {error}"),
-                                        NoticeLevel::Error,
-                                    );
+                                SessionPickerAction::Delete(id) => match store.delete(&id) {
+                                    Ok(()) => {
+                                        if let Some(picker) = app.session_picker.as_mut() {
+                                            picker.sessions.retain(|session| session.id != id);
+                                            picker.selected = 0;
+                                        }
+                                        app.set_notice(
+                                            format!("deleted session {id}"),
+                                            NoticeLevel::Info,
+                                        );
+                                    }
+                                    Err(error) => {
+                                        app.set_notice(
+                                            format!("cannot delete {id}: {error}"),
+                                            NoticeLevel::Error,
+                                        );
+                                    }
+                                },
+                                SessionPickerAction::Fork(id) => {
+                                    let blocked = if turn_handle.is_some() {
+                                        Some(
+                                            "finish or abort the current turn before switching sessions",
+                                        )
+                                    } else if spawner.running_background() > 0 {
+                                        Some(
+                                            "background agents are running; wait or abort them first",
+                                        )
+                                    } else if !app.input.is_blank() {
+                                        Some("input has an unsent draft; send or clear it first")
+                                    } else {
+                                        None
+                                    };
+                                    if let Some(reason) = blocked {
+                                        app.set_notice(reason, NoticeLevel::Warning);
+                                        continue;
+                                    }
+                                    match store.fork(&id) {
+                                        Ok(fork_id) => {
+                                            spawner.shutdown().await;
+                                            return Ok(AppExit::Switch(fork_id));
+                                        }
+                                        Err(error) => {
+                                            app.set_notice(
+                                                format!("cannot fork {id}: {error}"),
+                                                NoticeLevel::Error,
+                                            );
+                                        }
+                                    }
                                 }
-                                Err(error) => {
-                                    app.set_notice(
-                                        format!("cannot resume {new_session}: {error}"),
-                                        NoticeLevel::Error,
-                                    );
+                                SessionPickerAction::Resume(new_session) => {
+                                    let blocked = if turn_handle.is_some() {
+                                        Some(
+                                            "finish or abort the current turn before switching sessions",
+                                        )
+                                    } else if spawner.running_background() > 0 {
+                                        Some(
+                                            "background agents are running; wait or abort them first",
+                                        )
+                                    } else if !app.input.is_blank() {
+                                        Some("input has an unsent draft; send or clear it first")
+                                    } else {
+                                        None
+                                    };
+                                    if let Some(reason) = blocked {
+                                        app.set_notice(reason, NoticeLevel::Warning);
+                                        continue;
+                                    }
+                                    // Validate now so a bad entry degrades to a
+                                    // notice instead of exiting the app later.
+                                    match store
+                                        .load(&new_session)
+                                        .map(|session| ensure_direct_resume_allowed(session.meta()))
+                                    {
+                                        Ok(Ok(())) => {
+                                            spawner.shutdown().await;
+                                            return Ok(AppExit::Switch(new_session));
+                                        }
+                                        Ok(Err(error)) => {
+                                            app.set_notice(
+                                                format!("cannot resume {new_session}: {error}"),
+                                                NoticeLevel::Error,
+                                            );
+                                        }
+                                        Err(error) => {
+                                            app.set_notice(
+                                                format!("cannot resume {new_session}: {error}"),
+                                                NoticeLevel::Error,
+                                            );
+                                        }
+                                    }
                                 }
                             }
                         }
-                    }
-                    continue;
-                }
-                if app.active_modal() == Some(Modal::ModelPicker)
-                    && let Some(picker) = app.model_picker.as_mut()
-                {
-                    match picker.handle_key(code, control) {
-                        PickerAction::Stay => {}
-                        PickerAction::Dismiss => {
-                            app.model_picker = None;
-                            app.status = "ready".into();
-                            app.clear_transient_notice();
-                        }
-                        PickerAction::Choose(new_model) => {
-                            if let Some(model) = ilar::model::find(&new_model)
-                                && !model.variants().is_empty()
-                            {
-                                app.clear_transient_notice();
-                                let active_variant = (new_model == app.current_model)
-                                    .then_some(app.current_variant.as_deref())
-                                    .flatten();
-                                app.model_picker = None;
-                                app.variant_picker =
-                                    Some(VariantPicker::new(model, active_variant));
-                                continue;
-                            }
-                            match adopt_model_selection(
-                                app,
-                                resolver.as_ref(),
-                                store,
-                                session_id,
-                                system_prompt,
-                                registry,
-                                new_model.clone(),
-                                None,
-                            ) {
-                                Ok(()) => {
+                        Modal::ModelPicker => {
+                            let picker = app.model_picker.as_mut().unwrap();
+                            match picker.handle_key(code, control) {
+                                PickerAction::Stay => {}
+                                PickerAction::Dismiss => {
                                     app.model_picker = None;
+                                    app.status = "ready".into();
+                                    app.clear_transient_notice();
                                 }
-                                Err(error) => {
-                                    if let Some(picker) = app.model_picker.as_mut() {
-                                        picker.error =
-                                            Some(format!("cannot switch to {new_model}: {error}"));
+                                PickerAction::Choose(new_model) => {
+                                    if let Some(model) = ilar::model::find(&new_model)
+                                        && !model.variants().is_empty()
+                                    {
+                                        app.clear_transient_notice();
+                                        let active_variant = (new_model == app.current_model)
+                                            .then_some(app.current_variant.as_deref())
+                                            .flatten();
+                                        app.model_picker = None;
+                                        app.variant_picker =
+                                            Some(VariantPicker::new(model, active_variant));
+                                        continue;
+                                    }
+                                    match adopt_model_selection(
+                                        app,
+                                        resolver.as_ref(),
+                                        store,
+                                        session_id,
+                                        system_prompt,
+                                        registry,
+                                        new_model.clone(),
+                                        None,
+                                    ) {
+                                        Ok(()) => {
+                                            app.model_picker = None;
+                                        }
+                                        Err(error) => {
+                                            if let Some(picker) = app.model_picker.as_mut() {
+                                                picker.error = Some(format!(
+                                                    "cannot switch to {new_model}: {error}"
+                                                ));
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
-                    continue;
-                }
-                if app.active_modal() == Some(Modal::VariantPicker) {
-                    let (action, model) = {
-                        let picker = app.variant_picker.as_mut().unwrap();
-                        (picker.handle_key(code, control), picker.model.full_id())
-                    };
-                    match action {
-                        VariantPickerAction::Stay => {}
-                        VariantPickerAction::Dismiss => {
-                            app.variant_picker = None;
-                            app.clear_transient_notice();
-                        }
-                        VariantPickerAction::Choose(variant) => {
-                            match adopt_model_selection(
-                                app,
-                                resolver.as_ref(),
-                                store,
-                                session_id,
-                                system_prompt,
-                                registry,
-                                model.clone(),
-                                variant,
-                            ) {
-                                Ok(()) => app.variant_picker = None,
-                                Err(error) => {
-                                    if let Some(picker) = app.variant_picker.as_mut() {
-                                        picker.error = Some(format!(
-                                            "cannot switch reasoning for {model}: {error}"
-                                        ));
+                        Modal::VariantPicker => {
+                            let (action, model) = {
+                                let picker = app.variant_picker.as_mut().unwrap();
+                                (picker.handle_key(code, control), picker.model.full_id())
+                            };
+                            match action {
+                                VariantPickerAction::Stay => {}
+                                VariantPickerAction::Dismiss => {
+                                    app.variant_picker = None;
+                                    app.clear_transient_notice();
+                                }
+                                VariantPickerAction::Choose(variant) => {
+                                    match adopt_model_selection(
+                                        app,
+                                        resolver.as_ref(),
+                                        store,
+                                        session_id,
+                                        system_prompt,
+                                        registry,
+                                        model.clone(),
+                                        variant,
+                                    ) {
+                                        Ok(()) => app.variant_picker = None,
+                                        Err(error) => {
+                                            if let Some(picker) = app.variant_picker.as_mut() {
+                                                picker.error = Some(format!(
+                                                    "cannot switch reasoning for {model}: {error}"
+                                                ));
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
-                    continue;
-                }
-                if app.active_modal() == Some(Modal::Search) {
-                    match (code, control) {
-                        (KeyCode::Esc, _) => app.close_search(true),
-                        (KeyCode::Enter, _) => app.close_search(false),
-                        (KeyCode::Up, _) | (KeyCode::Char('p'), true) => app.search_jump(-1),
-                        (KeyCode::Down, _) | (KeyCode::Char('n'), true) => app.search_jump(1),
-                        (KeyCode::Char('f'), true) => app.close_search(false),
-                        (KeyCode::Backspace, _) => {
-                            app.search_query.pop();
-                            app.search_refresh();
-                        }
-                        (KeyCode::Char(character), false) if !character.is_control() => {
-                            app.search_query.push(character);
-                            app.search_refresh();
-                        }
-                        _ => {}
-                    }
-                    continue;
-                }
-                if app.active_modal() == Some(Modal::CommandPalette)
-                    && let Some(palette) = app.command_palette.as_mut()
-                {
-                    match palette.handle_key(code, control) {
-                        CommandPaletteAction::Stay => {}
-                        CommandPaletteAction::Dismiss => {
-                            app.command_palette = None;
-                        }
-                        CommandPaletteAction::Choose(command) => {
-                            activate_palette_command(app, command, model_choices.clone());
-                            if std::mem::take(&mut app.session_picker_requested) {
-                                let sessions = store
-                                    .list()
-                                    .into_iter()
-                                    .filter(|session| session.id != app.session_id)
-                                    .collect();
-                                app.session_picker = Some(SessionPicker::new(sessions));
+                        Modal::Search => match (code, control) {
+                            (KeyCode::Esc, _) => app.close_search(true),
+                            (KeyCode::Enter, _) => app.close_search(false),
+                            (KeyCode::Up, _) | (KeyCode::Char('p'), true) => app.search_jump(-1),
+                            (KeyCode::Down, _) | (KeyCode::Char('n'), true) => app.search_jump(1),
+                            (KeyCode::Char('f'), true) => app.close_search(false),
+                            (KeyCode::Backspace, _) => {
+                                app.search_query.pop();
+                                app.search_refresh();
+                            }
+                            (KeyCode::Char(character), false) if !character.is_control() => {
+                                app.search_query.push(character);
+                                app.search_refresh();
+                            }
+                            _ => {}
+                        },
+                        Modal::CommandPalette => {
+                            let palette = app.command_palette.as_mut().unwrap();
+                            match palette.handle_key(code, control) {
+                                CommandPaletteAction::Stay => {}
+                                CommandPaletteAction::Dismiss => {
+                                    app.command_palette = None;
+                                }
+                                CommandPaletteAction::Choose(command) => {
+                                    activate_palette_command(app, command, model_choices.clone());
+                                    if std::mem::take(&mut app.session_picker_requested) {
+                                        let sessions = store
+                                            .list()
+                                            .into_iter()
+                                            .filter(|session| session.id != app.session_id)
+                                            .collect();
+                                        app.session_picker = Some(SessionPicker::new(sessions));
+                                    }
+                                }
                             }
                         }
                     }
