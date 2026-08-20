@@ -94,7 +94,9 @@ pub(crate) fn render_todo_sidebar_snapshot(
                 ),
                 ilar::todo::Status::InProgress => (
                     "▸ ",
-                    Style::default().fg(theme::WAITING),
+                    // Same colour as todo_summary: in progress is active
+                    // work, not a wait state.
+                    Style::default().fg(TOOL_ACTIVE),
                     Style::default()
                         .fg(theme::PRIMARY)
                         .add_modifier(Modifier::BOLD),
