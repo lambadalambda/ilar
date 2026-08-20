@@ -30,6 +30,7 @@
 - [ ] [Unify the TUI modal layer](issues/unify-tui-modals.md)
 - [ ] [Steer a running turn](issues/steer-a-running-turn.md)
 - [ ] [User-invoked commands](issues/user-invoked-commands.md)
+- [ ] [Load Claude and opencode style skills](issues/portable-skill-formats.md)
 - [ ] [Make the event loop testable](issues/testable-event-loop.md)
 - [ ] [TUI module follow-ups](issues/tui-module-follow-ups.md)
 

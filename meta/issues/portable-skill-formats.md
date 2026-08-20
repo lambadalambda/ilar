@@ -1,0 +1,68 @@
+# Load Claude and opencode style skills
+
+## Summary
+
+ilar's skills are flat `skills/*.md` files with TOML frontmatter
+(`description = "..."`, `triggers = [...]`), name taken from the file
+stem (`crates/ilar/src/skill.rs:118-133`).
+
+Claude Code and opencode both use a different shape: a directory per
+skill, `skills/<name>/SKILL.md`, with YAML frontmatter carrying `name`,
+`description` and extras like `allowed-tools`, `compatibility`,
+`metadata`, `hidden`.
+
+So an existing skill collection cannot be used with ilar at all — it
+differs on both axes, format *and* layout. There are nine such skills in
+`~/.config/opencode/skills/` today (agent-browser, claude-print,
+eosrift-tunnel, nas-podman, obsidian-memory, repo-issues,
+search-and-research-with-tavily, simulator-automation, tea-pleroma),
+none of which load.
+
+This follows the decision on
+[User-invoked commands](user-invoked-commands.md) to accept both
+frontmatter formats. The same parser serves both, so they should share
+it.
+
+## Requirements
+
+- Accept YAML frontmatter alongside TOML, for skills and commands alike,
+  through one shared parser. Detect by probing the first key line rather
+  than by file location.
+- Accept the directory layout `skills/<name>/SKILL.md` alongside flat
+  `skills/<name>.md`. Directory name is the skill name; a `name:` field
+  in frontmatter overrides it.
+- Map the fields we understand and ignore the rest without failing:
+  `description` maps directly, and Claude's convention of embedding cue
+  phrases in the description means `triggers` stays optional.
+- Unknown frontmatter keys are preserved-and-ignored, not an error. That
+  is what makes a foreign skill directory usable unchanged.
+- Precedence and override rules stay as they are: built-ins, then user
+  dir, then project, later wins by name.
+
+## Acceptance Criteria
+
+- A skill in `skills/<name>/SKILL.md` with YAML frontmatter loads, and
+  its name, description and body match the file.
+- A skill with unknown keys (`allowed-tools`, `hidden`, `metadata`)
+  loads without error and ignores them.
+- Existing TOML flat-file skills keep working unchanged, including the
+  two built-ins.
+- A YAML `name:` that disagrees with the directory name wins, and the
+  disagreement is not silently confusing.
+- Test fixtures copied verbatim from `~/.config/opencode/skills/` load.
+
+## Notes
+
+- Deliberately one-way: read foreign formats, keep writing our own. No
+  conversion tooling, no migration.
+- `allowed-tools` is worth a second look later — it expresses a
+  per-skill tool restriction, and ilar already has per-agent tool
+  restriction. Out of scope here; loading the field without honouring it
+  is the honest first step.
+- Skill bodies referencing sibling files (`references/*.md`) work
+  differently in a directory layout than a flat one. Loading the body is
+  enough for now; relative-path resolution can wait for a real case.
+
+## Milestone
+
+6 — Hardening

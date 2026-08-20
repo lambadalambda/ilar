@@ -72,13 +72,14 @@ with reasoning variants, and subagents via the `task` tool.
 
 ## Notes
 
-- **Frontmatter format is a real decision.** ilar's skills use TOML
+- **Frontmatter: accept both formats.** Decided. ilar's skills use TOML
   (`description = "..."`, `triggers = [...]`); opencode's commands use
-  YAML (`description: ...`). Copying an existing opencode command into
-  ilar will not parse as-is. Either accept both, or convert on import
-  and say so in the docs. Worth settling before writing the loader,
-  since it determines whether `~/.config/opencode/commands/*.md` files
-  port by copying.
+  YAML (`description: ...`). The loader should take either, so
+  `~/.config/opencode/commands/*.md` port by copying. Detect by probing:
+  a `key: value` line is YAML, `key = value` is TOML. Put the parser
+  somewhere both skills and commands can share it — see
+  [Load Claude and opencode style skills](portable-skill-formats.md),
+  which needs the same thing.
 - The palette already carries skills as dynamic items, so commands
   should be a small addition there rather than a new surface.
 - Sample commands to port and test against live in
