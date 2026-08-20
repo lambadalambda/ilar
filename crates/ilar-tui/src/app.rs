@@ -38,8 +38,8 @@ use crate::session_view::{
     tool_notification_display,
 };
 use crate::sidebar::{
-    content_areas, render_todo_sidebar_snapshot, todo_render_snapshot, todo_sidebar_snapshot,
-    todo_summary,
+    carve_panel, content_areas, render_todo_sidebar_snapshot, todo_render_snapshot,
+    todo_sidebar_snapshot, todo_summary,
 };
 use crate::text::{
     Truncation, abbreviated_path, bounded_detail, context_meter, context_usage, format_bytes,
@@ -1866,15 +1866,7 @@ impl App {
                     ),
                     Style::default().fg(MUTED),
                 ));
-                let height = (lines.len() as u16 + 2).min(todo_area.height / 2);
-                if height > 2 {
-                    let goal_area = Rect::new(todo_area.x, todo_area.y, todo_area.width, height);
-                    todo_area = Rect::new(
-                        todo_area.x,
-                        todo_area.y + height,
-                        todo_area.width,
-                        todo_area.height - height,
-                    );
+                if let Some(goal_area) = carve_panel(&mut todo_area, lines.len()) {
                     let goal_block = Block::default()
                         .borders(Borders::ALL)
                         .border_type(BorderType::Rounded)
@@ -1927,15 +1919,7 @@ impl App {
                         Style::default().fg(MUTED),
                     ));
                 }
-                let height = (lines.len() as u16 + 2).min(todo_area.height / 2);
-                if height > 2 {
-                    let service_area = Rect::new(todo_area.x, todo_area.y, todo_area.width, height);
-                    todo_area = Rect::new(
-                        todo_area.x,
-                        todo_area.y + height,
-                        todo_area.width,
-                        todo_area.height - height,
-                    );
+                if let Some(service_area) = carve_panel(&mut todo_area, lines.len()) {
                     let service_block = Block::default()
                         .borders(Borders::ALL)
                         .border_type(BorderType::Rounded)

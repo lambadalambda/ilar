@@ -35,6 +35,25 @@ pub(crate) fn content_areas(area: Rect) -> ContentAreas {
     }
 }
 
+/// Carve a bordered panel of `content_rows` lines off the top of
+/// `area`, capped at half of it so stacked panels cannot crowd out the
+/// todos below. Returns `None` — leaving `area` untouched — when the
+/// cap leaves no room for any content.
+pub(crate) fn carve_panel(area: &mut Rect, content_rows: usize) -> Option<Rect> {
+    let height = (content_rows as u16 + 2).min(area.height / 2);
+    if height <= 2 {
+        return None;
+    }
+    let panel = Rect::new(area.x, area.y, area.width, height);
+    *area = Rect::new(
+        area.x,
+        area.y + height,
+        area.width,
+        area.height - height,
+    );
+    Some(panel)
+}
+
 pub(crate) struct TodoRenderSnapshot {
     items: Vec<ilar::todo::TodoItem>,
     hidden: usize,
@@ -290,6 +309,24 @@ fn visible_todo_indices(list: &ilar::todo::TodoList, cap: usize) -> Vec<usize> {
 mod tests {
     use super::*;
     use crate::text::tests::rendered_text;
+
+    #[test]
+    fn carve_panel_takes_the_top_and_respects_the_half_height_cap() {
+        let mut area = Rect::new(0, 10, 42, 20);
+        let panel = carve_panel(&mut area, 3).expect("fits");
+        assert_eq!(panel, Rect::new(0, 10, 42, 5));
+        assert_eq!(area, Rect::new(0, 15, 42, 15));
+
+        // Tall content is capped at half the remaining area.
+        let panel = carve_panel(&mut area, 40).expect("capped");
+        assert_eq!(panel.height, 7);
+        assert_eq!(area, Rect::new(0, 22, 42, 8));
+
+        // Too small to show any content: nothing carved, area untouched.
+        let mut tiny = Rect::new(0, 0, 42, 4);
+        assert_eq!(carve_panel(&mut tiny, 3), None);
+        assert_eq!(tiny, Rect::new(0, 0, 42, 4));
+    }
 
     #[test]
     fn current_todos_render_all_statuses_and_live_replacements() {
