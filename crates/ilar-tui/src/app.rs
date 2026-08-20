@@ -42,17 +42,15 @@ use crate::sidebar::{
     todo_summary,
 };
 use crate::text::{
-    Truncation, abbreviated_path, bounded_detail, context_meter, context_usage, format_cost,
-    format_tokens_compact, safe_lines, safe_text, truncate_display, wrap_styled_line,
+    Truncation, abbreviated_path, bounded_detail, context_meter, context_usage, format_bytes,
+    format_cost, format_tokens_compact, safe_lines, safe_text, truncate_display, wrap_styled_line,
 };
 use crate::transcript::{
     Line_, ToolKind, ToolProgress, ToolState, TranscriptHitTarget, TranscriptRenderCache,
     append_thought_tail, apply_subagent_activity, toggle_tool_expansion, transcript_markdown,
 };
 use crate::{
-    ASSISTANT, Activity, CONTENT_HORIZONTAL_PADDING, ERROR, MAX_GOAL_ROUNDS, MUTED, NoticeLevel,
-    StatusNotice, TOOL_ACTIVE, activity_line, history, slash_candidates, stream_liveness, theme,
-    windowed_rate,
+    Activity, ERROR, MAX_GOAL_ROUNDS, MUTED, NoticeLevel, history, slash_candidates, theme,
 };
 
 pub(crate) struct App {
@@ -61,9 +59,9 @@ pub(crate) struct App {
     pub(crate) history: history::PromptHistory,
     pub(crate) busy: bool,
     pub(crate) status: String,
-    pub(crate) notice: Option<StatusNotice>,
+    notice: Option<StatusNotice>,
     activity: Activity,
-    pub(crate) activity_started: std::time::Instant,
+    activity_started: std::time::Instant,
     pub(crate) current_model: String,
     pub(crate) current_variant: Option<String>,
     pub(crate) session_id: String,
@@ -71,13 +69,13 @@ pub(crate) struct App {
     pub(crate) context_used: u64,
     pub(crate) context_limit: Option<u64>,
     pub(crate) context_estimated: bool,
-    pub(crate) latest_usage: Option<ilar::session::Usage>,
-    pub(crate) session_usage: ilar::session::Usage,
-    pub(crate) session_cost: Option<f64>,
+    latest_usage: Option<ilar::session::Usage>,
+    session_usage: ilar::session::Usage,
+    session_cost: Option<f64>,
     /// Bytes of streamed text/thinking received this turn, plus the last
     /// arrival instant — the status line's stream-liveness indicator.
     stream_received: u64,
-    pub(crate) stream_last_data: Option<std::time::Instant>,
+    stream_last_data: Option<std::time::Instant>,
     /// Bytes already attributed to completed steps; the live output
     /// estimate uses only the current step's bytes.
     stream_step_base: u64,
@@ -107,14 +105,14 @@ pub(crate) struct App {
     pub(crate) compact_requested: bool,
     pub(crate) search_active: bool,
     pub(crate) search_query: String,
-    pub(crate) search_matches: Vec<usize>,
+    search_matches: Vec<usize>,
     search_current: usize,
     /// (scroll_top, follow_tail) before the search opened; Esc restores.
     search_saved: Option<(usize, bool)>,
     search_computed_revision: Option<u64>,
-    pub(crate) scroll_top: usize,
-    pub(crate) content_rows: usize,
-    pub(crate) viewport_rows: usize,
+    scroll_top: usize,
+    content_rows: usize,
+    viewport_rows: usize,
     pub(crate) follow_tail: bool,
     pub(crate) command_palette: Option<CommandPalette>,
     pub(crate) model_picker: Option<ModelPicker>,
@@ -134,20 +132,19 @@ pub(crate) struct App {
     /// must not advertise it.
     pub(crate) keyboard_enhanced: bool,
     pub(crate) model_key_pending: bool,
-    pub(crate) transcript_text_area: Rect,
-    pub(crate) transcript_cache: TranscriptRenderCache,
-    pub(crate) transcript_hit_targets: Vec<Option<TranscriptHitTarget>>,
-    pub(crate) transcript_cells: Vec<RenderedRow>,
-    pub(crate) transcript_selection: Option<TranscriptSelection>,
-    pub(crate) selecting_transcript: bool,
+    transcript_text_area: Rect,
+    transcript_cache: TranscriptRenderCache,
+    transcript_hit_targets: Vec<Option<TranscriptHitTarget>>,
+    transcript_cells: Vec<RenderedRow>,
+    transcript_selection: Option<TranscriptSelection>,
+    selecting_transcript: bool,
     transcript_dragged: bool,
     clipboard: Option<arboard::Clipboard>,
     next_tool_group: u64,
     next_thought: u64,
-    pub(crate) expanded_tool_groups: std::collections::HashSet<String>,
-    pub(crate) transcript_revision: u64,
-    pub(crate) pending_subagent_activity:
-        std::collections::VecDeque<ilar::subagent::SubagentActivity>,
+    expanded_tool_groups: std::collections::HashSet<String>,
+    transcript_revision: u64,
+    pending_subagent_activity: std::collections::VecDeque<ilar::subagent::SubagentActivity>,
     pub(crate) todos: std::sync::Arc<std::sync::Mutex<ilar::todo::TodoList>>,
 }
 
@@ -990,7 +987,7 @@ impl App {
         }
     }
 
-    pub(crate) fn max_scroll(&self) -> usize {
+    fn max_scroll(&self) -> usize {
         self.content_rows.saturating_sub(self.viewport_rows)
     }
 
@@ -1032,7 +1029,7 @@ impl App {
         self.follow_tail = true;
     }
 
-    pub(crate) fn update_scroll_metrics(&mut self, content_rows: usize, viewport_rows: usize) {
+    fn update_scroll_metrics(&mut self, content_rows: usize, viewport_rows: usize) {
         self.content_rows = content_rows;
         self.viewport_rows = viewport_rows;
         let max_scroll = self.max_scroll();
@@ -1061,7 +1058,7 @@ impl App {
         self.selecting_transcript = true;
     }
 
-    pub(crate) fn update_transcript_selection(&mut self, column: u16, row: u16) {
+    fn update_transcript_selection(&mut self, column: u16, row: u16) {
         if !self.selecting_transcript {
             return;
         }
@@ -1104,7 +1101,7 @@ impl App {
         text
     }
 
-    pub(crate) fn toggle_transcript_target(&mut self, target: TranscriptHitTarget) {
+    fn toggle_transcript_target(&mut self, target: TranscriptHitTarget) {
         match target {
             TranscriptHitTarget::ToolGroup(id) => {
                 if !self.expanded_tool_groups.remove(&id) {
@@ -1156,11 +1153,7 @@ impl App {
     }
 
     #[cfg(test)]
-    pub(crate) fn transcript_lines(
-        &self,
-        width: u16,
-        now: std::time::Instant,
-    ) -> Vec<Line<'static>> {
+    fn transcript_lines(&self, width: u16, now: std::time::Instant) -> Vec<Line<'static>> {
         use crate::transcript::{transcript_entries, transcript_entry_rows};
 
         let mut output = Vec::new();
@@ -1205,7 +1198,7 @@ impl App {
         output
     }
 
-    pub(crate) fn model_status_label(&self, include_provider: bool, width: usize) -> String {
+    fn model_status_label(&self, include_provider: bool, width: usize) -> String {
         let model = if include_provider {
             self.current_model.as_str()
         } else {
@@ -1277,7 +1270,7 @@ impl App {
         }
     }
 
-    pub(crate) fn operational_notice(&self) -> Option<(&str, Color)> {
+    fn operational_notice(&self) -> Option<(&str, Color)> {
         self.notice.as_ref().map(|notice| {
             let color = match notice.level {
                 NoticeLevel::Info => theme::PRIMARY,
@@ -1288,7 +1281,7 @@ impl App {
         })
     }
 
-    pub(crate) fn status_line(&self, width: u16) -> Line<'static> {
+    fn status_line(&self, width: u16) -> Line<'static> {
         let width = width as usize;
         if self.search_active {
             let counter = if self.search_matches.is_empty() {
@@ -2177,5 +2170,2909 @@ pub(crate) fn activate_palette_command(
             app.help_visible = true;
             app.help_scroll = 0;
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StatusNotice {
+    text: String,
+    level: NoticeLevel,
+    persistent: bool,
+}
+const ASSISTANT: Color = theme::ASSISTANT;
+const TOOL_ACTIVE: Color = theme::RUNNING;
+const CONTENT_HORIZONTAL_PADDING: u16 = 2;
+/// Show "no data Ns" in the status line once the stream has been silent
+/// this long during thinking/responding.
+const STREAM_STALL_AFTER: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// "12.3 KiB" while data flows, "12.3 KiB · no data Ns" once the stream
+/// has been silent past the stall threshold. `None` before any turn.
+fn stream_liveness(
+    received: u64,
+    last_data: Option<std::time::Instant>,
+    rate: Option<f64>,
+    now: std::time::Instant,
+) -> Option<String> {
+    let since = now.saturating_duration_since(last_data?);
+    Some(if since >= STREAM_STALL_AFTER {
+        format!("{} · no data {}s", format_bytes(received), since.as_secs())
+    } else {
+        match rate {
+            Some(rate) if rate >= 1.0 => format!(
+                "{} · {}/s",
+                format_bytes(received),
+                format_bytes(rate as u64)
+            ),
+            _ => format_bytes(received),
+        }
+    })
+}
+
+/// Advance a >=1s measurement window; returns the completed window's
+/// bytes/sec when one elapses.
+fn windowed_rate(
+    anchor: &mut Option<(std::time::Instant, u64)>,
+    received: u64,
+    now: std::time::Instant,
+) -> Option<f64> {
+    match *anchor {
+        None => {
+            *anchor = Some((now, received));
+            None
+        }
+        Some((window_start, window_bytes)) => {
+            let elapsed = now.saturating_duration_since(window_start);
+            if elapsed < std::time::Duration::from_secs(1) {
+                return None;
+            }
+            *anchor = Some((now, received));
+            Some(received.saturating_sub(window_bytes) as f64 / elapsed.as_secs_f64())
+        }
+    }
+}
+
+fn activity_line(
+    busy: bool,
+    activity: Activity,
+    now: std::time::Instant,
+    activity_started: std::time::Instant,
+    liveness: Option<&str>,
+) -> Option<Line<'static>> {
+    if !busy
+        || !matches!(
+            activity,
+            Activity::Thinking | Activity::Responding | Activity::Tools
+        )
+    {
+        return None;
+    }
+    let elapsed = now.saturating_duration_since(activity_started);
+    let (frame, label, color) = match activity {
+        Activity::Thinking => {
+            let frames = ["◐", "◓", "◑", "◒"];
+            (
+                frames[(elapsed.as_millis() / 160) as usize % frames.len()],
+                "thinking…",
+                theme::REASONING,
+            )
+        }
+        Activity::Responding => {
+            let frames = ["▏", "▎", "▍", "▎"];
+            (
+                frames[(elapsed.as_millis() / 120) as usize % frames.len()],
+                "responding…",
+                ASSISTANT,
+            )
+        }
+        Activity::Tools => {
+            let frames = ["◐", "◓", "◑", "◒"];
+            (
+                frames[(elapsed.as_millis() / 160) as usize % frames.len()],
+                "processing tools and agents…",
+                TOOL_ACTIVE,
+            )
+        }
+        _ => unreachable!(),
+    };
+    let label = match liveness {
+        // Tool rows carry their own progress; liveness belongs to the
+        // provider-stream states only.
+        Some(liveness) if !matches!(activity, Activity::Tools) => {
+            format!("{label} · {liveness}")
+        }
+        _ => label.to_string(),
+    };
+    Some(Line::from(vec![
+        Span::styled(
+            "ilar ",
+            Style::default().fg(ASSISTANT).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!("{frame} "), Style::default().fg(color)),
+        Span::styled(label, Style::default().fg(MUTED)),
+    ]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn activity_line_carries_stream_liveness() {
+        let now = std::time::Instant::now();
+        let started = now - std::time::Duration::from_secs(1);
+        let fresh = activity_line(true, Activity::Thinking, now, started, Some("2.0 KiB"))
+            .expect("busy thinking renders");
+        let fresh = rendered_text(&fresh);
+        assert!(fresh.contains("thinking… · 2.0 KiB"), "{fresh}");
+
+        let stalled = activity_line(
+            true,
+            Activity::Thinking,
+            now,
+            started,
+            Some("2.0 KiB · no data 7s"),
+        )
+        .expect("busy thinking renders");
+        assert!(rendered_text(&stalled).contains("no data 7s"));
+
+        // Tool activity keeps its own label; liveness is not appended.
+        let tools = activity_line(true, Activity::Tools, now, started, Some("2.0 KiB"))
+            .expect("busy tools renders");
+        assert!(!rendered_text(&tools).contains("KiB"));
+
+        // The helper itself: fresh vs stalled vs absent.
+        assert_eq!(stream_liveness(2048, None, None, now), None);
+        assert_eq!(
+            stream_liveness(2048, Some(now), None, now).as_deref(),
+            Some("2.0 KiB")
+        );
+        assert_eq!(
+            stream_liveness(2048, Some(now), Some(512.0), now).as_deref(),
+            Some("2.0 KiB · 512 B/s")
+        );
+        assert_eq!(
+            stream_liveness(
+                0,
+                Some(now - std::time::Duration::from_secs(7)),
+                Some(512.0),
+                now
+            )
+            .as_deref(),
+            Some("0 B · no data 7s")
+        );
+    }
+
+    #[test]
+    fn windowed_rate_measures_per_second_windows() {
+        let start = std::time::Instant::now();
+        let mut anchor = None;
+        // First observation opens the window.
+        assert_eq!(windowed_rate(&mut anchor, 1_000, start), None);
+        // Within the window: no reading yet.
+        assert_eq!(
+            windowed_rate(
+                &mut anchor,
+                3_000,
+                start + std::time::Duration::from_millis(500)
+            ),
+            None
+        );
+        // Window closes: (5000 - 1000) bytes over 2s = 2000 B/s.
+        let rate = windowed_rate(
+            &mut anchor,
+            5_000,
+            start + std::time::Duration::from_secs(2),
+        )
+        .unwrap();
+        assert!((rate - 2_000.0).abs() < 1.0, "{rate}");
+        // Anchor advanced: the next window measures fresh bytes.
+        let rate = windowed_rate(
+            &mut anchor,
+            5_000,
+            start + std::time::Duration::from_secs(3),
+        )
+        .unwrap();
+        assert!(rate.abs() < 1.0, "{rate}");
+    }
+    use crate::modals::{CommandPaletteAction, PALETTE_COMMANDS, is_command_palette_shortcut};
+    use crate::selection::SelectionPoint;
+    use crate::session_view::restored_session_view;
+    use crate::text::tests::rendered_text;
+    use crate::transcript::{reasoning_summary_title, tool_line, transcript_entry_lines};
+    use crate::{begin_retry, drain_wheel_batch, slash_candidates};
+    use crossterm::event::{Event, KeyEvent, KeyModifiers, MouseEventKind};
+    use ilar::session::{SessionMeta, new_id};
+
+    /// Render precedence and key-dispatch precedence used to be two
+    /// hand-maintained orders that were near-opposite. One value now
+    /// feeds both, so they cannot disagree about which overlay is in
+    /// front of the user.
+    #[test]
+    fn one_precedence_order_decides_the_active_overlay() {
+        let mut app = App::new();
+        assert_eq!(app.active_modal(), None);
+        assert!(!app.has_modal());
+
+        app.model_picker = Some(ModelPicker::new(
+            ilar::model::catalog().iter().collect(),
+            "zai/glm-4.7",
+        ));
+        assert_eq!(app.active_modal(), Some(Modal::ModelPicker));
+
+        // The pending manager is reachable from the palette and outranks
+        // everything: whatever is showing must also be taking the keys.
+        app.pending_manager = Some(PendingManager::default());
+        assert_eq!(app.active_modal(), Some(Modal::PendingManager));
+    }
+
+    /// Search owns the keyboard like any other overlay. It used to sit
+    /// outside `has_modal`, so a paste landed in the message input, the
+    /// input kept a caret it was not receiving, and a background
+    /// notification could start a turn underneath the search bar.
+    #[test]
+    fn search_is_a_modal_like_any_other() {
+        let mut app = App::new();
+        app.open_search();
+        assert_eq!(app.active_modal(), Some(Modal::Search));
+        assert!(app.has_modal());
+        assert!(
+            !input_accepts_keys(false, app.has_modal()),
+            "the prompt must not show a caret while search takes the keys"
+        );
+        app.close_search(true);
+        assert!(!app.has_modal());
+    }
+
+    /// Everything else in the transcript is mouse-driven; a 45-entry
+    /// model picker that cannot be scrolled is the odd one out.
+    #[test]
+    fn the_wheel_scrolls_the_active_picker() {
+        let mut app = App::new();
+        // Pin the entry count so catalog reordering cannot flip this.
+        let models: Vec<_> = ilar::model::catalog().iter().take(10).collect();
+        let first = models[0].full_id();
+        app.model_picker = Some(ModelPicker::new(models, &first));
+        assert_eq!(app.model_picker.as_ref().unwrap().selected, 0);
+
+        assert!(app.scroll_active_modal(3));
+        assert_eq!(app.model_picker.as_ref().unwrap().selected, 3);
+        assert!(app.scroll_active_modal(-3));
+        assert_eq!(app.model_picker.as_ref().unwrap().selected, 0);
+    }
+
+    /// The theme picker previews the highlighted theme across the whole
+    /// UI and its footer says so, so the wheel must preview like the
+    /// arrow keys rather than only moving the marker.
+    #[test]
+    fn the_wheel_previews_themes_like_the_arrow_keys() {
+        let mut app = App::new();
+        app.theme = theme::ThemeId::ALL[0];
+        app.theme_picker = Some(ThemePicker::new(app.theme));
+
+        assert!(app.scroll_active_modal(1));
+        let highlighted = app.theme_picker.as_ref().unwrap().selected_theme();
+        assert_ne!(highlighted, theme::ThemeId::ALL[0]);
+        assert_eq!(
+            app.theme, highlighted,
+            "the wheel moved the marker without previewing the theme"
+        );
+    }
+
+    /// A net-zero wheel batch has to fall through to the transcript:
+    /// `scroll_wheel` is what clears a stale selection.
+    #[test]
+    fn a_net_zero_wheel_batch_is_not_consumed_by_a_modal() {
+        let mut app = App::new();
+        assert!(!app.scroll_active_modal(0));
+        app.open_search();
+        assert!(!app.scroll_active_modal(0));
+        app.close_search(true);
+        app.help_visible = true;
+        assert!(!app.scroll_active_modal(0));
+    }
+
+    #[test]
+    fn restored_task_notifications_are_not_attributed_to_the_user() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf());
+        let session_id = new_id();
+        let mut session = store
+            .create(SessionMeta {
+                session_id: session_id.clone(),
+                parent_id: None,
+                agent: "build".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+            })
+            .unwrap();
+        session
+            .append(ilar::session::SessionEvent::UserMessage {
+                id: new_id(),
+                text: "hello".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        session
+            .append(ilar::session::SessionEvent::UserMessage {
+                id: new_id(),
+                text: "<task-notification>\nTask \"Assess architecture and risks\" completed.\n<result>\nRepository review\n</result>\n</task-notification>".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        session
+            .append(ilar::session::SessionEvent::UserMessage {
+                id: new_id(),
+                text: "<tool-notification>\nBackground job job-1 (\"Run checks\") completed.\n<result>\nchecks passed\n</result>\n</tool-notification>".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        drop(session);
+
+        let view = restored_session_view(&store.load(&session_id).unwrap());
+        let now = std::time::Instant::now();
+        let rendered = view
+            .lines
+            .iter()
+            .flat_map(|line| transcript_entry_lines(line, 100, now, now))
+            .map(|line| rendered_text(&line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("you  hello"), "{rendered}");
+        assert!(
+            rendered.contains("task ▸ Assess architecture and risks completed."),
+            "{rendered}"
+        );
+        // The body is collapsed behind the disclosure.
+        assert!(
+            !rendered.contains("Repository review"),
+            "body must be collapsed: {rendered}"
+        );
+        assert!(rendered.contains("more line(s)"), "{rendered}");
+        assert!(!rendered.contains("you  Task"), "{rendered}");
+        assert!(
+            rendered.contains("job  ▸ job-1 (\"Run checks\") completed."),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("you  Background job"), "{rendered}");
+        assert!(!rendered.contains("<task-notification>"), "{rendered}");
+        assert!(!rendered.contains("<tool-notification>"), "{rendered}");
+        assert!(!rendered.contains("<result>"), "{rendered}");
+
+        let mut app = App::new();
+        app.push_notification(
+            "Live review",
+            "<task-notification>\nTask \"Live review\" completed.\n<result>\nDone\n</result>\n</task-notification>",
+        );
+        let rendered = app
+            .transcript_lines(100, now)
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            rendered.contains("task ▸ Live review completed."),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("\nDone"), "collapsed body: {rendered}");
+        // Clicking the header expands the body, a second click collapses.
+        let task_id = app
+            .lines
+            .iter()
+            .find_map(|line| match line {
+                Line_::Task { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .expect("task line present");
+        let target = TranscriptHitTarget::Thought(task_id);
+        app.toggle_transcript_target(target.clone());
+        let expanded = app
+            .transcript_lines(100, now)
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(expanded.contains("Done"), "{expanded}");
+        app.toggle_transcript_target(target);
+        assert!(!rendered.contains("you  "), "{rendered}");
+        assert!(!rendered.contains("<result>"), "{rendered}");
+
+        let parsed = task_notification_display(
+            "<task-notification>\nTask \"Review \"risky\" paths\" completed.\n<result>\nLiteral delimiters:\n<result>\ninside\n</result>\n</result>\n</task-notification>",
+        )
+        .unwrap();
+        assert!(
+            parsed.starts_with("Review \"risky\" paths completed."),
+            "{parsed}"
+        );
+        assert!(parsed.contains("<result>\ninside\n</result>"), "{parsed}");
+        assert_eq!(
+            task_notification_display(
+                "<task-notification>\nTask \"Build project\" failed: path \"foo\" is unavailable\n</task-notification>"
+            )
+            .unwrap(),
+            "Build project failed: path \"foo\" is unavailable"
+        );
+
+        let mut fallback = App::new();
+        fallback.push_notification("Unknown format", "opaque notification");
+        let rendered = fallback
+            .transcript_lines(100, now)
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            rendered.contains("task notification: Unknown format"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("you  opaque notification"), "{rendered}");
+    }
+
+    #[test]
+    fn multiline_input_renders_multiple_lines_and_cursor_position() {
+        let backend = ratatui::backend::TestBackend::new(40, 12);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.input = InputBuffer::from("first line\nsecond line\nthird line");
+
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let screen = (0..terminal.backend().buffer().area.height)
+            .map(|row| {
+                (0..terminal.backend().buffer().area.width)
+                    .map(|column| terminal.backend().buffer()[(column, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("first line"), "{screen}");
+        assert!(screen.contains("second line"), "{screen}");
+        assert!(screen.contains("third line"), "{screen}");
+        assert!(screen.contains("3/3"), "{screen}");
+    }
+
+    #[test]
+    fn session_usage_accumulates_across_steps_and_poisons_on_unknown_pricing() {
+        let mut app = App::new();
+        app.current_model = "zai/glm-4.7".into();
+        let step = ilar::session::Usage {
+            input_tokens: 1_000_000,
+            output_tokens: 0,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            input_token_accounting: None,
+        };
+        for _ in 0..2 {
+            app.push_loop_event(&LoopEvent::StepComplete {
+                stop_reason: "end_turn".into(),
+                usage: step,
+            });
+        }
+        assert_eq!(app.session_usage.input_tokens, 2_000_000);
+        let cost = app.session_cost.unwrap();
+        assert!((cost - 1.2).abs() < 1e-9, "{cost}");
+
+        // A step on an unpriced model keeps tokens but drops the dollars.
+        app.current_model = "custom/self-hosted".into();
+        app.push_loop_event(&LoopEvent::StepComplete {
+            stop_reason: "end_turn".into(),
+            usage: step,
+        });
+        assert_eq!(app.session_usage.input_tokens, 3_000_000);
+        assert_eq!(app.session_cost, None);
+    }
+
+    #[test]
+    fn command_palette_sizes_to_show_every_command() {
+        let mut app = App::new();
+        app.command_palette = Some(CommandPalette::new(palette_items()));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let screen = (0..24)
+            .map(|row| {
+                (0..80)
+                    .map(|column| terminal.backend().buffer()[(column, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        for definition in PALETTE_COMMANDS {
+            assert!(
+                screen.contains(definition.label),
+                "missing {:?}:\n{screen}",
+                definition.label
+            );
+        }
+        assert!(
+            !screen.contains("more"),
+            "nothing should be clipped:\n{screen}"
+        );
+    }
+
+    #[test]
+    fn transcript_search_finds_jumps_and_restores() {
+        let mut app = App::new();
+        app.lines = (0..40)
+            .map(|index| Line_::User(format!("message number {index}")))
+            .chain(std::iter::once(Line_::Assistant(
+                "the special needle answer".into(),
+            )))
+            .collect();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 12)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let scroll_before = app.scroll_top;
+
+        app.open_search();
+        for character in "needle".chars() {
+            app.search_query.push(character);
+        }
+        app.search_refresh();
+        assert_eq!(app.search_matches.len(), 1, "{:?}", app.search_matches);
+        assert!(!app.follow_tail);
+
+        // Status line reflects the query and counter.
+        let bar = rendered_text(&app.status_line(120));
+        assert!(bar.contains("/needle"), "{bar}");
+        assert!(bar.contains("1/1"), "{bar}");
+
+        // Esc restores the pre-search view.
+        app.close_search(true);
+        assert!(!app.search_active);
+        assert_eq!(app.scroll_top, scroll_before.min(app.max_scroll()));
+
+        // Case-insensitive; no matches reported gracefully.
+        app.open_search();
+        app.search_query = "NEEDLE".into();
+        app.search_refresh();
+        assert_eq!(app.search_matches.len(), 1);
+        app.search_query = "zzz-not-there".into();
+        app.search_refresh();
+        assert!(app.search_matches.is_empty());
+        assert!(rendered_text(&app.status_line(120)).contains("no matches"));
+    }
+
+    #[test]
+    fn slash_input_shows_inline_completion_including_goal() {
+        let skills = vec![
+            ("deploy".to_string(), "Deploy things".to_string()),
+            ("greptile".to_string(), "Review comments".to_string()),
+        ];
+        // All candidates on bare slash, fuzzy-filtered as the name grows.
+        let all = slash_candidates("/", &skills);
+        assert_eq!(all.len(), 3);
+        assert!(all.iter().any(|(name, _)| name == "goal"));
+        let filtered = slash_candidates("/go", &skills);
+        assert_eq!(
+            filtered.first().map(|(name, _)| name.as_str()),
+            Some("goal")
+        );
+        // Finished name (whitespace) or non-slash input: no popup.
+        assert!(slash_candidates("/goal recover", &skills).is_empty());
+        assert!(slash_candidates("plain text", &skills).is_empty());
+        assert!(slash_candidates("/zzz", &skills).is_empty());
+
+        // The popup renders above the input.
+        let mut app = App::new();
+        app.skills = skills;
+        app.input = InputBuffer::from("/go");
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let screen = (0..24)
+            .map(|row| {
+                (0..80)
+                    .map(|column| terminal.backend().buffer()[(column, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("/goal — work until"), "{screen}");
+    }
+
+    #[test]
+    fn pending_manager_lists_and_mutates_standing_state() {
+        let mut app = App::new();
+        app.queued_messages = vec!["first".into(), "second".into()];
+        app.goal = Some(("recover the engine".into(), 2));
+        app.background_running = 1;
+        app.retry_available = true;
+        app.last_prompt = Some("previous prompt".into());
+        app.pending_manager = Some(PendingManager::default());
+        assert_eq!(app.pending_items().len(), 5);
+
+        // Deleting a queued message is immediate and targeted.
+        assert_eq!(
+            app.pending_manager_key(KeyCode::Char('d'), false),
+            PendingAction::DeleteQueued(0)
+        );
+        app.queued_messages.remove(0);
+        assert_eq!(app.pending_items().len(), 4);
+
+        // Enter on a queued message edits it into the input.
+        assert_eq!(
+            app.pending_manager_key(KeyCode::Enter, false),
+            PendingAction::EditQueued(0)
+        );
+
+        // Goal abort requires arming: first d stays, second fires.
+        app.pending_manager_key(KeyCode::Down, false);
+        assert_eq!(
+            app.pending_manager_key(KeyCode::Char('d'), false),
+            PendingAction::Stay
+        );
+        assert_eq!(
+            app.pending_manager_key(KeyCode::Char('d'), false),
+            PendingAction::AbortGoal
+        );
+        // Moving the selection disarms.
+        app.pending_manager_key(KeyCode::Char('d'), false);
+        app.pending_manager_key(KeyCode::Down, false);
+        assert_eq!(
+            app.pending_manager_key(KeyCode::Char('d'), false),
+            PendingAction::Stay,
+            "background cancel must re-arm after selection moved"
+        );
+        assert_eq!(
+            app.pending_manager_key(KeyCode::Esc, false),
+            PendingAction::Close
+        );
+    }
+
+    #[test]
+    fn services_show_in_the_sidebar() {
+        let mut app = App::new();
+        app.services_view = vec![
+            ("web".into(), true, "up 3m2s".into()),
+            ("worker".into(), false, "exit 1".into()),
+        ];
+        app.services_running = 1;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let screen = (0..30)
+            .map(|row| {
+                (0..140)
+                    .map(|column| terminal.backend().buffer()[(column, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("services (1)"), "{screen}");
+        assert!(screen.contains("web · up 3m2s"), "{screen}");
+        assert!(screen.contains("worker · exit 1"), "{screen}");
+        assert!(screen.contains("todos"), "{screen}");
+    }
+
+    #[test]
+    fn goal_shows_in_the_sidebar_on_wide_terminals() {
+        let mut app = App::new();
+        app.goal = Some((
+            "recover the engine until 5 turns replay at 90% accuracy".into(),
+            4,
+        ));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let screen = (0..30)
+            .map(|row| {
+                (0..140)
+                    .map(|column| terminal.backend().buffer()[(column, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("goal 4/25"), "{screen}");
+        assert!(screen.contains("recover the engine"), "{screen}");
+        assert!(screen.contains("Ctrl-Q manage"), "{screen}");
+        assert!(
+            screen.contains("todos"),
+            "todos panel still present: {screen}"
+        );
+    }
+
+    #[test]
+    fn goal_round_shows_in_the_input_title() {
+        let mut app = App::new();
+        app.goal = Some(("recover the engine".into(), 3));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let screen = (0..24)
+            .map(|row| {
+                (0..80)
+                    .map(|column| terminal.backend().buffer()[(column, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("goal 3/25"), "{screen}");
+    }
+
+    #[test]
+    fn queued_messages_show_in_the_input_title() {
+        let mut app = App::new();
+        app.queued_messages = vec!["next thing".into(), "after that".into()];
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let screen = (0..24)
+            .map(|row| {
+                (0..80)
+                    .map(|column| terminal.backend().buffer()[(column, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("2 queued"), "{screen}");
+    }
+
+    #[test]
+    fn turn_errors_offer_retry_only_with_a_known_prompt() {
+        let mut app = App::new();
+        app.finish_turn(Err(anyhow::anyhow!("api down")));
+        assert!(!app.retry_available, "no prompt, nothing to retry");
+
+        let mut app = App::new();
+        app.last_prompt = Some("do the thing".into());
+        app.finish_turn(Err(anyhow::anyhow!("api down")));
+        assert!(app.retry_available);
+        let (notice, _) = app.operational_notice().expect("error notice");
+        assert!(notice.contains("Ctrl-R to retry"), "{notice}");
+
+        // A fresh successful turn clears nothing prematurely.
+        app.retry_available = false;
+        app.finish_turn(Ok(TurnOutcome::Completed));
+        assert!(!app.retry_available);
+    }
+
+    #[test]
+    fn thinking_status_shows_stream_liveness() {
+        let mut app = App::new();
+        app.push_loop_event(&LoopEvent::TurnStarted);
+        // Liveness engages immediately: a pre-first-byte hang must be
+        // visible, not a bare spinner.
+        let plain = rendered_text(&app.status_line(120));
+        assert!(plain.contains("thinking · 0 B"), "{plain}");
+        app.stream_last_data = Some(std::time::Instant::now() - std::time::Duration::from_secs(12));
+        let hung = rendered_text(&app.status_line(120));
+        assert!(hung.contains("0 B · no data 12s"), "{hung}");
+        app.stream_last_data = Some(std::time::Instant::now());
+
+        app.push_loop_event(&LoopEvent::ThinkingDelta("x".repeat(2048)));
+        let live = rendered_text(&app.status_line(120));
+        assert!(live.contains("thinking · 2.0 KiB"), "{live}");
+        assert!(
+            !live.contains("no data"),
+            "fresh data is not a stall: {live}"
+        );
+
+        // A silent stream surfaces the stall age instead of spinning forever.
+        app.stream_last_data = Some(std::time::Instant::now() - std::time::Duration::from_secs(10));
+        let stalled = rendered_text(&app.status_line(120));
+        assert!(stalled.contains("no data 10s"), "{stalled}");
+
+        // Responding keeps counting; narrow widths drop the counter.
+        app.push_loop_event(&LoopEvent::TextDelta("y".repeat(1024)));
+        let responding = rendered_text(&app.status_line(120));
+        assert!(responding.contains("responding · 3.0 KiB"), "{responding}");
+        let narrow = rendered_text(&app.status_line(40));
+        assert!(!narrow.contains("KiB"), "{narrow}");
+
+        // A new turn resets the counter.
+        app.push_loop_event(&LoopEvent::TurnStarted);
+        let reset = rendered_text(&app.status_line(120));
+        assert!(!reset.contains("KiB"), "{reset}");
+    }
+
+    #[test]
+    fn idle_status_keeps_model_and_latest_step_usage() {
+        let mut app = App::new();
+        app.configure_runtime(
+            "openai/gpt-5.6-sol".into(),
+            Some("high".into()),
+            std::path::PathBuf::from("/workspace/project"),
+            0,
+            Some(272_000),
+            true,
+        );
+        app.push_loop_event(&LoopEvent::StepComplete {
+            stop_reason: "end_turn".into(),
+            usage: ilar::session::Usage {
+                input_tokens: 300,
+                output_tokens: 50,
+                cache_read_input_tokens: 1_500,
+                cache_creation_input_tokens: 20,
+                input_token_accounting: Some(ilar::session::InputTokenAccounting::ExcludesCached),
+            },
+        });
+        app.push_loop_event(&LoopEvent::TurnDone {
+            outcome: TurnOutcome::Completed,
+        });
+        app.finish_turn(Ok(TurnOutcome::Completed));
+
+        let status = rendered_text(&app.status_line(140));
+        assert!(status.contains("openai/gpt-5.6-sol@high"), "{status}");
+        assert!(status.contains("in 300"), "{status}");
+        assert!(status.contains("out 50"), "{status}");
+        assert!(status.contains("req cache r1500/w20"), "{status}");
+        assert!(status.contains("Σ 1k"), "{status}");
+        assert!(status.contains("$0.004"), "{status}");
+        let narrow = rendered_text(&app.status_line(60));
+        assert!(narrow.contains("gpt-5.6"), "{narrow}");
+        assert!(narrow.contains("high"), "{narrow}");
+        assert!(narrow.contains("i300/o50"), "{narrow}");
+        assert!(narrow.contains("req-cache r1k/w20"), "{narrow}");
+        for width in [64, 72, 77] {
+            let boundary = rendered_text(&app.status_line(width));
+            assert!(boundary.contains("gpt-5.6"), "width {width}: {boundary}");
+            assert!(boundary.contains("i300/o50"), "width {width}: {boundary}");
+        }
+        for width in 0..=120 {
+            let status = rendered_text(&app.status_line(width));
+            assert!(
+                UnicodeWidthStr::width(status.as_str()) <= width as usize,
+                "width {width}: {status:?}"
+            );
+        }
+        for width in 0..=20 {
+            let model = app.model_status_label(false, width);
+            assert!(
+                model.is_empty() || model.ends_with("@high"),
+                "{width}: {model}"
+            );
+        }
+        app.latest_usage = None;
+        app.context_used = u64::MAX;
+        app.context_limit = Some(1);
+        let saturated = rendered_text(&app.status_line(64));
+        assert!(
+            UnicodeWidthStr::width(saturated.as_str()) <= 64,
+            "{saturated}"
+        );
+    }
+
+    #[test]
+    fn status_line_prioritizes_notices_and_shows_a_wide_context_meter() {
+        let mut app = App::new();
+        app.configure_runtime(
+            "openai/gpt-5.6-sol".into(),
+            Some("high".into()),
+            std::path::PathBuf::from("/workspace/project"),
+            204_000,
+            Some(272_000),
+            false,
+        );
+        app.status = "notification paused; send a message to resume".into();
+        app.set_notice(
+            "notification paused; send a message to resume",
+            NoticeLevel::Warning,
+        );
+        app.set_activity(Activity::Paused);
+
+        let wide = rendered_text(&app.status_line(120));
+        assert!(wide.contains("notification paused"), "{wide}");
+        assert!(wide.contains("ctx ["), "{wide}");
+        assert!(wide.contains("75%"), "{wide}");
+
+        let narrow = rendered_text(&app.status_line(48));
+        assert!(narrow.contains("notification paused"), "{narrow}");
+        assert!(narrow.contains("75%"), "{narrow}");
+        assert!(UnicodeWidthStr::width(narrow.as_str()) <= 48);
+    }
+
+    #[test]
+    fn focused_input_border_is_stronger_and_help_moves_to_the_footer() {
+        let backend = ratatui::backend::TestBackend::new(80, 12);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new();
+
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(0, 0)].fg, theme::BORDER);
+        assert_eq!(buffer[(0, 9)].fg, theme::FOCUS_BORDER);
+        assert_eq!(buffer[(0, 0)].symbol(), "┌");
+        assert_eq!(buffer[(0, 9)].symbol(), "┏");
+        let bottom = (0..buffer.area.width)
+            .map(|x| buffer[(x, 11)].symbol())
+            .collect::<String>();
+        assert!(bottom.contains("Enter send"), "{bottom}");
+
+        let backend = ratatui::backend::TestBackend::new(40, 12);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let bottom = (0..buffer.area.width)
+            .map(|x| buffer[(x, 11)].symbol())
+            .collect::<String>();
+        assert!(bottom.contains("Enter send"), "{bottom}");
+    }
+
+    #[test]
+    fn wide_tool_rows_align_state_and_nested_rows_have_tree_rails() {
+        let now = std::time::Instant::now();
+        let short = rendered_text(&tool_line(
+            "read",
+            &ToolKind::Tool,
+            "src/main.rs",
+            ToolState::Succeeded,
+            100,
+            std::time::Duration::ZERO,
+            ToolProgress::None,
+            now,
+        ));
+        let long = rendered_text(&tool_line(
+            "a-much-longer-tool-name",
+            &ToolKind::Tool,
+            "src/main.rs",
+            ToolState::Succeeded,
+            100,
+            std::time::Duration::ZERO,
+            ToolProgress::None,
+            now,
+        ));
+        assert_eq!(
+            short.chars().position(|character| character == '✓'),
+            long.chars().position(|character| character == '✓'),
+            "{short:?} {long:?}"
+        );
+
+        let mut app = App::new();
+        app.lines.clear();
+        app.push_loop_event(&LoopEvent::ReasoningSummaryDelta("Inspecting".into()));
+        app.push_loop_event(&LoopEvent::ReasoningSummaryCompleted);
+        app.push_loop_event(&LoopEvent::ToolStarted {
+            id: "read-1".into(),
+            name: "read".into(),
+        });
+        app.push_loop_event(&LoopEvent::ToolFinished {
+            id: "read-1".into(),
+            name: "read".into(),
+            is_error: false,
+            result: String::new(),
+            child_session_id: None,
+        });
+        app.toggle_transcript_target(TranscriptHitTarget::ToolGroup("live:0:read-1".into()));
+        let rendered = app
+            .transcript_lines(100, now)
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>();
+        assert!(rendered[1].starts_with("└─tools "), "{rendered:?}");
+        assert!(rendered[2].starts_with("  └─tool "), "{rendered:?}");
+
+        let compact = app
+            .transcript_lines(48, now)
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>();
+        assert!(
+            !compact.iter().any(|line| line.contains('─')),
+            "{compact:?}"
+        );
+    }
+
+    #[test]
+    fn operational_notices_are_bounded_and_clear_when_work_starts() {
+        let mut app = App::new();
+        app.finish_turn(Err(anyhow::anyhow!("provider unavailable\nsecret detail")));
+
+        let notice = app.notice.as_ref().expect("error notice");
+        assert_eq!(notice.level, NoticeLevel::Error);
+        assert_eq!(notice.text, "error: provider unavailable");
+        assert!(notice.persistent);
+
+        app.push_loop_event(&LoopEvent::TurnStarted);
+        assert!(app.notice.is_some());
+        app.clear_notice();
+        assert!(app.notice.is_none());
+
+        app.set_persistent_notice(
+            "notification paused; send a message to resume",
+            NoticeLevel::Warning,
+        );
+        app.clear_transient_notice();
+        assert!(app.notice.is_some());
+        app.set_notice("aborting turn…", NoticeLevel::Warning);
+        assert_eq!(
+            app.notice.as_ref().map(|notice| notice.text.as_str()),
+            Some("notification paused; send a message to resume")
+        );
+    }
+
+    #[test]
+    fn transcript_tail_renders_beyond_u16_scroll_offsets() {
+        let backend = ratatui::backend::TestBackend::new(40, 9);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.lines = (0..u16::MAX as usize + 20)
+            .map(|index| Line_::System(format!("row {index}")))
+            .collect();
+        app.lines.push(Line_::System("true tail marker".into()));
+
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        assert!(app.scroll_top > u16::MAX as usize);
+        let screen = (0..terminal.backend().buffer().area.height)
+            .map(|row| {
+                (0..terminal.backend().buffer().area.width)
+                    .map(|column| terminal.backend().buffer()[(column, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("true tail marker"), "{screen}");
+    }
+
+    #[test]
+    fn skills_open_as_a_palette_submenu() {
+        // The palette lists a single Skills entry, not one row per skill.
+        let mut palette = CommandPalette::new(palette_items());
+        assert_eq!(palette.items.len(), PALETTE_COMMANDS.len());
+        palette.insert_query("skill");
+        assert_eq!(
+            palette.handle_key(KeyCode::Enter, false),
+            CommandPaletteAction::Choose(PaletteAction::Command(PaletteCommand::Skills))
+        );
+
+        let mut app = App::new();
+        app.skills = vec![("deploy".into(), "Deploy things".into())];
+        activate_palette_command(
+            &mut app,
+            PaletteAction::Command(PaletteCommand::Skills),
+            Vec::new(),
+        );
+        let picker = app.skill_picker.as_ref().expect("skill picker opens");
+        assert_eq!(picker.skills.len(), 1);
+        assert!(app.command_palette.is_none());
+    }
+
+    #[test]
+    fn command_palette_opens_only_while_idle_and_switches_to_model_picker() {
+        assert!(is_command_palette_shortcut(&Event::Key(KeyEvent::new(
+            KeyCode::Char('p'),
+            KeyModifiers::CONTROL,
+        ))));
+        assert!(!is_command_palette_shortcut(&Event::Key(KeyEvent::new(
+            KeyCode::Char('p'),
+            KeyModifiers::NONE,
+        ))));
+
+        let mut app = App::new();
+        app.input = "draft prompt".into();
+        app.status = "paused".into();
+        app.model_key_pending = true;
+        app.busy = true;
+
+        app.open_command_palette();
+        assert!(app.command_palette.is_none());
+        assert_eq!(app.status, "paused");
+
+        app.busy = false;
+        app.open_command_palette();
+        assert!(app.command_palette.is_some());
+        assert!(!app.model_key_pending);
+        assert_eq!(app.status, "paused");
+        assert_eq!(app.input.text(), "draft prompt");
+
+        activate_palette_command(
+            &mut app,
+            PaletteAction::Command(PaletteCommand::Model),
+            ilar::model::catalog().iter().collect(),
+        );
+        assert!(app.command_palette.is_none());
+        assert!(app.model_picker.is_some());
+        assert_eq!(app.input.text(), "draft prompt");
+
+        app.model_picker = None;
+        app.current_model = "openai/gpt-5.2".into();
+        app.current_variant = Some("high".into());
+        app.command_palette = Some(CommandPalette::new(palette_items()));
+        activate_palette_command(
+            &mut app,
+            PaletteAction::Command(PaletteCommand::Reasoning),
+            ilar::model::catalog().iter().collect(),
+        );
+        assert!(app.command_palette.is_none());
+        assert!(app.variant_picker.is_some());
+
+        app.variant_picker = None;
+        app.command_palette = Some(CommandPalette::new(palette_items()));
+        activate_palette_command(
+            &mut app,
+            PaletteAction::Command(PaletteCommand::Theme),
+            ilar::model::catalog().iter().collect(),
+        );
+        assert!(app.command_palette.is_none());
+        assert!(app.theme_picker.is_some());
+    }
+
+    #[test]
+    fn theme_picker_previews_navigation_and_distinguishes_commit_from_cancel() {
+        let mut picker = ThemePicker::new(theme::ThemeId::Terminal);
+
+        assert_eq!(picker.selected_theme(), theme::ThemeId::Terminal);
+        assert_eq!(
+            picker.handle_key(KeyCode::Down, false),
+            ThemePickerAction::Preview(theme::ThemeId::Carbon)
+        );
+        assert_eq!(picker.active_theme, theme::ThemeId::Terminal);
+        assert_eq!(
+            picker.handle_key(KeyCode::Esc, false),
+            ThemePickerAction::Dismiss
+        );
+
+        assert_eq!(
+            picker.handle_key(KeyCode::End, false),
+            ThemePickerAction::Preview(theme::ThemeId::HighContrast)
+        );
+        assert_eq!(
+            picker.handle_key(KeyCode::Enter, false),
+            ThemePickerAction::Choose(theme::ThemeId::HighContrast)
+        );
+
+        let mut app = App::new();
+        app.theme_picker = Some(ThemePicker::new(theme::ThemeId::Terminal));
+        apply_theme_picker_action(
+            &mut app,
+            ThemePickerAction::Preview(theme::ThemeId::Carbon),
+            |_| unreachable!(),
+        );
+        assert_eq!(app.theme, theme::ThemeId::Carbon);
+        apply_theme_picker_action(&mut app, ThemePickerAction::Dismiss, |_| unreachable!());
+        assert_eq!(app.theme, theme::ThemeId::Terminal);
+        assert!(app.theme_picker.is_none());
+
+        app.theme_picker = Some(ThemePicker::new(theme::ThemeId::Terminal));
+        app.theme = theme::ThemeId::Frost;
+        let mut persisted = None;
+        apply_theme_picker_action(
+            &mut app,
+            ThemePickerAction::Choose(theme::ThemeId::Frost),
+            |theme| {
+                persisted = Some(theme);
+                Ok(ilar::config::ThemePersistOutcome::Saved)
+            },
+        );
+        assert_eq!(persisted, Some(theme::ThemeId::Frost));
+        assert_eq!(app.theme, theme::ThemeId::Frost);
+        assert!(app.theme_picker.is_none());
+
+        app.theme_picker = Some(ThemePicker::new(theme::ThemeId::Frost));
+        apply_theme_picker_action(
+            &mut app,
+            ThemePickerAction::Choose(theme::ThemeId::Parchment),
+            |_| {
+                Ok(ilar::config::ThemePersistOutcome::DurabilityUncertain(
+                    "directory sync failed".into(),
+                ))
+            },
+        );
+        assert_eq!(app.theme, theme::ThemeId::Parchment);
+        assert!(app.theme_picker.is_none());
+        let notice = app.notice.as_ref().unwrap();
+        assert_eq!(notice.level, NoticeLevel::Warning);
+        assert!(notice.text.contains("durability is uncertain"));
+    }
+
+    #[test]
+    fn theme_picker_blocks_events_for_the_underlying_interface() {
+        let mut app = App::new();
+        assert!(!app.has_modal());
+
+        app.theme_picker = Some(ThemePicker::new(theme::ThemeId::Terminal));
+
+        assert!(app.has_modal());
+    }
+
+    #[test]
+    fn theme_picker_renders_a_full_preview_on_narrow_terminals() {
+        let backend = ratatui::backend::TestBackend::new(28, 10);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.theme = theme::ThemeId::Carbon;
+        app.theme_picker = Some(ThemePicker::new(theme::ThemeId::Terminal));
+
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(0, 0)].bg, theme::canvas(theme::ThemeId::Carbon));
+        let screen = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("themes"), "{screen}");
+        assert!(screen.contains("Carbon"), "{screen}");
+        assert!(screen.contains("save"), "{screen}");
+        assert!(screen.contains("undo"), "{screen}");
+    }
+
+    #[test]
+    fn command_palette_renders_a_selectable_command_on_narrow_terminals() {
+        let backend = ratatui::backend::TestBackend::new(30, 6);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.command_palette = Some(CommandPalette::new(palette_items()));
+
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let screen = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("commands"), "{screen}");
+        assert!(screen.contains("search"), "{screen}");
+        assert!(screen.contains("Switch model"), "{screen}");
+    }
+
+    #[test]
+    fn reasoning_variant_picker_renders_on_narrow_terminals() {
+        let backend = ratatui::backend::TestBackend::new(30, 6);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.variant_picker = Some(VariantPicker::new(
+            ilar::model::find("openai/gpt-5.2").unwrap(),
+            Some("high"),
+        ));
+
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let screen = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("reasoning"), "{screen}");
+        assert!(screen.contains("high"), "{screen}");
+    }
+
+    #[test]
+    fn model_picker_renders_on_narrow_terminals() {
+        let backend = ratatui::backend::TestBackend::new(30, 6);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.model_picker = Some(ModelPicker::new(
+            ilar::model::catalog().iter().collect(),
+            "openai/gpt-5.6-sol",
+        ));
+
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let screen = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("models"), "{screen}");
+        assert!(screen.contains("search"), "{screen}");
+        assert!(
+            screen.contains("openai"),
+            "a selectable row must remain visible: {screen}"
+        );
+
+        app.model_picker.as_mut().unwrap().error = Some("switch failed".into());
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("switch failed"), "{screen}");
+    }
+
+    #[test]
+    fn prompt_and_picker_render_visible_cursor_positions() {
+        let backend = ratatui::backend::TestBackend::new(40, 10);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.input = "abc".into();
+
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert_eq!(
+            terminal.get_cursor_position().unwrap(),
+            ratatui::layout::Position::new(4, 8)
+        );
+
+        // Typing during a turn queues the message, so the caret must
+        // track it. The text has to change too: TestBackend keeps the
+        // last position, so an unset cursor is otherwise indistinguishable
+        // from a correctly placed one.
+        app.busy = true;
+        app.input = "abcdefgh".into();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert_eq!(
+            terminal.get_cursor_position().unwrap(),
+            ratatui::layout::Position::new(9, 8),
+            "the caret stopped tracking the input while a turn was running"
+        );
+        app.busy = false;
+        app.input = "abc".into();
+
+        let mut picker = ModelPicker::new(
+            ilar::model::catalog().iter().collect(),
+            "openai/gpt-5.6-sol",
+        );
+        picker.set_query("glm");
+        app.model_picker = Some(picker);
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert_eq!(
+            terminal.get_cursor_position().unwrap(),
+            ratatui::layout::Position::new(12, 2)
+        );
+    }
+
+    /// Ctrl-R must not clobber a draft: an unsubmitted draft is not in
+    /// the history, so overwriting it loses the text for good.
+    #[test]
+    fn retry_declines_rather_than_discarding_an_unsent_draft() {
+        let mut app = App::new();
+        app.last_prompt = Some("previous prompt".into());
+        app.retry_available = true;
+        app.input = "half-written thought".into();
+
+        assert!(begin_retry(&mut app).is_none());
+        assert_eq!(app.input.text(), "half-written thought");
+        assert!(app.retry_available, "retry stays on offer");
+
+        app.input.clear();
+        assert!(begin_retry(&mut app).is_some());
+        assert_eq!(app.input.text(), "previous prompt");
+        assert!(!app.retry_available);
+    }
+
+    #[test]
+    fn wrapped_assistant_lines_keep_content_indent() {
+        let backend = ratatui::backend::TestBackend::new(32, 10);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.lines = vec![Line_::Assistant(
+            "abcdefghijklmnopqrstuvwxyz0123456789".into(),
+        )];
+
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let continuation_start = (1..buffer.area.width.saturating_sub(1))
+            .find(|x| buffer[(*x, 2)].symbol() != " ")
+            .unwrap();
+        assert_eq!(continuation_start, 8);
+    }
+
+    #[test]
+    fn markdown_separator_occupies_one_final_terminal_row() {
+        let backend = ratatui::backend::TestBackend::new(48, 12);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.lines = vec![Line_::Assistant(
+            "- final list item\n\n## Section\n\nParagraph text.".into(),
+        )];
+
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let rows = (0..terminal.backend().buffer().area.height)
+            .map(|y| {
+                (0..terminal.backend().buffer().area.width)
+                    .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        let list = rows
+            .iter()
+            .position(|row| row.contains("final list item"))
+            .unwrap();
+        let heading = rows.iter().position(|row| row.contains("Section")).unwrap();
+        let paragraph = rows
+            .iter()
+            .position(|row| row.contains("Paragraph text"))
+            .unwrap();
+        assert_eq!(heading - list, 2, "rows: {rows:#?}");
+        assert_eq!(paragraph - heading, 2, "rows: {rows:#?}");
+    }
+
+    #[test]
+    fn turn_error_is_visible() {
+        let mut app = App::new();
+        app.busy = true;
+
+        app.finish_turn(Err(anyhow::anyhow!("provider rejected tool result")));
+
+        assert!(!app.busy);
+        assert_eq!(app.status, "error");
+        assert!(matches!(
+            app.lines.last(),
+            Some(Line_::System(message)) if message.contains("provider rejected tool result")
+        ));
+    }
+
+    #[test]
+    fn turn_done_keeps_ownership_until_join_cleanup() {
+        let mut app = App::new();
+        app.busy = true;
+
+        app.push_loop_event(&LoopEvent::TurnDone {
+            outcome: TurnOutcome::Completed,
+        });
+        assert!(app.busy);
+
+        app.finish_turn(Ok(TurnOutcome::Completed));
+        assert!(!app.busy);
+    }
+
+    #[test]
+    fn completed_consecutive_tools_collapse_to_one_group_row() {
+        let mut app = App::new();
+        app.lines.clear();
+        for (id, name) in [("call-1", "read"), ("call-2", "grep")] {
+            app.push_loop_event(&LoopEvent::ToolStarted {
+                id: id.into(),
+                name: name.into(),
+            });
+            app.push_loop_event(&LoopEvent::ToolFinished {
+                id: id.into(),
+                name: name.into(),
+                is_error: false,
+                result: String::new(),
+                child_session_id: None,
+            });
+        }
+
+        let rendered = app
+            .transcript_lines(80, std::time::Instant::now())
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(rendered.len(), 1);
+        assert!(rendered[0].contains("tools"), "{rendered:?}");
+        assert!(rendered[0].contains("2 calls"), "{rendered:?}");
+
+        app.toggle_transcript_target(TranscriptHitTarget::ToolGroup("live:0:call-1".into()));
+        let expanded = app
+            .transcript_lines(80, std::time::Instant::now())
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>();
+        assert_eq!(expanded.len(), 3);
+        assert!(expanded.iter().any(|line| line.contains("read")));
+        assert!(expanded.iter().any(|line| line.contains("grep")));
+    }
+
+    #[test]
+    fn provider_steps_in_one_thought_phase_share_a_group() {
+        let mut app = App::new();
+        app.lines.clear();
+        for (index, (id, name)) in [("call-1", "read"), ("call-2", "grep")]
+            .into_iter()
+            .enumerate()
+        {
+            app.push_loop_event(&LoopEvent::ToolStarted {
+                id: id.into(),
+                name: name.into(),
+            });
+            app.push_loop_event(&LoopEvent::ToolFinished {
+                id: id.into(),
+                name: name.into(),
+                is_error: false,
+                result: String::new(),
+                child_session_id: None,
+            });
+            if index == 0 {
+                app.push_loop_event(&LoopEvent::StepComplete {
+                    stop_reason: "tool_use".into(),
+                    usage: Default::default(),
+                });
+            }
+        }
+
+        let rendered = app
+            .transcript_lines(80, std::time::Instant::now())
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>();
+        assert_eq!(rendered.len(), 1);
+        assert!(rendered[0].contains("tools"), "{rendered:?}");
+        assert!(rendered[0].contains("2 calls"), "{rendered:?}");
+    }
+
+    #[test]
+    fn single_tool_group_is_a_compact_child_of_its_thought() {
+        let mut app = App::new();
+        app.lines.clear();
+        app.push_loop_event(&LoopEvent::ReasoningSummaryDelta(
+            "Inspecting layout".into(),
+        ));
+        app.push_loop_event(&LoopEvent::ReasoningSummaryCompleted);
+        app.push_loop_event(&LoopEvent::ToolStarted {
+            id: "read-1".into(),
+            name: "read".into(),
+        });
+        app.push_loop_event(&LoopEvent::ToolFinished {
+            id: "read-1".into(),
+            name: "read".into(),
+            is_error: false,
+            result: String::new(),
+            child_session_id: None,
+        });
+
+        let rendered = app
+            .transcript_lines(80, std::time::Instant::now())
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(rendered.len(), 2);
+        assert!(rendered[0].contains("Thought: Inspecting layout"));
+        assert!(rendered[1].starts_with("└─tools "), "{rendered:?}");
+        assert!(rendered[1].contains("1 call"), "{rendered:?}");
+        for width in 0..=2 {
+            app.transcript_cache.update(
+                &app.lines,
+                &app.expanded_tool_groups,
+                app.transcript_revision,
+                width,
+                std::time::Instant::now(),
+                app.activity_started,
+            );
+            assert!(
+                app.transcript_cache
+                    .visible_rows(0, usize::MAX, &[])
+                    .iter()
+                    .all(|row| row.line.width() <= width as usize),
+                "width {width}"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_is_a_spaced_top_level_parent_outside_tool_groups() {
+        let mut app = App::new();
+        app.lines.clear();
+        app.push_loop_event(&LoopEvent::ToolStarted {
+            id: "read-1".into(),
+            name: "read".into(),
+        });
+        app.push_loop_event(&LoopEvent::ToolStarted {
+            id: "task-1".into(),
+            name: "task".into(),
+        });
+        app.push_loop_event(&LoopEvent::SubagentConfigured {
+            id: "task-1".into(),
+            description: "Inspect rendering".into(),
+            agent: "explore".into(),
+            model: None,
+        });
+
+        let rendered = app
+            .transcript_lines(100, std::time::Instant::now())
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>();
+
+        assert!(rendered[0].starts_with("tools "), "{rendered:?}");
+        assert!(rendered[1].starts_with("└─tool "), "{rendered:?}");
+        assert_eq!(rendered[2], "");
+        assert!(rendered[3].starts_with("agent "), "{rendered:?}");
+        assert!(rendered[4].contains("thinking"), "{rendered:?}");
+    }
+
+    #[test]
+    fn tool_runs_around_an_agent_expand_independently() {
+        let mut app = App::new();
+        app.lines.clear();
+        for (id, name) in [("read-1", "read"), ("task-1", "task"), ("grep-1", "grep")] {
+            app.push_loop_event(&LoopEvent::ToolStarted {
+                id: id.into(),
+                name: name.into(),
+            });
+            if name == "task" {
+                app.push_loop_event(&LoopEvent::SubagentConfigured {
+                    id: id.into(),
+                    description: "Inspect".into(),
+                    agent: "explore".into(),
+                    model: None,
+                });
+            }
+            app.push_loop_event(&LoopEvent::ToolFinished {
+                id: id.into(),
+                name: name.into(),
+                is_error: false,
+                result: String::new(),
+                child_session_id: None,
+            });
+        }
+
+        app.toggle_transcript_target(TranscriptHitTarget::ToolGroup("live:0:read-1".into()));
+        let rendered = app
+            .transcript_lines(100, std::time::Instant::now())
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>();
+
+        assert!(rendered.iter().any(|line| line.contains("read")));
+        assert!(!rendered.iter().any(|line| line.contains("grep")));
+        assert_eq!(
+            rendered
+                .iter()
+                .filter(|line| line.contains("tools ▸"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn collapsed_running_group_shows_only_active_children() {
+        let mut app = App::new();
+        app.lines.clear();
+        for (id, name) in [("call-1", "read"), ("call-2", "grep")] {
+            app.push_loop_event(&LoopEvent::ToolStarted {
+                id: id.into(),
+                name: name.into(),
+            });
+        }
+        app.push_loop_event(&LoopEvent::ToolFinished {
+            id: "call-1".into(),
+            name: "read".into(),
+            is_error: false,
+            result: String::new(),
+            child_session_id: None,
+        });
+
+        let rendered = app
+            .transcript_lines(100, std::time::Instant::now())
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>();
+
+        assert!(rendered[0].contains("1 running · 2 calls"), "{rendered:?}");
+        assert!(rendered.iter().any(|line| line.contains("grep")));
+        assert!(!rendered.iter().any(|line| line.contains("read")));
+    }
+
+    #[test]
+    fn top_level_items_have_one_blank_separator_row() {
+        let mut app = App::new();
+        app.lines = vec![
+            Line_::User("Question".into()),
+            Line_::Thought {
+                id: String::new(),
+                text: "Answering".into(),
+                complete: true,
+                expanded: false,
+            },
+            Line_::Assistant("Response".into()),
+        ];
+
+        let rendered = app
+            .transcript_lines(80, std::time::Instant::now())
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered,
+            [
+                "you  Question",
+                "",
+                "+ Thought: Answering",
+                "",
+                "ilar Response"
+            ]
+        );
+    }
+
+    #[test]
+    fn expanded_tool_shows_bounded_arguments_and_result() {
+        let mut app = App::new();
+        app.lines.clear();
+        app.push_loop_event(&LoopEvent::ToolStarted {
+            id: "read-1".into(),
+            name: "read".into(),
+        });
+        app.push_loop_event(&LoopEvent::ToolInputComplete {
+            id: "read-1".into(),
+            arguments: "{\n  \"path\": \"src/main.rs\"\n}".into(),
+        });
+        app.push_loop_event(&LoopEvent::ToolFinished {
+            id: "read-1".into(),
+            name: "read".into(),
+            is_error: false,
+            result: (1..=12)
+                .map(|line| format!("result line {line}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            child_session_id: None,
+        });
+        app.toggle_transcript_target(TranscriptHitTarget::ToolGroup("live:0:read-1".into()));
+        app.toggle_transcript_target(TranscriptHitTarget::Tool("read-1".into()));
+
+        let rendered = app
+            .transcript_lines(60, std::time::Instant::now())
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>();
+
+        assert!(rendered.iter().any(|line| line.contains("args")));
+        assert!(rendered.iter().any(|line| line.contains("src/main.rs")));
+        assert!(rendered.iter().any(|line| line.contains("result")));
+        assert!(rendered.iter().any(|line| line.contains("… more")));
+        assert!(!rendered.iter().any(|line| line.contains("result line 12")));
+        assert!(rendered.iter().all(|line| line.width() <= 60));
+        for width in 0..=20 {
+            let narrow = app.transcript_lines(width, std::time::Instant::now());
+            assert!(
+                narrow.iter().all(|line| line.width() <= width as usize),
+                "width {width}: {:?}",
+                narrow.iter().map(rendered_text).collect::<Vec<_>>()
+            );
+        }
+
+        app.toggle_transcript_target(TranscriptHitTarget::Tool("read-1".into()));
+        let full = app
+            .transcript_lines(60, std::time::Instant::now())
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>();
+        assert!(full.iter().any(|line| line.contains("result line 12")));
+        assert!(!full.iter().any(|line| line.contains("… more")));
+
+        app.toggle_transcript_target(TranscriptHitTarget::Tool("read-1".into()));
+        let collapsed = app
+            .transcript_lines(60, std::time::Instant::now())
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>();
+        assert_eq!(collapsed.len(), 2);
+        assert!(!collapsed.iter().any(|line| line.contains("args")));
+    }
+
+    #[test]
+    fn expanded_edit_tool_shows_colored_diff_instead_of_args() {
+        let mut app = App::new();
+        app.lines.clear();
+        app.push_loop_event(&LoopEvent::ToolStarted {
+            id: "edit-1".into(),
+            name: "edit".into(),
+        });
+        app.push_loop_event(&LoopEvent::ToolInputComplete {
+            id: "edit-1".into(),
+            arguments: serde_json::json!({
+                "path": "src/lib.rs",
+                "old_string": "shared\nbefore\nshared tail",
+                "new_string": "shared\nafter\nshared tail",
+            })
+            .to_string(),
+        });
+        app.push_loop_event(&LoopEvent::ToolFinished {
+            id: "edit-1".into(),
+            name: "edit".into(),
+            is_error: false,
+            result: "edited src/lib.rs: 1 replacement".into(),
+            child_session_id: None,
+        });
+        app.toggle_transcript_target(TranscriptHitTarget::ToolGroup("live:0:edit-1".into()));
+        app.toggle_transcript_target(TranscriptHitTarget::Tool("edit-1".into()));
+
+        let lines = app.transcript_lines(60, std::time::Instant::now());
+        let rendered = lines.iter().map(rendered_text).collect::<Vec<_>>();
+        assert!(
+            rendered.iter().any(|line| line.contains("diff")),
+            "{rendered:?}"
+        );
+        assert!(
+            rendered.iter().any(|line| line.contains("- before")),
+            "{rendered:?}"
+        );
+        assert!(
+            rendered.iter().any(|line| line.contains("+ after")),
+            "{rendered:?}"
+        );
+        assert!(
+            !rendered.iter().any(|line| line.contains("old_string")),
+            "raw args JSON must be replaced by the diff: {rendered:?}"
+        );
+        let colors: Vec<_> = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .filter_map(|span| span.style.fg.map(|color| (span.content.to_string(), color)))
+            .collect();
+        assert!(
+            colors
+                .iter()
+                .any(|(text, color)| text.contains("+ after") && *color == theme::SUCCESS),
+            "{colors:?}"
+        );
+        assert!(
+            colors
+                .iter()
+                .any(|(text, color)| text.contains("- before") && *color == ERROR),
+            "{colors:?}"
+        );
+
+        for width in 0..=20 {
+            let narrow = app.transcript_lines(width, std::time::Instant::now());
+            assert!(
+                narrow.iter().all(|line| line.width() <= width as usize),
+                "width {width}"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_shows_live_children_and_expands_completed_timeline() {
+        let mut app = App::new();
+        app.lines.clear();
+        app.push_loop_event(&LoopEvent::ToolStarted {
+            id: "task-1".into(),
+            name: "task".into(),
+        });
+        app.push_loop_event(&LoopEvent::SubagentConfigured {
+            id: "task-1".into(),
+            description: "Inspect rendering".into(),
+            agent: "explore".into(),
+            model: None,
+        });
+        for event in [
+            LoopEvent::ReasoningSummaryDelta("Tracing transcript".into()),
+            LoopEvent::ReasoningSummaryCompleted,
+            LoopEvent::ToolStarted {
+                id: "child-read".into(),
+                name: "read".into(),
+            },
+        ] {
+            app.push_subagent_activity(&ilar::subagent::SubagentActivity {
+                parent_session_id: String::new(),
+                parent_call_id: "task-1".into(),
+                child_session_id: "child-session".into(),
+                event,
+            });
+        }
+
+        let live = app
+            .transcript_lines(100, std::time::Instant::now())
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>();
+        assert!(
+            live.iter()
+                .any(|line| line.contains("Thought: Tracing transcript"))
+        );
+        assert!(
+            live.iter()
+                .any(|line| line.contains("child-read") || line.contains("read"))
+        );
+        assert!(
+            live.iter()
+                .all(|line| !line.contains("└─└─") && !line.contains("├─└─")),
+            "{live:?}"
+        );
+
+        app.push_subagent_activity(&ilar::subagent::SubagentActivity {
+            parent_session_id: String::new(),
+            parent_call_id: "task-1".into(),
+            child_session_id: "child-session".into(),
+            event: LoopEvent::TextDelta("Nested answer".into()),
+        });
+        app.push_subagent_activity(&ilar::subagent::SubagentActivity {
+            parent_session_id: String::new(),
+            parent_call_id: "task-1".into(),
+            child_session_id: "child-session".into(),
+            event: LoopEvent::TurnDone {
+                outcome: TurnOutcome::Completed,
+            },
+        });
+        app.push_loop_event(&LoopEvent::ToolFinished {
+            id: "task-1".into(),
+            name: "task".into(),
+            is_error: false,
+            result: "Nested answer".into(),
+            child_session_id: Some("child-session".into()),
+        });
+        let collapsed = app
+            .transcript_lines(100, std::time::Instant::now())
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>();
+        assert!(!collapsed.iter().any(|line| line.contains("Nested answer")));
+
+        app.toggle_transcript_target(TranscriptHitTarget::Tool("task-1".into()));
+        let expanded = app
+            .transcript_lines(100, std::time::Instant::now())
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>();
+        assert!(expanded.iter().any(|line| line.contains("Nested answer")));
+        assert!(
+            expanded
+                .iter()
+                .any(|line| line.contains("Tracing transcript"))
+        );
+    }
+
+    #[test]
+    fn early_child_activity_waits_for_its_parent_row() {
+        let mut app = App::new();
+        app.lines.clear();
+        app.push_subagent_activity(&ilar::subagent::SubagentActivity {
+            parent_session_id: "root-session".into(),
+            parent_call_id: "task-early".into(),
+            child_session_id: "child-early".into(),
+            event: LoopEvent::ReasoningSummaryDelta("Already working".into()),
+        });
+        assert_eq!(app.pending_subagent_activity.len(), 1);
+
+        app.push_loop_event(&LoopEvent::ToolStarted {
+            id: "task-early".into(),
+            name: "task".into(),
+        });
+        app.push_loop_event(&LoopEvent::SubagentConfigured {
+            id: "task-early".into(),
+            description: "Fast child".into(),
+            agent: "explore".into(),
+            model: None,
+        });
+        app.retry_subagent_activity();
+
+        assert!(app.pending_subagent_activity.is_empty());
+        assert!(matches!(
+            app.lines.last(),
+            Some(Line_::Tool { child_lines, .. })
+                if matches!(child_lines.last(), Some(Line_::Thought { text, .. }) if text == "Already working")
+        ));
+    }
+
+    #[test]
+    fn zero_distance_click_toggles_a_semantic_transcript_row() {
+        let mut app = App::new();
+        app.transcript_text_area = Rect::new(4, 2, 40, 1);
+        app.transcript_hit_targets = vec![Some(TranscriptHitTarget::ToolGroup("group-1".into()))];
+
+        app.begin_transcript_selection(5, 2);
+        assert_eq!(app.finish_transcript_selection(5, 2), None);
+
+        assert!(app.expanded_tool_groups.contains("group-1"));
+        assert!(app.transcript_selection.is_none());
+    }
+
+    #[test]
+    fn aborted_turn_closes_running_tool_rows() {
+        let mut app = App::new();
+        app.push_loop_event(&LoopEvent::ToolStarted {
+            id: "call-1".into(),
+            name: "bash".into(),
+        });
+
+        app.push_loop_event(&LoopEvent::TurnDone {
+            outcome: TurnOutcome::Aborted,
+        });
+
+        assert!(matches!(
+            app.lines.last(),
+            Some(Line_::Tool {
+                state: ToolState::Failed,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn parallel_tool_completions_match_by_id() {
+        let mut app = App::new();
+        app.push_loop_event(&LoopEvent::ToolStarted {
+            id: "read-1".into(),
+            name: "read".into(),
+        });
+        app.push_loop_event(&LoopEvent::ToolStarted {
+            id: "todo-1".into(),
+            name: "todo".into(),
+        });
+        app.push_loop_event(&LoopEvent::ToolFinished {
+            id: "read-1".into(),
+            name: "read".into(),
+            is_error: false,
+            result: String::new(),
+            child_session_id: None,
+        });
+
+        assert!(matches!(
+            &app.lines[1],
+            Line_::Tool { id, state: ToolState::Succeeded, .. } if id == "read-1"
+        ));
+        assert!(matches!(
+            &app.lines[2],
+            Line_::Tool { id, state: ToolState::Running, .. } if id == "todo-1"
+        ));
+    }
+
+    #[test]
+    fn tool_arguments_are_muted_id_safe_and_single_line() {
+        let mut app = App::new();
+        app.push_loop_event(&LoopEvent::ToolStarted {
+            id: "bash-1".into(),
+            name: "bash".into(),
+        });
+        app.push_loop_event(&LoopEvent::ToolArguments {
+            id: "bash-1".into(),
+            arguments: "cargo test --workspace && cargo clippy --workspace".into(),
+        });
+        app.push_loop_event(&LoopEvent::ToolFinished {
+            id: "bash-1".into(),
+            name: "bash".into(),
+            is_error: false,
+            result: String::new(),
+            child_session_id: None,
+        });
+        app.toggle_transcript_target(TranscriptHitTarget::ToolGroup("live:0:bash-1".into()));
+
+        let lines = app.transcript_lines(36, std::time::Instant::now());
+        let tool = lines.last().unwrap();
+        assert!(UnicodeWidthStr::width(rendered_text(tool).as_str()) <= 36);
+        assert_eq!(tool.spans.last().unwrap().style.fg, Some(theme::SECONDARY));
+        assert!(rendered_text(tool).contains("cargo test"));
+        assert!(!rendered_text(tool).contains('\n'));
+    }
+
+    #[test]
+    fn write_progress_distinguishes_receiving_waiting_and_writing() {
+        let now = std::time::Instant::now();
+        let receiving = tool_line(
+            "write",
+            &ToolKind::Tool,
+            "src/generated.html",
+            ToolState::Running,
+            120,
+            std::time::Duration::ZERO,
+            ToolProgress::Receiving {
+                received_bytes: 48 * 1024,
+                last_data: now,
+            },
+            now,
+        );
+        let receiving = rendered_text(&receiving);
+        assert!(receiving.contains("src/generated.html"), "{receiving}");
+        assert!(receiving.contains("receiving 48.0 KiB"), "{receiving}");
+
+        let waiting = tool_line(
+            "write",
+            &ToolKind::Tool,
+            "src/generated.html",
+            ToolState::Running,
+            120,
+            std::time::Duration::ZERO,
+            ToolProgress::Receiving {
+                received_bytes: 48 * 1024,
+                last_data: now - std::time::Duration::from_secs(3),
+            },
+            now,
+        );
+        let waiting = rendered_text(&waiting);
+        assert!(waiting.contains("waiting for provider"), "{waiting}");
+        assert!(waiting.contains("last data 3s ago"), "{waiting}");
+
+        let mut app = App::new();
+        app.push_loop_event(&LoopEvent::ToolStarted {
+            id: "write-1".into(),
+            name: "write".into(),
+        });
+        app.push_loop_event(&LoopEvent::ToolInputProgress {
+            id: "write-1".into(),
+            received_bytes: 48 * 1024,
+            last_data: now,
+        });
+        app.push_loop_event(&LoopEvent::ToolInputComplete {
+            id: "write-1".into(),
+            arguments: "{\"path\":\"src/generated.html\"}".into(),
+        });
+        let queued = app.transcript_lines(120, now);
+        let queued = rendered_text(queued.last().unwrap());
+        assert!(queued.contains("queued"), "{queued}");
+        assert!(!queued.contains("provider"), "{queued}");
+
+        app.push_loop_event(&LoopEvent::ToolInputProgress {
+            id: "write-1".into(),
+            received_bytes: 48 * 1024,
+            last_data: now,
+        });
+        let still_queued = app.transcript_lines(120, now);
+        assert!(
+            rendered_text(still_queued.last().unwrap()).contains("queued"),
+            "{still_queued:?}"
+        );
+        let long_queued = rendered_text(&tool_line(
+            "bash",
+            &ToolKind::Tool,
+            "git status --short && find . -maxdepth 3 -type f | sort | sed -n 1,200p",
+            ToolState::Running,
+            36,
+            std::time::Duration::ZERO,
+            ToolProgress::Queued,
+            now,
+        ));
+        assert!(long_queued.contains("queued"), "{long_queued}");
+        // Explicit model overrides render as agent@model (short id).
+        let pinned = rendered_text(&tool_line(
+            "task",
+            &ToolKind::Agent {
+                name: "explore".into(),
+                model: Some("zai/glm-5.3".into()),
+            },
+            "grep the tree",
+            ToolState::Running,
+            120,
+            std::time::Duration::ZERO,
+            ToolProgress::None,
+            std::time::Instant::now(),
+        ));
+        assert!(pinned.contains("explore@glm-5.3"), "{pinned}");
+
+        let narrow_agent = rendered_text(&tool_line(
+            "task",
+            &ToolKind::Agent {
+                name: "repository-reviewer".into(),
+                model: None,
+            },
+            "inspect every lifecycle path",
+            ToolState::Running,
+            26,
+            std::time::Duration::ZERO,
+            ToolProgress::Queued,
+            now,
+        ));
+        assert!(narrow_agent.contains("queued"), "{narrow_agent}");
+
+        app.push_loop_event(&LoopEvent::ToolExecutionStarted {
+            id: "write-1".into(),
+            received_bytes: 64 * 1024,
+            started: now,
+        });
+        let writing = app.transcript_lines(120, now);
+        let writing = rendered_text(writing.last().unwrap());
+        assert!(writing.contains("writing 64.0 KiB · 0s"), "{writing}");
+        assert!(!writing.contains("received"), "{writing}");
+        app.push_loop_event(&LoopEvent::ToolExecutionCompleted {
+            id: "write-1".into(),
+        });
+        let complete = rendered_text(app.transcript_lines(120, now).last().unwrap());
+        assert!(complete.contains("done"), "{complete}");
+
+        let executing = tool_line(
+            "bash",
+            &ToolKind::Tool,
+            "cargo test",
+            ToolState::Running,
+            120,
+            std::time::Duration::ZERO,
+            ToolProgress::Executing {
+                received_bytes: 2048,
+                started: now - std::time::Duration::from_secs(3),
+            },
+            now,
+        );
+        let executing = rendered_text(&executing);
+        assert!(executing.contains("executing · 3s"), "{executing}");
+        assert!(!executing.contains("received"), "{executing}");
+
+        let mut agent_app = App::new();
+        agent_app.push_loop_event(&LoopEvent::ToolStarted {
+            id: "task-1".into(),
+            name: "task".into(),
+        });
+        agent_app.push_loop_event(&LoopEvent::ToolArguments {
+            id: "task-1".into(),
+            arguments: "ambiguous · summary".into(),
+        });
+        agent_app.push_loop_event(&LoopEvent::SubagentConfigured {
+            id: "task-1".into(),
+            description: "Review security paths".into(),
+            agent: "build · secure".into(),
+            model: None,
+        });
+        agent_app.push_loop_event(&LoopEvent::ToolInputComplete {
+            id: "task-1".into(),
+            arguments: "{\"description\":\"Review security paths\"}".into(),
+        });
+        agent_app.push_loop_event(&LoopEvent::ToolExecutionStarted {
+            id: "task-1".into(),
+            received_bytes: 406,
+            started: now - std::time::Duration::from_secs(72),
+        });
+        let subagent = agent_app
+            .transcript_lines(120, now)
+            .iter()
+            .map(rendered_text)
+            .find(|line| line.contains("agent"))
+            .unwrap();
+        assert!(subagent.contains("agent ▶ build · secure"), "{subagent}");
+        assert!(subagent.contains("Review security paths"), "{subagent}");
+        assert!(subagent.contains("running · 1m 12s"), "{subagent}");
+        assert!(!subagent.contains("received"), "{subagent}");
+    }
+
+    #[test]
+    fn telemetry_always_contains_runtime_context() {
+        let mut app = App::new();
+        app.configure_runtime(
+            "openai/gpt-5.6-sol".into(),
+            None,
+            std::path::PathBuf::from("/very/long/workspace/project"),
+            68_000,
+            Some(272_000),
+            false,
+        );
+        let wide = rendered_text(&app.status_line(100));
+        assert!(wide.contains("ready"));
+        assert!(wide.contains("openai/gpt-5.6-sol"));
+        assert!(wide.contains("project"));
+        assert!(wide.contains("ctx ["), "{wide}");
+        assert!(wide.contains("25%"));
+
+        let narrow = rendered_text(&app.status_line(40));
+        assert!(UnicodeWidthStr::width(narrow.as_str()) <= 40, "{narrow}");
+        assert!(narrow.contains("ready"));
+        assert!(narrow.contains("25%"));
+
+        let boundary = rendered_text(&app.status_line(64));
+        assert!(
+            UnicodeWidthStr::width(boundary.as_str()) <= 64,
+            "{boundary}"
+        );
+        assert!(boundary.contains("25%"), "{boundary}");
+
+        for width in 0..=100 {
+            let line = rendered_text(&app.status_line(width));
+            assert!(
+                UnicodeWidthStr::width(line.as_str()) <= width as usize,
+                "width {width}: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn telemetry_counts_uncached_and_cached_context_categories() {
+        let mut app = App::new();
+        app.push_loop_event(&LoopEvent::StepComplete {
+            stop_reason: "end_turn".into(),
+            usage: ilar::session::Usage {
+                input_tokens: 300,
+                output_tokens: 50,
+                cache_read_input_tokens: 1_500,
+                cache_creation_input_tokens: 0,
+                input_token_accounting: Some(ilar::session::InputTokenAccounting::ExcludesCached),
+            },
+        });
+        assert_eq!(app.context_used, 1_850);
+        assert!(!app.context_estimated);
+    }
+
+    #[test]
+    fn activity_row_animates_and_clears_with_turn() {
+        let mut app = App::new();
+        app.busy = true;
+        app.push_loop_event(&LoopEvent::TurnStarted);
+        let thinking = app.transcript_lines(80, app.activity_started);
+        assert!(rendered_text(thinking.last().unwrap()).contains("thinking"));
+        let next_frame = app.transcript_lines(
+            80,
+            app.activity_started + std::time::Duration::from_millis(200),
+        );
+        assert_ne!(
+            rendered_text(thinking.last().unwrap()),
+            rendered_text(next_frame.last().unwrap())
+        );
+
+        app.push_loop_event(&LoopEvent::ToolStarted {
+            id: "tool-1".into(),
+            name: "read".into(),
+        });
+        let tools = app.transcript_lines(80, app.activity_started);
+        assert!(rendered_text(tools.last().unwrap()).contains("processing tools and agents"));
+        let tool_now = std::time::Instant::now();
+        let first_tool = tool_line(
+            "read",
+            &ToolKind::Tool,
+            "src/main.rs",
+            ToolState::Running,
+            80,
+            std::time::Duration::ZERO,
+            ToolProgress::None,
+            tool_now,
+        );
+        let next_tool = tool_line(
+            "read",
+            &ToolKind::Tool,
+            "src/main.rs",
+            ToolState::Running,
+            80,
+            std::time::Duration::from_millis(200),
+            ToolProgress::None,
+            tool_now + std::time::Duration::from_millis(200),
+        );
+        assert_ne!(rendered_text(&first_tool), rendered_text(&next_tool));
+
+        app.push_loop_event(&LoopEvent::TextDelta("hello".into()));
+        let responding = app.transcript_lines(80, app.activity_started);
+        assert!(rendered_text(responding.last().unwrap()).contains("responding"));
+
+        app.push_loop_event(&LoopEvent::TurnDone {
+            outcome: TurnOutcome::Completed,
+        });
+        app.finish_turn(Ok(TurnOutcome::Completed));
+        let complete = app.transcript_lines(80, std::time::Instant::now());
+        assert!(!rendered_text(complete.last().unwrap()).contains("responding"));
+    }
+
+    #[test]
+    fn raw_thinking_accumulates_and_expands_on_click() {
+        let mut app = App::new();
+        app.lines.clear();
+        app.push_loop_event(&LoopEvent::TurnStarted);
+        app.push_loop_event(&LoopEvent::ThinkingDelta(
+            "First I will check the parser.\nNow comparing".into(),
+        ));
+        app.push_loop_event(&LoopEvent::ThinkingDelta(" the two branches.".into()));
+
+        // Collapsed: tail-first title shows what it is doing right now.
+        let live = app.transcript_lines(100, std::time::Instant::now());
+        let rendered: Vec<String> = live.iter().map(rendered_text).collect();
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("▸ Thinking: Now comparing the two branches.")),
+            "{rendered:?}"
+        );
+        assert!(
+            !rendered
+                .iter()
+                .any(|line| line.contains("check the parser"))
+        );
+
+        // Click expands to the full (bounded) thinking text. Targets are
+        // computed during render, so draw once first.
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let target = app
+            .transcript_hit_targets
+            .iter()
+            .flatten()
+            .find(|target| matches!(target, TranscriptHitTarget::Thought(_)))
+            .cloned();
+        let Some(target) = target else {
+            panic!(
+                "thought row must be clickable: {:?}",
+                app.transcript_hit_targets
+            )
+        };
+        app.toggle_transcript_target(target.clone());
+        let expanded = app.transcript_lines(100, std::time::Instant::now());
+        let rendered: Vec<String> = expanded.iter().map(rendered_text).collect();
+        assert!(
+            rendered.iter().any(|line| line.contains("▾ Thinking:")),
+            "{rendered:?}"
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("First I will check the parser.")),
+            "{rendered:?}"
+        );
+        app.toggle_transcript_target(target);
+        let collapsed = app.transcript_lines(100, std::time::Instant::now());
+        assert!(
+            !collapsed
+                .iter()
+                .map(rendered_text)
+                .any(|line| line.contains("check the parser")),
+        );
+
+        // Text starting: the thought completes and stays in the transcript.
+        app.push_loop_event(&LoopEvent::TextDelta("The answer".into()));
+        assert!(
+            app.lines
+                .iter()
+                .any(|line| matches!(line, Line_::Thought { complete: true, .. }))
+        );
+        app.push_loop_event(&LoopEvent::TurnDone {
+            outcome: TurnOutcome::Completed,
+        });
+        assert!(
+            app.lines
+                .iter()
+                .any(|line| matches!(line, Line_::Thought { complete: true, .. }))
+        );
+    }
+
+    #[test]
+    fn streamed_reasoning_summary_becomes_a_completed_thought_row() {
+        assert_eq!(
+            reasoning_summary_title("## Reviewing tests ##\n\nMore detail"),
+            "Reviewing tests"
+        );
+        let mut app = App::new();
+        app.push_loop_event(&LoopEvent::ReasoningSummaryDelta("**Running".into()));
+        app.push_loop_event(&LoopEvent::ReasoningSummaryDelta(
+            " tests**\n\nChecking the suite.".into(),
+        ));
+        let live = app.transcript_lines(80, std::time::Instant::now());
+        assert!(
+            rendered_text(live.last().unwrap()).contains("Thinking: Running tests"),
+            "{live:?}"
+        );
+
+        app.push_loop_event(&LoopEvent::ReasoningSummaryCompleted);
+        let complete = app.transcript_lines(80, std::time::Instant::now());
+        assert!(
+            rendered_text(complete.last().unwrap()).contains("Thought: Running tests"),
+            "{complete:?}"
+        );
+        assert!(!rendered_text(complete.last().unwrap()).contains("Checking the suite"));
+
+        let mut interrupted = App::new();
+        interrupted.push_loop_event(&LoopEvent::ReasoningSummaryDelta("**Partial".into()));
+        interrupted.finish_turn(Err(anyhow::anyhow!("connection lost")));
+        assert!(
+            !interrupted
+                .lines
+                .iter()
+                .any(|line| matches!(line, Line_::Thought { .. }))
+        );
+    }
+
+    #[test]
+    fn stopped_and_paused_states_remain_visible() {
+        let mut app = App::new();
+        app.push_loop_event(&LoopEvent::TurnDone {
+            outcome: TurnOutcome::MaxIterations,
+        });
+        assert!(rendered_text(&app.status_line(80)).contains("stopped"));
+        app.set_activity(Activity::Paused);
+        app.set_notice("paused", NoticeLevel::Warning);
+        assert!(rendered_text(&app.status_line(80)).contains("paused"));
+    }
+
+    #[test]
+    fn narrow_terminal_keeps_transcript_status_and_input_visible() {
+        let backend = ratatui::backend::TestBackend::new(40, 9);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.configure_runtime(
+            "openai/gpt-5.6-sol".into(),
+            None,
+            std::path::PathBuf::from("/workspace/very-long-project-name"),
+            204_000,
+            Some(272_000),
+            false,
+        );
+        app.busy = true;
+        app.push_loop_event(&LoopEvent::TurnStarted);
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let screen = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("ilar"), "{screen}");
+        assert!(screen.contains("thinking"), "{screen}");
+        assert!(screen.contains("75%"), "{screen}");
+        assert!(screen.contains("input"), "{screen}");
+    }
+
+    #[test]
+    fn scrolling_detaches_and_resumes_tail_follow() {
+        let mut app = App::new();
+        app.content_rows = 100;
+        app.viewport_rows = 20;
+        app.scroll_top = 80;
+        app.follow_tail = true;
+
+        app.scroll_up(18);
+        assert_eq!(app.scroll_top, 62);
+        assert!(!app.follow_tail);
+
+        app.scroll_down(18);
+        assert_eq!(app.scroll_top, 80);
+        assert!(app.follow_tail);
+    }
+
+    #[test]
+    fn scrolling_clamps_at_top_and_bottom() {
+        let mut app = App::new();
+        app.content_rows = 30;
+        app.viewport_rows = 10;
+        app.scroll_top = 20;
+
+        app.scroll_up(100);
+        assert_eq!(app.scroll_top, 0);
+        app.scroll_down(100);
+        assert_eq!(app.scroll_top, 20);
+        assert!(app.follow_tail);
+    }
+
+    #[test]
+    fn wheel_batch_work_is_bounded_and_zero_net_clears_selection() {
+        let mut reads = 0;
+        let batch = drain_wheel_batch(-3, 4, || {
+            reads += 1;
+            Ok(Some(Event::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            })))
+        })
+        .unwrap();
+        assert_eq!(reads, 3);
+        assert_eq!(batch.rows, -12);
+        assert!(batch.deferred.is_none());
+
+        let mut app = App::new();
+        app.scroll_top = 7;
+        app.follow_tail = false;
+        app.transcript_selection = Some(TranscriptSelection {
+            anchor: SelectionPoint { row: 0, column: 0 },
+            focus: SelectionPoint { row: 0, column: 1 },
+        });
+
+        app.scroll_wheel(0);
+
+        assert_eq!(app.scroll_top, 7);
+        assert!(!app.follow_tail);
+        assert_eq!(app.transcript_selection, None);
+    }
+
+    #[test]
+    fn transcript_selection_highlights_cells_and_scrolling_clears_it() {
+        let area = Rect::new(0, 0, 4, 2);
+        let mut buffer = ratatui::buffer::Buffer::empty(area);
+        buffer.set_string(0, 0, "abcd", Style::default());
+        buffer.set_string(0, 1, "efgh", Style::default());
+        let selection = TranscriptSelection {
+            anchor: SelectionPoint { row: 0, column: 1 },
+            focus: SelectionPoint { row: 1, column: 1 },
+        };
+        let rows = transcript_cells(&buffer, area);
+        highlight_transcript_selection(&mut buffer, area, selection, &rows);
+
+        assert!(!buffer[(0, 0)].modifier.contains(Modifier::REVERSED));
+        for position in [(1, 0), (2, 0), (3, 0), (0, 1), (1, 1)] {
+            assert!(
+                buffer[position].modifier.contains(Modifier::REVERSED),
+                "missing highlight at {position:?}"
+            );
+        }
+        assert!(!buffer[(2, 1)].modifier.contains(Modifier::REVERSED));
+
+        let mut app = App::new();
+        app.transcript_selection = Some(selection);
+        app.selecting_transcript = true;
+        app.scroll_down(3);
+        assert_eq!(app.transcript_selection, None);
+        assert!(!app.selecting_transcript);
+    }
+
+    #[test]
+    fn transcript_selection_is_cancelled_when_visible_output_changes() {
+        let backend = ratatui::backend::TestBackend::new(40, 9);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let area = app.transcript_text_area;
+        app.begin_transcript_selection(area.x, area.y);
+        app.update_transcript_selection(area.x.saturating_add(3), area.y);
+        assert!(app.transcript_selection.is_some());
+        let previous = app.transcript_cells.clone();
+
+        app.lines[0] = Line_::System("changed output".into());
+        app.transcript_revision = app.transcript_revision.wrapping_add(1);
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        assert_ne!(previous, app.transcript_cells);
+        assert_eq!(app.transcript_selection, None);
+        assert!(!app.selecting_transcript);
+    }
+
+    #[test]
+    fn transcript_lines_exclude_current_todos() {
+        let app = App::new();
+        app.todos.lock().unwrap().items = vec![ilar::todo::TodoItem {
+            content: "must stay fixed".into(),
+            status: ilar::todo::Status::InProgress,
+        }];
+
+        let rendered = app
+            .transcript_lines(80, std::time::Instant::now())
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(!rendered.contains("must stay fixed"), "{rendered}");
+    }
+
+    #[test]
+    fn transcript_cache_rebuilds_only_the_changed_streaming_entry() {
+        let mut app = App::new();
+        app.lines = vec![
+            Line_::Assistant("final **answer**".into()),
+            Line_::Tool {
+                id: "done".into(),
+                group_id: "test:0".into(),
+                name: "read".into(),
+                kind: ToolKind::Tool,
+                arguments: "src/main.rs".into(),
+                argument_detail: String::new(),
+                diff: Vec::new(),
+                tail: String::new(),
+                result: None,
+                state: ToolState::Succeeded,
+                progress: ToolProgress::None,
+                expanded: false,
+                full: false,
+                child_lines: Vec::new(),
+                child_group: 0,
+                child_running: false,
+                child_session_id: None,
+            },
+            Line_::Assistant("stream".into()),
+        ];
+        let now = std::time::Instant::now();
+        app.transcript_cache.update(
+            &app.lines,
+            &app.expanded_tool_groups,
+            app.transcript_revision,
+            40,
+            now,
+            app.activity_started,
+        );
+        assert_eq!(app.transcript_cache.rebuilds, 3);
+
+        app.push_loop_event(&LoopEvent::TextDelta("ing".into()));
+        app.transcript_cache.update(
+            &app.lines,
+            &app.expanded_tool_groups,
+            app.transcript_revision,
+            40,
+            now,
+            app.activity_started,
+        );
+
+        assert_eq!(app.transcript_cache.rebuilds, 4);
+    }
+
+    #[test]
+    fn idle_transcript_cache_returns_only_viewport_rows() {
+        let mut app = App::new();
+        app.lines = (0..1_000)
+            .map(|index| Line_::System(format!("row {index}")))
+            .collect();
+        let now = std::time::Instant::now();
+        app.transcript_cache.update(
+            &app.lines,
+            &app.expanded_tool_groups,
+            app.transcript_revision,
+            40,
+            now,
+            app.activity_started,
+        );
+        let rebuilds = app.transcript_cache.rebuilds;
+
+        let visible = app.transcript_cache.visible_rows(500, 7, &[]);
+        app.transcript_cache.update(
+            &app.lines,
+            &app.expanded_tool_groups,
+            app.transcript_revision,
+            40,
+            now,
+            app.activity_started,
+        );
+
+        assert_eq!(visible.len(), 7);
+        assert_eq!(app.transcript_cache.rebuilds, rebuilds);
+    }
+
+    #[test]
+    fn cached_transcript_output_matches_the_existing_renderer() {
+        let mut app = App::new();
+        app.lines = vec![
+            Line_::User("hello\nthere".into()),
+            Line_::Assistant("## Result\n\nA **styled** response that wraps.".into()),
+            Line_::System("finished".into()),
+        ];
+        let width = 24;
+        let now = std::time::Instant::now();
+        let expected = app
+            .transcript_lines(width, now)
+            .into_iter()
+            .flat_map(|line| wrap_styled_line(line, width as usize))
+            .collect::<Vec<_>>();
+
+        app.transcript_cache.update(
+            &app.lines,
+            &app.expanded_tool_groups,
+            app.transcript_revision,
+            width,
+            now,
+            app.activity_started,
+        );
+        let actual = app
+            .transcript_cache
+            .visible_rows(0, usize::MAX, &[])
+            .into_iter()
+            .map(|row| row.line)
+            .collect::<Vec<_>>();
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn wide_transcript_keeps_two_cell_horizontal_margins() {
+        let backend = ratatui::backend::TestBackend::new(140, 12);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.lines.push(Line_::Assistant("visible prose".into()));
+
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        assert_eq!(app.transcript_text_area.x, 3);
+        assert_eq!(app.transcript_text_area.width, 92);
+    }
+
+    #[test]
+    fn todo_updates_do_not_change_transcript_scroll_or_selection() {
+        let backend = ratatui::backend::TestBackend::new(100, 12);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.lines
+            .extend((0..20).map(|index| Line_::System(format!("transcript row {index}"))));
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        app.scroll_up(2);
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let area = app.transcript_text_area;
+        app.begin_transcript_selection(area.x, area.y);
+        app.update_transcript_selection(area.x.saturating_add(3), area.y);
+        let metrics = (
+            app.content_rows,
+            app.viewport_rows,
+            app.scroll_top,
+            app.follow_tail,
+            app.transcript_selection,
+        );
+
+        app.todos.lock().unwrap().items = vec![ilar::todo::TodoItem {
+            content: "fixed sidebar item".into(),
+            status: ilar::todo::Status::InProgress,
+        }];
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        assert_eq!(
+            (
+                app.content_rows,
+                app.viewport_rows,
+                app.scroll_top,
+                app.follow_tail,
+                app.transcript_selection,
+            ),
+            metrics
+        );
+    }
+
+    #[test]
+    fn narrow_todos_use_border_chrome_instead_of_transcript_rows() {
+        let backend = ratatui::backend::TestBackend::new(40, 9);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.todos.lock().unwrap().items = vec![ilar::todo::TodoItem {
+            content: "border task".into(),
+            status: ilar::todo::Status::InProgress,
+        }];
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let screen = (0..buffer.area.height)
+            .map(|row| {
+                (0..buffer.area.width)
+                    .map(|column| buffer[(column, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("todos ▸ border task"), "{screen}");
+        let transcript = app
+            .transcript_lines(40, std::time::Instant::now())
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!transcript.contains("border task"), "{transcript}");
+    }
+
+    #[test]
+    fn one_row_transcript_omits_overlapping_todo_title() {
+        let backend = ratatui::backend::TestBackend::new(40, 5);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.todos.lock().unwrap().items = vec![ilar::todo::TodoItem {
+            content: "border task".into(),
+            status: ilar::todo::Status::InProgress,
+        }];
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let first_row = (0..buffer.area.width)
+            .map(|column| buffer[(column, 0)].symbol())
+            .collect::<String>();
+        assert!(first_row.contains("ilar"), "{first_row}");
+        assert!(!first_row.contains("border task"), "{first_row}");
+    }
+
+    #[test]
+    fn wide_todos_render_in_sidebar_and_sidebar_clicks_do_not_select_transcript() {
+        let backend = ratatui::backend::TestBackend::new(140, 12);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.todos.lock().unwrap().items = vec![ilar::todo::TodoItem {
+            content: "sidebar task".into(),
+            status: ilar::todo::Status::InProgress,
+        }];
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let screen = (0..buffer.area.height)
+            .map(|row| {
+                (0..buffer.area.width)
+                    .map(|column| buffer[(column, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("todos"), "{screen}");
+        assert!(screen.contains("▸ sidebar task"), "{screen}");
+        assert_eq!(app.transcript_text_area.width, 92);
+
+        app.begin_transcript_selection(110, 1);
+        assert_eq!(app.transcript_selection, None);
+    }
+
+    #[test]
+    fn resize_clamps_without_reattaching_detached_viewport() {
+        let mut app = App::new();
+        app.content_rows = 100;
+        app.viewport_rows = 20;
+        app.scroll_top = 70;
+        app.follow_tail = false;
+
+        app.update_scroll_metrics(30, 20);
+
+        assert_eq!(app.scroll_top, 10);
+        assert!(!app.follow_tail);
     }
 }

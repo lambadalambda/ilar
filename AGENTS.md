@@ -4,7 +4,9 @@
 
 - `cargo build` / `cargo test` from the workspace root.
 - Core crate (`crates/ilar`) is TDD'd: run tests before committing changes
-  to loop/tools/providers. The TUI crate has no tests by design.
+  to loop/tools/providers. The TUI crate is tested too: unit tests live
+  beside the module they cover, and render assertions go through
+  ratatui's `TestBackend`.
 - `cargo clippy --workspace` and `cargo fmt` should stay clean.
 
 ## Conventions
