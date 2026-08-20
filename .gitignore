@@ -1,3 +1,7 @@
 /target
 # local state
 *.jsonl
+
+# Python bytecode from scripts/
+__pycache__/
+*.pyc
