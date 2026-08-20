@@ -30,3 +30,7 @@
 - [ ] [Make the event loop testable](issues/testable-event-loop.md)
 - [ ] [TUI module follow-ups](issues/tui-module-follow-ups.md)
 
+## Milestone 7 — Unscheduled
+
+- [ ] [A harness for the event loop's schedule](issues/loop-schedule-harness.md)
+

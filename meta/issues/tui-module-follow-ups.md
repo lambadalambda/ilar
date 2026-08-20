@@ -44,6 +44,31 @@ Each is independent; none is urgent.
 - No behaviour change beyond the todo-colour decision, which is a
   deliberate one-way pick.
 
+## Outcome
+
+- **Pending manager snapshot: done.** `App::pending_snapshot()` bakes
+  the labels (armed confirmations included); `render_pending_manager`
+  takes `&PendingSnapshot` and modals.rs no longer imports `App`. The
+  label logic is unit tested where it could not be before.
+- **Todo colour: settled on `RUNNING`.** In progress is active work,
+  not a wait state, and `todo_summary` already used it. The sidebar
+  list now agrees.
+- **Sidebar geometry: the carving is extracted, the rendering is not.**
+  The duplicated carve-off-the-top arithmetic is now
+  `sidebar::carve_panel`, pure over `Rect` and unit tested. Moving the
+  goal/services/todo *rendering* into sidebar.rs is declined: it would
+  need three more snapshot types for no cycle broken — the payoff that
+  justified the modals.rs version does not exist here.
+- **`slash_candidates`: moved to input.rs** unchanged, callers updated.
+- **Glob braces: supported, not rejected.** `{a,b}` alternation expands
+  (nested included, capped at 64 patterns) before compiling, and
+  unbalanced braces error loudly instead of matching nothing. Braces
+  inside `[...]` classes stay literal outside group bodies; a class
+  *inside* a group body still miscounts (`{a[{]b,c}` errors, a comma in
+  a class splits) — loud failures on inputs no model writes, recorded
+  by review and left alone. A file literally named `a{b` now needs
+  `a[{]b` to match.
+
 ## Notes
 
 - `scripts/split_module.py` and `scripts/minimize_visibility.py` exist
