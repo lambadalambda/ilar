@@ -10,6 +10,7 @@
 //! `decide(event, state) -> Vec<Intent>` is an assembly of functions
 //! that already exist rather than a rewrite of them.
 
+use crate::NoticeLevel;
 use crate::modals::Modal;
 
 /// What the loop can see when deciding. A snapshot, so a decision
@@ -41,6 +42,28 @@ impl LoopState {
     fn accepts_synthetic_submit(&self) -> bool {
         self.modal.is_none() && self.input_blank && !self.pending_event
     }
+}
+
+/// Something for the loop to do. Decisions return these; `run_app`
+/// performs them in one place.
+///
+/// This is what replaces the synthetic-Enter trick, where a decision
+/// posted a fake keypress and hoped the dispatcher was in a state that
+/// would route it correctly. An intent says what to do rather than
+/// impersonating the user doing it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Intent {
+    /// Send this as a new turn.
+    StartTurn(String),
+    /// Take the head of the queue and send it.
+    SendQueued,
+    /// Drop the goal, having finished or run out of rounds.
+    ClearGoal,
+    /// Advance the goal to this round.
+    AdvanceGoal(u32),
+    /// A line in the transcript.
+    SystemLine(String),
+    Notice(String, NoticeLevel),
 }
 
 /// Where pasted text goes.
@@ -140,6 +163,73 @@ pub(crate) fn goal_step(
         GoalStep::CapReached
     } else {
         GoalStep::Continue(round + 1)
+    }
+}
+
+/// Everything to do when a root turn finishes: the goal round, then the
+/// queue. Order matters — a goal continuation fills the prompt, which
+/// is exactly the state that must stop the queue draining over it, so
+/// the two are decided together rather than by two blocks that have to
+/// remember to observe each other.
+pub(crate) fn after_turn(
+    state: &LoopState,
+    completed: bool,
+    goal: Option<(&str, u32)>,
+    achieved: bool,
+    max_rounds: u32,
+) -> Vec<Intent> {
+    let mut intents = Vec::new();
+    let round = goal.map(|(_, round)| round);
+    match goal_step(state, completed, round, achieved, max_rounds) {
+        GoalStep::Idle => {}
+        GoalStep::Achieved => {
+            let message = format!("goal achieved after {} round(s)", round.unwrap_or(0).max(1));
+            intents.push(Intent::ClearGoal);
+            intents.push(Intent::SystemLine(message.clone()));
+            intents.push(Intent::Notice(message, NoticeLevel::Info));
+        }
+        GoalStep::CapReached => {
+            let message = format!(
+                "goal round cap ({max_rounds}) reached without {} — stopping",
+                crate::GOAL_SENTINEL
+            );
+            intents.push(Intent::ClearGoal);
+            intents.push(Intent::SystemLine(message.clone()));
+            intents.push(Intent::Notice(message, NoticeLevel::Warning));
+        }
+        GoalStep::Continue(next_round) => {
+            let (goal, _) = goal.expect("a continuing round implies a goal");
+            intents.push(Intent::AdvanceGoal(next_round));
+            intents.push(Intent::StartTurn(crate::goal_continuation_prompt(
+                goal, next_round,
+            )));
+        }
+    }
+    // No need to re-observe after the goal round: `goal_step` only
+    // continues when the queue is empty, and `queue_step` is `Idle` on
+    // an empty queue, so the two cannot both want the turn.
+    match queue_step(state, completed) {
+        QueueStep::Idle => {}
+        QueueStep::Send => intents.push(Intent::SendQueued),
+        QueueStep::Hold(count) => intents.push(Intent::Notice(
+            format!("{count} queued message(s) held — Ctrl-Q to review"),
+            NoticeLevel::Warning,
+        )),
+    }
+    intents
+}
+
+/// Retry the last prompt, or explain why not.
+pub(crate) fn retry(state: &LoopState, last_prompt: Option<&str>) -> Vec<Intent> {
+    if !state.input_blank {
+        return vec![Intent::Notice(
+            "input has an unsent draft — send or clear it before retrying".into(),
+            NoticeLevel::Warning,
+        )];
+    }
+    match last_prompt {
+        Some(prompt) => vec![Intent::StartTurn(prompt.to_string())],
+        None => Vec::new(),
     }
 }
 
@@ -289,5 +379,97 @@ mod tests {
             modal: Some(Modal::Search),
             ..idle()
         }));
+    }
+
+    /// The interaction the old two-block arrangement had to remember by
+    /// hand: a goal round fills the prompt, so the queue must not drain
+    /// over it in the same breath.
+    #[test]
+    fn a_goal_round_claims_the_turn_and_the_queue_waits() {
+        let state = LoopState {
+            queued: 0,
+            ..idle()
+        };
+        let intents = after_turn(&state, true, Some(("ship it", 3)), false, 25);
+        assert_eq!(
+            intents,
+            vec![
+                Intent::AdvanceGoal(4),
+                Intent::StartTurn(crate::goal_continuation_prompt("ship it", 4)),
+            ]
+        );
+        // The two cannot both claim the turn: a round only continues on
+        // an empty queue, which is also when the queue has nothing to
+        // send. Pin that so neither guard can drift alone.
+        let with_queue = LoopState { queued: 1, ..state };
+        assert_eq!(
+            after_turn(&with_queue, true, Some(("ship it", 3)), false, 25),
+            vec![Intent::SendQueued]
+        );
+    }
+
+    /// A queued message outranks a goal round: the user spoke more
+    /// recently than the goal did.
+    #[test]
+    fn a_queued_message_wins_over_a_goal_round() {
+        let state = LoopState {
+            queued: 1,
+            ..idle()
+        };
+        let intents = after_turn(&state, true, Some(("ship it", 3)), false, 25);
+        assert_eq!(intents, vec![Intent::SendQueued]);
+    }
+
+    #[test]
+    fn an_achieved_goal_clears_and_announces_once() {
+        let intents = after_turn(&idle(), true, Some(("ship it", 2)), true, 25);
+        assert_eq!(intents[0], Intent::ClearGoal);
+        assert!(matches!(&intents[1], Intent::SystemLine(text) if text.contains("after 2 round")));
+        assert!(matches!(&intents[2], Intent::Notice(_, NoticeLevel::Info)));
+        assert!(!intents.iter().any(|i| matches!(i, Intent::StartTurn(_))));
+    }
+
+    #[test]
+    fn a_cap_stops_the_goal_rather_than_running_another_round() {
+        let intents = after_turn(&idle(), true, Some(("ship it", 25)), false, 25);
+        assert_eq!(intents[0], Intent::ClearGoal);
+        assert!(matches!(&intents[1], Intent::SystemLine(text) if text.contains("cap (25)")));
+        assert!(!intents.iter().any(|i| matches!(i, Intent::StartTurn(_))));
+    }
+
+    /// An aborted or errored turn holds everything: it is not a moment
+    /// to send anything on the user's behalf.
+    #[test]
+    fn an_unfinished_turn_starts_nothing() {
+        let state = LoopState {
+            queued: 2,
+            ..idle()
+        };
+        let intents = after_turn(&state, false, Some(("ship it", 1)), false, 25);
+        assert!(!intents.iter().any(|i| matches!(i, Intent::StartTurn(_))));
+        assert!(!intents.contains(&Intent::SendQueued));
+        assert!(matches!(
+            intents.last(),
+            Some(Intent::Notice(text, NoticeLevel::Warning)) if text.contains("2 queued")
+        ));
+    }
+
+    /// Retry must not overwrite a draft — an unsubmitted one is not in
+    /// the history, so it would be unrecoverable.
+    #[test]
+    fn retry_declines_on_a_draft_and_resends_otherwise() {
+        let drafting = LoopState {
+            input_blank: false,
+            ..idle()
+        };
+        assert!(matches!(
+            retry(&drafting, Some("previous")).as_slice(),
+            [Intent::Notice(text, NoticeLevel::Warning)] if text.contains("draft")
+        ));
+        assert_eq!(
+            retry(&idle(), Some("previous")),
+            vec![Intent::StartTurn("previous".into())]
+        );
+        assert!(retry(&idle(), None).is_empty());
     }
 }

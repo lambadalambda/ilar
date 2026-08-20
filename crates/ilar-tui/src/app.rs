@@ -2420,7 +2420,7 @@ mod tests {
     use crate::session_view::restored_session_view;
     use crate::text::tests::rendered_text;
     use crate::transcript::{reasoning_summary_title, tool_line, transcript_entry_lines};
-    use crate::{begin_retry, drain_wheel_batch, slash_candidates};
+    use crate::{drain_wheel_batch, slash_candidates};
     use crossterm::event::{Event, KeyEvent, KeyModifiers, MouseEventKind};
     use ilar::session::{SessionMeta, new_id};
 
@@ -3564,25 +3564,6 @@ mod tests {
             terminal.get_cursor_position().unwrap(),
             ratatui::layout::Position::new(12, 2)
         );
-    }
-
-    /// Ctrl-R must not clobber a draft: an unsubmitted draft is not in
-    /// the history, so overwriting it loses the text for good.
-    #[test]
-    fn retry_declines_rather_than_discarding_an_unsent_draft() {
-        let mut app = App::new();
-        app.last_prompt = Some("previous prompt".into());
-        app.retry_available = true;
-        app.input = "half-written thought".into();
-
-        assert!(begin_retry(&mut app).is_none());
-        assert_eq!(app.input.text(), "half-written thought");
-        assert!(app.retry_available, "retry stays on offer");
-
-        app.input.clear();
-        assert!(begin_retry(&mut app).is_some());
-        assert_eq!(app.input.text(), "previous prompt");
-        assert!(!app.retry_available);
     }
 
     #[test]
@@ -5214,5 +5195,107 @@ mod tests {
             crate::resolve_slash(&app, "gaol", ""),
             crate::SlashResolution::Unknown(matches) if matches.iter().any(|m| m == "goal")
         ));
+    }
+
+    /// The wiring, not just the decision: an intent has to actually
+    /// change the app and hand back a prompt to send. Phase one could
+    /// not assert this — every call site could be gutted and the suite
+    /// stayed green.
+    #[test]
+    fn intents_change_the_app_and_yield_the_prompt_to_send() {
+        use crate::{Intent, apply_intent};
+
+        let mut app = App::new();
+        app.queued_messages = vec!["first".into(), "second".into()];
+
+        // Sending from the queue takes the head and becomes a turn.
+        let sent = apply_intent(&mut app, Intent::SendQueued);
+        assert_eq!(sent.as_deref(), Some("first"));
+        assert_eq!(app.queued_messages, vec!["second"]);
+        assert!(app.busy, "a started turn marks the app busy");
+        assert_eq!(app.last_prompt.as_deref(), Some("first"));
+        assert!(
+            matches!(app.lines.last(), Some(Line_::User(text)) if text == "first"),
+            "the prompt is echoed into the transcript"
+        );
+
+        // An empty queue starts nothing.
+        app.queued_messages.clear();
+        assert_eq!(apply_intent(&mut app, Intent::SendQueued), None);
+
+        // Goal bookkeeping does not start a turn.
+        app.goal = Some(("ship it".into(), 3));
+        assert_eq!(apply_intent(&mut app, Intent::AdvanceGoal(4)), None);
+        assert_eq!(app.goal.as_ref().map(|(_, round)| *round), Some(4));
+        assert_eq!(apply_intent(&mut app, Intent::ClearGoal), None);
+        assert!(app.goal.is_none());
+
+        // Starting a turn withdraws the retry offer.
+        app.retry_available = true;
+        app.queued_messages = vec!["again".into()];
+        assert!(apply_intent(&mut app, Intent::SendQueued).is_some());
+        assert!(!app.retry_available);
+    }
+
+    /// End to end over the decision layer: a finished turn with a queued
+    /// message must produce the intents that send it, and applying them
+    /// must actually send it.
+    #[test]
+    fn a_finished_turn_drains_the_queue_through_intents() {
+        use crate::decide::{LoopState, after_turn};
+        use crate::{Intent, apply_intent};
+
+        let mut app = App::new();
+        app.queued_messages = vec!["do the next thing".into()];
+        let state = LoopState {
+            input_blank: true,
+            queued: app.queued_messages.len(),
+            ..LoopState::default()
+        };
+
+        let intents = after_turn(&state, true, None, false, 25);
+        assert_eq!(intents, vec![Intent::SendQueued]);
+
+        let mut started = None;
+        for intent in intents {
+            started = started.or(apply_intent(&mut app, intent));
+        }
+        assert_eq!(started.as_deref(), Some("do the next thing"));
+        assert!(app.queued_messages.is_empty());
+    }
+
+    /// A queued `/goal` must still arm the goal when it finally sends.
+    /// Routing it straight to the model sent the literal text instead —
+    /// the old code only expanded on the interactive Enter path.
+    #[test]
+    fn a_queued_slash_invocation_is_still_expanded_when_it_sends() {
+        use crate::{Intent, apply_intent};
+
+        let mut app = App::new();
+        app.commands = vec![command("greptile", "Greptile", "Review $ARGUMENTS")];
+        app.queued_messages = vec!["/goal ship the parser".into()];
+
+        let sent = apply_intent(&mut app, Intent::SendQueued).expect("the goal kickoff");
+        assert!(
+            app.goal
+                .as_ref()
+                .is_some_and(|(goal, _)| goal == "ship the parser"),
+            "the goal should be armed, not sent as text: {:?}",
+            app.goal
+        );
+        assert_ne!(sent, "/goal ship the parser", "sent verbatim");
+        assert!(
+            app.lines
+                .iter()
+                .any(|line| matches!(line, Line_::System(text) if text.contains("goal armed"))),
+            "arming should be announced"
+        );
+        // Retry replays what was typed, not the expansion.
+        assert_eq!(app.last_prompt.as_deref(), Some("/goal ship the parser"));
+
+        // Same for a queued command.
+        app.queued_messages = vec!["/greptile PR 41".into()];
+        let sent = apply_intent(&mut app, Intent::SendQueued).expect("the command body");
+        assert_eq!(sent, "Review PR 41");
     }
 }

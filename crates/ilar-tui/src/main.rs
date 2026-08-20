@@ -27,8 +27,8 @@ use crossterm::event::{
 };
 use crossterm::terminal::supports_keyboard_enhancement;
 use decide::{
-    GoalStep, LoopState, PasteTarget, QueueStep, SubmitTarget, goal_step, may_route_notification,
-    paste_target, queue_step, submit_target,
+    Intent, LoopState, PasteTarget, SubmitTarget, after_turn, may_route_notification, paste_target,
+    retry as retry_intents, submit_target,
 };
 use input::{InputBuffer, PromptAction, handle_prompt_key, retry_requested};
 use modals::{
@@ -170,28 +170,130 @@ impl Drop for TerminalSession {
     }
 }
 
-/// Load the last prompt and return the synthetic Enter that resubmits it
-/// through the ordinary path.
+/// Turn what the user typed into what gets sent: arm or edit a goal,
+/// expand a command, or route a skill. Returns `None` when the input
+/// was consumed without starting a turn.
 ///
-/// Declines when the input holds a draft: overwriting it would discard
-/// text the user typed but never submitted, and an unsubmitted draft is
-/// not in the history, so it would be unrecoverable.
-fn begin_retry(app: &mut App) -> Option<Event> {
-    if !app.input.is_blank() {
-        app.set_notice(
-            "input has an unsent draft — send or clear it before retrying",
-            NoticeLevel::Warning,
-        );
-        return None;
+/// Every path that starts a turn goes through this. When only the
+/// interactive Enter did, a queued `/goal ship it` was sent to the model
+/// as literal text once the turn it was waiting on finished.
+fn prepare_prompt(app: &mut App, text: String) -> Option<String> {
+    if let Some(("goal", goal_text)) = parse_slash_invocation(&text) {
+        if goal_text.is_empty() {
+            match &app.goal {
+                Some((goal, _)) => {
+                    // Prefill for editing; Esc on an emptied input aborts.
+                    app.input = InputBuffer::from(format!("/goal {goal}"));
+                    app.set_notice(
+                        "edit the goal and press Enter — /goal abort ends it",
+                        NoticeLevel::Info,
+                    );
+                }
+                None => app.set_notice(
+                    "no active goal — /goal <description> sets one",
+                    NoticeLevel::Info,
+                ),
+            }
+            return None;
+        }
+        if goal_text == "abort" {
+            let notice = match app.goal.take() {
+                Some((goal, round)) => {
+                    let message = format!("goal aborted after {round} round(s): {goal}");
+                    app.push_transcript_line(Line_::System(message.clone()));
+                    message
+                }
+                None => "no active goal".into(),
+            };
+            app.set_notice(notice, NoticeLevel::Info);
+            return None;
+        }
+        if let Some((goal, round)) = &mut app.goal {
+            // Editing mid-loop keeps the round budget; the next
+            // continuation carries the new wording.
+            if goal != goal_text {
+                *goal = goal_text.to_string();
+                let round = *round;
+                app.push_transcript_line(Line_::System(format!(
+                    "goal updated (round {round}/{MAX_GOAL_ROUNDS}): {goal_text}"
+                )));
+            }
+            app.clear_transient_notice();
+            return None;
+        }
+        app.goal = Some((goal_text.to_string(), 0));
+        app.push_transcript_line(Line_::System(format!(
+            "goal armed (max {MAX_GOAL_ROUNDS} rounds): {goal_text}"
+        )));
+        return Some(goal_kickoff_prompt(goal_text));
     }
-    let prompt = app.last_prompt.clone()?;
-    app.retry_available = false;
-    app.clear_notice();
-    app.input = InputBuffer::from(prompt);
-    Some(Event::Key(KeyEvent::new(
-        KeyCode::Enter,
-        KeyModifiers::NONE,
-    )))
+    if let Some((name, args)) = parse_slash_invocation(&text) {
+        match resolve_slash(app, name, args) {
+            SlashResolution::Prompt(expanded) => return Some(expanded),
+            SlashResolution::Skill(prompt) => return Some(prompt),
+            SlashResolution::Empty => {
+                app.input = InputBuffer::from(text.as_str());
+                app.set_notice(
+                    format!("/{name} needs arguments — its body is only placeholders"),
+                    NoticeLevel::Warning,
+                );
+                return None;
+            }
+            SlashResolution::Unknown(matches) => {
+                app.input = InputBuffer::from(text.as_str());
+                app.set_notice(
+                    format!("unknown /{name} · available: {}", matches.join(", ")),
+                    NoticeLevel::Warning,
+                );
+                return None;
+            }
+        }
+    }
+    Some(text)
+}
+
+/// Apply one intent to the app. Returns the prompt when the intent
+/// starts a turn — spawning needs the runtime, everything else does
+/// not, and keeping the split here is what makes the wiring testable.
+fn apply_intent(app: &mut App, intent: Intent) -> Option<String> {
+    match intent {
+        Intent::Notice(text, level) => {
+            app.set_notice(text, level);
+            None
+        }
+        Intent::SystemLine(text) => {
+            app.push_transcript_line(Line_::System(text));
+            None
+        }
+        Intent::ClearGoal => {
+            app.goal = None;
+            None
+        }
+        Intent::AdvanceGoal(round) => {
+            if let Some((_, current)) = app.goal.as_mut() {
+                *current = round;
+            }
+            None
+        }
+        Intent::SendQueued => {
+            let next = (!app.queued_messages.is_empty()).then(|| app.queued_messages.remove(0))?;
+            apply_intent(app, Intent::StartTurn(next))
+        }
+        Intent::StartTurn(text) => {
+            // Recorded before expansion, so a retry replays what the
+            // user actually typed.
+            app.last_prompt = Some(text.clone());
+            let text = prepare_prompt(app, text)?;
+            app.retry_available = false;
+            app.clear_notice();
+            app.push_transcript_line(Line_::User(text.clone()));
+            app.follow_tail = true;
+            app.busy = true;
+            app.status = "thinking".into();
+            app.set_activity(Activity::Thinking);
+            Some(text)
+        }
+    }
 }
 
 /// Inline completion candidates for a slash input: built-in commands
@@ -841,6 +943,9 @@ async fn run_app(
     let mut ring_on_turn_completion = false;
     let mut bell_pending = false;
     let mut pending_terminal_event = None;
+    // Decisions accumulate here and are performed in one place below,
+    // rather than each arm doing its own effects inline.
+    let mut intents: Vec<Intent> = Vec::new();
 
     loop {
         // Drain pending loop events.
@@ -882,8 +987,6 @@ async fn run_app(
                         app.push_transcript_line(Line_::System(message.clone()));
                         app.set_notice(message, NoticeLevel::Warning);
                     }
-                    // Goal mode: verify-and-continue until the sentinel,
-                    // a cap, or user interjections (queue wins below).
                     let state = observe(
                         app,
                         &turn_handle,
@@ -904,66 +1007,17 @@ async fn run_app(
                                 _ => None,
                             })
                             .unwrap_or(false);
-                    match goal_step(&state, completed, round, achieved, MAX_GOAL_ROUNDS) {
-                        GoalStep::Idle => {}
-                        GoalStep::Achieved => {
-                            let round = round.unwrap_or(0).max(1);
-                            app.goal = None;
-                            let message = format!("goal achieved after {round} round(s)");
-                            app.push_transcript_line(Line_::System(message.clone()));
-                            app.set_notice(message, NoticeLevel::Info);
-                        }
-                        GoalStep::CapReached => {
-                            app.goal = None;
-                            let message = format!(
-                                "goal round cap ({MAX_GOAL_ROUNDS}) reached without \
-                                 {GOAL_SENTINEL} — stopping"
-                            );
-                            app.push_transcript_line(Line_::System(message.clone()));
-                            app.set_notice(message, NoticeLevel::Warning);
-                        }
-                        GoalStep::Continue(next_round) => {
-                            // `Continue` implies a goal; update in place
-                            // rather than reconstructing it.
-                            if let Some((goal, round)) = app.goal.as_mut() {
-                                *round = next_round;
-                                let prompt = goal_continuation_prompt(goal, next_round);
-                                app.input = InputBuffer::from(prompt);
-                                pending_terminal_event = Some(Event::Key(KeyEvent::new(
-                                    KeyCode::Enter,
-                                    KeyModifiers::NONE,
-                                )));
-                            }
-                        }
-                    }
-                    // Rebuilt, not patched: the goal round may have put
-                    // a continuation prompt in the input, and a stale
-                    // `input_blank` here would dequeue over it.
-                    let state = observe(
-                        app,
-                        &turn_handle,
-                        &pending_terminal_event,
-                        &steer_tx,
-                        notifications_paused,
-                    );
-                    match queue_step(&state, completed) {
-                        QueueStep::Idle => {}
-                        QueueStep::Send => {
-                            let next = app.queued_messages.remove(0);
-                            app.input = InputBuffer::from(next);
-                            // Send through the ordinary submit path.
-                            pending_terminal_event = Some(Event::Key(KeyEvent::new(
-                                KeyCode::Enter,
-                                KeyModifiers::NONE,
-                            )));
-                        }
-                        QueueStep::Hold(count) => {
-                            app.set_notice(
-                                format!("{count} queued message(s) held — Ctrl-Q to review"),
-                                NoticeLevel::Warning,
-                            );
-                        }
-                    }
+                    let goal = app
+                        .goal
+                        .as_ref()
+                        .map(|(goal, round)| (goal.clone(), *round));
+                    intents.extend(after_turn(
+                        &state,
+                        completed,
+                        goal.as_ref().map(|(goal, round)| (goal.as_str(), *round)),
+                        achieved,
+                        MAX_GOAL_ROUNDS,
+                    ));
                 }
                 Ok(TurnCompletion::Routed(Ok(ilar::subagent::RouteOutcome::Propagate(
                     notification,
@@ -1031,6 +1085,58 @@ async fn run_app(
                     NoticeLevel::Warning,
                 );
             }
+        }
+
+        // Perform what was decided. `apply_intent` owns the state
+        // changes and is testable on an App alone; spawning is the only
+        // thing that needs the runtime, so it stays here.
+        for intent in std::mem::take(&mut intents) {
+            let Some(text) = apply_intent(app, intent) else {
+                continue;
+            };
+            // Every push site is guarded against starting a turn while
+            // one runs. If that ever slips, the running turn would be
+            // orphaned — its cancellation token dropped without firing,
+            // still writing to the same session.
+            debug_assert!(
+                turn_handle.is_none(),
+                "starting a turn while one is already running"
+            );
+            let (tx, rx) = loop_event_channel(LOOP_EVENT_CAPACITY);
+            events_rx = Some(rx);
+            let token = CancellationToken::new();
+            cancel = Some(token.clone());
+            let resolver = resolver.clone();
+            let store = store.clone();
+            let session_id = session_id.to_string();
+            let system_prompt = system_prompt.to_string();
+            let registry = registry.clone();
+            let turn_ctx = tool_ctx.clone();
+            let mut loop_config = loop_config.clone();
+            if std::mem::take(&mut app.compact_requested) {
+                loop_config.force_compaction = true;
+            }
+            ring_on_turn_completion = true;
+            let (tx_steer, steer_rx) = ilar::agent::steer_channel();
+            steer_tx = Some(tx_steer);
+            turn_handle = Some(tokio::spawn(async move {
+                TurnCompletion::Root(
+                    run_turn(
+                        resolver.as_ref(),
+                        &registry,
+                        &store,
+                        &session_id,
+                        &text,
+                        Some(&system_prompt),
+                        loop_config,
+                        tx,
+                        token,
+                        turn_ctx,
+                        Some(steer_rx),
+                    )
+                    .await,
+                )
+            }));
         }
 
         // Let a buffered Ctrl-P open the palette before starting queued work.
@@ -1222,10 +1328,18 @@ async fn run_app(
                         }
                         PendingAction::RetryNow => {
                             if !app.busy && turn_handle.is_none() {
-                                pending_terminal_event = begin_retry(app);
-                                if pending_terminal_event.is_some() {
+                                let state = observe(
+                                    app,
+                                    &turn_handle,
+                                    &pending_terminal_event,
+                                    &steer_tx,
+                                    notifications_paused,
+                                );
+                                let decided = retry_intents(&state, app.last_prompt.as_deref());
+                                if decided.iter().any(|i| matches!(i, Intent::StartTurn(_))) {
                                     app.pending_manager = None;
                                 }
+                                intents.extend(decided);
                             }
                         }
                     }
@@ -1598,7 +1712,14 @@ async fn run_app(
                             && !app.busy
                             && turn_handle.is_none() =>
                     {
-                        pending_terminal_event = begin_retry(app);
+                        let state = observe(
+                            app,
+                            &turn_handle,
+                            &pending_terminal_event,
+                            &steer_tx,
+                            notifications_paused,
+                        );
+                        intents.extend(retry_intents(&state, app.last_prompt.as_deref()));
                     }
                     // Inline slash completion: navigate/accept while the
                     // command name is being typed.
@@ -1642,132 +1763,9 @@ async fn run_app(
                                     app.busy,
                                 ) == SubmitTarget::StartTurn =>
                         {
-                            let mut text = app.input.take();
+                            let text = app.input.take();
                             app.history.push(&text);
-                            app.last_prompt = Some(text.clone());
-                            app.retry_available = false;
-                            if let Some(("goal", goal_text)) = parse_slash_invocation(&text) {
-                                if goal_text.is_empty() {
-                                    match &app.goal {
-                                        Some((goal, _)) => {
-                                            // Prefill for editing; Esc on an
-                                            // emptied input aborts instead.
-                                            app.input = InputBuffer::from(format!("/goal {goal}"));
-                                            app.set_notice(
-                                                "edit the goal and press Enter — /goal abort ends it",
-                                                NoticeLevel::Info,
-                                            );
-                                        }
-                                        None => app.set_notice(
-                                            "no active goal — /goal <description> sets one",
-                                            NoticeLevel::Info,
-                                        ),
-                                    }
-                                    continue;
-                                }
-                                if goal_text == "abort" {
-                                    let notice = match app.goal.take() {
-                                        Some((goal, round)) => {
-                                            let message = format!(
-                                                "goal aborted after {round} round(s): {goal}"
-                                            );
-                                            app.push_transcript_line(Line_::System(
-                                                message.clone(),
-                                            ));
-                                            message
-                                        }
-                                        None => "no active goal".into(),
-                                    };
-                                    app.set_notice(notice, NoticeLevel::Info);
-                                    continue;
-                                }
-                                if let Some((goal, round)) = &mut app.goal {
-                                    // Editing mid-loop keeps the round
-                                    // budget; the next continuation carries
-                                    // the new wording.
-                                    if goal != goal_text {
-                                        *goal = goal_text.to_string();
-                                        let round = *round;
-                                        app.push_transcript_line(Line_::System(format!(
-                                            "goal updated (round {round}/{MAX_GOAL_ROUNDS}): {goal_text}"
-                                        )));
-                                    }
-                                    app.clear_transient_notice();
-                                    continue;
-                                }
-                                app.goal = Some((goal_text.to_string(), 0));
-                                app.push_transcript_line(Line_::System(format!(
-                                    "goal armed (max {MAX_GOAL_ROUNDS} rounds): {goal_text}"
-                                )));
-                                text = goal_kickoff_prompt(goal_text);
-                            } else if let Some((name, args)) = parse_slash_invocation(&text) {
-                                match resolve_slash(app, name, args) {
-                                    SlashResolution::Prompt(expanded) => text = expanded,
-                                    SlashResolution::Skill(prompt) => text = prompt,
-                                    SlashResolution::Empty => {
-                                        app.input = InputBuffer::from(text.as_str());
-                                        app.set_notice(
-                                            format!(
-                                                "/{name} needs arguments — its body is only placeholders"
-                                            ),
-                                            NoticeLevel::Warning,
-                                        );
-                                        continue;
-                                    }
-                                    SlashResolution::Unknown(matches) => {
-                                        app.input = InputBuffer::from(text.as_str());
-                                        app.set_notice(
-                                            format!(
-                                                "unknown /{name} · available: {}",
-                                                matches.join(", ")
-                                            ),
-                                            NoticeLevel::Warning,
-                                        );
-                                        continue;
-                                    }
-                                }
-                            }
-                            app.clear_notice();
-                            app.push_transcript_line(Line_::User(text.clone()));
-                            app.follow_tail = true;
-                            let (tx, rx) = loop_event_channel(LOOP_EVENT_CAPACITY);
-                            events_rx = Some(rx);
-                            let token = CancellationToken::new();
-                            cancel = Some(token.clone());
-                            app.busy = true;
-                            app.status = "thinking".into();
-                            app.set_activity(Activity::Thinking);
-                            let resolver = resolver.clone();
-                            let store = store.clone();
-                            let session_id = session_id.to_string();
-                            let system_prompt = system_prompt.to_string();
-                            let registry = registry.clone();
-                            let turn_ctx = tool_ctx.clone();
-                            let mut loop_config = loop_config.clone();
-                            if std::mem::take(&mut app.compact_requested) {
-                                loop_config.force_compaction = true;
-                            }
-                            ring_on_turn_completion = true;
-                            let (tx_steer, steer_rx) = ilar::agent::steer_channel();
-                            steer_tx = Some(tx_steer);
-                            turn_handle = Some(tokio::spawn(async move {
-                                TurnCompletion::Root(
-                                    run_turn(
-                                        resolver.as_ref(),
-                                        &registry,
-                                        &store,
-                                        &session_id,
-                                        &text,
-                                        Some(&system_prompt),
-                                        loop_config,
-                                        tx,
-                                        token,
-                                        turn_ctx,
-                                        Some(steer_rx),
-                                    )
-                                    .await,
-                                )
-                            }));
+                            intents.push(Intent::StartTurn(text));
                         }
                         PromptAction::Submit if !app.input.is_blank() => {
                             // Observe before taking the text: the

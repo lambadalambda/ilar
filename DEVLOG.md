@@ -1073,3 +1073,38 @@ filling fields with plausible defaults the consumers happened to ignore
 `input_blank: true` recorded after the input had been emptied. Inert
 today, poison later, since `decide()` will read the whole struct. One
 `observe()` builds it honestly everywhere now.
+
+## 2026-08-20 — intents, and the end of the synthetic Enter
+
+Phase two of making the loop testable. Decisions now return `Vec<Intent>`
+and `apply_intent` owns the state changes, so only the spawn needs a
+runtime.
+
+The real prize was deleting the synthetic Enter. The queue drain, goal
+continuation and retry all worked by writing the message into the input
+and posting a fake `KeyEvent::new(Enter)`, then hoping the dispatcher
+was in a state that would route it to the submit arm. Review found that
+hope was misplaced: `may_route_notification` never looked at
+`pending_event`, so after a queue drain the notification gate fired
+first, and the drained message became a *steer of the notification's
+turn* — exactly the "queue order can invert" nitpick deferred in the
+Milestone 5 entry. The chord handler and the completion popup could each
+swallow it too.
+
+Draining intents before the gate closes all three, and starting a turn
+is now one code path rather than an impersonation of the user.
+
+Review also caught a regression I introduced doing it: only the
+interactive Enter expanded slash invocations, so a queued `/goal ship
+the parser` was sent to the model as literal text once the turn it was
+waiting on finished. Goal arming and slash resolution moved into
+`prepare_prompt`, which every start now goes through, and `last_prompt`
+records the raw text so a retry replays what was typed rather than the
+expansion.
+
+Honest coverage note, measured rather than asserted: `apply_intent` is
+pinned by mutation testing, but deleting the drain loop entirely still
+leaves the suite green. The wiring boundary narrowed from "every call
+site" to "four pushes plus the drain". Phase three is `decide(event,
+state)`; even that will not cover the loop's *schedule*, which is where
+the bug above actually lived.

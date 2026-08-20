@@ -68,8 +68,39 @@ two criteria in [Unify the TUI modal layer](unify-tui-modals.md) are
 still verified by reading; what changed is that the reading is three
 lines of match arm instead of a forty-line block.
 
-Phase two is what earns those: `decide()` returning intents that
-`run_app` interprets in one place a test can drive.
+Phase two landed the intent layer. `after_turn` and `retry` return
+`Vec<Intent>`; `apply_intent(app, intent) -> Option<String>` owns every
+state change and hands back the prompt when a turn should start, so only
+the spawn needs the runtime. **The synthetic-Enter trick is gone** — the
+queue drain, goal continuation and retry no longer post a fake keypress
+and hope the dispatcher is in a state that routes it correctly.
+
+Removing it closed a bug recorded in DEVLOG under Milestone 5: draining
+the queue set the synthetic Enter, the notification gate then fired
+first, and the drained message was silently converted into a *steer of
+the notification's turn*. Two more disappeared with it — the synthetic
+Enter could be swallowed by the Ctrl-X model chord, and a queued bare
+`/rev` was eaten by the completion popup.
+
+Coverage, measured the same way as phase one. `apply_intent` is pinned:
+mutating any of `StartTurn`, `SendQueued`, `ClearGoal` or `AdvanceGoal`
+fails a test. Still green under mutation, and therefore still untested:
+
+- the drain loop itself — deleting it entirely leaves the suite green
+- the four sites that push intents
+- paste routing, the notification gate, and the start/steer/queue branch
+
+So the two criteria in [Unify the TUI modal layer](unify-tui-modals.md)
+remain verified by reading. Phase three is `decide(event, &state) ->
+Vec<Intent>` for the key and paste paths, which brings those three under
+test and makes the drain covered by construction.
+
+Two things a `decide()` still would not cover, worth stating so the
+issue is not closed on a false claim: the spawn block, which needs a
+provider and a session store; and the loop *schedule* — where the drain
+sits relative to the notification gate and the render. The bug above
+lived in that ordering and no `decide()` test would have seen it. That
+needs an extracted `tick()` or a harness with a fake terminal.
 
 ## Notes
 
