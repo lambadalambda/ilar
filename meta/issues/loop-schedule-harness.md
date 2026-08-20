@@ -42,6 +42,42 @@ because each decision was individually correct; the composition was not.
 - At least the three regression cases above are covered.
 - No behaviour change: the full suite passes before and after.
 
+## Progress
+
+Phase one landed: the stretch whose ordering caused every recorded bug
+— intent drain, palette peek, notification gate — is
+`schedule::settle`, driven through a `Runtime` trait. `run_app`
+implements it over tokio and crossterm (`LoopRuntime`, holding mutable
+borrows of the loop's state so a spawn is observed by the rest of the
+pass); tests implement it with a recorder whose `turn_running` flips
+when a turn starts, which is exactly what makes a reordering visible.
+
+Acceptance criteria met by it:
+
+- The queue-inversion scenario is a real test
+  (`a_dequeued_message_outranks_a_notification_in_the_same_pass`), and
+  reordering the gate before the drain inside `settle` fails it —
+  verified by performing that mutation.
+- A queued slash invocation reaches the runtime expanded; a modal
+  holds both the queue and the gate without losing either; an idle
+  pass admits the notification (same-session starts a turn, foreign
+  routes and restarts the iteration, preserving the gate's old
+  `continue`).
+
+Not covered, so the issue stays open: the completion block's position
+(await, `finish_turn`, `after_turn`, the undelivered-steer splice and
+the model revert all sit before `settle` in run_app, unpinned); the
+render and event-poll positions; and cross-iteration sequences (an
+event-half intent surviving into the next pass's drain). Those need
+the full `tick()` — the remaining shape is now visible: completion
+handling in, then the poll/dispatch half, then run_app is a loop over
+`tick` plus I/O.
+
+One deliberate reorder, judged inert: the subtask spawn used to sit
+between the drain and the gate and now runs after `settle` (it touches
+neither `turn_handle` nor anything the gate observes). It runs before
+the `Restart` continue, so a routed notification cannot defer it.
+
 ## Notes
 
 - This is deliberately **not** part of Milestone 6. Phase three of
