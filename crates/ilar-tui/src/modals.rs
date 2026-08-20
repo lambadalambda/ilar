@@ -5,7 +5,6 @@
 //! both the render pass and the key dispatcher derive from that single
 //! value so they cannot disagree.
 
-use anyhow::Result;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -16,11 +15,10 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::text::{
-    Truncation, format_cost, format_tokens_compact, fuzzy_score, text_field_view, truncate_display,
+    Truncation, format_tokens_compact, fuzzy_score, text_field_view, truncate_display,
 };
 use crate::theme::{ERROR, MUTED};
-use crate::transcript::{Line_, transcript_markdown};
-use crate::{App, MAX_GOAL_ROUNDS, NoticeLevel, theme};
+use crate::{App, MAX_GOAL_ROUNDS, theme};
 
 /// The overlay that owns the keyboard. Render and key dispatch both
 /// derive their precedence from `App::active_modal`, so adding a variant
@@ -54,11 +52,11 @@ pub(crate) enum PaletteCommand {
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct PaletteCommandDefinition {
-    pub(crate) id: PaletteCommand,
-    pub(crate) section: &'static str,
+    id: PaletteCommand,
+    section: &'static str,
     pub(crate) label: &'static str,
-    pub(crate) shortcut: &'static str,
-    pub(crate) search_terms: &'static str,
+    shortcut: &'static str,
+    search_terms: &'static str,
 }
 
 pub(crate) static PALETTE_COMMANDS: &[PaletteCommandDefinition] = &[
@@ -143,8 +141,8 @@ pub(crate) enum PaletteAction {
 pub(crate) struct PaletteItem {
     action: PaletteAction,
     label: String,
-    pub(crate) shortcut: String,
-    pub(crate) search_terms: String,
+    shortcut: String,
+    search_terms: String,
 }
 
 /// Palette entries, one per built-in command.
@@ -169,7 +167,7 @@ pub(crate) enum CommandPaletteAction {
 
 pub(crate) struct CommandPalette {
     query: String,
-    pub(crate) selected: usize,
+    selected: usize,
     pub(crate) items: Vec<PaletteItem>,
 }
 
@@ -583,7 +581,7 @@ pub(crate) struct PendingManager {
 
 pub(crate) struct SkillPicker {
     pub(crate) skills: Vec<(String, String)>,
-    pub(crate) selected: usize,
+    selected: usize,
 }
 
 impl SkillPicker {
@@ -873,7 +871,7 @@ pub(crate) fn render_session_picker(frame: &mut Frame, picker: &SessionPicker) {
 
 pub(crate) struct ModelPicker {
     models: Vec<&'static ilar::model::ModelInfo>,
-    pub(crate) active_model: String,
+    active_model: String,
     query: String,
     pub(crate) selected: usize,
     pub(crate) error: Option<String>,
@@ -1090,7 +1088,7 @@ pub(crate) enum ThemePickerAction {
 pub(crate) struct ThemePicker {
     pub(crate) active_theme: theme::ThemeId,
     selected: usize,
-    error: Option<String>,
+    pub(crate) error: Option<String>,
 }
 
 impl ThemePicker {
@@ -1132,134 +1130,6 @@ impl ThemePicker {
             (KeyCode::Home, _) => self.select(0),
             (KeyCode::End, _) => self.select(theme::ThemeId::ALL.len() - 1),
             _ => ThemePickerAction::Preview(self.selected_theme()),
-        }
-    }
-}
-
-pub(crate) fn apply_theme_picker_action(
-    app: &mut App,
-    action: ThemePickerAction,
-    persist: impl FnOnce(theme::ThemeId) -> Result<ilar::config::ThemePersistOutcome>,
-) {
-    match action {
-        ThemePickerAction::Preview(preview) => app.theme = preview,
-        ThemePickerAction::Dismiss => {
-            if let Some(picker) = app.theme_picker.take() {
-                app.theme = picker.active_theme;
-            }
-            app.status = "ready".into();
-            app.clear_transient_notice();
-        }
-        ThemePickerAction::Choose(selected) => match persist(selected) {
-            Ok(outcome) => {
-                app.theme = selected;
-                app.theme_picker = None;
-                app.status = format!("theme: {}", selected.label());
-                match outcome {
-                    ilar::config::ThemePersistOutcome::Saved => app.set_notice(
-                        format!("theme saved: {}", selected.label()),
-                        NoticeLevel::Info,
-                    ),
-                    ilar::config::ThemePersistOutcome::DurabilityUncertain(error) => app
-                        .set_notice(
-                            format!("theme updated, but durability is uncertain: {error}"),
-                            NoticeLevel::Warning,
-                        ),
-                }
-            }
-            Err(error) => {
-                if let Some(picker) = app.theme_picker.as_mut() {
-                    picker.error = Some(format!("cannot save theme: {error}"));
-                }
-            }
-        },
-    }
-}
-
-pub(crate) fn activate_palette_command(
-    app: &mut App,
-    action: PaletteAction,
-    model_choices: Vec<&'static ilar::model::ModelInfo>,
-) {
-    app.command_palette = None;
-    let PaletteAction::Command(command) = action;
-    match command {
-        PaletteCommand::Model if !model_choices.is_empty() => {
-            app.model_picker = Some(ModelPicker::new(model_choices, &app.current_model));
-        }
-        PaletteCommand::Model => {}
-        PaletteCommand::Reasoning => {
-            if let Some(model) = ilar::model::find(&app.current_model)
-                && !model.variants().is_empty()
-            {
-                app.variant_picker =
-                    Some(VariantPicker::new(model, app.current_variant.as_deref()));
-            } else {
-                app.status = "current model has no reasoning variants".into();
-                app.set_notice(
-                    "current model has no reasoning variants",
-                    NoticeLevel::Warning,
-                );
-            }
-        }
-        PaletteCommand::Theme => {
-            app.theme_picker = Some(ThemePicker::new(app.theme));
-        }
-        PaletteCommand::Session => {
-            // Sessions are loaded by the caller (needs the store); the
-            // palette only records the request.
-            app.session_picker_requested = true;
-        }
-        PaletteCommand::Usage => {
-            let total = app.session_usage;
-            let cost = match app.session_cost {
-                Some(cost) => format_cost(cost),
-                None if ilar::model::plan_billed(&app.current_model) => {
-                    "subscription plan (no per-token cost)".into()
-                }
-                None => "unknown (model without pricing)".into(),
-            };
-            app.push_transcript_line(Line_::System(format!(
-                "session usage\ninput {} · output {} · cache read {} · cache write {}\nestimated cost {cost} (list prices, {})",
-                total.input_tokens,
-                total.output_tokens,
-                total.cache_read_input_tokens,
-                total.cache_creation_input_tokens,
-                ilar::model::CATALOG_UPDATED,
-            )));
-            app.follow_tail = true;
-        }
-        PaletteCommand::Skills => {
-            app.skill_picker = Some(SkillPicker::new(app.skills.clone()));
-        }
-        PaletteCommand::Compact => {
-            app.compact_requested = true;
-            app.set_notice(
-                "compaction will run before your next message",
-                NoticeLevel::Info,
-            );
-        }
-        PaletteCommand::Export => {
-            let prefix: String = app.session_id.chars().take(8).collect();
-            let path = app.cwd.join(format!("ilar-transcript-{prefix}.md"));
-            let markdown = transcript_markdown(&app.session_id, &app.lines);
-            match std::fs::write(&path, markdown) {
-                Ok(()) => {
-                    let message = format!("transcript exported to {}", path.display());
-                    app.set_notice(&message, NoticeLevel::Info);
-                    app.push_transcript_line(Line_::System(message));
-                }
-                Err(error) => {
-                    app.set_notice(format!("export failed: {error}"), NoticeLevel::Error);
-                }
-            }
-        }
-        PaletteCommand::Pending => {
-            app.pending_manager = Some(PendingManager::default());
-        }
-        PaletteCommand::Help => {
-            app.help_visible = true;
-            app.help_scroll = 0;
         }
     }
 }

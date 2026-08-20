@@ -493,7 +493,7 @@ fn inline_width(cell: &str, base: Style) -> usize {
 }
 
 fn bounded_wrap(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
-    super::wrap_styled_line(line, width)
+    crate::text::wrap_styled_line(line, width)
         .into_iter()
         .map(|line| {
             if line.width() <= width {
