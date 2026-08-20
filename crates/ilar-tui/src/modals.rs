@@ -17,8 +17,8 @@ use unicode_width::UnicodeWidthStr;
 use crate::text::{
     Truncation, format_tokens_compact, fuzzy_score, text_field_view, truncate_display,
 };
+use crate::theme;
 use crate::theme::{ERROR, MUTED};
-use crate::{App, MAX_GOAL_ROUNDS, theme};
 
 /// The overlay that owns the keyboard. Render and key dispatch both
 /// derive their precedence from `App::active_modal`, so adding a variant
@@ -407,10 +407,16 @@ fn help_lines(width: usize, keyboard_enhanced: bool) -> Vec<Line<'static>> {
     lines
 }
 
-pub(crate) fn render_pending_manager(frame: &mut Frame, app: &App) {
-    let Some(manager) = &app.pending_manager else {
-        return;
-    };
+/// What the pending manager shows, with labels already baked: the
+/// renderer only truncates and styles, so it needs nothing from `App`.
+pub(crate) struct PendingSnapshot {
+    pub(crate) selected: usize,
+    /// The selected row is armed for a destructive action.
+    pub(crate) armed: bool,
+    pub(crate) rows: Vec<String>,
+}
+
+pub(crate) fn render_pending_manager(frame: &mut Frame, snapshot: &PendingSnapshot) {
     let area = centered_rect(frame.area(), 76, 14);
     frame.render_widget(Clear, area);
     let block = Block::default()
@@ -430,8 +436,7 @@ pub(crate) fn render_pending_manager(frame: &mut Frame, app: &App) {
     if inner.width == 0 || inner.height == 0 {
         return;
     }
-    let items = app.pending_items();
-    if items.is_empty() {
+    if snapshot.rows.is_empty() {
         frame.render_widget(
             Paragraph::new(Line::styled(
                 "nothing pending — queued messages, the goal, background jobs, and retry offers appear here",
@@ -441,66 +446,24 @@ pub(crate) fn render_pending_manager(frame: &mut Frame, app: &App) {
         );
         return;
     }
-    let selected = manager.selected.min(items.len() - 1);
-    let lines: Vec<Line<'static>> = items
+    let lines: Vec<Line<'static>> = snapshot
+        .rows
         .iter()
         .enumerate()
         .take(inner.height as usize)
-        .map(|(index, item)| {
-            let armed = manager.armed == Some(*item) && index == selected;
-            let marker = if index == selected {
+        .map(|(index, label)| {
+            let armed = snapshot.armed && index == snapshot.selected;
+            let marker = if index == snapshot.selected {
                 if armed { "✗ " } else { "> " }
             } else {
                 "  "
-            };
-            let label = match item {
-                PendingItem::Queued(queue_index) => format!(
-                    "message {}: {}",
-                    queue_index + 1,
-                    app.queued_messages
-                        .get(*queue_index)
-                        .map(|message| message.replace('\n', " "))
-                        .unwrap_or_default()
-                ),
-                PendingItem::Goal => {
-                    let (goal, round) = app.goal.as_ref().expect("goal item implies goal");
-                    if armed {
-                        format!("goal (round {round}/{MAX_GOAL_ROUNDS}): press d again to abort")
-                    } else {
-                        format!("goal (round {round}/{MAX_GOAL_ROUNDS}): {goal}")
-                    }
-                }
-                PendingItem::BackgroundJobs => {
-                    if armed {
-                        format!(
-                            "background jobs ({}): press d again to cancel all",
-                            app.background_running
-                        )
-                    } else {
-                        format!("background jobs: {} running", app.background_running)
-                    }
-                }
-                PendingItem::Services => {
-                    if armed {
-                        format!(
-                            "services ({}): press d again to stop all",
-                            app.services_running
-                        )
-                    } else {
-                        format!("services: {} running", app.services_running)
-                    }
-                }
-                PendingItem::Retry => format!(
-                    "retry: {}",
-                    app.last_prompt.as_deref().unwrap_or("").replace('\n', " ")
-                ),
             };
             let text = truncate_display(
                 &format!("{marker}{label}"),
                 inner.width as usize,
                 Truncation::Right,
             );
-            let style = if index == selected {
+            let style = if index == snapshot.selected {
                 if armed {
                     Style::default().fg(ERROR).add_modifier(Modifier::REVERSED)
                 } else {

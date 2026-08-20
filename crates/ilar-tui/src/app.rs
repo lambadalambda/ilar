@@ -915,6 +915,72 @@ impl App {
         items
     }
 
+    /// Labels for the pending manager, armed-state confirmations baked
+    /// in, so the renderer never needs `&App`.
+    pub(crate) fn pending_snapshot(&self) -> Option<crate::modals::PendingSnapshot> {
+        let manager = self.pending_manager.as_ref()?;
+        let items = self.pending_items();
+        let selected = manager.selected.min(items.len().saturating_sub(1));
+        let mut armed = false;
+        let rows = items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                let is_armed = manager.armed == Some(*item) && index == selected;
+                armed |= is_armed;
+                match item {
+                    PendingItem::Queued(queue_index) => format!(
+                        "message {}: {}",
+                        queue_index + 1,
+                        self.queued_messages
+                            .get(*queue_index)
+                            .map(|message| message.replace('\n', " "))
+                            .unwrap_or_default()
+                    ),
+                    PendingItem::Goal => {
+                        let (goal, round) = self.goal.as_ref().expect("goal item implies goal");
+                        if is_armed {
+                            format!(
+                                "goal (round {round}/{MAX_GOAL_ROUNDS}): press d again to abort"
+                            )
+                        } else {
+                            format!("goal (round {round}/{MAX_GOAL_ROUNDS}): {goal}")
+                        }
+                    }
+                    PendingItem::BackgroundJobs => {
+                        if is_armed {
+                            format!(
+                                "background jobs ({}): press d again to cancel all",
+                                self.background_running
+                            )
+                        } else {
+                            format!("background jobs: {} running", self.background_running)
+                        }
+                    }
+                    PendingItem::Services => {
+                        if is_armed {
+                            format!(
+                                "services ({}): press d again to stop all",
+                                self.services_running
+                            )
+                        } else {
+                            format!("services: {} running", self.services_running)
+                        }
+                    }
+                    PendingItem::Retry => format!(
+                        "retry: {}",
+                        self.last_prompt.as_deref().unwrap_or("").replace('\n', " ")
+                    ),
+                }
+            })
+            .collect();
+        Some(crate::modals::PendingSnapshot {
+            selected,
+            armed,
+            rows,
+        })
+    }
+
     pub(crate) fn pending_manager_key(&mut self, code: KeyCode, control: bool) -> PendingAction {
         let items = self.pending_items();
         let Some(manager) = self.pending_manager.as_mut() else {
@@ -2057,7 +2123,11 @@ impl App {
         // Same precedence the key dispatcher uses, from the same value:
         // whatever is drawn on top is whatever is taking the keys.
         match self.active_modal() {
-            Some(Modal::PendingManager) => render_pending_manager(frame, self),
+            Some(Modal::PendingManager) => {
+                if let Some(snapshot) = self.pending_snapshot() {
+                    render_pending_manager(frame, &snapshot);
+                }
+            }
             Some(Modal::Help) => render_help(frame, self.help_scroll, self.keyboard_enhanced),
             Some(Modal::ThemePicker) => {
                 render_theme_picker(frame, self.theme_picker.as_ref().expect("theme picker"));
@@ -2811,6 +2881,34 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(screen.contains("/goal — work until"), "{screen}");
+    }
+
+    #[test]
+    fn pending_snapshot_bakes_labels_and_arming() {
+        let mut app = App::new();
+        app.queued_messages = vec!["first\nline".into()];
+        app.goal = Some(("recover the engine".into(), 2));
+        app.pending_manager = Some(PendingManager::default());
+
+        let snapshot = app.pending_snapshot().expect("manager is open");
+        assert_eq!(snapshot.selected, 0);
+        assert!(!snapshot.armed);
+        assert_eq!(snapshot.rows[0], "message 1: first line");
+        assert_eq!(
+            snapshot.rows[1],
+            format!("goal (round 2/{MAX_GOAL_ROUNDS}): recover the engine")
+        );
+
+        // Arming the goal changes its label to the confirmation.
+        app.pending_manager_key(KeyCode::Down, false);
+        app.pending_manager_key(KeyCode::Char('d'), false);
+        let snapshot = app.pending_snapshot().expect("manager is open");
+        assert_eq!(snapshot.selected, 1);
+        assert!(snapshot.armed);
+        assert!(snapshot.rows[1].contains("press d again to abort"));
+
+        app.pending_manager = None;
+        assert!(app.pending_snapshot().is_none());
     }
 
     #[test]
