@@ -131,3 +131,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Steer a running turn](issues/steer-a-running-turn.md)
 - [x] [Input key hazards and busy-state affordances](issues/input-key-hazards.md)
 - [x] [Load Claude and opencode style skills](issues/portable-skill-formats.md)
+- [x] [User-invoked commands](issues/user-invoked-commands.md)

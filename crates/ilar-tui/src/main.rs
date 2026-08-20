@@ -192,7 +192,7 @@ fn begin_retry(app: &mut App) -> Option<Event> {
 /// Inline completion candidates for a slash input: built-in commands
 /// plus skills, fuzzy-ranked. Empty once the name is finished (whitespace)
 /// or the input is not a slash command.
-fn slash_candidates(input: &str, skills: &[(String, String)]) -> Vec<(String, String)> {
+fn slash_candidates(input: &str, inventory: &[(String, String)]) -> Vec<(String, String)> {
     let Some(token) = input.strip_prefix('/') else {
         return Vec::new();
     };
@@ -203,7 +203,9 @@ fn slash_candidates(input: &str, skills: &[(String, String)]) -> Vec<(String, St
         "goal".to_string(),
         "work until the goal is achieved (evidence-based)".to_string(),
     )];
-    candidates.extend(skills.iter().cloned());
+    // `goal` is built in and outranks everything, so drop anything that
+    // would render as a second row with the same name.
+    candidates.extend(inventory.iter().filter(|(name, _)| name != "goal").cloned());
     let mut scored: Vec<(i64, (String, String))> = candidates
         .into_iter()
         .filter_map(|(name, description)| {
@@ -267,6 +269,39 @@ fn skill_invocation_prompt(name: &str, args: &str) -> String {
             "Use the `skill` tool to load the skill \"{name}\" and follow its instructions. Arguments: {args}"
         )
     }
+}
+
+/// What `/name args` means. Extracted from the key handler so the
+/// precedence between commands, skills and the built-in is testable
+/// without a running event loop.
+#[derive(Debug, PartialEq)]
+enum SlashResolution {
+    /// A command's body, arguments already substituted.
+    Prompt(String),
+    /// A request for the model to load a skill.
+    Skill(String),
+    /// Nothing by that name; near matches to suggest.
+    Unknown(Vec<String>),
+    /// A command whose body expanded to nothing.
+    Empty,
+}
+
+fn resolve_slash(app: &App, name: &str, args: &str) -> SlashResolution {
+    if let Some(command) = app.commands.iter().find(|command| command.name == name) {
+        let expanded = ilar::command::expand(&command.template, args);
+        // A body of just `$ARGUMENTS` invoked bare expands to nothing,
+        // and an empty prompt is rejected by the provider.
+        if expanded.trim().is_empty() {
+            return SlashResolution::Empty;
+        }
+        return SlashResolution::Prompt(expanded);
+    }
+    if app.skills.iter().any(|(skill, _)| skill == name) {
+        return SlashResolution::Skill(skill_invocation_prompt(name, args));
+    }
+    let mut inventory = app.slash_inventory();
+    inventory.push(("goal".into(), String::new()));
+    SlashResolution::Unknown(close_skill_matches(&inventory, name))
 }
 
 fn close_skill_matches(skills: &[(String, String)], name: &str) -> Vec<String> {
@@ -476,6 +511,14 @@ async fn main() -> Result<()> {
             .into_iter()
             .map(|skill| (skill.name, skill.description))
             .collect();
+        // Commands are never listed in the system prompt: unlike skills
+        // they are only ever invoked by the user.
+        let command_inventory = ilar::command::CommandStore::new(
+            config.dirs().0.to_path_buf(),
+            config.dirs().1.to_path_buf(),
+        )
+        .list()
+        .context("loading commands")?;
         let mut system_prompt =
             system_prompt_for(config.dirs().0, &cwd).context("loading project instructions")?;
         if !skill_listing.is_empty() {
@@ -569,6 +612,7 @@ async fn main() -> Result<()> {
         app.theme = active_theme;
         app.history = history::PromptHistory::load(config.state_dir().join("prompt_history.jsonl"));
         app.skills = skill_inventory;
+        app.commands = command_inventory;
         app.session_id = session_id.clone();
         app.todos = todos;
         if let Some(resumed) = &resumed {
@@ -1515,10 +1559,11 @@ async fn run_app(
                     // Inline slash completion: navigate/accept while the
                     // command name is being typed.
                     (KeyCode::Up | KeyCode::Down | KeyCode::Tab | KeyCode::Enter, false)
-                        if !slash_candidates(app.input.text(), &app.skills).is_empty()
+                        if !slash_candidates(app.input.text(), &app.slash_inventory())
+                            .is_empty()
                             && !key.modifiers.contains(KeyModifiers::SHIFT) =>
                     {
-                        let candidates = slash_candidates(app.input.text(), &app.skills);
+                        let candidates = slash_candidates(app.input.text(), &app.slash_inventory());
                         app.slash_selected = app.slash_selected.min(candidates.len() - 1);
                         match code {
                             KeyCode::Up => {
@@ -1602,19 +1647,30 @@ async fn run_app(
                                 )));
                                 text = goal_kickoff_prompt(goal_text);
                             } else if let Some((name, args)) = parse_slash_invocation(&text) {
-                                if app.skills.iter().any(|(skill, _)| skill == name) {
-                                    text = skill_invocation_prompt(name, args);
-                                } else {
-                                    let matches = close_skill_matches(&app.skills, name);
-                                    app.input = InputBuffer::from(text.as_str());
-                                    app.set_notice(
-                                        format!(
-                                            "unknown skill /{name} · available: {}",
-                                            matches.join(", ")
-                                        ),
-                                        NoticeLevel::Warning,
-                                    );
-                                    continue;
+                                match resolve_slash(app, name, args) {
+                                    SlashResolution::Prompt(expanded) => text = expanded,
+                                    SlashResolution::Skill(prompt) => text = prompt,
+                                    SlashResolution::Empty => {
+                                        app.input = InputBuffer::from(text.as_str());
+                                        app.set_notice(
+                                            format!(
+                                                "/{name} needs arguments — its body is only placeholders"
+                                            ),
+                                            NoticeLevel::Warning,
+                                        );
+                                        continue;
+                                    }
+                                    SlashResolution::Unknown(matches) => {
+                                        app.input = InputBuffer::from(text.as_str());
+                                        app.set_notice(
+                                            format!(
+                                                "unknown /{name} · available: {}",
+                                                matches.join(", ")
+                                            ),
+                                            NoticeLevel::Warning,
+                                        );
+                                        continue;
+                                    }
                                 }
                             }
                             app.clear_notice();

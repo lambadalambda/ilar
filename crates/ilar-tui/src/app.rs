@@ -129,6 +129,9 @@ pub(crate) struct App {
     pub(crate) skill_picker: Option<SkillPicker>,
     /// (name, description) pairs for slash invocation and the picker.
     pub(crate) skills: Vec<(String, String)>,
+    /// User-invoked commands. Whole values rather than name/description
+    /// pairs, so honouring `agent`/`model`/`variant` later is additive.
+    pub(crate) commands: Vec<ilar::command::Command>,
     pub(crate) theme: theme::ThemeId,
     pub(crate) theme_picker: Option<ThemePicker>,
     /// Whether the terminal speaks the kitty keyboard protocol. Without
@@ -211,6 +214,7 @@ impl App {
             help_scroll: 0,
             skill_picker: None,
             skills: Vec::new(),
+            commands: Vec::new(),
             theme: theme::ThemeId::Terminal,
             theme_picker: None,
             keyboard_enhanced: false,
@@ -268,6 +272,25 @@ impl App {
         } else {
             None
         }
+    }
+
+    /// Everything `/` can invoke, in the precedence the dispatcher
+    /// uses: the built-in, then commands, then skills a command has not
+    /// shadowed. Completion, the picker and near-match suggestions all
+    /// read this, so they cannot disagree about what exists.
+    pub(crate) fn slash_inventory(&self) -> Vec<(String, String)> {
+        let mut entries: Vec<(String, String)> = self
+            .commands
+            .iter()
+            .map(|command| (command.name.clone(), command.description.clone()))
+            .collect();
+        entries.extend(
+            self.skills
+                .iter()
+                .filter(|(skill, _)| !self.commands.iter().any(|c| &c.name == skill))
+                .cloned(),
+        );
+        entries
     }
 
     pub(crate) fn has_modal(&self) -> bool {
@@ -1952,7 +1975,7 @@ impl App {
         frame.render_widget(input, chunks[2]);
 
         // Inline slash-completion popup anchored above the input.
-        let candidates = slash_candidates(self.input.text(), &self.skills);
+        let candidates = slash_candidates(self.input.text(), &self.slash_inventory());
         if !candidates.is_empty() && !self.has_modal() {
             let rows = candidates.len().min(6) as u16;
             let height = rows + 2;
@@ -2156,7 +2179,7 @@ pub(crate) fn activate_palette_command(
             app.follow_tail = true;
         }
         PaletteCommand::Skills => {
-            app.skill_picker = Some(SkillPicker::new(app.skills.clone()));
+            app.skill_picker = Some(SkillPicker::new(app.slash_inventory()));
         }
         PaletteCommand::Compact => {
             app.compact_requested = true;
@@ -5091,5 +5114,105 @@ mod tests {
 
         assert_eq!(app.scroll_top, 10);
         assert!(!app.follow_tail);
+    }
+
+    fn command(name: &str, description: &str, template: &str) -> ilar::command::Command {
+        ilar::command::Command {
+            name: name.into(),
+            description: description.into(),
+            template: template.into(),
+            agent: None,
+            model: None,
+            variant: None,
+        }
+    }
+
+    /// A command's body is the prompt. A skill's invocation is a request
+    /// for the model to go and load one — the distinction is the whole
+    /// point of having both, so exercise the dispatcher rather than
+    /// re-implementing it.
+    #[test]
+    fn a_command_expands_to_its_body_while_a_skill_asks_the_model_to_load_one() {
+        let mut app = App::new();
+        app.commands = vec![command(
+            "greptile",
+            "Address Greptile PR comments",
+            "Address Greptile feedback.\n\nCommand arguments: $ARGUMENTS",
+        )];
+        app.skills = vec![("repo-issues".into(), "Manage issues".into())];
+
+        match crate::resolve_slash(&app, "greptile", "PR 41") {
+            crate::SlashResolution::Prompt(text) => {
+                assert!(text.contains("Command arguments: PR 41"), "{text}");
+                assert!(!text.contains("skill` tool"), "{text}");
+            }
+            other => panic!("expected a prompt, got {other:?}"),
+        }
+        assert!(matches!(
+            crate::resolve_slash(&app, "repo-issues", ""),
+            crate::SlashResolution::Skill(prompt) if prompt.contains("`skill` tool")
+        ));
+    }
+
+    /// A command and a skill can share a name; the command wins, and
+    /// every surface agrees because they read one inventory.
+    #[test]
+    fn a_command_shadows_a_skill_of_the_same_name_consistently() {
+        let mut app = App::new();
+        app.commands = vec![command("review", "Command review", "Command body")];
+        app.skills = vec![
+            ("review".into(), "Skill review".into()),
+            ("other".into(), "Untouched".into()),
+        ];
+
+        assert!(matches!(
+            crate::resolve_slash(&app, "review", ""),
+            crate::SlashResolution::Prompt(text) if text == "Command body"
+        ));
+        let inventory = app.slash_inventory();
+        assert_eq!(
+            inventory
+                .iter()
+                .filter(|(name, _)| name == "review")
+                .count(),
+            1,
+            "the shadowed skill must not also be listed: {inventory:?}"
+        );
+        assert_eq!(inventory[0].1, "Command review");
+        assert!(inventory.iter().any(|(name, _)| name == "other"));
+    }
+
+    /// A body of only placeholders with no arguments expands to nothing,
+    /// and an empty prompt is rejected by the provider.
+    #[test]
+    fn a_command_that_expands_to_nothing_is_refused() {
+        let mut app = App::new();
+        app.commands = vec![command("echo", "Echo", "$ARGUMENTS")];
+        assert_eq!(
+            crate::resolve_slash(&app, "echo", ""),
+            crate::SlashResolution::Empty
+        );
+        assert!(matches!(
+            crate::resolve_slash(&app, "echo", "something"),
+            crate::SlashResolution::Prompt(text) if text == "something"
+        ));
+    }
+
+    /// The built-in `goal` outranks everything and must not be offered
+    /// twice when a command or skill shares its name.
+    #[test]
+    fn the_goal_builtin_is_listed_once_and_suggested_on_a_typo() {
+        let mut app = App::new();
+        app.commands = vec![command("goal", "A shadowing command", "body")];
+        let candidates = slash_candidates("/goal", &app.slash_inventory());
+        assert_eq!(
+            candidates.iter().filter(|(name, _)| name == "goal").count(),
+            1,
+            "{candidates:?}"
+        );
+        assert!(matches!(
+            crate::resolve_slash(&app, "gaol", ""),
+            crate::SlashResolution::Unknown(matches) if matches.iter().any(|m| m == "goal")
+        ));
     }
 }

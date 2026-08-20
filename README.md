@@ -244,6 +244,30 @@ abort the goal or cancel background jobs (both confirmed with a second
 press). **Esc is strictly immediate-scope**: it aborts the running turn
 or clears the input, and never touches the queue or the goal.
 
+### Commands
+
+Commands are markdown whose body *is* the prompt. Unlike skills they are
+never listed in the system prompt and the model can never invoke one:
+`/name args` substitutes `$ARGUMENTS` (or `$1`, `$2`, …) into the body
+and submits it directly. Put them in `~/.config/ilar/commands/` or a
+project's `.ilar/commands/`.
+
+```markdown
+---
+description: Address Greptile PR comments
+---
+Address Greptile feedback on the current pull request.
+
+Command arguments: $ARGUMENTS
+```
+
+Frontmatter is TOML or YAML, so opencode and Claude Code command files
+work unchanged. `$` is otherwise left alone — `$(date)`, `${HOME}` and
+`$NAME` pass through — but `$` followed by a digit is always a
+placeholder, so an unmatched one expands to nothing rather than staying
+literal. A command sharing a name with a skill shadows it; `goal` is
+reserved for the built-in.
+
 ### MCP
 
 ilar deliberately ships no built-in MCP client. The built-in `mcp-via-cli`

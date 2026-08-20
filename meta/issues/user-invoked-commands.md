@@ -70,6 +70,32 @@ with reasoning variants, and subagents via the `task` tool.
   and skills.
 - Existing skill invocation is unchanged.
 
+## Outcome
+
+Landed. All five commands in `~/.config/opencode/commands/` load and
+substitute unchanged. `resolve_slash` in main.rs owns the precedence —
+commands, then skills, then near-match suggestions — and is unit tested,
+rather than the logic living inline in a key handler.
+
+Not done, and the issue should not read as if it were:
+
+- **`agent`, `model` and `variant` are parsed but not honoured.** They
+  are carried on `Command` so wiring them is additive, but nothing reads
+  them yet, and the two acceptance criteria about running under them are
+  untested because there is nothing to test.
+- **`subtask` is not parsed at all.**
+- **A command shadowing a skill is deterministic but not announced.**
+  Every surface agrees the command wins and the skill stops being listed,
+  but nothing says so. Reporting it wants the same warning channel
+  `SkillStore::list` lacks.
+
+Decisions worth knowing: `goal` is reserved, since `/goal` is handled
+before commands and a command by that name could never run. Names must
+match what `/name` accepts, so a dotted filename fails at load rather
+than appearing in completion and doing nothing. `$` followed by a digit
+is always a placeholder, so `costs $5` with fewer arguments empties —
+there is no escape hatch today.
+
 ## Notes
 
 - **Frontmatter: accept both formats.** Decided. ilar's skills use TOML

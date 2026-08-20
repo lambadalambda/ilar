@@ -1002,3 +1002,45 @@ also gives the input title something to show.
 Also took opencode's detail of resetting the step budget when a steer
 lands: new instructions get a fresh budget rather than inheriting what
 the interrupted work had left.
+
+## 2026-08-20 — commands, and reading foreign skill formats
+
+Two halves of the same gap. Skills are model-invoked: listed in the
+system prompt with cue phrases, loaded through a tool when the model
+decides they apply. That is a round trip and a judgement call, which is
+wrong for "do exactly this now". Commands are the deterministic half —
+markdown whose body is the prompt, substituted and submitted, never
+auto-invoked.
+
+The prerequisite was reading other people's files. Nine skills in
+~/.config/opencode/skills/ could not load at all: they differ on two
+axes, YAML frontmatter and a <name>/SKILL.md directory layout against
+our flat TOML files. The parser now takes either, probing the first
+meaningful line rather than inferring from where a file lives, and keeps
+unknown keys in an extras map so a command's `model` or a skill's
+`allowed-tools` survives before anything honours it.
+
+The YAML side is a deliberate subset and review found three ways it was
+silently wrong, each of which real frontmatter hits: a block scalar
+truncated at its first blank line, an indicator like |+ or |2 leaving the
+description as the literal string "|+", and a plain value wrapped across
+lines losing everything after the first. Two real SKILL.md files are
+checked in as fixtures so the long-description cases stay covered.
+
+Commands drew its own crop. An apostrophe opened a quote, so
+`/review don't merge yet` gave $1 = "dont fix it" with $2 and $3 empty —
+quotes now only open at a token boundary. `$ARGUMENTS` matched without a
+word boundary, mangling `$ARGUMENTS_LIST`. A body of only placeholders
+invoked bare expanded to an empty prompt, which providers reject.
+
+The dispatch was also written inline in a run_app key handler and its
+test called `expand` directly, so it would have passed with the whole
+branch deleted. Extracted to `resolve_slash(app, name, args) ->
+SlashResolution`, which made command-shadows-skill, empty-expansion and
+the `goal` collision testable in three lines each. That is the shape the
+event-loop issue is about, arrived at from the other direction.
+
+`$` semantics settled deliberately: `$(`, `${`, `$NAME`, `$$` are
+literal, but `$` plus a digit is always a placeholder, so `costs $5`
+with fewer args empties. Consistency beats guessing which `$5` was
+meant, and there is no escape today.
