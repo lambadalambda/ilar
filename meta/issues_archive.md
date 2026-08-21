@@ -145,3 +145,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Add structured user questions](issues/add-structured-user-questions.md)
 - [x] [Configurable default reasoning level](issues/configurable-default-reasoning.md)
 - [x] [Colour hierarchy and a theme pack](issues/colour-hierarchy-and-theme-pack.md)
+- [x] [Resume failed turns and retry transient provider errors](issues/resume-failed-turns-with-backoff.md)

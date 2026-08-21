@@ -1170,3 +1170,26 @@ instead of slab, and the syntax classes stay distinct and readable on the
 code surface. The floor is AA rather than AAA precisely because the ports
 keep their published values — Solarized Dark is 5.6:1 by design — with the
 default theme held to AAA separately.
+
+## 2026-08-21 — Failed turns resume history; transient calls back off
+
+The old Ctrl-R path was not a retry at all: it submitted `last_prompt` as a
+new user message. That duplicated the original request after every completed
+tool round and could rerun slash-command setup. Failed-turn recovery now has a
+separate `ResumeTurn` intent and core `resume_turn` entry point. It acquires the
+same session writer and starts from `session.transcript()` without appending a
+user event, so completed assistant/tool rounds remain context rather than work
+to replay. The TUI only offers this after `TurnStarted` proves the turn's state
+was committed; a resume attempt retains that disposition even if its preflight
+fails.
+
+Provider failures now distinguish permanent `Error` from
+`RetryableError`. Network connection/timeout/body-read failures, HTTP
+408/409/429/500/502/503/504, and structured overload/rate-limit/server errors
+are transient; request/auth, protocol, and decode failures remain permanent. A
+provider call that has not yet emitted response content retries up to three
+times with cancellable 500ms/1s/2s exponential backoff (capped at 30s by
+configuration). Once output has streamed, the loop persists it and leaves
+recovery to Ctrl-R rather than replaying a potentially different response over
+already-rendered deltas. `ProviderRetry` events make the delay and cause visible
+in the TUI.
