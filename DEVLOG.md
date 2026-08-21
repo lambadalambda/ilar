@@ -1193,3 +1193,20 @@ configuration). Once output has streamed, the loop persists it and leaves
 recovery to Ctrl-R rather than replaying a potentially different response over
 already-rendered deltas. `ProviderRetry` events make the delay and cause visible
 in the TUI.
+
+## 2026-08-21 — Manual compaction is a maintenance operation
+
+Manual compaction no longer piggybacks on the next user turn. The palette and
+built-in `/compact` command arm a standalone, cancellable operation which
+acquires the normal session writer, resolves the session's persisted provider,
+and summarizes the complete active transcript. It appends no user message and
+does not advance goal mode, drain the message queue after cancellation, or run
+ordinary turn completion behavior. `/compact` is rejected while another
+operation is active rather than leaking into model steering.
+
+`CompactionCut::ActiveHistory` is deliberately separate from automatic
+`TurnBoundary` and in-turn `RecentSteps` cuts: only an explicit idle-session
+request should replace the entire active provider context with its handover.
+Successful completion reuses the live `Compacted` event path, so the handover
+summary is shown in the transcript immediately and the context meter is
+recomputed from persisted state.
