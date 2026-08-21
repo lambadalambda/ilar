@@ -30,4 +30,4 @@
 
 ## Milestone 7 — Unscheduled
 
-- [ ] [Ctrl-C interrupts, Ctrl-D quits](issues/ctrl-c-interrupts-ctrl-d-quits.md)
+(all complete — see issues_archive.md)

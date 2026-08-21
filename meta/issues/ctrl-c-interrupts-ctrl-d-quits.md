@@ -38,6 +38,27 @@ overlay open, it quits.
   session picker still arms and confirms a delete.
 - The full suite passes.
 
+## Outcome
+
+Closed. `input::interrupt` and `input::quit_requested` carry the
+decisions, and the dispatcher does one thing with the first: it rewrites
+Ctrl-C into an Esc key event and falls through. Every scope therefore
+keeps exactly one close path — the pickers dismiss through their own
+`handle_key`, search restores its scroll, the Ctrl-X leader disarms, a
+turn aborts, typed text clears — and none of it was duplicated.
+
+Two things the wiring turned up:
+
+- An armed Ctrl-X leader is invisible outside the status line, so a
+  Ctrl-C that hinted past it would leave the next keystroke to be eaten
+  as a leader argument. `something_open` covers the leader as well as
+  overlays.
+- Ctrl-D from a blank prompt quits *during* a turn too, cancelling it —
+  the same thing Ctrl-C used to do. Sessions are resumable
+  (`ilar --continue`), so the cost of a misfire is a resume, and this
+  is the migration hazard worth knowing about: the old half-page scroll
+  and the new exit share a key and a condition.
+
 ## Notes
 
 - The dispatch half of the loop sits outside the `schedule` seam by
