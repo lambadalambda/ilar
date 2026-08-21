@@ -142,3 +142,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [A harness for the event loop's schedule](issues/loop-schedule-harness.md)
 - [x] [Ctrl-C interrupts, Ctrl-D quits](issues/ctrl-c-interrupts-ctrl-d-quits.md)
 - [x] [Grow the input box for long messages](issues/grow-input-box-for-long-messages.md)
+- [x] [Add structured user questions](issues/add-structured-user-questions.md)
