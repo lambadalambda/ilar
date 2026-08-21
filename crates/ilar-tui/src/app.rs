@@ -1763,7 +1763,12 @@ impl App {
     }
 
     pub(crate) fn render(&mut self, frame: &mut Frame) {
-        let desired_input_height = self.input.line_count().min(6) as u16 + 2;
+        let input_width = frame.area().width.saturating_sub(2);
+        let desired_input_height = self
+            .input
+            .visual_line_count(input_width)
+            .saturating_add(2)
+            .min(u16::MAX as usize) as u16;
         let input_height = desired_input_height.min(frame.area().height.saturating_sub(4).max(3));
         let chunks = Layout::vertical([
             Constraint::Min(3),
@@ -2873,6 +2878,35 @@ mod tests {
             "{rendered}"
         );
         assert!(rendered.contains("you  opaque notification"), "{rendered}");
+    }
+
+    #[test]
+    fn long_input_wraps_and_grows_to_show_the_whole_message() {
+        let backend = ratatui::backend::TestBackend::new(40, 12);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.input = InputBuffer::from(
+            "first section of a long message then the second section remains visible",
+        );
+
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let screen = (0..terminal.backend().buffer().area.height)
+            .map(|row| {
+                (0..terminal.backend().buffer().area.width)
+                    .map(|column| terminal.backend().buffer()[(column, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            screen.contains("first section of a long message then"),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("the second section remains visible"),
+            "{screen}"
+        );
     }
 
     #[test]

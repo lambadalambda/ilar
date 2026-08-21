@@ -9,7 +9,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::text::{Truncation, text_field_view_at, truncate_display};
+#[cfg(test)]
+use crate::text::text_field_view_at;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct InputBuffer {
@@ -241,8 +242,76 @@ impl InputBuffer {
         self.text.contains('\n')
     }
 
-    pub(crate) fn line_count(&self) -> usize {
-        self.text.bytes().filter(|byte| *byte == b'\n').count() + 1
+    pub(crate) fn visual_line_count(&self, width: u16) -> usize {
+        self.wrapped_rows(width).len()
+    }
+
+    fn wrapped_rows(&self, width: u16) -> Vec<WrappedInputRow<'_>> {
+        let width = width.max(1) as usize;
+        let mut rows = Vec::new();
+        let mut line_start = 0;
+        for line in self.text.split('\n') {
+            let graphemes = line
+                .grapheme_indices(true)
+                .map(|(start, text)| WrappedGrapheme {
+                    start,
+                    end: start + text.len(),
+                    width: UnicodeWidthStr::width(text),
+                    whitespace: text.chars().all(char::is_whitespace),
+                })
+                .collect::<Vec<_>>();
+            if graphemes.is_empty() {
+                rows.push(WrappedInputRow {
+                    text: "",
+                    start: line_start,
+                    end: line_start,
+                });
+                line_start += line.len() + 1;
+                continue;
+            }
+
+            let mut start = 0;
+            while start < graphemes.len() {
+                let mut end = start;
+                let mut row_width = 0usize;
+                while end < graphemes.len()
+                    && (end == start || row_width.saturating_add(graphemes[end].width) <= width)
+                {
+                    row_width = row_width.saturating_add(graphemes[end].width);
+                    end += 1;
+                }
+
+                let row_end = if end == graphemes.len() || graphemes[end].whitespace {
+                    end
+                } else {
+                    (start..end)
+                        .rev()
+                        .find(|index| graphemes[*index].whitespace)
+                        .unwrap_or(end)
+                };
+                let row_end = row_end.max(start + 1);
+                let byte_start = graphemes[start].start;
+                let byte_end = graphemes[row_end - 1].end;
+                rows.push(WrappedInputRow {
+                    text: &line[byte_start..byte_end],
+                    start: line_start + byte_start,
+                    end: line_start + byte_end,
+                });
+
+                start = row_end;
+            }
+            line_start += line.len() + 1;
+        }
+        if rows.last().is_some_and(|row| {
+            row.end == self.text.len() && UnicodeWidthStr::width(row.text) >= width
+        }) {
+            rows.push(WrappedInputRow {
+                text: "",
+                start: self.text.len(),
+                end: self.text.len(),
+            });
+        }
+        rows
     }
 
     #[cfg(test)]
@@ -251,40 +320,51 @@ impl InputBuffer {
     }
 
     pub(crate) fn multiline_view(&self, width: u16, height: u16) -> InputView {
-        let lines = self.text.split('\n').collect::<Vec<_>>();
-        let cursor_line = self.text[..self.cursor]
-            .bytes()
-            .filter(|byte| *byte == b'\n')
-            .count();
-        let cursor_line_start = self.text[..self.cursor]
-            .rfind('\n')
-            .map(|index| index + 1)
-            .unwrap_or(0);
-        let visible_count = (height as usize).max(1).min(lines.len());
-        let start = cursor_line
+        let rows = self.wrapped_rows(width);
+        let cursor_row = rows
+            .iter()
+            .enumerate()
+            .position(|(index, row)| {
+                self.cursor < row.end
+                    || (self.cursor == row.end
+                        && rows.get(index + 1).is_none_or(|next| next.start != row.end))
+            })
+            .unwrap_or_else(|| rows.len().saturating_sub(1));
+        let visible_count = (height as usize).max(1).min(rows.len());
+        let start = cursor_row
             .saturating_add(1)
             .saturating_sub(visible_count)
-            .min(lines.len().saturating_sub(visible_count));
-        let mut visible = Vec::with_capacity(visible_count);
-        let mut cursor_x = 0;
-        for (index, line) in lines.iter().enumerate().skip(start).take(visible_count) {
-            if index == cursor_line {
-                let (text, offset) =
-                    text_field_view_at(line, self.cursor.saturating_sub(cursor_line_start), width);
-                visible.push(text);
-                cursor_x = offset;
-            } else {
-                visible.push(truncate_display(line, width as usize, Truncation::Right));
-            }
-        }
+            .min(rows.len().saturating_sub(visible_count));
+        let visible = rows
+            .iter()
+            .skip(start)
+            .take(visible_count)
+            .map(|row| row.text.to_string())
+            .collect();
+        let cursor = &rows[cursor_row];
+        let cursor_byte = self.cursor.clamp(cursor.start, cursor.end);
         InputView {
             lines: visible,
-            cursor_x,
-            cursor_y: cursor_line.saturating_sub(start) as u16,
-            cursor_line: cursor_line + 1,
-            line_count: lines.len(),
+            cursor_x: (UnicodeWidthStr::width(&self.text[cursor.start..cursor_byte]) as u16)
+                .min(width.saturating_sub(1)),
+            cursor_y: cursor_row.saturating_sub(start) as u16,
+            cursor_line: cursor_row + 1,
+            line_count: rows.len(),
         }
     }
+}
+
+struct WrappedGrapheme {
+    start: usize,
+    end: usize,
+    width: usize,
+    whitespace: bool,
+}
+
+struct WrappedInputRow<'a> {
+    text: &'a str,
+    start: usize,
+    end: usize,
 }
 
 pub(crate) struct InputView {
@@ -481,6 +561,26 @@ pub(crate) fn slash_candidates(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wrapped_input_moves_the_caret_to_a_new_row_at_the_right_edge() {
+        let input = InputBuffer::from("abc");
+        let view = input.multiline_view(3, 2);
+
+        assert_eq!(view.lines, ["abc", ""]);
+        assert_eq!((view.cursor_x, view.cursor_y), (0, 1));
+    }
+
+    #[test]
+    fn wrapped_input_preserves_whitespace_and_tracks_boundary_carets() {
+        let mut input = InputBuffer::from("abc  def");
+        input.cursor = 4;
+        let view = input.multiline_view(4, 3);
+
+        assert_eq!(view.lines, ["abc ", " def", ""]);
+        assert_eq!((view.cursor_x, view.cursor_y), (0, 1));
+    }
+
     /// A bare printable key must never trigger an action while the
     /// prompt has focus: after an error, "run the tests" began with `r`
     /// and silently resent the previous prompt as a whole new turn.
