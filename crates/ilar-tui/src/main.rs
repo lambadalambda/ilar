@@ -987,6 +987,9 @@ struct LoopRuntime<'a> {
     tool_ctx: &'a ToolContext,
     loop_config: &'a LoopConfig,
     spawner: &'a std::sync::Arc<ilar::subagent::SubagentSpawner>,
+    services: &'a std::sync::Arc<ilar::tools::service::ServiceManager>,
+    terminal: &'a mut ratatui::DefaultTerminal,
+    bell_pending: &'a mut bool,
 }
 
 impl schedule::Runtime for LoopRuntime<'_> {
@@ -1220,6 +1223,82 @@ impl schedule::Runtime for LoopRuntime<'_> {
             ),
         }
     }
+
+    async fn start_subtask(&mut self, app: &mut App, request: crate::app::SubtaskRequest) {
+        let description = request.description.clone();
+        // The root ToolContext carries no session id — run_turn fills
+        // it per turn, and this call bypasses run_turn. An empty id
+        // here creates an unroutable completion notification that
+        // wedges the pipeline.
+        let mut task_ctx = self.tool_ctx.clone();
+        task_ctx.session_id = self.session_id.to_string();
+        let output = self
+            .spawner
+            .run_task(
+                ilar::subagent::TaskInput {
+                    description: request.description,
+                    prompt: request.prompt,
+                    subagent_type: request.agent.clone(),
+                    task_id: None,
+                    background: Some(true),
+                    workspace: None,
+                    model: request.model,
+                    reasoning: request.variant,
+                },
+                &task_ctx,
+            )
+            .await;
+        if output.is_error {
+            app.set_notice(
+                format!("{description}: {}", output.content),
+                NoticeLevel::Error,
+            );
+            app.push_transcript_line(Line_::System(format!(
+                "{description} failed to start: {}",
+                output.content
+            )));
+        } else {
+            let line = format!(
+                "{description} running in the background as {} — completion arrives as a notification",
+                request.agent
+            );
+            app.set_notice(&line, NoticeLevel::Info);
+            app.push_transcript_line(Line_::System(line));
+        }
+    }
+
+    fn present(&mut self, app: &mut App) -> Result<()> {
+        let _ = ring_terminal_bell_if_idle(
+            &mut std::io::stdout(),
+            self.bell_pending,
+            self.turn_handle.is_some(),
+        );
+        app.background_running = self.spawner.running_background();
+        app.services_view = self.services.snapshot();
+        app.services_running = app
+            .services_view
+            .iter()
+            .filter(|(_, running, _)| *running)
+            .count();
+        self.terminal.draw(|frame| app.render(frame))?;
+        Ok(())
+    }
+
+    fn poll_event(&mut self, busy: bool) -> Result<Option<Event>> {
+        if let Some(event) = self.pending_terminal_event.take() {
+            return Ok(Some(event));
+        }
+        // Fast while busy so streaming keeps rendering.
+        let timeout = if busy {
+            std::time::Duration::from_millis(50)
+        } else {
+            std::time::Duration::from_millis(250)
+        };
+        if !crossterm::event::poll(timeout)? {
+            return Ok(None);
+        }
+        Ok(Some(crossterm::event::read()?))
+    }
 }
 
 fn ring_terminal_bell_if_idle(
@@ -1353,12 +1432,12 @@ async fn run_app(
             });
         }
 
-        // The iteration's spine — completion bookkeeping and its
-        // after_turn decisions, then the intent drain, the palette
-        // peek and the notification gate — lives in schedule::pass so
-        // tests can drive the whole sequence. Only the effects live
-        // here.
-        let settled = schedule::pass(
+        // The whole iteration minus the dispatch — completion
+        // bookkeeping and its after_turn decisions, the intent drain,
+        // the palette peek, the notification gate, the subtask spawn,
+        // the frame and the poll — lives in schedule::tick so tests
+        // can drive the sequence. Only the effects live here.
+        let outcome = schedule::tick(
             app,
             completion,
             std::mem::take(&mut intents),
@@ -1380,90 +1459,15 @@ async fn run_app(
                 tool_ctx: &tool_ctx,
                 loop_config: &loop_config,
                 spawner: &spawner,
+                services: &services,
+                terminal: &mut *terminal,
+                bell_pending: &mut bell_pending,
             },
-        )?;
-
-        // A subtask command spawns detached; its completion arrives as
-        // a notification like any background task's. `run_task` with
-        // background only sets the session up, so awaiting it inline is
-        // brief; it validates the agent name and model itself.
-        if let Some(request) = app.pending_subtask.take() {
-            let description = request.description.clone();
-            // The root ToolContext carries no session id — run_turn
-            // fills it per turn, and this call bypasses run_turn. An
-            // empty id here creates an unroutable completion
-            // notification that wedges the pipeline.
-            let mut task_ctx = tool_ctx.clone();
-            task_ctx.session_id = session_id.to_string();
-            let output = spawner
-                .run_task(
-                    ilar::subagent::TaskInput {
-                        description: request.description,
-                        prompt: request.prompt,
-                        subagent_type: request.agent.clone(),
-                        task_id: None,
-                        background: Some(true),
-                        workspace: None,
-                        model: request.model,
-                        reasoning: request.variant,
-                    },
-                    &task_ctx,
-                )
-                .await;
-            if output.is_error {
-                app.set_notice(
-                    format!("{description}: {}", output.content),
-                    NoticeLevel::Error,
-                );
-                app.push_transcript_line(Line_::System(format!(
-                    "{description} failed to start: {}",
-                    output.content
-                )));
-            } else {
-                let line = format!(
-                    "{description} running in the background as {} — completion arrives as a notification",
-                    request.agent
-                );
-                app.set_notice(&line, NoticeLevel::Info);
-                app.push_transcript_line(Line_::System(line));
-            }
-        }
-
-        // A routed notification restarts the iteration so its
-        // completion is awaited before anything else happens — the
-        // `continue` the gate always had, now spelled out.
-        if settled == schedule::Settled::Restart {
-            continue;
-        }
-
-        let _ = ring_terminal_bell_if_idle(
-            &mut std::io::stdout(),
-            &mut bell_pending,
-            turn_handle.is_some(),
-        );
-
-        app.background_running = spawner.running_background();
-        app.services_view = services.snapshot();
-        app.services_running = app
-            .services_view
-            .iter()
-            .filter(|(_, running, _)| *running)
-            .count();
-        terminal.draw(|frame| app.render(frame))?;
-
-        // Poll terminal input (fast while busy so streaming keeps rendering).
-        let timeout = if app.busy {
-            std::time::Duration::from_millis(50)
-        } else {
-            std::time::Duration::from_millis(250)
-        };
-        let event = if let Some(event) = pending_terminal_event.take() {
-            event
-        } else {
-            if !crossterm::event::poll(timeout)? {
-                continue;
-            }
-            crossterm::event::read()?
+        )
+        .await?;
+        let event = match outcome {
+            schedule::Tick::Restart | schedule::Tick::Idle => continue,
+            schedule::Tick::Dispatch(event) => event,
         };
         match event {
             Event::Key(

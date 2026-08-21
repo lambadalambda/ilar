@@ -64,6 +64,15 @@ pub(crate) trait Runtime {
     /// Persist and adopt the pre-override model — the tail end of a
     /// command's one-turn override.
     fn revert_model(&mut self, app: &mut App, model: String, variant: Option<String>);
+    /// A subtask command spawns detached; only session setup runs
+    /// before this returns.
+    async fn start_subtask(&mut self, app: &mut App, request: crate::app::SubtaskRequest);
+    /// Everything the user sees for this pass: the bell, the counts,
+    /// the frame.
+    fn present(&mut self, app: &mut App) -> anyhow::Result<()>;
+    /// Wait briefly for the next terminal event (fast while busy, so
+    /// streaming keeps rendering).
+    fn poll_event(&mut self, busy: bool) -> anyhow::Result<Option<crossterm::event::Event>>;
 }
 
 /// What the caller does after a settle pass.
@@ -73,6 +82,48 @@ pub(crate) enum Settled {
     /// A routing turn was spawned; restart the iteration so its
     /// completion is awaited before anything else happens.
     Restart,
+}
+
+/// How a tick ended, and what the caller owes the iteration.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Tick {
+    /// A routing turn was spawned; restart without drawing so its
+    /// completion is awaited before anything else happens.
+    Restart,
+    /// Nothing arrived within the poll window.
+    Idle,
+    /// A terminal event for the dispatch half, which stays outside
+    /// this seam: its decisions are already under test in `decide` and
+    /// the modal handlers, and its effects are session-store and
+    /// terminal I/O that a fake could only mirror, not check.
+    Dispatch(crossterm::event::Event),
+}
+
+/// One whole iteration, minus the dispatch: the pass, the subtask
+/// spawn, the frame, the poll. The frame sits between the pass and
+/// the poll by construction — a click is always mapped through the
+/// hit map of the frame the user actually saw.
+pub(crate) async fn tick<R: Runtime>(
+    app: &mut App,
+    completion: Option<Completion>,
+    carried: Vec<Intent>,
+    runtime: &mut R,
+) -> anyhow::Result<Tick> {
+    let settled = pass(app, completion, carried, runtime)?;
+    // After the drain — a queued command may have armed it there —
+    // and before the restart, so a routed notification cannot defer
+    // the spawn.
+    if let Some(request) = app.pending_subtask.take() {
+        runtime.start_subtask(app, request).await;
+    }
+    if settled == Settled::Restart {
+        return Ok(Tick::Restart);
+    }
+    runtime.present(app)?;
+    match runtime.poll_event(app.busy)? {
+        Some(event) => Ok(Tick::Dispatch(event)),
+        None => Ok(Tick::Idle),
+    }
 }
 
 /// A whole pass: fold the completion that triggered it (if any) into
@@ -343,6 +394,20 @@ mod tests {
             app.current_model = model;
             app.current_variant = variant;
         }
+
+        async fn start_subtask(&mut self, _app: &mut App, request: crate::app::SubtaskRequest) {
+            self.log.push(format!("subtask:{}", request.description));
+        }
+
+        fn present(&mut self, _app: &mut App) -> anyhow::Result<()> {
+            self.log.push("present".into());
+            Ok(())
+        }
+
+        fn poll_event(&mut self, _busy: bool) -> anyhow::Result<Option<crossterm::event::Event>> {
+            self.log.push("poll".into());
+            Ok(None)
+        }
     }
 
     /// The recorded queue-inversion bug, pinned: a turn completes with
@@ -584,6 +649,91 @@ mod tests {
         assert_eq!(runtime.log, vec!["requeue:needs the user", "end_turn"]);
         assert_eq!(runtime.pending.len(), 1, "held, not delivered");
         assert!(!app.busy);
+    }
+
+    /// The frame is drawn after the drain and before the poll: what
+    /// the user clicks on next is the frame that reflects the turn
+    /// that just started. Swapping present and poll fails this.
+    #[tokio::test]
+    async fn a_tick_draws_after_the_drain_and_before_the_poll() {
+        let mut app = App::new();
+        app.busy = true;
+        app.queued_messages = vec!["next".into()];
+        let mut runtime = FakeRuntime::new();
+
+        let outcome = tick(
+            &mut app,
+            Some(Completion::Root(Ok(TurnOutcome::Completed))),
+            Vec::new(),
+            &mut runtime,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, Tick::Idle);
+        assert_eq!(
+            runtime.log,
+            vec!["end_turn", "start_turn:next", "present", "poll"]
+        );
+    }
+
+    /// A routed notification restarts the iteration without drawing —
+    /// its completion is awaited first, exactly as the old `continue`
+    /// behaved.
+    #[tokio::test]
+    async fn a_restart_skips_the_frame_and_the_poll() {
+        let mut app = App::new();
+        let mut runtime = FakeRuntime::new().with_notification("elsewhere", "done");
+
+        let outcome = tick(&mut app, None, Vec::new(), &mut runtime)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, Tick::Restart);
+        assert_eq!(runtime.log, vec!["route:elsewhere"]);
+    }
+
+    /// A subtask armed during the drain spawns in the same tick,
+    /// between the drain and the frame — and before a restart could
+    /// defer it.
+    #[tokio::test]
+    async fn a_subtask_spawns_between_the_drain_and_the_frame() {
+        let mut app = App::new();
+        app.pending_subtask = Some(crate::app::SubtaskRequest {
+            description: "/scout".into(),
+            prompt: "look around".into(),
+            agent: "explore".into(),
+            model: None,
+            variant: None,
+        });
+        let mut runtime = FakeRuntime::new();
+
+        tick(&mut app, None, Vec::new(), &mut runtime)
+            .await
+            .unwrap();
+
+        assert_eq!(runtime.log, vec!["subtask:/scout", "present", "poll"]);
+        assert!(app.pending_subtask.is_none());
+    }
+
+    /// An intent decided by the event half survives to the next tick's
+    /// drain — the cross-iteration seam, driven as the loop drives it.
+    #[tokio::test]
+    async fn an_event_half_intent_drains_on_the_next_tick() {
+        let mut app = App::new();
+        let carried = crate::decide::submit(
+            &FakeRuntime::new().observe(&app),
+            false,
+            "typed while idle".into(),
+        );
+        let mut runtime = FakeRuntime::new();
+
+        tick(&mut app, None, carried, &mut runtime).await.unwrap();
+
+        assert_eq!(
+            runtime.log,
+            vec!["start_turn:typed while idle", "present", "poll"]
+        );
     }
 
     /// An idle pass lets the notification through: same-session starts
