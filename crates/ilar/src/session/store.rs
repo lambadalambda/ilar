@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 
 use super::event::{SessionEvent, SessionMeta, new_id};
 use super::model::{ChatMessage, ContentBlock, Role};
+use crate::question::{QUESTION_TOOL_NAME, QuestionRequest, validate_request};
 
 /// Owns the session directory; creates/loads sessions.
 #[derive(Clone)]
@@ -130,6 +131,13 @@ impl Drop for SessionWriter {
     fn drop(&mut self) {
         let _ = FileExt::unlock(&self._file);
     }
+}
+
+/// A validated question tool call awaiting an interactive answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingQuestion {
+    pub tool_call_id: String,
+    pub request: QuestionRequest,
 }
 
 /// One entry in the session listing.
@@ -380,11 +388,13 @@ impl SessionStore {
             id.as_str(),
             false,
         )?;
+        let pending_question = pending_question(&replay.events, &replay.unanswered_calls);
         Ok(SessionReader {
             events: replay.events,
             effective_model: replay.effective_model,
             effective_variant: replay.effective_variant,
             todo_list: replay.todo_list,
+            pending_question,
         })
     }
 }
@@ -408,6 +418,7 @@ impl SessionWriter {
             return invalid_replay(self.id.as_str(), "session changed after writer replay");
         }
         let observed_stamp = replay.observed_stamp.clone();
+        let pending_question = pending_question(&replay.events, &replay.unanswered_calls);
         let mut session = Session {
             events: replay.events,
             file,
@@ -432,6 +443,12 @@ impl SessionWriter {
             session.checkpoint_tail_start = session.events.len();
         }
         for tool_use_id in replay.unanswered_calls {
+            if pending_question
+                .as_ref()
+                .is_some_and(|pending| pending.tool_call_id == tool_use_id)
+            {
+                continue;
+            }
             session.append(SessionEvent::ToolResult {
                 id: new_id(),
                 tool_use_id,
@@ -1174,6 +1191,34 @@ fn validate_replay(events: &[SessionEvent], id: &str) -> std::io::Result<Vec<Str
         .collect())
 }
 
+fn pending_question(
+    events: &[SessionEvent],
+    unanswered_calls: &[String],
+) -> Option<PendingQuestion> {
+    let [tool_call_id] = unanswered_calls else {
+        return None;
+    };
+    let input = events.iter().rev().find_map(|event| match event {
+        SessionEvent::AssistantMessage { content, .. } => {
+            content.iter().find_map(|block| match block {
+                ContentBlock::ToolCall { id, name, input }
+                    if id == tool_call_id && name == QUESTION_TOOL_NAME =>
+                {
+                    Some(input)
+                }
+                _ => None,
+            })
+        }
+        _ => None,
+    })?;
+    let request: QuestionRequest = serde_json::from_value(input.clone()).ok()?;
+    validate_request(&request).ok()?;
+    Some(PendingQuestion {
+        tool_call_id: tool_call_id.clone(),
+        request,
+    })
+}
+
 fn invalid_replay<T>(id: &str, message: impl std::fmt::Display) -> std::io::Result<T> {
     Err(std::io::Error::new(
         std::io::ErrorKind::InvalidData,
@@ -1460,6 +1505,7 @@ impl Session {
             effective_model,
             effective_variant,
             todo_list,
+            pending_question: None,
         }
     }
 }
@@ -1470,6 +1516,7 @@ pub struct SessionReader {
     effective_model: String,
     effective_variant: Option<String>,
     todo_list: Option<crate::todo::TodoList>,
+    pending_question: Option<PendingQuestion>,
 }
 
 impl SessionReader {
@@ -1506,6 +1553,11 @@ impl SessionReader {
 
     pub fn todo_list(&self) -> Option<&crate::todo::TodoList> {
         self.todo_list.as_ref()
+    }
+
+    /// Returns the sole validated question tool call awaiting a result.
+    pub fn pending_question(&self) -> Option<&PendingQuestion> {
+        self.pending_question.as_ref()
     }
 }
 

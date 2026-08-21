@@ -1,6 +1,7 @@
 use chrono::Utc;
 use std::io::Write;
 
+use ilar::question::{Question, QuestionKind, QuestionRequest};
 use ilar::session::{
     ChatMessage, ContentBlock, Role, SessionEvent, SessionId, SessionMeta, SessionState,
     SessionStore, Usage, new_id,
@@ -1058,6 +1059,203 @@ fn middle_corruption_with_torn_tail_is_rejected_without_mutating_log() {
         .expect("writer must reject middle corruption");
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     assert_eq!(std::fs::read(path).unwrap(), before);
+}
+
+fn question_request() -> QuestionRequest {
+    QuestionRequest {
+        questions: vec![Question {
+            id: "choice".into(),
+            prompt: "Choose one".into(),
+            description: None,
+            required: true,
+            kind: QuestionKind::FreeText,
+        }],
+    }
+}
+
+fn assistant_with_question(call_id: &str, input: serde_json::Value) -> SessionEvent {
+    SessionEvent::AssistantMessage {
+        id: new_id(),
+        model: "zai/glm-4.7".into(),
+        content: vec![ContentBlock::ToolCall {
+            id: call_id.into(),
+            name: "question".into(),
+            input,
+        }],
+        usage: Usage::default(),
+        stop_reason: "tool_use".into(),
+        ts: Utc::now(),
+    }
+}
+
+#[test]
+fn sole_valid_pending_question_survives_writer_load_and_is_typed_for_readers() {
+    let (store, _dir) = temp_store();
+    let meta = sample_meta();
+    let request = question_request();
+    let mut session = store.create(meta.clone()).unwrap();
+    session
+        .append(assistant_with_question(
+            "pending-question",
+            serde_json::to_value(&request).unwrap(),
+        ))
+        .unwrap();
+    drop(session);
+
+    let resumed = store
+        .acquire_writer(&meta.session_id)
+        .unwrap()
+        .load()
+        .unwrap();
+    assert_eq!(resumed.events().len(), 2);
+    drop(resumed);
+
+    let reader = store.load(&meta.session_id).unwrap();
+    let pending = reader.pending_question().expect("pending question");
+    assert_eq!(pending.tool_call_id, "pending-question");
+    assert_eq!(pending.request, request);
+}
+
+#[test]
+fn malformed_or_invalid_pending_question_is_repaired_normally() {
+    for input in [
+        serde_json::json!({"questions": "not-an-array"}),
+        serde_json::json!({"questions": []}),
+    ] {
+        let (store, _dir) = temp_store();
+        let meta = sample_meta();
+        let mut session = store.create(meta.clone()).unwrap();
+        session
+            .append(assistant_with_question("bad-question", input))
+            .unwrap();
+        drop(session);
+
+        let reader = store.load(&meta.session_id).unwrap();
+        assert!(reader.pending_question().is_none());
+        assert_eq!(reader.events().len(), 2);
+
+        let resumed = store
+            .acquire_writer(&meta.session_id)
+            .unwrap()
+            .load()
+            .unwrap();
+        assert!(matches!(
+            resumed.events().last(),
+            Some(SessionEvent::ToolResult {
+                tool_use_id,
+                is_error: true,
+                ..
+            }) if tool_use_id == "bad-question"
+        ));
+        drop(resumed);
+        assert!(
+            store
+                .load(&meta.session_id)
+                .unwrap()
+                .pending_question()
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn multiple_or_mixed_pending_calls_are_repaired_normally() {
+    for names in [["question", "question"], ["question", "read"]] {
+        let (store, _dir) = temp_store();
+        let meta = sample_meta();
+        let request = serde_json::to_value(question_request()).unwrap();
+        let mut session = store.create(meta.clone()).unwrap();
+        session
+            .append(SessionEvent::AssistantMessage {
+                id: new_id(),
+                model: meta.model.clone(),
+                content: names
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, name)| ContentBlock::ToolCall {
+                        id: format!("call-{index}"),
+                        name: name.into(),
+                        input: request.clone(),
+                    })
+                    .collect(),
+                usage: Usage::default(),
+                stop_reason: "tool_use".into(),
+                ts: Utc::now(),
+            })
+            .unwrap();
+        drop(session);
+
+        let reader = store.load(&meta.session_id).unwrap();
+        assert!(reader.pending_question().is_none());
+        assert_eq!(reader.events().len(), 2);
+
+        let resumed = store
+            .acquire_writer(&meta.session_id)
+            .unwrap()
+            .load()
+            .unwrap();
+        assert_eq!(resumed.events().len(), 4);
+        drop(resumed);
+        assert!(
+            store
+                .load(&meta.session_id)
+                .unwrap()
+                .pending_question()
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn pending_question_is_restored_from_active_checkpoint_replay() {
+    let (store, _dir) = temp_store();
+    let meta = sample_meta();
+    let request = question_request();
+    let mut session = store.create(meta.clone()).unwrap();
+    session
+        .append(SessionEvent::UserMessage {
+            id: new_id(),
+            text: "old".into(),
+            ts: Utc::now(),
+        })
+        .unwrap();
+    let kept_from = session.events().len();
+    session
+        .append(SessionEvent::Compaction {
+            id: new_id(),
+            summary: "old context".into(),
+            kept_from,
+            ts: Utc::now(),
+        })
+        .unwrap();
+    session
+        .append(assistant_with_question(
+            "checkpoint-question",
+            serde_json::to_value(&request).unwrap(),
+        ))
+        .unwrap();
+    drop(session);
+
+    assert!(store.replay_index_path(&meta.session_id).unwrap().exists());
+    let reader = store.load(&meta.session_id).unwrap();
+    let pending = reader.pending_question().expect("checkpoint question");
+    assert_eq!(pending.tool_call_id, "checkpoint-question");
+    assert_eq!(pending.request, request);
+
+    drop(
+        store
+            .acquire_writer(&meta.session_id)
+            .unwrap()
+            .load()
+            .unwrap(),
+    );
+    assert!(
+        store
+            .load(&meta.session_id)
+            .unwrap()
+            .pending_question()
+            .is_some()
+    );
 }
 
 #[test]
