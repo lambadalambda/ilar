@@ -90,11 +90,39 @@ Newly pinned (the first two verified by performing the mutation):
 - A goal round continues through the whole pass; a requeued routing
   pauses the gate and is held rather than delivered.
 
-Still not covered, so the issue stays open: the render and event-poll
-positions, the event dispatch half, and cross-iteration sequences (an
-event-half intent surviving into the next pass's drain). The
-remaining shape: fold the poll/dispatch half in and run_app is a loop
-over `tick` plus I/O.
+Phase three folded the frame and the poll in. `schedule::tick` is one
+whole iteration minus the dispatch: the pass, the subtask spawn, the
+frame, the poll — and `run_app` is now literally a loop over `tick`
+plus the edge (event-channel drains, the join await) and the
+dispatch. Newly pinned, verified by mutation (swapping present and
+poll fails three tests): **the frame is drawn after the drain and
+before the poll**, which is the freshness property click-to-select
+silently relies on — a click is always mapped through the hit map of
+the frame the user actually saw. Also pinned: a subtask spawns
+between the drain and the frame (and before a restart could defer
+it); a restart skips the frame and the poll, preserving the gate's
+old `continue`; and an event-half intent drains on the next tick —
+the cross-iteration seam, driven the way the loop drives it.
+
+## Outcome
+
+Closed. All three acceptance criteria hold: the queue-inversion
+scenario fails under the pre-fix ordering (verified by performing the
+mutation), the regression cases are covered — the synthetic-Enter
+swallowing cases structurally, since the drain no longer posts
+terminal events at all — and the full suite passed unchanged at
+every phase.
+
+One requirement is deliberately not met, and should stay that way
+until something forces it: **the event dispatch half remains outside
+the seam.** Its decisions already live under test in `decide`, the
+modal `handle_key`s and `click_active_modal`; its effects are
+session-store operations, shutdown and clipboard I/O that a fake
+could only mirror, not check. Folding it in would grow the `Runtime`
+trait into a god-interface for no new coverage. Consequence, recorded
+honestly: tests can enqueue completions, notifications and intents
+and assert cross-tick sequences, but not raw key or paste events —
+those enter after `tick` returns `Dispatch(event)`.
 
 One deliberate reorder, judged inert: the subtask spawn used to sit
 between the drain and the gate and now runs after `settle` (it touches

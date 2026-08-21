@@ -30,5 +30,4 @@
 
 ## Milestone 7 — Unscheduled
 
-- [ ] [A harness for the event loop's schedule](issues/loop-schedule-harness.md)
-
+(all complete — see issues_archive.md)
