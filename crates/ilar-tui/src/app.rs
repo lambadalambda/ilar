@@ -248,7 +248,9 @@ impl App {
             skill_picker: None,
             skills: Vec::new(),
             commands: Vec::new(),
-            theme: theme::ThemeId::Terminal,
+            // Overwritten from config at startup; the default matters for
+            // the window before that and for tests.
+            theme: theme::ThemeId::default(),
             theme_picker: None,
             keyboard_enhanced: false,
             model_key_pending: false,
@@ -3431,6 +3433,9 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(80, 12);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         let mut app = App::new();
+        // Assert in role space: the adaptive theme is the one whose remap
+        // is the identity, so the roles survive to the buffer.
+        app.theme = theme::ThemeId::Terminal;
 
         terminal.draw(|frame| app.render(frame)).unwrap();
 
