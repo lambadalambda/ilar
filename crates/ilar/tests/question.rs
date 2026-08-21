@@ -144,6 +144,7 @@ async fn public_channel_carries_request_and_oneshot_reply() {
     let expected = request();
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     tx.send(ilar::question::QuestionPrompt {
+        session_id: "session".into(),
         tool_call_id: "call-1".into(),
         request: expected.clone(),
         reply: reply_tx,

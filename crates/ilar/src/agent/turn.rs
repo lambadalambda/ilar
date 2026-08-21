@@ -1570,6 +1570,7 @@ async fn run_turn_inner(
                     loop {
                         let (reply, receive) = tokio::sync::oneshot::channel();
                         let prompt = crate::question::QuestionPrompt {
+                            session_id: session_id.to_string(),
                             tool_call_id: id.clone(),
                             request: request.clone(),
                             reply,

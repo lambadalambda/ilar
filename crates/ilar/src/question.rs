@@ -117,6 +117,7 @@ impl QuestionAnswer {
 /// A request delivered over [`QuestionSender`], with its one-shot reply path.
 #[derive(Debug)]
 pub struct QuestionPrompt {
+    pub session_id: String,
     pub tool_call_id: String,
     pub request: QuestionRequest,
     pub reply: oneshot::Sender<QuestionResponse>,

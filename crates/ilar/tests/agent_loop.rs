@@ -2414,6 +2414,7 @@ async fn question_delivery_backpressure_is_cancellable_and_preserves_pending_cal
     let (dummy_reply, _dummy_rx) = tokio::sync::oneshot::channel();
     question_tx
         .send(ilar::question::QuestionPrompt {
+            session_id: "session".into(),
             tool_call_id: "dummy".into(),
             request: ilar::question::QuestionRequest { questions: vec![] },
             reply: dummy_reply,
