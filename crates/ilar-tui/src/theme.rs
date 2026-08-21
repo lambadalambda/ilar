@@ -577,7 +577,11 @@ mod tests {
                 // Comments are meant to recede, so they get the lower bar.
                 let floor = if *name == "comment" { 3.0 } else { 4.0 };
                 let ratio = contrast(*color, surfaces.code_bg);
-                assert!(ratio >= floor, "{}: {name} on code {ratio:.1}:1", theme.id());
+                assert!(
+                    ratio >= floor,
+                    "{}: {name} on code {ratio:.1}:1",
+                    theme.id()
+                );
             }
         }
     }

@@ -624,9 +624,12 @@ fn render_inline(text: &str, base: Style) -> Vec<Span<'static>> {
             let opening = rest.bytes().take_while(|byte| *byte == b'`').count();
             if let Some(end) = matching_backticks(rest, opening) {
                 let content = &rest[opening..end];
+                // A tint, not reverse video: inline code is the most
+                // common inline element there is, and reversing it put a
+                // white slab in the middle of every other sentence.
                 spans.push(Span::styled(
                     content.to_string(),
-                    base.fg(theme::PRIMARY).add_modifier(Modifier::REVERSED),
+                    base.fg(theme::CODE).bg(theme::CODE_BG),
                 ));
                 rest = &rest[end + opening..];
             } else {
@@ -743,8 +746,9 @@ mod tests {
         }));
         assert!(spans.iter().any(|span| {
             span.content == "cargo test"
-                && span.style.fg == Some(theme::PRIMARY)
-                && span.style.add_modifier.contains(Modifier::REVERSED)
+                && span.style.fg == Some(theme::CODE)
+                && span.style.bg == Some(theme::CODE_BG)
+                && !span.style.add_modifier.contains(Modifier::REVERSED)
         }));
         assert!(spans.iter().any(|span| {
             span.content == "Ratatui" && span.style.add_modifier.contains(Modifier::UNDERLINED)
@@ -845,8 +849,9 @@ mod tests {
         }));
         assert!(lines[3].spans.iter().any(|span| {
             span.content == "x|y"
-                && span.style.fg == Some(theme::PRIMARY)
-                && span.style.add_modifier.contains(Modifier::REVERSED)
+                && span.style.fg == Some(theme::CODE)
+                && span.style.bg == Some(theme::CODE_BG)
+                && !span.style.add_modifier.contains(Modifier::REVERSED)
         }));
     }
 
@@ -916,8 +921,9 @@ mod tests {
         assert!(text(&lines[2]).contains("a`b|c"));
         assert!(lines[2].spans.iter().any(|span| {
             span.content == "a`b|c"
-                && span.style.fg == Some(theme::PRIMARY)
-                && span.style.add_modifier.contains(Modifier::REVERSED)
+                && span.style.fg == Some(theme::CODE)
+                && span.style.bg == Some(theme::CODE_BG)
+                && !span.style.add_modifier.contains(Modifier::REVERSED)
         }));
     }
 

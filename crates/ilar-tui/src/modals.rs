@@ -511,7 +511,9 @@ pub(crate) fn render_pending_manager(frame: &mut Frame, snapshot: &PendingSnapsh
             );
             let style = if index == snapshot.selected {
                 if armed {
-                    Style::default().fg(ERROR).add_modifier(Modifier::REVERSED)
+                    // Armed deletion is the one place a full bar is the
+                    // point; it is still a colour, not inverted video.
+                    Style::default().fg(theme::SELECTED_FG).bg(ERROR)
                 } else {
                     theme::selected()
                 }

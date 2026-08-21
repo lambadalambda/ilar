@@ -1893,12 +1893,15 @@ impl App {
                 {
                     let current = self.search_matches.get(self.search_current)
                         == Some(&(self.scroll_top + offset));
+                    // The current hit is bold on the same tint; themes
+                    // without surfaces get reverse video back from
+                    // `theme::apply`, which is what a search hit looks
+                    // like on a canvas nobody can see.
                     for span in &mut line.spans {
-                        span.style = span.style.add_modifier(if current {
-                            Modifier::REVERSED | Modifier::BOLD
-                        } else {
-                            Modifier::REVERSED
-                        });
+                        span.style = span.style.bg(theme::SELECTION_BG);
+                        if current {
+                            span.style = span.style.add_modifier(Modifier::BOLD);
+                        }
                     }
                 }
                 line
