@@ -313,9 +313,13 @@ fn restored_session_invocation_view(
             ilar::session::SessionEvent::Compaction { .. } => {}
         }
     }
+    let pending_question_id = session
+        .pending_question()
+        .map(|pending| pending.tool_call_id.as_str());
     for line in &mut lines {
-        if let Line_::Tool { state, .. } = line
+        if let Line_::Tool { id, state, .. } = line
             && *state == ToolState::Running
+            && pending_question_id != Some(id.as_str())
         {
             *state = ToolState::Failed;
         }

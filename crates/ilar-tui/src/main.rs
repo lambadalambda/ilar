@@ -8,6 +8,7 @@ mod history;
 mod input;
 mod markdown;
 mod modals;
+mod questions;
 mod schedule;
 mod selection;
 mod session_view;
@@ -38,6 +39,7 @@ use modals::{
     SessionPicker, SessionPickerAction, ThemePicker, VariantPicker, VariantPickerAction,
     is_command_palette_shortcut,
 };
+use questions::QuestionAction;
 use ratatui::style::Color;
 use tokio_util::sync::CancellationToken;
 use transcript::Line_;
@@ -373,6 +375,12 @@ fn apply_intent(
         Intent::PasteSearch(text) => {
             app.search_query.push_str(text.trim());
             app.search_refresh();
+            None
+        }
+        Intent::PasteQuestion(text) => {
+            if let Some(question) = app.question_modal.as_mut() {
+                question.paste(&text);
+            }
             None
         }
         Intent::PasteInput(text) => {
@@ -838,7 +846,9 @@ async fn main() -> Result<()> {
             .with_available_models(config.available_models()),
         );
         let todos = std::sync::Arc::new(std::sync::Mutex::new(restored_todos(resumed.as_ref())));
+        let (question_tx, question_rx) = ilar::question::question_channel(1);
         let registry = ToolRegistry::builtin()
+            .with_questions(question_tx)
             .with_subagents(spawner.clone())?
             .with_services(services.clone())?
             .with_models(config.available_models())?
@@ -864,6 +874,12 @@ async fn main() -> Result<()> {
         app.todos = todos;
         if let Some(resumed) = &resumed {
             app.restore_session(resumed, &store);
+            if let Some(pending) = resumed.pending_question() {
+                app.question_modal = Some(questions::QuestionModal::new(pending.request.clone()));
+                app.busy = true;
+                app.status = "waiting for your answer".into();
+                app.set_activity(Activity::Paused);
+            }
         }
         app.configure_runtime(
             model_for_session.clone(),
@@ -875,6 +891,9 @@ async fn main() -> Result<()> {
             context_limit,
             context_estimated,
         );
+        if app.question_modal.is_some() {
+            app.status = "waiting for your answer".into();
+        }
 
         if terminal_hold.is_none() {
             terminal_hold = Some(TerminalSession::start()?);
@@ -896,6 +915,7 @@ async fn main() -> Result<()> {
             spawner,
             notifications,
             subagent_activity,
+            question_rx,
             loop_config,
             model_choices,
             services,
@@ -1381,6 +1401,7 @@ async fn run_app(
     spawner: std::sync::Arc<ilar::subagent::SubagentSpawner>,
     mut notifications: tokio::sync::mpsc::Receiver<ilar::subagent::Notification>,
     mut subagent_activity: tokio::sync::broadcast::Receiver<ilar::subagent::SubagentActivity>,
+    mut question_rx: ilar::question::QuestionReceiver,
     loop_config: LoopConfig,
     model_choices: Vec<&'static ilar::model::ModelInfo>,
     services: std::sync::Arc<ilar::tools::service::ServiceManager>,
@@ -1397,11 +1418,30 @@ async fn run_app(
     let mut ring_on_turn_completion = false;
     let mut bell_pending = false;
     let mut pending_terminal_event = None;
+    let mut question_reply: Option<tokio::sync::oneshot::Sender<ilar::question::QuestionResponse>> =
+        None;
+    let mut pending_question_id = store
+        .load(session_id)?
+        .pending_question()
+        .map(|pending| pending.tool_call_id.clone());
     // Decisions accumulate here and are performed in one place below,
     // rather than each arm doing its own effects inline.
     let mut intents: Vec<Intent> = Vec::new();
 
     loop {
+        // A failed/cancelled resume may leave the persisted question pending.
+        // Reopen it instead of stranding the session behind a rejected new turn.
+        if turn_handle.is_none()
+            && app.question_modal.is_none()
+            && let Some(pending) = store.load(session_id)?.pending_question()
+        {
+            pending_question_id = Some(pending.tool_call_id.clone());
+            question_reply = None;
+            app.question_modal = Some(questions::QuestionModal::new(pending.request.clone()));
+            app.busy = true;
+            app.status = "waiting for your answer".into();
+            app.set_activity(Activity::Paused);
+        }
         // Drain pending loop events.
         if let Some(rx) = events_rx.as_mut() {
             while let Ok(event) = rx.try_recv() {
@@ -1414,6 +1454,19 @@ async fn run_app(
                 break;
             };
             app.push_subagent_activity(&activity);
+        }
+        // Questions use their own typed reply path and intentionally wait
+        // outside the ordinary tool executor. Apply them after loop events so
+        // the waiting state wins over the preceding StepComplete update.
+        while let Ok(prompt) = question_rx.try_recv() {
+            if prompt.session_id != session_id {
+                continue;
+            }
+            pending_question_id = Some(prompt.tool_call_id);
+            question_reply = Some(prompt.reply);
+            app.question_modal = Some(questions::QuestionModal::new(prompt.request));
+            app.status = "waiting for your answer".into();
+            app.set_activity(Activity::Paused);
         }
         // Turn finished? Join at the edge; schedule::pass folds the
         // completion into the same pass as the drain and the gate.
@@ -1520,6 +1573,55 @@ async fn run_app(
                 // error, which the old `if` chain could not promise.
                 if let Some(modal) = app.active_modal() {
                     match modal {
+                        Modal::Question => {
+                            let action = app
+                                .question_modal
+                                .as_mut()
+                                .expect("question modal")
+                                .handle_key(key);
+                            if let QuestionAction::Complete(response) = action {
+                                app.question_modal = None;
+                                app.status = "processing answer".into();
+                                app.set_activity(Activity::Tools);
+                                if let Some(reply) = question_reply.take() {
+                                    let _ = reply.send(response);
+                                    pending_question_id = None;
+                                } else if pending_question_id.take().is_some() {
+                                    let (tx, rx) = loop_event_channel(LOOP_EVENT_CAPACITY);
+                                    events_rx = Some(rx);
+                                    let token = CancellationToken::new();
+                                    cancel = Some(token.clone());
+                                    let resolver = resolver.clone();
+                                    let store = store.clone();
+                                    let session_id = session_id.to_string();
+                                    let system_prompt = system_prompt.to_string();
+                                    let registry = registry.clone();
+                                    let turn_ctx = tool_ctx.clone();
+                                    let loop_config = loop_config.clone();
+                                    let (tx_steer, steer_rx) = ilar::agent::steer_channel();
+                                    steer_tx = Some(tx_steer);
+                                    ring_on_turn_completion = true;
+                                    turn_handle = Some(tokio::spawn(async move {
+                                        TurnCompletion::Root(
+                                            ilar::agent::resume_pending_question(
+                                                resolver.as_ref(),
+                                                &registry,
+                                                &store,
+                                                &session_id,
+                                                response,
+                                                Some(&system_prompt),
+                                                loop_config,
+                                                tx,
+                                                token,
+                                                turn_ctx,
+                                                Some(steer_rx),
+                                            )
+                                            .await,
+                                        )
+                                    }));
+                                }
+                            }
+                        }
                         Modal::PendingManager => match app.pending_manager_key(code, control) {
                             PendingAction::Stay => {}
                             PendingAction::Close => app.pending_manager = None,

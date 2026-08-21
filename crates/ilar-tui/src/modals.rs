@@ -65,6 +65,7 @@ pub(crate) fn nav_delta(code: KeyCode, control: bool) -> Option<isize> {
 /// without wiring both is a compile error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Modal {
+    Question,
     PendingManager,
     Help,
     ThemePicker,

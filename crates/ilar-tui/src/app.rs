@@ -30,6 +30,7 @@ use crate::modals::{
     render_pending_manager, render_session_picker, render_skill_picker, render_theme_picker,
     render_variant_picker,
 };
+use crate::questions::QuestionModal;
 use crate::selection::{
     RenderedRow, TranscriptSelection, highlight_transcript_selection, selected_rows_unchanged,
     selected_transcript_text, selection_point, transcript_cells,
@@ -109,6 +110,7 @@ pub(crate) struct App {
     pub(crate) goal: Option<(String, u32)>,
     /// Selection inside the inline slash-completion popup.
     pub(crate) slash_selected: usize,
+    pub(crate) question_modal: Option<QuestionModal>,
     pub(crate) pending_manager: Option<PendingManager>,
     /// Where the active modal's rows were drawn last frame; how a click
     /// finds the item it landed on. Rebuilt by every render.
@@ -215,6 +217,7 @@ impl App {
             pending_steers: Vec::new(),
             goal: None,
             slash_selected: 0,
+            question_modal: None,
             pending_manager: None,
             modal_hit: None,
             available_models: Vec::new(),
@@ -281,7 +284,9 @@ impl App {
     /// overlays at once, so the app drew and typed into the same one by
     /// luck rather than by construction.
     pub(crate) fn active_modal(&self) -> Option<Modal> {
-        if self.pending_manager.is_some() {
+        if self.question_modal.is_some() {
+            Some(Modal::Question)
+        } else if self.pending_manager.is_some() {
             Some(Modal::PendingManager)
         } else if self.help_visible {
             Some(Modal::Help)
@@ -360,7 +365,9 @@ impl App {
             }
             // The pending manager is a handful of rows; search leaves the
             // wheel to the transcript so results stay browsable.
-            Some(Modal::PendingManager) | Some(Modal::Search) | None => return false,
+            Some(Modal::Question) | Some(Modal::PendingManager) | Some(Modal::Search) | None => {
+                return false;
+            }
         }
         true
     }
@@ -400,7 +407,7 @@ impl App {
                     manager.selected = index;
                     manager.armed = None;
                 }
-                Modal::Help | Modal::Search => {}
+                Modal::Question | Modal::Help | Modal::Search => {}
             }
         }
         true
@@ -2186,6 +2193,13 @@ impl App {
         // renderer hands back where its rows landed, so a click can be
         // mapped to the item it names.
         self.modal_hit = match self.active_modal() {
+            Some(Modal::Question) => {
+                self.question_modal
+                    .as_ref()
+                    .expect("question modal")
+                    .render(frame, frame.area());
+                None
+            }
             Some(Modal::PendingManager) => self
                 .pending_snapshot()
                 .map(|snapshot| render_pending_manager(frame, &snapshot)),
@@ -2585,6 +2599,24 @@ mod tests {
         // everything: whatever is showing must also be taking the keys.
         app.pending_manager = Some(PendingManager::default());
         assert_eq!(app.active_modal(), Some(Modal::PendingManager));
+
+        app.question_modal = Some(QuestionModal::new(ilar::question::QuestionRequest {
+            questions: vec![ilar::question::Question {
+                id: "confirm".into(),
+                prompt: "Continue?".into(),
+                description: None,
+                required: true,
+                kind: ilar::question::QuestionKind::SingleChoice {
+                    allow_other: false,
+                    options: vec![ilar::question::QuestionOption {
+                        id: "yes".into(),
+                        label: "Yes".into(),
+                        description: None,
+                    }],
+                },
+            }],
+        }));
+        assert_eq!(app.active_modal(), Some(Modal::Question));
     }
 
     /// Search owns the keyboard like any other overlay. It used to sit

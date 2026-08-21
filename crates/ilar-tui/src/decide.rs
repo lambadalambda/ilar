@@ -66,6 +66,7 @@ pub(crate) enum Intent {
     /// Pasted text, routed to whichever surface owned the keyboard.
     PastePalette(String),
     PasteSearch(String),
+    PasteQuestion(String),
     PasteInput(String),
     /// Drop the goal, having finished or run out of rounds.
     ClearGoal,
@@ -81,6 +82,7 @@ pub(crate) enum Intent {
 pub(crate) enum PasteTarget {
     Palette,
     Search,
+    Question,
     Input,
     /// A modal with nowhere to put it.
     Discard,
@@ -90,6 +92,7 @@ pub(crate) fn paste_target(state: &LoopState) -> PasteTarget {
     match state.modal {
         Some(Modal::CommandPalette) => PasteTarget::Palette,
         Some(Modal::Search) => PasteTarget::Search,
+        Some(Modal::Question) => PasteTarget::Question,
         Some(_) => PasteTarget::Discard,
         None => PasteTarget::Input,
     }
@@ -247,6 +250,7 @@ pub(crate) fn paste(state: &LoopState, text: String) -> Vec<Intent> {
     match paste_target(state) {
         PasteTarget::Palette => vec![Intent::PastePalette(text)],
         PasteTarget::Search => vec![Intent::PasteSearch(text)],
+        PasteTarget::Question => vec![Intent::PasteQuestion(text)],
         PasteTarget::Input => vec![Intent::PasteInput(text)],
         PasteTarget::Discard => Vec::new(),
     }
@@ -297,6 +301,11 @@ mod tests {
             ..idle()
         };
         assert_eq!(paste_target(&palette), PasteTarget::Palette);
+        let question = LoopState {
+            modal: Some(Modal::Question),
+            ..idle()
+        };
+        assert_eq!(paste_target(&question), PasteTarget::Question);
         // A picker has nowhere to put it; it must not fall through to
         // the prompt behind it.
         let picker = LoopState {

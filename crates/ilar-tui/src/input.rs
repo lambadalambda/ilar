@@ -39,6 +39,10 @@ impl InputBuffer {
         &self.text
     }
 
+    pub(crate) fn cursor(&self) -> usize {
+        self.cursor
+    }
+
     pub(crate) fn is_blank(&self) -> bool {
         self.text.trim().is_empty()
     }
