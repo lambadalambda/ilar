@@ -30,4 +30,4 @@
 
 ## Milestone 7 — Unscheduled
 
-(all complete — see issues_archive.md)
+- [ ] [Add structured user questions](issues/add-structured-user-questions.md)
