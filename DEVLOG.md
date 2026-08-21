@@ -1108,3 +1108,16 @@ leaves the suite green. The wiring boundary narrowed from "every call
 site" to "four pushes plus the drain". Phase three is `decide(event,
 state)`; even that will not cover the loop's *schedule*, which is where
 the bug above actually lived.
+
+## 2026-08-21 — Structured user questions
+
+- Questions are provider-visible tool calls but suspend in the agent loop, not
+  `Tool::run`; a human wait therefore holds neither an executor slot nor a
+  workspace lease.
+- The assistant `question` call and ordinary `ToolResult` remain the sole
+  persisted representation. A sole valid unanswered question is preserved on
+  replay and resumed without inserting a synthetic user message; malformed or
+  mixed pending calls retain normal interruption repair.
+- Frontends receive a typed, session- and call-correlated prompt with a oneshot
+  reply path. The TUI implements that protocol as a modal for batched single
+  choice, multiple choice, free text, custom answers, and cancellation.
