@@ -45,10 +45,11 @@ impl OpenAIProvider {
 
     /// ChatGPT-account auth: Responses API through the ChatGPT backend.
     pub fn with_chatgpt_auth(store: crate::auth::AuthStore, base_url: Option<String>) -> Self {
+        let prompt_cache_key = base_url.is_none();
         Self {
             auth: Auth::ChatGpt { store },
             base_url: base_url.unwrap_or_else(|| "https://chatgpt.com/backend-api/codex".into()),
-            prompt_cache_key: false,
+            prompt_cache_key,
             token_url: format!("{}/oauth/token", crate::auth::AUTH_BASE),
             http: transport::streaming_client(),
         }
@@ -60,10 +61,10 @@ impl OpenAIProvider {
         self
     }
 
-    /// Test hook for probing endpoint support without changing production
-    /// capability defaults.
-    pub fn with_prompt_cache_key_for_test(mut self) -> Self {
-        self.prompt_cache_key = true;
+    /// Test hook: the unkeyed control arm of the live cache probe, now
+    /// that sending the key is what production does.
+    pub fn without_prompt_cache_key_for_test(mut self) -> Self {
+        self.prompt_cache_key = false;
         self
     }
 
@@ -854,11 +855,31 @@ mod tests {
         assert_eq!(body["prompt_cache_key"], "session-123");
     }
 
+    /// The Codex backend accepts the field — a live probe established that
+    /// much — and it is the only session-affinity lever the API offers.
+    /// The probe could not measure a routing *benefit*, but a null result
+    /// over two samples is not a reason to withhold it.
     #[test]
-    fn chatgpt_backend_does_not_receive_undocumented_prompt_cache_key() {
+    fn chatgpt_backend_receives_the_prompt_cache_key() {
         let provider = OpenAIProvider::with_chatgpt_auth(
             crate::auth::AuthStore::open(std::path::PathBuf::from("unused")),
             None,
+        );
+        let mut request = Request::with_model("openai/gpt-5.2");
+        request.cache_key = Some("session-123".into());
+
+        let body = provider.wire_body(&request).unwrap();
+
+        assert_eq!(body["prompt_cache_key"], "session-123");
+    }
+
+    /// Both auth paths follow one rule: the documented endpoint gets the
+    /// field, a gateway that may reject unknown fields does not.
+    #[test]
+    fn a_custom_chatgpt_endpoint_omits_the_prompt_cache_key() {
+        let provider = OpenAIProvider::with_chatgpt_auth(
+            crate::auth::AuthStore::open(std::path::PathBuf::from("unused")),
+            Some("https://gateway.example/codex".into()),
         );
         let mut request = Request::with_model("openai/gpt-5.2");
         request.cache_key = Some("session-123".into());

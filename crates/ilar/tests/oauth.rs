@@ -505,9 +505,9 @@ async fn live_chatgpt_prompt_cache_probe(keyed: bool) {
         .expect("ILAR_LIVE_CHATGPT_STATE_DIR with seeded auth.json");
     let provider = OpenAIProvider::with_chatgpt_auth(AuthStore::open(state_dir.into()), None);
     let provider = if keyed {
-        provider.with_prompt_cache_key_for_test()
-    } else {
         provider
+    } else {
+        provider.without_prompt_cache_key_for_test()
     };
     let cache_key = format!("ilar-live-probe-{}", uuid::Uuid::new_v4());
     let synthetic_prefix = (0..3_000)
