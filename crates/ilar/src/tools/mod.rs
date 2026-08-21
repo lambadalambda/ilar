@@ -530,6 +530,7 @@ pub trait Tool: Send + Sync {
 #[derive(Clone)]
 pub struct ToolRegistry {
     tools: Vec<Arc<dyn Tool>>,
+    questions: bool,
 }
 
 /// Tool names an agent `tools:` allowlist may reference — everything a
@@ -564,6 +565,7 @@ impl ToolRegistry {
                 Arc::new(grep::GrepTool),
                 Arc::new(web::WebFetchTool::default()),
             ],
+            questions: false,
         }
     }
 
@@ -577,6 +579,7 @@ impl ToolRegistry {
                 Arc::new(grep::GrepTool),
                 Arc::new(web::WebFetchTool::default()),
             ],
+            questions: false,
         }
     }
 
@@ -598,10 +601,11 @@ impl ToolRegistry {
 
     /// Registry with an extra tool (tests, future custom tools).
     pub fn with_tool(mut self, tool: Arc<dyn Tool>) -> Result<Self, DuplicateToolError> {
-        if self
-            .tools
-            .iter()
-            .any(|existing| existing.name() == tool.name())
+        if tool.name() == crate::question::QUESTION_TOOL_NAME
+            || self
+                .tools
+                .iter()
+                .any(|existing| existing.name() == tool.name())
         {
             return Err(DuplicateToolError(tool.name()));
         }
@@ -668,15 +672,29 @@ impl ToolRegistry {
         self.with_tool(Arc::new(crate::subagent::TaskTool::new(spawner)))
     }
 
+    /// Advertise structured questions to the provider for a root agent.
+    ///
+    /// The question definition is a protocol marker, not an executable tool:
+    /// it is intentionally absent from [`Self::get`] and ordinary execution.
+    pub fn with_questions(mut self) -> Self {
+        self.questions = true;
+        self
+    }
+
     pub fn definitions(&self) -> Vec<ToolDefinition> {
-        self.tools
+        let mut definitions = self
+            .tools
             .iter()
             .map(|t| ToolDefinition {
                 name: t.name().into(),
                 description: t.description().into(),
                 input_schema: t.input_schema(),
             })
-            .collect()
+            .collect::<Vec<_>>();
+        if self.questions {
+            definitions.push(crate::question::question_tool_definition());
+        }
+        definitions
     }
 }
 
