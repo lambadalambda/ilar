@@ -18,6 +18,18 @@ locked-down container, or a dedicated virtual machine.
 Git worktrees and ilar's read-only/mutating tool scheduling are coordination
 mechanisms, not security boundaries.
 
+## Install
+
+```sh
+scripts/install.sh            # builds --release, installs to ~/.local/bin
+scripts/install.sh /opt/bin   # or anywhere else (also $ILAR_INSTALL_DIR)
+```
+
+The script deletes the old binary before copying: overwriting one in place
+keeps its inode, and macOS then kills the next launch with SIGKILL because
+the cached code signature no longer matches. It re-signs ad-hoc if the
+installed binary still refuses to run.
+
 ## Design principles
 
 - **One event loop, no hidden runtimes.** The agent loop is a plain async
