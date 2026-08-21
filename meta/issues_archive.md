@@ -147,3 +147,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Colour hierarchy and a theme pack](issues/colour-hierarchy-and-theme-pack.md)
 - [x] [Resume failed turns and retry transient provider errors](issues/resume-failed-turns-with-backoff.md)
 - [x] [Immediate manual compaction command](issues/immediate-manual-compaction-command.md)
+- [x] [Document system prompt lifecycle](issues/document-system-prompt-lifecycle.md)

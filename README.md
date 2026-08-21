@@ -183,7 +183,9 @@ two locations:
 
 When both locations contain instructions, user instructions are included first
 and working-directory instructions second. ilar does not search parent
-directories or combine instructions from an ancestor tree.
+directories or combine instructions from an ancestor tree. See
+[System prompts and session context](docs/system-prompts.md) for prompt
+composition, refresh timing, subagents, and compaction handovers.
 
 ### Agents and skills
 
@@ -191,20 +193,20 @@ Custom agents are Markdown files in
 `${ILAR_CONFIG_DIR:-~/.config/ilar}/agents/` and `./.ilar/agents/`. Project
 definitions override user definitions with the same filename, and user
 definitions override built-ins. Agent frontmatter supports `description`,
-`model`, `disabled`, `read_only`, and `tools` (an allowlist of tool names the
-agent may use; unknown names are a load-time error, and the list intersects
-with the read-only set when `read_only = true`). Tool restriction is
+`model`, and `disabled`; for subagents it also supports `read_only` and `tools`
+(an allowlist of tool names; unknown names are a load-time error, and the list
+intersects with the read-only set when `read_only = true`). Tool restriction is
 coordination, not a security boundary. A file with `disabled = true` is
 skipped; it does not remove a lower-priority definition with the same name.
 
 Skills are Markdown files in `${ILAR_CONFIG_DIR:-~/.config/ilar}/skills/` and
 `./.ilar/skills/`. Project skills override user and built-in skills with the
-same filename. Root sessions list their names and descriptions in the system
-prompt and load full bodies on demand through the `skill` tool. Skill
-frontmatter supports `description` and `triggers` (a list of cue phrases
-included in the system-prompt listing so the model invokes the skill when they
-match the task). In the TUI, typing `/` shows inline completion for
-skills and built-in commands (Tab or Enter accepts); `/<skill-name>
+same parsed name. Skill frontmatter supports `name`, `description`, and
+`triggers`; root sessions list skill names and descriptions in the system
+prompt and load full bodies on demand through the `skill` tool. Trigger cue
+phrases are included in the system-prompt listing so the model invokes the
+skill when they match the task. In the TUI, typing `/` shows inline completion
+for skills and built-in commands (Tab or Enter accepts); `/<skill-name>
 [arguments]` invokes a skill directly, and the palette's "Invoke skill…"
 entry opens a picker.
 
