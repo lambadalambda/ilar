@@ -1137,3 +1137,36 @@ without expanding the metadata schema. Startup removes a just-created session
 if this initial event cannot be written, rather than exposing a resumable
 provider-default session that contradicts the configuration. The literal
 `default` is the layer-reset sentinel because TOML has no null value.
+
+## 2026-08-21 — Colour as hierarchy, not decoration
+
+Side by side with opencode and Claude Code, the transcript read as loud and
+flat. All three causes traced back to one property of `theme::apply`, which
+remaps cells by ANSI colour name after render: the names were used up, so a
+palette had exactly *one* background. With no surfaces to group with,
+emphasis had to be `REVERSED` — a white slab on every inline code span and
+every search hit — and syntax highlighting had to borrow the status colours,
+which made a string literal the same green as a passing tool call.
+
+New roles use `Color::Indexed` sentinels, a namespace nothing else emits, so
+widgets stay theme-agnostic and `apply` resolves them: six surfaces and four
+syntax classes. The adaptive `terminal` theme resolves surfaces to *nothing*
+— it cannot know the canvas, so it must not paint one — and falls back to
+reverse video for the selection alone, which is what `less` and `vim` do for
+the same reason.
+
+The hierarchy fix is the part that is not about the palette at all. The rows
+that repeat most carried the most saturated colour: reasoning rows were
+magenta end to end, and a green `tools ▸ N calls ✓` sat under every one of
+them, which is green that cannot also mean success. Repetition now drives
+saturation down — the label keeps the hue, the title is text, a group that
+worked is muted — and hue is spent on what is rare: failures, live state,
+diffs.
+
+Legibility became a test rather than a judgement call, which is what made
+shipping ten ported palettes tractable: body text clears WCAG AA on every
+canvas and surface, surfaces stay within 2:1 of their canvas so they tint
+instead of slab, and the syntax classes stay distinct and readable on the
+code surface. The floor is AA rather than AAA precisely because the ports
+keep their published values — Solarized Dark is 5.6:1 by design — with the
+default theme held to AAA separately.

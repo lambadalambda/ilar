@@ -1969,7 +1969,7 @@ impl App {
                         ))
                         .title(Line::from(Span::styled(
                             format!("goal {round}/{MAX_GOAL_ROUNDS}"),
-                            theme::title(theme::REASONING),
+                            theme::title(theme::SECONDARY),
                         )));
                     frame.render_widget(Paragraph::new(lines).block(goal_block), goal_area);
                 }
@@ -2022,7 +2022,7 @@ impl App {
                         ))
                         .title(Line::from(Span::styled(
                             format!("services ({})", self.services_running),
-                            theme::title(TOOL_ACTIVE),
+                            theme::title(theme::SECONDARY),
                         )));
                     frame.render_widget(Paragraph::new(lines).block(service_block), service_area);
                 }
@@ -2039,7 +2039,7 @@ impl App {
                 ))
                 .title(Line::from(Span::styled(
                     "todos",
-                    theme::title(theme::WAITING),
+                    theme::title(theme::SECONDARY),
                 )));
             let inner = todo_block.inner(todo_area);
             let snapshot = {
