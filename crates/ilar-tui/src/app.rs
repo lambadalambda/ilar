@@ -6,7 +6,7 @@
 //! replay when a session is restored.
 
 use anyhow::{Context, Result};
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -329,6 +329,80 @@ impl App {
                 .cloned(),
         );
         entries
+    }
+
+    /// Give the visible slash-completion popup first refusal on its
+    /// navigation and acceptance keys. Returns whether it consumed the key.
+    fn handle_slash_completion_key(&mut self, key: KeyEvent) -> bool {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+            || !matches!(
+                key.code,
+                KeyCode::Up | KeyCode::Down | KeyCode::Tab | KeyCode::Enter
+            )
+        {
+            return false;
+        }
+        let candidates = slash_candidates(self.input.text(), &self.slash_inventory());
+        if candidates.is_empty() {
+            return false;
+        }
+
+        self.slash_selected = self.slash_selected.min(candidates.len() - 1);
+        match key.code {
+            KeyCode::Up => {
+                self.slash_selected =
+                    (self.slash_selected + candidates.len() - 1) % candidates.len();
+            }
+            KeyCode::Down => self.slash_selected = (self.slash_selected + 1) % candidates.len(),
+            // The completed input hides the popup, so a second Enter
+            // submits it through the normal prompt path.
+            KeyCode::Tab | KeyCode::Enter => {
+                let (name, _) = &candidates[self.slash_selected];
+                self.input = InputBuffer::from(format!("/{name} "));
+                self.slash_selected = 0;
+            }
+            _ => unreachable!("slash completion keys were filtered above"),
+        }
+        true
+    }
+
+    /// Route prompt-level arrows in precedence order: visible slash
+    /// completions, history recall, then transcript scrolling.
+    pub(crate) fn handle_prompt_navigation_key(&mut self, key: KeyEvent) -> bool {
+        if self.handle_slash_completion_key(key) {
+            return true;
+        }
+
+        match key.code {
+            KeyCode::Up
+                if self.history.browsing()
+                    || (!self.input.is_multiline() && self.input.is_blank()) =>
+            {
+                if let Some(text) = self.history.previous(self.input.text()) {
+                    self.input = InputBuffer::from(text);
+                } else if !self.history.browsing() {
+                    self.scroll_up(1);
+                }
+                true
+            }
+            KeyCode::Down if self.history.browsing() => {
+                if let Some(text) = self.history.next(self.input.text()) {
+                    self.input = InputBuffer::from(text);
+                }
+                true
+            }
+            KeyCode::Up if !self.input.is_multiline() => {
+                self.scroll_up(1);
+                true
+            }
+            KeyCode::Down if !self.input.is_multiline() => {
+                self.scroll_down(1);
+                true
+            }
+            _ => false,
+        }
     }
 
     pub(crate) fn has_modal(&self) -> bool {
@@ -3086,6 +3160,55 @@ mod tests {
         app.search_refresh();
         assert!(app.search_matches.is_empty());
         assert!(rendered_text(&app.status_line(120)).contains("no matches"));
+    }
+
+    #[test]
+    fn slash_completion_arrow_keys_move_and_wrap_the_selection() {
+        let mut app = App::new();
+        app.skills = vec![
+            ("deploy".to_string(), "Deploy things".to_string()),
+            ("greptile".to_string(), "Review comments".to_string()),
+        ];
+        app.input = InputBuffer::from("/");
+        let candidates = slash_candidates(app.input.text(), &app.slash_inventory());
+        let plain = |code| KeyEvent::new(code, KeyModifiers::NONE);
+
+        assert!(app.handle_prompt_navigation_key(plain(KeyCode::Down)));
+        assert_eq!(app.slash_selected, 1);
+
+        assert!(app.handle_prompt_navigation_key(plain(KeyCode::Up)));
+        assert_eq!(app.slash_selected, 0);
+
+        assert!(app.handle_prompt_navigation_key(plain(KeyCode::Up)));
+        assert_eq!(app.slash_selected, candidates.len() - 1);
+
+        assert!(app.handle_prompt_navigation_key(plain(KeyCode::Down)));
+        assert_eq!(app.slash_selected, 0);
+
+        assert!(app.handle_prompt_navigation_key(plain(KeyCode::Down)));
+        assert!(app.handle_prompt_navigation_key(plain(KeyCode::Enter)));
+        assert_eq!(app.input.text(), format!("/{} ", candidates[1].0));
+        assert_eq!(app.slash_selected, 0);
+
+        app.input = InputBuffer::from("/go");
+        assert!(
+            !app.handle_prompt_navigation_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT,))
+        );
+        assert_eq!(app.input.text(), "/go");
+    }
+
+    #[test]
+    fn prompt_arrows_keep_history_behavior_without_slash_completions() {
+        let mut app = App::new();
+        app.history.push("previous prompt");
+
+        assert!(app.handle_prompt_navigation_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE,)));
+        assert_eq!(app.input.text(), "previous prompt");
+
+        assert!(
+            app.handle_prompt_navigation_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE,))
+        );
+        assert!(app.input.is_blank());
     }
 
     #[test]

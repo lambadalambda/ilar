@@ -29,7 +29,6 @@ use crossterm::event::{
 };
 use crossterm::terminal::supports_keyboard_enhancement;
 use decide::{Intent, LoopState, retry as retry_intents};
-use input::slash_candidates;
 use input::{
     InputBuffer, Interrupt, PromptAction, handle_prompt_key, interrupt, quit_requested,
     retry_requested,
@@ -2140,6 +2139,9 @@ async fn run_app(
                     continue;
                 }
                 match (code, control) {
+                    // The visible completion popup owns arrows before
+                    // history recall or transcript scrolling can consume them.
+                    _ if app.handle_prompt_navigation_key(key) => {}
                     (KeyCode::F(1), _) => {
                         app.help_visible = true;
                         app.help_scroll = 0;
@@ -2188,25 +2190,8 @@ async fn run_app(
                     (KeyCode::End, true) => app.scroll_to_tail(),
                     (KeyCode::PageUp, _) => app.scroll_up(app.page_size()),
                     (KeyCode::PageDown, _) => app.scroll_down(app.page_size()),
-                    // History recall wins while browsing or on a blank
-                    // input; transcript scrolling stays on PgUp/wheel/^U.
-                    (KeyCode::Up, _)
-                        if app.history.browsing()
-                            || (!app.input.is_multiline() && app.input.is_blank()) =>
-                    {
-                        if let Some(text) = app.history.previous(app.input.text()) {
-                            app.input = InputBuffer::from(text);
-                        } else if !app.history.browsing() {
-                            app.scroll_up(1);
-                        }
-                    }
-                    (KeyCode::Down, _) if app.history.browsing() => {
-                        if let Some(text) = app.history.next(app.input.text()) {
-                            app.input = InputBuffer::from(text);
-                        }
-                    }
-                    (KeyCode::Up, _) if !app.input.is_multiline() => app.scroll_up(1),
-                    (KeyCode::Down, _) if !app.input.is_multiline() => app.scroll_down(1),
+                    // Prompt arrows were routed above; transcript paging
+                    // stays on PgUp/wheel/^U.
                     (KeyCode::Char('f'), true) => {
                         app.open_search();
                     }
@@ -2227,34 +2212,6 @@ async fn run_app(
                             notifications_paused,
                         );
                         intents.extend(retry_intents(&state));
-                    }
-                    // Inline slash completion: navigate/accept while the
-                    // command name is being typed.
-                    (KeyCode::Up | KeyCode::Down | KeyCode::Tab | KeyCode::Enter, false)
-                        if !slash_candidates(app.input.text(), &app.slash_inventory())
-                            .is_empty()
-                            && !key.modifiers.contains(KeyModifiers::SHIFT) =>
-                    {
-                        let candidates = slash_candidates(app.input.text(), &app.slash_inventory());
-                        app.slash_selected = app.slash_selected.min(candidates.len() - 1);
-                        match code {
-                            KeyCode::Up => {
-                                app.slash_selected =
-                                    (app.slash_selected + candidates.len() - 1) % candidates.len();
-                            }
-                            KeyCode::Down => {
-                                app.slash_selected = (app.slash_selected + 1) % candidates.len();
-                            }
-                            // Tab and Enter both accept the selection; the
-                            // completed input ("/name ") hides the popup, so
-                            // a second Enter submits as usual.
-                            KeyCode::Tab | KeyCode::Enter => {
-                                let (name, _) = &candidates[app.slash_selected];
-                                app.input = InputBuffer::from(format!("/{name} "));
-                                app.slash_selected = 0;
-                            }
-                            _ => {}
-                        }
                     }
                     _ => match handle_prompt_key(&mut app.input, key) {
                         PromptAction::Submit if !app.input.is_blank() => {
