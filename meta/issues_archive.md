@@ -144,3 +144,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Grow the input box for long messages](issues/grow-input-box-for-long-messages.md)
 - [x] [Add structured user questions](issues/add-structured-user-questions.md)
 - [x] [Configurable default reasoning level](issues/configurable-default-reasoning.md)
+- [x] [Colour hierarchy and a theme pack](issues/colour-hierarchy-and-theme-pack.md)

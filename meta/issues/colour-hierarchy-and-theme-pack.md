@@ -53,6 +53,31 @@ with it.
 - The picker can find a theme by typing once the list is this long.
 - The full suite passes.
 
+## Outcome
+
+Closed. Surfaces and syntax classes are palette slots reached through
+`Color::Indexed` sentinels, so widgets still never see a theme. Inline
+code and search hits tint; reasoning rows keep the hue on the label and
+give the title to normal text; a tool group where nothing failed is
+muted; diff rows carry their tint to the margin. Ten ported palettes
+ship alongside the five authored ones, `carbon` is the default, and F3
+filters as you type.
+
+Legibility is enforced by test — AA on every canvas and surface, AAA for
+the default theme, surfaces within 2:1 of their canvas, syntax classes
+distinct and readable on the code surface. That is what made ten hand-
+entered palettes tractable: the tints and any too-dim comment colour are
+derived and then *checked*, rather than eyeballed.
+
+Deliberately not done, because each needs the render width that the
+markdown layer does not have until after wrapping:
+
+- **Code fences have no block background.** They keep the `│` gutter and
+  now-proper syntax colours; the surface exists in every palette and is
+  ready when the wrap seam can pad to the column.
+- **Tool output blocks are not on `surface`.** Same reason. These two are
+  the remaining visible gap against opencode's look.
+
 ## Notes
 
 - The ANSI-name keyed remap has run out of names. New roles use
