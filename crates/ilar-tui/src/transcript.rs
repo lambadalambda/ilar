@@ -831,7 +831,10 @@ fn tool_group_line(
             ERROR,
         )
     } else {
-        (call_count(calls), "✓", theme::SUCCESS)
+        // A tool group that worked is scaffolding, not news: there is one
+        // under every thought. Green on all of them is green that cannot
+        // also mean "this one succeeded".
+        (call_count(calls), "✓", MUTED)
     };
     let text = truncate_display(
         &format!("tools {disclosure} {status} {icon}"),
@@ -1066,6 +1069,27 @@ fn detail_layout(width: usize, indent: usize) -> DetailLayout {
     }
 }
 
+/// Carry a row's tint to the edge of its column. A band that stops at the
+/// last character reads as a highlighter pen; one that reaches the margin
+/// reads as a surface, which is the whole point of having one.
+fn pad_background(
+    mut line: Line<'static>,
+    width: usize,
+    background: Option<ratatui::style::Color>,
+) -> Line<'static> {
+    let Some(background) = background else {
+        return line;
+    };
+    let padding = width.saturating_sub(line.width());
+    if padding > 0 {
+        line.spans.push(Span::styled(
+            " ".repeat(padding),
+            Style::default().bg(background),
+        ));
+    }
+    line
+}
+
 fn labeled_rows(
     label: &str,
     mut content: Vec<Line<'static>>,
@@ -1153,18 +1177,25 @@ fn tool_diff_rows(
     let content = diff
         .iter()
         .flat_map(|line| {
-            let (marker, color) = match line.kind {
-                diff::DiffKind::Added => ("+", theme::SUCCESS),
-                diff::DiffKind::Removed => ("-", ERROR),
-                diff::DiffKind::Context => (" ", MUTED),
+            let (marker, color, background) = match line.kind {
+                diff::DiffKind::Added => ("+", theme::SUCCESS, Some(theme::DIFF_ADD_BG)),
+                diff::DiffKind::Removed => ("-", ERROR, Some(theme::DIFF_DEL_BG)),
+                diff::DiffKind::Context => (" ", MUTED, None),
             };
+            let mut style = Style::default().fg(color);
+            if let Some(background) = background {
+                style = style.bg(background);
+            }
             wrap_styled_line(
                 Line::from(Span::styled(
                     format!("{marker} {}", safe_text(&line.text)),
-                    Style::default().fg(color),
+                    style,
                 )),
                 layout.content_width,
             )
+            .into_iter()
+            .map(|line| pad_background(line, layout.content_width, background))
+            .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
     labeled_rows("diff", content, &layout, limit, false)
@@ -1236,14 +1267,19 @@ pub(crate) fn transcript_entry_lines(
                 (false, true) => "▾",
                 (false, false) => "▸",
             };
-            let mut output = vec![Line::from(Span::styled(
-                truncate_display(
-                    &format!("{disclosure} {state}: {title}"),
-                    width as usize,
-                    Truncation::Right,
-                ),
-                Style::default().fg(theme::REASONING),
-            ))];
+            // The label carries the hue and the title carries the text:
+            // these rows repeat more than any other, and a full line of
+            // saturated colour on each one flattens the whole transcript.
+            let label = format!("{disclosure} {state}: ");
+            let title = truncate_display(
+                &title,
+                (width as usize).saturating_sub(label.chars().count()),
+                Truncation::Right,
+            );
+            let mut output = vec![Line::from(vec![
+                Span::styled(label, Style::default().fg(theme::REASONING)),
+                Span::styled(title, Style::default().fg(theme::SECONDARY)),
+            ])];
             if *expanded {
                 for line in safe_lines(text) {
                     output.push(Line::from(vec![
@@ -1728,6 +1764,74 @@ mod tests {
         );
         assert_eq!(thought[0].spans[0].style.fg, Some(theme::REASONING));
         assert_ne!(theme::REASONING, theme::WAITING);
+    }
+
+    /// Chrome that appears on every row must not be the loudest thing on
+    /// the screen. The label keeps the hue because it is short; the title
+    /// is text and reads as text.
+    #[test]
+    fn repeated_chrome_spends_its_colour_sparingly() {
+        let now = std::time::Instant::now();
+        let thought = transcript_entry_lines(
+            &Line_::Thought {
+                id: String::new(),
+                text: "Inspecting state".into(),
+                complete: true,
+                expanded: false,
+            },
+            80,
+            now,
+            now,
+        );
+        assert!(rendered_text(&thought[0]).contains("Inspecting state"));
+        assert_eq!(thought[0].spans[1].style.fg, Some(theme::SECONDARY));
+
+        // A group of calls that all worked is scaffolding; one that failed
+        // is not.
+        let succeeded = tool_group_line(3, 0, 0, false, 80);
+        assert!(
+            succeeded
+                .spans
+                .iter()
+                .all(|span| span.style.fg == Some(MUTED)),
+            "{succeeded:?}"
+        );
+        let failed = tool_group_line(3, 0, 1, false, 80);
+        assert!(
+            failed.spans.iter().any(|span| span.style.fg == Some(ERROR)),
+            "{failed:?}"
+        );
+    }
+
+    /// A diff tint that stops at the last character reads as a highlighter
+    /// pen; the band has to reach the margin.
+    #[test]
+    fn diff_tints_reach_the_margin() {
+        let rows = tool_diff_rows(
+            &[
+                diff::DiffLine {
+                    kind: diff::DiffKind::Added,
+                    text: "let x = 1;".into(),
+                },
+                diff::DiffLine {
+                    kind: diff::DiffKind::Context,
+                    text: "unchanged".into(),
+                },
+            ],
+            60,
+            0,
+            10,
+        );
+        let added = &rows[0].line;
+        assert_eq!(
+            added.spans.last().unwrap().style.bg,
+            Some(theme::DIFF_ADD_BG)
+        );
+        let context = &rows[1].line;
+        assert!(
+            context.spans.iter().all(|span| span.style.bg.is_none()),
+            "unchanged rows stay untinted: {context:?}"
+        );
     }
 
     #[test]
