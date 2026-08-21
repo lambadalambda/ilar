@@ -2,6 +2,7 @@ use ilar::agent::{LOOP_EVENT_CAPACITY, LoopConfig, TurnOutcome, loop_event_chann
 use std::sync::Arc;
 use std::time::Duration;
 
+use ilar::compaction::{ManualCompactionOutcome, compact_session};
 use ilar::provider::{
     EventStream, MockProvider, Provider, ProviderEvent, ProviderHandle, ProviderResolver, Request,
     StopReason, ToolDefinition, resolve_model,
@@ -70,6 +71,79 @@ fn seed_compactable_history(store: &SessionStore, session_id: &str) {
             })
             .unwrap();
     }
+}
+
+#[tokio::test]
+async fn manual_compaction_of_empty_session_is_a_local_no_op() {
+    let (store, session_id) = temp_session();
+    let provider = MockProvider::new(Vec::new());
+    let cancel = tokio_util::sync::CancellationToken::new();
+
+    let outcome = compact_session(&provider, &store, &session_id, None, &[], &cancel)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, ManualCompactionOutcome::NothingToCompact);
+    assert!(provider.requests().is_empty());
+}
+
+#[tokio::test]
+async fn manual_active_history_compaction_persists_without_a_new_user_message() {
+    let (store, session_id) = temp_session();
+    seed_compactable_history(&store, &session_id);
+    let provider = MockProvider::new(vec![
+        text_turn("handover: all important context"),
+        text_turn("handover: compacted context remains"),
+    ]);
+    let cancel = tokio_util::sync::CancellationToken::new();
+
+    let outcome = compact_session(&provider, &store, &session_id, Some("system"), &[], &cancel)
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        outcome,
+        ManualCompactionOutcome::Compacted { ref summary, .. }
+            if summary == "handover: all important context"
+    ));
+    assert_eq!(provider.requests().len(), 1);
+    let session = store.load(&session_id).unwrap();
+    let canonical_events = std::fs::read_to_string(store.session_path(&session_id).unwrap())
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<SessionEvent>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        canonical_events
+            .iter()
+            .filter(|event| matches!(event, SessionEvent::UserMessage { .. }))
+            .count(),
+        6,
+        "manual compaction appended a user message"
+    );
+    assert!(matches!(
+        canonical_events.last(),
+        Some(SessionEvent::Compaction { summary, .. })
+            if summary == "handover: all important context"
+    ));
+    let transcript = session.transcript();
+    assert_eq!(transcript.len(), 1);
+    assert!(format!("{transcript:?}").contains("handover: all important context"));
+    drop(session);
+
+    let second = compact_session(&provider, &store, &session_id, Some("system"), &[], &cancel)
+        .await
+        .unwrap();
+    assert!(matches!(
+        second,
+        ManualCompactionOutcome::Compacted { ref summary, .. }
+            if summary == "handover: compacted context remains"
+    ));
+    assert_eq!(provider.requests().len(), 2);
+    assert!(
+        format!("{:?}", store.load(&session_id).unwrap().transcript())
+            .contains("handover: compacted context remains")
+    );
 }
 
 #[tokio::test]

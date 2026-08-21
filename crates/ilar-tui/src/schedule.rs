@@ -15,17 +15,19 @@
 //! exactly what makes a reordering visible.
 
 use crate::app::App;
-use crate::decide::{Intent, LoopState, after_turn, may_route_notification};
+use crate::decide::{Intent, LoopState, QueueStep, after_turn, may_route_notification, queue_step};
 use crate::transcript::Line_;
 use crate::{Activity, MAX_GOAL_ROUNDS, NoticeLevel};
 use ilar::agent::TurnOutcome;
+use ilar::compaction::ManualCompactionOutcome;
 use ilar::subagent::{Notification, RouteOutcome};
 
-/// How the turn that was running ended — the edge hands this in after
+/// How the operation that was running ended — the edge hands this in after
 /// awaiting the join, so the pass itself never blocks.
 pub(crate) enum Completion {
     Root(anyhow::Result<TurnOutcome>),
     Routed(anyhow::Result<RouteOutcome>),
+    Compaction(anyhow::Result<ManualCompactionOutcome>),
     /// The turn task itself died.
     Crashed(String),
 }
@@ -44,6 +46,8 @@ pub(crate) trait Runtime {
     /// The next notification to act on; `held` means the gate is
     /// closed and nothing may be consumed.
     fn next_notification(&mut self, held: bool) -> Option<Notification>;
+    /// Start an explicitly requested idle-session compaction.
+    fn start_compaction(&mut self, app: &mut App);
     /// A notification for another session: hand it off.
     fn route(&mut self, app: &mut App, notification: Notification);
     /// A notification for this session: start its turn here.
@@ -195,6 +199,55 @@ fn complete<R: Runtime>(app: &mut App, completion: Completion, runtime: &mut R) 
                 MAX_GOAL_ROUNDS,
             );
         }
+        Completion::Compaction(result) => {
+            let completed = matches!(
+                &result,
+                Ok(ManualCompactionOutcome::Compacted { .. })
+                    | Ok(ManualCompactionOutcome::NothingToCompact)
+            );
+            match result {
+                Ok(ManualCompactionOutcome::Compacted {
+                    summary,
+                    context_tokens,
+                }) => {
+                    app.push_loop_event(&ilar::agent::LoopEvent::Compacted {
+                        context_tokens,
+                        summary,
+                    });
+                    app.busy = false;
+                    app.status = "ready".into();
+                    app.set_activity(Activity::Ready);
+                    app.set_notice("compaction complete", NoticeLevel::Info);
+                }
+                Ok(ManualCompactionOutcome::NothingToCompact) => {
+                    app.busy = false;
+                    app.status = "ready".into();
+                    app.set_activity(Activity::Ready);
+                    app.set_notice("nothing to compact", NoticeLevel::Info);
+                }
+                Ok(ManualCompactionOutcome::Aborted) => {
+                    app.busy = false;
+                    app.status = "compaction aborted".into();
+                    app.set_activity(Activity::Paused);
+                    app.set_notice("compaction aborted", NoticeLevel::Warning);
+                    app.push_transcript_line(Line_::System("compaction aborted".into()));
+                }
+                Err(error) => {
+                    app.busy = false;
+                    app.status = "compaction failed".into();
+                    app.set_activity(Activity::Error);
+                    let message = format!("compaction failed: {error:#}");
+                    app.set_notice(&message, NoticeLevel::Error);
+                    app.push_transcript_line(Line_::System(message));
+                }
+            }
+            runtime.end_turn();
+            let state = runtime.observe(app);
+            return match queue_step(&state, completed) {
+                QueueStep::Send => vec![Intent::SendQueued],
+                QueueStep::Idle | QueueStep::Hold(_) => Vec::new(),
+            };
+        }
         Completion::Routed(Ok(RouteOutcome::Propagate(notification))) => {
             app.busy = false;
             app.status = "ready".into();
@@ -231,7 +284,7 @@ fn complete<R: Runtime>(app: &mut App, completion: Completion, runtime: &mut R) 
             app.busy = false;
             app.status = "error".into();
             app.set_activity(Activity::Error);
-            let message = format!("notification routing failed: {error}");
+            let message = format!("operation crashed: {error}");
             app.set_notice(&message, NoticeLevel::Error);
             app.push_transcript_line(Line_::System(message));
         }
@@ -270,6 +323,10 @@ pub(crate) fn settle<R: Runtime>(
         runtime.perform(app, intent)?;
     }
     runtime.peek_palette(app)?;
+    if app.compact_requested && !runtime.observe(app).turn_running {
+        app.compact_requested = false;
+        runtime.start_compaction(app);
+    }
     let state = runtime.observe(app);
     if let Some(notification) = runtime.next_notification(!may_route_notification(&state)) {
         if notification.parent_session_id != runtime.session_id() {
@@ -355,6 +412,12 @@ mod tests {
             self.pending.pop_front()
         }
 
+        fn start_compaction(&mut self, app: &mut App) {
+            self.turn_running = true;
+            app.busy = true;
+            self.log.push("start_compaction".into());
+        }
+
         fn route(&mut self, _app: &mut App, notification: Notification) {
             self.turn_running = true;
             self.log
@@ -411,6 +474,82 @@ mod tests {
             self.log.push("poll".into());
             Ok(None)
         }
+    }
+
+    #[test]
+    fn manual_compaction_outranks_a_waiting_notification() {
+        let mut app = App::new();
+        app.compact_requested = true;
+        let mut runtime = FakeRuntime::new().with_notification("root", "task finished");
+
+        settle(&mut app, Vec::new(), &mut runtime).unwrap();
+
+        assert_eq!(runtime.log, vec!["start_compaction"]);
+        assert_eq!(runtime.pending.len(), 1, "the notification must wait");
+    }
+
+    #[test]
+    fn compact_slash_starts_maintenance_without_a_model_turn() {
+        let mut app = App::new();
+        app.queued_messages = vec!["/compact".into()];
+        let mut runtime = FakeRuntime::new();
+
+        settle(&mut app, vec![Intent::SendQueued], &mut runtime).unwrap();
+
+        assert_eq!(runtime.log, vec!["start_compaction"]);
+        assert!(app.queued_messages.is_empty());
+        assert!(
+            app.lines.iter().all(|line| !matches!(line, Line_::User(_))),
+            "/compact leaked into the transcript"
+        );
+    }
+
+    #[test]
+    fn compaction_completion_shows_summary_and_resumes_the_queue_only() {
+        let mut app = App::new();
+        app.busy = true;
+        app.goal = Some(("ship it".into(), 3));
+        app.queued_messages = vec!["wait for me".into()];
+        let mut runtime = FakeRuntime::new();
+
+        pass(
+            &mut app,
+            Some(Completion::Compaction(Ok(
+                ManualCompactionOutcome::Compacted {
+                    summary: "handover keeps the migration plan".into(),
+                    context_tokens: 42,
+                },
+            ))),
+            Vec::new(),
+            &mut runtime,
+        )
+        .unwrap();
+
+        assert_eq!(runtime.log, vec!["end_turn", "start_turn:wait for me"]);
+        assert_eq!(app.goal, Some(("ship it".into(), 3)));
+        assert!(app.queued_messages.is_empty());
+        assert!(app.lines.iter().any(
+            |line| matches!(line, Line_::System(text) if text.contains("handover keeps the migration plan"))
+        ));
+    }
+
+    #[test]
+    fn aborted_compaction_holds_messages_queued_during_it() {
+        let mut app = App::new();
+        app.busy = true;
+        app.queued_messages = vec!["wait for me".into()];
+        let mut runtime = FakeRuntime::new();
+
+        pass(
+            &mut app,
+            Some(Completion::Compaction(Ok(ManualCompactionOutcome::Aborted))),
+            Vec::new(),
+            &mut runtime,
+        )
+        .unwrap();
+
+        assert_eq!(runtime.log, vec!["end_turn"]);
+        assert_eq!(app.queued_messages, vec!["wait for me"]);
     }
 
     /// The recorded queue-inversion bug, pinned: a turn completes with

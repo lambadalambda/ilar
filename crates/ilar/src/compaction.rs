@@ -33,11 +33,24 @@ pub enum CompactionCut {
     /// At the current turn's user message: everything before it is
     /// summarized, the turn itself is untouched. The turn-start default.
     TurnBoundary,
+    /// Summarize the complete active transcript. Used only by explicit
+    /// idle-session compaction; automatic compaction always preserves a tail.
+    ActiveHistory,
     /// Inside the current turn, keeping only the most recent steps.
     /// A single agentic turn can outgrow the window on its own, and
     /// `TurnBoundary` cannot help there — mid-turn the last user message
     /// *is* this turn's prompt, so it would summarize nothing.
     RecentSteps,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ManualCompactionOutcome {
+    Compacted {
+        summary: String,
+        context_tokens: u64,
+    },
+    NothingToCompact,
+    Aborted,
 }
 
 /// Tokens at which compaction should fire for a given limit.
@@ -223,10 +236,10 @@ fn estimate_tokens_from(
     estimated.max(reported)
 }
 
-/// Compact the session if the transcript exceeds
-/// `context_limit * threshold`. Runs once per user turn (before the
-/// provider loop); the cut keeps the current user message and everything
-/// after it.
+/// Compact a session according to the supplied threshold and cut policy.
+///
+/// Agent turns use the boundary and recent-step policies. Interactive manual
+/// compaction should use [`compact_session`] instead of assembling options.
 pub async fn compact_if_needed(
     resolver: &dyn ProviderResolver,
     store: &SessionStore,
@@ -240,6 +253,50 @@ pub async fn compact_if_needed(
     let model = session.effective_model();
     let provider = resolver.resolve_provider(&model)?;
     compact_if_needed_locked(provider.as_provider(), &model, &mut session, options).await
+}
+
+/// Immediately replace the complete active provider transcript with one
+/// handover summary. Canonical audit history remains append-only.
+pub async fn compact_session(
+    resolver: &dyn ProviderResolver,
+    store: &SessionStore,
+    session_id: &str,
+    system_prompt: Option<&str>,
+    tools: &[ToolDefinition],
+    cancel: &CancellationToken,
+) -> Result<ManualCompactionOutcome> {
+    if cancel.is_cancelled() {
+        return Ok(ManualCompactionOutcome::Aborted);
+    }
+    let mut session = store.acquire_writer(session_id)?.load()?;
+    if session.transcript().is_empty() {
+        return Ok(ManualCompactionOutcome::NothingToCompact);
+    }
+    let model = session.effective_model();
+    let provider = resolver.resolve_provider(&model)?;
+    let summary = compact_if_needed_locked(
+        provider.as_provider(),
+        &model,
+        &mut session,
+        CompactionOptions {
+            context_limit: 0,
+            threshold: 0.0,
+            force: true,
+            cut: CompactionCut::ActiveHistory,
+            system_prompt,
+            tools,
+            cancel,
+        },
+    )
+    .await?;
+    match summary {
+        Some(summary) => Ok(ManualCompactionOutcome::Compacted {
+            context_tokens: estimate_tokens_with_request(&session, system_prompt, tools),
+            summary,
+        }),
+        None if cancel.is_cancelled() => Ok(ManualCompactionOutcome::Aborted),
+        None => Ok(ManualCompactionOutcome::NothingToCompact),
+    }
 }
 
 /// Returns the compaction summary when one was performed.
@@ -271,6 +328,7 @@ pub(crate) async fn compact_if_needed_locked(
         .unwrap_or(0);
 
     let cut = match options.cut {
+        CompactionCut::ActiveHistory => session.events().len(),
         CompactionCut::TurnBoundary => {
             // Cut at the current turn's user message (last UserMessage).
             let mut cut = session

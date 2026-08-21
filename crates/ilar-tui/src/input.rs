@@ -543,13 +543,20 @@ pub(crate) fn slash_candidates(
     if token.contains(char::is_whitespace) {
         return Vec::new();
     }
-    let mut candidates: Vec<(String, String)> = vec![(
-        "goal".to_string(),
-        "work until the goal is achieved (evidence-based)".to_string(),
-    )];
-    // `goal` is built in and outranks everything, so drop anything that
-    // would render as a second row with the same name.
-    candidates.extend(inventory.iter().filter(|(name, _)| name != "goal").cloned());
+    let mut candidates: Vec<(String, String)> = crate::BUILTIN_SLASH_COMMANDS
+        .iter()
+        .map(|(name, description)| ((*name).into(), (*description).into()))
+        .collect();
+    candidates.extend(
+        inventory
+            .iter()
+            .filter(|(name, _)| {
+                !crate::BUILTIN_SLASH_COMMANDS
+                    .iter()
+                    .any(|(builtin, _)| name == builtin)
+            })
+            .cloned(),
+    );
     let mut scored: Vec<(i64, (String, String))> = candidates
         .into_iter()
         .filter_map(|(name, description)| {
@@ -565,6 +572,21 @@ pub(crate) fn slash_candidates(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slash_completion_lists_compact_as_a_unique_builtin() {
+        let candidates =
+            slash_candidates("/comp", &[("compact".into(), "external duplicate".into())]);
+
+        assert_eq!(
+            candidates
+                .iter()
+                .filter(|(name, _)| name == "compact")
+                .count(),
+            1
+        );
+        assert!(candidates[0].1.contains("session"));
+    }
 
     #[test]
     fn wrapped_input_moves_the_caret_to_a_new_row_at_the_right_edge() {

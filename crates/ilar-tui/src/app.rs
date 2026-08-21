@@ -133,7 +133,7 @@ pub(crate) struct App {
     pub(crate) services_running: usize,
     /// (name, running, detail) rows for the sidebar.
     pub(crate) services_view: Vec<(String, bool, String)>,
-    /// Palette-requested compaction, applied to the next turn's config.
+    /// Idle-session compaction waiting for the scheduler's operation slot.
     pub(crate) compact_requested: bool,
     pub(crate) search_active: bool,
     pub(crate) search_query: String,
@@ -2362,10 +2362,7 @@ pub(crate) fn activate_palette_command(
         }
         PaletteCommand::Compact => {
             app.compact_requested = true;
-            app.set_notice(
-                "compaction will run before your next message",
-                NoticeLevel::Info,
-            );
+            app.set_notice("compaction starting", NoticeLevel::Info);
         }
         PaletteCommand::Export => {
             let prefix: String = app.session_id.chars().take(8).collect();
@@ -3092,15 +3089,16 @@ mod tests {
     }
 
     #[test]
-    fn slash_input_shows_inline_completion_including_goal() {
+    fn slash_input_shows_inline_completion_including_builtins() {
         let skills = vec![
             ("deploy".to_string(), "Deploy things".to_string()),
             ("greptile".to_string(), "Review comments".to_string()),
         ];
         // All candidates on bare slash, fuzzy-filtered as the name grows.
         let all = slash_candidates("/", &skills);
-        assert_eq!(all.len(), 3);
+        assert_eq!(all.len(), 4);
         assert!(all.iter().any(|(name, _)| name == "goal"));
+        assert!(all.iter().any(|(name, _)| name == "compact"));
         let filtered = slash_candidates("/go", &skills);
         assert_eq!(
             filtered.first().map(|(name, _)| name.as_str()),
@@ -3310,6 +3308,34 @@ mod tests {
         app.retry_available = false;
         app.finish_turn(Ok(TurnOutcome::Completed));
         assert!(!app.retry_available);
+    }
+
+    #[test]
+    fn compacted_event_displays_the_handover_summary() {
+        let mut app = App::new();
+        app.push_loop_event(&LoopEvent::Compacted {
+            context_tokens: 42,
+            summary: "keep the parser decision and pending migration".into(),
+        });
+
+        assert!(matches!(
+            app.lines.last(),
+            Some(Line_::System(text))
+                if text.contains("transcript compacted")
+                    && text.contains("keep the parser decision and pending migration")
+        ));
+        let rendered = app
+            .transcript_lines(80, std::time::Instant::now())
+            .into_iter()
+            .map(|line| {
+                line.spans
+                    .into_iter()
+                    .map(|span| span.content)
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("keep the parser decision"), "{rendered}");
     }
 
     #[test]

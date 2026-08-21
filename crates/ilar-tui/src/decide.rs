@@ -238,6 +238,21 @@ pub(crate) fn after_turn(
 /// the payload travel together, so a call site cannot route the text
 /// one way while believing it decided another.
 pub(crate) fn submit(state: &LoopState, busy: bool, text: String) -> Vec<Intent> {
+    // Maintenance commands must never become steering text for the model.
+    if let Some(("compact", args)) = crate::parse_slash_invocation(&text) {
+        if !args.is_empty() {
+            return vec![Intent::Notice(
+                "usage: /compact".into(),
+                NoticeLevel::Warning,
+            )];
+        }
+        if state.turn_running || busy {
+            return vec![Intent::Notice(
+                "wait for the current operation before compacting".into(),
+                NoticeLevel::Warning,
+            )];
+        }
+    }
     match submit_target(state, busy) {
         SubmitTarget::StartTurn => vec![Intent::StartTurn(text)],
         SubmitTarget::Steer => vec![Intent::Steer(text)],
@@ -338,6 +353,30 @@ mod tests {
             ..idle()
         };
         assert_eq!(submit_target(&aborting, true), SubmitTarget::Queue);
+    }
+
+    #[test]
+    fn compact_command_never_steers_a_running_model() {
+        let running = LoopState {
+            turn_running: true,
+            steerable: true,
+            ..idle()
+        };
+
+        assert_eq!(
+            submit(&running, true, "/compact".into()),
+            vec![Intent::Notice(
+                "wait for the current operation before compacting".into(),
+                NoticeLevel::Warning,
+            )]
+        );
+        assert_eq!(
+            submit(&running, true, "/compact now".into()),
+            vec![Intent::Notice(
+                "usage: /compact".into(),
+                NoticeLevel::Warning,
+            )]
+        );
     }
 
     #[test]

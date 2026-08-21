@@ -181,6 +181,16 @@ impl Drop for TerminalSession {
 /// interactive Enter did, a queued `/goal ship it` was sent to the model
 /// as literal text once the turn it was waiting on finished.
 fn prepare_prompt(app: &mut App, text: String) -> Option<String> {
+    if let Some(("compact", args)) = parse_slash_invocation(&text) {
+        if args.is_empty() {
+            app.compact_requested = true;
+            app.set_notice("compaction starting", NoticeLevel::Info);
+        } else {
+            app.input = InputBuffer::from(text.as_str());
+            app.set_notice("usage: /compact", NoticeLevel::Warning);
+        }
+        return None;
+    }
     if let Some(("goal", goal_text)) = parse_slash_invocation(&text) {
         if goal_text.is_empty() {
             match &app.goal {
@@ -451,6 +461,13 @@ fn apply_event_intents(
 
 /// Rounds after which goal mode gives up (a budget, unlike the
 /// runaway-loop iteration guard).
+const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
+    ("goal", "work until the goal is achieved (evidence-based)"),
+    (
+        "compact",
+        "compact the session now and show its handover summary",
+    ),
+];
 const MAX_GOAL_ROUNDS: u32 = 25;
 const GOAL_SENTINEL: &str = "GOAL_ACHIEVED";
 
@@ -571,7 +588,16 @@ fn resolve_slash(app: &App, name: &str, args: &str) -> SlashResolution {
         return SlashResolution::Skill(skill_invocation_prompt(name, args));
     }
     let mut inventory = app.slash_inventory();
-    inventory.push(("goal".into(), String::new()));
+    inventory.retain(|(name, _)| {
+        !BUILTIN_SLASH_COMMANDS
+            .iter()
+            .any(|(builtin, _)| name == builtin)
+    });
+    inventory.extend(
+        BUILTIN_SLASH_COMMANDS
+            .iter()
+            .map(|(name, description)| ((*name).into(), (*description).into())),
+    );
     SlashResolution::Unknown(close_skill_matches(&inventory, name))
 }
 
@@ -1060,6 +1086,7 @@ fn next_notification(
 enum TurnCompletion {
     Root(Result<TurnOutcome>),
     Routed(Result<ilar::subagent::RouteOutcome>),
+    Compaction(Result<ilar::compaction::ManualCompactionOutcome>),
 }
 
 /// `settle`'s effectful edges over tokio and crossterm — see
@@ -1151,10 +1178,7 @@ impl schedule::Runtime for LoopRuntime<'_> {
         let system_prompt = self.system_prompt.to_string();
         let registry = self.registry.clone();
         let turn_ctx = self.tool_ctx.clone();
-        let mut loop_config = self.loop_config.clone();
-        if std::mem::take(&mut app.compact_requested) {
-            loop_config.force_compaction = true;
-        }
+        let loop_config = self.loop_config.clone();
         *self.ring_on_turn_completion = true;
         let (tx_steer, steer_rx) = ilar::agent::steer_channel();
         *self.steer_tx = Some(tx_steer);
@@ -1226,6 +1250,35 @@ impl schedule::Runtime for LoopRuntime<'_> {
 
     fn next_notification(&mut self, held: bool) -> Option<ilar::subagent::Notification> {
         next_notification(held, self.pending_notification, self.notifications)
+    }
+
+    fn start_compaction(&mut self, app: &mut App) {
+        debug_assert!(self.turn_handle.is_none());
+        app.busy = true;
+        app.status = "compacting session".into();
+        app.clear_transient_notice();
+        app.set_activity(Activity::Thinking);
+
+        let token = CancellationToken::new();
+        *self.cancel = Some(token.clone());
+        let resolver = self.resolver.clone();
+        let store = self.store.clone();
+        let session_id = self.session_id.to_string();
+        let system_prompt = self.system_prompt.to_string();
+        let registry = self.registry.clone();
+        *self.turn_handle = Some(tokio::spawn(async move {
+            let tools = registry.definitions();
+            let result = ilar::compaction::compact_session(
+                resolver.as_ref(),
+                &store,
+                &session_id,
+                Some(&system_prompt),
+                &tools,
+                &token,
+            )
+            .await;
+            TurnCompletion::Compaction(result)
+        }));
     }
 
     fn route(&mut self, app: &mut App, notification: ilar::subagent::Notification) {
@@ -1580,6 +1633,7 @@ async fn run_app(
             completion = Some(match handle.await {
                 Ok(TurnCompletion::Root(result)) => schedule::Completion::Root(result),
                 Ok(TurnCompletion::Routed(result)) => schedule::Completion::Routed(result),
+                Ok(TurnCompletion::Compaction(result)) => schedule::Completion::Compaction(result),
                 Err(error) => schedule::Completion::Crashed(error.to_string()),
             });
         }
@@ -2114,7 +2168,7 @@ async fn run_app(
                             if let Some(cancel) = &cancel {
                                 cancel.cancel();
                                 app.status = "aborting…".into();
-                                app.set_notice("aborting turn…", NoticeLevel::Warning);
+                                app.set_notice("aborting current operation…", NoticeLevel::Warning);
                                 app.set_activity(Activity::Aborting);
                             }
                         } else if !app.input.is_blank() {
