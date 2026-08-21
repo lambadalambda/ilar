@@ -3668,14 +3668,37 @@ mod tests {
             ThemePickerAction::Dismiss
         );
 
+        let last = *theme::ThemeId::ALL.last().unwrap();
         assert_eq!(
             picker.handle_key(KeyCode::End, false),
-            ThemePickerAction::Preview(theme::ThemeId::HighContrast)
+            ThemePickerAction::Preview(last)
         );
         assert_eq!(
             picker.handle_key(KeyCode::Enter, false),
-            ThemePickerAction::Choose(theme::ThemeId::HighContrast)
+            ThemePickerAction::Choose(last)
         );
+
+        // The list is long enough now that typing has to narrow it, and
+        // a query that matches nothing falls back to the whole list
+        // rather than leaving nothing to preview.
+        let mut picker = ThemePicker::new(theme::ThemeId::Terminal);
+        for character in "gruv".chars() {
+            picker.handle_key(KeyCode::Char(character), false);
+        }
+        assert!(
+            picker
+                .matches()
+                .iter()
+                .take(2)
+                .all(|theme| theme.id().starts_with("gruvbox")),
+            "{:?}",
+            picker.matches().iter().map(|t| t.id()).collect::<Vec<_>>()
+        );
+        assert_eq!(picker.selected_theme().id(), "gruvbox-dark");
+        for _ in 0..4 {
+            picker.handle_key(KeyCode::Backspace, false);
+        }
+        assert_eq!(picker.matches().len(), theme::ThemeId::ALL.len());
 
         let mut app = App::new();
         app.theme_picker = Some(ThemePicker::new(theme::ThemeId::Terminal));

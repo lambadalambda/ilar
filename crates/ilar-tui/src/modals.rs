@@ -1118,6 +1118,11 @@ pub(crate) enum ThemePickerAction {
 
 pub(crate) struct ThemePicker {
     pub(crate) active_theme: theme::ThemeId,
+    pub(crate) query: String,
+    /// Themes matching the query, best first. Never empty while the query
+    /// matches nothing — it falls back to the full list, because an empty
+    /// picker has nothing to preview.
+    matches: Vec<theme::ThemeId>,
     selected: usize,
     pub(crate) error: Option<String>,
 }
@@ -1130,24 +1135,63 @@ impl ThemePicker {
             .unwrap_or_default();
         Self {
             active_theme,
+            query: String::new(),
+            matches: theme::ThemeId::ALL.to_vec(),
             selected,
             error: None,
         }
     }
 
+    pub(crate) fn matches(&self) -> &[theme::ThemeId] {
+        &self.matches
+    }
+
+    pub(crate) fn selected_index(&self) -> usize {
+        self.selected.min(self.matches.len().saturating_sub(1))
+    }
+
     pub(crate) fn selected_theme(&self) -> theme::ThemeId {
-        theme::ThemeId::ALL[self.selected.min(theme::ThemeId::ALL.len() - 1)]
+        self.matches
+            .get(self.selected_index())
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Rank by label and id together, so both "Tokyo" and "gruvbox-light"
+    /// find their theme. The active theme stays selected if it survives.
+    fn refresh(&mut self) -> ThemePickerAction {
+        let previous = self.selected_theme();
+        let mut ranked: Vec<(i64, theme::ThemeId)> = theme::ThemeId::ALL
+            .into_iter()
+            .filter_map(|candidate| {
+                let haystack = format!("{} {}", candidate.label(), candidate.id());
+                fuzzy_score(&self.query, &haystack).map(|score| (score, candidate))
+            })
+            .collect();
+        ranked.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+        self.matches = if ranked.is_empty() {
+            theme::ThemeId::ALL.to_vec()
+        } else {
+            ranked.into_iter().map(|(_, theme)| theme).collect()
+        };
+        self.selected = self
+            .matches
+            .iter()
+            .position(|candidate| *candidate == previous)
+            .unwrap_or(0);
+        self.error = None;
+        ThemePickerAction::Preview(self.selected_theme())
     }
 
     pub(crate) fn select(&mut self, selected: usize) -> ThemePickerAction {
-        self.selected = selected.min(theme::ThemeId::ALL.len() - 1);
+        self.selected = selected.min(self.matches.len().saturating_sub(1));
         self.error = None;
         ThemePickerAction::Preview(self.selected_theme())
     }
 
     pub(crate) fn move_selection(&mut self, delta: isize) -> ThemePickerAction {
-        let count = theme::ThemeId::ALL.len() as isize;
-        self.selected = (self.selected as isize + delta).rem_euclid(count) as usize;
+        let count = self.matches.len().max(1) as isize;
+        self.selected = (self.selected_index() as isize + delta).rem_euclid(count) as usize;
         self.error = None;
         ThemePickerAction::Preview(self.selected_theme())
     }
@@ -1160,7 +1204,15 @@ impl ThemePicker {
             (KeyCode::Esc, _) => ThemePickerAction::Dismiss,
             (KeyCode::Enter, _) => ThemePickerAction::Choose(self.selected_theme()),
             (KeyCode::Home, _) => self.select(0),
-            (KeyCode::End, _) => self.select(theme::ThemeId::ALL.len() - 1),
+            (KeyCode::End, _) => self.select(self.matches.len().saturating_sub(1)),
+            (KeyCode::Backspace, _) => {
+                self.query.pop();
+                self.refresh()
+            }
+            (KeyCode::Char(character), false) if !character.is_control() => {
+                self.query.push(character);
+                self.refresh()
+            }
             _ => ThemePickerAction::Preview(self.selected_theme()),
         }
     }
@@ -1394,7 +1446,7 @@ pub(crate) fn render_variant_picker(frame: &mut Frame, picker: &VariantPicker) -
 }
 
 pub(crate) fn render_theme_picker(frame: &mut Frame, picker: &ThemePicker) -> ModalHit {
-    let area = centered_rect(frame.area(), 58, 12);
+    let area = centered_rect(frame.area(), 58, 20);
     frame.render_widget(Clear, area);
 
     let footer = if area.width < 32 {
@@ -1402,7 +1454,7 @@ pub(crate) fn render_theme_picker(frame: &mut Frame, picker: &ThemePicker) -> Mo
     } else if area.width < 48 {
         " Enter save · Esc undo "
     } else {
-        " ↑↓ preview · Enter save · Esc undo · saved "
+        " type to filter · ↑↓ preview · Enter save · Esc undo "
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -1416,40 +1468,49 @@ pub(crate) fn render_theme_picker(frame: &mut Frame, picker: &ThemePicker) -> Mo
         return ModalHit::default();
     }
 
-    let selected = picker.selected.min(theme::ThemeId::ALL.len() - 1);
+    let choices = picker.matches();
+    let selected = picker.selected_index();
     let mut lines = Vec::new();
     if let Some(error) = &picker.error {
         lines.push(Line::styled(
             truncate_display(error, inner.width as usize, Truncation::Right),
             Style::default().fg(ERROR),
         ));
-    } else {
+    } else if picker.query.is_empty() {
         lines.push(Line::styled(
             truncate_display(
-                theme::ThemeId::ALL[selected].description(),
+                picker.selected_theme().description(),
                 inner.width as usize,
                 Truncation::Right,
             ),
             Style::default().fg(MUTED),
         ));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled("/", Style::default().fg(theme::MARKUP)),
+            Span::styled(
+                truncate_display(
+                    &picker.query,
+                    (inner.width as usize).saturating_sub(1),
+                    Truncation::Right,
+                ),
+                Style::default().fg(theme::PRIMARY),
+            ),
+        ]));
     }
 
-    let show_sample = inner.height as usize > theme::ThemeId::ALL.len() + 1;
+    let show_sample = inner.height as usize > choices.len() + 1;
     let row_count = inner
         .height
         .saturating_sub(lines.len() as u16)
-        .saturating_sub(u16::from(show_sample)) as usize;
+        .saturating_sub(u16::from(show_sample))
+        .max(1) as usize;
     let start = selected
         .saturating_add(1)
         .saturating_sub(row_count)
-        .min(theme::ThemeId::ALL.len().saturating_sub(row_count));
+        .min(choices.len().saturating_sub(row_count));
     let mut rows: Vec<Option<usize>> = vec![None; lines.len()];
-    for (index, choice) in theme::ThemeId::ALL
-        .iter()
-        .enumerate()
-        .skip(start)
-        .take(row_count)
-    {
+    for (index, choice) in choices.iter().enumerate().skip(start).take(row_count) {
         rows.push(Some(index));
         let active = *choice == picker.active_theme;
         let marker = if index == selected { "> " } else { "  " };

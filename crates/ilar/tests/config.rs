@@ -28,7 +28,9 @@ fn defaults_when_no_config_exists() {
         .unwrap();
     assert_eq!(config.general.model, "zai/glm-4.7");
     assert_eq!(config.general.reasoning, None);
-    assert_eq!(config.general.theme, "terminal");
+    // A tuned dark theme by default; `terminal` is opt-in for people who
+    // want their own terminal colours instead.
+    assert_eq!(config.general.theme, "carbon");
     assert_eq!(config.providers.len(), 2); // openai + zai defaults
     assert!(config.providers.contains_key("zai"));
     assert_eq!(

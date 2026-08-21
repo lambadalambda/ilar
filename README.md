@@ -103,7 +103,7 @@ by project files.
 | --- | --- | --- |
 | `general.model` | `zai/glm-4.7` | Default `provider/model-id`. |
 | `general.reasoning` | provider default | Default reasoning variant for new sessions (for example `low`, `high`, or `max`; model-specific). Set `default` in a higher config layer to clear an inherited value. |
-| `general.theme` | `terminal` | `terminal`, `carbon`, `parchment`, `frost`, or `high-contrast`. |
+| `general.theme` | `carbon` | Authored: `carbon`, `parchment`, `frost`, `high-contrast`, `terminal` (adapts to your terminal, so no surfaces of its own). Ported: `monokai`, `dracula`, `gruvbox-dark`, `gruvbox-light`, `solarized-dark`, `solarized-light`, `tokyo-night`, `catppuccin-mocha`, `one-dark`, `rose-pine`. F3 opens the picker; type to filter. |
 | `providers.openai.base_url` | API or ChatGPT endpoint | Override the Responses API base URL selected by `auth`. |
 | `providers.openai.api_key` | `ILAR_OPENAI_API_KEY` | OpenAI API key. |
 | `providers.openai.auth` | `api_key` | `api_key` or `chatgpt`; see [OpenAI ChatGPT OAuth](#openai-chatgpt-oauth). |

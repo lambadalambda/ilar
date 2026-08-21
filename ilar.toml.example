@@ -4,8 +4,12 @@ model = "zai/glm-4.7"
 # Optional model-specific reasoning level, e.g. low/high/max for zai/glm-5.3.
 # A project config can set "default" to clear an inherited user value.
 # reasoning = "high"
-# User-scoped TUI theme: terminal, carbon, parchment, frost, or high-contrast
-theme = "terminal"
+# User-scoped TUI theme. Authored: carbon (default), parchment, frost,
+# high-contrast, and terminal (adapts to your own terminal colours, and so
+# has no surfaces of its own). Ported: monokai, dracula, gruvbox-dark,
+# gruvbox-light, solarized-dark, solarized-light, tokyo-night,
+# catppuccin-mocha, one-dark, rose-pine.
+theme = "carbon"
 
 [providers.openai]
 # api_key from ILAR_OPENAI_API_KEY (env) by default; can be set here.

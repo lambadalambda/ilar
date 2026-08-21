@@ -349,7 +349,9 @@ impl Config {
             general: GeneralConfigResolved {
                 model,
                 reasoning,
-                theme: user_theme.unwrap_or_else(|| "terminal".into()),
+                // A tuned dark theme, not the adaptive one: the surfaces and
+                // damped chrome it encodes are what a first run should show.
+                theme: user_theme.unwrap_or_else(|| "carbon".into()),
             },
             providers,
             agent: AgentConfig {
@@ -509,7 +511,7 @@ impl Config {
             general: GeneralConfigResolved {
                 model: "zai/glm-4.7".into(),
                 reasoning: None,
-                theme: "terminal".into(),
+                theme: "carbon".into(),
             },
             agent: AgentConfig::default(),
             providers,
