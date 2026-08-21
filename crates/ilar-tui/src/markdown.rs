@@ -17,13 +17,16 @@ struct MarkdownTable {
     rows: Vec<Vec<String>>,
 }
 
+/// Code speaks its own language. Borrowing the status colours meant a
+/// string literal and a passing tool call were the same green, so a fence
+/// read as more status rather than as code.
 fn highlight_color(class: crate::highlight::Class) -> ratatui::style::Color {
     use crate::highlight::Class;
     match class {
-        Class::Keyword => theme::MARKUP,
-        Class::String => theme::SUCCESS,
-        Class::Comment => theme::MUTED,
-        Class::Number => theme::REASONING,
+        Class::Keyword => theme::SYN_KEYWORD,
+        Class::String => theme::SYN_STRING,
+        Class::Comment => theme::SYN_COMMENT,
+        Class::Number => theme::SYN_NUMBER,
         Class::Plain => theme::PRIMARY,
     }
 }
@@ -767,7 +770,7 @@ mod tests {
         assert_eq!(rendered[3], "│     println!(\"hi\");");
         assert_eq!(lines[1].spans[0].style.fg, Some(theme::CODE));
         // `fn` is highlighted as a keyword; the rest of the signature is plain.
-        assert_eq!(lines[1].spans[1].style.fg, Some(theme::MARKUP));
+        assert_eq!(lines[1].spans[1].style.fg, Some(theme::SYN_KEYWORD));
         assert_eq!(lines[1].spans[1].content, "fn");
         assert_eq!(lines[1].spans[2].style.fg, Some(theme::PRIMARY));
     }
@@ -784,9 +787,11 @@ mod tests {
                 .style
                 .fg
         };
-        assert_eq!(span_for("let"), Some(theme::MARKUP));
-        assert_eq!(span_for("\"text\""), Some(theme::SUCCESS));
-        assert_eq!(span_for("// note"), Some(theme::MUTED));
+        // Syntax classes resolve per theme and never borrow a status
+        // colour's slot, so a string literal is not the success green.
+        assert_eq!(span_for("let"), Some(theme::SYN_KEYWORD));
+        assert_eq!(span_for("\"text\""), Some(theme::SYN_STRING));
+        assert_eq!(span_for("// note"), Some(theme::SYN_COMMENT));
         assert_eq!(text(code), "│ let s = \"text\"; // note");
 
         // Unknown language: single plain span as before.
@@ -797,7 +802,7 @@ mod tests {
         // Streaming: an unclosed fence still renders highlighted lines.
         let streaming = render("```rust\nlet x = 1;");
         assert_eq!(text(&streaming[1]), "│ let x = 1;");
-        assert_eq!(streaming[1].spans[1].style.fg, Some(theme::MARKUP));
+        assert_eq!(streaming[1].spans[1].style.fg, Some(theme::SYN_KEYWORD));
     }
 
     #[test]
