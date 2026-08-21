@@ -7,6 +7,6 @@ pub use event::{
     LOOP_EVENT_CAPACITY, LoopEvent, LoopEventReceiver, LoopEventSender, loop_event_channel,
 };
 pub use turn::{
-    LoopConfig, SteerReceiver, SteerSender, TurnOutcome, resume_pending_question, run_turn,
-    steer_channel, summarize_task_input, summarize_tool_input, tool_argument_detail,
+    LoopConfig, SteerReceiver, SteerSender, TurnOutcome, resume_pending_question, resume_turn,
+    run_turn, steer_channel, summarize_task_input, summarize_tool_input, tool_argument_detail,
 };

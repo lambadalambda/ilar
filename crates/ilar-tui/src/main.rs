@@ -312,14 +312,19 @@ fn apply_command_overrides(
     Some(expanded)
 }
 
-/// Apply one intent to the app. Returns the prompt when the intent
-/// starts a turn — spawning needs the runtime, everything else does
-/// not, and keeping the split here is what makes the wiring testable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TurnRequest {
+    New(String),
+    Resume,
+}
+
+/// Apply one intent to the app. Returns the request when the intent starts a
+/// turn — spawning needs the runtime, everything else does not.
 fn apply_intent(
     app: &mut App,
     intent: Intent,
     steer: Option<&ilar::agent::SteerSender>,
-) -> Option<String> {
+) -> Option<TurnRequest> {
     match intent {
         Intent::Notice(text, level) => {
             app.set_notice(text, level);
@@ -393,19 +398,31 @@ fn apply_intent(
             let next = (!app.queued_messages.is_empty()).then(|| app.queued_messages.remove(0))?;
             apply_intent(app, Intent::StartTurn(next), steer)
         }
+        Intent::ResumeTurn => {
+            app.retry_available = false;
+            // The failed turn already committed its chain. Keep that retry
+            // disposition even if this resume fails before TurnStarted.
+            app.turn_committed = true;
+            app.clear_notice();
+            app.follow_tail = true;
+            app.busy = true;
+            app.status = "thinking".into();
+            app.set_activity(Activity::Thinking);
+            Some(TurnRequest::Resume)
+        }
         Intent::StartTurn(text) => {
-            // Recorded before expansion, so a retry replays what the
-            // user actually typed.
-            app.last_prompt = Some(text.clone());
+            // Starting a new turn preserves the raw text only in prompt history;
+            // failed-turn resume uses persisted conversation state.
             let text = prepare_prompt(app, text)?;
             app.retry_available = false;
+            app.turn_committed = false;
             app.clear_notice();
             app.push_transcript_line(Line_::User(text.clone()));
             app.follow_tail = true;
             app.busy = true;
             app.status = "thinking".into();
             app.set_activity(Activity::Thinking);
-            Some(text)
+            Some(TurnRequest::New(text))
         }
     }
 }
@@ -423,10 +440,10 @@ fn apply_event_intents(
 ) {
     for intent in decided {
         match intent {
-            Intent::StartTurn(_) => deferred.push(intent),
+            Intent::StartTurn(_) | Intent::ResumeTurn => deferred.push(intent),
             other => {
                 let started = apply_intent(app, other, steer);
-                debug_assert!(started.is_none(), "only StartTurn yields a prompt");
+                debug_assert!(started.is_none(), "only turn intents yield a request");
             }
         }
     }
@@ -1084,7 +1101,7 @@ impl schedule::Runtime for LoopRuntime<'_> {
     }
 
     fn perform(&mut self, app: &mut App, intent: Intent) -> Result<()> {
-        let Some(text) = apply_intent(app, intent, self.steer_tx.as_ref()) else {
+        let Some(request) = apply_intent(app, intent, self.steer_tx.as_ref()) else {
             return Ok(());
         };
         // Every push site is guarded against starting a turn while
@@ -1099,7 +1116,9 @@ impl schedule::Runtime for LoopRuntime<'_> {
         // prepare_prompt; the provider check happens in the adopt.
         // On failure the turn still runs — its prompt is already in
         // the transcript — just under the session's own model.
-        if let Some((model, variant)) = app.pending_model_override.take() {
+        if matches!(&request, TurnRequest::New(_))
+            && let Some((model, variant)) = app.pending_model_override.take()
+        {
             let target = model.unwrap_or_else(|| app.current_model.clone());
             let revert = (app.current_model.clone(), app.current_variant.clone());
             match adopt_model_selection(
@@ -1140,22 +1159,40 @@ impl schedule::Runtime for LoopRuntime<'_> {
         let (tx_steer, steer_rx) = ilar::agent::steer_channel();
         *self.steer_tx = Some(tx_steer);
         *self.turn_handle = Some(tokio::spawn(async move {
-            TurnCompletion::Root(
-                run_turn(
-                    resolver.as_ref(),
-                    &registry,
-                    &store,
-                    &session_id,
-                    &text,
-                    Some(&system_prompt),
-                    loop_config,
-                    tx,
-                    token,
-                    turn_ctx,
-                    Some(steer_rx),
-                )
-                .await,
-            )
+            let result = match request {
+                TurnRequest::New(text) => {
+                    run_turn(
+                        resolver.as_ref(),
+                        &registry,
+                        &store,
+                        &session_id,
+                        &text,
+                        Some(&system_prompt),
+                        loop_config,
+                        tx,
+                        token,
+                        turn_ctx,
+                        Some(steer_rx),
+                    )
+                    .await
+                }
+                TurnRequest::Resume => {
+                    ilar::agent::resume_turn(
+                        resolver.as_ref(),
+                        &registry,
+                        &store,
+                        &session_id,
+                        Some(&system_prompt),
+                        loop_config,
+                        tx,
+                        token,
+                        turn_ctx,
+                        Some(steer_rx),
+                    )
+                    .await
+                }
+            };
+            TurnCompletion::Root(result)
         }));
         Ok(())
     }
@@ -1216,6 +1253,8 @@ impl schedule::Runtime for LoopRuntime<'_> {
         let token = CancellationToken::new();
         *self.cancel = Some(token.clone());
         app.busy = true;
+        app.turn_committed = false;
+        app.retry_available = false;
         app.status = "thinking".into();
         app.clear_transient_notice();
         app.set_activity(Activity::Thinking);
@@ -1644,6 +1683,8 @@ async fn run_app(
                                     let _ = reply.send(response);
                                     pending_question_id = None;
                                 } else if pending_question_id.take().is_some() {
+                                    app.turn_committed = false;
+                                    app.retry_available = false;
                                     let (tx, rx) = loop_event_channel(LOOP_EVENT_CAPACITY);
                                     events_rx = Some(rx);
                                     let token = CancellationToken::new();
@@ -1742,7 +1783,7 @@ async fn run_app(
                                         &steer_tx,
                                         notifications_paused,
                                     );
-                                    let decided = retry_intents(&state, app.last_prompt.as_deref());
+                                    let decided = retry_intents(&state);
                                     if decided.iter().any(|i| matches!(i, Intent::StartTurn(_))) {
                                         app.pending_manager = None;
                                     }
@@ -2131,7 +2172,7 @@ async fn run_app(
                             &steer_tx,
                             notifications_paused,
                         );
-                        intents.extend(retry_intents(&state, app.last_prompt.as_deref()));
+                        intents.extend(retry_intents(&state));
                     }
                     // Inline slash completion: navigate/accept while the
                     // command name is being typed.

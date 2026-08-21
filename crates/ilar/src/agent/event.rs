@@ -55,6 +55,12 @@ pub enum LoopEvent {
     Steered {
         text: String,
     },
+    ProviderRetry {
+        attempt: usize,
+        max_retries: usize,
+        delay: std::time::Duration,
+        error: String,
+    },
     /// One provider call completed (stop reason + usage).
     StepComplete {
         stop_reason: String,

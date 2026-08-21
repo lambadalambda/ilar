@@ -342,7 +342,9 @@ pub(crate) async fn compact_if_needed_locked(
             ProviderEvent::TurnComplete { stop_reason, .. } => {
                 anyhow::bail!("compaction ended with invalid stop reason {stop_reason:?}")
             }
-            ProviderEvent::Error(e) => anyhow::bail!("compaction call failed: {e}"),
+            ProviderEvent::Error(e) | ProviderEvent::RetryableError(e) => {
+                anyhow::bail!("compaction call failed: {e}")
+            }
             _ => {}
         }
     }

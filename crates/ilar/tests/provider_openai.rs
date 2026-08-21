@@ -291,7 +291,7 @@ async fn error_fixture_maps_to_error_event() {
     let events = drain(provider(base).stream(request_with_tool()).unwrap()).await;
     assert_eq!(events.len(), 1);
     assert!(matches!(&events[0],
-        ProviderEvent::Error(msg) if msg.contains("overloaded")));
+        ProviderEvent::RetryableError(msg) if msg.contains("overloaded")));
 }
 
 #[tokio::test]
@@ -306,7 +306,7 @@ async fn top_level_nested_stream_error_exposes_its_message() {
 
     assert!(matches!(
         &events[0],
-        ProviderEvent::Error(error) if error.contains("Please retry shortly")
+        ProviderEvent::RetryableError(error) if error.contains("Please retry shortly")
     ));
 }
 
@@ -350,7 +350,7 @@ async fn http_error_body_is_bounded_and_redacted() {
 
     let events = drain(provider.stream(request_with_tool()).unwrap()).await;
 
-    let ProviderEvent::Error(error) = &events[0] else {
+    let ProviderEvent::RetryableError(error) = &events[0] else {
         panic!("expected HTTP error: {events:?}");
     };
     assert!(

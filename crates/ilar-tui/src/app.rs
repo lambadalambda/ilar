@@ -95,8 +95,9 @@ pub(crate) struct App {
     /// last completed window's bytes/sec.
     stream_rate_anchor: Option<(std::time::Instant, u64)>,
     stream_rate: Option<f64>,
-    /// Last submitted prompt, offered for Ctrl-R retry after a turn error.
-    pub(crate) last_prompt: Option<String>,
+    /// The active root turn has appended everything needed to resume from
+    /// session history. Set by `TurnStarted`, cleared before each spawn.
+    pub(crate) turn_committed: bool,
     pub(crate) retry_available: bool,
     /// Messages submitted during an active turn, auto-sent in order when
     /// the turn completes.
@@ -211,7 +212,7 @@ impl App {
             stream_step_base: 0,
             stream_rate_anchor: None,
             stream_rate: None,
-            last_prompt: None,
+            turn_committed: false,
             retry_available: false,
             queued_messages: Vec::new(),
             pending_steers: Vec::new(),
@@ -520,6 +521,13 @@ impl App {
     }
 
     pub(crate) fn push_loop_event(&mut self, event: &LoopEvent) {
+        if !matches!(event, LoopEvent::ProviderRetry { .. })
+            && self.notice.as_ref().is_some_and(|notice| {
+                !notice.persistent && notice.text.starts_with("provider retry:")
+            })
+        {
+            self.notice = None;
+        }
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
         match event {
             // Shown when the loop delivers it, not when it was typed —
@@ -532,6 +540,7 @@ impl App {
                 self.follow_tail = true;
             }
             LoopEvent::TurnStarted => {
+                self.turn_committed = true;
                 self.clear_transient_notice();
                 self.status = "thinking…".into();
                 self.stream_received = 0;
@@ -846,6 +855,19 @@ impl App {
                     self.set_activity(Activity::Thinking);
                 }
             }
+            LoopEvent::ProviderRetry {
+                attempt,
+                max_retries,
+                delay,
+                error,
+            } => {
+                self.status = format!("retrying provider ({attempt}/{max_retries})");
+                self.set_activity(Activity::Thinking);
+                self.set_notice(
+                    format!("provider retry: {error} — in {delay:?}"),
+                    NoticeLevel::Warning,
+                );
+            }
             LoopEvent::StepComplete { stop_reason, usage } => {
                 self.stream_step_base = self.stream_received;
                 self.next_tool_group = self.next_tool_group.saturating_add(1);
@@ -970,15 +992,16 @@ impl App {
             }
             let mut message = format!("error: {error:#}");
             self.lines.push(Line_::System(message.clone()));
-            if self.last_prompt.is_some() {
+            if self.turn_committed {
                 self.retry_available = true;
-                message.push_str(" — Ctrl-R to retry");
+                message.push_str(" — Ctrl-R to resume");
             }
             self.set_notice(&message, NoticeLevel::Error);
             self.status = "error".into();
             self.set_activity(Activity::Error);
         }
         self.busy = false;
+        self.turn_committed = false;
     }
 
     pub(crate) fn pending_items(&self) -> Vec<PendingItem> {
@@ -1052,10 +1075,7 @@ impl App {
                             format!("services: {} running", self.services_running)
                         }
                     }
-                    PendingItem::Retry => format!(
-                        "retry: {}",
-                        self.last_prompt.as_deref().unwrap_or("").replace('\n', " ")
-                    ),
+                    PendingItem::Retry => "resume failed turn from current context".into(),
                 }
             })
             .collect();
@@ -3144,7 +3164,6 @@ mod tests {
         app.goal = Some(("recover the engine".into(), 2));
         app.background_running = 1;
         app.retry_available = true;
-        app.last_prompt = Some("previous prompt".into());
         app.pending_manager = Some(PendingManager::default());
         assert_eq!(app.pending_items().len(), 5);
 
@@ -3275,22 +3294,45 @@ mod tests {
     }
 
     #[test]
-    fn turn_errors_offer_retry_only_with_a_known_prompt() {
+    fn turn_errors_offer_retry_only_after_session_state_is_committed() {
         let mut app = App::new();
         app.finish_turn(Err(anyhow::anyhow!("api down")));
-        assert!(!app.retry_available, "no prompt, nothing to retry");
+        assert!(!app.retry_available, "nothing was committed to resume");
 
         let mut app = App::new();
-        app.last_prompt = Some("do the thing".into());
+        app.push_loop_event(&LoopEvent::TurnStarted);
         app.finish_turn(Err(anyhow::anyhow!("api down")));
         assert!(app.retry_available);
         let (notice, _) = app.operational_notice().expect("error notice");
-        assert!(notice.contains("Ctrl-R to retry"), "{notice}");
+        assert!(notice.contains("Ctrl-R to resume"), "{notice}");
 
         // A fresh successful turn clears nothing prematurely.
         app.retry_available = false;
         app.finish_turn(Ok(TurnOutcome::Completed));
         assert!(!app.retry_available);
+    }
+
+    #[test]
+    fn provider_retry_event_shows_backoff_activity() {
+        let mut app = App::new();
+        app.push_loop_event(&LoopEvent::ProviderRetry {
+            attempt: 2,
+            max_retries: 3,
+            delay: std::time::Duration::from_secs(1),
+            error: "overloaded".into(),
+        });
+
+        assert!(
+            app.status.contains("retrying provider (2/3)"),
+            "{}",
+            app.status
+        );
+        let (notice, _) = app.operational_notice().expect("retry notice");
+        assert!(notice.contains("overloaded"), "{notice}");
+        assert!(notice.contains("1s"), "{notice}");
+
+        app.push_loop_event(&LoopEvent::TextDelta("recovered".into()));
+        assert!(app.operational_notice().is_none());
     }
 
     #[test]
@@ -5664,10 +5706,9 @@ mod tests {
 
         // Sending from the queue takes the head and becomes a turn.
         let sent = apply_intent(&mut app, Intent::SendQueued, None);
-        assert_eq!(sent.as_deref(), Some("first"));
+        assert_eq!(sent, Some(crate::TurnRequest::New("first".into())));
         assert_eq!(app.queued_messages, vec!["second"]);
         assert!(app.busy, "a started turn marks the app busy");
-        assert_eq!(app.last_prompt.as_deref(), Some("first"));
         assert!(
             matches!(app.lines.last(), Some(Line_::User(text)) if text == "first"),
             "the prompt is echoed into the transcript"
@@ -5689,6 +5730,23 @@ mod tests {
         app.queued_messages = vec!["again".into()];
         assert!(apply_intent(&mut app, Intent::SendQueued, None).is_some());
         assert!(!app.retry_available);
+    }
+
+    #[test]
+    fn resume_intent_starts_work_without_replaying_ui_prompt() {
+        use crate::{Intent, TurnRequest, apply_intent};
+
+        let mut app = App::new();
+        app.retry_available = true;
+        let lines_before = app.lines.len();
+
+        let request = apply_intent(&mut app, Intent::ResumeTurn, None);
+
+        assert_eq!(request, Some(TurnRequest::Resume));
+        assert_eq!(app.lines.len(), lines_before, "resume added a user line");
+        assert!(!app.retry_available);
+        assert!(app.turn_committed);
+        assert!(app.busy);
     }
 
     /// End to end over the decision layer: a finished turn with a queued
@@ -5714,7 +5772,10 @@ mod tests {
         for intent in intents {
             started = started.or(apply_intent(&mut app, intent, None));
         }
-        assert_eq!(started.as_deref(), Some("do the next thing"));
+        assert_eq!(
+            started,
+            Some(crate::TurnRequest::New("do the next thing".into()))
+        );
         assert!(app.queued_messages.is_empty());
     }
 
@@ -5737,20 +5798,21 @@ mod tests {
             "the goal should be armed, not sent as text: {:?}",
             app.goal
         );
-        assert_ne!(sent, "/goal ship the parser", "sent verbatim");
+        assert!(
+            !matches!(&sent, crate::TurnRequest::New(text) if text == "/goal ship the parser"),
+            "sent verbatim"
+        );
         assert!(
             app.lines
                 .iter()
                 .any(|line| matches!(line, Line_::System(text) if text.contains("goal armed"))),
             "arming should be announced"
         );
-        // Retry replays what was typed, not the expansion.
-        assert_eq!(app.last_prompt.as_deref(), Some("/goal ship the parser"));
 
         // Same for a queued command.
         app.queued_messages = vec!["/greptile PR 41".into()];
         let sent = apply_intent(&mut app, Intent::SendQueued, None).expect("the command body");
-        assert_eq!(sent, "Review PR 41");
+        assert_eq!(sent, crate::TurnRequest::New("Review PR 41".into()));
     }
 
     /// A steer reaches the channel while it lives and falls back to the
@@ -5850,7 +5912,7 @@ mod tests {
         for intent in after_turn(&idle, true, None, false, 25) {
             started = started.or(apply_intent(&mut app, intent, None));
         }
-        assert_eq!(started.as_deref(), Some("next thing"));
+        assert_eq!(started, Some(crate::TurnRequest::New("next thing".into())));
         assert!(app.queued_messages.is_empty());
     }
 }

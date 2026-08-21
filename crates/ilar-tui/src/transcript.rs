@@ -663,7 +663,7 @@ fn apply_child_loop_event(lines: &mut Vec<Line_>, group: &mut u64, scope: &str, 
                 mark_running_tools_failed(lines);
             }
         }
-        LoopEvent::TurnStarted | LoopEvent::Compacted { .. } => {}
+        LoopEvent::TurnStarted | LoopEvent::ProviderRetry { .. } | LoopEvent::Compacted { .. } => {}
     }
 }
 

@@ -343,7 +343,7 @@ async fn error_fixture_maps_to_error_event() {
     let (base, _server) = http_server(fixture("zai_error.sse"));
     let events = drain(anthropic_provider(base).stream(request()).unwrap()).await;
     assert_eq!(events.len(), 1);
-    assert!(matches!(&events[0], ProviderEvent::Error(m) if m.contains("Overloaded")));
+    assert!(matches!(&events[0], ProviderEvent::RetryableError(m) if m.contains("Overloaded")));
 }
 
 #[tokio::test]
@@ -354,7 +354,7 @@ async fn http_error_body_is_bounded_and_redacted() {
 
     let events = drain(provider.stream(request()).unwrap()).await;
 
-    let ProviderEvent::Error(error) = &events[0] else {
+    let ProviderEvent::RetryableError(error) = &events[0] else {
         panic!("expected HTTP error: {events:?}");
     };
     assert!(

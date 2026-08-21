@@ -413,7 +413,7 @@ impl Provider for ZaiProvider {
             let response = http
                 .execute(request)
                 .await
-                .map_err(|error| error.to_string())?;
+                .map_err(transport::request_error)?;
             Ok(TransportResponse {
                 response,
                 secrets: vec![api_key],
@@ -744,9 +744,7 @@ impl AnthropicMapper {
             }
             "error" => {
                 self.completed = true;
-                vec![ProviderEvent::Error(
-                    super::error_body::stream_error_message(&value),
-                )]
+                vec![super::error_body::stream_error_event(&value)]
             }
             _ => Vec::new(),
         };
@@ -757,7 +755,7 @@ impl AnthropicMapper {
         if self.completed {
             None
         } else {
-            Some(ProviderEvent::Error(
+            Some(ProviderEvent::RetryableError(
                 "stream ended before message_stop".into(),
             ))
         }
@@ -1030,9 +1028,7 @@ impl OpenAiMapper {
         // error chunks rather than terminating the HTTP response).
         if value["error"].is_object() {
             self.completed = true;
-            return Ok(vec![ProviderEvent::Error(
-                super::error_body::stream_error_message(&value),
-            )]);
+            return Ok(vec![super::error_body::stream_error_event(&value)]);
         }
         if let Some(usage) = value["usage"].as_object() {
             merge_usage(&mut self.usage, usage);
@@ -1065,7 +1061,7 @@ impl OpenAiMapper {
                 usage: self.usage,
             })
         } else {
-            Some(ProviderEvent::Error(
+            Some(ProviderEvent::RetryableError(
                 "stream ended before finish_reason".into(),
             ))
         }

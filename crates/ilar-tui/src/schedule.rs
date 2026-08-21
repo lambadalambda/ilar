@@ -334,9 +334,12 @@ mod tests {
         }
 
         fn perform(&mut self, app: &mut App, intent: Intent) -> anyhow::Result<()> {
-            if let Some(text) = crate::apply_intent(app, intent, None) {
+            if let Some(request) = crate::apply_intent(app, intent, None) {
                 self.turn_running = true;
-                self.log.push(format!("start_turn:{text}"));
+                match request {
+                    crate::TurnRequest::New(text) => self.log.push(format!("start_turn:{text}")),
+                    crate::TurnRequest::Resume => self.log.push("resume_turn".into()),
+                }
             }
             Ok(())
         }

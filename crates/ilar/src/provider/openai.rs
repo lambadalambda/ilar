@@ -246,11 +246,11 @@ impl Provider for OpenAIProvider {
                         builder = builder.header("chatgpt-account-id", account);
                     }
                 }
-                let request = builder.build().map_err(|error| error.to_string())?;
+                let request = builder.build().map_err(transport::fatal)?;
                 match http
                     .execute(request)
                     .await
-                    .map_err(|error| error.to_string())
+                    .map_err(transport::request_error)
                 {
                     Ok(response) => {
                         if response.status() == reqwest::StatusCode::UNAUTHORIZED
@@ -275,7 +275,9 @@ impl Provider for OpenAIProvider {
                                     continue;
                                 }
                                 Err(e) => {
-                                    return Err(format!("token refresh failed: {e:#}"));
+                                    return Err(transport::fatal(format!(
+                                        "token refresh failed: {e:#}"
+                                    )));
                                 }
                             }
                         }
@@ -724,9 +726,7 @@ impl TransportEventMapper for EventMapper {
             }
             "response.failed" | "error" => {
                 self.completed = true; // terminal: don't synthesize a second error
-                vec![ProviderEvent::Error(
-                    super::error_body::stream_error_message(&value),
-                )]
+                vec![super::error_body::stream_error_event(&value)]
             }
             _ => Vec::new(),
         };
@@ -739,7 +739,7 @@ impl TransportEventMapper for EventMapper {
         if self.completed {
             None
         } else {
-            Some(ProviderEvent::Error(
+            Some(ProviderEvent::RetryableError(
                 "stream ended before completion".into(),
             ))
         }

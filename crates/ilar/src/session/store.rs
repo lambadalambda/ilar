@@ -1240,6 +1240,28 @@ impl Session {
         &self.events
     }
 
+    /// Whether this id has ever identified a tool call in the canonical
+    /// session, including history omitted from the active compaction window.
+    pub(crate) fn contains_tool_call_id(&self, id: &str) -> std::io::Result<bool> {
+        if self.events.iter().any(|event| {
+            matches!(event, SessionEvent::AssistantMessage { content, .. }
+                if content.iter().any(|block| matches!(block,
+                    ContentBlock::ToolCall { id: call_id, .. } if call_id == id)))
+        }) {
+            return Ok(true);
+        }
+        let Some(checkpoint) = &self.checkpoint else {
+            return Ok(false);
+        };
+        let path = replay_ids_path(
+            &self._writer.replay_index_path,
+            self.session_id(),
+            &checkpoint.generation,
+        );
+        ReplayIdIndex::open(&path, &checkpoint.generation, &checkpoint.id_root)?
+            .contains(&id_record(1, id))
+    }
+
     /// Session metadata (the Meta event), if present.
     pub fn meta(&self) -> Option<&SessionMeta> {
         self.events.iter().find_map(|e| match e {

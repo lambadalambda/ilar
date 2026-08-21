@@ -55,6 +55,8 @@ impl LoopState {
 pub(crate) enum Intent {
     /// Send this as a new turn.
     StartTurn(String),
+    /// Continue a failed turn from its persisted conversation state.
+    ResumeTurn,
     /// Take the head of the queue and send it.
     SendQueued,
     /// Steer the running turn; falls back to the queue when the
@@ -256,18 +258,15 @@ pub(crate) fn paste(state: &LoopState, text: String) -> Vec<Intent> {
     }
 }
 
-/// Retry the last prompt, or explain why not.
-pub(crate) fn retry(state: &LoopState, last_prompt: Option<&str>) -> Vec<Intent> {
+/// Resume the failed turn, or preserve an unsent draft.
+pub(crate) fn retry(state: &LoopState) -> Vec<Intent> {
     if !state.input_blank {
         return vec![Intent::Notice(
-            "input has an unsent draft — send or clear it before retrying".into(),
+            "input has an unsent draft — send or clear it before resuming".into(),
             NoticeLevel::Warning,
         )];
     }
-    match last_prompt {
-        Some(prompt) => vec![Intent::StartTurn(prompt.to_string())],
-        None => Vec::new(),
-    }
+    vec![Intent::ResumeTurn]
 }
 
 /// Whether a background completion may start a turn now. An overlay
@@ -556,19 +555,15 @@ mod tests {
     /// Retry must not overwrite a draft — an unsubmitted one is not in
     /// the history, so it would be unrecoverable.
     #[test]
-    fn retry_declines_on_a_draft_and_resends_otherwise() {
+    fn retry_declines_on_a_draft_and_continues_otherwise() {
         let drafting = LoopState {
             input_blank: false,
             ..idle()
         };
         assert!(matches!(
-            retry(&drafting, Some("previous")).as_slice(),
+            retry(&drafting).as_slice(),
             [Intent::Notice(text, NoticeLevel::Warning)] if text.contains("draft")
         ));
-        assert_eq!(
-            retry(&idle(), Some("previous")),
-            vec![Intent::StartTurn("previous".into())]
-        );
-        assert!(retry(&idle(), None).is_empty());
+        assert_eq!(retry(&idle()), vec![Intent::ResumeTurn]);
     }
 }

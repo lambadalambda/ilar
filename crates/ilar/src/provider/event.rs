@@ -31,7 +31,7 @@ pub enum StopReason {
 /// - tool calls: `ToolCallStarted`, zero+ `ToolCallInputDelta`, exactly one
 ///   `ToolCallCompleted`
 /// - `TurnComplete` is always the last event of a successful call;
-///   `Error` terminates the stream
+///   `Error` or `RetryableError` terminates the stream
 ///
 /// Convention for malformed tool-call arguments (e.g. truncated on
 /// max_output_tokens): emit `ToolCallCompleted` with `input: Value::Null`
@@ -72,9 +72,12 @@ pub enum ProviderEvent {
         stop_reason: StopReason,
         usage: Usage,
     },
-    /// Fatal provider error; stream terminates after this. String message
+    /// Permanent provider error; stream terminates after this. String message
     /// keeps events Clone/PartialEq for tests; impls stringify typed errors.
     Error(String),
+    /// Transient transport, overload, or rate-limit failure. Consumers may
+    /// safely retry the same request when no response content was received.
+    RetryableError(String),
 }
 
 impl ProviderEvent {

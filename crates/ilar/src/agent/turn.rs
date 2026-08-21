@@ -47,6 +47,13 @@ pub struct LoopConfig {
     pub max_iterations: usize,
     /// Number of server-side paused responses that may be reissued.
     pub max_pause_retries: usize,
+    /// Number of transient provider failures retried before surfacing the
+    /// final error. Retries only happen before response content arrives.
+    pub max_provider_retries: usize,
+    /// Initial retry delay. Each subsequent retry doubles this delay.
+    pub provider_retry_base_delay: std::time::Duration,
+    /// Upper bound for any individual exponential-backoff delay.
+    pub provider_retry_max_delay: std::time::Duration,
     /// Context window in tokens; compaction triggers above
     /// `context_limit * compaction_threshold`. None uses the resolver's
     /// model-specific default, or disables compaction if it has none.
@@ -61,6 +68,9 @@ impl Default for LoopConfig {
         Self {
             max_iterations: 1_000,
             max_pause_retries: 3,
+            max_provider_retries: 3,
+            provider_retry_base_delay: std::time::Duration::from_millis(500),
+            provider_retry_max_delay: std::time::Duration::from_secs(30),
             context_limit: None,
             compaction_threshold: 0.85,
             force_compaction: false,
@@ -887,6 +897,37 @@ pub async fn run_turn(
     .await
 }
 
+/// Continue from the session's accumulated transcript without appending a
+/// synthetic user message. Used to resume a provider call after a failed turn.
+#[allow(clippy::too_many_arguments)]
+pub async fn resume_turn(
+    resolver: &dyn ProviderResolver,
+    registry: &ToolRegistry,
+    store: &SessionStore,
+    session_id: &str,
+    system_prompt: Option<&str>,
+    config: LoopConfig,
+    events: LoopEventSender,
+    cancel: CancellationToken,
+    tool_ctx: crate::tools::ToolContext,
+    steer: Option<SteerReceiver>,
+) -> Result<TurnOutcome> {
+    run_turn_inner(
+        resolver,
+        registry,
+        store,
+        session_id,
+        TurnStart::Continue,
+        system_prompt,
+        config,
+        events,
+        cancel,
+        tool_ctx,
+        steer,
+    )
+    .await
+}
+
 /// Answer or cancel the session's pending question and continue without a
 /// synthetic user message.
 #[allow(clippy::too_many_arguments)]
@@ -921,6 +962,7 @@ pub async fn resume_pending_question(
 
 enum TurnStart<'a> {
     User(&'a str),
+    Continue,
     Resume(crate::question::QuestionResponse),
 }
 
@@ -962,6 +1004,19 @@ async fn run_turn_inner(
                 text: user_input.to_string(),
                 ts: Utc::now(),
             })?;
+        }
+        TurnStart::Continue => {
+            if tool_ctx.depth != 0 {
+                anyhow::bail!("only a root agent can resume a failed turn");
+            }
+            if session.pending_question().is_some() {
+                anyhow::bail!(
+                    "session has a pending question; use resume_pending_question before resuming"
+                );
+            }
+            if session.transcript().is_empty() {
+                anyhow::bail!("session has no conversation to resume");
+            }
         }
         TurnStart::Resume(response) => {
             if tool_ctx.depth != 0 {
@@ -1035,6 +1090,22 @@ async fn run_turn_inner(
     let mut continuations = Vec::new();
     let mut continuation_provider: Option<String> = None;
     let mut paused_content = Vec::new();
+    // Provider-generated call ids are globally unique in a session. Keeping
+    // the completed ids reserved prevents a resumed model response from
+    // replaying an already-applied side effect (and keeps JSONL valid).
+    let mut seen_tool_call_ids: std::collections::HashSet<String> = session
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::AssistantMessage { content, .. } => Some(content),
+            _ => None,
+        })
+        .flat_map(|content| content.iter())
+        .filter_map(|block| match block {
+            ContentBlock::ToolCall { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
     // Steers drained at the end of a step, waiting to be appended at the
     // top of the next one.
     let mut pending_steers: Vec<String> = Vec::new();
@@ -1127,154 +1198,223 @@ async fn run_turn_inner(
             options: request_options.clone(),
         };
 
-        let mut stream = provider.as_provider().stream(request)?;
-        let mut acc = StepAccumulator::default();
-        let mut aborted = false;
-        let mut errored: Option<String> = None;
+        let mut provider_retries = 0;
+        let (mut acc, aborted, errored) = loop {
+            let mut stream = provider.as_provider().stream(request.clone())?;
+            let mut acc = StepAccumulator::default();
+            let mut aborted = false;
+            let mut errored: Option<String> = None;
+            let mut retryable_error = false;
+            let mut received_response = false;
 
-        loop {
-            let next = tokio::select! {
-                next = stream.next() => next,
-                _ = cancel.cancelled() => {
-                    aborted = true;
-                    break;
-                }
-            };
-            let Some(event) = next else { break };
-            match event {
-                ProviderEvent::TextDelta(t) => {
-                    events
-                        .publish(LoopEvent::TextDelta(t.clone()), &cancel)
-                        .await;
-                    acc.push_text(t);
-                }
-                ProviderEvent::ThinkingDelta(t) => {
-                    events
-                        .publish(LoopEvent::ThinkingDelta(t.clone()), &cancel)
-                        .await;
-                    acc.push_thinking(t);
-                }
-                ProviderEvent::ThinkingCompleted { signature } => {
-                    acc.complete_thinking(signature);
-                }
-                ProviderEvent::ReasoningSummaryDelta(summary) => {
-                    events
-                        .publish(LoopEvent::ReasoningSummaryDelta(summary.clone()), &cancel)
-                        .await;
-                    acc.push_reasoning_summary(summary);
-                }
-                ProviderEvent::ReasoningSummaryCompleted => {
-                    events
-                        .publish(LoopEvent::ReasoningSummaryCompleted, &cancel)
-                        .await;
-                    acc.complete_reasoning_summary();
-                }
-                ProviderEvent::ReasoningItem { item } => {
-                    acc.push_reasoning(item);
-                }
-                ProviderEvent::ToolCallStarted { id, name } => {
-                    if let Err(error) = acc.start_tool_call(id.clone(), name.clone()) {
-                        errored = Some(error);
+            loop {
+                let next = tokio::select! {
+                    next = stream.next() => next,
+                    _ = cancel.cancelled() => {
+                        aborted = true;
                         break;
                     }
-                    acc.announced_calls.insert(id.clone(), name.clone());
-                    events
-                        .publish(LoopEvent::ToolStarted { id, name }, &cancel)
-                        .await;
+                };
+                let Some(event) = next else { break };
+                if !matches!(
+                    &event,
+                    ProviderEvent::Error(_) | ProviderEvent::RetryableError(_)
+                ) {
+                    received_response = true;
                 }
-                ProviderEvent::ToolCallInputDelta { id, delta } => {
-                    match acc.push_tool_input_delta(&id, &delta) {
-                        Ok(update) => {
-                            events.publish_tool_input_progress(&id, update.received_bytes);
-                            if let Some(arguments) = update.arguments {
-                                events
-                                    .publish(LoopEvent::ToolArguments { id, arguments }, &cancel)
-                                    .await;
-                            }
+                match event {
+                    ProviderEvent::TextDelta(t) => {
+                        events
+                            .publish(LoopEvent::TextDelta(t.clone()), &cancel)
+                            .await;
+                        acc.push_text(t);
+                    }
+                    ProviderEvent::ThinkingDelta(t) => {
+                        events
+                            .publish(LoopEvent::ThinkingDelta(t.clone()), &cancel)
+                            .await;
+                        acc.push_thinking(t);
+                    }
+                    ProviderEvent::ThinkingCompleted { signature } => {
+                        acc.complete_thinking(signature);
+                    }
+                    ProviderEvent::ReasoningSummaryDelta(summary) => {
+                        events
+                            .publish(LoopEvent::ReasoningSummaryDelta(summary.clone()), &cancel)
+                            .await;
+                        acc.push_reasoning_summary(summary);
+                    }
+                    ProviderEvent::ReasoningSummaryCompleted => {
+                        events
+                            .publish(LoopEvent::ReasoningSummaryCompleted, &cancel)
+                            .await;
+                        acc.complete_reasoning_summary();
+                    }
+                    ProviderEvent::ReasoningItem { item } => {
+                        acc.push_reasoning(item);
+                    }
+                    ProviderEvent::ToolCallStarted { id, name } => {
+                        if seen_tool_call_ids.contains(&id) || session.contains_tool_call_id(&id)? {
+                            errored = Some(format!(
+                                "duplicate tool call id {id:?} already exists in this session"
+                            ));
+                            break;
                         }
-                        Err(error) => {
+                        if let Err(error) = acc.start_tool_call(id.clone(), name.clone()) {
                             errored = Some(error);
                             break;
                         }
+                        seen_tool_call_ids.insert(id.clone());
+                        acc.announced_calls.insert(id.clone(), name.clone());
+                        events
+                            .publish(LoopEvent::ToolStarted { id, name }, &cancel)
+                            .await;
                     }
-                }
-                ProviderEvent::ToolCallCompleted { id, name, input } => {
-                    if let Err(error) =
-                        acc.complete_tool_call(id.clone(), name.clone(), input.clone())
-                    {
-                        errored = Some(error);
-                        break;
+                    ProviderEvent::ToolCallInputDelta { id, delta } => {
+                        match acc.push_tool_input_delta(&id, &delta) {
+                            Ok(update) => {
+                                events.publish_tool_input_progress(&id, update.received_bytes);
+                                if let Some(arguments) = update.arguments {
+                                    events
+                                        .publish(
+                                            LoopEvent::ToolArguments { id, arguments },
+                                            &cancel,
+                                        )
+                                        .await;
+                                }
+                            }
+                            Err(error) => {
+                                errored = Some(error);
+                                break;
+                            }
+                        }
                     }
-                    let arguments = summarize_tool_input(&name, &input);
-                    if acc.arguments_changed(&id, &arguments) {
+                    ProviderEvent::ToolCallCompleted { id, name, input } => {
+                        if let Err(error) =
+                            acc.complete_tool_call(id.clone(), name.clone(), input.clone())
+                        {
+                            errored = Some(error);
+                            break;
+                        }
+                        let arguments = summarize_tool_input(&name, &input);
+                        if acc.arguments_changed(&id, &arguments) {
+                            events
+                                .publish(
+                                    LoopEvent::ToolArguments {
+                                        id: id.clone(),
+                                        arguments,
+                                    },
+                                    &cancel,
+                                )
+                                .await;
+                        }
+                        if name == "task"
+                            && let Some((description, agent, model)) = summarize_task_input(&input)
+                        {
+                            events
+                                .publish(
+                                    LoopEvent::SubagentConfigured {
+                                        id: id.clone(),
+                                        description,
+                                        agent,
+                                        model,
+                                    },
+                                    &cancel,
+                                )
+                                .await;
+                        }
                         events
                             .publish(
-                                LoopEvent::ToolArguments {
-                                    id: id.clone(),
-                                    arguments,
+                                LoopEvent::ToolInputComplete {
+                                    id,
+                                    arguments: tool_argument_detail(&name, &input),
                                 },
                                 &cancel,
                             )
                             .await;
                     }
-                    if name == "task"
-                        && let Some((description, agent, model)) = summarize_task_input(&input)
-                    {
-                        events
-                            .publish(
-                                LoopEvent::SubagentConfigured {
-                                    id: id.clone(),
-                                    description,
-                                    agent,
-                                    model,
-                                },
-                                &cancel,
-                            )
-                            .await;
+                    ProviderEvent::ResponseContent { provider, content } => {
+                        if provider.is_empty()
+                            || acc.response_content.is_some()
+                            || !content.is_array()
+                        {
+                            errored = Some("invalid or duplicate provider response content".into());
+                            break;
+                        }
+                        acc.response_content = Some((provider, content));
                     }
-                    events
-                        .publish(
-                            LoopEvent::ToolInputComplete {
-                                id,
-                                arguments: tool_argument_detail(&name, &input),
-                            },
-                            &cancel,
-                        )
-                        .await;
-                }
-                ProviderEvent::ResponseContent { provider, content } => {
-                    if provider.is_empty() || acc.response_content.is_some() || !content.is_array()
-                    {
-                        errored = Some("invalid or duplicate provider response content".into());
+                    ProviderEvent::TurnComplete { stop_reason, usage } => {
+                        acc.stop_reason = Some(stop_reason.clone());
+                        acc.usage = usage;
                         break;
                     }
-                    acc.response_content = Some((provider, content));
-                }
-                ProviderEvent::TurnComplete { stop_reason, usage } => {
-                    acc.stop_reason = Some(stop_reason.clone());
-                    acc.usage = usage;
-                    break;
-                }
-                ProviderEvent::Error(message) => {
-                    errored = Some(message);
-                    break;
+                    ProviderEvent::Error(message) => {
+                        errored = Some(message);
+                        break;
+                    }
+                    ProviderEvent::RetryableError(message) => {
+                        retryable_error = true;
+                        errored = Some(message);
+                        break;
+                    }
                 }
             }
-        }
-        drop(stream); // abort the underlying request
+            drop(stream); // abort the underlying request
 
-        // A stream that ended without TurnComplete or Error is a broken
-        // provider/connection — treat it as an error, not a clean step.
-        let errored = errored
-            .or_else(|| {
-                (acc.stop_reason.is_none() && !aborted)
-                    .then(|| "stream ended before completion".to_string())
-            })
-            .or_else(|| {
-                acc.stop_reason
-                    .as_ref()
-                    .and_then(|stop_reason| acc.validate_terminal(stop_reason).err())
-            });
+            // A stream that ended without TurnComplete or Error is a broken
+            // provider/connection — treat it as a transient error, not a clean step.
+            if errored.is_none() && acc.stop_reason.is_none() && !aborted {
+                retryable_error = true;
+            }
+            let errored = errored
+                .or_else(|| {
+                    (acc.stop_reason.is_none() && !aborted)
+                        .then(|| "stream ended before completion".to_string())
+                })
+                .or_else(|| {
+                    acc.stop_reason
+                        .as_ref()
+                        .and_then(|stop_reason| acc.validate_terminal(stop_reason).err())
+                });
+
+            if retryable_error
+                && !received_response
+                && provider_retries < config.max_provider_retries
+                && let Some(message) = errored.as_ref()
+            {
+                let multiplier = 1_u32
+                    .checked_shl(provider_retries.min(31) as u32)
+                    .unwrap_or(u32::MAX);
+                let delay = config
+                    .provider_retry_base_delay
+                    .saturating_mul(multiplier)
+                    .min(config.provider_retry_max_delay);
+                provider_retries += 1;
+                events
+                    .publish(
+                        LoopEvent::ProviderRetry {
+                            attempt: provider_retries,
+                            max_retries: config.max_provider_retries,
+                            delay,
+                            error: message.clone(),
+                        },
+                        &cancel,
+                    )
+                    .await;
+                tokio::select! {
+                    _ = tokio::time::sleep(delay) => {}
+                    _ = cancel.cancelled() => {
+                        events.publish_terminal(LoopEvent::TurnDone {
+                            outcome: TurnOutcome::Aborted,
+                        });
+                        return Ok(TurnOutcome::Aborted);
+                    }
+                }
+                continue;
+            }
+
+            break (acc, aborted, errored);
+        };
 
         if let Some(message) = errored {
             // Persist the partial step so the UI's already-shown deltas

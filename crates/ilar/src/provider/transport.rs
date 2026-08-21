@@ -27,6 +27,19 @@ pub(super) fn streaming_client() -> reqwest::Client {
         .expect("valid provider HTTP client")
 }
 
+fn retryable_status(status: reqwest::StatusCode) -> bool {
+    matches!(
+        status,
+        reqwest::StatusCode::REQUEST_TIMEOUT
+            | reqwest::StatusCode::CONFLICT
+            | reqwest::StatusCode::TOO_MANY_REQUESTS
+            | reqwest::StatusCode::INTERNAL_SERVER_ERROR
+            | reqwest::StatusCode::BAD_GATEWAY
+            | reqwest::StatusCode::SERVICE_UNAVAILABLE
+            | reqwest::StatusCode::GATEWAY_TIMEOUT
+    )
+}
+
 /// Full error chain — reqwest's Display alone hides the cause ("error
 /// decoding response body" for what is actually a timeout or reset).
 fn error_with_sources(error: &dyn std::error::Error) -> String {
@@ -45,6 +58,27 @@ pub(super) struct TransportResponse {
     pub secrets: Vec<String>,
 }
 
+pub(super) enum TransportError {
+    Retryable(String),
+    Fatal(String),
+}
+
+pub(super) fn retryable(error: impl ToString) -> TransportError {
+    TransportError::Retryable(error.to_string())
+}
+
+pub(super) fn request_error(error: reqwest::Error) -> TransportError {
+    if error.is_connect() || error.is_timeout() || error.is_body() {
+        retryable(error)
+    } else {
+        fatal(error)
+    }
+}
+
+pub(super) fn fatal(error: impl ToString) -> TransportError {
+    TransportError::Fatal(error.to_string())
+}
+
 pub(super) trait EventMapper: Send + 'static {
     fn map(&mut self, data: &str) -> Result<Vec<ProviderEvent>, String>;
     fn finish(&mut self) -> Option<ProviderEvent>;
@@ -52,7 +86,7 @@ pub(super) trait EventMapper: Send + 'static {
 
 pub(super) fn stream<F, M>(send: F, mut mapper: M) -> EventStream
 where
-    F: Future<Output = Result<TransportResponse, String>> + Send + 'static,
+    F: Future<Output = Result<TransportResponse, TransportError>> + Send + 'static,
     M: EventMapper,
 {
     let (tx, rx) = mpsc::channel(64);
@@ -60,7 +94,11 @@ where
     let pump = async move {
         let TransportResponse { response, secrets } = match send.await {
             Ok(response) => response,
-            Err(error) => {
+            Err(TransportError::Retryable(error)) => {
+                let _ = tx.send(ProviderEvent::RetryableError(error)).await;
+                return;
+            }
+            Err(TransportError::Fatal(error)) => {
                 let _ = tx.send(ProviderEvent::Error(error)).await;
                 return;
             }
@@ -69,9 +107,12 @@ where
             let status = response.status();
             let secret_refs = secrets.iter().map(String::as_str).collect::<Vec<_>>();
             let body = super::error_body::bounded_error_body(response, &secret_refs).await;
-            let _ = tx
-                .send(ProviderEvent::Error(format!("HTTP {status}: {body}")))
-                .await;
+            let event = if retryable_status(status) {
+                ProviderEvent::RetryableError(format!("HTTP {status}: {body}"))
+            } else {
+                ProviderEvent::Error(format!("HTTP {status}: {body}"))
+            };
+            let _ = tx.send(event).await;
             return;
         }
 
@@ -82,7 +123,7 @@ where
                 Ok(chunk) => chunk,
                 Err(error) => {
                     let _ = tx
-                        .send(ProviderEvent::Error(error_with_sources(&error)))
+                        .send(ProviderEvent::RetryableError(error_with_sources(&error)))
                         .await;
                     return;
                 }
@@ -161,7 +202,9 @@ fn decode_error(error: String, data: &str, secrets: &[String]) -> String {
 fn is_terminal(event: &ProviderEvent) -> bool {
     matches!(
         event,
-        ProviderEvent::TurnComplete { .. } | ProviderEvent::Error(_)
+        ProviderEvent::TurnComplete { .. }
+            | ProviderEvent::Error(_)
+            | ProviderEvent::RetryableError(_)
     )
 }
 
@@ -251,14 +294,59 @@ mod tests {
         reqwest::get(format!("http://{address}")).await.unwrap()
     }
 
+    #[test]
+    fn only_transient_http_statuses_are_retryable() {
+        for status in [
+            reqwest::StatusCode::REQUEST_TIMEOUT,
+            reqwest::StatusCode::CONFLICT,
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            reqwest::StatusCode::BAD_GATEWAY,
+        ] {
+            assert!(retryable_status(status), "{status}");
+        }
+        for status in [
+            reqwest::StatusCode::BAD_REQUEST,
+            reqwest::StatusCode::UNAUTHORIZED,
+            reqwest::StatusCode::FORBIDDEN,
+            reqwest::StatusCode::NOT_FOUND,
+            reqwest::StatusCode::NOT_IMPLEMENTED,
+            reqwest::StatusCode::HTTP_VERSION_NOT_SUPPORTED,
+        ] {
+            assert!(!retryable_status(status), "{status}");
+        }
+    }
+
+    #[tokio::test]
+    async fn request_errors_retry_connections_but_not_invalid_requests() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let connection = reqwest::Client::new()
+            .get(format!("http://{address}"))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            request_error(connection),
+            TransportError::Retryable(_)
+        ));
+
+        let invalid = reqwest::Client::new()
+            .get("http://[invalid")
+            .send()
+            .await
+            .unwrap_err();
+        assert!(matches!(request_error(invalid), TransportError::Fatal(_)));
+    }
+
     #[tokio::test]
     async fn send_failure_is_a_terminal_stream_error() {
-        let events = stream(async { Err("connection failed".into()) }, TextMapper)
+        let events = stream(async { Err(retryable("connection failed")) }, TextMapper)
             .collect::<Vec<_>>()
             .await;
 
         assert!(
-            matches!(events.as_slice(), [ProviderEvent::Error(error)] if error == "connection failed")
+            matches!(events.as_slice(), [ProviderEvent::RetryableError(error)] if error == "connection failed")
         );
     }
 
@@ -268,7 +356,7 @@ mod tests {
             async {
                 panic!("transport boom");
                 #[allow(unreachable_code)]
-                Err("unreachable".into())
+                Err(fatal("unreachable"))
             },
             TextMapper,
         )
@@ -385,7 +473,7 @@ mod tests {
             async move {
                 let _guard = DropSignal(Some(dropped_tx));
                 let _ = started_tx.send(());
-                std::future::pending::<Result<TransportResponse, String>>().await
+                std::future::pending::<Result<TransportResponse, TransportError>>().await
             },
             TextMapper,
         );

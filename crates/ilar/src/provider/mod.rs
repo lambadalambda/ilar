@@ -27,8 +27,9 @@ pub type EventStream = Pin<Box<dyn Stream<Item = ProviderEvent> + Send>>;
 ///
 /// `stream()` itself only fails on local, pre-flight problems (bad model
 /// id, missing key). All network/HTTP/stream-decode failures — DNS, TLS,
-/// 4xx/5xx, malformed SSE — arrive as [`ProviderEvent::Error`] *on the
-/// stream*. Consumers must handle `Error` mid-stream.
+/// 4xx/5xx, malformed SSE — arrive as [`ProviderEvent::Error`] or
+/// [`ProviderEvent::RetryableError`] *on the stream*. Consumers must handle
+/// errors mid-stream.
 ///
 /// ## Cancellation
 ///

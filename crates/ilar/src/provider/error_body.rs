@@ -4,6 +4,43 @@ const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
 const MAX_STREAM_ERROR_BYTES: usize = 4096;
 const TRUNCATED: &str = "...[truncated]";
 
+pub(super) fn stream_error_event(value: &serde_json::Value) -> super::ProviderEvent {
+    let message = stream_error_message(value);
+    if stream_error_is_retryable(value) {
+        super::ProviderEvent::RetryableError(message)
+    } else {
+        super::ProviderEvent::Error(message)
+    }
+}
+
+fn stream_error_is_retryable(value: &serde_json::Value) -> bool {
+    [
+        "/response/error/type",
+        "/response/error/code",
+        "/response/status_details/error/type",
+        "/response/status_details/error/code",
+        "/error/type",
+        "/error/code",
+        "/type",
+        "/code",
+    ]
+    .into_iter()
+    .filter_map(|pointer| value.pointer(pointer).and_then(serde_json::Value::as_str))
+    .map(str::to_ascii_lowercase)
+    .any(|kind| {
+        [
+            "overload",
+            "rate_limit",
+            "server_error",
+            "timeout",
+            "unavailable",
+            "capacity",
+        ]
+        .iter()
+        .any(|retryable| kind.contains(retryable))
+    })
+}
+
 pub(super) fn stream_error_message(value: &serde_json::Value) -> String {
     for pointer in [
         "/response/error/message",
@@ -214,6 +251,22 @@ mod tests {
         let mut boundary = "request failed: super-sec".to_string();
         redact_explicit_secrets(&mut boundary, &["super-secret"], true);
         assert_eq!(boundary, "request failed: <redacted>");
+    }
+
+    #[test]
+    fn structured_stream_codes_control_retryability() {
+        assert!(matches!(
+            stream_error_event(&serde_json::json!({
+                "error": {"type": "rate_limit_error", "message": "slow down"}
+            })),
+            super::super::ProviderEvent::RetryableError(message) if message == "slow down"
+        ));
+        assert!(matches!(
+            stream_error_event(&serde_json::json!({
+                "error": {"code": "invalid_request_error", "message": "bad input"}
+            })),
+            super::super::ProviderEvent::Error(message) if message == "bad input"
+        ));
     }
 
     #[test]

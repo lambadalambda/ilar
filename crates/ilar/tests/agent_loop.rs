@@ -5,7 +5,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use ilar::agent::{
     LOOP_EVENT_CAPACITY, LoopConfig, LoopEvent, LoopEventReceiver, LoopEventSender, TurnOutcome,
-    loop_event_channel, resume_pending_question, run_turn,
+    loop_event_channel, resume_pending_question, resume_turn, run_turn,
 };
 use ilar::provider::zai::{Flavor, ZaiProvider};
 use ilar::provider::{EventStream, MockProvider, Provider, ProviderEvent, Request, StopReason};
@@ -1400,6 +1400,324 @@ async fn provider_error_surfaces_and_session_stays_resumable() {
 }
 
 #[tokio::test]
+async fn failed_tool_chain_resumes_without_replaying_prompt_or_tool() {
+    let (store, session_id) = temp_session("build");
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let registry = registry_with(EchoTool {
+        calls: calls.clone(),
+    });
+    let provider = MockProvider::new(vec![
+        vec![
+            ProviderEvent::ToolCallStarted {
+                id: "echo-1".into(),
+                name: "echo".into(),
+            },
+            tool_call_event("echo-1", "once"),
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+                usage: Default::default(),
+            },
+        ],
+        vec![ProviderEvent::Error("connection lost".into())],
+        vec![
+            ProviderEvent::TextDelta("recovered".into()),
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+                usage: Default::default(),
+            },
+        ],
+    ]);
+
+    let first = run_turn(
+        &provider,
+        &registry,
+        &store,
+        &session_id,
+        "original prompt",
+        None,
+        LoopConfig::default(),
+        events_channel().0,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+        None,
+    )
+    .await;
+    assert!(first.is_err());
+
+    let resumed = resume_turn(
+        &provider,
+        &registry,
+        &store,
+        &session_id,
+        None,
+        LoopConfig::default(),
+        events_channel().0,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(resumed, TurnOutcome::Completed);
+    assert_eq!(calls.lock().unwrap().len(), 1, "completed tool reran");
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 3);
+    let resumed_messages = &requests[2].messages;
+    let original_count = resumed_messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter(|block| matches!(block, ContentBlock::Text { text } if text == "original prompt"))
+        .count();
+    assert_eq!(original_count, 1, "original prompt was duplicated");
+    assert!(format!("{resumed_messages:?}").contains("echo: once"));
+}
+
+#[tokio::test]
+async fn resumed_provider_cannot_replay_a_completed_tool_call_id() {
+    let (store, session_id) = temp_session("build");
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let registry = registry_with(EchoTool {
+        calls: calls.clone(),
+    });
+    let provider = MockProvider::new(vec![
+        vec![
+            ProviderEvent::ToolCallStarted {
+                id: "echo-1".into(),
+                name: "echo".into(),
+            },
+            tool_call_event("echo-1", "once"),
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+                usage: Default::default(),
+            },
+        ],
+        vec![ProviderEvent::Error("connection lost".into())],
+        vec![
+            ProviderEvent::ToolCallStarted {
+                id: "echo-1".into(),
+                name: "echo".into(),
+            },
+            tool_call_event("echo-1", "twice"),
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+                usage: Default::default(),
+            },
+        ],
+    ]);
+
+    assert!(
+        run_turn(
+            &provider,
+            &registry,
+            &store,
+            &session_id,
+            "original prompt",
+            None,
+            LoopConfig::default(),
+            events_channel().0,
+            CancellationToken::new(),
+            ToolContext::root(std::env::temp_dir()),
+            None,
+        )
+        .await
+        .is_err()
+    );
+    // Compact the completed tool round out of the active replay window. The
+    // canonical id index must still reserve its call id.
+    let mut session = store.acquire_writer(&session_id).unwrap().load().unwrap();
+    let kept_from = session.events().len() - 1;
+    session
+        .append(SessionEvent::Compaction {
+            id: new_id(),
+            summary: "earlier work completed".into(),
+            kept_from,
+            ts: chrono::Utc::now(),
+        })
+        .unwrap();
+    drop(session);
+
+    let error = resume_turn(
+        &provider,
+        &registry,
+        &store,
+        &session_id,
+        None,
+        LoopConfig::default(),
+        events_channel().0,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+        None,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("duplicate tool call id"));
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["msg"], "once");
+    drop(calls);
+    store.load(&session_id).expect("session remains valid");
+}
+
+#[tokio::test]
+async fn transient_provider_errors_retry_with_bounded_backoff() {
+    let (store, session_id) = temp_session("build");
+    let provider = MockProvider::new(vec![
+        vec![ProviderEvent::RetryableError("overloaded".into())],
+        vec![ProviderEvent::RetryableError("still overloaded".into())],
+        vec![
+            ProviderEvent::TextDelta("ready".into()),
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+                usage: Default::default(),
+            },
+        ],
+    ]);
+    let (tx, mut rx) = events_channel();
+
+    let outcome = run_turn(
+        &provider,
+        &ToolRegistry::read_only(),
+        &store,
+        &session_id,
+        "hello",
+        None,
+        LoopConfig {
+            max_provider_retries: 2,
+            provider_retry_base_delay: Duration::from_millis(10),
+            provider_retry_max_delay: Duration::from_millis(15),
+            ..LoopConfig::default()
+        },
+        tx,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, TurnOutcome::Completed);
+    assert_eq!(provider.requests().len(), 3);
+    let mut retries = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let LoopEvent::ProviderRetry { attempt, delay, .. } = event {
+            retries.push((attempt, delay));
+        }
+    }
+    assert_eq!(
+        retries,
+        vec![
+            (1, Duration::from_millis(10)),
+            (2, Duration::from_millis(15)),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn transient_provider_retry_limit_returns_the_last_error() {
+    let (store, session_id) = temp_session("build");
+    let provider = MockProvider::repeating(vec![vec![ProviderEvent::RetryableError(
+        "service unavailable".into(),
+    )]]);
+
+    let error = run_turn(
+        &provider,
+        &ToolRegistry::read_only(),
+        &store,
+        &session_id,
+        "hello",
+        None,
+        LoopConfig {
+            max_provider_retries: 2,
+            provider_retry_base_delay: Duration::ZERO,
+            ..LoopConfig::default()
+        },
+        events_channel().0,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+        None,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("service unavailable"));
+    assert_eq!(provider.requests().len(), 3);
+}
+
+#[tokio::test]
+async fn permanent_provider_errors_are_not_retried() {
+    let (store, session_id) = temp_session("build");
+    let provider = MockProvider::new(vec![vec![ProviderEvent::Error("invalid request".into())]]);
+
+    let error = run_turn(
+        &provider,
+        &ToolRegistry::read_only(),
+        &store,
+        &session_id,
+        "hello",
+        None,
+        LoopConfig {
+            max_provider_retries: 3,
+            provider_retry_base_delay: Duration::ZERO,
+            ..LoopConfig::default()
+        },
+        events_channel().0,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+        None,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("invalid request"));
+    assert_eq!(provider.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn provider_backoff_is_cancellable() {
+    let (store, session_id) = temp_session("build");
+    let provider =
+        MockProvider::repeating(vec![vec![ProviderEvent::RetryableError("offline".into())]]);
+    let (tx, mut rx) = events_channel();
+    let cancel = CancellationToken::new();
+    let registry = ToolRegistry::read_only();
+    let turn = run_turn(
+        &provider,
+        &registry,
+        &store,
+        &session_id,
+        "hello",
+        None,
+        LoopConfig {
+            max_provider_retries: 3,
+            provider_retry_base_delay: Duration::from_secs(60),
+            ..LoopConfig::default()
+        },
+        tx,
+        cancel.clone(),
+        ToolContext::root(std::env::temp_dir()),
+        None,
+    );
+    tokio::pin!(turn);
+
+    loop {
+        tokio::select! {
+            event = rx.recv() => {
+                if matches!(event, Some(LoopEvent::ProviderRetry { .. })) {
+                    cancel.cancel();
+                    break;
+                }
+            }
+            result = &mut turn => panic!("turn ended before backoff: {result:?}"),
+        }
+    }
+
+    assert_eq!(turn.await.unwrap(), TurnOutcome::Aborted);
+    assert_eq!(provider.requests().len(), 1);
+}
+
+#[tokio::test]
 async fn concurrent_turn_on_same_session_is_rejected_before_append() {
     struct PendingProvider {
         started: Arc<tokio::sync::Notify>,
@@ -1611,17 +1929,24 @@ async fn max_iterations_guard_stops_loop() {
     let (store, session_id) = temp_session("build");
     let registry = ToolRegistry::builtin();
     // Always ends with a tool call -> would loop forever without the guard.
-    let provider = MockProvider::repeating(vec![vec![
-        ProviderEvent::ToolCallStarted {
-            id: "t".into(),
-            name: "echo".into(),
-        },
-        tool_call_event("t", "again"),
-        ProviderEvent::TurnComplete {
-            stop_reason: StopReason::ToolUse,
-            usage: Default::default(),
-        },
-    ]]);
+    let provider = MockProvider::new(
+        (0..5)
+            .map(|index| {
+                let id = format!("t-{index}");
+                vec![
+                    ProviderEvent::ToolCallStarted {
+                        id: id.clone(),
+                        name: "echo".into(),
+                    },
+                    tool_call_event(&id, "again"),
+                    ProviderEvent::TurnComplete {
+                        stop_reason: StopReason::ToolUse,
+                        usage: Default::default(),
+                    },
+                ]
+            })
+            .collect(),
+    );
 
     let (tx, _rx) = events_channel();
     let config = LoopConfig {
