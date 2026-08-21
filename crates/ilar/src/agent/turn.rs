@@ -857,15 +857,6 @@ fn redact_command(command: &str) -> String {
 }
 
 /// Run one user turn to completion.
-///
-/// Flow: append the user message, then repeat { call provider, stream
-/// events, persist the assistant message, execute tool calls through the
-/// barrier executor, persist results } until the model stops calling
-/// tools, the abort token fires, or the iteration guard trips.
-///
-/// Provider errors abort the turn with `Err`; the partial transcript
-/// (user message + any completed assistant messages) stays in the
-/// session.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_turn(
     resolver: &dyn ProviderResolver,
@@ -873,6 +864,73 @@ pub async fn run_turn(
     store: &SessionStore,
     session_id: &str,
     user_input: &str,
+    system_prompt: Option<&str>,
+    config: LoopConfig,
+    events: LoopEventSender,
+    cancel: CancellationToken,
+    tool_ctx: crate::tools::ToolContext,
+    steer: Option<SteerReceiver>,
+) -> Result<TurnOutcome> {
+    run_turn_inner(
+        resolver,
+        registry,
+        store,
+        session_id,
+        TurnStart::User(user_input),
+        system_prompt,
+        config,
+        events,
+        cancel,
+        tool_ctx,
+        steer,
+    )
+    .await
+}
+
+/// Answer or cancel the session's pending question and continue without a
+/// synthetic user message.
+#[allow(clippy::too_many_arguments)]
+pub async fn resume_pending_question(
+    resolver: &dyn ProviderResolver,
+    registry: &ToolRegistry,
+    store: &SessionStore,
+    session_id: &str,
+    response: crate::question::QuestionResponse,
+    system_prompt: Option<&str>,
+    config: LoopConfig,
+    events: LoopEventSender,
+    cancel: CancellationToken,
+    tool_ctx: crate::tools::ToolContext,
+    steer: Option<SteerReceiver>,
+) -> Result<TurnOutcome> {
+    run_turn_inner(
+        resolver,
+        registry,
+        store,
+        session_id,
+        TurnStart::Resume(response),
+        system_prompt,
+        config,
+        events,
+        cancel,
+        tool_ctx,
+        steer,
+    )
+    .await
+}
+
+enum TurnStart<'a> {
+    User(&'a str),
+    Resume(crate::question::QuestionResponse),
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_turn_inner(
+    resolver: &dyn ProviderResolver,
+    registry: &ToolRegistry,
+    store: &SessionStore,
+    session_id: &str,
+    start: TurnStart<'_>,
     system_prompt: Option<&str>,
     config: LoopConfig,
     mut events: LoopEventSender,
@@ -885,18 +943,45 @@ pub async fn run_turn(
     let variant = session.effective_variant();
     let request_options = crate::model::variant_options(&model, variant.as_deref())?;
     let provider = resolver.resolve_provider(&model)?;
-    if let Some(parent_tool_call_id) = tool_ctx.call_id.as_ref() {
-        session.append(SessionEvent::SubagentInvocation {
-            id: new_id(),
-            parent_tool_call_id: parent_tool_call_id.clone(),
-            ts: Utc::now(),
-        })?;
+    match start {
+        TurnStart::User(user_input) => {
+            if session.pending_question().is_some() {
+                anyhow::bail!(
+                    "session has a pending question; use resume_pending_question before starting a new turn"
+                );
+            }
+            if let Some(parent_tool_call_id) = tool_ctx.call_id.as_ref() {
+                session.append(SessionEvent::SubagentInvocation {
+                    id: new_id(),
+                    parent_tool_call_id: parent_tool_call_id.clone(),
+                    ts: Utc::now(),
+                })?;
+            }
+            session.append(SessionEvent::UserMessage {
+                id: new_id(),
+                text: user_input.to_string(),
+                ts: Utc::now(),
+            })?;
+        }
+        TurnStart::Resume(response) => {
+            if tool_ctx.depth != 0 {
+                anyhow::bail!("only a root agent can resume a pending question");
+            }
+            let pending = session
+                .pending_question()
+                .ok_or_else(|| anyhow::anyhow!("session has no valid pending question"))?;
+            response.validate(&pending.request)?;
+            session.append(SessionEvent::ToolResult {
+                id: new_id(),
+                tool_use_id: pending.tool_call_id,
+                content: serde_json::to_string(&response)?,
+                is_error: false,
+                child_session_id: None,
+                state: None,
+                ts: Utc::now(),
+            })?;
+        }
     }
-    session.append(SessionEvent::UserMessage {
-        id: new_id(),
-        text: user_input.to_string(),
-        ts: Utc::now(),
-    })?;
     events.publish(LoopEvent::TurnStarted, &cancel).await;
 
     let tools = registry.definitions();
@@ -1428,6 +1513,126 @@ pub async fn run_turn(
         // Never execute incomplete or null-input calls. Keep result order
         // aligned with the streamed call order.
         let ordered_calls = acc.tool_calls();
+
+        let question_calls = ordered_calls
+            .iter()
+            .filter(|(_, name, _, _)| name.as_str() == crate::question::QUESTION_TOOL_NAME)
+            .count();
+        if question_calls > 0 && ordered_calls.len() != 1 {
+            for (id, name, _, _) in ordered_calls {
+                let content = "question must be the sole tool call in a provider step".to_string();
+                session.append(SessionEvent::ToolResult {
+                    id: new_id(),
+                    tool_use_id: id.clone(),
+                    content: content.clone(),
+                    is_error: true,
+                    child_session_id: None,
+                    state: None,
+                    ts: Utc::now(),
+                })?;
+                events
+                    .publish(
+                        LoopEvent::ToolFinished {
+                            id: id.clone(),
+                            name: name.clone(),
+                            is_error: true,
+                            result: content.clone(),
+                            child_session_id: None,
+                        },
+                        &cancel,
+                    )
+                    .await;
+            }
+            continue;
+        }
+
+        if question_calls == 1 {
+            let (id, name, input, completed) = ordered_calls[0];
+            let parsed = if !completed || input.is_null() {
+                Err("question call was incomplete or had invalid arguments".to_string())
+            } else if tool_ctx.depth != 0 {
+                Err("questions are available only to the root agent".to_string())
+            } else if registry.question_sender().is_none() {
+                Err("question capability is not attached to this registry".to_string())
+            } else {
+                serde_json::from_value::<crate::question::QuestionRequest>(input.clone())
+                    .map_err(|error| format!("invalid question request: {error}"))
+                    .and_then(|request| {
+                        crate::question::validate_request(&request)
+                            .map_err(|error| format!("invalid question request: {error}"))?;
+                        Ok(request)
+                    })
+            };
+
+            let response = match parsed {
+                Ok(request) => {
+                    let sender = registry.question_sender().expect("checked above").clone();
+                    loop {
+                        let (reply, receive) = tokio::sync::oneshot::channel();
+                        let prompt = crate::question::QuestionPrompt {
+                            tool_call_id: id.clone(),
+                            request: request.clone(),
+                            reply,
+                        };
+                        let delivered = tokio::select! {
+                            delivered = sender.send(prompt) => delivered,
+                            _ = cancel.cancelled() => {
+                                events.publish_terminal(LoopEvent::TurnDone { outcome: TurnOutcome::Aborted });
+                                return Ok(TurnOutcome::Aborted);
+                            }
+                        };
+                        if delivered.is_err() {
+                            break Err("question frontend is unavailable".to_string());
+                        }
+                        let received = tokio::select! {
+                            response = receive => response,
+                            _ = cancel.cancelled() => {
+                                events.publish_terminal(LoopEvent::TurnDone { outcome: TurnOutcome::Aborted });
+                                return Ok(TurnOutcome::Aborted);
+                            }
+                        };
+                        let response = match received {
+                            Ok(response) => response,
+                            Err(_) => break Err("question frontend dropped its reply".to_string()),
+                        };
+                        if response.validate(&request).is_ok() {
+                            break serde_json::to_string(&response)
+                                .map_err(|error| error.to_string());
+                        }
+                        // Invalid frontend data is never persisted or sent to the provider;
+                        // ask again on a fresh one-shot reply path.
+                    }
+                }
+                Err(error) => Err(error),
+            };
+            let (content, is_error) = match response {
+                Ok(content) => (content, false),
+                Err(error) => (error, true),
+            };
+            session.append(SessionEvent::ToolResult {
+                id: new_id(),
+                tool_use_id: id.clone(),
+                content: content.clone(),
+                is_error,
+                child_session_id: None,
+                state: None,
+                ts: Utc::now(),
+            })?;
+            events
+                .publish(
+                    LoopEvent::ToolFinished {
+                        id: id.clone(),
+                        name: name.clone(),
+                        is_error,
+                        result: bounded_tool_detail(&content),
+                        child_session_id: None,
+                    },
+                    &cancel,
+                )
+                .await;
+            continue;
+        }
+
         let calls: Vec<ToolCall> = ordered_calls
             .iter()
             .filter(|(_, _, input, completed)| *completed && !input.is_null())

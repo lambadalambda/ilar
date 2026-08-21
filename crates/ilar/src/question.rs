@@ -48,9 +48,38 @@ pub struct QuestionOption {
     pub description: Option<String>,
 }
 
+/// A validated answer set for a structured question request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuestionReply {
     pub answers: Vec<QuestionAnswer>,
+}
+
+/// Frontend response to a structured question prompt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum QuestionResponse {
+    Answered { answers: Vec<QuestionAnswer> },
+    Cancelled,
+}
+
+impl QuestionResponse {
+    pub fn answered(reply: QuestionReply) -> Self {
+        Self::Answered {
+            answers: reply.answers,
+        }
+    }
+
+    pub fn validate(&self, request: &QuestionRequest) -> Result<(), QuestionValidationError> {
+        match self {
+            Self::Answered { answers } => validate_reply(
+                request,
+                &QuestionReply {
+                    answers: answers.clone(),
+                },
+            ),
+            Self::Cancelled => validate_request(request),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,8 +117,9 @@ impl QuestionAnswer {
 /// A request delivered over [`QuestionSender`], with its one-shot reply path.
 #[derive(Debug)]
 pub struct QuestionPrompt {
+    pub tool_call_id: String,
     pub request: QuestionRequest,
-    pub reply: oneshot::Sender<QuestionReply>,
+    pub reply: oneshot::Sender<QuestionResponse>,
 }
 
 pub type QuestionSender = mpsc::Sender<QuestionPrompt>;

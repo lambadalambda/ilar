@@ -1227,6 +1227,13 @@ fn invalid_replay<T>(id: &str, message: impl std::fmt::Display) -> std::io::Resu
 }
 
 impl Session {
+    /// The sole valid unanswered structured question, if this writable
+    /// session was restored in a suspended state.
+    pub fn pending_question(&self) -> Option<PendingQuestion> {
+        let unanswered = validate_replay(&self.events, self.session_id()).ok()?;
+        pending_question(&self.events, &unanswered)
+    }
+
     /// Active replay events, in log order. Use `SessionStore::audit_events`
     /// when compacted-away canonical history is required.
     pub fn events(&self) -> &[SessionEvent] {

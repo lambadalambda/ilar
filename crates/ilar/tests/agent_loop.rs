@@ -5,7 +5,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use ilar::agent::{
     LOOP_EVENT_CAPACITY, LoopConfig, LoopEvent, LoopEventReceiver, LoopEventSender, TurnOutcome,
-    loop_event_channel, run_turn,
+    loop_event_channel, resume_pending_question, run_turn,
 };
 use ilar::provider::zai::{Flavor, ZaiProvider};
 use ilar::provider::{EventStream, MockProvider, Provider, ProviderEvent, Request, StopReason};
@@ -2148,4 +2148,359 @@ async fn no_steer_leaves_turn_completion_alone() {
 
     assert_eq!(outcome, TurnOutcome::Completed);
     assert_eq!(provider.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn structured_question_suspends_and_continues_with_answer_result() {
+    let (store, session_id) = temp_session("build");
+    let input = serde_json::json!({"questions": [{"id": "language", "type": "single_choice", "prompt": "Language?", "required": true, "allow_other": true, "options": [{"id": "rust", "label": "Rust"}]}]});
+    let provider = MockProvider::new(vec![
+        vec![
+            ProviderEvent::ToolCallStarted {
+                id: "q-1".into(),
+                name: "question".into(),
+            },
+            ProviderEvent::ToolCallCompleted {
+                id: "q-1".into(),
+                name: "question".into(),
+                input,
+            },
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+                usage: Default::default(),
+            },
+        ],
+        vec![ProviderEvent::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+            usage: Default::default(),
+        }],
+    ]);
+    let (question_tx, mut question_rx) = ilar::question::question_channel(1);
+    let registry = ToolRegistry::builtin().with_questions(question_tx);
+    let turn = run_turn(
+        &provider,
+        &registry,
+        &store,
+        &session_id,
+        "start",
+        None,
+        LoopConfig::default(),
+        events_channel().0,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+        None,
+    );
+    tokio::pin!(turn);
+    let prompt = tokio::select! { prompt = question_rx.recv() => prompt.unwrap(), result = &mut turn => panic!("turn did not suspend: {result:?}") };
+    assert_eq!(prompt.tool_call_id, "q-1");
+    prompt
+        .reply
+        .send(ilar::question::QuestionResponse::Answered {
+            answers: vec![ilar::question::QuestionAnswer::SingleChoice {
+                question_id: "language".into(),
+                option_id: Some("rust".into()),
+                other: None,
+            }],
+        })
+        .unwrap();
+    assert_eq!(turn.await.unwrap(), TurnOutcome::Completed);
+    let events = store.audit_events(&session_id).unwrap();
+    let result = events
+        .iter()
+        .find_map(|event| match event {
+            SessionEvent::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+                ..
+            } if tool_use_id == "q-1" => Some((content, is_error)),
+            _ => None,
+        })
+        .unwrap();
+    assert!(!result.1);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(result.0).unwrap()["status"],
+        "answered"
+    );
+    assert_eq!(provider.requests().len(), 2);
+}
+
+#[tokio::test]
+async fn mixed_question_batch_is_rejected_before_tool_effects() {
+    let (store, session_id) = temp_session("build");
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let (question_tx, _question_rx) = ilar::question::question_channel(1);
+    let registry = registry_with(EchoTool {
+        calls: calls.clone(),
+    })
+    .with_questions(question_tx);
+    let provider = MockProvider::new(vec![
+        vec![
+            ProviderEvent::ToolCallStarted {
+                id: "q-1".into(),
+                name: "question".into(),
+            },
+            ProviderEvent::ToolCallCompleted {
+                id: "q-1".into(),
+                name: "question".into(),
+                input: serde_json::json!({"questions": [{"id":"x","type":"free_text","prompt":"X?","required":true}]}),
+            },
+            ProviderEvent::ToolCallStarted {
+                id: "echo-1".into(),
+                name: "echo".into(),
+            },
+            tool_call_event("echo-1", "must not run"),
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+                usage: Default::default(),
+            },
+        ],
+        vec![ProviderEvent::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+            usage: Default::default(),
+        }],
+    ]);
+    run_turn(
+        &provider,
+        &registry,
+        &store,
+        &session_id,
+        "start",
+        None,
+        LoopConfig::default(),
+        events_channel().0,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(calls.lock().unwrap().is_empty());
+    let errors = store
+        .audit_events(&session_id)
+        .unwrap()
+        .into_iter()
+        .filter(|event| matches!(event, SessionEvent::ToolResult { is_error: true, .. }))
+        .count();
+    assert_eq!(errors, 2);
+}
+
+#[tokio::test]
+async fn pending_question_resumes_without_a_new_user_message() {
+    let (store, session_id) = temp_session("build");
+    {
+        let mut session = store.acquire_writer(&session_id).unwrap().load().unwrap();
+        session
+            .append(SessionEvent::UserMessage {
+                id: new_id(),
+                text: "start".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        session.append(SessionEvent::AssistantMessage { id: new_id(), model: "zai/glm-4.7".into(), content: vec![ContentBlock::ToolCall { id: "q-pending".into(), name: "question".into(), input: serde_json::json!({"questions": [{"id":"details","type":"free_text","prompt":"Details?","required":true}]}) }], usage: Default::default(), stop_reason: "tool_use".into(), ts: chrono::Utc::now() }).unwrap();
+    }
+    assert!(
+        store
+            .load(&session_id)
+            .unwrap()
+            .pending_question()
+            .is_some()
+    );
+    let provider = MockProvider::new(vec![vec![ProviderEvent::TurnComplete {
+        stop_reason: StopReason::EndTurn,
+        usage: Default::default(),
+    }]]);
+    let (question_tx, _question_rx) = ilar::question::question_channel(1);
+    let registry = ToolRegistry::builtin().with_questions(question_tx);
+    resume_pending_question(
+        &provider,
+        &registry,
+        &store,
+        &session_id,
+        ilar::question::QuestionResponse::Answered {
+            answers: vec![ilar::question::QuestionAnswer::FreeText {
+                question_id: "details".into(),
+                text: "done".into(),
+            }],
+        },
+        None,
+        LoopConfig::default(),
+        events_channel().0,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+        None,
+    )
+    .await
+    .unwrap();
+    let events = store.audit_events(&session_id).unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, SessionEvent::UserMessage { .. }))
+            .count(),
+        1
+    );
+    assert!(events.iter().any(|event| matches!(event, SessionEvent::ToolResult { tool_use_id, is_error: false, .. } if tool_use_id == "q-pending")));
+}
+
+#[tokio::test]
+async fn structured_question_cancellation_is_a_successful_tool_result() {
+    let (store, session_id) = temp_session("build");
+    let provider = MockProvider::new(vec![
+        vec![
+            ProviderEvent::ToolCallStarted {
+                id: "q-cancel".into(),
+                name: "question".into(),
+            },
+            ProviderEvent::ToolCallCompleted {
+                id: "q-cancel".into(),
+                name: "question".into(),
+                input: serde_json::json!({"questions": [{"id":"confirm","type":"free_text","prompt":"Continue?","required":true}]}),
+            },
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+                usage: Default::default(),
+            },
+        ],
+        vec![ProviderEvent::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+            usage: Default::default(),
+        }],
+    ]);
+    let (question_tx, mut question_rx) = ilar::question::question_channel(1);
+    let registry = ToolRegistry::builtin().with_questions(question_tx);
+    let turn = run_turn(
+        &provider,
+        &registry,
+        &store,
+        &session_id,
+        "start",
+        None,
+        LoopConfig::default(),
+        events_channel().0,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+        None,
+    );
+    tokio::pin!(turn);
+    let prompt = tokio::select! { prompt = question_rx.recv() => prompt.unwrap(), result = &mut turn => panic!("turn did not suspend: {result:?}") };
+    prompt
+        .reply
+        .send(ilar::question::QuestionResponse::Cancelled)
+        .unwrap();
+    assert_eq!(turn.await.unwrap(), TurnOutcome::Completed);
+    assert!(store.audit_events(&session_id).unwrap().iter().any(|event| matches!(event, SessionEvent::ToolResult { tool_use_id, content, is_error: false, .. } if tool_use_id == "q-cancel" && content == r#"{"status":"cancelled"}"#)));
+}
+
+#[tokio::test]
+async fn question_delivery_backpressure_is_cancellable_and_preserves_pending_call() {
+    let (store, session_id) = temp_session("build");
+    let provider = MockProvider::new(vec![vec![
+        ProviderEvent::ToolCallStarted {
+            id: "q-wait".into(),
+            name: "question".into(),
+        },
+        ProviderEvent::ToolCallCompleted {
+            id: "q-wait".into(),
+            name: "question".into(),
+            input: serde_json::json!({"questions": [{"id":"x","type":"free_text","prompt":"X?","required":true}]}),
+        },
+        ProviderEvent::TurnComplete {
+            stop_reason: StopReason::ToolUse,
+            usage: Default::default(),
+        },
+    ]]);
+    let (question_tx, _question_rx) = ilar::question::question_channel(1);
+    let (dummy_reply, _dummy_rx) = tokio::sync::oneshot::channel();
+    question_tx
+        .send(ilar::question::QuestionPrompt {
+            tool_call_id: "dummy".into(),
+            request: ilar::question::QuestionRequest { questions: vec![] },
+            reply: dummy_reply,
+        })
+        .await
+        .unwrap();
+    let registry = ToolRegistry::builtin().with_questions(question_tx);
+    let cancel = CancellationToken::new();
+    let turn = run_turn(
+        &provider,
+        &registry,
+        &store,
+        &session_id,
+        "start",
+        None,
+        LoopConfig::default(),
+        events_channel().0,
+        cancel.clone(),
+        ToolContext::root(std::env::temp_dir()),
+        None,
+    );
+    tokio::pin!(turn);
+    tokio::select! {
+        result = &mut turn => panic!("turn ended before cancellation: {result:?}"),
+        _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+    }
+    cancel.cancel();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), &mut turn)
+            .await
+            .unwrap()
+            .unwrap(),
+        TurnOutcome::Aborted
+    );
+    assert_eq!(
+        store
+            .load(&session_id)
+            .unwrap()
+            .pending_question()
+            .unwrap()
+            .tool_call_id,
+        "q-wait"
+    );
+}
+
+#[tokio::test]
+async fn a_new_turn_cannot_overwrite_a_pending_question() {
+    let (store, session_id) = temp_session("build");
+    {
+        let mut session = store.acquire_writer(&session_id).unwrap().load().unwrap();
+        session
+            .append(SessionEvent::UserMessage {
+                id: new_id(),
+                text: "start".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        session.append(SessionEvent::AssistantMessage { id: new_id(), model: "zai/glm-4.7".into(), content: vec![ContentBlock::ToolCall { id: "q-existing".into(), name: "question".into(), input: serde_json::json!({"questions": [{"id":"x","type":"free_text","prompt":"X?","required":true}]}) }], usage: Default::default(), stop_reason: "tool_use".into(), ts: chrono::Utc::now() }).unwrap();
+    }
+    let provider = MockProvider::new(vec![]);
+    let error = run_turn(
+        &provider,
+        &ToolRegistry::builtin(),
+        &store,
+        &session_id,
+        "new message",
+        None,
+        LoopConfig::default(),
+        events_channel().0,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("pending question"));
+    let reader = store.load(&session_id).unwrap();
+    assert_eq!(
+        reader.pending_question().unwrap().tool_call_id,
+        "q-existing"
+    );
+    assert_eq!(
+        reader
+            .events()
+            .iter()
+            .filter(|event| matches!(event, SessionEvent::UserMessage { .. }))
+            .count(),
+        1
+    );
 }

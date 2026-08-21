@@ -530,7 +530,7 @@ pub trait Tool: Send + Sync {
 #[derive(Clone)]
 pub struct ToolRegistry {
     tools: Vec<Arc<dyn Tool>>,
-    questions: bool,
+    questions: Option<crate::question::QuestionSender>,
 }
 
 /// Tool names an agent `tools:` allowlist may reference — everything a
@@ -565,7 +565,7 @@ impl ToolRegistry {
                 Arc::new(grep::GrepTool),
                 Arc::new(web::WebFetchTool::default()),
             ],
-            questions: false,
+            questions: None,
         }
     }
 
@@ -579,7 +579,7 @@ impl ToolRegistry {
                 Arc::new(grep::GrepTool),
                 Arc::new(web::WebFetchTool::default()),
             ],
-            questions: false,
+            questions: None,
         }
     }
 
@@ -676,9 +676,13 @@ impl ToolRegistry {
     ///
     /// The question definition is a protocol marker, not an executable tool:
     /// it is intentionally absent from [`Self::get`] and ordinary execution.
-    pub fn with_questions(mut self) -> Self {
-        self.questions = true;
+    pub fn with_questions(mut self, sender: crate::question::QuestionSender) -> Self {
+        self.questions = Some(sender);
         self
+    }
+
+    pub(crate) fn question_sender(&self) -> Option<&crate::question::QuestionSender> {
+        self.questions.as_ref()
     }
 
     pub fn definitions(&self) -> Vec<ToolDefinition> {
@@ -691,7 +695,7 @@ impl ToolRegistry {
                 input_schema: t.input_schema(),
             })
             .collect::<Vec<_>>();
-        if self.questions {
+        if self.questions.is_some() {
             definitions.push(crate::question::question_tool_definition());
         }
         definitions

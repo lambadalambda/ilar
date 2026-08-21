@@ -144,6 +144,7 @@ async fn public_channel_carries_request_and_oneshot_reply() {
     let expected = request();
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     tx.send(ilar::question::QuestionPrompt {
+        tool_call_id: "call-1".into(),
         request: expected.clone(),
         reply: reply_tx,
     })
@@ -154,7 +155,7 @@ async fn public_channel_carries_request_and_oneshot_reply() {
     assert_eq!(prompt.request, expected);
     prompt
         .reply
-        .send(QuestionReply { answers: vec![] })
+        .send(ilar::question::QuestionResponse::Cancelled)
         .unwrap();
     assert!(reply_rx.await.is_ok());
 }
@@ -165,7 +166,8 @@ fn questions_are_an_explicit_non_executable_root_definition() {
     assert_eq!(ordinary.definitions().len(), ordinary.tool_names().len());
     assert!(ordinary.get("question").is_none());
 
-    let root = ordinary.with_questions();
+    let (question_tx, _question_rx) = question_channel(1);
+    let root = ordinary.with_questions(question_tx);
     let definition = root
         .definitions()
         .into_iter()
