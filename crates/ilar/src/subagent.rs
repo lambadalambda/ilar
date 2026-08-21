@@ -190,7 +190,8 @@ impl SubagentSpawner {
         self.activity_tx.subscribe()
     }
 
-    /// Abort every detached background task (Ctrl-C path).
+    /// Abort every detached background task (the pending manager's
+    /// cancel; quitting goes through `shutdown`).
     pub fn abort_all(&self) {
         let tasks = self.background_tasks.lock().unwrap();
         for task in &tasks.tasks {

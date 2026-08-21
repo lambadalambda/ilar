@@ -375,8 +375,8 @@ pub(crate) fn handle_prompt_key(input: &mut InputBuffer, key: KeyEvent) -> Promp
             input.delete();
             PromptAction::Edited
         }
-        // Reachable only on a non-blank input; the dispatcher keeps
-        // Ctrl-D as half-page scroll while the prompt is empty.
+        // Reachable only on a non-blank input; on a blank prompt the
+        // dispatcher takes Ctrl-D as the exit.
         KeyCode::Char('d') if control => {
             input.delete();
             PromptAction::Edited
@@ -401,6 +401,42 @@ pub(crate) fn handle_prompt_key(input: &mut InputBuffer, key: KeyEvent) -> Promp
 /// so any printable key must reach the input buffer.
 pub(crate) fn retry_requested(code: KeyCode, control: bool) -> bool {
     control && matches!(code, KeyCode::Char('r' | 'R'))
+}
+
+/// What a Ctrl-C does. It is an interrupt, never a quit — the exit is
+/// Ctrl-D on a blank prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Interrupt {
+    /// Whatever Esc means in the scope that is open: dismiss the overlay,
+    /// else abort the running turn, else clear the input. Ctrl-C rides
+    /// those paths rather than growing a second set of its own.
+    AsEsc,
+    /// Nothing to interrupt: point at the exit instead of doing nothing.
+    Hint,
+}
+
+/// Ctrl-C aims at the innermost open scope. Only a session that is idle,
+/// unobstructed and blank has nothing for it to hit. `something_open`
+/// covers overlays and the armed Ctrl-X leader alike — anything Esc
+/// would back out of.
+pub(crate) fn interrupt(something_open: bool, busy: bool, input_blank: bool) -> Interrupt {
+    if something_open || busy || !input_blank {
+        Interrupt::AsEsc
+    } else {
+        Interrupt::Hint
+    }
+}
+
+/// Ctrl-D is EOF: it quits from a blank prompt with nothing open. Its two
+/// older meanings keep their scopes — delete-forward once the prompt has
+/// text, and the session picker's delete confirmation inside a modal.
+pub(crate) fn quit_requested(
+    code: KeyCode,
+    control: bool,
+    has_modal: bool,
+    input_blank: bool,
+) -> bool {
+    control && code == KeyCode::Char('d') && !has_modal && input_blank
 }
 
 /// Whether keystrokes reach the input buffer, and so whether the caret
@@ -455,6 +491,61 @@ mod tests {
             !retry_requested(KeyCode::Char('r'), false),
             "a bare letter must reach the input buffer"
         );
+    }
+
+    /// Ctrl-C used to end the session from anywhere. It is an interrupt:
+    /// whatever scope is open is what it aims at, innermost first.
+    #[test]
+    fn an_interrupt_aims_at_the_innermost_scope() {
+        // An overlay outranks a running turn: Ctrl-C gets you out of the
+        // picker you are looking at, not out of the turn behind it.
+        assert_eq!(
+            interrupt(true, true, true),
+            Interrupt::AsEsc,
+            "an overlay is dismissed first"
+        );
+        assert_eq!(interrupt(false, true, true), Interrupt::AsEsc, "abort");
+        assert_eq!(
+            interrupt(false, false, false),
+            Interrupt::AsEsc,
+            "typed text is cleared"
+        );
+        // An armed Ctrl-X leader is invisible except in the status line;
+        // Ctrl-C must disarm it rather than hint past it and let the next
+        // keystroke be swallowed as a leader argument.
+        assert_eq!(
+            interrupt(true, false, true),
+            Interrupt::AsEsc,
+            "an armed leader is something to back out of"
+        );
+    }
+
+    /// Idle, blank, nothing open: the old binding would have quit here,
+    /// so silence is the one answer that would be read as a broken key.
+    #[test]
+    fn an_interrupt_with_nothing_to_interrupt_points_at_the_exit() {
+        assert_eq!(interrupt(false, false, true), Interrupt::Hint);
+    }
+
+    /// Ctrl-D is the exit, but it carries two older meanings that the
+    /// quit must not shadow: delete-forward in a non-blank prompt, and
+    /// the session picker's delete confirmation.
+    #[test]
+    fn quitting_needs_a_blank_prompt_and_no_overlay() {
+        assert!(quit_requested(KeyCode::Char('d'), true, false, true));
+        assert!(
+            !quit_requested(KeyCode::Char('d'), true, false, false),
+            "with text, Ctrl-D deletes forward"
+        );
+        assert!(
+            !quit_requested(KeyCode::Char('d'), true, true, true),
+            "in a modal, Ctrl-D is the delete confirmation"
+        );
+        assert!(
+            !quit_requested(KeyCode::Char('d'), false, false, true),
+            "a bare letter must reach the input buffer"
+        );
+        assert!(!quit_requested(KeyCode::Char('c'), true, false, true));
     }
 
     #[test]

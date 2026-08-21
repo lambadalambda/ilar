@@ -39,7 +39,8 @@ mechanisms, not security boundaries.
 - `ilar` — core: providers, tools, agent loop, sessions, config. Pure logic,
   no TUI dependencies. Unit-testable with mock SSE streams.
 - `ilar-tui` — ratatui frontend: streaming output, tool display, input box,
-  Enter sends, Shift-Enter or Ctrl-J inserts a newline, Esc = full abort.
+  Enter sends, Shift-Enter or Ctrl-J inserts a newline, Esc or Ctrl-C =
+  full abort, Ctrl-D on a blank prompt quits.
 
 ## Status
 

@@ -29,7 +29,10 @@ use crossterm::event::{
 use crossterm::terminal::supports_keyboard_enhancement;
 use decide::{Intent, LoopState, retry as retry_intents};
 use input::slash_candidates;
-use input::{InputBuffer, PromptAction, handle_prompt_key, retry_requested};
+use input::{
+    InputBuffer, Interrupt, PromptAction, handle_prompt_key, interrupt, quit_requested,
+    retry_requested,
+};
 use modals::{
     CommandPaletteAction, Modal, ModelPicker, PendingAction, PendingManager, PickerAction,
     SessionPicker, SessionPickerAction, ThemePicker, VariantPicker, VariantPickerAction,
@@ -1479,7 +1482,33 @@ async fn run_app(
                 },
             ) => {
                 let control = modifiers.contains(KeyModifiers::CONTROL);
-                if matches!((code, control), (KeyCode::Char('c'), true)) {
+                let alt = modifiers.contains(KeyModifiers::ALT);
+                // Ctrl-C is an interrupt, not the exit: it is rewritten
+                // into Esc and rides the dispatch below, so every scope
+                // keeps exactly one set of dismiss/abort/clear paths.
+                let (key, code) = if matches!((code, control), (KeyCode::Char('c'), true)) {
+                    match interrupt(
+                        app.has_modal() || app.model_key_pending,
+                        app.busy,
+                        app.input.is_blank(),
+                    ) {
+                        Interrupt::Hint => {
+                            app.set_notice(
+                                "nothing to interrupt — Ctrl-D on a blank prompt quits",
+                                NoticeLevel::Info,
+                            );
+                            continue;
+                        }
+                        Interrupt::AsEsc => (
+                            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+                            KeyCode::Esc,
+                        ),
+                    }
+                } else {
+                    (key, code)
+                };
+                // The exit, EOF-style: a blank prompt with nothing open.
+                if quit_requested(code, control, app.has_modal(), app.input.is_blank()) {
                     if let Some(cancel) = &cancel {
                         cancel.cancel();
                     }
@@ -1879,7 +1908,8 @@ async fn run_app(
                         // Esc is strictly immediate-scope: abort the running
                         // turn or clear the input. Standing state (goal,
                         // queue, background jobs) lives in the pending
-                        // manager (Ctrl-Q) and explicit commands.
+                        // manager (Ctrl-Q) and explicit commands. Ctrl-C
+                        // arrives here too — it is rewritten into Esc above.
                         if app.busy {
                             if let Some(cancel) = &cancel {
                                 cancel.cancel();
@@ -1891,12 +1921,13 @@ async fn run_app(
                             app.input.clear();
                         }
                     }
-                    // Ctrl-U edits the input when it has text; the
-                    // half-page scroll needs a blank input.
-                    (KeyCode::Char('u'), true) if app.input.is_blank() => {
+                    // Half-page scrolling lives on Alt so that Ctrl-U and
+                    // Ctrl-D can keep one meaning each: kill to line
+                    // start, and quit.
+                    (KeyCode::Char('u' | 'U'), _) if alt => {
                         app.scroll_up(app.page_size().div_ceil(2));
                     }
-                    (KeyCode::Char('d'), true) if app.input.is_blank() => {
+                    (KeyCode::Char('d' | 'D'), _) if alt => {
                         app.scroll_down(app.page_size().div_ceil(2));
                     }
                     (KeyCode::Home, true) => app.scroll_to_top(),

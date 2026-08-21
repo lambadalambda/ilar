@@ -335,7 +335,11 @@ static HELP_SECTIONS: &[HelpSection] = &[
         bindings: &[
             binding!("Enter", "send message"),
             binding!("Shift-Enter / Ctrl-J", "insert newline"),
-            binding!("Esc", "abort running turn · clear input (nothing else)"),
+            binding!(
+                "Esc / Ctrl-C",
+                "dismiss overlay · abort turn · clear input (nothing else)"
+            ),
+            binding!("Ctrl-D", "quit (blank input, nothing open)"),
             binding!("Ctrl-Q", "pending manager: queue, goal, jobs, retry"),
             binding!("Ctrl-R", "retry the last prompt after an error"),
             binding!("Up / Down", "recall prompt history (blank input)"),
@@ -350,7 +354,7 @@ static HELP_SECTIONS: &[HelpSection] = &[
         bindings: &[
             binding!("Ctrl-F", "search transcript"),
             binding!("PgUp / PgDn", "scroll page"),
-            binding!("Ctrl-U / Ctrl-D", "scroll half page (blank input)"),
+            binding!("Alt-U / Alt-D", "scroll half page"),
             binding!("Ctrl-Home / Ctrl-End", "jump to top / tail"),
             binding!("Up / Down", "scroll line (while input has text)"),
             binding!("mouse wheel / drag", "scroll · select and copy"),
@@ -1803,6 +1807,8 @@ mod tests {
             "Shift-Enter",
             "PgUp",
             "Ctrl-U",
+            // The exit moved off Ctrl-C; help is where a user looks for it.
+            "Ctrl-D",
             "Resume session",
             "history",
             "--continue",
