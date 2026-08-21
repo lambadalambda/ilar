@@ -143,3 +143,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Ctrl-C interrupts, Ctrl-D quits](issues/ctrl-c-interrupts-ctrl-d-quits.md)
 - [x] [Grow the input box for long messages](issues/grow-input-box-for-long-messages.md)
 - [x] [Add structured user questions](issues/add-structured-user-questions.md)
+- [x] [Configurable default reasoning level](issues/configurable-default-reasoning.md)

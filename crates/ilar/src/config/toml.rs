@@ -13,6 +13,7 @@ use super::AgentDefinition;
 #[serde(deny_unknown_fields)]
 pub struct GeneralConfig {
     pub model: Option<String>,
+    pub reasoning: Option<String>,
     pub theme: Option<String>,
 }
 
@@ -145,6 +146,7 @@ pub struct Config {
 #[derive(Debug, Clone)]
 pub struct GeneralConfigResolved {
     pub model: String,
+    pub reasoning: Option<String>,
     pub theme: String,
 }
 
@@ -330,13 +332,23 @@ impl Config {
             },
         );
 
+        let model = merged
+            .general
+            .as_ref()
+            .and_then(|general| general.model.clone())
+            .unwrap_or_else(|| "zai/glm-4.7".into());
+        let reasoning = merged
+            .general
+            .as_ref()
+            .and_then(|general| general.reasoning.clone())
+            .filter(|reasoning| reasoning != "default");
+        crate::model::variant_options(&model, reasoning.as_deref())
+            .context("validating general.reasoning")?;
+
         Ok(Config {
             general: GeneralConfigResolved {
-                model: merged
-                    .general
-                    .as_ref()
-                    .and_then(|general| general.model.clone())
-                    .unwrap_or_else(|| "zai/glm-4.7".into()),
+                model,
+                reasoning,
                 theme: user_theme.unwrap_or_else(|| "terminal".into()),
             },
             providers,
@@ -496,6 +508,7 @@ impl Config {
         Self {
             general: GeneralConfigResolved {
                 model: "zai/glm-4.7".into(),
+                reasoning: None,
                 theme: "terminal".into(),
             },
             agent: AgentConfig::default(),
@@ -577,6 +590,9 @@ fn merge_file(base: FileConfig, text: &str, origin: &Path) -> anyhow::Result<Fil
         let current = merged.general.get_or_insert_with(GeneralConfig::default);
         if g.model.is_some() {
             current.model = g.model;
+        }
+        if g.reasoning.is_some() {
+            current.reasoning = g.reasoning;
         }
         if g.theme.is_some() {
             current.theme = g.theme;

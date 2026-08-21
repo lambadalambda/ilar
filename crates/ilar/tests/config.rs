@@ -27,6 +27,7 @@ fn defaults_when_no_config_exists() {
         .resolve()
         .unwrap();
     assert_eq!(config.general.model, "zai/glm-4.7");
+    assert_eq!(config.general.reasoning, None);
     assert_eq!(config.general.theme, "terminal");
     assert_eq!(config.providers.len(), 2); // openai + zai defaults
     assert!(config.providers.contains_key("zai"));
@@ -144,12 +145,12 @@ fn project_config_overrides_user_config() {
     let (_gu, user) = tempdir();
     write(
         &user.join("ilar.toml"),
-        "[general]\nmodel = \"zai/glm-4.7-air\"\n",
+        "[general]\nmodel = \"openai/gpt-5.2\"\nreasoning = \"low\"\n",
     );
     let (_gp, project) = tempdir();
     write(
         &project.join("ilar.toml"),
-        "[general]\nmodel = \"openai/gpt-5.2\"\n",
+        "[general]\nreasoning = \"high\"\n",
     );
 
     let config = Loader::no_env()
@@ -157,7 +158,8 @@ fn project_config_overrides_user_config() {
         .project_dir(project.clone())
         .resolve()
         .unwrap();
-    assert_eq!(config.general.model, "openai/gpt-5.2", "project wins");
+    assert_eq!(config.general.model, "openai/gpt-5.2");
+    assert_eq!(config.general.reasoning.as_deref(), Some("high"));
 
     // Without a project file, user config applies.
     fs::remove_file(project.join("ilar.toml")).unwrap();
@@ -166,7 +168,47 @@ fn project_config_overrides_user_config() {
         .project_dir(project)
         .resolve()
         .unwrap();
-    assert_eq!(config.general.model, "zai/glm-4.7-air");
+    assert_eq!(config.general.model, "openai/gpt-5.2");
+    assert_eq!(config.general.reasoning.as_deref(), Some("low"));
+}
+
+#[test]
+fn higher_config_layer_can_reset_reasoning_to_provider_default() {
+    let (_user_guard, user) = tempdir();
+    write(
+        &user.join("ilar.toml"),
+        "[general]\nmodel = \"openai/gpt-5.2\"\nreasoning = \"high\"\n",
+    );
+    let (_project_guard, project) = tempdir();
+    write(
+        &project.join("ilar.toml"),
+        "[general]\nmodel = \"zai/glm-4.7\"\nreasoning = \"default\"\n",
+    );
+
+    let config = Loader::no_env()
+        .config_dir(user)
+        .project_dir(project)
+        .resolve()
+        .unwrap();
+
+    assert_eq!(config.general.model, "zai/glm-4.7");
+    assert_eq!(config.general.reasoning, None);
+}
+
+#[test]
+fn configured_reasoning_must_match_the_configured_model() {
+    let (_guard, dir) = tempdir();
+    write(
+        &dir.join("ilar.toml"),
+        "[general]\nmodel = \"zai/glm-4.7\"\nreasoning = \"high\"\n",
+    );
+
+    let error = Loader::no_env().config_dir(dir).resolve().unwrap_err();
+    let rendered = format!("{error:#}");
+    assert!(
+        rendered.contains("unsupported variant \"high\" for zai/glm-4.7"),
+        "{rendered}"
+    );
 }
 
 #[test]

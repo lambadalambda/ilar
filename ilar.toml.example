@@ -1,6 +1,9 @@
 [general]
 # Default model: provider/model-id
 model = "zai/glm-4.7"
+# Optional model-specific reasoning level, e.g. low/high/max for zai/glm-5.3.
+# A project config can set "default" to clear an inherited user value.
+# reasoning = "high"
 # User-scoped TUI theme: terminal, carbon, parchment, frost, or high-contrast
 theme = "terminal"
 

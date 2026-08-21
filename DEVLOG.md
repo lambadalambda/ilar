@@ -1121,3 +1121,19 @@ the bug above actually lived.
 - Frontends receive a typed, session- and call-correlated prompt with a oneshot
   reply path. The TUI implements that protocol as a modal for batched single
   choice, multiple choice, free text, custom answers, and cancellation.
+
+## 2026-08-21 — Configured reasoning defaults
+
+`general.reasoning` now layers alongside `general.model` and is validated
+against the resolved model catalog. It applies only when creating a session:
+resumes keep their persisted reasoning choice, including an explicit return to
+the provider default, and a CLI model override on a resumed session does not
+inherit a potentially incompatible old variant.
+
+Session metadata predates reasoning variants, so a non-default configured value
+is persisted as the same initial `ModelChange` event used by the runtime picker.
+That keeps JSONL compatibility and gives resumed sessions one source of truth
+without expanding the metadata schema. Startup removes a just-created session
+if this initial event cannot be written, rather than exposing a resumable
+provider-default session that contradicts the configuration. The literal
+`default` is the layer-reset sentinel because TOML has no null value.

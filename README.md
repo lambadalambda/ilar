@@ -102,6 +102,7 @@ by project files.
 | Setting | Default | Description |
 | --- | --- | --- |
 | `general.model` | `zai/glm-4.7` | Default `provider/model-id`. |
+| `general.reasoning` | provider default | Default reasoning variant for new sessions (for example `low`, `high`, or `max`; model-specific). Set `default` in a higher config layer to clear an inherited value. |
 | `general.theme` | `terminal` | `terminal`, `carbon`, `parchment`, `frost`, or `high-contrast`. |
 | `providers.openai.base_url` | API or ChatGPT endpoint | Override the Responses API base URL selected by `auth`. |
 | `providers.openai.api_key` | `ILAR_OPENAI_API_KEY` | OpenAI API key. |

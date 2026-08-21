@@ -588,6 +588,54 @@ fn selected_model(
     cli.or(persisted).or(agent).unwrap_or(general).to_string()
 }
 
+fn selected_reasoning(
+    resumed: bool,
+    model: &str,
+    persisted_model: Option<&str>,
+    persisted_reasoning: Option<&str>,
+    configured_reasoning: Option<&str>,
+) -> Option<String> {
+    if resumed {
+        (persisted_model == Some(model))
+            .then_some(persisted_reasoning)
+            .flatten()
+            .map(String::from)
+    } else {
+        configured_reasoning.map(String::from)
+    }
+}
+
+fn create_root_session(
+    store: &SessionStore,
+    meta: SessionMeta,
+    reasoning: Option<&str>,
+) -> Result<()> {
+    ilar::model::variant_options(&meta.model, reasoning)?;
+    let session_id = meta.session_id.clone();
+    let model = meta.model.clone();
+    let mut session = store.create(meta).context("creating session")?;
+    let Some(reasoning) = reasoning else {
+        return Ok(());
+    };
+    let result = session.append(ilar::session::SessionEvent::ModelChange {
+        id: ilar::session::new_id(),
+        model,
+        variant: Some(reasoning.to_string()),
+        ts: chrono::Utc::now(),
+    });
+    drop(session);
+    if let Err(error) = result {
+        let error = anyhow::Error::new(error).context("persisting configured reasoning");
+        return match store.delete(&session_id) {
+            Ok(()) => Err(error),
+            Err(cleanup) => Err(error.context(format!(
+                "also failed to remove incomplete session {session_id}: {cleanup}"
+            ))),
+        };
+    }
+    Ok(())
+}
+
 fn persist_model_change(
     resolver: &dyn ProviderResolver,
     store: &SessionStore,
@@ -750,6 +798,15 @@ async fn main() -> Result<()> {
             agent.model.as_deref(),
             &config.general.model,
         );
+        let reasoning_for_session = selected_reasoning(
+            resumed.is_some(),
+            &model_for_session,
+            persisted_model.as_deref(),
+            persisted_variant.as_deref(),
+            config.general.reasoning.as_deref(),
+        );
+        ilar::model::variant_options(&model_for_session, reasoning_for_session.as_deref())
+            .with_context(|| format!("invalid reasoning for {model_for_session}"))?;
 
         let cwd = std::env::current_dir().context("no cwd")?;
         let skill_store = std::sync::Arc::new(ilar::skill::SkillStore::new(
@@ -808,15 +865,17 @@ async fn main() -> Result<()> {
             }
             None => {
                 let id = new_id();
-                store
-                    .create(SessionMeta {
+                create_root_session(
+                    &store,
+                    SessionMeta {
                         session_id: id.clone(),
                         parent_id: None,
                         agent: agent.name.clone(),
                         model: model_for_session.clone(),
                         workspace: None,
-                    })
-                    .context("creating session")?;
+                    },
+                    reasoning_for_session.as_deref(),
+                )?;
                 id
             }
         };
@@ -883,9 +942,7 @@ async fn main() -> Result<()> {
         }
         app.configure_runtime(
             model_for_session.clone(),
-            (persisted_model.as_deref() == Some(model_for_session.as_str()))
-                .then_some(persisted_variant)
-                .flatten(),
+            reasoning_for_session,
             cwd.clone(),
             context_used,
             context_limit,
@@ -2283,6 +2340,45 @@ mod tests {
             ),
             "openai/persisted"
         );
+
+        assert_eq!(
+            selected_reasoning(false, "openai/gpt-5.2", None, None, Some("high")),
+            Some("high".into()),
+            "new sessions use configured reasoning"
+        );
+        assert_eq!(
+            selected_reasoning(
+                true,
+                "openai/gpt-5.2",
+                Some("openai/gpt-5.2"),
+                Some("low"),
+                Some("high")
+            ),
+            Some("low".into()),
+            "resumed sessions preserve their variant"
+        );
+        assert_eq!(
+            selected_reasoning(
+                true,
+                "openai/gpt-5.2",
+                Some("openai/gpt-5.2"),
+                None,
+                Some("high")
+            ),
+            None,
+            "a resumed server-default variant stays default"
+        );
+        assert_eq!(
+            selected_reasoning(
+                true,
+                "openai/gpt-5.3-codex",
+                Some("openai/gpt-5.2"),
+                Some("high"),
+                Some("low")
+            ),
+            None,
+            "a resumed session's variant does not leak across a model override"
+        );
     }
 
     #[test]
@@ -2349,6 +2445,54 @@ mod tests {
 
         assert!(error.to_string().contains("through Task"), "{error:#}");
         assert!(ensure_direct_resume_allowed(None).is_ok());
+    }
+
+    #[test]
+    fn new_session_persists_configured_reasoning_before_startup_continues() {
+        let root = std::env::temp_dir().join(format!("ilar-tui-reasoning-{}", new_id()));
+        let store = SessionStore::new(root.clone());
+        let session_id = new_id();
+
+        create_root_session(
+            &store,
+            SessionMeta {
+                session_id: session_id.clone(),
+                parent_id: None,
+                agent: "build".into(),
+                model: "openai/gpt-5.2".into(),
+                workspace: None,
+            },
+            Some("high"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            store.load(&session_id).unwrap().effective_variant(),
+            Some("high".into())
+        );
+
+        let invalid_id = new_id();
+        let error = create_root_session(
+            &store,
+            SessionMeta {
+                session_id: invalid_id.clone(),
+                parent_id: None,
+                agent: "build".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+            },
+            Some("high"),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("unsupported variant"),
+            "{error:#}"
+        );
+        assert!(
+            store.load(&invalid_id).is_err(),
+            "invalid reasoning created a session"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
