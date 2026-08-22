@@ -571,3 +571,162 @@ async fn live_chatgpt_prompt_cache_routing_probe() {
 async fn live_chatgpt_prompt_cache_key_probe() {
     live_chatgpt_prompt_cache_probe(true).await;
 }
+
+/// Live A/B for the item-identity fix: the same tool-heavy conversation
+/// replayed with the ids the API gave us, and again with them stripped —
+/// which is exactly what ilar used to send. Prints token counts only,
+/// never prompt or response content.
+///
+///   ILAR_LIVE_CHATGPT_STATE_DIR=~/.local/state/ilar \
+///     cargo test -p ilar --test oauth live_chatgpt_item_id -- --ignored --nocapture
+#[tokio::test]
+#[ignore]
+async fn live_chatgpt_item_id_cache_ab() {
+    let state_dir = std::env::var("ILAR_LIVE_CHATGPT_STATE_DIR")
+        .expect("ILAR_LIVE_CHATGPT_STATE_DIR with seeded auth.json");
+    let model = std::env::var("ILAR_LIVE_MODEL").unwrap_or_else(|_| "openai/gpt-5.6-luna".into());
+    let mut results = Vec::new();
+    for keep_ids in [true, false] {
+        let reads = item_id_cache_arm(&state_dir, &model, keep_ids).await;
+        println!(
+            "\n== arm {}: cached tokens per step = {reads:?}\n",
+            if keep_ids {
+                "WITH item ids"
+            } else {
+                "WITHOUT item ids (old behaviour)"
+            }
+        );
+        results.push((keep_ids, reads));
+    }
+    for (keep_ids, reads) in &results {
+        let label = if *keep_ids {
+            "with ids   "
+        } else {
+            "without ids"
+        };
+        let hits = reads.iter().skip(1).filter(|(_, read)| *read > 0).count();
+        println!(
+            "{label}: {hits}/{} follow-up steps read a cache",
+            reads.len() - 1
+        );
+    }
+}
+
+/// One arm: a large prefix, then steps that each append several tool
+/// calls and their outputs, which is the shape that was missing.
+async fn item_id_cache_arm(state_dir: &str, model: &str, keep_ids: bool) -> Vec<(u64, u64)> {
+    use ilar::session::{ChatMessage, ContentBlock, Role};
+
+    let provider = OpenAIProvider::with_chatgpt_auth(AuthStore::open(state_dir.into()), None);
+    let cache_key = format!("ilar-item-id-probe-{}", uuid::Uuid::new_v4());
+    // Big enough to be worth caching, and stable across every step.
+    let prefix = (0..4_000)
+        .map(|n| n.to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let tool = ilar::provider::ToolDefinition {
+        name: "record".into(),
+        description: "Record one observation. Call it repeatedly.".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {"value": {"type": "string"}},
+            "required": ["value"],
+        }),
+    };
+
+    let mut messages = vec![ChatMessage::user_text(format!(
+        "Reference data:\n{prefix}\n\nCall the record tool exactly six times, \
+         each with a different one-word value. Do not answer in text."
+    ))];
+    let mut observed = Vec::new();
+
+    // Each result is deliberately large: the failure regime is a step
+    // that appends tens of thousands of tokens, not one that appends a
+    // few hundred.
+    let bulky_result = (0..1_500)
+        .map(|n| format!("line {n} of recorded observation data"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for step in 0..4 {
+        let mut request = Request::with_model(model);
+        request.system_prompt = Some("You are a terse tool-calling probe.".into());
+        request.messages = messages.clone();
+        request.tools = vec![tool.clone()];
+        request.cache_key = Some(cache_key.clone());
+        request.options = serde_json::json!({"reasoning": {"effort": "low"}});
+
+        let mut stream = provider.stream(request).unwrap();
+        let mut content: Vec<ContentBlock> = Vec::new();
+        let mut calls: Vec<(String, String)> = Vec::new();
+        let mut pending: std::collections::HashMap<String, (String, Option<String>)> =
+            std::collections::HashMap::new();
+        let usage = loop {
+            match stream.next().await {
+                Some(ProviderEvent::ReasoningItem { item }) => {
+                    content.push(ContentBlock::Reasoning { item });
+                }
+                Some(ProviderEvent::ToolCallStarted { id, name, item_id }) => {
+                    pending.insert(id, (name, item_id));
+                }
+                Some(ProviderEvent::ToolCallCompleted { id, name, input }) => {
+                    let item_id = pending.get(&id).and_then(|(_, item)| item.clone());
+                    content.push(ContentBlock::ToolCall {
+                        id: id.clone(),
+                        name: name.clone(),
+                        input,
+                        // The arm under test: keep the identity, or drop
+                        // it the way the old serializer did.
+                        item_id: keep_ids.then_some(item_id).flatten(),
+                    });
+                    calls.push((id, name));
+                }
+                Some(ProviderEvent::TextDelta(text)) => match content.last_mut() {
+                    Some(ContentBlock::Text { text: existing }) => existing.push_str(&text),
+                    _ => content.push(ContentBlock::Text { text }),
+                },
+                Some(ProviderEvent::TurnComplete { usage, .. }) => break usage,
+                Some(ProviderEvent::Error(error)) => panic!("provider error: {error}"),
+                Some(ProviderEvent::RetryableError(error)) => panic!("provider error: {error}"),
+                Some(_) => {}
+                None => panic!("stream ended without usage"),
+            }
+        };
+        let prompt = usage.input_tokens + usage.cache_read_input_tokens;
+        let grew = prompt.saturating_sub(observed.last().map_or(0, |(p, _): &(u64, u64)| *p));
+        println!(
+            "  {} step {}: prompt={prompt} (+{grew}) cached={} calls={}",
+            if keep_ids { "ids " } else { "none" },
+            step + 1,
+            usage.cache_read_input_tokens,
+            calls.len()
+        );
+        observed.push((
+            usage.input_tokens + usage.cache_read_input_tokens,
+            usage.cache_read_input_tokens,
+        ));
+
+        if calls.is_empty() {
+            println!("  (no tool calls; stopping this arm early)");
+            break;
+        }
+        messages.push(ChatMessage {
+            role: Role::Assistant,
+            content,
+        });
+        messages.push(ChatMessage {
+            role: Role::User,
+            content: calls
+                .iter()
+                .map(|(id, _)| ContentBlock::ToolResult {
+                    tool_use_id: id.clone(),
+                    content: bulky_result.clone(),
+                    is_error: false,
+                })
+                .collect(),
+        });
+        messages.push(ChatMessage::user_text(
+            "Call record six more times with different values.",
+        ));
+    }
+    observed
+}

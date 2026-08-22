@@ -57,13 +57,34 @@ per step* rather than reasoning items per step is the fingerprint.
 
 ## Outcome
 
-Closed by the above. Whether it fixes the cache is a measurement, not a
-claim: the baseline to beat is **40% misses on appends over 2k**, and
-`scripts/cache_report.py --all` reads it straight off the sessions after
-a day of use. If the number does not move, the next candidate is message
-item ids, which Codex also sends and this change deliberately leaves out
-— they would have meant a new field on `ChatMessage` and its event, for
-the part of the shape the data does not implicate.
+**The hypothesis did not survive its own test.** A live A/B on
+`gpt-5.6-luna` (`live_chatgpt_item_id_cache_ab`) replayed one tool-heavy
+conversation twice, identical but for the ids, four steps each with six
+calls and ~75k appended per step:
+
+| step | with ids | without ids (old) |
+| --- | --- | --- |
+| 2 | 0 | 10752 |
+| 3 | 0 | 85504 |
+| 4 | 161280 | 0 |
+
+One of three follow-up steps cached with ids, two of three without.
+Reads are binary — either near-zero or the whole previous prompt —
+which is a shard that has the prefix or does not, not a prefix that
+half-matches. Codex's own client confirms there is nothing else at the
+request level to copy: `store: false`, `prompt_cache_key`, no retention
+field, no `previous_response_id`.
+
+Caveats, because the test is weak: three follow-up steps per arm is no
+statistical power, the arms ran in a fixed order so the second arm saw a
+warmer backend, and 75k per step is past the regime the sessions
+actually live in. It shows no benefit; it does not prove none exists.
+
+The change stays because it is what the API returned and what the
+reference client replays, not because it was shown to fix anything.
+Together with the August finding that *byte-identical* requests
+alternated 0 / 6912 / 0, the evidence now points at backend shard
+routing, with append size as a correlate rather than a cause.
 
 ## Notes
 
