@@ -44,8 +44,9 @@ use crate::sidebar::{
     todo_sidebar_snapshot, todo_summary,
 };
 use crate::text::{
-    Truncation, abbreviated_path, bounded_detail, context_meter, context_usage, format_bytes,
-    format_cost, format_tokens_compact, safe_lines, safe_text, truncate_display, wrap_styled_line,
+    Truncation, abbreviated_path, bounded_detail, cache_share, context_meter, context_usage,
+    format_bytes, format_cost, format_tokens_compact, safe_lines, safe_text, truncate_display,
+    wrap_styled_line,
 };
 use crate::transcript::{
     Line_, ToolKind, ToolProgress, ToolState, TranscriptHitTarget, TranscriptRenderCache,
@@ -961,11 +962,10 @@ impl App {
                     self.context_estimated = true;
                 }
                 self.status = format!(
-                    "{stop_reason} · in {} out {} (request cache read {} / write {})",
+                    "{stop_reason} · in {} out {} ({})",
                     usage.input_tokens,
                     usage.output_tokens,
-                    usage.cache_read_input_tokens,
-                    usage.cache_creation_input_tokens
+                    Self::cache_hit_display(usage)
                 );
             }
             LoopEvent::Compacted {
@@ -1559,6 +1559,21 @@ impl App {
         })
     }
 
+    /// "cache 77%" — the share of the last request's prompt the provider
+    /// served from its cache. Two raw counts left the reader dividing in
+    /// their head, and cache writes are not reported at all on some
+    /// backends, so a pair of numbers was as likely to mislead as inform.
+    fn cache_hit_display(usage: &ilar::session::Usage) -> String {
+        let prompt = usage
+            .input_tokens
+            .saturating_add(usage.cache_read_input_tokens)
+            .saturating_add(usage.cache_creation_input_tokens);
+        match cache_share(prompt, usage.cache_read_input_tokens) {
+            Some(share) => format!("cache {share}%"),
+            None => "cache —".to_string(),
+        }
+    }
+
     fn status_line(&self, width: u16) -> Line<'static> {
         let width = width as usize;
         if self.search_active {
@@ -1688,18 +1703,16 @@ impl App {
             .then_some((self.stream_received - self.stream_step_base) / 4);
         let compact_latest_usage = match (self.latest_usage, live_out) {
             (Some(latest), Some(out)) => Some(format!(
-                "i{}/o~{} req-cache r{}/w{} {percent}",
+                "i{}/o~{} {} {percent}",
                 format_tokens_compact(latest.input_tokens),
                 format_tokens_compact(out),
-                format_tokens_compact(latest.cache_read_input_tokens),
-                format_tokens_compact(latest.cache_creation_input_tokens)
+                Self::cache_hit_display(&latest)
             )),
             (Some(latest), None) => Some(format!(
-                "i{}/o{} req-cache r{}/w{} {percent}",
+                "i{}/o{} {} {percent}",
                 format_tokens_compact(latest.input_tokens),
                 format_tokens_compact(latest.output_tokens),
-                format_tokens_compact(latest.cache_read_input_tokens),
-                format_tokens_compact(latest.cache_creation_input_tokens)
+                Self::cache_hit_display(&latest)
             )),
             (None, Some(out)) => Some(format!("o~{} {percent}", format_tokens_compact(out))),
             (None, None) => None,
@@ -1800,10 +1813,9 @@ impl App {
                 None => latest.output_tokens.to_string(),
             };
             format!(
-                "in {} · out {out} · req cache r{}/w{} · {session}{context_display}",
+                "in {} · out {out} · {} · {session}{context_display}",
                 latest.input_tokens,
-                latest.cache_read_input_tokens,
-                latest.cache_creation_input_tokens
+                Self::cache_hit_display(&latest)
             )
         });
         let detailed_usage = detailed_usage.filter(|usage| {
@@ -3553,14 +3565,15 @@ mod tests {
         assert!(status.contains("openai/gpt-5.6-sol@high"), "{status}");
         assert!(status.contains("in 300"), "{status}");
         assert!(status.contains("out 50"), "{status}");
-        assert!(status.contains("req cache r1500/w20"), "{status}");
+        // 1500 read of a 1820-token prompt (300 fresh + 1500 read + 20 written).
+        assert!(status.contains("cache 82%"), "{status}");
         assert!(status.contains("Σ 1k"), "{status}");
         assert!(status.contains("$0.004"), "{status}");
         let narrow = rendered_text(&app.status_line(60));
         assert!(narrow.contains("gpt-5.6"), "{narrow}");
         assert!(narrow.contains("high"), "{narrow}");
         assert!(narrow.contains("i300/o50"), "{narrow}");
-        assert!(narrow.contains("req-cache r1k/w20"), "{narrow}");
+        assert!(narrow.contains("cache 82%"), "{narrow}");
         for width in [64, 72, 77] {
             let boundary = rendered_text(&app.status_line(width));
             assert!(boundary.contains("gpt-5.6"), "width {width}: {boundary}");

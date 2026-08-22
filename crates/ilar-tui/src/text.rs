@@ -325,6 +325,17 @@ pub(crate) fn format_tokens_compact(tokens: u64) -> String {
     }
 }
 
+/// How much of the last request's prompt the provider served from its
+/// cache. Two raw token counts made the reader do this division in their
+/// head, and the interesting question was never "how many" but "did it
+/// hit". `None` when the request carried no prompt to speak of.
+pub(crate) fn cache_share(prompt_tokens: u64, cached_tokens: u64) -> Option<u8> {
+    (prompt_tokens > 0).then(|| {
+        let share = (cached_tokens as f64 / prompt_tokens as f64 * 100.0).round();
+        share.clamp(0.0, 100.0) as u8
+    })
+}
+
 pub(crate) fn context_usage(used: u64, limit: Option<u64>, estimated: bool) -> String {
     let estimate = if estimated { "~" } else { "" };
     match limit.filter(|limit| *limit > 0) {
@@ -419,6 +430,20 @@ pub(crate) fn fuzzy_score(needle: &str, haystack: &str) -> Option<i64> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    /// The number people actually read off the status line: reads over
+    /// the whole prompt, including what was written and what was fresh.
+    #[test]
+    fn cache_share_is_the_read_fraction_of_the_whole_prompt() {
+        // 2000 read + 400 written + 200 fresh, the shape OpenAI reports.
+        assert_eq!(cache_share(2_600, 2_000), Some(77));
+        assert_eq!(cache_share(2_600, 0), Some(0));
+        assert_eq!(cache_share(2_600, 2_600), Some(100));
+        // A request with nothing to cache has no share to report, and a
+        // provider that over-reports must not print 103%.
+        assert_eq!(cache_share(0, 0), None);
+        assert_eq!(cache_share(1_000, 1_100), Some(100));
+    }
+
     #[test]
     fn fuzzy_score_prefers_word_starts_and_runs() {
         assert!(fuzzy_score("abc", "xyz").is_none());

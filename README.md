@@ -64,7 +64,7 @@ Pre-alpha. See `meta/issues.md` for the roadmap and
 During a turn the status line reads like:
 
 ```
-○ thinking · 84.2 KiB · 12.3 KiB/s   zai/glm-5.3   in 300 · out ~8.4k · req cache r1838/w0 · Σ 1.2M $0.42 · ctx [██░░░░░░] 24%
+○ thinking · 84.2 KiB · 12.3 KiB/s   zai/glm-5.3   in 300 · out ~8.4k · cache 86% · Σ 1.2M $0.42 · ctx [██░░░░░░] 24%
 ```
 
 - **Activity + liveness** — `thinking · 84.2 KiB · 12.3 KiB/s`: bytes
@@ -76,13 +76,13 @@ During a turn the status line reads like:
   step streams, `out ~N` is a live estimate from streamed bytes
   (~4 bytes/token) and snaps to the exact reported value when the step
   completes.
-- **`req cache rN/wM`** — prompt-cache accounting for the last request:
-  `r` tokens were read from the provider's prompt cache (billed at the
-  cheap cache-read rate), `w` tokens were written as new cache entries
-  (an Anthropic-style charge; OpenAI-compatible endpoints report 0).
-  A healthy agentic session shows a large, growing `r`; a sudden drop to
-  0 means the cached prefix was invalidated (model switch, prompt change,
-  or provider eviction) and per-step cost/latency just went up.
+- **`cache N%`** — how much of the last request's prompt the provider
+  served from its cache, billed at the cheap cache-read rate. A healthy
+  agentic session sits high and climbs as the conversation grows; a drop
+  to 0% means the cached prefix was not matched (model switch, prompt
+  change, or provider eviction) and that request's cost and latency just
+  went up. `cache —` means the request had no prompt to speak of. The
+  palette's "Session usage" entry still has the raw read/write counts.
 - **`Σ tokens $cost`** — session-cumulative totals across all turns,
   priced per-step at each model's list rates (cache reads at the cache
   rate). Coding-plan models show `plan` instead of dollars; unknown
