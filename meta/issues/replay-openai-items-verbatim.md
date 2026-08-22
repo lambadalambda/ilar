@@ -82,9 +82,11 @@ actually live in. It shows no benefit; it does not prove none exists.
 
 The change stays because it is what the API returned and what the
 reference client replays, not because it was shown to fix anything.
-Together with the August finding that *byte-identical* requests
-alternated 0 / 6912 / 0, the evidence now points at backend shard
-routing, with append size as a correlate rather than a cause.
+
+**The actual cause was found next, and it was the routing after all:**
+the Codex backend takes the conversation's identity from `session-id`
+and `thread-id` *headers*, which Codex sends and ilar did not. See
+[Pin the Codex backend to a shard](codex-session-affinity-headers.md).
 
 ## Notes
 

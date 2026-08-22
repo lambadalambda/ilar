@@ -31,3 +31,4 @@
 ## Milestone 7 — Unscheduled
 
 - [ ] [Replay OpenAI items in the shape they arrived](issues/replay-openai-items-verbatim.md)
+- [ ] [Pin the Codex backend to a shard](issues/codex-session-affinity-headers.md)

@@ -25,6 +25,7 @@ pub struct OpenAIProvider {
     auth: Auth,
     base_url: String,
     prompt_cache_key: bool,
+    session_headers: bool,
     token_url: String,
     http: reqwest::Client,
 }
@@ -38,6 +39,8 @@ impl OpenAIProvider {
             auth: Auth::ApiKey(api_key),
             base_url: base_url.unwrap_or_else(|| "https://api.openai.com/v1".into()),
             prompt_cache_key,
+            // Codex-backend headers; the public API has no use for them.
+            session_headers: false,
             token_url: format!("{}/oauth/token", crate::auth::AUTH_BASE),
             http: transport::streaming_client(),
         }
@@ -50,6 +53,7 @@ impl OpenAIProvider {
             auth: Auth::ChatGpt { store },
             base_url: base_url.unwrap_or_else(|| "https://chatgpt.com/backend-api/codex".into()),
             prompt_cache_key,
+            session_headers: prompt_cache_key,
             token_url: format!("{}/oauth/token", crate::auth::AUTH_BASE),
             http: transport::streaming_client(),
         }
@@ -65,6 +69,27 @@ impl OpenAIProvider {
     /// that sending the key is what production does.
     pub fn without_prompt_cache_key_for_test(mut self) -> Self {
         self.prompt_cache_key = false;
+        self
+    }
+
+    /// The conversation's identity as headers, which is how the Codex
+    /// backend pins a request to the shard holding its cached prefix.
+    /// `prompt_cache_key` alone does not: measured over four alternating
+    /// arms, 2/10 follow-up steps read a cache without these and 10/10
+    /// with them. Only the Codex backend reads them, so only it gets them.
+    fn session_headers(&self, cache_key: Option<&str>) -> Vec<(&'static str, String)> {
+        let Some(cache_key) = cache_key.filter(|_| self.session_headers) else {
+            return Vec::new();
+        };
+        vec![
+            ("session-id", cache_key.to_string()),
+            ("thread-id", cache_key.to_string()),
+        ]
+    }
+
+    /// Test hook: the control arm for the session-affinity headers.
+    pub fn without_session_headers_for_test(mut self) -> Self {
+        self.session_headers = false;
         self
     }
 
@@ -241,6 +266,7 @@ impl Provider for OpenAIProvider {
             }
         }
 
+        let session_headers = self.session_headers(req.cache_key.as_deref());
         let url = format!("{}/responses", self.base_url);
         let (token, account, auth_store) = match &self.auth {
             Auth::ApiKey(key) => (key.clone(), None, None),
@@ -270,6 +296,9 @@ impl Provider for OpenAIProvider {
                         .header("OpenAI-Beta", "responses=experimental");
                     if let Some(account) = &current_account {
                         builder = builder.header("chatgpt-account-id", account);
+                    }
+                    for (name, value) in &session_headers {
+                        builder = builder.header(*name, value);
                     }
                 }
                 let request = builder.build().map_err(transport::fatal)?;
@@ -827,22 +856,35 @@ fn required_u64(value: &serde_json::Value, field: &str, label: &str) -> Result<u
 }
 
 fn wire_usage(usage: &serde_json::Value) -> Usage {
-    let cached = usage["input_tokens_details"]["cached_tokens"]
-        .as_u64()
-        .or_else(|| usage["prompt_tokens_details"]["cached_tokens"].as_u64())
-        .unwrap_or_default();
+    let detail = |field: &str| {
+        usage["input_tokens_details"][field]
+            .as_u64()
+            .or_else(|| usage["prompt_tokens_details"][field].as_u64())
+            .unwrap_or_default()
+    };
+    let cached = detail("cached_tokens");
+    // Reported from GPT-5.6 on. Without it every request looked like it
+    // wrote nothing, which made "the prefix was never cached" and "the
+    // prefix was cached somewhere this request could not reach"
+    // indistinguishable.
+    let written = detail("cache_write_tokens");
     let input = usage["input_tokens"]
         .as_u64()
         .or_else(|| usage["prompt_tokens"].as_u64())
         .unwrap_or_default();
     Usage {
-        input_tokens: input.saturating_sub(cached),
+        // Both are subsets of the reported input total, so the remainder
+        // is what was neither read from nor written to the cache. Splitting
+        // them out keeps the cost identical — models with no separate write
+        // price bill writes at the input rate — while making the split
+        // visible.
+        input_tokens: input.saturating_sub(cached).saturating_sub(written),
         output_tokens: usage["output_tokens"]
             .as_u64()
             .or_else(|| usage["completion_tokens"].as_u64())
             .unwrap_or_default(),
         cache_read_input_tokens: cached,
-        cache_creation_input_tokens: 0,
+        cache_creation_input_tokens: written,
         input_token_accounting: Some(InputTokenAccounting::ExcludesCached),
     }
 }
@@ -850,6 +892,33 @@ fn wire_usage(usage: &serde_json::Value) -> Usage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The example from OpenAI's prompt-caching guide, verbatim: reads and
+    /// writes are both carved out of the input total, and what remains is
+    /// neither. Context and cost must come out unchanged by the split.
+    #[test]
+    fn cache_writes_are_reported_and_do_not_inflate_the_total() {
+        let usage = wire_usage(&serde_json::json!({
+            "input_tokens": 2_600,
+            "input_tokens_details": {
+                "cached_tokens": 2_000,
+                "cache_write_tokens": 400
+            }
+        }));
+        assert_eq!(usage.cache_read_input_tokens, 2_000);
+        assert_eq!(usage.cache_creation_input_tokens, 400);
+        assert_eq!(usage.input_tokens, 200);
+        assert_eq!(usage.context_tokens(), 2_600);
+
+        // A model that reports no writes still accounts the same way.
+        let silent = wire_usage(&serde_json::json!({
+            "input_tokens": 2_600,
+            "input_tokens_details": {"cached_tokens": 2_000}
+        }));
+        assert_eq!(silent.cache_creation_input_tokens, 0);
+        assert_eq!(silent.input_tokens, 600);
+        assert_eq!(silent.context_tokens(), 2_600);
+    }
 
     #[test]
     fn cached_input_is_normalized_out_of_openai_input_total() {
@@ -941,6 +1010,37 @@ mod tests {
         assert_eq!(items[0]["call_id"], "call_1");
         // Text output is a plain string; arrays are the multimodal form.
         assert_eq!(items[0]["output"], "ok");
+    }
+
+    /// `prompt_cache_key` influences routing but does not pin it. The
+    /// Codex backend takes the conversation's identity from headers, and
+    /// without them a request lands wherever — measured at 2/10 follow-up
+    /// steps reading a cache, against 10/10 with them.
+    #[test]
+    fn the_codex_backend_gets_the_conversation_identity_as_headers() {
+        let chatgpt = OpenAIProvider::with_chatgpt_auth(
+            crate::auth::AuthStore::open(std::path::PathBuf::from("unused")),
+            None,
+        );
+        assert_eq!(
+            chatgpt.session_headers(Some("session-123")),
+            vec![
+                ("session-id", "session-123".to_string()),
+                ("thread-id", "session-123".to_string()),
+            ]
+        );
+        // Nothing to pin to.
+        assert!(chatgpt.session_headers(None).is_empty());
+
+        // The public API has no use for them, and a gateway may reject
+        // headers it does not know — same rule as `prompt_cache_key`.
+        let api_key = OpenAIProvider::new("test".into(), None);
+        assert!(api_key.session_headers(Some("session-123")).is_empty());
+        let gateway = OpenAIProvider::with_chatgpt_auth(
+            crate::auth::AuthStore::open(std::path::PathBuf::from("unused")),
+            Some("https://gateway.example/codex".into()),
+        );
+        assert!(gateway.session_headers(Some("session-123")).is_empty());
     }
 
     #[test]

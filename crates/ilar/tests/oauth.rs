@@ -585,39 +585,48 @@ async fn live_chatgpt_item_id_cache_ab() {
     let state_dir = std::env::var("ILAR_LIVE_CHATGPT_STATE_DIR")
         .expect("ILAR_LIVE_CHATGPT_STATE_DIR with seeded auth.json");
     let model = std::env::var("ILAR_LIVE_MODEL").unwrap_or_else(|_| "openai/gpt-5.6-luna".into());
-    let mut results = Vec::new();
-    for keep_ids in [true, false] {
-        let reads = item_id_cache_arm(&state_dir, &model, keep_ids).await;
-        println!(
-            "\n== arm {}: cached tokens per step = {reads:?}\n",
-            if keep_ids {
-                "WITH item ids"
-            } else {
-                "WITHOUT item ids (old behaviour)"
-            }
-        );
-        results.push((keep_ids, reads));
-    }
-    for (keep_ids, reads) in &results {
-        let label = if *keep_ids {
-            "with ids   "
-        } else {
-            "without ids"
-        };
+    // Alternating order: the arm that runs second inherits a warmer
+    // backend, so a fixed order would hand it the win.
+    let mut tally: std::collections::BTreeMap<bool, (usize, usize)> = Default::default();
+    for headers in [false, true, false, true] {
+        let reads = item_id_cache_arm(&state_dir, &model, headers).await;
         let hits = reads.iter().skip(1).filter(|(_, read)| *read > 0).count();
+        let entry = tally.entry(headers).or_insert((0, 0));
+        entry.0 += hits;
+        entry.1 += reads.len() - 1;
         println!(
-            "{label}: {hits}/{} follow-up steps read a cache",
+            "\n== arm {}: {hits}/{} follow-up steps cached\n",
+            if headers {
+                "WITH session headers"
+            } else {
+                "WITHOUT session headers (current behaviour)"
+            },
             reads.len() - 1
+        );
+    }
+    for (headers, (hits, total)) in tally {
+        println!(
+            "{}: {hits}/{total} follow-up steps read a cache",
+            if headers {
+                "with session headers   "
+            } else {
+                "without session headers"
+            }
         );
     }
 }
 
 /// One arm: a large prefix, then steps that each append several tool
 /// calls and their outputs, which is the shape that was missing.
-async fn item_id_cache_arm(state_dir: &str, model: &str, keep_ids: bool) -> Vec<(u64, u64)> {
+async fn item_id_cache_arm(state_dir: &str, model: &str, session_headers: bool) -> Vec<(u64, u64)> {
     use ilar::session::{ChatMessage, ContentBlock, Role};
 
     let provider = OpenAIProvider::with_chatgpt_auth(AuthStore::open(state_dir.into()), None);
+    let provider = if session_headers {
+        provider
+    } else {
+        provider.without_session_headers_for_test()
+    };
     let cache_key = format!("ilar-item-id-probe-{}", uuid::Uuid::new_v4());
     // Big enough to be worth caching, and stable across every step.
     let prefix = (0..4_000)
@@ -643,11 +652,11 @@ async fn item_id_cache_arm(state_dir: &str, model: &str, keep_ids: bool) -> Vec<
     // Each result is deliberately large: the failure regime is a step
     // that appends tens of thousands of tokens, not one that appends a
     // few hundred.
-    let bulky_result = (0..1_500)
+    let bulky_result = (0..250)
         .map(|n| format!("line {n} of recorded observation data"))
         .collect::<Vec<_>>()
         .join("\n");
-    for step in 0..4 {
+    for step in 0..6 {
         let mut request = Request::with_model(model);
         request.system_prompt = Some("You are a terse tool-calling probe.".into());
         request.messages = messages.clone();
@@ -674,9 +683,7 @@ async fn item_id_cache_arm(state_dir: &str, model: &str, keep_ids: bool) -> Vec<
                         id: id.clone(),
                         name: name.clone(),
                         input,
-                        // The arm under test: keep the identity, or drop
-                        // it the way the old serializer did.
-                        item_id: keep_ids.then_some(item_id).flatten(),
+                        item_id,
                     });
                     calls.push((id, name));
                 }
@@ -694,10 +701,11 @@ async fn item_id_cache_arm(state_dir: &str, model: &str, keep_ids: bool) -> Vec<
         let prompt = usage.input_tokens + usage.cache_read_input_tokens;
         let grew = prompt.saturating_sub(observed.last().map_or(0, |(p, _): &(u64, u64)| *p));
         println!(
-            "  {} step {}: prompt={prompt} (+{grew}) cached={} calls={}",
-            if keep_ids { "ids " } else { "none" },
+            "  {} step {}: prompt={prompt} (+{grew}) cached={} written={} calls={}",
+            if session_headers { "hdr " } else { "none" },
             step + 1,
             usage.cache_read_input_tokens,
+            usage.cache_creation_input_tokens,
             calls.len()
         );
         observed.push((
