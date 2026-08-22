@@ -158,6 +158,7 @@ async fn tool_call_fixture_maps_thinking_and_tool_use() {
         ProviderEvent::ToolCallStarted {
             id: "toolu_01".into(),
             name: "read".into(),
+            item_id: None,
         }
     );
     assert_eq!(
@@ -276,6 +277,7 @@ fn incomplete_tool_input_is_normalized_for_anthropic_replay() {
             id: "incomplete".into(),
             name: "read".into(),
             input: serde_json::Value::Null,
+            item_id: None,
         }],
     }];
 
@@ -374,7 +376,7 @@ async fn truncated_tool_call_synthesizes_null_completion() {
 
     assert!(matches!(
         &events[0],
-        ProviderEvent::ToolCallStarted { id, name } if id == "toolu_02" && name == "edit"
+        ProviderEvent::ToolCallStarted { id, name, .. } if id == "toolu_02" && name == "edit"
     ));
     assert!(matches!(
         &events[2],
@@ -683,6 +685,7 @@ async fn wire_format_anthropic_flavor() {
                     id: "toolu_01".into(),
                     name: "read".into(),
                     input: serde_json::json!({"path": "Cargo.toml"}),
+                    item_id: None,
                 },
             ],
         },
@@ -797,11 +800,13 @@ fn openai_flavor_serializes_system_and_tool_results_in_protocol_order() {
                     id: "call_1".into(),
                     name: "read".into(),
                     input: serde_json::json!({"path": "one"}),
+                    item_id: None,
                 },
                 ContentBlock::ToolCall {
                     id: "call_2".into(),
                     name: "read".into(),
                     input: serde_json::json!({"path": "two"}),
+                    item_id: None,
                 },
             ],
         },
@@ -915,6 +920,7 @@ async fn cache_breakpoints_placed() {
                     id: "toolu_01".into(),
                     name: "read".into(),
                     input: serde_json::json!({"path": "x"}),
+                    item_id: None,
                 },
             ],
         },
@@ -989,6 +995,7 @@ fn wire_prefix_stable_across_turns() {
                 id: "toolu_01".into(),
                 name: "read".into(),
                 input: serde_json::json!({"path": "ilar.toml"}),
+                item_id: None,
             },
         ],
     };

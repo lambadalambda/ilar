@@ -141,6 +141,7 @@ impl Provider for NestedBackgroundProvider {
             ProviderEvent::ToolCallStarted {
                 id: "nested-task".into(),
                 name: "task".into(),
+                item_id: None,
             },
             ProviderEvent::ToolCallCompleted {
                 id: "nested-task".into(),
@@ -594,6 +595,7 @@ async fn foreground_child_rejects_detached_workspace_mutation() {
             ProviderEvent::ToolCallStarted {
                 id: "nested-bash".into(),
                 name: "bash".into(),
+                item_id: None,
             },
             ProviderEvent::ToolCallCompleted {
                 id: "nested-bash".into(),
@@ -826,6 +828,7 @@ async fn background_task_returns_immediately_and_notifies_once() {
             ProviderEvent::ToolCallStarted {
                 id: "t1".into(),
                 name: "task".into(),
+                item_id: None,
             },
             bg_call("t1"),
             ProviderEvent::TurnComplete {
@@ -1162,6 +1165,7 @@ async fn isolated_notification_uses_persisted_cwd_and_independent_lock() {
             ProviderEvent::ToolCallStarted {
                 id: "write-cwd".into(),
                 name: "bash".into(),
+                item_id: None,
             },
             ProviderEvent::ToolCallCompleted {
                 id: "write-cwd".into(),
@@ -1456,6 +1460,7 @@ async fn routed_read_only_agent_keeps_mutating_tools_unavailable() {
             ProviderEvent::ToolCallStarted {
                 id: "write-1".into(),
                 name: "write".into(),
+                item_id: None,
             },
             ProviderEvent::ToolCallCompleted {
                 id: "write-1".into(),

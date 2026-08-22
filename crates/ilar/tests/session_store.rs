@@ -47,6 +47,7 @@ fn sample_log(meta: &SessionMeta) -> Vec<SessionEvent> {
                     id: "toolu_1".into(),
                     name: "read".into(),
                     input: serde_json::json!({"path": "ilar.toml"}),
+                    item_id: None,
                 },
             ],
             usage: Usage {
@@ -95,11 +96,13 @@ fn todo_snapshots_round_trip_and_latest_replacement_wins() {
                     id: "todo-1".into(),
                     name: "todo".into(),
                     input: serde_json::json!({}),
+                    item_id: None,
                 },
                 ContentBlock::ToolCall {
                     id: "todo-2".into(),
                     name: "todo".into(),
                     input: serde_json::json!({}),
+                    item_id: None,
                 },
             ],
             usage: Usage::default(),
@@ -199,6 +202,7 @@ fn assistant_with_calls(event_id: &str, call_ids: &[&str]) -> SessionEvent {
                 id: (*id).into(),
                 name: "read".into(),
                 input: serde_json::json!({"path": "ilar.toml"}),
+                item_id: None,
             })
             .collect(),
         usage: Usage::default(),
@@ -720,6 +724,7 @@ fn replay_index_preserves_folded_model_and_todo_state() {
                 id: "todo-before-cut".into(),
                 name: "todo".into(),
                 input: serde_json::json!({}),
+                item_id: None,
             }],
             usage: Usage::default(),
             stop_reason: "tool_use".into(),
@@ -1081,6 +1086,7 @@ fn assistant_with_question(call_id: &str, input: serde_json::Value) -> SessionEv
             id: call_id.into(),
             name: "question".into(),
             input,
+            item_id: None,
         }],
         usage: Usage::default(),
         stop_reason: "tool_use".into(),
@@ -1176,6 +1182,7 @@ fn multiple_or_mixed_pending_calls_are_repaired_normally() {
                         id: format!("call-{index}"),
                         name: name.into(),
                         input: request.clone(),
+                        item_id: None,
                     })
                     .collect(),
                 usage: Usage::default(),

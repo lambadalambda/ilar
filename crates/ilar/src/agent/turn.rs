@@ -193,7 +193,12 @@ impl StepAccumulator {
         self.content.push(ContentBlock::Reasoning { item });
     }
 
-    fn start_tool_call(&mut self, id: String, name: String) -> Result<(), String> {
+    fn start_tool_call(
+        &mut self,
+        id: String,
+        name: String,
+        item_id: Option<String>,
+    ) -> Result<(), String> {
         self.thinking_open = None;
         if id.is_empty() || name.is_empty() {
             return Err("tool call id and name must not be empty".into());
@@ -205,6 +210,7 @@ impl StepAccumulator {
             id: id.clone(),
             name,
             input: serde_json::Value::Null,
+            item_id,
         });
         self.tool_indices.insert(id, self.content.len() - 1);
         Ok(())
@@ -237,7 +243,18 @@ impl StepAccumulator {
         }
         if let Some(index) = self.tool_indices.get(&id).copied() {
             let completed_id = id.clone();
-            self.content[index] = ContentBlock::ToolCall { id, name, input };
+            // The item id arrives with the announcement, not the
+            // completion, so completion must not drop it.
+            let item_id = match &self.content[index] {
+                ContentBlock::ToolCall { item_id, .. } => item_id.clone(),
+                _ => None,
+            };
+            self.content[index] = ContentBlock::ToolCall {
+                id,
+                name,
+                input,
+                item_id,
+            };
             self.completed_calls.insert(completed_id);
         }
         Ok(())
@@ -333,9 +350,9 @@ impl StepAccumulator {
         self.content
             .iter()
             .filter_map(|block| match block {
-                ContentBlock::ToolCall { id, name, input } => {
-                    Some((id, name, input, self.completed_calls.contains(id)))
-                }
+                ContentBlock::ToolCall {
+                    id, name, input, ..
+                } => Some((id, name, input, self.completed_calls.contains(id))),
                 _ => None,
             })
             .collect()
@@ -1253,14 +1270,14 @@ async fn run_turn_inner(
                     ProviderEvent::ReasoningItem { item } => {
                         acc.push_reasoning(item);
                     }
-                    ProviderEvent::ToolCallStarted { id, name } => {
+                    ProviderEvent::ToolCallStarted { id, name, item_id } => {
                         if seen_tool_call_ids.contains(&id) || session.contains_tool_call_id(&id)? {
                             errored = Some(format!(
                                 "duplicate tool call id {id:?} already exists in this session"
                             ));
                             break;
                         }
-                        if let Err(error) = acc.start_tool_call(id.clone(), name.clone()) {
+                        if let Err(error) = acc.start_tool_call(id.clone(), name.clone(), item_id) {
                             errored = Some(error);
                             break;
                         }
@@ -1956,7 +1973,7 @@ mod tests {
     fn partial_write_path_extraction_is_bounded_and_json_aware() {
         let mut accumulator = StepAccumulator::default();
         accumulator
-            .start_tool_call("write-1".into(), "write".into())
+            .start_tool_call("write-1".into(), "write".into(), None)
             .unwrap();
         accumulator
             .announced_calls
@@ -1980,7 +1997,7 @@ mod tests {
 
         let mut content_first = StepAccumulator::default();
         content_first
-            .start_tool_call("write-2".into(), "write".into())
+            .start_tool_call("write-2".into(), "write".into(), None)
             .unwrap();
         content_first
             .announced_calls
@@ -2009,11 +2026,35 @@ mod tests {
         );
     }
 
+    /// The item id arrives with the announcement and the completion
+    /// rewrites the block, so the completion has to carry it forward —
+    /// otherwise every finished call replays anonymously, which is the
+    /// state that broke prompt caching.
+    #[test]
+    fn completing_a_tool_call_keeps_the_item_id_from_its_announcement() {
+        let mut acc = StepAccumulator::default();
+        acc.start_tool_call("call_1".into(), "read".into(), Some("fc_1".into()))
+            .unwrap();
+        acc.complete_tool_call(
+            "call_1".into(),
+            "read".into(),
+            serde_json::json!({"path": "x"}),
+        )
+        .unwrap();
+
+        let blocks = acc.content_blocks();
+        let ContentBlock::ToolCall { item_id, id, .. } = &blocks[0] else {
+            panic!("tool call expected: {blocks:?}");
+        };
+        assert_eq!(id, "call_1");
+        assert_eq!(item_id.as_deref(), Some("fc_1"));
+    }
+
     #[test]
     fn tool_call_terminal_validation_is_strict() {
         let mut missing_completion = StepAccumulator::default();
         missing_completion
-            .start_tool_call("call".into(), "read".into())
+            .start_tool_call("call".into(), "read".into(), None)
             .unwrap();
         assert!(
             missing_completion
@@ -2024,7 +2065,7 @@ mod tests {
 
         let mut null_input = StepAccumulator::default();
         null_input
-            .start_tool_call("call".into(), "read".into())
+            .start_tool_call("call".into(), "read".into(), None)
             .unwrap();
         null_input
             .complete_tool_call("call".into(), "read".into(), serde_json::Value::Null)
@@ -2039,7 +2080,7 @@ mod tests {
 
         let mut complete_input = StepAccumulator::default();
         complete_input
-            .start_tool_call("call".into(), "read".into())
+            .start_tool_call("call".into(), "read".into(), None)
             .unwrap();
         complete_input
             .complete_tool_call("call".into(), "read".into(), serde_json::json!({}))

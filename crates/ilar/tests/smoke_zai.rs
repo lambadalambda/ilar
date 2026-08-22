@@ -97,6 +97,7 @@ async fn live_anthropic_flavor_tool_roundtrip() {
             id: call_id.clone(),
             name: name.clone(),
             input: input.clone(),
+            item_id: None,
         }],
     });
     messages.push(ilar::session::ChatMessage {

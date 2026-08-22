@@ -124,15 +124,28 @@ impl OpenAIProvider {
 }
 
 /// One neutral message may map to zero (dropped thinking) or more wire items.
+///
+/// Items go back in the canonical shape the API returned them in, because
+/// a replayed conversation is only cacheable if the server can rebuild the
+/// same item graph: typed `message` items rather than bare role/content
+/// pairs, and function calls carrying the item id a preceding reasoning
+/// item refers to. `function_call_output.output` stays a plain string —
+/// that is the canonical form for text results, arrays being for
+/// multimodal ones.
 fn wire_input_items(msg: &ChatMessage) -> Vec<serde_json::Value> {
     let mut items = Vec::new();
     // Group tool results with their role; text becomes message items.
     let mut text = String::new();
     let flush_text = |text: &mut String, items: &mut Vec<serde_json::Value>| {
         if !text.is_empty() {
+            let (role, part) = match msg.role {
+                Role::User => ("user", "input_text"),
+                Role::Assistant => ("assistant", "output_text"),
+            };
             items.push(serde_json::json!({
-                "role": match msg.role { Role::User => "user", Role::Assistant => "assistant" },
-                "content": std::mem::take(text),
+                "type": "message",
+                "role": role,
+                "content": [{"type": part, "text": std::mem::take(text)}],
             }));
         }
     };
@@ -147,19 +160,32 @@ fn wire_input_items(msg: &ChatMessage) -> Vec<serde_json::Value> {
                 flush_text(&mut text, &mut items);
                 items.push(item.clone());
             }
-            ContentBlock::ToolCall { id, name, input } => {
+            ContentBlock::ToolCall {
+                id,
+                name,
+                input,
+                item_id,
+            } => {
                 flush_text(&mut text, &mut items);
                 let input = input
                     .is_object()
                     .then_some(input)
                     .cloned()
                     .unwrap_or_else(|| serde_json::json!({}));
-                items.push(serde_json::json!({
+                let mut call = serde_json::json!({
                     "type": "function_call",
                     "call_id": id,
                     "name": name,
                     "arguments": input.to_string(),
-                }));
+                });
+                // Omitted for sessions recorded before the id was kept,
+                // and for calls that never had one.
+                if let Some(item_id) = item_id
+                    && let Some(object) = call.as_object_mut()
+                {
+                    object.insert("id".into(), serde_json::json!(item_id));
+                }
+                items.push(call);
             }
             ContentBlock::ToolResult {
                 tool_use_id,
@@ -505,10 +531,15 @@ impl TransportEventMapper for EventMapper {
                     {
                         return Err(format!("duplicate OpenAI tool call id {call_id:?}"));
                     }
+                    let item_id_for_event = item_id.clone();
                     self.calls.insert(item_id, (call_id.clone(), name.clone()));
                     self.pending.push(call_id.clone());
                     self.tool_call_seen = true;
-                    vec![ProviderEvent::ToolCallStarted { id: call_id, name }]
+                    vec![ProviderEvent::ToolCallStarted {
+                        id: call_id,
+                        name,
+                        item_id: Some(item_id_for_event),
+                    }]
                 } else if item_type == "reasoning" {
                     let item_id = required_str(item, "id", "OpenAI reasoning item id")?;
                     let output_index =
@@ -844,6 +875,74 @@ mod tests {
         assert_eq!(usage.cache_read_input_tokens, 1_500);
     }
 
+    /// A replayed conversation is only cacheable if the server can
+    /// rebuild the item graph it handed us, so items go back in the shape
+    /// they came in: typed `message` items, and function calls carrying
+    /// the item id that a preceding reasoning item refers to. Sending
+    /// bare `{role, content}` pairs and anonymous calls left the backend
+    /// synthesizing identity per request, and cache reads collapsed as
+    /// soon as a step appended more than a couple of calls.
+    #[test]
+    fn replayed_items_keep_the_shape_and_identity_the_api_gave_them() {
+        let message = wire_input_items(&ChatMessage {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Text {
+                    text: "on it".into(),
+                },
+                ContentBlock::ToolCall {
+                    id: "call_1".into(),
+                    name: "read".into(),
+                    input: serde_json::json!({"path": "Cargo.toml"}),
+                    item_id: Some("fc_1".into()),
+                },
+            ],
+        });
+
+        assert_eq!(message[0]["type"], "message");
+        assert_eq!(message[0]["role"], "assistant");
+        // Assistant text is `output_text`; user text is `input_text`.
+        assert_eq!(message[0]["content"][0]["type"], "output_text");
+        assert_eq!(message[0]["content"][0]["text"], "on it");
+        assert_eq!(message[1]["type"], "function_call");
+        assert_eq!(message[1]["id"], "fc_1");
+        assert_eq!(message[1]["call_id"], "call_1");
+
+        let user = wire_input_items(&ChatMessage::user_text("hello"));
+        assert_eq!(user[0]["content"][0]["type"], "input_text");
+
+        // A session recorded before item ids were captured still replays;
+        // it simply has no id to send.
+        let legacy = wire_input_items(&ChatMessage {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolCall {
+                id: "call_2".into(),
+                name: "read".into(),
+                input: serde_json::json!({}),
+                item_id: None,
+            }],
+        });
+        assert!(legacy[0].get("id").is_none(), "{:?}", legacy[0]);
+    }
+
+    /// The call id pairs a call with its result; the item id names the
+    /// call itself. Conflating them would break tool results.
+    #[test]
+    fn a_tool_result_still_references_the_call_id() {
+        let items = wire_input_items(&ChatMessage {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_1".into(),
+                content: "ok".into(),
+                is_error: false,
+            }],
+        });
+        assert_eq!(items[0]["type"], "function_call_output");
+        assert_eq!(items[0]["call_id"], "call_1");
+        // Text output is a plain string; arrays are the multimodal form.
+        assert_eq!(items[0]["output"], "ok");
+    }
+
     #[test]
     fn cache_key_is_mapped_to_openai_prompt_cache_key() {
         let provider = OpenAIProvider::new("test".into(), None);
@@ -929,6 +1028,7 @@ mod tests {
                         id: "call_1".into(),
                         name: "read".into(),
                         input: serde_json::json!({"path": "Cargo.toml"}),
+                        item_id: None,
                     },
                 ],
             },

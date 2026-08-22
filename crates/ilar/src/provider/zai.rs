@@ -227,6 +227,7 @@ fn anthropic_message(msg: &ChatMessage) -> anyhow::Result<Option<serde_json::Val
                             id: neutral_id,
                             name: neutral_name,
                             input: neutral_input,
+                            ..
                         } if neutral_id == id && neutral_name == name && neutral_input == input
                     )
                 });
@@ -272,7 +273,9 @@ fn anthropic_message(msg: &ChatMessage) -> anyhow::Result<Option<serde_json::Val
             ContentBlock::Reasoning { .. } => None,
             ContentBlock::ProviderReplay { .. } => None,
             ContentBlock::Diagnostic { .. } => None,
-            ContentBlock::ToolCall { id, name, input } => {
+            ContentBlock::ToolCall {
+                id, name, input, ..
+            } => {
                 let input = input
                     .is_object()
                     .then_some(input)
@@ -326,7 +329,9 @@ fn openai_message(msg: &ChatMessage) -> Vec<serde_json::Value> {
             | ContentBlock::Reasoning { .. }
             | ContentBlock::ProviderReplay { .. }
             | ContentBlock::Diagnostic { .. } => {}
-            ContentBlock::ToolCall { id, name, input } => {
+            ContentBlock::ToolCall {
+                id, name, input, ..
+            } => {
                 let input = if input.is_object() {
                     input.to_string()
                 } else {
@@ -525,7 +530,11 @@ impl AnthropicMapper {
                                 args: String::new(),
                             },
                         );
-                        vec![ProviderEvent::ToolCallStarted { id, name }]
+                        vec![ProviderEvent::ToolCallStarted {
+                            id,
+                            name,
+                            item_id: None,
+                        }]
                     }
                     "thinking" => {
                         self.blocks
@@ -944,6 +953,7 @@ impl OpenAiMapper {
                             events.push(ProviderEvent::ToolCallStarted {
                                 id: entry.0.clone(),
                                 name: name.into(),
+                                item_id: None,
                             });
                         }
                     }

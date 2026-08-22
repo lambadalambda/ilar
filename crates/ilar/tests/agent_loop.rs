@@ -88,6 +88,7 @@ async fn every_provider_step_uses_the_stable_session_cache_key() {
             ProviderEvent::ToolCallStarted {
                 id: "echo-1".into(),
                 name: "echo".into(),
+                item_id: None,
             },
             tool_call_event("echo-1", "first"),
             ProviderEvent::TurnComplete {
@@ -141,6 +142,7 @@ impl Provider for PartialWriteProvider {
                 ProviderEvent::ToolCallStarted {
                     id: "write-1".into(),
                     name: "write".into(),
+                    item_id: None,
                 },
                 ProviderEvent::ToolCallInputDelta {
                     id: "write-1".into(),
@@ -219,6 +221,7 @@ async fn completed_write_arguments_transition_from_receiving_to_execution() {
             ProviderEvent::ToolCallStarted {
                 id: "write-1".into(),
                 name: "write".into(),
+                item_id: None,
             },
             ProviderEvent::ToolCallInputDelta {
                 id: "write-1".into(),
@@ -358,6 +361,7 @@ async fn cancellation_during_tool_step_backpressure_closes_persisted_calls() {
         ProviderEvent::ToolCallStarted {
             id: "call-1".into(),
             name: "echo".into(),
+            item_id: None,
         },
         tool_call_event("call-1", "hello"),
         ProviderEvent::TurnComplete {
@@ -412,6 +416,7 @@ async fn todo_replacements_persist_in_provider_call_order() {
             ProviderEvent::ToolCallStarted {
                 id: "todo-1".into(),
                 name: "todo".into(),
+                item_id: None,
             },
             ProviderEvent::ToolCallCompleted {
                 id: "todo-1".into(),
@@ -421,6 +426,7 @@ async fn todo_replacements_persist_in_provider_call_order() {
             ProviderEvent::ToolCallStarted {
                 id: "todo-2".into(),
                 name: "todo".into(),
+                item_id: None,
             },
             ProviderEvent::ToolCallCompleted {
                 id: "todo-2".into(),
@@ -489,6 +495,7 @@ async fn truncated_null_input_never_invokes_custom_tool() {
             ProviderEvent::ToolCallStarted {
                 id: "truncated".into(),
                 name: "echo".into(),
+                item_id: None,
             },
             ProviderEvent::ToolCallCompleted {
                 id: "truncated".into(),
@@ -730,6 +737,7 @@ async fn resumed_tool_use_persists_replay_before_tool_results() {
             ProviderEvent::ToolCallStarted {
                 id: "client_1".into(),
                 name: "echo".into(),
+                item_id: None,
             },
             tool_call_event("client_1", "result"),
             ProviderEvent::ResponseContent {
@@ -794,6 +802,7 @@ async fn duplicate_tool_completion_is_rejected_before_execution() {
         ProviderEvent::ToolCallStarted {
             id: "duplicate".into(),
             name: "echo".into(),
+            item_id: None,
         },
         tool_call_event("duplicate", "one"),
         tool_call_event("duplicate", "two"),
@@ -843,12 +852,14 @@ async fn multi_turn_tool_conversation_end_to_end() {
             ProviderEvent::ToolCallStarted {
                 id: "t1".into(),
                 name: "echo".into(),
+                item_id: None,
             },
             tool_call_event("t1", "alpha"),
             ProviderEvent::TextDelta("after first".into()),
             ProviderEvent::ToolCallStarted {
                 id: "t2".into(),
                 name: "echo".into(),
+                item_id: None,
             },
             tool_call_event("t2", "beta"),
             ProviderEvent::TurnComplete {
@@ -1067,6 +1078,7 @@ async fn opaque_reasoning_is_persisted_and_replayed_with_tool_continuation() {
             ProviderEvent::ToolCallStarted {
                 id: "t1".into(),
                 name: "echo".into(),
+                item_id: None,
             },
             tool_call_event("t1", "continue"),
             ProviderEvent::TurnComplete {
@@ -1259,6 +1271,7 @@ async fn started_tool_call_without_completion_is_rejected() {
         ProviderEvent::ToolCallStarted {
             id: "incomplete".into(),
             name: "echo".into(),
+            item_id: None,
         },
         ProviderEvent::TurnComplete {
             stop_reason: StopReason::MaxTokens,
@@ -1303,6 +1316,7 @@ async fn tool_finished_means_call_and_result_are_already_on_disk() {
                     ProviderEvent::ToolCallStarted {
                         id: "t1".into(),
                         name: "echo".into(),
+                        item_id: None,
                     },
                     tool_call_event("t1", "persist me"),
                     ProviderEvent::TurnComplete {
@@ -1411,6 +1425,7 @@ async fn failed_tool_chain_resumes_without_replaying_prompt_or_tool() {
             ProviderEvent::ToolCallStarted {
                 id: "echo-1".into(),
                 name: "echo".into(),
+                item_id: None,
             },
             tool_call_event("echo-1", "once"),
             ProviderEvent::TurnComplete {
@@ -1485,6 +1500,7 @@ async fn resumed_provider_cannot_replay_a_completed_tool_call_id() {
             ProviderEvent::ToolCallStarted {
                 id: "echo-1".into(),
                 name: "echo".into(),
+                item_id: None,
             },
             tool_call_event("echo-1", "once"),
             ProviderEvent::TurnComplete {
@@ -1497,6 +1513,7 @@ async fn resumed_provider_cannot_replay_a_completed_tool_call_id() {
             ProviderEvent::ToolCallStarted {
                 id: "echo-1".into(),
                 name: "echo".into(),
+                item_id: None,
             },
             tool_call_event("echo-1", "twice"),
             ProviderEvent::TurnComplete {
@@ -1798,6 +1815,7 @@ async fn provider_error_after_tool_call_closes_tool_in_session_and_ui() {
         ProviderEvent::ToolCallStarted {
             id: "t1".into(),
             name: "read".into(),
+            item_id: None,
         },
         ProviderEvent::ToolCallCompleted {
             id: "t1".into(),
@@ -1937,6 +1955,7 @@ async fn max_iterations_guard_stops_loop() {
                     ProviderEvent::ToolCallStarted {
                         id: id.clone(),
                         name: "echo".into(),
+                        item_id: None,
                     },
                     tool_call_event(&id, "again"),
                     ProviderEvent::TurnComplete {
@@ -1987,6 +2006,7 @@ async fn abort_after_tool_call_keeps_transcript_valid() {
                     ProviderEvent::ToolCallStarted {
                         id: "t1".into(),
                         name: "echo".into(),
+                        item_id: None,
                     },
                     ProviderEvent::ToolCallCompleted {
                         id: "t1".into(),
@@ -2205,6 +2225,7 @@ fn echo_call(id: &str, msg: &str) -> Vec<ProviderEvent> {
         ProviderEvent::ToolCallStarted {
             id: id.into(),
             name: "echo".into(),
+            item_id: None,
         },
         ProviderEvent::ToolCallCompleted {
             id: id.into(),
@@ -2285,6 +2306,7 @@ async fn a_steer_reaches_the_model_at_the_next_step() {
             ProviderEvent::ToolCallStarted {
                 id: "call-1".into(),
                 name: "slow_work".into(),
+                item_id: None,
             },
             ProviderEvent::ToolCallCompleted {
                 id: "call-1".into(),
@@ -2484,6 +2506,7 @@ async fn structured_question_suspends_and_continues_with_answer_result() {
             ProviderEvent::ToolCallStarted {
                 id: "q-1".into(),
                 name: "question".into(),
+                item_id: None,
             },
             ProviderEvent::ToolCallCompleted {
                 id: "q-1".into(),
@@ -2564,6 +2587,7 @@ async fn mixed_question_batch_is_rejected_before_tool_effects() {
             ProviderEvent::ToolCallStarted {
                 id: "q-1".into(),
                 name: "question".into(),
+                item_id: None,
             },
             ProviderEvent::ToolCallCompleted {
                 id: "q-1".into(),
@@ -2573,6 +2597,7 @@ async fn mixed_question_batch_is_rejected_before_tool_effects() {
             ProviderEvent::ToolCallStarted {
                 id: "echo-1".into(),
                 name: "echo".into(),
+                item_id: None,
             },
             tool_call_event("echo-1", "must not run"),
             ProviderEvent::TurnComplete {
@@ -2622,7 +2647,7 @@ async fn pending_question_resumes_without_a_new_user_message() {
                 ts: chrono::Utc::now(),
             })
             .unwrap();
-        session.append(SessionEvent::AssistantMessage { id: new_id(), model: "zai/glm-4.7".into(), content: vec![ContentBlock::ToolCall { id: "q-pending".into(), name: "question".into(), input: serde_json::json!({"questions": [{"id":"details","type":"free_text","prompt":"Details?","required":true}]}) }], usage: Default::default(), stop_reason: "tool_use".into(), ts: chrono::Utc::now() }).unwrap();
+        session.append(SessionEvent::AssistantMessage { id: new_id(), model: "zai/glm-4.7".into(), content: vec![ContentBlock::ToolCall { id: "q-pending".into(), name: "question".into(), input: serde_json::json!({"questions": [{"id":"details","type":"free_text","prompt":"Details?","required":true}]}), item_id: None }], usage: Default::default(), stop_reason: "tool_use".into(), ts: chrono::Utc::now() }).unwrap();
     }
     assert!(
         store
@@ -2676,6 +2701,7 @@ async fn structured_question_cancellation_is_a_successful_tool_result() {
             ProviderEvent::ToolCallStarted {
                 id: "q-cancel".into(),
                 name: "question".into(),
+                item_id: None,
             },
             ProviderEvent::ToolCallCompleted {
                 id: "q-cancel".into(),
@@ -2724,6 +2750,7 @@ async fn question_delivery_backpressure_is_cancellable_and_preserves_pending_cal
         ProviderEvent::ToolCallStarted {
             id: "q-wait".into(),
             name: "question".into(),
+            item_id: None,
         },
         ProviderEvent::ToolCallCompleted {
             id: "q-wait".into(),
@@ -2797,7 +2824,7 @@ async fn a_new_turn_cannot_overwrite_a_pending_question() {
                 ts: chrono::Utc::now(),
             })
             .unwrap();
-        session.append(SessionEvent::AssistantMessage { id: new_id(), model: "zai/glm-4.7".into(), content: vec![ContentBlock::ToolCall { id: "q-existing".into(), name: "question".into(), input: serde_json::json!({"questions": [{"id":"x","type":"free_text","prompt":"X?","required":true}]}) }], usage: Default::default(), stop_reason: "tool_use".into(), ts: chrono::Utc::now() }).unwrap();
+        session.append(SessionEvent::AssistantMessage { id: new_id(), model: "zai/glm-4.7".into(), content: vec![ContentBlock::ToolCall { item_id: None, id: "q-existing".into(), name: "question".into(), input: serde_json::json!({"questions": [{"id":"x","type":"free_text","prompt":"X?","required":true}]}) }], usage: Default::default(), stop_reason: "tool_use".into(), ts: chrono::Utc::now() }).unwrap();
     }
     let provider = MockProvider::new(vec![]);
     let error = run_turn(

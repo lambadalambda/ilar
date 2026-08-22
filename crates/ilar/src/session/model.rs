@@ -47,9 +47,17 @@ pub enum ContentBlock {
         text: String,
     },
     ToolCall {
+        /// The provider's call id, which pairs a call with its result.
         id: String,
         name: String,
         input: serde_json::Value,
+        /// The provider's *item* id, distinct from the call id and needed
+        /// to replay the call as the same item it was — OpenAI reasoning
+        /// items reference the calls that followed them. Absent for
+        /// providers that have no item identity, and for sessions written
+        /// before it was captured.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        item_id: Option<String>,
     },
     ToolResult {
         tool_use_id: String,

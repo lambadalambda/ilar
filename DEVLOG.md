@@ -1210,3 +1210,39 @@ request should replace the entire active provider context with its handover.
 Successful completion reuses the live `Compacted` event path, so the handover
 summary is shown in the transcript immediately and the context meter is
 recomputed from persisted state.
+
+## 2026-08-22 — Prompt caching was our item shapes, not OpenAI's cache
+
+Cache reads on the ChatGPT backend kept collapsing to zero, worst right
+after a step with several tool calls. Sessions already held the evidence:
+each `assistant_message` carries one provider request's usage and a
+timestamp, so `scripts/cache_report.py` reads the whole history straight
+off disk. Across 160 sessions, misses tracked *how much the step
+appended* — 6% after one or two tool calls, 52% after six — while the
+gap since the previous request barely mattered, which rules out TTL.
+
+Two controls turned a suspicion into a diagnosis. z.ai read a cache on
+614 of 614 eligible requests through the same transcript pipeline. Codex
+CLI, on the same account and the same Codex endpoint, managed 738 of
+738, including every request that grew 10–30k — our 46%-miss bucket. And
+a prefix that had drifted on our side could not produce these numbers
+anyway: append-only history means a mutation still leaves the head
+cached and reports a *partial* read, whereas zero on a 100k prompt whose
+first thousands of tokens are pinned means nothing matched at all.
+
+The difference was item identity. With `store: false` the server
+rebuilds the item graph from what the client sends, and reasoning items
+reference the calls that followed them by id. Codex replays every item
+as it arrived, id included. ilar kept only `call_id` from
+`response.output_item.added`, dropped the item id, and replayed calls
+anonymously and messages as bare `{role, content}` pairs rather than
+typed `message` items. Miss rate scaling with calls per step — and not
+with reasoning items per step — is that fingerprint.
+
+The id now survives from the stream through the session (an optional
+field, so old sessions still load) back onto the wire, and messages
+replay as `message` items with `input_text`/`output_text` parts.
+`function_call_output.output` stays a plain string, which is the
+canonical form for text results. Whether this fixes the cache is a
+measurement rather than a claim: the baseline to beat is 40% misses on
+appends over 2k, and the same script reads it back.

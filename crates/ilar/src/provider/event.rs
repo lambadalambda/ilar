@@ -52,7 +52,14 @@ pub enum ProviderEvent {
     /// Opaque provider reasoning item, preserved exactly for replay.
     ReasoningItem { item: serde_json::Value },
     /// A tool call was announced (id + name known, args not yet).
-    ToolCallStarted { id: String, name: String },
+    /// `item_id` is the provider's identity for the call *as an item* in
+    /// the conversation, which OpenAI needs back verbatim on replay so a
+    /// reasoning item can still point at the call that followed it.
+    ToolCallStarted {
+        id: String,
+        name: String,
+        item_id: Option<String>,
+    },
     /// Incremental tool-call argument JSON.
     ToolCallInputDelta { id: String, delta: String },
     /// Tool call finished; `input` is the parsed JSON value.

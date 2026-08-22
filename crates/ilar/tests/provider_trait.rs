@@ -25,6 +25,7 @@ fn tool_turn() -> Vec<ProviderEvent> {
         ProviderEvent::ToolCallStarted {
             id: "toolu_1".into(),
             name: "read".into(),
+            item_id: None,
         },
         ProviderEvent::ToolCallInputDelta {
             id: "toolu_1".into(),

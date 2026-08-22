@@ -264,9 +264,13 @@ async fn tool_call_fixture_maps_to_neutral_events() {
     assert_eq!(events.len(), 6);
     assert_eq!(
         events[0],
+        // The item id is distinct from the call id and has to survive:
+        // OpenAI reasoning items reference the call that followed them,
+        // and a replay that drops it is a different item graph.
         ProviderEvent::ToolCallStarted {
             id: "call_1".into(),
             name: "read".into(),
+            item_id: Some("fc_1".into()),
         }
     );
     assert_eq!(
@@ -371,7 +375,7 @@ async fn truncated_tool_call_synthesizes_null_completion() {
     // input + MaxTokens per the truncation convention.
     assert!(matches!(
         &events[0],
-        ProviderEvent::ToolCallStarted { id, name } if id == "call_9" && name == "edit"
+        ProviderEvent::ToolCallStarted { id, name, .. } if id == "call_9" && name == "edit"
     ));
     assert_eq!(
         events[1],
@@ -655,6 +659,7 @@ async fn neutral_request_serializes_to_wire_format() {
                 id: "call_1".into(),
                 name: "read".into(),
                 input: serde_json::json!({"path": "Cargo.toml"}),
+                item_id: None,
             }],
         },
         ilar::session::ChatMessage {
@@ -724,6 +729,7 @@ async fn stateless_tool_continuation_replays_opaque_reasoning_in_order() {
                 id: id.clone(),
                 name: name.clone(),
                 input: input.clone(),
+                item_id: None,
             }),
             _ => None,
         })

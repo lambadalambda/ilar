@@ -2711,6 +2711,7 @@ mod tests {
                     id: "todo-resume".into(),
                     name: "todo".into(),
                     input: Default::default(),
+                    item_id: None,
                 }],
                 usage: ilar::session::Usage::default(),
                 stop_reason: "tool_use".into(),

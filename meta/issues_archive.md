@@ -149,3 +149,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Immediate manual compaction command](issues/immediate-manual-compaction-command.md)
 - [x] [Document system prompt lifecycle](issues/document-system-prompt-lifecycle.md)
 - [x] [Navigate slash completions with arrow keys](issues/navigate-slash-completions-with-arrow-keys.md)
+- [x] [Send the prompt cache key on the ChatGPT backend too](issues/chatgpt-prompt-cache-key.md)

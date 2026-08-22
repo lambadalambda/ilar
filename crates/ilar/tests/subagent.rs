@@ -320,11 +320,13 @@ async fn run_two_tasks(
             ProviderEvent::ToolCallStarted {
                 id: "t1".into(),
                 name: "task".into(),
+                item_id: None,
             },
             task_call("t1", "find alpha"),
             ProviderEvent::ToolCallStarted {
                 id: "t2".into(),
                 name: "task".into(),
+                item_id: None,
             },
             task_call("t2", "find beta"),
             ProviderEvent::TurnComplete {
@@ -556,11 +558,13 @@ async fn mutable_tasks_in_distinct_validated_worktrees_may_overlap() {
             ProviderEvent::ToolCallStarted {
                 id: "first".into(),
                 name: "task".into(),
+                item_id: None,
             },
             workspace_call("first", &first),
             ProviderEvent::ToolCallStarted {
                 id: "second".into(),
                 name: "task".into(),
+                item_id: None,
             },
             workspace_call("second", &second),
             ProviderEvent::TurnComplete {
@@ -847,11 +851,13 @@ async fn concurrency_cap_errors_with_guidance() {
             ProviderEvent::ToolCallStarted {
                 id: "t1".into(),
                 name: "task".into(),
+                item_id: None,
             },
             task_call("t1", "a"),
             ProviderEvent::ToolCallStarted {
                 id: "t2".into(),
                 name: "task".into(),
+                item_id: None,
             },
             task_call("t2", "b"),
             ProviderEvent::TurnComplete {
@@ -1308,6 +1314,7 @@ async fn tool_only_child_does_not_return_its_prompt() {
             ProviderEvent::ToolCallStarted {
                 id: "missing".into(),
                 name: "not_a_tool".into(),
+                item_id: None,
             },
             ProviderEvent::ToolCallCompleted {
                 id: "missing".into(),
@@ -1937,6 +1944,7 @@ async fn child_session_created_with_parent_link() {
             ProviderEvent::ToolCallStarted {
                 id: "t1".into(),
                 name: "task".into(),
+                item_id: None,
             },
             task_call("t1", "look"),
             ProviderEvent::TurnComplete {
@@ -2182,11 +2190,13 @@ async fn task_model_override_pins_child_model_and_rejects_unknown() {
             ProviderEvent::ToolCallStarted {
                 id: "t1".into(),
                 name: "task".into(),
+                item_id: None,
             },
             override_call("t1", serde_json::json!("zai/glm-4.7-flash")),
             ProviderEvent::ToolCallStarted {
                 id: "t2".into(),
                 name: "task".into(),
+                item_id: None,
             },
             override_call("t2", serde_json::json!("zai/not-a-model")),
             ProviderEvent::TurnComplete {

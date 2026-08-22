@@ -227,7 +227,9 @@ fn restored_session_invocation_view(
                         ilar::session::ContentBlock::ReasoningSummary {
                             completed: false, ..
                         } => {}
-                        ilar::session::ContentBlock::ToolCall { id, name, input } => {
+                        ilar::session::ContentBlock::ToolCall {
+                            id, name, input, ..
+                        } => {
                             let (kind, arguments) = if name == "task" {
                                 match ilar::agent::summarize_task_input(input) {
                                     Some((description, agent, model)) => {
@@ -433,6 +435,7 @@ mod tests {
                         id: "read-1".into(),
                         name: "read".into(),
                         input: Default::default(),
+                        item_id: None,
                     },
                     ilar::session::ContentBlock::ToolCall {
                         id: "task-1".into(),
@@ -441,6 +444,7 @@ mod tests {
                             "description": "Review restored security paths",
                             "subagent_type": "build · secure",
                         }),
+                        item_id: None,
                     },
                 ],
                 usage,
@@ -543,6 +547,7 @@ mod tests {
                         "old_string": "keep\nold",
                         "new_string": "keep\nnew",
                     }),
+                    item_id: None,
                 }],
                 usage: ilar::session::Usage::default(),
                 stop_reason: "tool_use".into(),
@@ -587,6 +592,7 @@ mod tests {
                     id: "unfinished".into(),
                     name: "bash".into(),
                     input: Default::default(),
+                    item_id: None,
                 }],
                 usage: ilar::session::Usage::default(),
                 stop_reason: "tool_use".into(),
@@ -739,6 +745,7 @@ mod tests {
                         "description": "Inspect rendering",
                         "subagent_type": "explore"
                     }),
+                    item_id: None,
                 }],
                 usage: Default::default(),
                 stop_reason: "tool_use".into(),

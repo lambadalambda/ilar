@@ -746,6 +746,7 @@ async fn context_growing_between_steps_compacts_without_a_new_user_message() {
             ProviderEvent::ToolCallStarted {
                 id: id.into(),
                 name: "read".into(),
+                item_id: None,
             },
             ProviderEvent::ToolCallCompleted {
                 id: id.into(),

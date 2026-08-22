@@ -1201,11 +1201,9 @@ fn pending_question(
     let input = events.iter().rev().find_map(|event| match event {
         SessionEvent::AssistantMessage { content, .. } => {
             content.iter().find_map(|block| match block {
-                ContentBlock::ToolCall { id, name, input }
-                    if id == tool_call_id && name == QUESTION_TOOL_NAME =>
-                {
-                    Some(input)
-                }
+                ContentBlock::ToolCall {
+                    id, name, input, ..
+                } if id == tool_call_id && name == QUESTION_TOOL_NAME => Some(input),
                 _ => None,
             })
         }
