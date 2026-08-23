@@ -260,6 +260,25 @@ abort the goal or cancel background jobs (both confirmed with a second
 press). **Esc is strictly immediate-scope**: it aborts the running turn
 or clears the input, and never touches the queue or the goal.
 
+### Rewind and fork
+
+When the working directory is a git repository, ilar snapshots the
+working tree as each turn starts: a shadow commit chain under
+`refs/ilar/checkpoints/<session-id>` that never touches HEAD, your
+index, or ignored files. `/rewind` (also in the palette) lists the
+session's turns; Enter twice rewinds conversation and tree together
+back to the chosen turn. The message you sent there returns to the
+input for editing, and a safety snapshot taken just before the restore
+keeps the abandoned tree state reachable from the same ref. `Ctrl-Y`
+in the picker forks at the turn instead — a new session truncated to
+that point, the original untouched — and `/fork` copies the whole
+session. The session log stays append-only: a rewind is a marker that
+replay honours, and the discarded tail remains in the file for
+auditing. Rewind and fork rebuild the session runtime, so running
+services stop. HEAD and commits are never moved — restores are
+files-only — and outside a git repository (or for turns predating
+checkpoints) rewind still works on the conversation alone.
+
 ### Commands
 
 Commands are markdown whose body *is* the prompt. Unlike skills they are

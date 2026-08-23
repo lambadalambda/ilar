@@ -1246,3 +1246,51 @@ replay as `message` items with `input_text`/`output_text` parts.
 canonical form for text results. Whether this fixes the cache is a
 measurement rather than a claim: the baseline to beat is 40% misses on
 appends over 2k, and the same script reads it back.
+
+## 2026-08-23 — Time travel: checkpoints, rewind, fork at a point
+
+Milestone 8. Every root turn in a git repository now snapshots the
+working tree before the user message: a temp-index `read-tree HEAD` +
+`add -A` + `write-tree`/`commit-tree`, chained under
+`refs/ilar/checkpoints/<session-id>` so gc never eats it, recorded as a
+`Checkpoint` event. The user's HEAD, index, and ignored files are never
+touched, in either direction.
+
+Rewind reuses the pattern compaction proved: an appended marker the
+replay folds out. `Rewind { to }` truncates the folded stream back to a
+user message, which becomes unsent (it returns to the input prefilled);
+`audit_events` still sees every line. The tree restores from the turn's
+checkpoint after a fresh safety snapshot, so a rewind is itself
+recoverable. `fork_at` is the non-destructive sibling: a truncated copy
+under a new id, `Ctrl-Y` in the same picker.
+
+Review caught three things worth recording. `call_id.is_none()` is not
+"is root" — notification turns on child sessions carry no call id, so
+the checkpoint gate is `depth == 0`. The writer lease must be held
+*before* the tree restore, or an active turn in another process gets
+its tree yanked out from under it. And both compaction cut policies
+landed the cut on the user message, stranding the checkpoint just
+before it outside the kept window — silently degrading a later rewind
+to conversation-only; the cuts now back over checkpoints the way
+turn-boundary already backed over subagent invocations.
+
+Crash-safety fell out of ordering rather than machinery: the replay
+index is deleted (and the in-memory checkpoint cleared) before the
+marker lands, so no crash point can leave a stamp-valid index
+describing the pre-rewind window.
+
+Smoke-ran the TUI flow in tmux against a scratch repo and scratch
+state dirs (provider deliberately unauthenticated — a failed turn
+still checkpoints and appends its user message, which is all rewind
+needs). Verified live: the picker lists turns newest-first with ⎇
+markers, Enter arms ("✗ … ↵ drops 1, restores tree"), the second
+Enter rewinds — tree back to the turn-start state including untracked
+files, drift deleted, notice "rewound 1 turn(s) · tree restored",
+unsent message prefilled — and Ctrl-Y forks at the turn into a new
+session with the same prefill. The audit log ends in the rewind
+marker with both tree commits, and the checkpoint ref chain sits
+under refs/ilar/checkpoints/<session-id>. A TUI review also caught
+that /rewind and /fork typed during a running turn would have been
+*steered to the model as literal text* — the maintenance-command
+carve-out in decide::submit only knew about /compact; it now covers
+all three.
