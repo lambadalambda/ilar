@@ -119,6 +119,14 @@ fn recent_steps_cut(
     {
         cut -= 1;
     }
+    // A turn's tree checkpoint travels with its user message: cutting
+    // between them would strand the snapshot outside the window.
+    while cut > floor
+        && matches!(events[cut], SessionEvent::UserMessage { .. })
+        && matches!(events[cut - 1], SessionEvent::Checkpoint { .. })
+    {
+        cut -= 1;
+    }
     if cut <= floor || cut >= events.len() {
         return None;
     }
@@ -336,10 +344,14 @@ pub(crate) async fn compact_if_needed_locked(
                 .iter()
                 .rposition(|e| matches!(e, SessionEvent::UserMessage { .. }))
                 .unwrap_or(0);
-            if cut > 0
+            // The invocation link and the tree checkpoint travel with
+            // their user message; cutting between them would strand
+            // them outside the window (a rewind to this turn would lose
+            // its tree snapshot).
+            while cut > 0
                 && matches!(
                     session.events()[cut - 1],
-                    SessionEvent::SubagentInvocation { .. }
+                    SessionEvent::SubagentInvocation { .. } | SessionEvent::Checkpoint { .. }
                 )
             {
                 cut -= 1;

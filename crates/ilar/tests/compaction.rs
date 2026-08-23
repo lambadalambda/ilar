@@ -862,3 +862,66 @@ fn every_catalog_model_compacts_below_its_input_cap() {
         offenders.join("\n")
     );
 }
+
+#[tokio::test]
+async fn turn_boundary_compaction_keeps_the_checkpoint_with_its_message() {
+    let (store, session_id) = temp_session();
+    seed_compactable_history(&store, &session_id);
+    // A git repo cwd makes the turn record a tree checkpoint just
+    // before its user message; the boundary cut must not separate them,
+    // or a later rewind to this turn loses its tree snapshot.
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("checkout");
+    std::fs::create_dir(&root).unwrap();
+    assert!(
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["init", "-q"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let provider = MockProvider::new(vec![
+        text_turn("summary of the old turns"),
+        text_turn("done"),
+    ]);
+    let (events_tx, _events_rx) = loop_event_channel(LOOP_EVENT_CAPACITY);
+
+    let outcome = run_turn(
+        &provider,
+        &ToolRegistry::builtin(),
+        &store,
+        &session_id,
+        "new question",
+        Some("system"),
+        tiny_config(),
+        events_tx,
+        tokio_util::sync::CancellationToken::new(),
+        ToolContext::root(root),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome, TurnOutcome::Completed);
+
+    let reader = store.load(&session_id).unwrap();
+    let events = reader.events();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::Compaction { .. })),
+        "the tiny context limit must actually force a compaction"
+    );
+    let user = events
+        .iter()
+        .position(
+            |event| matches!(event, SessionEvent::UserMessage { text, .. } if text == "new question"),
+        )
+        .unwrap();
+    assert!(
+        matches!(events[user - 1], SessionEvent::Checkpoint { .. }),
+        "the kept window must open with the turn's checkpoint, got {:?}",
+        events[user - 1]
+    );
+}
