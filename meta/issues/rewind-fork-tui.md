@@ -48,6 +48,18 @@ guard rails a destructive restore needs.
   transcript is exactly what it was at that point; the notice carries
   the news.
 
+## Outcome
+
+Landed with all acceptance criteria met, including the tmux smoke run
+recorded in the DEVLOG. Review caught the one real hazard: /rewind and
+/fork typed during a running turn were routed through the steer path as
+literal model text; they now join /compact in decide::submit's
+maintenance carve-out. Fork verifies its target user-message id against
+a fresh load like rewind does, and the rewind notice carries the
+discarded-turn count. The unsent message survives the session rebuild
+as an input prefill (AppExit::SwitchInto carries prefill + notice
+across the teardown).
+
 ## Milestone
 
 8 — Time travel
