@@ -2857,3 +2857,158 @@ async fn a_new_turn_cannot_overwrite_a_pending_question() {
         1
     );
 }
+
+fn scratch_repo() -> (tempfile::TempDir, std::path::PathBuf) {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("checkout");
+    std::fs::create_dir(&root).unwrap();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {args:?} failed");
+    };
+    git(&["init", "-q"]);
+    std::fs::write(root.join("main.rs"), "fn main() {}\n").unwrap();
+    (temp, root)
+}
+
+fn text_only_provider(text: &str) -> MockProvider {
+    MockProvider::new(vec![vec![
+        ProviderEvent::TextDelta(text.into()),
+        ProviderEvent::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+            usage: Default::default(),
+        },
+    ]])
+}
+
+#[tokio::test]
+async fn root_turn_in_a_git_repo_checkpoints_before_the_user_message() {
+    let (store, session_id) = temp_session("build");
+    let (_temp, root) = scratch_repo();
+    let provider = text_only_provider("done");
+    let registry = ToolRegistry::builtin();
+
+    run_turn(
+        &provider,
+        &registry,
+        &store,
+        &session_id,
+        "start",
+        None,
+        LoopConfig::default(),
+        events_channel().0,
+        CancellationToken::new(),
+        ToolContext::root(root.clone()),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let events = store.load(&session_id).unwrap().events().to_vec();
+    let checkpoints: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| {
+            matches!(event, SessionEvent::Checkpoint { .. }).then_some(index)
+        })
+        .collect();
+    let [checkpoint] = checkpoints[..] else {
+        panic!("expected exactly one checkpoint, got {checkpoints:?}");
+    };
+    assert!(matches!(
+        events[checkpoint + 1],
+        SessionEvent::UserMessage { .. }
+    ));
+    let SessionEvent::Checkpoint { commit, .. } = &events[checkpoint] else {
+        unreachable!()
+    };
+    // The snapshot is a real commit in the workspace repository.
+    let verified = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["cat-file", "-e", &format!("{commit}^{{commit}}")])
+        .status()
+        .unwrap();
+    assert!(verified.success());
+}
+
+#[tokio::test]
+async fn turn_outside_a_git_repo_records_no_checkpoint() {
+    let (store, session_id) = temp_session("build");
+    let provider = text_only_provider("done");
+    let registry = ToolRegistry::builtin();
+
+    run_turn(
+        &provider,
+        &registry,
+        &store,
+        &session_id,
+        "start",
+        None,
+        LoopConfig::default(),
+        events_channel().0,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let events = store.load(&session_id).unwrap().events().to_vec();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::Checkpoint { .. }))
+    );
+}
+
+#[tokio::test]
+async fn child_session_turns_never_checkpoint_even_without_a_call_id() {
+    // Notification turns on child sessions run with depth > 0 but no
+    // call_id; `call_id` alone must not be mistaken for a root test.
+    let (store, session_id) = temp_session("explore");
+    let (_temp, root) = scratch_repo();
+    let provider = text_only_provider("noted");
+    let registry = ToolRegistry::builtin();
+    let mut ctx = ToolContext::root(root.clone());
+    ctx.depth = 1;
+
+    run_turn(
+        &provider,
+        &registry,
+        &store,
+        &session_id,
+        "background task finished",
+        None,
+        LoopConfig::default(),
+        events_channel().0,
+        CancellationToken::new(),
+        ctx,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let events = store.load(&session_id).unwrap().events().to_vec();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::Checkpoint { .. }))
+    );
+    let no_ref = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args([
+            "rev-parse",
+            "--verify",
+            &format!("refs/ilar/checkpoints/{session_id}"),
+        ])
+        .output()
+        .unwrap();
+    assert!(!no_ref.status.success());
+}

@@ -1015,6 +1015,21 @@ async fn run_turn_inner(
                     parent_tool_call_id: parent_tool_call_id.clone(),
                     ts: Utc::now(),
                 })?;
+            } else if tool_ctx.depth == 0
+                && let Ok(Some(snapshot)) =
+                    crate::checkpoint::snapshot(&tool_ctx.cwd, session_id).await
+            {
+                // Root turns only: the parent's checkpoint covers the
+                // workspace a child shares, and `call_id` alone is not a
+                // root test (notification turns on child sessions carry
+                // none). A failed snapshot (or a non-git cwd) never
+                // blocks the turn.
+                session.append(SessionEvent::Checkpoint {
+                    id: new_id(),
+                    commit: snapshot.commit,
+                    head: snapshot.head,
+                    ts: Utc::now(),
+                })?;
             }
             session.append(SessionEvent::UserMessage {
                 id: new_id(),
