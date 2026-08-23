@@ -112,6 +112,23 @@ pub enum SessionEvent {
         kept_from: usize,
         ts: DateTime<Utc>,
     },
+    /// Rewind boundary: replay behaves as if the log ended just before
+    /// canonical event `to` (a `UserMessage`, which becomes unsent).
+    /// The log stays append-only — the discarded tail and this marker
+    /// remain visible to `audit_events`, like `Compaction` in reverse.
+    Rewind {
+        id: String,
+        /// Canonical event index the session was cut back to.
+        to: usize,
+        /// Checkpoint commit the working tree was restored to, when the
+        /// target turn had a tree snapshot.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tree_restored: Option<String>,
+        /// Safety snapshot of the tree taken just before restoring.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tree_saved: Option<String>,
+        ts: DateTime<Utc>,
+    },
 }
 
 impl SessionEvent {
@@ -124,7 +141,8 @@ impl SessionEvent {
             | SessionEvent::ToolResult { ts, .. }
             | SessionEvent::Checkpoint { ts, .. }
             | SessionEvent::ModelChange { ts, .. }
-            | SessionEvent::Compaction { ts, .. } => *ts,
+            | SessionEvent::Compaction { ts, .. }
+            | SessionEvent::Rewind { ts, .. } => *ts,
         }
     }
 }

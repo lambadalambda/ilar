@@ -140,6 +140,13 @@ pub struct PendingQuestion {
     pub request: QuestionRequest,
 }
 
+/// What a rewind cut away.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RewindOutcome {
+    /// Text of the user message the cut unsent.
+    pub unsent: String,
+}
+
 /// One entry in the session listing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionSummary {
@@ -180,12 +187,18 @@ impl SessionStore {
         Ok(self.replay_index_path_for(&id))
     }
 
-    /// Fully replay the canonical JSONL audit log, bypassing disposable indexes.
+    /// Fully replay the canonical JSONL audit log, bypassing disposable
+    /// indexes. Unlike `load`, rewind markers are not folded out: the
+    /// audit view keeps every line, including abandoned tails.
     pub fn audit_events(&self, id: &str) -> std::io::Result<Vec<SessionEvent>> {
         let id = SessionId::parse(id)?;
         let path = self.session_path_for(&id);
-        let mut file = File::open(&path)?;
-        read_events(&mut file, &path, id.as_str(), false).map(|(events, _, _)| events)
+        let bytes = std::fs::read(&path)?;
+        let complete_len = bytes
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |position| position + 1);
+        parse_event_bytes(&bytes[..complete_len], id.as_str(), 0)
     }
 
     pub fn acquire_writer(&self, id: &str) -> std::io::Result<SessionWriter> {
@@ -337,7 +350,32 @@ impl SessionStore {
     /// new session id.
     pub fn fork(&self, id: &str) -> std::io::Result<String> {
         let source = self.load(id)?;
-        let mut events = source.events().to_vec();
+        let cut = source.events().len();
+        self.fork_events(id, source, cut)
+    }
+
+    /// Fork a session at a point: like `fork`, truncated to the active
+    /// window's first `cut` events. `cut` must either equal the window
+    /// length (a plain fork) or index a `UserMessage`, the same turn
+    /// boundary a rewind accepts. Returns the new session id.
+    pub fn fork_at(&self, id: &str, cut: usize) -> std::io::Result<String> {
+        let source = self.load(id)?;
+        if cut != source.events().len()
+            && !matches!(
+                source.events().get(cut),
+                Some(SessionEvent::UserMessage { .. })
+            )
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("fork cut {cut} is not a user message in session {id}"),
+            ));
+        }
+        self.fork_events(id, source, cut)
+    }
+
+    fn fork_events(&self, id: &str, source: SessionReader, cut: usize) -> std::io::Result<String> {
+        let mut events = source.events()[..cut].to_vec();
         let new_id = crate::session::new_id();
         match events.first_mut() {
             Some(SessionEvent::Meta { meta, .. }) => {
@@ -367,6 +405,23 @@ impl SessionStore {
         std::io::Write::write_all(&mut file, output.as_bytes())?;
         file.sync_data()?;
         Ok(new_id)
+    }
+
+    /// Rewind a session in place: the `UserMessage` at local event
+    /// index `cut` becomes unsent, and everything from it on is folded
+    /// out of replay by an appended `Rewind` marker. The audit log
+    /// keeps the abandoned tail. `tree_restored` and `tree_saved`
+    /// record what happened to the working tree; the git work itself is
+    /// the caller's.
+    pub fn rewind(
+        &self,
+        id: &str,
+        cut: usize,
+        tree_restored: Option<String>,
+        tree_saved: Option<String>,
+    ) -> std::io::Result<RewindOutcome> {
+        let session = self.acquire_writer(id)?.load()?;
+        session.rewind_to(cut, tree_restored, tree_saved)
     }
 
     /// Read a session snapshot. Only newline-committed records are parsed;
@@ -544,10 +599,12 @@ fn read_indexed_replay(
         return invalid_replay(id, "indexed tail is not committed");
     }
     let tail_events = parse_event_bytes(&tail, id, checkpoint.physical_line_count)?;
-    if tail_events
-        .iter()
-        .any(|event| matches!(event, SessionEvent::Compaction { .. }))
-    {
+    if tail_events.iter().any(|event| {
+        matches!(
+            event,
+            SessionEvent::Compaction { .. } | SessionEvent::Rewind { .. }
+        )
+    }) {
         return invalid_replay(id, "stale replay checkpoint generation");
     }
     for record in id_records(&tail_events) {
@@ -647,7 +704,7 @@ fn read_events(
         .iter()
         .rposition(|byte| *byte == b'\n')
         .map_or(0, |position| position + 1);
-    let events = parse_event_bytes(&bytes[..complete_len], id, 0)?;
+    let events = fold_rewinds(parse_event_bytes(&bytes[..complete_len], id, 0)?);
     if events.is_empty() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -728,6 +785,28 @@ fn replay_state(
     (effective_model, effective_variant, todo_list)
 }
 
+/// Fold rewind markers out of a canonical event stream. Each marker
+/// truncates the stream back to its `to` index — a position in the
+/// already-folded stream, since markers are appended against the folded
+/// view — and disappears itself. `truncate` tolerates an out-of-range
+/// `to` from a damaged file by keeping everything.
+fn fold_rewinds(events: Vec<SessionEvent>) -> Vec<SessionEvent> {
+    if !events
+        .iter()
+        .any(|event| matches!(event, SessionEvent::Rewind { .. }))
+    {
+        return events;
+    }
+    let mut folded = Vec::with_capacity(events.len());
+    for event in events {
+        match event {
+            SessionEvent::Rewind { to, .. } => folded.truncate(to),
+            event => folded.push(event),
+        }
+    }
+    folded
+}
+
 fn active_replay_window(events: &[SessionEvent]) -> (Vec<SessionEvent>, usize) {
     if !events
         .iter()
@@ -782,7 +861,8 @@ fn id_records(events: &[SessionEvent]) -> Vec<[u8; REPLAY_ID_RECORD_LEN as usize
             | SessionEvent::ToolResult { id, .. }
             | SessionEvent::Checkpoint { id, .. }
             | SessionEvent::ModelChange { id, .. }
-            | SessionEvent::Compaction { id, .. } => Some(id.as_str()),
+            | SessionEvent::Compaction { id, .. }
+            | SessionEvent::Rewind { id, .. } => Some(id.as_str()),
         };
         if let Some(id) = event_id {
             records.push(id_record(0, id));
@@ -1117,7 +1197,8 @@ fn validate_replay(events: &[SessionEvent], id: &str) -> std::io::Result<Vec<Str
             | SessionEvent::ToolResult { id, .. }
             | SessionEvent::Checkpoint { id, .. }
             | SessionEvent::ModelChange { id, .. }
-            | SessionEvent::Compaction { id, .. } => Some(id),
+            | SessionEvent::Compaction { id, .. }
+            | SessionEvent::Rewind { id, .. } => Some(id),
         };
         if let Some(event_id) = event_id
             && !event_ids.insert(event_id)
@@ -1288,7 +1369,21 @@ impl Session {
     }
 
     /// Append an event: persists one JSONL line, then updates the model.
+    ///
+    /// `Rewind` markers are reserved for `rewind_to`: appended raw they
+    /// would leave this in-memory session unfolded while the file says
+    /// otherwise.
     pub fn append(&mut self, event: SessionEvent) -> std::io::Result<()> {
+        if matches!(event, SessionEvent::Rewind { .. }) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "rewind markers are appended through SessionStore::rewind",
+            ));
+        }
+        self.append_event(event)
+    }
+
+    fn append_event(&mut self, event: SessionEvent) -> std::io::Result<()> {
         let next_canonical_event_count = self
             .canonical_event_count
             .checked_add(1)
@@ -1359,6 +1454,62 @@ impl Session {
             let _ = self.refresh_checkpoint();
         }
         Ok(())
+    }
+
+    /// Consume the session, appending a rewind marker that folds replay
+    /// back to `cut` — the local index of a `UserMessage`, which
+    /// becomes unsent. Consuming is the point: the in-memory state is
+    /// pre-rewind, so nothing may keep using it; the next load sees the
+    /// folded log.
+    pub(crate) fn rewind_to(
+        mut self,
+        cut: usize,
+        tree_restored: Option<String>,
+        tree_saved: Option<String>,
+    ) -> std::io::Result<RewindOutcome> {
+        let unsent = self.rewind_target(cut)?.to_string();
+        let to = self.canonical_index(cut)?;
+        // Drop the replay index *before* the marker lands: with no index
+        // on disk and `checkpoint` cleared, no crash point can leave a
+        // stamp-valid index describing the pre-rewind window. (A crash
+        // before the append merely costs the next writer a full parse.)
+        if let Some(checkpoint) = &self.checkpoint {
+            let ids_path = replay_ids_path(
+                &self._writer.replay_index_path,
+                self.session_id(),
+                &checkpoint.generation,
+            );
+            let _ = std::fs::remove_file(ids_path);
+        }
+        let _ = std::fs::remove_file(&self._writer.replay_index_path);
+        self.checkpoint = None;
+        self.append_event(SessionEvent::Rewind {
+            id: new_id(),
+            to,
+            tree_restored,
+            tree_saved,
+            ts: chrono::Utc::now(),
+        })?;
+        Ok(RewindOutcome { unsent })
+    }
+
+    /// Validate a rewind/fork cut, returning the user message text it
+    /// would unsend.
+    pub(crate) fn rewind_target(&self, cut: usize) -> std::io::Result<&str> {
+        let invalid =
+            |message: String| std::io::Error::new(std::io::ErrorKind::InvalidInput, message);
+        if self.pending_question().is_some() {
+            return Err(invalid(
+                "session has a pending question; answer or abort it before rewinding".into(),
+            ));
+        }
+        let Some(SessionEvent::UserMessage { text, .. }) = self.events.get(cut) else {
+            return Err(invalid(format!(
+                "rewind cut {cut} is not a user message in session {}",
+                self.session_id()
+            )));
+        };
+        Ok(text)
     }
 
     /// Render the event log into provider-neutral chat messages.
@@ -1591,7 +1742,7 @@ impl SessionReader {
 }
 
 /// Pure transcript rendering over an event slice.
-fn transcript_of(events: &[SessionEvent]) -> Vec<ChatMessage> {
+pub fn transcript_of(events: &[SessionEvent]) -> Vec<ChatMessage> {
     let mut cut = compaction_cut(events);
     let mut summary: Option<&str> = None;
     for event in events {
@@ -1618,7 +1769,8 @@ fn transcript_of(events: &[SessionEvent]) -> Vec<ChatMessage> {
         match event {
             SessionEvent::Meta { .. }
             | SessionEvent::SubagentInvocation { .. }
-            | SessionEvent::Checkpoint { .. } => {}
+            | SessionEvent::Checkpoint { .. }
+            | SessionEvent::Rewind { .. } => {}
             SessionEvent::UserMessage { text, .. } => {
                 if !pending_results.is_empty() {
                     push_user_blocks(&mut messages, std::mem::take(&mut pending_results));

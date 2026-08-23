@@ -1666,3 +1666,438 @@ fn checkpoint_between_call_and_result_is_rejected() {
 
     assert_replay_invalid(&store, &id);
 }
+
+fn simple_turn(user_id: &str, text: &str, assistant_id: &str) -> Vec<SessionEvent> {
+    let ts = Utc::now();
+    vec![
+        SessionEvent::UserMessage {
+            id: user_id.into(),
+            text: text.into(),
+            ts,
+        },
+        SessionEvent::AssistantMessage {
+            id: assistant_id.into(),
+            model: "zai/glm-4.7".into(),
+            content: vec![ContentBlock::Text {
+                text: format!("answered {text}"),
+            }],
+            usage: Usage::default(),
+            stop_reason: "end_turn".into(),
+            ts,
+        },
+    ]
+}
+
+fn two_turn_session(store: &SessionStore) -> String {
+    let meta = sample_meta();
+    let id = meta.session_id.clone();
+    let mut session = store.create(meta).unwrap();
+    for event in simple_turn("user-1", "first", "assistant-1") {
+        session.append(event).unwrap();
+    }
+    for event in simple_turn("user-2", "second", "assistant-2") {
+        session.append(event).unwrap();
+    }
+    id
+}
+
+#[test]
+fn rewind_folds_replay_to_the_cut_and_keeps_the_audit_log() {
+    let (store, _dir) = temp_store();
+    let id = two_turn_session(&store);
+
+    // Cut at "second" (canonical index 3): that message becomes unsent.
+    let outcome = store
+        .rewind(&id, 3, Some("commit-a".into()), Some("commit-b".into()))
+        .unwrap();
+    assert_eq!(outcome.unsent, "second");
+
+    let reader = store.load(&id).unwrap();
+    assert_eq!(reader.events().len(), 3);
+    assert!(matches!(
+        &reader.events()[1],
+        SessionEvent::UserMessage { text, .. } if text == "first"
+    ));
+    let transcript = reader.transcript();
+    assert_eq!(transcript.len(), 2);
+
+    let audit = store.audit_events(&id).unwrap();
+    assert_eq!(audit.len(), 6);
+    assert!(matches!(
+        audit.last(),
+        Some(SessionEvent::Rewind {
+            to: 3,
+            tree_restored: Some(_),
+            tree_saved: Some(_),
+            ..
+        })
+    ));
+    // The abandoned tail stays visible to the audit view.
+    assert!(audit.iter().any(|event| matches!(
+        event,
+        SessionEvent::UserMessage { text, .. } if text == "second"
+    )));
+}
+
+#[test]
+fn a_second_rewind_folds_past_the_first() {
+    let (store, _dir) = temp_store();
+    let id = two_turn_session(&store);
+    store.rewind(&id, 3, None, None).unwrap();
+
+    let mut session = store.acquire_writer(&id).unwrap().load().unwrap();
+    for event in simple_turn("user-3", "third", "assistant-3") {
+        session.append(event).unwrap();
+    }
+    drop(session);
+
+    let outcome = store.rewind(&id, 1, None, None).unwrap();
+    assert_eq!(outcome.unsent, "first");
+    let reader = store.load(&id).unwrap();
+    assert_eq!(reader.events().len(), 1);
+    assert!(matches!(reader.events()[0], SessionEvent::Meta { .. }));
+    assert!(reader.transcript().is_empty());
+    assert_eq!(store.audit_events(&id).unwrap().len(), 9);
+}
+
+#[test]
+fn rewound_sessions_accept_new_turns() {
+    let (store, _dir) = temp_store();
+    let id = two_turn_session(&store);
+    store.rewind(&id, 3, None, None).unwrap();
+
+    let mut session = store.acquire_writer(&id).unwrap().load().unwrap();
+    for event in simple_turn("user-2b", "second try", "assistant-2b") {
+        session.append(event).unwrap();
+    }
+    drop(session);
+
+    let reader = store.load(&id).unwrap();
+    assert_eq!(reader.events().len(), 5);
+    assert!(matches!(
+        reader.events().last(),
+        Some(SessionEvent::AssistantMessage { id, .. }) if id == "assistant-2b"
+    ));
+}
+
+#[test]
+fn rewind_rejects_invalid_cuts() {
+    let (store, _dir) = temp_store();
+    let id = two_turn_session(&store);
+
+    for cut in [0, 2, 4, 5, 99] {
+        let error = store.rewind(&id, cut, None, None).unwrap_err();
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::InvalidInput,
+            "cut {cut} must be rejected"
+        );
+    }
+    // Nothing was appended by the rejected attempts.
+    assert_eq!(store.audit_events(&id).unwrap().len(), 5);
+}
+
+#[test]
+fn rewind_refuses_a_session_with_a_pending_question() {
+    let (store, _dir) = temp_store();
+    let meta = sample_meta();
+    let id = meta.session_id.clone();
+    let mut session = store.create(meta).unwrap();
+    for event in simple_turn("user-1", "first", "assistant-1") {
+        session.append(event).unwrap();
+    }
+    let request = QuestionRequest {
+        questions: vec![Question {
+            id: "q1".into(),
+            prompt: "which one?".into(),
+            description: None,
+            required: true,
+            kind: QuestionKind::FreeText,
+        }],
+    };
+    session
+        .append(SessionEvent::AssistantMessage {
+            id: "assistant-q".into(),
+            model: "zai/glm-4.7".into(),
+            content: vec![ContentBlock::ToolCall {
+                id: "question-1".into(),
+                name: "question".into(),
+                input: serde_json::to_value(&request).unwrap(),
+                item_id: None,
+            }],
+            usage: Usage::default(),
+            stop_reason: "tool_use".into(),
+            ts: Utc::now(),
+        })
+        .unwrap();
+    drop(session);
+
+    let error = store.rewind(&id, 1, None, None).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+#[test]
+fn rewind_across_compaction_keeps_or_drops_the_summary_with_the_cut() {
+    let (store, _dir) = temp_store();
+    let meta = sample_meta();
+    let id = meta.session_id.clone();
+    let mut session = store.create(meta).unwrap();
+    for event in simple_turn("user-1", "first", "assistant-1") {
+        session.append(event).unwrap();
+    }
+    session
+        .append(SessionEvent::Compaction {
+            id: "compaction-1".into(),
+            summary: "the story so far".into(),
+            kept_from: 3,
+            ts: Utc::now(),
+        })
+        .unwrap();
+    for event in simple_turn("user-2", "second", "assistant-2") {
+        session.append(event).unwrap();
+    }
+    for event in simple_turn("user-3", "third", "assistant-3") {
+        session.append(event).unwrap();
+    }
+    drop(session);
+
+    // The reader sees the active window: Meta + events from the cut on.
+    let reader = store.load(&id).unwrap();
+    let window_len = reader.events().len();
+    let third_local = reader
+        .events()
+        .iter()
+        .position(
+            |event| matches!(event, SessionEvent::UserMessage { text, .. } if text == "third"),
+        )
+        .unwrap();
+
+    // Cut at "third": the compaction survives, so the summary stays.
+    let outcome = store.rewind(&id, third_local, None, None).unwrap();
+    assert_eq!(outcome.unsent, "third");
+    let reader = store.load(&id).unwrap();
+    assert_eq!(reader.events().len(), window_len - 2);
+    let transcript = reader.transcript();
+    assert!(matches!(
+        &transcript[0].content[0],
+        ContentBlock::Text { text } if text.contains("the story so far")
+    ));
+}
+
+#[test]
+fn a_stale_replay_index_surviving_a_rewind_is_rejected() {
+    let (store, dir) = temp_store();
+    let meta = sample_meta();
+    let id = meta.session_id.clone();
+    let mut session = store.create(meta).unwrap();
+    for event in simple_turn("user-1", "first", "assistant-1") {
+        session.append(event).unwrap();
+    }
+    session
+        .append(SessionEvent::Compaction {
+            id: "compaction-1".into(),
+            summary: "so far".into(),
+            kept_from: 3,
+            ts: Utc::now(),
+        })
+        .unwrap();
+    for event in simple_turn("user-2", "second", "assistant-2") {
+        session.append(event).unwrap();
+    }
+    drop(session);
+
+    // Simulate a crash between the rewind append and the index cleanup:
+    // stash the published index files, rewind, put them back.
+    let stashed: Vec<(std::path::PathBuf, Vec<u8>)> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            let name = path.file_name().unwrap().to_string_lossy();
+            name.starts_with(id.as_str()) && !name.ends_with(".jsonl") && !name.ends_with(".lock")
+        })
+        .map(|path| (path.clone(), std::fs::read(&path).unwrap()))
+        .collect();
+    assert!(
+        !stashed.is_empty(),
+        "expected a published replay index to stash"
+    );
+
+    let second_local = store
+        .load(&id)
+        .unwrap()
+        .events()
+        .iter()
+        .position(
+            |event| matches!(event, SessionEvent::UserMessage { text, .. } if text == "second"),
+        )
+        .unwrap();
+    store.rewind(&id, second_local, None, None).unwrap();
+    for (path, bytes) in &stashed {
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    // The stale index must not resurrect the pre-rewind tail.
+    let reader = store.load(&id).unwrap();
+    assert!(!reader.events().iter().any(|event| matches!(
+        event,
+        SessionEvent::UserMessage { text, .. } if text == "second"
+    )));
+}
+
+#[test]
+fn fork_at_copies_a_truncated_history_under_a_new_id() {
+    let (store, _dir) = temp_store();
+    let id = two_turn_session(&store);
+
+    let fork_id = store.fork_at(&id, 3).unwrap();
+    assert_ne!(fork_id, id);
+
+    let fork = store.load(&fork_id).unwrap();
+    assert_eq!(fork.meta().unwrap().session_id, fork_id);
+    assert_eq!(fork.events().len(), 3);
+    let original = store.load(&id).unwrap();
+    assert_eq!(original.events().len(), 5, "the original is untouched");
+    let expected: Vec<ChatMessage> = ilar::session::transcript_of(&original.events()[..3]);
+    assert_eq!(fork.transcript(), expected);
+}
+
+#[test]
+fn fork_at_the_full_length_matches_fork() {
+    let (store, _dir) = temp_store();
+    let id = two_turn_session(&store);
+
+    let fork_id = store.fork_at(&id, 5).unwrap();
+    let fork = store.load(&fork_id).unwrap();
+    assert_eq!(fork.events().len(), 5);
+    assert_eq!(fork.transcript(), store.load(&id).unwrap().transcript());
+}
+
+#[test]
+fn fork_at_rejects_non_boundary_cuts() {
+    let (store, _dir) = temp_store();
+    let id = two_turn_session(&store);
+
+    for cut in [0, 2, 4, 6] {
+        let error = store.fork_at(&id, cut).unwrap_err();
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::InvalidInput,
+            "cut {cut} must be rejected"
+        );
+    }
+}
+
+#[test]
+fn forking_a_compacted_session_after_the_boundary_keeps_the_summary() {
+    let (store, _dir) = temp_store();
+    let meta = sample_meta();
+    let id = meta.session_id.clone();
+    let mut session = store.create(meta).unwrap();
+    for event in simple_turn("user-1", "first", "assistant-1") {
+        session.append(event).unwrap();
+    }
+    session
+        .append(SessionEvent::Compaction {
+            id: "compaction-1".into(),
+            summary: "the story so far".into(),
+            kept_from: 3,
+            ts: Utc::now(),
+        })
+        .unwrap();
+    for event in simple_turn("user-2", "second", "assistant-2") {
+        session.append(event).unwrap();
+    }
+    for event in simple_turn("user-3", "third", "assistant-3") {
+        session.append(event).unwrap();
+    }
+    drop(session);
+
+    let reader = store.load(&id).unwrap();
+    let third_local = reader
+        .events()
+        .iter()
+        .position(
+            |event| matches!(event, SessionEvent::UserMessage { text, .. } if text == "third"),
+        )
+        .unwrap();
+    let fork_id = store.fork_at(&id, third_local).unwrap();
+
+    let fork = store.load(&fork_id).unwrap();
+    let transcript = fork.transcript();
+    assert!(matches!(
+        &transcript[0].content[0],
+        ContentBlock::Text { text } if text.contains("the story so far")
+    ));
+    assert!(!transcript.iter().any(|message| {
+        message
+            .content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::Text { text } if text == "third"))
+    }));
+}
+
+#[test]
+fn raw_rewind_markers_are_rejected_by_append() {
+    let (store, _dir) = temp_store();
+    let id = two_turn_session(&store);
+    let mut session = store.acquire_writer(&id).unwrap().load().unwrap();
+    let error = session
+        .append(SessionEvent::Rewind {
+            id: new_id(),
+            to: 1,
+            tree_restored: None,
+            tree_saved: None,
+            ts: Utc::now(),
+        })
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+#[test]
+fn indexed_and_canonical_replay_agree_after_a_rewind() {
+    let (store, _dir) = temp_store();
+    let id = two_turn_session(&store);
+    store.rewind(&id, 3, None, None).unwrap();
+
+    // New life after the rewind, ending in a compaction so the indexed
+    // fast path publishes a checkpoint.
+    let mut session = store.acquire_writer(&id).unwrap().load().unwrap();
+    for event in simple_turn("user-2b", "second try", "assistant-2b") {
+        session.append(event).unwrap();
+    }
+    for event in simple_turn("user-3", "third", "assistant-3") {
+        session.append(event).unwrap();
+    }
+    let cut = session
+        .events()
+        .iter()
+        .position(
+            |event| matches!(event, SessionEvent::UserMessage { text, .. } if text == "third"),
+        )
+        .unwrap();
+    session
+        .append(SessionEvent::Compaction {
+            id: new_id(),
+            summary: "compacted after rewind".into(),
+            kept_from: cut,
+            ts: Utc::now(),
+        })
+        .unwrap();
+    for event in simple_turn("user-4", "fourth", "assistant-4") {
+        session.append(event).unwrap();
+    }
+    drop(session);
+
+    assert!(
+        store
+            .replay_index_path(&id)
+            .map(|path| path.exists())
+            .unwrap_or(false),
+        "the fast path must actually be exercised"
+    );
+    let indexed = store.load(&id).unwrap();
+    std::fs::remove_file(store.replay_index_path(&id).unwrap()).unwrap();
+    let canonical = store.load(&id).unwrap();
+    assert_eq!(indexed.events(), canonical.events());
+    assert_eq!(indexed.transcript(), canonical.transcript());
+}

@@ -7,5 +7,6 @@ mod store;
 pub use event::{SessionEvent, SessionMeta, SessionState, new_id};
 pub use model::{ChatMessage, ContentBlock, InputTokenAccounting, Role, Usage};
 pub use store::{
-    PendingQuestion, Session, SessionId, SessionReader, SessionStore, SessionSummary, SessionWriter,
+    PendingQuestion, RewindOutcome, Session, SessionId, SessionReader, SessionStore,
+    SessionSummary, SessionWriter, transcript_of,
 };

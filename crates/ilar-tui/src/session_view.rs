@@ -176,6 +176,9 @@ fn restored_session_invocation_view(
             ilar::session::SessionEvent::Meta { .. } => {}
             ilar::session::SessionEvent::SubagentInvocation { .. } => {}
             ilar::session::SessionEvent::Checkpoint { .. } => {}
+            // Folded out of replay before the view ever sees one; kept
+            // total so a raw event stream renders as nothing.
+            ilar::session::SessionEvent::Rewind { .. } => {}
             ilar::session::SessionEvent::UserMessage { text, .. } => {
                 match task_notification_display(text) {
                     Some(text) => lines.push(Line_::Task {
