@@ -13,6 +13,7 @@ pub mod config;
 pub mod model;
 pub mod provider;
 pub mod question;
+pub mod rewind;
 pub mod session;
 pub mod skill;
 pub mod subagent;
