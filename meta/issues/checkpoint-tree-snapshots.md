@@ -55,6 +55,19 @@ HEAD, branch, index, or ignored files.
 - `git add -A` cost on large repositories is accepted; git's object
   store dedupes unchanged blobs.
 
+## Outcome
+
+Landed as `checkpoint::snapshot` plus `SessionEvent::Checkpoint`,
+appended in `run_turn_inner` gated on `depth == 0` — `call_id` alone is
+not a root test, since notification turns on child sessions carry none;
+review caught that and a test now pins it. A synchronous `.git`
+ancestor pre-check keeps non-git turns at zero subprocesses. Review
+items accepted as documented limitations: submodules snapshot as bare
+gitlinks, sparse checkouts record out-of-cone files as deleted.
+Deferred: the fresh temp index re-hashes the whole tree each turn
+(no stat cache); if turn-start latency on large repos ever hurts, a
+persistent per-session index is the fix.
+
 ## Milestone
 
 8 — Time travel
