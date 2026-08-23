@@ -239,16 +239,18 @@ pub(crate) fn after_turn(
 /// one way while believing it decided another.
 pub(crate) fn submit(state: &LoopState, busy: bool, text: String) -> Vec<Intent> {
     // Maintenance commands must never become steering text for the model.
-    if let Some(("compact", args)) = crate::parse_slash_invocation(&text) {
+    if let Some((name @ ("compact" | "rewind" | "fork"), args)) =
+        crate::parse_slash_invocation(&text)
+    {
         if !args.is_empty() {
             return vec![Intent::Notice(
-                "usage: /compact".into(),
+                format!("usage: /{name}"),
                 NoticeLevel::Warning,
             )];
         }
         if state.turn_running || busy {
             return vec![Intent::Notice(
-                "wait for the current operation before compacting".into(),
+                format!("wait for the current operation before /{name}"),
                 NoticeLevel::Warning,
             )];
         }
@@ -366,7 +368,7 @@ mod tests {
         assert_eq!(
             submit(&running, true, "/compact".into()),
             vec![Intent::Notice(
-                "wait for the current operation before compacting".into(),
+                "wait for the current operation before /compact".into(),
                 NoticeLevel::Warning,
             )]
         );

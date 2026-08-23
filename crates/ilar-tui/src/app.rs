@@ -25,10 +25,10 @@ use crate::input::slash_candidates;
 use crate::input::{InputBuffer, input_accepts_keys};
 use crate::modals::{
     CommandPalette, Modal, ModelPicker, PaletteAction, PaletteCommand, PendingAction, PendingItem,
-    PendingManager, SessionPicker, SkillPicker, ThemePicker, ThemePickerAction, VariantPicker,
-    palette_items, render_command_palette, render_help, render_model_picker,
+    PendingManager, SessionPicker, SkillPicker, ThemePicker, ThemePickerAction, TurnPicker,
+    VariantPicker, palette_items, render_command_palette, render_help, render_model_picker,
     render_pending_manager, render_session_picker, render_skill_picker, render_theme_picker,
-    render_variant_picker,
+    render_turn_picker, render_variant_picker,
 };
 use crate::questions::QuestionModal;
 use crate::selection::{
@@ -151,6 +151,12 @@ pub(crate) struct App {
     pub(crate) model_picker: Option<ModelPicker>,
     pub(crate) variant_picker: Option<VariantPicker>,
     pub(crate) session_picker: Option<SessionPicker>,
+    pub(crate) turn_picker: Option<TurnPicker>,
+    /// The turn picker needs the store; set by /rewind or the palette,
+    /// consumed by run_app.
+    pub(crate) turn_picker_requested: bool,
+    /// A whole-session fork (/fork); consumed by run_app.
+    pub(crate) fork_requested: bool,
     /// Set by the palette; run_app opens the picker (it owns the store).
     pub(crate) session_picker_requested: bool,
     pub(crate) help_visible: bool,
@@ -244,6 +250,9 @@ impl App {
             model_picker: None,
             variant_picker: None,
             session_picker: None,
+            turn_picker: None,
+            turn_picker_requested: false,
+            fork_requested: false,
             session_picker_requested: false,
             help_visible: false,
             help_scroll: 0,
@@ -300,6 +309,8 @@ impl App {
             Some(Modal::SkillPicker)
         } else if self.session_picker.is_some() {
             Some(Modal::SessionPicker)
+        } else if self.turn_picker.is_some() {
+            Some(Modal::TurnPicker)
         } else if self.model_picker.is_some() {
             Some(Modal::ModelPicker)
         } else if self.variant_picker.is_some() {
@@ -434,6 +445,9 @@ impl App {
             Some(Modal::SessionPicker) => {
                 self.session_picker.as_mut().unwrap().move_selection(rows);
             }
+            Some(Modal::TurnPicker) => {
+                self.turn_picker.as_mut().unwrap().move_selection(rows);
+            }
             Some(Modal::SkillPicker) => self.skill_picker.as_mut().unwrap().move_selection(rows),
             Some(Modal::CommandPalette) => {
                 self.command_palette.as_mut().unwrap().move_selection(rows);
@@ -478,6 +492,7 @@ impl App {
                     self.theme = self.theme_picker.as_ref().unwrap().selected_theme();
                 }
                 Modal::SessionPicker => self.session_picker.as_mut().unwrap().select(index),
+                Modal::TurnPicker => self.turn_picker.as_mut().unwrap().select(index),
                 Modal::SkillPicker => self.skill_picker.as_mut().unwrap().select(index),
                 Modal::CommandPalette => self.command_palette.as_mut().unwrap().select(index),
                 Modal::PendingManager => {
@@ -2330,6 +2345,10 @@ impl App {
                 frame,
                 self.session_picker.as_ref().expect("session picker"),
             )),
+            Some(Modal::TurnPicker) => Some(render_turn_picker(
+                frame,
+                self.turn_picker.as_ref().expect("turn picker"),
+            )),
             Some(Modal::ModelPicker) => Some(render_model_picker(
                 frame,
                 self.model_picker.as_ref().expect("model picker"),
@@ -2423,6 +2442,11 @@ pub(crate) fn activate_palette_command(
             // Sessions are loaded by the caller (needs the store); the
             // palette only records the request.
             app.session_picker_requested = true;
+        }
+        PaletteCommand::Rewind => {
+            // Turns are loaded by the caller (needs the store); the
+            // palette only records the request.
+            app.turn_picker_requested = true;
         }
         PaletteCommand::Usage => {
             let total = app.session_usage;
@@ -3231,9 +3255,11 @@ mod tests {
         ];
         // All candidates on bare slash, fuzzy-filtered as the name grows.
         let all = slash_candidates("/", &skills);
-        assert_eq!(all.len(), 4);
+        assert_eq!(all.len(), 6);
         assert!(all.iter().any(|(name, _)| name == "goal"));
         assert!(all.iter().any(|(name, _)| name == "compact"));
+        assert!(all.iter().any(|(name, _)| name == "rewind"));
+        assert!(all.iter().any(|(name, _)| name == "fork"));
         let filtered = slash_candidates("/go", &skills);
         assert_eq!(
             filtered.first().map(|(name, _)| name.as_str()),

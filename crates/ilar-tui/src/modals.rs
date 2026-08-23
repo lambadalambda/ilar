@@ -71,6 +71,7 @@ pub(crate) enum Modal {
     ThemePicker,
     SkillPicker,
     SessionPicker,
+    TurnPicker,
     ModelPicker,
     VariantPicker,
     Search,
@@ -83,6 +84,7 @@ pub(crate) enum PaletteCommand {
     Reasoning,
     Theme,
     Session,
+    Rewind,
     Usage,
     Compact,
     Export,
@@ -128,6 +130,13 @@ pub(crate) static PALETTE_COMMANDS: &[PaletteCommandDefinition] = &[
         label: "Resume session",
         shortcut: "",
         search_terms: "session resume continue switch history recent",
+    },
+    PaletteCommandDefinition {
+        id: PaletteCommand::Rewind,
+        section: "General",
+        label: "Rewind to a turn…",
+        shortcut: "",
+        search_terms: "rewind undo restore checkpoint fork turn back time travel",
     },
     PaletteCommandDefinition {
         id: PaletteCommand::Usage,
@@ -395,6 +404,10 @@ static HELP_SECTIONS: &[HelpSection] = &[
         bindings: &[
             binding!("palette: Resume session", "switch to another session"),
             binding!("palette: Session usage", "token and cost totals"),
+            binding!("/rewind", "pick a turn: Enter ×2 rewinds chat + tree"),
+            binding!("^Y in that picker", "fork at the turn instead (keeps both)"),
+            binding!("/fork", "fork the whole session under a new id"),
+            binding!("", "rewind/fork rebuild the session; services stop"),
             binding!("ilar --continue", "resume latest session (CLI)"),
         ],
     },
@@ -794,6 +807,265 @@ impl SessionPicker {
             _ => SessionPickerAction::Stay,
         }
     }
+}
+
+/// One rewindable turn: a user message in the loaded session, newest
+/// first in the picker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TurnEntry {
+    /// Local event index of the `UserMessage` (the rewind/fork cut).
+    pub(crate) cut: usize,
+    /// The message's event id, verified again under the rewind lease.
+    pub(crate) user_id: String,
+    /// Whitespace-collapsed message text; truncated at render.
+    pub(crate) excerpt: String,
+    /// Whether the turn has a tree checkpoint to restore.
+    pub(crate) has_tree: bool,
+    pub(crate) ts: chrono::DateTime<chrono::Utc>,
+}
+
+/// Every user message is a valid cut; the entry records whether the
+/// checkpoint right before it makes the rewind restore the tree too.
+pub(crate) fn turn_entries(events: &[ilar::session::SessionEvent]) -> Vec<TurnEntry> {
+    use ilar::session::SessionEvent;
+    let mut entries: Vec<TurnEntry> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| match event {
+            SessionEvent::UserMessage { id, text, ts } => Some(TurnEntry {
+                cut: index,
+                user_id: id.clone(),
+                excerpt: text.split_whitespace().collect::<Vec<_>>().join(" "),
+                has_tree: index.checked_sub(1).is_some_and(|previous| {
+                    matches!(events[previous], SessionEvent::Checkpoint { .. })
+                }),
+                ts: *ts,
+            }),
+            _ => None,
+        })
+        .collect();
+    entries.reverse();
+    entries
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum TurnPickerAction {
+    Stay,
+    Dismiss,
+    /// Confirmed rewind to this turn (second Enter on the armed row).
+    Rewind {
+        cut: usize,
+        target: String,
+        discarded: usize,
+    },
+    /// Fork the session at this turn; non-destructive, no confirmation.
+    Fork {
+        cut: usize,
+        target: String,
+    },
+}
+
+pub(crate) struct TurnPicker {
+    turns: Vec<TurnEntry>,
+    query: String,
+    selected: usize,
+    /// User-message id armed for rewind; the next Enter confirms. Any
+    /// selection move or filter edit disarms.
+    armed: Option<String>,
+}
+
+impl TurnPicker {
+    pub(crate) fn new(turns: Vec<TurnEntry>) -> Self {
+        Self {
+            turns,
+            query: String::new(),
+            selected: 0,
+            armed: None,
+        }
+    }
+
+    fn filtered(&self) -> Vec<&TurnEntry> {
+        let mut scored: Vec<(i64, &TurnEntry)> = self
+            .turns
+            .iter()
+            .filter_map(|turn| fuzzy_score(&self.query, &turn.excerpt).map(|score| (score, turn)))
+            .collect();
+        scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+        scored.into_iter().map(|(_, turn)| turn).collect()
+    }
+
+    fn selected_turn(&self) -> Option<&TurnEntry> {
+        self.filtered().get(self.selected).copied()
+    }
+
+    /// Discarded-turn count and tree flag for the armed confirmation.
+    fn selected_stakes(&self) -> Option<(usize, bool)> {
+        let turn = self.selected_turn()?;
+        let discarded = self
+            .turns
+            .iter()
+            .filter(|other| other.cut >= turn.cut)
+            .count();
+        Some((discarded, turn.has_tree))
+    }
+
+    pub(crate) fn select(&mut self, index: usize) {
+        self.armed = None;
+        self.selected = index.min(self.filtered().len().saturating_sub(1));
+    }
+
+    pub(crate) fn move_selection(&mut self, delta: isize) {
+        self.armed = None;
+        let count = self.filtered().len();
+        if count == 0 {
+            self.selected = 0;
+        } else {
+            self.selected = (self.selected as isize + delta).rem_euclid(count as isize) as usize;
+        }
+    }
+
+    pub(crate) fn handle_key(&mut self, code: KeyCode, control: bool) -> TurnPickerAction {
+        if let Some(delta) = nav_delta(code, control) {
+            self.move_selection(delta);
+            return TurnPickerAction::Stay;
+        }
+        match (code, control) {
+            (KeyCode::Esc, _) => TurnPickerAction::Dismiss,
+            (KeyCode::Enter, _) => match self.selected_turn() {
+                Some(turn) if self.armed.as_deref() == Some(turn.user_id.as_str()) => {
+                    TurnPickerAction::Rewind {
+                        cut: turn.cut,
+                        target: turn.user_id.clone(),
+                        discarded: self.selected_stakes().map_or(0, |(discarded, _)| discarded),
+                    }
+                }
+                Some(turn) => {
+                    self.armed = Some(turn.user_id.clone());
+                    TurnPickerAction::Stay
+                }
+                None => TurnPickerAction::Dismiss,
+            },
+            (KeyCode::Char('y'), true) => self
+                .selected_turn()
+                .map(|turn| TurnPickerAction::Fork {
+                    cut: turn.cut,
+                    target: turn.user_id.clone(),
+                })
+                .unwrap_or(TurnPickerAction::Stay),
+            (KeyCode::Backspace, _) => {
+                self.query.pop();
+                self.selected = 0;
+                self.armed = None;
+                TurnPickerAction::Stay
+            }
+            (KeyCode::Char(character), false) if !character.is_control() => {
+                self.query.push(character);
+                self.selected = 0;
+                self.armed = None;
+                TurnPickerAction::Stay
+            }
+            _ => TurnPickerAction::Stay,
+        }
+    }
+}
+
+pub(crate) fn render_turn_picker(frame: &mut Frame, picker: &TurnPicker) -> ModalHit {
+    let area = centered_rect(frame.area(), 72, 16);
+    frame.render_widget(Clear, area);
+    let footer = if area.width < 48 {
+        " ↵ rewind ×2 · ^Y fork · Esc "
+    } else {
+        " type to filter · ↵ rewind (×2 confirms) · ^Y fork here · Esc "
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .border_style(theme::focus_border())
+        .title(Line::styled(
+            " rewind to turn ",
+            theme::title(theme::MARKUP),
+        ))
+        .title_bottom(Line::styled(footer, Style::default().fg(theme::MUTED)).right_aligned());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return ModalHit::default();
+    }
+    let mut lines = vec![Line::from(vec![
+        Span::styled("filter ", Style::default().fg(MUTED)),
+        Span::raw(truncate_display(
+            &picker.query,
+            (inner.width as usize).saturating_sub(8),
+            Truncation::Middle,
+        )),
+    ])];
+    let turns = picker.filtered();
+    if turns.is_empty() {
+        lines.push(Line::styled(
+            if picker.turns.is_empty() {
+                "no turns to rewind to"
+            } else {
+                "no matches"
+            },
+            Style::default().fg(MUTED),
+        ));
+        frame.render_widget(Paragraph::new(lines), inner);
+        return ModalHit::default();
+    }
+    let now = std::time::SystemTime::now();
+    let selected = picker.selected.min(turns.len() - 1);
+    let row_count = (inner.height as usize).saturating_sub(lines.len()).max(1);
+    let start = selected
+        .saturating_add(1)
+        .saturating_sub(row_count)
+        .min(turns.len().saturating_sub(row_count));
+    let mut rows: Vec<Option<usize>> = vec![None];
+    for (index, turn) in turns.iter().enumerate().skip(start).take(row_count) {
+        let armed = index == selected && picker.armed.as_deref() == Some(turn.user_id.as_str());
+        let marker = if index == selected {
+            if armed { "✗ " } else { "> " }
+        } else {
+            "  "
+        };
+        let right = if armed {
+            match picker.selected_stakes() {
+                Some((discarded, true)) => format!("↵ drops {discarded}, restores tree"),
+                Some((discarded, false)) => format!("↵ drops {discarded}, chat only"),
+                None => String::new(),
+            }
+        } else {
+            let age = session_age(std::time::SystemTime::from(turn.ts), now);
+            if turn.has_tree {
+                format!("⎇ {age}")
+            } else {
+                age
+            }
+        };
+        let label_width = (inner.width as usize)
+            .saturating_sub(UnicodeWidthStr::width(marker))
+            .saturating_sub(UnicodeWidthStr::width(right.as_str()))
+            .saturating_sub(1);
+        let label = truncate_display(&turn.excerpt, label_width, Truncation::Right);
+        let text = format!(
+            "{marker}{label:<label_width$} {right}",
+            label_width = label_width
+        );
+        let text = truncate_display(&text, inner.width as usize, Truncation::Right);
+        let style = if armed {
+            Style::default().fg(theme::SELECTED_FG).bg(theme::ERROR)
+        } else if index == selected {
+            theme::selected()
+        } else {
+            Style::default().fg(theme::PRIMARY)
+        };
+        lines.push(Line::styled(
+            format!("{text:<width$}", width = inner.width as usize),
+            style,
+        ));
+        rows.push(Some(index));
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
+    ModalHit { area: inner, rows }
 }
 
 fn session_age(modified: std::time::SystemTime, now: std::time::SystemTime) -> String {
@@ -1705,6 +1977,118 @@ pub(crate) fn is_command_palette_shortcut(event: &Event) -> bool {
 
 #[cfg(test)]
 mod tests {
+    fn user(id: &str, text: &str) -> ilar::session::SessionEvent {
+        ilar::session::SessionEvent::UserMessage {
+            id: id.into(),
+            text: text.into(),
+            ts: chrono::Utc::now(),
+        }
+    }
+
+    fn checkpoint(commit: &str) -> ilar::session::SessionEvent {
+        ilar::session::SessionEvent::Checkpoint {
+            id: format!("cp-{commit}"),
+            commit: commit.into(),
+            head: None,
+            ts: chrono::Utc::now(),
+        }
+    }
+
+    fn meta_event() -> ilar::session::SessionEvent {
+        ilar::session::SessionEvent::Meta {
+            meta: ilar::session::SessionMeta {
+                session_id: "s".into(),
+                parent_id: None,
+                agent: "build".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+            },
+            ts: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn turn_entries_are_newest_first_with_tree_flags_and_cuts() {
+        let events = vec![
+            meta_event(),
+            checkpoint("aaa"),
+            user("u1", "  first   question  "),
+            user("u2", "a steer"),
+            checkpoint("bbb"),
+            user("u3", "second question"),
+        ];
+        let entries = turn_entries(&events);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].cut, 5);
+        assert!(entries[0].has_tree);
+        assert_eq!(entries[0].excerpt, "second question");
+        assert_eq!(entries[1].cut, 3);
+        assert!(!entries[1].has_tree, "a steer has no checkpoint before it");
+        assert_eq!(entries[2].cut, 2);
+        assert!(entries[2].has_tree);
+        assert_eq!(entries[2].excerpt, "first question", "whitespace collapses");
+        assert_eq!(entries[2].user_id, "u1");
+    }
+
+    #[test]
+    fn turn_picker_arms_then_rewinds_and_navigation_disarms() {
+        let events = vec![meta_event(), user("u1", "first"), user("u2", "second")];
+        let mut picker = TurnPicker::new(turn_entries(&events));
+
+        // First Enter arms; second confirms with the newest turn's cut.
+        assert_eq!(
+            picker.handle_key(KeyCode::Enter, false),
+            TurnPickerAction::Stay
+        );
+        assert_eq!(
+            picker.handle_key(KeyCode::Enter, false),
+            TurnPickerAction::Rewind {
+                cut: 2,
+                target: "u2".into(),
+                discarded: 1
+            }
+        );
+
+        // Arm, then move: disarmed, so Enter re-arms instead of firing.
+        picker.handle_key(KeyCode::Enter, false);
+        picker.handle_key(KeyCode::Down, false);
+        assert_eq!(
+            picker.handle_key(KeyCode::Enter, false),
+            TurnPickerAction::Stay
+        );
+
+        // Arm, then filter edit: also disarmed.
+        let mut picker = TurnPicker::new(turn_entries(&events));
+        picker.handle_key(KeyCode::Enter, false);
+        picker.handle_key(KeyCode::Char('f'), false);
+        assert_eq!(
+            picker.handle_key(KeyCode::Enter, false),
+            TurnPickerAction::Stay
+        );
+    }
+
+    #[test]
+    fn turn_picker_fork_fires_immediately_without_confirmation() {
+        let events = vec![meta_event(), user("u1", "first"), user("u2", "second")];
+        let mut picker = TurnPicker::new(turn_entries(&events));
+        assert_eq!(
+            picker.handle_key(KeyCode::Char('y'), true),
+            TurnPickerAction::Fork {
+                cut: 2,
+                target: "u2".into()
+            }
+        );
+    }
+
+    #[test]
+    fn empty_turn_picker_dismisses_on_enter() {
+        let mut picker = TurnPicker::new(Vec::new());
+        assert_eq!(
+            picker.handle_key(KeyCode::Enter, false),
+            TurnPickerAction::Dismiss
+        );
+    }
+
     use super::*;
     use crate::text::tests::rendered_text;
 

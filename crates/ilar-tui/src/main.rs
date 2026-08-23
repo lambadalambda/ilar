@@ -35,8 +35,8 @@ use input::{
 };
 use modals::{
     CommandPaletteAction, Modal, ModelPicker, PendingAction, PendingManager, PickerAction,
-    SessionPicker, SessionPickerAction, ThemePicker, VariantPicker, VariantPickerAction,
-    is_command_palette_shortcut,
+    SessionPicker, SessionPickerAction, ThemePicker, TurnPicker, TurnPickerAction, VariantPicker,
+    VariantPickerAction, is_command_palette_shortcut, turn_entries,
 };
 use questions::QuestionAction;
 use ratatui::style::Color;
@@ -187,6 +187,27 @@ fn prepare_prompt(app: &mut App, text: String) -> Option<String> {
         } else {
             app.input = InputBuffer::from(text.as_str());
             app.set_notice("usage: /compact", NoticeLevel::Warning);
+        }
+        return None;
+    }
+    if let Some(("rewind", args)) = parse_slash_invocation(&text) {
+        if args.is_empty() {
+            app.turn_picker_requested = true;
+        } else {
+            app.input = InputBuffer::from(text.as_str());
+            app.set_notice("usage: /rewind", NoticeLevel::Warning);
+        }
+        return None;
+    }
+    if let Some(("fork", args)) = parse_slash_invocation(&text) {
+        if args.is_empty() {
+            app.fork_requested = true;
+        } else {
+            app.input = InputBuffer::from(text.as_str());
+            app.set_notice(
+                "usage: /fork — Ctrl-Y in the /rewind picker forks at a turn",
+                NoticeLevel::Warning,
+            );
         }
         return None;
     }
@@ -466,6 +487,11 @@ const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
         "compact",
         "compact the session now and show its handover summary",
     ),
+    (
+        "rewind",
+        "pick a turn to rewind conversation and tree to (^Y forks instead)",
+    ),
+    ("fork", "fork this session under a new id"),
 ];
 const MAX_GOAL_ROUNDS: u32 = 25;
 const GOAL_SENTINEL: &str = "GOAL_ACHIEVED";
@@ -778,6 +804,8 @@ async fn main() -> Result<()> {
     // The whole runtime (agent, model, prompt, registry) is rebuilt per
     // session so switching via the picker restarts with full fidelity.
     let mut session_override: Option<String> = None;
+    // Prefill + notice carried across a rewind/fork rebuild.
+    let mut carried: Option<(Option<String>, Option<String>)> = None;
     let mut first_run = true;
     let mut terminal_hold: Option<(ratatui::DefaultTerminal, TerminalSession)> = None;
     let mut active_theme = configured_theme;
@@ -993,6 +1021,14 @@ async fn main() -> Result<()> {
         if app.question_modal.is_some() {
             app.status = "waiting for your answer".into();
         }
+        if let Some((prefill, notice)) = carried.take() {
+            if let Some(prefill) = prefill {
+                app.input = InputBuffer::from(prefill.as_str());
+            }
+            if let Some(notice) = notice {
+                app.set_notice(notice, NoticeLevel::Info);
+            }
+        }
 
         if terminal_hold.is_none() {
             terminal_hold = Some(TerminalSession::start()?);
@@ -1024,6 +1060,14 @@ async fn main() -> Result<()> {
         match exit {
             AppExit::Quit => return Ok(()),
             AppExit::Switch(next) => session_override = Some(next),
+            AppExit::SwitchInto {
+                id,
+                prefill,
+                notice,
+            } => {
+                session_override = Some(id);
+                carried = Some((prefill, notice));
+            }
         }
     } // session loop
 }
@@ -1529,10 +1573,35 @@ fn drain_wheel_batch(
     })
 }
 
+/// The reasons a session switch (resume, fork, rewind) must wait; the
+/// same triple guards every path that tears the runtime down.
+fn switch_blocked(
+    turn_running: bool,
+    background_agents: usize,
+    has_draft: bool,
+) -> Option<&'static str> {
+    if turn_running {
+        Some("finish or abort the current turn before switching sessions")
+    } else if background_agents > 0 {
+        Some("background agents are running; wait or abort them first")
+    } else if has_draft {
+        Some("input has an unsent draft; send or clear it first")
+    } else {
+        None
+    }
+}
+
 /// How run_app ended: quit the program, or restart against another session.
 enum AppExit {
     Quit,
     Switch(String),
+    /// Switch carrying rewind/fork context into the rebuilt app: an
+    /// input prefill (the unsent message) and a notice.
+    SwitchInto {
+        id: String,
+        prefill: Option<String>,
+        notice: Option<String>,
+    },
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1615,6 +1684,54 @@ async fn run_app(
             app.question_modal = Some(questions::QuestionModal::new(prompt.request));
             app.status = "waiting for your answer".into();
             app.set_activity(Activity::Paused);
+        }
+        // Rewind and fork requests recorded by /rewind, /fork or the
+        // palette; they need the store, so they are consumed here.
+        if std::mem::take(&mut app.turn_picker_requested) {
+            if let Some(reason) = switch_blocked(
+                turn_handle.is_some(),
+                spawner.running_background(),
+                !app.input.is_blank(),
+            ) {
+                app.set_notice(reason, NoticeLevel::Warning);
+            } else if app.goal.is_some() {
+                app.set_notice(
+                    "a goal is active — /goal abort before rewinding away its context",
+                    NoticeLevel::Warning,
+                );
+            } else {
+                match store.load(session_id) {
+                    Ok(reader) => {
+                        app.turn_picker = Some(TurnPicker::new(turn_entries(reader.events())));
+                    }
+                    Err(error) => {
+                        app.set_notice(format!("cannot load session: {error}"), NoticeLevel::Error);
+                    }
+                }
+            }
+        }
+        if std::mem::take(&mut app.fork_requested) {
+            if let Some(reason) = switch_blocked(
+                turn_handle.is_some(),
+                spawner.running_background(),
+                !app.input.is_blank(),
+            ) {
+                app.set_notice(reason, NoticeLevel::Warning);
+            } else {
+                match store.fork(session_id) {
+                    Ok(fork_id) => {
+                        spawner.shutdown().await;
+                        return Ok(AppExit::SwitchInto {
+                            id: fork_id,
+                            prefill: None,
+                            notice: Some(format!("forked from {session_id}")),
+                        });
+                    }
+                    Err(error) => {
+                        app.set_notice(format!("cannot fork: {error}"), NoticeLevel::Error);
+                    }
+                }
+            }
         }
         // Turn finished? Join at the edge; schedule::pass folds the
         // completion into the same pass as the drain and the gate.
@@ -1908,19 +2025,11 @@ async fn run_app(
                                     }
                                 },
                                 SessionPickerAction::Fork(id) => {
-                                    let blocked = if turn_handle.is_some() {
-                                        Some(
-                                            "finish or abort the current turn before switching sessions",
-                                        )
-                                    } else if spawner.running_background() > 0 {
-                                        Some(
-                                            "background agents are running; wait or abort them first",
-                                        )
-                                    } else if !app.input.is_blank() {
-                                        Some("input has an unsent draft; send or clear it first")
-                                    } else {
-                                        None
-                                    };
+                                    let blocked = switch_blocked(
+                                        turn_handle.is_some(),
+                                        spawner.running_background(),
+                                        !app.input.is_blank(),
+                                    );
                                     if let Some(reason) = blocked {
                                         app.set_notice(reason, NoticeLevel::Warning);
                                         continue;
@@ -1939,19 +2048,11 @@ async fn run_app(
                                     }
                                 }
                                 SessionPickerAction::Resume(new_session) => {
-                                    let blocked = if turn_handle.is_some() {
-                                        Some(
-                                            "finish or abort the current turn before switching sessions",
-                                        )
-                                    } else if spawner.running_background() > 0 {
-                                        Some(
-                                            "background agents are running; wait or abort them first",
-                                        )
-                                    } else if !app.input.is_blank() {
-                                        Some("input has an unsent draft; send or clear it first")
-                                    } else {
-                                        None
-                                    };
+                                    let blocked = switch_blocked(
+                                        turn_handle.is_some(),
+                                        spawner.running_background(),
+                                        !app.input.is_blank(),
+                                    );
                                     if let Some(reason) = blocked {
                                         app.set_notice(reason, NoticeLevel::Warning);
                                         continue;
@@ -1975,6 +2076,121 @@ async fn run_app(
                                         Err(error) => {
                                             app.set_notice(
                                                 format!("cannot resume {new_session}: {error}"),
+                                                NoticeLevel::Error,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Modal::TurnPicker => {
+                            let picker = app.turn_picker.as_mut().unwrap();
+                            match picker.handle_key(code, control) {
+                                TurnPickerAction::Stay => {}
+                                TurnPickerAction::Dismiss => {
+                                    app.turn_picker = None;
+                                    app.clear_transient_notice();
+                                }
+                                TurnPickerAction::Rewind {
+                                    cut,
+                                    target,
+                                    discarded,
+                                } => {
+                                    if let Some(reason) = switch_blocked(
+                                        turn_handle.is_some(),
+                                        spawner.running_background(),
+                                        false,
+                                    ) {
+                                        app.set_notice(reason, NoticeLevel::Warning);
+                                        continue;
+                                    }
+                                    app.turn_picker = None;
+                                    match ilar::rewind::rewind_session(
+                                        store,
+                                        session_id,
+                                        cut,
+                                        &target,
+                                        &tool_ctx.cwd,
+                                    )
+                                    .await
+                                    {
+                                        Ok(report) => {
+                                            spawner.shutdown().await;
+                                            let mut notice = if report.tree_restored {
+                                                format!(
+                                                    "rewound {discarded} turn(s) · tree restored"
+                                                )
+                                            } else {
+                                                format!(
+                                                    "rewound {discarded} turn(s) · no tree snapshot"
+                                                )
+                                            };
+                                            if report.head_moved {
+                                                notice
+                                                    .push_str(" · HEAD moved since (commits kept)");
+                                            }
+                                            return Ok(AppExit::SwitchInto {
+                                                id: session_id.to_string(),
+                                                prefill: Some(report.unsent),
+                                                notice: Some(notice),
+                                            });
+                                        }
+                                        Err(error) => {
+                                            app.set_notice(
+                                                format!("rewind failed: {error}"),
+                                                NoticeLevel::Error,
+                                            );
+                                        }
+                                    }
+                                }
+                                TurnPickerAction::Fork { cut, target } => {
+                                    if let Some(reason) = switch_blocked(
+                                        turn_handle.is_some(),
+                                        spawner.running_background(),
+                                        false,
+                                    ) {
+                                        app.set_notice(reason, NoticeLevel::Warning);
+                                        continue;
+                                    }
+                                    // The forked message is unsent in the copy;
+                                    // this load both fetches it for the input
+                                    // prefill and verifies the picker's target
+                                    // still sits at `cut`.
+                                    let unsent =
+                                        store.load(session_id).ok().and_then(|reader| match reader
+                                            .events()
+                                            .get(cut)
+                                        {
+                                            Some(ilar::session::SessionEvent::UserMessage {
+                                                id,
+                                                text,
+                                                ..
+                                            }) if *id == target => Some(text.clone()),
+                                            _ => None,
+                                        });
+                                    if unsent.is_none() {
+                                        app.set_notice(
+                                            "the session changed since the turn was chosen; reopen the picker",
+                                            NoticeLevel::Warning,
+                                        );
+                                        app.turn_picker = None;
+                                        continue;
+                                    }
+                                    app.turn_picker = None;
+                                    match store.fork_at(session_id, cut) {
+                                        Ok(fork_id) => {
+                                            spawner.shutdown().await;
+                                            return Ok(AppExit::SwitchInto {
+                                                id: fork_id,
+                                                prefill: unsent,
+                                                notice: Some(format!(
+                                                    "forked at that turn from {session_id}"
+                                                )),
+                                            });
+                                        }
+                                        Err(error) => {
+                                            app.set_notice(
+                                                format!("cannot fork here: {error}"),
                                                 NoticeLevel::Error,
                                             );
                                         }
