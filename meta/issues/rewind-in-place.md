@@ -58,6 +58,22 @@ rewind drops the tail.
 - Sessions recorded before checkpointing existed rewind conversation
   only; `tree_restored` stays empty.
 
+## Outcome
+
+Landed as designed, plus review-driven hardening: the writer lease is
+held from validation through the marker append (an active turn rejects
+the rewind before any git work); the rewind target is verified by event
+id under the lease; raw `Rewind` appends are rejected so only
+`rewind_to` can write markers; the replay index is dropped *before* the
+marker lands, so no crash point leaves a stamp-valid pre-rewind index;
+`restore` tolerates file/directory type conflicts; and both compaction
+cut policies now keep a turn's checkpoint inside the kept window
+(cutting between them silently degraded a later rewind to
+conversation-only). Known cosmetic leftovers: the session listing
+titles from the raw file head, so a rewound-away first message can
+still title the list entry; `physical_line_count` in the replay index
+undercounts after a rewind (only mis-numbers parse-error messages).
+
 ## Milestone
 
 8 — Time travel

@@ -42,6 +42,15 @@ context and keep the winner.
 - Child-session references in the dropped tail simply do not appear in
   the fork; the child JSONL files remain owned by the original session.
 
+## Outcome
+
+`fork_at` shares `fork_events` with `fork`; cut validation matches
+rewind's (a `UserMessage`, or the full window length for a plain fork).
+The "cut between call and result" rejection is enforced at load rather
+than fork time — such a session cannot be loaded at all. Compacted
+forks keep the summary; tests pin truncation, full-length equivalence,
+and rejection.
+
 ## Milestone
 
 8 — Time travel
