@@ -187,7 +187,116 @@ async fn tracked_but_ignored_files_stay_in_the_snapshot() {
         .unwrap();
 
     assert_eq!(
-        git_stdout(&root, &["show", &format!("{}:tracked.txt", snapshot.commit)]),
+        git_stdout(
+            &root,
+            &["show", &format!("{}:tracked.txt", snapshot.commit)]
+        ),
         "ignored but tracked"
     );
+}
+
+#[tokio::test]
+async fn restore_makes_the_tree_match_the_snapshot() {
+    let (_temp, root) = repository();
+    std::fs::write(root.join("tracked.txt"), "snapshot state\n").unwrap();
+    std::fs::write(root.join("fresh.txt"), "untracked at snapshot\n").unwrap();
+    std::fs::remove_file(root.join("doomed.txt")).unwrap();
+    let snapshot = checkpoint::snapshot(&root, "session-r")
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Drift after the snapshot: edits, deletions, new files, revivals.
+    std::fs::write(root.join("tracked.txt"), "drifted\n").unwrap();
+    std::fs::remove_file(root.join("fresh.txt")).unwrap();
+    std::fs::write(root.join("later.txt"), "created after\n").unwrap();
+    std::fs::write(root.join("doomed.txt"), "revived\n").unwrap();
+    std::fs::create_dir_all(root.join("deep/nest")).unwrap();
+    std::fs::write(root.join("deep/nest/leaf.txt"), "nested\n").unwrap();
+    let head_before = git_stdout(&root, &["rev-parse", "HEAD"]);
+
+    checkpoint::restore(&root, &snapshot.commit).await.unwrap();
+
+    let read = |path: &str| std::fs::read_to_string(root.join(path)).unwrap();
+    assert_eq!(read("tracked.txt"), "snapshot state\n");
+    assert_eq!(read("fresh.txt"), "untracked at snapshot\n");
+    assert!(!root.join("later.txt").exists());
+    assert!(!root.join("doomed.txt").exists());
+    assert!(!root.join("deep/nest/leaf.txt").exists());
+    assert!(!root.join("deep").exists(), "emptied directories go too");
+    assert_eq!(git_stdout(&root, &["rev-parse", "HEAD"]), head_before);
+}
+
+#[tokio::test]
+async fn restore_never_touches_ignored_files() {
+    let (_temp, root) = repository();
+    std::fs::write(root.join(".gitignore"), "*.secret\n").unwrap();
+    std::fs::write(root.join("keys.secret"), "v1\n").unwrap();
+    let snapshot = checkpoint::snapshot(&root, "session-s")
+        .await
+        .unwrap()
+        .unwrap();
+
+    std::fs::write(root.join("keys.secret"), "v2\n").unwrap();
+    std::fs::write(root.join("new.secret"), "born after\n").unwrap();
+
+    checkpoint::restore(&root, &snapshot.commit).await.unwrap();
+
+    let read = |path: &str| std::fs::read_to_string(root.join(path)).unwrap();
+    assert_eq!(read("keys.secret"), "v2\n");
+    assert_eq!(read("new.secret"), "born after\n");
+}
+
+#[tokio::test]
+async fn restore_from_a_subdirectory_covers_the_whole_repo() {
+    let (_temp, root) = repository();
+    std::fs::create_dir(root.join("sub")).unwrap();
+    std::fs::write(root.join("sub/inner.txt"), "inner\n").unwrap();
+    let snapshot = checkpoint::snapshot(&root, "session-t")
+        .await
+        .unwrap()
+        .unwrap();
+
+    std::fs::write(root.join("tracked.txt"), "drifted\n").unwrap();
+    std::fs::write(root.join("sub/inner.txt"), "drifted too\n").unwrap();
+
+    checkpoint::restore(&root.join("sub"), &snapshot.commit)
+        .await
+        .unwrap();
+
+    let read = |path: &str| std::fs::read_to_string(root.join(path)).unwrap();
+    assert_eq!(read("tracked.txt"), "original\n");
+    assert_eq!(read("sub/inner.txt"), "inner\n");
+}
+
+#[tokio::test]
+async fn restore_handles_file_and_directory_swapping_places() {
+    let (_temp, root) = repository();
+    // Snapshot state: `swap` is a directory, `flat` is a file.
+    std::fs::create_dir(root.join("swap")).unwrap();
+    std::fs::write(root.join("swap/inner.txt"), "dir content\n").unwrap();
+    std::fs::write(root.join("flat"), "file content\n").unwrap();
+    let snapshot = checkpoint::snapshot(&root, "session-u")
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Drift: both flip type.
+    std::fs::remove_dir_all(root.join("swap")).unwrap();
+    std::fs::write(root.join("swap"), "now a file\n").unwrap();
+    std::fs::remove_file(root.join("flat")).unwrap();
+    std::fs::create_dir(root.join("flat")).unwrap();
+    std::fs::write(root.join("flat/nested.txt"), "now a dir\n").unwrap();
+
+    checkpoint::restore(&root, &snapshot.commit).await.unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(root.join("swap/inner.txt")).unwrap(),
+        "dir content\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("flat")).unwrap(),
+        "file content\n"
+    );
+    assert!(!root.join("flat/nested.txt").exists());
 }

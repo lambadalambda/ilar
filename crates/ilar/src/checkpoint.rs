@@ -64,6 +64,72 @@ pub async fn snapshot(cwd: &Path, session_id: &str) -> anyhow::Result<Option<Tre
     Ok(Some(TreeSnapshot { commit, head }))
 }
 
+/// Make the working tree match `commit`'s snapshot: overwrite changed
+/// files, recreate deleted ones, and delete files the snapshot did not
+/// have — while never touching ignored files, the user's index, HEAD,
+/// or the branch. Directories emptied by the deletions are removed.
+pub async fn restore(cwd: &Path, commit: &str) -> anyhow::Result<()> {
+    let root = PathBuf::from(git(cwd, NO_ENV, &["rev-parse", "--show-toplevel"]).await?);
+
+    // Both file lists come first: the current set must describe the
+    // pre-restore tree, and a bad commit id must fail before anything
+    // is written.
+    let current = git(
+        &root,
+        NO_ENV,
+        &[
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ],
+    )
+    .await?;
+    let index = TempIndex::new(commit)?;
+    git(&root, index.env(), &["read-tree", commit]).await?;
+    let snapshot: std::collections::HashSet<String> =
+        split_z(&git(&root, index.env(), &["ls-files", "-z"]).await?)
+            .map(str::to_string)
+            .collect();
+
+    git(&root, index.env(), &["checkout-index", "-a", "-f"]).await?;
+
+    for path in split_z(&current).filter(|path| !snapshot.contains(*path)) {
+        let absolute = root.join(path);
+        // A file↔directory type conflict means `checkout-index -f`
+        // already replaced this path with snapshot content: a directory
+        // here is snapshot-owned, and a missing path (or one whose
+        // parent became a file) needs no deletion.
+        match std::fs::symlink_metadata(&absolute) {
+            Err(_) => continue,
+            Ok(metadata) if metadata.is_dir() => continue,
+            Ok(_) => {}
+        }
+        match std::fs::remove_file(&absolute) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).context(format!("failed to remove {}", absolute.display()));
+            }
+        }
+        // Prune directories the deletion emptied; `remove_dir` refuses
+        // non-empty ones, which is exactly the stop condition.
+        let mut parent = absolute.parent();
+        while let Some(directory) = parent {
+            if directory == root || std::fs::remove_dir(directory).is_err() {
+                break;
+            }
+            parent = directory.parent();
+        }
+    }
+    Ok(())
+}
+
+fn split_z(list: &str) -> impl Iterator<Item = &str> {
+    list.split('\0').filter(|path| !path.is_empty())
+}
+
 fn checkpoint_ref(session_id: &str) -> String {
     // Session ids are canonical UUIDs, but this function cannot assume
     // its caller checked; a ref-unsafe id must not turn into a silent
@@ -114,7 +180,13 @@ impl Drop for TempIndex {
 fn sanitize(label: &str) -> String {
     label
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
