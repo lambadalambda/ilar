@@ -175,6 +175,7 @@ fn restored_session_invocation_view(
         match event {
             ilar::session::SessionEvent::Meta { .. } => {}
             ilar::session::SessionEvent::SubagentInvocation { .. } => {}
+            ilar::session::SessionEvent::Checkpoint { .. } => {}
             ilar::session::SessionEvent::UserMessage { text, .. } => {
                 match task_notification_display(text) {
                     Some(text) => lines.push(Line_::Task {

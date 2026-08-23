@@ -78,6 +78,17 @@ pub enum SessionEvent {
         state: Option<SessionState>,
         ts: DateTime<Utc>,
     },
+    /// Shadow git snapshot of the working tree, taken as a user turn
+    /// starts. Renders nothing; rewind uses it to restore the tree.
+    Checkpoint {
+        id: String,
+        /// The shadow commit under `refs/ilar/checkpoints/<session-id>`.
+        commit: String,
+        /// Repository HEAD at capture time; absent on an unborn branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        head: Option<String>,
+        ts: DateTime<Utc>,
+    },
     /// Runtime model switch; effective from the next provider call.
     ModelChange {
         id: String,
@@ -111,6 +122,7 @@ impl SessionEvent {
             | SessionEvent::SubagentInvocation { ts, .. }
             | SessionEvent::AssistantMessage { ts, .. }
             | SessionEvent::ToolResult { ts, .. }
+            | SessionEvent::Checkpoint { ts, .. }
             | SessionEvent::ModelChange { ts, .. }
             | SessionEvent::Compaction { ts, .. } => *ts,
         }

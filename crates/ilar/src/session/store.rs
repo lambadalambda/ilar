@@ -780,6 +780,7 @@ fn id_records(events: &[SessionEvent]) -> Vec<[u8; REPLAY_ID_RECORD_LEN as usize
             | SessionEvent::SubagentInvocation { id, .. }
             | SessionEvent::AssistantMessage { id, .. }
             | SessionEvent::ToolResult { id, .. }
+            | SessionEvent::Checkpoint { id, .. }
             | SessionEvent::ModelChange { id, .. }
             | SessionEvent::Compaction { id, .. } => Some(id.as_str()),
         };
@@ -1114,6 +1115,7 @@ fn validate_replay(events: &[SessionEvent], id: &str) -> std::io::Result<Vec<Str
             | SessionEvent::SubagentInvocation { id, .. }
             | SessionEvent::AssistantMessage { id, .. }
             | SessionEvent::ToolResult { id, .. }
+            | SessionEvent::Checkpoint { id, .. }
             | SessionEvent::ModelChange { id, .. }
             | SessionEvent::Compaction { id, .. } => Some(id),
         };
@@ -1614,7 +1616,9 @@ fn transcript_of(events: &[SessionEvent]) -> Vec<ChatMessage> {
     let mut pending_results: Vec<ContentBlock> = Vec::new();
     for event in &events[cut..] {
         match event {
-            SessionEvent::Meta { .. } | SessionEvent::SubagentInvocation { .. } => {}
+            SessionEvent::Meta { .. }
+            | SessionEvent::SubagentInvocation { .. }
+            | SessionEvent::Checkpoint { .. } => {}
             SessionEvent::UserMessage { text, .. } => {
                 if !pending_results.is_empty() {
                     push_user_blocks(&mut messages, std::mem::take(&mut pending_results));

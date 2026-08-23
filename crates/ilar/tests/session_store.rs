@@ -1595,3 +1595,74 @@ fn fork_copies_history_under_a_new_id() {
         original.events().len() + 1
     );
 }
+
+#[test]
+fn checkpoint_events_round_trip_and_render_nothing() {
+    let (store, _dir) = temp_store();
+    let meta = sample_meta();
+    let id = meta.session_id.clone();
+    let mut session = store.create(meta).unwrap();
+    let ts = Utc::now();
+    session
+        .append(SessionEvent::Checkpoint {
+            id: new_id(),
+            commit: "abc123".into(),
+            head: Some("def456".into()),
+            ts,
+        })
+        .unwrap();
+    session
+        .append(SessionEvent::UserMessage {
+            id: new_id(),
+            text: "rewrite the parser".into(),
+            ts,
+        })
+        .unwrap();
+    drop(session);
+
+    let reader = store.load(&id).unwrap();
+    assert!(reader.events().iter().any(|event| matches!(
+        event,
+        SessionEvent::Checkpoint { commit, head: Some(head), .. }
+            if commit == "abc123" && head == "def456"
+    )));
+    let transcript = reader.transcript();
+    assert_eq!(transcript.len(), 1);
+    assert_eq!(transcript[0].role, Role::User);
+}
+
+#[test]
+fn checkpoint_without_head_omits_the_field_on_the_wire() {
+    let event = SessionEvent::Checkpoint {
+        id: "cp-1".into(),
+        commit: "abc123".into(),
+        head: None,
+        ts: Utc::now(),
+    };
+    let line = serde_json::to_string(&event).unwrap();
+    assert!(line.contains("\"type\":\"checkpoint\""), "{line}");
+    assert!(!line.contains("head"), "{line}");
+    assert_eq!(serde_json::from_str::<SessionEvent>(&line).unwrap(), event);
+}
+
+#[test]
+fn checkpoint_between_call_and_result_is_rejected() {
+    let (store, _dir) = temp_store();
+    let meta = sample_meta();
+    let id = meta.session_id.clone();
+    let mut session = store.create(meta).unwrap();
+    session
+        .append(assistant_with_calls("assistant-1", &["call-1"]))
+        .unwrap();
+    session
+        .append(SessionEvent::Checkpoint {
+            id: new_id(),
+            commit: "abc123".into(),
+            head: None,
+            ts: Utc::now(),
+        })
+        .unwrap();
+    drop(session);
+
+    assert_replay_invalid(&store, &id);
+}
