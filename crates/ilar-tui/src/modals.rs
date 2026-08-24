@@ -102,6 +102,29 @@ fn list_window(selected: usize, len: usize, visible_rows: usize) -> usize {
         .min(len.saturating_sub(visible_rows))
 }
 
+/// The one query editor. Backspace removes the last grapheme — the
+/// palette and the model picker always did, and the byte-popping
+/// pickers now match. Typed characters append unless they are control
+/// characters (the model picker previously accepted them); Ctrl-chords
+/// stay free for the picker's own bindings. Returns true when the key
+/// edited the query, so the caller can reset its selection and disarm
+/// whatever it had pending.
+fn edit_query(query: &mut String, code: KeyCode, control: bool) -> bool {
+    match (code, control) {
+        (KeyCode::Backspace, _) => {
+            if let Some((index, _)) = query.grapheme_indices(true).next_back() {
+                query.truncate(index);
+            }
+            true
+        }
+        (KeyCode::Char(character), false) if !character.is_control() => {
+            query.push(character);
+            true
+        }
+        _ => false,
+    }
+}
+
 /// The overlay that owns the keyboard. Render and key dispatch both
 /// derive their precedence from `App::active_modal`, so adding a variant
 /// without wiring both is a compile error.
@@ -330,15 +353,10 @@ impl CommandPalette {
                 self.nav.selected = self.filtered_commands().len().saturating_sub(1);
                 CommandPaletteAction::Stay
             }
-            (KeyCode::Backspace, _) => {
-                if let Some((index, _)) = self.query.grapheme_indices(true).next_back() {
-                    self.query.truncate(index);
+            (KeyCode::Backspace, _) | (KeyCode::Char(_), _) => {
+                if edit_query(&mut self.query, code, control) {
+                    self.nav.reset();
                 }
-                self.nav.reset();
-                CommandPaletteAction::Stay
-            }
-            (KeyCode::Char(character), false) => {
-                self.insert_query(&character.to_string());
                 CommandPaletteAction::Stay
             }
             _ => CommandPaletteAction::Stay,
@@ -831,16 +849,11 @@ impl SessionPicker {
                 .selected_id()
                 .map(SessionPickerAction::Fork)
                 .unwrap_or(SessionPickerAction::Stay),
-            (KeyCode::Backspace, _) => {
-                self.query.pop();
-                self.nav.reset();
-                self.pending_delete = None;
-                SessionPickerAction::Stay
-            }
-            (KeyCode::Char(character), false) if !character.is_control() => {
-                self.query.push(character);
-                self.nav.reset();
-                self.pending_delete = None;
+            (KeyCode::Backspace, _) | (KeyCode::Char(_), _) => {
+                if edit_query(&mut self.query, code, control) {
+                    self.nav.reset();
+                    self.pending_delete = None;
+                }
                 SessionPickerAction::Stay
             }
             _ => SessionPickerAction::Stay,
@@ -897,14 +910,10 @@ impl LinkPicker {
                 .get(self.nav.selected)
                 .map(|link| PickerAction::Choose(link.url.clone()))
                 .unwrap_or(PickerAction::Dismiss),
-            (KeyCode::Backspace, _) => {
-                self.query.pop();
-                self.nav.reset();
-                PickerAction::Stay
-            }
-            (KeyCode::Char(character), false) if !character.is_control() => {
-                self.query.push(character);
-                self.nav.reset();
+            (KeyCode::Backspace, _) | (KeyCode::Char(_), _) => {
+                if edit_query(&mut self.query, code, control) {
+                    self.nav.reset();
+                }
                 PickerAction::Stay
             }
             _ => PickerAction::Stay,
@@ -1119,16 +1128,11 @@ impl TurnPicker {
                     target: turn.user_id.clone(),
                 })
                 .unwrap_or(TurnPickerAction::Stay),
-            (KeyCode::Backspace, _) => {
-                self.query.pop();
-                self.nav.reset();
-                self.armed = None;
-                TurnPickerAction::Stay
-            }
-            (KeyCode::Char(character), false) if !character.is_control() => {
-                self.query.push(character);
-                self.nav.reset();
-                self.armed = None;
+            (KeyCode::Backspace, _) | (KeyCode::Char(_), _) => {
+                if edit_query(&mut self.query, code, control) {
+                    self.nav.reset();
+                    self.armed = None;
+                }
                 TurnPickerAction::Stay
             }
             _ => TurnPickerAction::Stay,
@@ -1431,18 +1435,11 @@ impl ModelPicker {
                 self.select_boundary(true);
                 PickerAction::Stay
             }
-            (KeyCode::Backspace, _) => {
-                if let Some((index, _)) = self.query.grapheme_indices(true).next_back() {
-                    self.query.truncate(index);
+            (KeyCode::Backspace, _) | (KeyCode::Char(_), _) => {
+                if edit_query(&mut self.query, code, control) {
+                    self.nav.reset();
+                    self.error = None;
                 }
-                self.nav.reset();
-                self.error = None;
-                PickerAction::Stay
-            }
-            (KeyCode::Char(character), false) => {
-                self.query.push(character);
-                self.nav.reset();
-                self.error = None;
                 PickerAction::Stay
             }
             _ => PickerAction::Stay,
@@ -1641,13 +1638,14 @@ impl ThemePicker {
             (KeyCode::Enter, _) => ThemePickerAction::Choose(self.selected_theme()),
             (KeyCode::Home, _) => self.select(0),
             (KeyCode::End, _) => self.select(self.matches.len().saturating_sub(1)),
-            (KeyCode::Backspace, _) => {
-                self.query.pop();
-                self.refresh()
-            }
-            (KeyCode::Char(character), false) if !character.is_control() => {
-                self.query.push(character);
-                self.refresh()
+            (KeyCode::Backspace, _) | (KeyCode::Char(_), false) => {
+                // The selection is not reset here: refresh() re-anchors
+                // it on whatever theme was highlighted.
+                if edit_query(&mut self.query, code, control) {
+                    self.refresh()
+                } else {
+                    ThemePickerAction::Preview(self.selected_theme())
+                }
             }
             _ => ThemePickerAction::Preview(self.selected_theme()),
         }
@@ -2350,6 +2348,60 @@ mod tests {
 
         picker.set_query("GPT-5.6 Sol");
         assert_eq!(picker.filtered_models()[0].full_id(), "openai/gpt-5.6-sol");
+    }
+
+    /// A combining mark arrives as its own key event, so the query can
+    /// hold multi-codepoint graphemes. Backspace must remove the whole
+    /// grapheme in every query picker — the byte-popping pickers used
+    /// to strand the base character.
+    #[test]
+    fn query_backspace_removes_whole_graphemes_in_every_picker() {
+        let mut session = SessionPicker::new(Vec::new());
+        session.handle_key(KeyCode::Char('e'), false);
+        session.handle_key(KeyCode::Char('\u{301}'), false);
+        assert_eq!(session.query, "e\u{301}");
+        session.handle_key(KeyCode::Backspace, false);
+        assert_eq!(session.query, "");
+
+        let mut turn = TurnPicker::new(Vec::new());
+        turn.handle_key(KeyCode::Char('e'), false);
+        turn.handle_key(KeyCode::Char('\u{301}'), false);
+        turn.handle_key(KeyCode::Backspace, false);
+        assert_eq!(turn.query, "");
+
+        let mut link = LinkPicker::new(Vec::new());
+        link.handle_key(KeyCode::Char('e'), false);
+        link.handle_key(KeyCode::Char('\u{301}'), false);
+        link.handle_key(KeyCode::Backspace, false);
+        assert_eq!(link.query, "");
+
+        let mut theme = ThemePicker::new(theme::ThemeId::ALL[0]);
+        theme.handle_key(KeyCode::Char('e'), false);
+        theme.handle_key(KeyCode::Char('\u{301}'), false);
+        theme.handle_key(KeyCode::Backspace, false);
+        assert_eq!(theme.query, "");
+    }
+
+    /// The model picker used to append control characters to its query
+    /// (and reset the selection while doing it); the shared editor
+    /// rejects them everywhere.
+    #[test]
+    fn model_picker_rejects_control_characters() {
+        let models = ilar::model::catalog().iter().take(3).collect();
+        let mut picker = ModelPicker::new(models, "missing/model");
+        picker.handle_key(KeyCode::Down, false);
+        assert_eq!(picker.selected_index(), 1);
+
+        assert_eq!(
+            picker.handle_key(KeyCode::Char('\u{7}'), false),
+            PickerAction::Stay
+        );
+        assert_eq!(picker.query, "", "control characters must not filter");
+        assert_eq!(
+            picker.selected_index(),
+            1,
+            "a rejected key must not reset the selection"
+        );
     }
 
     #[test]
