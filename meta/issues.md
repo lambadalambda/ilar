@@ -45,6 +45,4 @@
 ## Milestone 11 — Beyond the terminal
 
 - [ ] [A web frontend](issues/web-frontend.md)
-- [ ] [The session search opens like a picker](issues/session-search-opens-like-a-picker.md)
-- [ ] [Enter submits a fully typed slash command](issues/enter-submits-a-fully-typed-slash-command.md)
 - [ ] [Asides run beside the turn](issues/asides-run-beside-the-turn.md)

@@ -36,3 +36,13 @@ it shows an empty pane and a hint. Three gaps, one surface:
 ## Milestone
 
 11 — Beyond the terminal
+
+## Outcome
+
+Done as specified: `recall::tail_sessions` walks the listing with no
+query — one pseudo-hit per session anchored at its last entry — and
+the modal chooses walks by query emptiness. `SessionHits` carries the
+session's mtime, rendered as a right-aligned age on every row and in
+the preview footer. The preview frame draws whenever the terminal is
+wide, closing the bleed-through. Scan spawning moved to a tick check
+so the opening scan starts regardless of which door opened the modal.

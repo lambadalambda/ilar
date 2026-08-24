@@ -22,3 +22,9 @@ costs a second Enter.
 ## Milestone
 
 11 — Beyond the terminal
+
+## Outcome
+
+Done: with the popup open, Enter on an input equal to the selected
+candidate falls through to the normal submit path; Tab still
+completes. Pinned by a test covering exact, partial and Tab.

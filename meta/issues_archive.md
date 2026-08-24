@@ -173,3 +173,5 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Compaction as handover, with the archive one grep away](issues/compaction-as-handover.md)
 - [x] [Find a session by something said in the middle of it](issues/search-across-sessions.md)
 - [x] [/btw: ask an aside that leaves no trace](issues/btw-asides.md)
+- [x] [The session search opens like a picker](issues/session-search-opens-like-a-picker.md)
+- [x] [Enter submits a fully typed slash command](issues/enter-submits-a-fully-typed-slash-command.md)
