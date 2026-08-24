@@ -2285,3 +2285,50 @@ async fn titling_records_a_topic_and_leaves_a_failure_alone() {
         "a titled session was re-titled"
     );
 }
+
+#[test]
+fn the_archive_outlives_the_context_window() {
+    let (store, _dir) = temp_store();
+    let meta = sample_meta();
+    let mut session = store.create(meta.clone()).unwrap();
+    session
+        .append(SessionEvent::UserMessage {
+            id: new_id(),
+            text: "the AES table lives at offset 0x4f11b4".into(),
+            ts: Utc::now(),
+        })
+        .unwrap();
+    session
+        .append(SessionEvent::AssistantMessage {
+            id: new_id(),
+            model: "zai/glm-4.7".into(),
+            content: vec![ContentBlock::Text {
+                text: "noted".into(),
+            }],
+            usage: Usage::default(),
+            stop_reason: "end_turn".into(),
+            ts: Utc::now(),
+        })
+        .unwrap();
+    // Compaction drops all of that from the transcript.
+    session
+        .append(SessionEvent::Compaction {
+            id: new_id(),
+            summary: "looked at firmware".into(),
+            kept_from: 3,
+            ts: Utc::now(),
+        })
+        .unwrap();
+    drop(session);
+
+    // Gone from what the model is sent...
+    let transcript = format!("{:?}", store.load(&meta.session_id).unwrap().transcript());
+    assert!(!transcript.contains("0x4f11b4"), "{transcript}");
+
+    // ...and still findable in the archive.
+    let entries = ilar::recall::session_entries(&store, &meta.session_id).unwrap();
+    let matches = ilar::recall::search(&entries, "0x4f11b4", ilar::recall::MAX_MATCHES);
+    assert_eq!(matches.len(), 1, "{matches:?}");
+    assert!(matches[0].excerpt.contains("0x4f11b4"), "{matches:?}");
+    assert_eq!(matches[0].speaker, ilar::recall::Speaker::User);
+}

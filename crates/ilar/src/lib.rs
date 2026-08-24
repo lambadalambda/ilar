@@ -13,6 +13,7 @@ pub mod config;
 pub mod model;
 pub mod provider;
 pub mod question;
+pub mod recall;
 pub mod rewind;
 pub mod runtime;
 pub mod session;
