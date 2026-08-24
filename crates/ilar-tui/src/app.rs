@@ -5408,6 +5408,38 @@ mod tests {
         ));
         assert!(narrow_agent.contains("queued"), "{narrow_agent}");
 
+        // An agent row is standalone prose, not part of a tool column:
+        // its task title follows the name directly instead of across a
+        // padded gap. Tools keep the column so stacked rows align.
+        let agent_row = rendered_text(&tool_line(
+            "task",
+            &ToolKind::Agent {
+                name: "explore".into(),
+                model: None,
+            },
+            "Analyze legacy identity fix",
+            ToolState::Succeeded,
+            120,
+            std::time::Duration::ZERO,
+            ToolProgress::None,
+            now,
+        ));
+        assert!(
+            agent_row.contains("explore ✓ Analyze legacy identity fix"),
+            "{agent_row}"
+        );
+        let tool_row = rendered_text(&tool_line(
+            "bash",
+            &ToolKind::Tool,
+            "cargo test",
+            ToolState::Succeeded,
+            120,
+            std::time::Duration::ZERO,
+            ToolProgress::None,
+            now,
+        ));
+        assert!(tool_row.contains("bash            "), "{tool_row}");
+
         app.push_loop_event(&LoopEvent::ToolExecutionStarted {
             id: "write-1".into(),
             received_bytes: 64 * 1024,

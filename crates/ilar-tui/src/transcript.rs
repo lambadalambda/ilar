@@ -1562,7 +1562,10 @@ fn tool_line_with_disclosure(
     let available_name = width.saturating_sub(fixed).saturating_sub(progress_reserve);
     let name_column = available_name.clamp(1, 20);
     let name = truncate_display(&name, name_column, Truncation::Right);
-    let name_padding = if width >= 72 {
+    // Tools pad to a shared column so stacked rows in an expanded list
+    // align; an agent row stands alone between thoughts, where the
+    // column is just a hole before the task title.
+    let name_padding = if width >= 72 && matches!(kind, ToolKind::Tool) {
         name_column.saturating_sub(UnicodeWidthStr::width(name.as_str()))
     } else {
         0
