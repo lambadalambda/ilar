@@ -33,3 +33,7 @@
 (all complete — see issues_archive.md)
 
 
+
+## Milestone 9 — Time travel follow-ups
+
+- [ ] [Extract the picker core](issues/extract-picker-core.md)
