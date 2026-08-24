@@ -14,6 +14,7 @@ pub mod model;
 pub mod provider;
 pub mod question;
 pub mod rewind;
+pub mod runtime;
 pub mod session;
 pub mod skill;
 pub mod subagent;

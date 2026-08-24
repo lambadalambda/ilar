@@ -48,10 +48,10 @@ use transcript::Line_;
 use ilar::agent::{
     LOOP_EVENT_CAPACITY, LoopConfig, LoopEventReceiver, TurnOutcome, loop_event_channel, run_turn,
 };
-use ilar::config::{Loader, system_prompt_for};
+use ilar::config::Loader;
 use ilar::provider::ProviderResolver;
-use ilar::session::{SessionMeta, SessionStore, new_id};
-use ilar::subagent::SubagentSpawner;
+use ilar::runtime::{ensure_direct_resume_allowed, persist_model_change};
+use ilar::session::SessionStore;
 use ilar::tools::{ToolContext, ToolRegistry};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -645,86 +645,6 @@ fn close_skill_matches(skills: &[(String, String)], name: &str) -> Vec<String> {
     matches
 }
 
-fn selected_agent_name(cli: Option<&str>, persisted: Option<&str>) -> String {
-    cli.or(persisted).unwrap_or("build").to_string()
-}
-
-fn selected_model(
-    cli: Option<&str>,
-    persisted: Option<&str>,
-    agent: Option<&str>,
-    general: &str,
-) -> String {
-    cli.or(persisted).or(agent).unwrap_or(general).to_string()
-}
-
-fn selected_reasoning(
-    resumed: bool,
-    model: &str,
-    persisted_model: Option<&str>,
-    persisted_reasoning: Option<&str>,
-    configured_reasoning: Option<&str>,
-) -> Option<String> {
-    if resumed {
-        (persisted_model == Some(model))
-            .then_some(persisted_reasoning)
-            .flatten()
-            .map(String::from)
-    } else {
-        configured_reasoning.map(String::from)
-    }
-}
-
-fn create_root_session(
-    store: &SessionStore,
-    meta: SessionMeta,
-    reasoning: Option<&str>,
-) -> Result<()> {
-    ilar::model::variant_options(&meta.model, reasoning)?;
-    let session_id = meta.session_id.clone();
-    let model = meta.model.clone();
-    let mut session = store.create(meta).context("creating session")?;
-    let Some(reasoning) = reasoning else {
-        return Ok(());
-    };
-    let result = session.append(ilar::session::SessionEvent::ModelChange {
-        id: ilar::session::new_id(),
-        model,
-        variant: Some(reasoning.to_string()),
-        ts: chrono::Utc::now(),
-    });
-    drop(session);
-    if let Err(error) = result {
-        let error = anyhow::Error::new(error).context("persisting configured reasoning");
-        return match store.delete(&session_id) {
-            Ok(()) => Err(error),
-            Err(cleanup) => Err(error.context(format!(
-                "also failed to remove incomplete session {session_id}: {cleanup}"
-            ))),
-        };
-    }
-    Ok(())
-}
-
-fn persist_model_change(
-    resolver: &dyn ProviderResolver,
-    store: &SessionStore,
-    session_id: &str,
-    model: &str,
-    variant: Option<&str>,
-) -> Result<()> {
-    drop(resolver.resolve_provider(model)?);
-    ilar::model::variant_options(model, variant)?;
-    let mut session = store.acquire_writer(session_id)?.load()?;
-    session.append(ilar::session::SessionEvent::ModelChange {
-        id: ilar::session::new_id(),
-        model: model.to_string(),
-        variant: variant.map(String::from),
-        ts: chrono::Utc::now(),
-    })?;
-    Ok(())
-}
-
 #[allow(clippy::too_many_arguments)]
 fn adopt_model_selection(
     app: &mut App,
@@ -754,20 +674,6 @@ fn adopt_model_selection(
         .unwrap_or(model);
     app.push_transcript_line(Line_::System(format!("switched to {selection}")));
     Ok(())
-}
-
-fn ensure_direct_resume_allowed(meta: Option<&SessionMeta>) -> Result<()> {
-    if meta.is_some_and(|meta| meta.workspace.is_some()) {
-        anyhow::bail!("workspace-bound child sessions must be resumed through Task");
-    }
-    Ok(())
-}
-
-fn restored_todos(resumed: Option<&ilar::session::SessionReader>) -> ilar::todo::TodoList {
-    resumed
-        .and_then(ilar::session::SessionReader::todo_list)
-        .cloned()
-        .unwrap_or_default()
 }
 
 #[tokio::main]
@@ -840,156 +746,46 @@ async fn main() -> Result<()> {
         };
         first_run = false;
 
-        let resumed = resume_target
-            .as_deref()
-            .map(|id| {
-                store
-                    .load(id)
-                    .with_context(|| format!("resuming session {id}"))
-            })
-            .transpose()?;
-        ensure_direct_resume_allowed(resumed.as_ref().and_then(|session| session.meta()))?;
-        let persisted_agent = resumed
-            .as_ref()
-            .and_then(|session| session.meta())
-            .map(|meta| meta.agent.clone());
-        let agent_name = selected_agent_name(cli_agent, persisted_agent.as_deref());
-        let agents = config.agents().context("loading agent definitions")?;
-        let agent = agents
-            .iter()
-            .find(|a| a.name == agent_name)
-            .cloned()
-            .with_context(|| format!("unknown agent {agent_name:?}"))?;
-        let persisted_model = resumed.as_ref().map(|session| session.effective_model());
-        let persisted_variant = resumed
-            .as_ref()
-            .and_then(|session| session.effective_variant());
-        let model_for_session = selected_model(
-            cli_model,
-            persisted_model.as_deref(),
-            agent.model.as_deref(),
-            &config.general.model,
-        );
-        let reasoning_for_session = selected_reasoning(
-            resumed.is_some(),
-            &model_for_session,
-            persisted_model.as_deref(),
-            persisted_variant.as_deref(),
-            config.general.reasoning.as_deref(),
-        );
-        ilar::model::variant_options(&model_for_session, reasoning_for_session.as_deref())
-            .with_context(|| format!("invalid reasoning for {model_for_session}"))?;
-
         let cwd = std::env::current_dir().context("no cwd")?;
-        let skill_store = std::sync::Arc::new(ilar::skill::SkillStore::new(
-            config.dirs().0.to_path_buf(),
-            config.dirs().1.to_path_buf(),
-        ));
-        let skill_listing = skill_store
-            .listing_prompt()
-            .context("loading skill definitions")?;
-        let skill_inventory: Vec<(String, String)> = skill_store
-            .list()
-            .context("loading skill definitions")?
-            .into_iter()
-            .map(|skill| (skill.name, skill.description))
-            .collect();
-        // Commands are never listed in the system prompt: unlike skills
-        // they are only ever invoked by the user.
-        let command_inventory = ilar::command::CommandStore::new(
-            config.dirs().0.to_path_buf(),
-            config.dirs().1.to_path_buf(),
-        )
-        .list()
-        .context("loading commands")?;
-        let mut system_prompt =
-            system_prompt_for(config.dirs().0, &cwd).context("loading project instructions")?;
-        if !skill_listing.is_empty() {
-            system_prompt = format!("{system_prompt}\n\n{skill_listing}");
-        }
-        if !agent.prompt.is_empty() {
-            system_prompt = format!(
-                "{system_prompt}\n\n# Agent: {}\n\n{}",
-                agent.name, agent.prompt
-            );
-        }
+        let plan = ilar::runtime::RuntimePlan::resolve(
+            &config,
+            &ilar::runtime::RuntimeOptions {
+                model: cli_model.map(str::to_string),
+                agent: cli_agent.map(str::to_string),
+                resume: resume_target.clone(),
+                cwd: cwd.clone(),
+                questions: true,
+            },
+        )?;
         if args.print_prompt {
-            println!("{system_prompt}");
+            println!("{}", plan.system_prompt);
             return Ok(());
         }
-
-        let resolver: Arc<dyn ProviderResolver> = Arc::new(config.clone());
-        drop(
-        resolver
-            .resolve_provider(&model_for_session)
-            .with_context(|| format!("no provider configured for {model_for_session} (set ILAR_ZAI_API_KEY / ILAR_OPENAI_API_KEY)"))?,
-    );
-
-        let session_id = match &resume_target {
-            Some(id) => {
-                if cli_model.is_some()
-                    && persisted_model.as_deref() != Some(model_for_session.as_str())
-                {
-                    persist_model_change(resolver.as_ref(), &store, id, &model_for_session, None)
-                        .with_context(|| format!("persisting model override {model_for_session}"))?;
-                }
-                id.clone()
-            }
-            None => {
-                let id = new_id();
-                create_root_session(
-                    &store,
-                    SessionMeta {
-                        session_id: id.clone(),
-                        parent_id: None,
-                        agent: agent.name.clone(),
-                        model: model_for_session.clone(),
-                        workspace: None,
-                    },
-                    reasoning_for_session.as_deref(),
-                )?;
-                id
-            }
-        };
-
-        let loop_config = LoopConfig {
-            compaction_threshold: config.compaction.threshold,
-            max_iterations: config.agent.max_iterations,
-            ..LoopConfig::default()
-        };
-        let services = ilar::tools::service::ServiceManager::new();
-        let spawner = std::sync::Arc::new(
-            SubagentSpawner::new(
-                resolver.clone(),
-                store.clone(),
-                agents,
-                cwd.clone(),
-                0,
-                config.subagents.max_concurrent,
-                config.subagents.max_depth,
-            )
-            .with_user_config_dir(config.dirs().0.to_path_buf())
-            .with_background_tool_timeout(std::time::Duration::from_millis(
-                config.subagents.background_tool_timeout_ms,
-            ))
-            .with_loop_config(loop_config.clone())
-            .with_services(services.clone())
-            .with_available_models(config.available_models()),
-        );
-        let todos = std::sync::Arc::new(std::sync::Mutex::new(restored_todos(resumed.as_ref())));
-        let (question_tx, question_rx) = ilar::question::question_channel(1);
-        let registry = ToolRegistry::builtin()
-            .with_questions(question_tx)
-            .with_subagents(spawner.clone())?
-            .with_services(services.clone())?
-            .with_models(config.available_models())?
-            .with_todos(todos.clone())?
-            .with_web_tools()?
-            .with_skills(skill_store)?;
+        let model_for_session = plan.model.clone();
+        let skill_inventory = plan.skills.clone();
+        let command_inventory = plan.commands.clone();
+        let system_prompt = plan.system_prompt.clone();
+        let runtime = plan.start(&config)?;
+        let ilar::runtime::SessionRuntime {
+            store: _,
+            session_id,
+            reasoning: reasoning_for_session,
+            registry,
+            spawner,
+            services,
+            todos,
+            tool_ctx,
+            loop_config,
+            resolver,
+            questions,
+            resumed,
+            ..
+        } = runtime;
+        let question_rx = questions.expect("the TUI asked for questions");
         let notifications = spawner.subscribe();
         let subagent_activity = spawner.subscribe_activity();
-        let tool_ctx = ToolContext::root(cwd.clone()).with_subagents(spawner.clone());
         let model_choices = config.available_models();
+
         let user_config_path = config.dirs().0.join("ilar.toml");
 
         let (context_used, context_estimated) =
@@ -2601,6 +2397,8 @@ async fn run_app(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ilar::runtime::{create_root_session, restored_todos};
+    use ilar::session::{SessionMeta, new_id};
 
     /// The meter must not show the whole window while compaction is
     /// measuring against the input cap — that reads as comfortable
@@ -2637,78 +2435,6 @@ mod tests {
         assert_eq!(
             display_context_limit(&WindowOnly, "custom/model"),
             Some(64_000)
-        );
-    }
-
-    #[test]
-    fn startup_selection_respects_cli_and_persisted_precedence() {
-        assert_eq!(selected_agent_name(None, None), "build");
-        assert_eq!(selected_agent_name(None, Some("explore")), "explore");
-        assert_eq!(
-            selected_agent_name(Some("review"), Some("explore")),
-            "review"
-        );
-
-        assert_eq!(
-            selected_model(None, None, Some("zai/agent-model"), "zai/general"),
-            "zai/agent-model"
-        );
-        assert_eq!(
-            selected_model(
-                Some("openai/cli"),
-                None,
-                Some("zai/agent-model"),
-                "zai/general"
-            ),
-            "openai/cli"
-        );
-        assert_eq!(
-            selected_model(
-                None,
-                Some("openai/persisted"),
-                Some("zai/agent-model"),
-                "zai/general"
-            ),
-            "openai/persisted"
-        );
-
-        assert_eq!(
-            selected_reasoning(false, "openai/gpt-5.2", None, None, Some("high")),
-            Some("high".into()),
-            "new sessions use configured reasoning"
-        );
-        assert_eq!(
-            selected_reasoning(
-                true,
-                "openai/gpt-5.2",
-                Some("openai/gpt-5.2"),
-                Some("low"),
-                Some("high")
-            ),
-            Some("low".into()),
-            "resumed sessions preserve their variant"
-        );
-        assert_eq!(
-            selected_reasoning(
-                true,
-                "openai/gpt-5.2",
-                Some("openai/gpt-5.2"),
-                None,
-                Some("high")
-            ),
-            None,
-            "a resumed server-default variant stays default"
-        );
-        assert_eq!(
-            selected_reasoning(
-                true,
-                "openai/gpt-5.3-codex",
-                Some("openai/gpt-5.2"),
-                Some("high"),
-                Some("low")
-            ),
-            None,
-            "a resumed session's variant does not leak across a model override"
         );
     }
 
