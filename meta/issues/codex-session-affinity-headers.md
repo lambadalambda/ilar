@@ -45,7 +45,9 @@ With the headers, every step read essentially the whole previous prompt
 
 Closed. The remaining measurement is the same one as before: the
 baseline is 40% misses on appends over 2k, read back with
-`scripts/cache_report.py --all` after real use. Unlike the previous two
+`scripts/cache_report.py --all` after real use. Field verification
+came back: post-fix sessions read 0/9 and 1/19 misses against the 40%
+baseline — archived on that evidence. Unlike the previous two
 attempts this one has a live A/B behind it rather than a correlation.
 
 Note that `cache_write_tokens` came back zero on every Codex-backend

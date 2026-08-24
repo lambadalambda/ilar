@@ -156,3 +156,5 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Rewind and fork in the TUI](issues/rewind-fork-tui.md)
 - [x] [Document checkpoints for users](issues/document-checkpoints-for-users.md)
 - [x] [Open links from the transcript](issues/open-links-from-transcript.md)
+- [x] [Replay OpenAI items in the shape they arrived](issues/replay-openai-items-verbatim.md)
+- [x] [Pin the Codex backend to a shard](issues/codex-session-affinity-headers.md)
