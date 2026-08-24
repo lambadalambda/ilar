@@ -394,9 +394,14 @@ impl CommandPalette {
     }
 
     pub(crate) fn insert_query(&mut self, text: &str) {
+        let before = self.query.len();
         self.query
             .extend(text.chars().filter(|character| !character.is_control()));
-        self.nav.reset();
+        // A paste that was entirely control characters changed nothing
+        // and must not move the selection, matching the keyboard path.
+        if self.query.len() != before {
+            self.nav.reset();
+        }
     }
 
     pub(crate) fn handle_key(&mut self, code: KeyCode, control: bool) -> CommandPaletteAction {
@@ -609,24 +614,15 @@ pub(crate) struct PendingSnapshot {
 
 pub(crate) fn render_pending_manager(frame: &mut Frame, snapshot: &PendingSnapshot) -> ModalHit {
     let area = centered_rect(frame.area(), 76, 14);
-    frame.render_widget(Clear, area);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Double)
-        .border_style(theme::focus_border())
-        .title(Line::styled(" pending ", theme::title(theme::MARKUP)))
-        .title_bottom(
-            Line::styled(
-                " ↑↓ · Enter edit/act · d delete (×2 for goal/jobs) · Esc ",
-                Style::default().fg(theme::MUTED),
-            )
-            .right_aligned(),
-        );
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    if inner.width == 0 || inner.height == 0 {
+    let Some(inner) = modal_frame(
+        frame,
+        area,
+        " pending ",
+        theme::MARKUP,
+        " ↑↓ · Enter edit/act · d delete (×2 for goal/jobs) · Esc ",
+    ) else {
         return ModalHit::default();
-    }
+    };
     if snapshot.rows.is_empty() {
         frame.render_widget(
             Paragraph::new(Line::styled(
@@ -637,65 +633,52 @@ pub(crate) fn render_pending_manager(frame: &mut Frame, snapshot: &PendingSnapsh
         );
         return ModalHit::default();
     }
-    let lines: Vec<Line<'static>> = snapshot
-        .rows
-        .iter()
-        .enumerate()
-        .take(inner.height as usize)
-        .map(|(index, label)| {
-            let armed = snapshot.armed && index == snapshot.selected;
-            let marker = if index == snapshot.selected {
-                if armed { "✗ " } else { "> " }
+    let mut body = ModalRows::default();
+    for (index, label) in snapshot.rows.iter().enumerate().take(inner.height as usize) {
+        let armed = snapshot.armed && index == snapshot.selected;
+        let marker = if index == snapshot.selected {
+            if armed { "✗ " } else { "> " }
+        } else {
+            "  "
+        };
+        let text = truncate_display(
+            &format!("{marker}{label}"),
+            inner.width as usize,
+            Truncation::Right,
+        );
+        let style = if index == snapshot.selected {
+            if armed {
+                // Armed deletion is the one place a full bar is the
+                // point; it is still a colour, not inverted video.
+                Style::default().fg(theme::SELECTED_FG).bg(ERROR)
             } else {
-                "  "
-            };
-            let text = truncate_display(
-                &format!("{marker}{label}"),
-                inner.width as usize,
-                Truncation::Right,
-            );
-            let style = if index == snapshot.selected {
-                if armed {
-                    // Armed deletion is the one place a full bar is the
-                    // point; it is still a colour, not inverted video.
-                    Style::default().fg(theme::SELECTED_FG).bg(ERROR)
-                } else {
-                    theme::selected()
-                }
-            } else {
-                Style::default().fg(theme::PRIMARY)
-            };
+                theme::selected()
+            }
+        } else {
+            Style::default().fg(theme::PRIMARY)
+        };
+        body.push(
             Line::styled(
                 format!("{text:<width$}", width = inner.width as usize),
                 style,
-            )
-        })
-        .collect();
-    let hit_rows = (0..lines.len()).map(Some).collect();
-    frame.render_widget(Paragraph::new(lines), inner);
-    ModalHit {
-        area: inner,
-        rows: hit_rows,
+            ),
+            Some(index),
+        );
     }
+    body.finish(frame, inner)
 }
 
 pub(crate) fn render_help(frame: &mut Frame, scroll: usize, keyboard_enhanced: bool) {
     let area = centered_rect(frame.area(), 72, 24);
-    frame.render_widget(Clear, area);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Double)
-        .border_style(theme::focus_border())
-        .title(Line::styled(" keys ", theme::title(theme::MARKUP)))
-        .title_bottom(
-            Line::styled(" ↑↓ scroll · Esc close ", Style::default().fg(theme::MUTED))
-                .right_aligned(),
-        );
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    if inner.width == 0 || inner.height == 0 {
+    let Some(inner) = modal_frame(
+        frame,
+        area,
+        " keys ",
+        theme::MARKUP,
+        " ↑↓ scroll · Esc close ",
+    ) else {
         return;
-    }
+    };
     let lines = help_lines(inner.width as usize, keyboard_enhanced);
     let start = scroll.min(lines.len().saturating_sub(inner.height as usize));
     let visible: Vec<Line<'static>> = lines
@@ -2509,6 +2492,18 @@ mod tests {
             palette.handle_key(KeyCode::Enter, false),
             CommandPaletteAction::Choose(PaletteAction::Command(PaletteCommand::Theme))
         );
+    }
+
+    #[test]
+    fn an_all_control_character_paste_is_a_full_no_op() {
+        let mut palette = CommandPalette::new(palette_items());
+        palette.move_selection(2);
+        let selected_before = palette.nav.selected;
+
+        palette.insert_query("\x1b\x07\n");
+
+        assert_eq!(palette.query, "");
+        assert_eq!(palette.nav.selected, selected_before);
     }
 
     #[test]
