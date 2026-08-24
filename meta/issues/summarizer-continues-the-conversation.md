@@ -68,6 +68,30 @@ Two observed failures, one cause, both in session `3d494ad6`:
 - Related: [pin user requests through compaction](pin-user-requests-through-compaction.md),
   [reframe the summarizer prompt](reframe-the-summarizer-prompt.md).
 
+## Outcome
+
+Fixed by moving the instruction to the end, but not by wrapping the
+conversation the way opencode does — that would guarantee a cache miss
+on the whole transcript every compaction (~180k tokens at full price
+for the session that prompted this). The compaction request is now the
+request the turn itself would have sent — same system prompt, same
+tools, same session cache key, transcript byte-identical — with the
+summarization instruction appended as the final user message. Codex's
+shape, for Codex's reason.
+
+Consequently two requirements were dropped as counterproductive:
+serializing the history into a delimited message, and truncating tool
+output for the summarizer. Both cost information *and* the cache; the
+cache is what made the truncation seem worth it. Provider reasoning
+and replay blocks stay in the request for the same reason — removing
+them would change the prefix.
+
+Degenerate summaries are retried once and then refused, leaving the
+session untouched: an apology opening, a refusal, or a one-liner
+covering more than 50k characters. The length rule is deliberately
+scoped to large conversations, since a false positive there ends in a
+hard compaction failure — the symptom being fixed.
+
 ## Milestone
 
 10 — Everyday polish

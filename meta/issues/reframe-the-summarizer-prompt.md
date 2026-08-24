@@ -78,6 +78,18 @@ continue".
 
 Both are objective-first handovers. ilar's is a work log.
 
+## Outcome
+
+The prompt is now the appended instruction, so the reframing and the
+structural fix landed together. It is a handover template — Objective,
+Important Details, Work State (Completed/Active/Blocked), Next Move,
+Relevant Files — with rules to copy URLs, PR numbers, branch names and
+paths verbatim, to record what was ruled out and not only what
+succeeded, and never to continue the conversation. When a prior
+summary is present the instruction states that it is discarded, and
+lists what must be carried forward regardless of what the recent
+conversation mentions.
+
 ## Milestone
 
 10 — Everyday polish

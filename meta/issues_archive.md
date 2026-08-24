@@ -163,3 +163,6 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Todos fill the space they have](issues/todos-fill-the-space-they-have.md)
 - [x] [Scrollbar thumb stops short of the bottom](issues/scrollbar-thumb-stops-short.md)
 - [x] [Let the agent revisit its subagents](issues/revisit-subagents.md)
+- [x] [Pin user requests through compaction](issues/pin-user-requests-through-compaction.md)
+- [x] [Reframe the summarizer prompt](issues/reframe-the-summarizer-prompt.md)
+- [x] [The summarizer is asked to continue the conversation](issues/summarizer-continues-the-conversation.md)

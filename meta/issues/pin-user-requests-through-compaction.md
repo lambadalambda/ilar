@@ -68,6 +68,16 @@ extra rule.
 opencode does not pin messages; it relies on an `## Objective` section
 in a structured template instead.
 
+## Outcome
+
+Landed in the same commit as the request fix. The stored summary now
+opens with the verbatim user requests from the summarized region,
+first-always then newest-first within 4,000 characters (2,000 per
+request), restored to chronological order, with a count of what was
+dropped. A test replays the firehose failure — a summarizer that
+writes a work log and forgets the ask — and asserts the PR link
+survives.
+
 ## Milestone
 
 10 — Everyday polish

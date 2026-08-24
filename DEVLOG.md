@@ -1370,3 +1370,47 @@ time), shared with child spawners the way the active-session set
 already is, emptied by an RAII guard however a run ends. The sidebar
 reads it every frame into an `agents` panel above services: two lines
 per agent, three agents then a count, gone when nothing is running.
+
+## 2026-08-24 — The summarizer was answering the user
+
+Two field failures, one cause. Session `9860bd12` lost its own
+objective: a mid-turn cut at event 245 sent the opening request — "Can
+we do the necessary changes to firehose to support bundled payments?"
+plus the two PR links defining the feature — into the summarizer along
+with 771k characters of transcript, and the summary that came back
+mentions neither. 167 characters of ask traded for 446k characters of
+retained tool output. Session `3d494ad6` was worse: its summarizer
+replied *to the user* — "I'm sorry, but I wasn't able to complete and
+push all four fixes within this run" — and that 81-character apology
+became the session's entire pre-cut history. A later manual /compact
+on it returned no text at all.
+
+The cause was the request shape. We sent `system = "You summarize
+agent conversations"` and then replayed the transcript, so the last
+thing the model read was conversation: a user message, or a wall of
+tool results. A model resolves that conflict in favour of the
+conversation — it answers, or (after tool results, with no tools
+offered) it tries to act, produces reasoning, and stops with no text.
+
+The instruction is now the final user message. Everything before it is
+byte-identical to the request the turn itself would have sent: same
+system prompt, same tools, same session cache key — which we were also
+throwing away, since compaction passed `cache_key: None` while turns
+pass the session id. This is Codex's shape and Codex's reason. The
+alternative, opencode's, serializes the conversation into one quoted
+message; it reads well but guarantees a cache miss on the entire
+transcript every compaction, which on the session model is the
+expensive way to lose information. Tool-output truncation went the
+same way: it only looked worthwhile while the cache was already
+broken.
+
+Two guards on top. The summary now opens with the user's verbatim
+requests — first always, then newest-first inside 4k characters —
+because they are the cheapest tokens in a transcript and the ones a
+summarizer paraphrases away first. And a summary that opens with an
+apology, or that is a line long for a conversation over 50k
+characters, is retried once and then refused: a stored summary
+replaces real history, so failing loudly leaves a session recoverable
+where storing the apology does not. The length rule is scoped to large
+conversations on purpose — a false positive there ends in exactly the
+hard compaction failure we set out to fix.
