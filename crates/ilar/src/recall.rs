@@ -255,6 +255,52 @@ pub fn session_entries(store: &SessionStore, session_id: &str) -> std::io::Resul
     Ok(entries(&store.audit_events(session_id)?))
 }
 
+/// Every hit one session produced for a query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionHits {
+    pub session_id: String,
+    /// Topic when the session has one, opening message otherwise —
+    /// whatever the listing would call it.
+    pub title: Option<String>,
+    pub hits: Vec<Match>,
+}
+
+/// Search every root session's full history for `query`, newest session
+/// first, calling `emit` once per session that matched. `emit` returning
+/// `false` abandons the walk — the caller typed another key.
+///
+/// Sessions are read one at a time, so results stream in listing order
+/// rather than arriving after the whole store has been scanned.
+pub fn search_sessions<F: FnMut(SessionHits) -> bool>(
+    store: &SessionStore,
+    query: &str,
+    per_session: usize,
+    mut emit: F,
+) {
+    if query.trim().is_empty() {
+        return;
+    }
+    for summary in store.list() {
+        // A session that vanished or went unreadable mid-walk is
+        // skipped, same as the listing would.
+        let Ok(entries) = session_entries(store, &summary.id) else {
+            continue;
+        };
+        let hits = search(&entries, query, None, per_session);
+        if hits.is_empty() {
+            continue;
+        }
+        let keep_going = emit(SessionHits {
+            session_id: summary.id,
+            title: summary.title,
+            hits,
+        });
+        if !keep_going {
+            return;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
