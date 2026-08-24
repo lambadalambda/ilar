@@ -811,7 +811,7 @@ impl SubagentSpawner {
                             parent_session_id,
                             description: description.clone(),
                             text: format!(
-                                "<task-notification>\nTask \"{description}\" completed.\n<result>\n{text}\n</result>\n</task-notification>"
+                                "<task-notification>\nTask \"{description}\" completed (task_id: {session_id}).\n<result>\n{text}\n</result>\n</task-notification>"
                             ),
                             is_error: false,
                         }
@@ -869,12 +869,11 @@ impl SubagentSpawner {
             if let Some(on_start) = on_start.take() {
                 on_start();
             }
-            return ToolOutput::text(
-                "Deferred background task started. Completion will trigger a separate follow-up turn. \
-Do not sleep, poll, or check on it. Do not perform this task's scope yourself; continue only \
-clearly disjoint work."
-                    .to_string(),
-            )
+            return ToolOutput::text(format!(
+                "Deferred background task started (task_id: {returned_session_id}). Completion \
+will trigger a separate follow-up turn. Do not sleep, poll, or check on it. Do not perform this \
+task's scope yourself; continue only clearly disjoint work."
+            ))
             .with_child_session(returned_session_id);
         }
 
@@ -978,7 +977,14 @@ clearly disjoint work."
             }
             Err(e) => ToolOutput::error(format!("subagent failed: {e:#}")),
         };
-        output.with_child_session(session_id.clone())
+        // The session outlives the call, so name it: without this the
+        // model cannot resume a task it just ran, and the resume path
+        // tells it never to invent an id. A failed run is worth naming
+        // too — an iteration-limited task is the one most worth
+        // resuming.
+        output
+            .with_appended_text(&format!("\n\n(task_id: {session_id})"))
+            .with_child_session(session_id.clone())
     }
 
     pub async fn spawn_background_tool(
@@ -1628,7 +1634,7 @@ impl Tool for TaskTool {
                 },
                 "task_id": {
                     "type": ["string", "null"],
-                    "description": "Existing task session UUID to resume. Set null or omit when starting a new task; never invent a value."
+                    "description": "Existing task session UUID to resume, replaying that task's full context — prefer it over a fresh task for follow-up questions on the same scope. Use an id reported by a task result, a task-notification, or the tasks tool; set null or omit to start a new task, and never invent a value."
                 },
                 "model": {
                     "type": ["string", "null"],

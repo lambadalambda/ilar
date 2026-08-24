@@ -1008,7 +1008,11 @@ async fn blank_task_id_starts_a_new_session() {
             )
             .await;
         assert!(!output.is_error, "{}", output.content);
-        assert_eq!(output.content, "fresh child");
+        assert!(
+            output.content.starts_with("fresh child"),
+            "{}",
+            output.content
+        );
     }
 
     let output = task
@@ -1024,7 +1028,11 @@ async fn blank_task_id_starts_a_new_session() {
         )
         .await;
     assert!(!output.is_error, "{}", output.content);
-    assert_eq!(output.content, "fresh child");
+    assert!(
+        output.content.starts_with("fresh child"),
+        "{}",
+        output.content
+    );
     assert_eq!(provider.requests().len(), 3);
 }
 
@@ -1077,7 +1085,11 @@ async fn null_task_id_starts_a_new_session_in_a_validated_worktree() {
         .await;
 
     assert!(!output.is_error, "{}", output.content);
-    assert_eq!(output.content, "isolated child");
+    assert!(
+        output.content.starts_with("isolated child"),
+        "{}",
+        output.content
+    );
 }
 
 #[test]
@@ -1541,7 +1553,11 @@ async fn subagent_turns_use_the_configured_compaction_threshold() {
         .await;
 
     assert!(!output.is_error, "{}", output.content);
-    assert_eq!(output.content, "fresh answer");
+    assert!(
+        output.content.starts_with("fresh answer"),
+        "{}",
+        output.content
+    );
     assert_eq!(provider.requests().len(), 2);
 }
 
@@ -2266,4 +2282,114 @@ async fn task_model_override_pins_child_model_and_rejects_unknown() {
         })
         .collect();
     assert_eq!(child_models, vec!["zai/glm-4.7-flash".to_string()]);
+}
+
+#[tokio::test]
+async fn a_task_result_names_the_session_the_model_can_resume() {
+    let (store, parent_id) = temp_store();
+    let spawner = spawner(
+        Arc::new(ScriptedDelayProvider {
+            text: "first answer",
+            delay_ms: 0,
+        }),
+        &store,
+        10,
+        3,
+    );
+    let task = parent_registry(spawner.clone()).get("task").unwrap();
+
+    let first = task
+        .run(
+            serde_json::json!({
+                "description": "survey",
+                "prompt": "look around",
+                "subagent_type": "explore",
+            }),
+            task_context(&parent_id),
+        )
+        .await;
+
+    assert!(!first.is_error, "{}", first.content);
+    assert!(first.content.contains("first answer"), "{}", first.content);
+    let child_id = first
+        .child_session_id()
+        .expect("task reports its child session")
+        .to_string();
+    assert!(
+        first.content.contains(&format!("task_id: {child_id}")),
+        "result hides the id it was produced by: {}",
+        first.content
+    );
+
+    // The id the model read is the id it can resume with.
+    let followup = task
+        .run(
+            serde_json::json!({
+                "description": "follow up",
+                "prompt": "one more question",
+                "subagent_type": "explore",
+                "task_id": child_id,
+            }),
+            task_context(&parent_id),
+        )
+        .await;
+
+    assert!(!followup.is_error, "{}", followup.content);
+    assert_eq!(followup.child_session_id(), Some(child_id.as_str()));
+}
+
+#[tokio::test]
+async fn a_background_task_names_its_session_at_start_and_at_completion() {
+    let (store, parent_id) = temp_store();
+    let spawner = spawner(
+        Arc::new(ScriptedDelayProvider {
+            text: "background answer",
+            delay_ms: 10,
+        }),
+        &store,
+        10,
+        3,
+    );
+    let mut notifications = spawner.subscribe();
+    let task = parent_registry(spawner.clone()).get("task").unwrap();
+
+    let started = task
+        .run(
+            serde_json::json!({
+                "description": "deferred survey",
+                "prompt": "look around slowly",
+                "subagent_type": "explore",
+                "background": true,
+            }),
+            task_context(&parent_id),
+        )
+        .await;
+
+    assert!(!started.is_error, "{}", started.content);
+    let child_id = started
+        .child_session_id()
+        .expect("background task reports its child session")
+        .to_string();
+    assert!(
+        started.content.contains(&format!("task_id: {child_id}")),
+        "start notice hides the id: {}",
+        started.content
+    );
+
+    let notification = tokio::time::timeout(Duration::from_secs(10), notifications.recv())
+        .await
+        .expect("notification arrives")
+        .expect("channel open");
+    assert!(
+        notification.text.contains(&format!("task_id: {child_id}")),
+        "completion hides the id: {}",
+        notification.text
+    );
+    assert!(
+        notification.text.contains("background answer"),
+        "{}",
+        notification.text
+    );
+
+    spawner.shutdown().await;
 }

@@ -472,6 +472,13 @@ impl ToolOutput {
         self
     }
 
+    /// Append a trailing note to the content, whether it is a result or
+    /// an error — an error the model can act on still needs the note.
+    pub(crate) fn with_appended_text(mut self, text: &str) -> Self {
+        self.content.push_str(text);
+        self
+    }
+
     pub(crate) fn with_todo_state(
         mut self,
         target: std::sync::Arc<std::sync::Mutex<crate::todo::TodoList>>,
