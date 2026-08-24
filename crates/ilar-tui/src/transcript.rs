@@ -96,6 +96,11 @@ pub(crate) enum ToolProgress {
     },
 }
 
+/// Blank rows held below the transcript so the newest line has room to
+/// breathe instead of sitting on the input box's border. Counted as
+/// content, so following the tail actually shows them.
+const TAIL_PADDING_ROWS: usize = 1;
+
 #[derive(Default)]
 pub(crate) struct TranscriptRenderCache {
     width: Option<u16>,
@@ -222,7 +227,11 @@ impl TranscriptRenderCache {
     }
 
     pub(crate) fn row_count(&self) -> usize {
-        self.entries.iter().map(|entry| entry.rows.len()).sum()
+        self.entries
+            .iter()
+            .map(|entry| entry.rows.len())
+            .sum::<usize>()
+            + TAIL_PADDING_ROWS
     }
 
     /// Absolute indices of rows whose text contains `query`
@@ -265,11 +274,19 @@ impl TranscriptRenderCache {
             .cloned()
             .map(|line| TranscriptRow { line, target: None })
             .collect::<Vec<_>>();
+        let padding = vec![
+            TranscriptRow {
+                line: Line::default(),
+                target: None,
+            };
+            TAIL_PADDING_ROWS
+        ];
         for rows in self
             .entries
             .iter()
             .map(|entry| entry.rows.as_slice())
             .chain(std::iter::once(trailing.as_slice()))
+            .chain(std::iter::once(padding.as_slice()))
         {
             if remaining == 0 {
                 break;
@@ -1643,6 +1660,46 @@ fn notification_lines(
 mod tests {
     use super::*;
     use crate::text::tests::rendered_text;
+
+    #[test]
+    fn the_transcript_tail_keeps_a_blank_row_off_the_input() {
+        let mut cache = TranscriptRenderCache::default();
+        let lines = vec![Line_::Assistant("done".into())];
+        let expanded = std::collections::HashSet::new();
+        let now = std::time::Instant::now();
+        cache.update(&lines, &expanded, 1, 40, now, now);
+
+        let rows = cache.visible_rows(0, 10, &[]);
+        let text = rows
+            .iter()
+            .map(|row| rendered_text(&row.line))
+            .collect::<Vec<_>>();
+
+        assert!(text.first().unwrap().contains("done"), "{text:?}");
+        assert_eq!(
+            text.last().map(String::as_str),
+            Some(""),
+            "the answer hugs the input box: {text:?}"
+        );
+        // The padding is real content, so scrolling can reach it.
+        assert_eq!(cache.row_count(), rows.len());
+
+        // It sits below the activity rows, not above them.
+        let busy = cache.visible_rows(0, 10, &[Line::raw("thinking…")]);
+        let busy_text = busy
+            .iter()
+            .map(|row| rendered_text(&row.line))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            busy_text.last().map(String::as_str),
+            Some(""),
+            "{busy_text:?}"
+        );
+        assert!(
+            busy_text[busy_text.len() - 2].contains("thinking"),
+            "{busy_text:?}"
+        );
+    }
 
     #[test]
     fn tool_diff_rows_truncate_and_expand() {

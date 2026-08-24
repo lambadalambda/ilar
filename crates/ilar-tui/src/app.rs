@@ -5716,7 +5716,16 @@ mod tests {
             .map(|row| row.line)
             .collect::<Vec<_>>();
 
-        assert_eq!(actual, expected);
+        // The cache renders the same lines, then holds blank rows below
+        // them so the tail does not sit on the input box.
+        assert_eq!(actual[..expected.len()], expected[..]);
+        assert!(
+            actual[expected.len()..]
+                .iter()
+                .all(|line| line.spans.is_empty()),
+            "{:?}",
+            &actual[expected.len()..]
+        );
     }
 
     #[test]
