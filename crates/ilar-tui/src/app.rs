@@ -6567,6 +6567,34 @@ mod tests {
         assert_eq!(app.pending_steers, vec!["go left"]);
     }
 
+    /// Delivery removes the pending entry the moment the loop reports
+    /// it — the "steering" indicator must never outlive the delivery
+    /// it announces.
+    #[test]
+    fn a_delivered_steer_leaves_the_pending_strip() {
+        let mut app = App::new();
+        app.pending_steers = vec!["go left".into(), "then stop".into()];
+
+        app.push_loop_event(&LoopEvent::Steered {
+            text: "go left".into(),
+        });
+
+        assert_eq!(app.pending_steers, vec!["then stop"]);
+        assert!(
+            app.lines
+                .iter()
+                .any(|line| matches!(line, Line_::User(text) if text == "go left")),
+            "delivered steer missing from the transcript"
+        );
+        assert_eq!(app.pending_strip_lines(80).len(), 1);
+
+        app.push_loop_event(&LoopEvent::Steered {
+            text: "then stop".into(),
+        });
+        assert!(app.pending_steers.is_empty());
+        assert!(app.pending_strip_lines(80).is_empty(), "the strip lingered");
+    }
+
     /// Paste intents land in the surface the decision named.
     #[test]
     fn paste_intents_land_in_their_surfaces() {
