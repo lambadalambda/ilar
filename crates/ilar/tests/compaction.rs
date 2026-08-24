@@ -124,9 +124,9 @@ async fn manual_active_history_compaction_persists_without_a_new_user_message() 
     assert!(matches!(
         canonical_events.last(),
         Some(SessionEvent::Compaction { summary, .. })
-            if summary.contains("handover: all important context")
-            // The user's own words ride above the model's prose.
-            && summary.contains("old question 0")
+            // The summary is the whole of the handover: no pins, no
+            // window, nothing stapled on.
+            if summary == "handover: all important context"
     ));
     let transcript = session.transcript();
     assert_eq!(transcript.len(), 1);
@@ -389,15 +389,15 @@ async fn oversize_transcript_triggers_compaction() {
     let rendered = format!("{transcript:?}");
     assert!(rendered.contains("SUMMARY: user asked"), "{rendered}");
     assert!(rendered.contains("next question"), "{rendered}");
-    // The bulk — old assistant turns — is gone; the user's own words
-    // are pinned above the summary on purpose.
+    // Everything before the current message is the summary's job now,
+    // questions included; the archive keeps the originals.
     assert!(
         !rendered.contains("answer number 0"),
         "old turns leaked past compaction: {rendered}"
     );
     assert!(
-        rendered.contains("question number 0"),
-        "the request being served was summarized away: {rendered}"
+        !rendered.contains("question number 0"),
+        "a recency window survived: {rendered}"
     );
     assert!(rendered.contains("fresh answer"), "{rendered}");
     // Alternation invariant holds.
@@ -768,10 +768,12 @@ async fn context_growing_between_steps_compacts_without_a_new_user_message() {
     let resolver = RoutingResolver {
         zai: MockProvider::new(vec![
             read_call("call-1", "big1.txt"),
-            read_call("call-2", "big2.txt"),
-            // Loop re-enters: context is now over the threshold, so the
-            // next provider call must be the compaction summary.
+            // The loop re-enters over the threshold, so the next
+            // provider call is the compaction summary rather than a
+            // step — no new user message involved.
             text_turn("SUMMARY: read big1.txt while investigating."),
+            read_call("call-2", "big2.txt"),
+            text_turn("SUMMARY: read both files while investigating."),
             text_turn("done investigating"),
         ]),
         openai: MockProvider::error("wrong provider"),
@@ -802,22 +804,22 @@ async fn context_growing_between_steps_compacts_without_a_new_user_message() {
     let requests = resolver.zai.requests();
     assert_eq!(
         requests.len(),
-        4,
-        "expected step, step, mid-turn compaction, step; got {}",
+        5,
+        "expected step, compaction, step, compaction, step; got {}",
         requests.len()
     );
     // The third call is the summarizer. It is identified by its final
     // message, not by a different system prompt: the whole prefix is
     // deliberately identical to the surrounding steps so the provider
     // serves it from its prompt cache.
-    let instruction = format!("{:?}", requests[2].messages.last().unwrap());
+    let instruction = format!("{:?}", requests[1].messages.last().unwrap());
     assert!(
         instruction.contains("Stop working on the task"),
-        "third call was not a compaction: {instruction}"
+        "second call was not a compaction: {instruction}"
     );
-    assert_eq!(requests[2].system_prompt, requests[3].system_prompt);
-    assert_eq!(requests[2].tools.len(), requests[3].tools.len());
-    assert_eq!(requests[2].cache_key, requests[3].cache_key);
+    assert_eq!(requests[1].system_prompt, requests[2].system_prompt);
+    assert_eq!(requests[1].tools.len(), requests[2].tools.len());
+    assert_eq!(requests[1].cache_key, requests[2].cache_key);
 
     let session = store.load(&session_id).unwrap();
     assert!(
@@ -827,17 +829,15 @@ async fn context_growing_between_steps_compacts_without_a_new_user_message() {
             .any(|e| matches!(e, SessionEvent::Compaction { .. })),
         "no compaction event persisted"
     );
-    // The final step ran on the compacted transcript.
-    let rendered = format!("{:?}", requests[3].messages);
-    assert!(rendered.contains("SUMMARY: read big1.txt"), "{rendered}");
-    assert!(
-        !rendered.contains("alpha-marker"),
-        "the older bulky result should have been summarized away"
-    );
-    assert!(
-        rendered.contains("beta-marker"),
-        "the recency window must keep the most recent step"
-    );
+    // The final step ran on the compacted transcript: a summary and
+    // nothing else, with the bulky results gone.
+    let rendered = format!("{:?}", requests[4].messages);
+    assert!(rendered.contains("SUMMARY: read both files"), "{rendered}");
+    // Both bulky results are gone — the recent one too. That is the
+    // point of the handover: what survives is the summary, and the
+    // originals stay in the archive for the history tool.
+    assert!(!rendered.contains("alpha-marker"), "{rendered}");
+    assert!(!rendered.contains("beta-marker"), "{rendered}");
     for pair in session.transcript().windows(2) {
         assert_ne!(pair[0].role, pair[1].role);
     }
@@ -932,45 +932,28 @@ async fn turn_boundary_compaction_keeps_the_checkpoint_with_its_message() {
 }
 
 #[tokio::test]
-async fn an_apology_is_retried_and_then_refused() {
+async fn an_apology_is_reported_not_repaired() {
     let (store, session_id) = temp_session();
     seed_compactable_history(&store, &session_id);
     // The failure observed in session 3d494ad6: the summarizer answered
     // the conversation instead of summarizing it.
-    let apology = "I'm sorry, but I wasn't able to complete and push all four fixes.";
-    let provider = MockProvider::new(vec![
-        text_turn(apology),
-        text_turn("handover: recovered on the second ask"),
-    ]);
+    let provider = MockProvider::new(vec![text_turn(
+        "I'm sorry, but I wasn't able to complete and push all four fixes.",
+    )]);
     let cancel = tokio_util::sync::CancellationToken::new();
 
-    let outcome = compact_session(&provider, &store, &session_id, Some("system"), &[], &cancel)
-        .await
-        .unwrap();
-
-    assert!(
-        matches!(outcome, ManualCompactionOutcome::Compacted { ref summary, .. }
-            if summary.contains("recovered on the second ask")),
-        "{outcome:?}"
-    );
-    assert_eq!(provider.requests().len(), 2, "the apology was not retried");
-    let stored = format!("{:?}", store.load(&session_id).unwrap().transcript());
-    assert!(
-        !stored.contains("I'm sorry"),
-        "the apology was stored: {stored}"
-    );
-
-    // Twice in a row is a failure, and the session is left alone.
-    let (store, session_id) = temp_session();
-    seed_compactable_history(&store, &session_id);
-    let stubborn = MockProvider::new(vec![text_turn(apology), text_turn(apology)]);
-    let error = compact_session(&stubborn, &store, &session_id, Some("system"), &[], &cancel)
+    let error = compact_session(&provider, &store, &session_id, Some("system"), &[], &cancel)
         .await
         .expect_err("a session must not be replaced by an apology");
+
     assert!(
         format!("{error:#}").contains("answered the conversation"),
         "{error:#}"
     );
+    // One call: no retry, no repair, nothing clever. The summary is the
+    // whole of what would have survived, so a bad one is reported and
+    // the session is left exactly as it was.
+    assert_eq!(provider.requests().len(), 1);
     assert!(
         !store
             .load(&session_id)
@@ -983,16 +966,16 @@ async fn an_apology_is_retried_and_then_refused() {
 }
 
 #[tokio::test]
-async fn the_request_being_served_survives_the_summarizer() {
+async fn what_the_summary_drops_stays_findable() {
     let (store, session_id) = temp_session();
+    let request = "Can we do the necessary changes to firehose to support bundled \
+                   payments? https://github.com/yodlpay/yodl-lite/pull/396";
     {
         let mut session = store.acquire_writer(&session_id).unwrap().load().unwrap();
         session
             .append(SessionEvent::UserMessage {
                 id: new_id(),
-                text: "Can we do the necessary changes to firehose to support bundled \
-                       payments? https://github.com/yodlpay/yodl-lite/pull/396"
-                    .into(),
+                text: request.into(),
                 ts: chrono::Utc::now(),
             })
             .unwrap();
@@ -1011,8 +994,8 @@ async fn the_request_being_served_survives_the_summarizer() {
                 .unwrap();
         }
     }
-    // A summarizer that does exactly what the real one did: writes a
-    // work log and forgets what was asked.
+    // A summarizer that writes a work log and forgets what was asked —
+    // which is what the real one did.
     let provider = MockProvider::new(vec![text_turn(
         "Implemented bundled-payment support across Firehose and its producers.",
     )]);
@@ -1022,19 +1005,25 @@ async fn the_request_being_served_survives_the_summarizer() {
         .await
         .unwrap();
 
+    // The handover is the summary alone: the request is gone from what
+    // the model is sent, deliberately, and nothing is pinned to it.
     let transcript = format!("{:?}", store.load(&session_id).unwrap().transcript());
+    assert!(!transcript.contains("pull/396"), "{transcript}");
     assert!(
-        transcript.contains("https://github.com/yodlpay/yodl-lite/pull/396"),
-        "the PR link that defines the task was lost: {transcript}"
-    );
-    assert!(
-        transcript.contains("Can we do the necessary changes to firehose"),
+        transcript.contains("Implemented bundled-payment"),
         "{transcript}"
     );
+
+    // Gone from sight is not gone: the archive still has it, and
+    // listing the user's own messages is one call away.
+    let entries = ilar::recall::session_entries(&store, &session_id).unwrap();
+    let asked = ilar::recall::by_speaker(&entries, ilar::recall::Speaker::User, 4_000);
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert!(asked[0].text.contains("pull/396"), "{asked:?}");
 }
 
 #[tokio::test]
-async fn the_plan_survives_compaction() {
+async fn the_plan_is_state_not_conversation() {
     let (store, session_id) = temp_session();
     seed_compactable_history(&store, &session_id);
     {
@@ -1093,14 +1082,16 @@ async fn the_plan_survives_compaction() {
         .await
         .unwrap();
 
-    // The list is state and survives, as it always did...
+    // The list is state: it survives compaction untouched...
     let session = store.load(&session_id).unwrap();
     assert_eq!(session.todo_list().unwrap().items.len(), 3);
-    // ...but now the model can see it too: before this, compaction
-    // dropped the tool results the list lived in and the plan simply
-    // vanished from the conversation.
+    // ...while the handover carries only the summary. The model reads
+    // the plan back by calling the todo tool with no arguments, which
+    // is what it is told to do — see tests/todo.rs.
     let transcript = format!("{:?}", session.transcript());
-    assert!(transcript.contains("[>] fix the parser"), "{transcript}");
-    assert!(transcript.contains("[ ] add a test"), "{transcript}");
-    assert!(transcript.contains("todo"), "{transcript}");
+    assert!(!transcript.contains("[>] fix the parser"), "{transcript}");
+    assert!(
+        transcript.contains("fix the parser"),
+        "the summary is gone too: {transcript}"
+    );
 }

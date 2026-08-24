@@ -1197,7 +1197,7 @@ async fn run_turn_inner(
                     context_limit: limit,
                     threshold: config.compaction_threshold,
                     force: false,
-                    cut: crate::compaction::CompactionCut::RecentSteps,
+                    cut: crate::compaction::CompactionCut::ActiveHistory,
                     system_prompt,
                     tools: &tools,
                     cancel: &cancel,
