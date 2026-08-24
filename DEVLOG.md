@@ -1294,3 +1294,31 @@ that /rewind and /fork typed during a running turn would have been
 *steered to the model as literal text* — the maintenance-command
 carve-out in decide::submit only knew about /compact; it now covers
 all three.
+
+## 2026-08-24 — The todo panel gets its space back
+
+The sidebar showed five todos and a `+N hidden`, whatever the height
+of the terminal — a twelve-item plan in a forty-row panel read as
+"five items and a number". The cap is now the rows the panel has.
+
+Raising it needed the trimming to get smarter first. The old pick was
+"the in-progress item, the first pending one, the last completed one,
+then fill from the top", which renders as a list with silent gaps
+(items 1, 2 and 17 in a row) and, once wrapping ate the rows, could
+push the active item off the panel it was chosen to keep. The visible
+todos are now a contiguous run anchored on the active item — in
+progress, else next pending, else the most recent completion — sitting
+at the top of the run, so a panel that cannot hold everything drops
+finished work above it before work still ahead.
+
+Hiding was also a dead end: the transcript deliberately omits the
+current list, so on a narrow terminal the one-line summary was the
+whole of it. Ctrl-T (and the palette) opens a read-only scrollable
+overlay over the full list, and the sidebar's hidden note names the
+key when the panel is wide enough to say so. Both views draw items
+through one `todo_item_lines`.
+
+Smoke-ran in tmux against a synthetic session carrying a twelve-item
+list: forty rows shows all twelve wrapped, sixteen rows shows the
+active item and everything after it with `+4 hidden · ^T`, and Ctrl-T
+opens `todos · 4/12 done` over the lot.
