@@ -1008,6 +1008,8 @@ pub(crate) struct SearchRow {
     /// Event index of the hit inside its session, shown as an anchor.
     pub(crate) event: usize,
     pub(crate) excerpt: String,
+    /// How long since the session was last written, picker-style.
+    pub(crate) age: String,
     /// (speaker label, text, is-the-hit) around the match, in order.
     pub(crate) context: Vec<(String, String, bool)>,
 }
@@ -1049,7 +1051,9 @@ impl SessionSearch {
             rows: Vec::new(),
             nav: ListNav::default(),
             generation: 0,
-            scanning: false,
+            // An empty query lists recent sessions, so a scan starts
+            // the moment the modal opens.
+            scanning: true,
         }
     }
 
@@ -1099,7 +1103,9 @@ impl SessionSearch {
                     self.nav.reset();
                     self.rows.clear();
                     self.generation += 1;
-                    self.scanning = !self.query.trim().is_empty();
+                    // Empty query included: that rescans as the
+                    // recent-sessions listing.
+                    self.scanning = true;
                     return SessionSearchAction::Rescan;
                 }
                 SessionSearchAction::Stay
@@ -1481,7 +1487,7 @@ pub(crate) fn render_turn_picker(frame: &mut Frame, picker: &TurnPicker) -> Moda
     body.finish(frame, inner)
 }
 
-fn session_age(modified: std::time::SystemTime, now: std::time::SystemTime) -> String {
+pub(crate) fn session_age(modified: std::time::SystemTime, now: std::time::SystemTime) -> String {
     let seconds = now.duration_since(modified).unwrap_or_default().as_secs();
     match seconds {
         0..=59 => "now".into(),
@@ -1638,6 +1644,67 @@ pub(crate) fn render_session_search(frame: &mut Frame, search: &SessionSearch) -
         area
     };
 
+    let selected = if search.rows.is_empty() {
+        0
+    } else {
+        search.nav.selected.min(search.rows.len() - 1)
+    };
+
+    // The preview pane exists whenever the terminal is wide, selection
+    // or not — an empty frame still covers whatever sat underneath the
+    // modal, where skipping it let the transcript bleed through.
+    if wide {
+        let preview_area = Rect {
+            x: area.x + list_area.width,
+            width: area.width - list_area.width,
+            ..area
+        };
+        let row = search.rows.get(selected);
+        let title = row
+            .map(|row| {
+                format!(
+                    " {} ",
+                    truncate_display(
+                        &row.title,
+                        preview_area.width.saturating_sub(4) as usize,
+                        Truncation::Right
+                    )
+                )
+            })
+            .unwrap_or_else(|| " preview ".into());
+        let footer = row
+            .map(|row| format!(" event {} · {} ", row.event, row.age))
+            .unwrap_or_default();
+        if let Some(preview_inner) =
+            modal_frame(frame, preview_area, &title, theme::PRIMARY, &footer)
+            && let Some(row) = row
+        {
+            let mut lines: Vec<Line> = Vec::new();
+            for (speaker, text, is_hit) in &row.context {
+                lines.push(Line::styled(
+                    format!("· {speaker}"),
+                    Style::default().fg(MUTED),
+                ));
+                let base = if *is_hit {
+                    Style::default().fg(theme::PRIMARY)
+                } else {
+                    Style::default().fg(MUTED)
+                };
+                lines.push(Line::from(highlighted_spans(
+                    text,
+                    if *is_hit { &search.query } else { "" },
+                    base,
+                    theme::title(theme::MARKUP),
+                )));
+                lines.push(Line::raw(""));
+            }
+            frame.render_widget(
+                Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false }),
+                preview_inner,
+            );
+        }
+    }
+
     let status = if search.scanning {
         format!("{} · scanning…", search.rows.len())
     } else {
@@ -1667,10 +1734,10 @@ pub(crate) fn render_session_search(frame: &mut Frame, search: &SessionSearch) -
         None,
     );
     if search.rows.is_empty() {
-        let hint = if search.query.trim().is_empty() {
-            "type to grep every session's history"
-        } else if search.scanning {
+        let hint = if search.scanning {
             "scanning…"
+        } else if search.query.trim().is_empty() {
+            "no other sessions"
         } else {
             "no matches"
         };
@@ -1678,7 +1745,6 @@ pub(crate) fn render_session_search(frame: &mut Frame, search: &SessionSearch) -
         return body.finish_unmapped(frame, inner);
     }
 
-    let selected = search.nav.selected.min(search.rows.len() - 1);
     let row_count = (inner.height as usize)
         .saturating_sub(body.line_count())
         .max(1);
@@ -1686,22 +1752,21 @@ pub(crate) fn render_session_search(frame: &mut Frame, search: &SessionSearch) -
     let width = inner.width as usize;
     for (index, row) in search.rows.iter().enumerate().skip(start).take(row_count) {
         let marker = if index == selected { "> " } else { "  " };
-        // The title gets a bounded column so the excerpt always shows.
+        // The title gets a bounded column so the excerpt always shows;
+        // the age keeps the right edge.
         let title_width = (width / 3).clamp(8, 28);
         let title = truncate_display(&row.title, title_width, Truncation::Right);
         let lead = format!("{marker}{title}: ");
-        let excerpt = truncate_display(
-            &row.excerpt,
-            width.saturating_sub(UnicodeWidthStr::width(lead.as_str())),
-            Truncation::Right,
-        );
+        let age_width = UnicodeWidthStr::width(row.age.as_str());
+        let excerpt_budget = width
+            .saturating_sub(UnicodeWidthStr::width(lead.as_str()))
+            .saturating_sub(age_width + 1);
+        let excerpt = truncate_display(&row.excerpt, excerpt_budget, Truncation::Right);
+        let pad = excerpt_budget.saturating_sub(UnicodeWidthStr::width(excerpt.as_str())) + 1;
         let line = if index == selected {
             // The bar owns the row; per-span colours would fight it.
             Line::styled(
-                format!(
-                    "{lead}{excerpt:<rest$}",
-                    rest = width.saturating_sub(UnicodeWidthStr::width(lead.as_str()))
-                ),
+                format!("{lead}{excerpt}{}{}", " ".repeat(pad), row.age),
                 theme::selected(),
             )
         } else {
@@ -1715,59 +1780,13 @@ pub(crate) fn render_session_search(frame: &mut Frame, search: &SessionSearch) -
                 Style::default().fg(theme::PRIMARY),
                 theme::title(theme::MARKUP),
             ));
+            spans.push(Span::raw(" ".repeat(pad)));
+            spans.push(Span::styled(row.age.clone(), Style::default().fg(MUTED)));
             Line::from(spans)
         };
         body.push(line, Some(index));
     }
-    let hit = body.finish(frame, inner);
-
-    if wide && let Some(row) = search.rows.get(selected) {
-        let preview_area = Rect {
-            x: area.x + list_area.width,
-            width: area.width - list_area.width,
-            ..area
-        };
-        let title = format!(
-            " {} ",
-            truncate_display(
-                &row.title,
-                preview_area.width.saturating_sub(4) as usize,
-                Truncation::Right
-            )
-        );
-        if let Some(preview_inner) = modal_frame(
-            frame,
-            preview_area,
-            &title,
-            theme::PRIMARY,
-            &format!(" event {} ", row.event),
-        ) {
-            let mut lines: Vec<Line> = Vec::new();
-            for (speaker, text, is_hit) in &row.context {
-                lines.push(Line::styled(
-                    format!("· {speaker}"),
-                    Style::default().fg(MUTED),
-                ));
-                let base = if *is_hit {
-                    Style::default().fg(theme::PRIMARY)
-                } else {
-                    Style::default().fg(MUTED)
-                };
-                lines.push(Line::from(highlighted_spans(
-                    text,
-                    if *is_hit { &search.query } else { "" },
-                    base,
-                    theme::title(theme::MARKUP),
-                )));
-                lines.push(Line::raw(""));
-            }
-            frame.render_widget(
-                Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false }),
-                preview_inner,
-            );
-        }
-    }
-    hit
+    body.finish(frame, inner)
 }
 
 pub(crate) struct ModelPicker {
@@ -3389,6 +3408,7 @@ mod tests {
             title: title.into(),
             event: 7,
             excerpt: excerpt.into(),
+            age: "3d".into(),
             context: vec![
                 ("user".into(), "before the hit".into(), false),
                 ("assistant".into(), context_line.into(), true),
@@ -3427,10 +3447,14 @@ mod tests {
         search.finish_scan(first_generation);
         assert!(search.scanning, "a stale scan finishing ended the new one");
 
-        // Erasing the last character leaves an empty query: no scan.
+        // Erasing back to an empty query rescans too: empty means the
+        // recent-sessions listing, not a blank pane.
         search.handle_key(KeyCode::Backspace, false);
-        search.handle_key(KeyCode::Backspace, false);
-        assert!(!search.scanning);
+        assert_eq!(
+            search.handle_key(KeyCode::Backspace, false),
+            SessionSearchAction::Rescan
+        );
+        assert!(search.scanning);
     }
 
     #[test]
@@ -3506,6 +3530,25 @@ mod tests {
         let (screen, _) = draw_modal(120, 24, |frame| render_session_search(frame, &search));
         assert!(screen.contains("the parser context"), "{screen}");
         assert!(!screen.contains("the auth context"), "{screen}");
+    }
+
+    #[test]
+    fn the_preview_frame_covers_its_half_even_with_nothing_to_show() {
+        let search = SessionSearch::new();
+        let (screen, _) = draw_modal(120, 24, |frame| render_session_search(frame, &search));
+        // The frame is there with its title even before any rows —
+        // otherwise the transcript underneath bleeds through.
+        assert!(screen.contains(" preview "), "{screen}");
+    }
+
+    #[test]
+    fn search_rows_carry_their_session_age() {
+        let mut search = SessionSearch::new();
+        search.query = "needle".into();
+        search.push_rows(0, vec![search_row("s1", "auth work", "needle here", "ctx")]);
+
+        let (screen, _) = draw_modal(120, 24, |frame| render_session_search(frame, &search));
+        assert!(screen.contains("3d"), "{screen}");
     }
 
     #[test]

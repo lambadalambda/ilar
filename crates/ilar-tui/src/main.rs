@@ -1595,12 +1595,15 @@ const SEARCH_CONTEXT_RADIUS: usize = 2;
 /// Characters of any one entry in the preview.
 const SEARCH_CONTEXT_CHARS: usize = 500;
 
-/// Start a background walk of every session for the search modal.
-/// Rows stream through the channel as each session is read; setting
-/// the returned flag abandons the walk at the next session boundary.
+/// Start a background walk of every session for the search modal: a
+/// content grep when there is a query, the recent-sessions listing
+/// when there is not. Rows stream through the channel as each session
+/// is read; setting the returned flag abandons the walk at the next
+/// session boundary.
 fn start_session_scan(
     store: ilar::session::SessionStore,
     query: String,
+    current_session: String,
 ) -> (
     std::sync::mpsc::Receiver<Vec<SearchRow>>,
     std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -1610,8 +1613,9 @@ fn start_session_scan(
     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let flag = cancel.clone();
     tokio::task::spawn_blocking(move || {
+        let now = std::time::SystemTime::now();
         let mut sent = 0usize;
-        ilar::recall::search_sessions(&store, &query, SEARCH_HITS_PER_SESSION, |entries, hits| {
+        let mut emit = |entries: &[ilar::recall::Entry], hits: ilar::recall::SessionHits| {
             if flag.load(Ordering::Relaxed) {
                 return false;
             }
@@ -1619,6 +1623,7 @@ fn start_session_scan(
                 .title
                 .clone()
                 .unwrap_or_else(|| hits.session_id.clone());
+            let age = crate::modals::session_age(hits.modified, now);
             let rows: Vec<SearchRow> = hits
                 .hits
                 .iter()
@@ -1627,6 +1632,7 @@ fn start_session_scan(
                     title: title.clone(),
                     event: hit.event,
                     excerpt: hit.excerpt.clone(),
+                    age: age.clone(),
                     context: ilar::recall::around(
                         entries,
                         hit.event,
@@ -1646,7 +1652,19 @@ fn start_session_scan(
                 .collect();
             sent += rows.len();
             tx.send(rows).is_ok() && sent < MAX_SEARCH_ROWS
-        });
+        };
+        if query.trim().is_empty() {
+            // The listing excludes the session being viewed, like the
+            // picker: resuming into yourself is not a switch.
+            ilar::recall::tail_sessions(&store, |entries, hits| {
+                if hits.session_id == current_session {
+                    return !flag.load(Ordering::Relaxed);
+                }
+                emit(entries, hits)
+            });
+        } else {
+            ilar::recall::search_sessions(&store, &query, SEARCH_HITS_PER_SESSION, emit);
+        }
     });
     (rx, cancel)
 }
@@ -1763,6 +1781,18 @@ async fn run_app(
         }
         if scan_done {
             search_rx = None;
+        }
+        // A search modal that wants a scan and has none running gets
+        // one — this serves both the just-opened modal (whoever opened
+        // it) and the keystroke that cancelled the previous scan.
+        if let Some(search) = app.session_search.as_ref()
+            && search.scanning
+            && search_rx.is_none()
+        {
+            let (rx, flag) =
+                start_session_scan(store.clone(), search.query.clone(), app.session_id.clone());
+            search_rx = Some((search.generation, rx));
+            search_cancel = Some(flag);
         }
         app.retry_subagent_activity();
         for _ in 0..256 {
@@ -2277,17 +2307,14 @@ async fn run_app(
                             match action {
                                 SessionSearchAction::Stay => {}
                                 SessionSearchAction::Rescan => {
+                                    // Only the cancellation happens here;
+                                    // the spawner below the drain starts
+                                    // the new scan, same as it starts the
+                                    // opening one.
                                     if let Some(flag) = search_cancel.take() {
                                         flag.store(true, std::sync::atomic::Ordering::Relaxed);
                                     }
                                     search_rx = None;
-                                    let search = app.session_search.as_ref().unwrap();
-                                    if search.scanning {
-                                        let (rx, flag) =
-                                            start_session_scan(store.clone(), search.query.clone());
-                                        search_rx = Some((search.generation, rx));
-                                        search_cancel = Some(flag);
-                                    }
                                 }
                                 SessionSearchAction::Dismiss => {
                                     if let Some(flag) = search_cancel.take() {

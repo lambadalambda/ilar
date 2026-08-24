@@ -174,3 +174,64 @@ fn an_empty_query_emits_nothing() {
     session_with(&store, vec![user("anything at all")]);
     assert!(collect_all(&store, "   ", 5).is_empty());
 }
+
+#[test]
+fn the_listing_walk_shows_every_session_by_its_last_words() {
+    let (store, _dir) = temp_store();
+    let noise = "x".repeat(2_000);
+    let first = session_with(
+        &store,
+        vec![
+            user("start the firmware dig"),
+            topic("GM1 firmware dig"),
+            assistant(&format!(
+                "{noise} and the last thing said was the AES table offset"
+            )),
+        ],
+    );
+    let second = session_with(&store, vec![user("fix the login page")]);
+
+    let mut seen = Vec::new();
+    ilar::recall::tail_sessions(&store, |entries, hits| {
+        assert!(!entries.is_empty());
+        seen.push(hits);
+        true
+    });
+
+    // Every root session, listing order (newest first), one row each.
+    let listing: Vec<String> = store.list().into_iter().map(|s| s.id).collect();
+    let ids: Vec<&str> = seen.iter().map(|hits| hits.session_id.as_str()).collect();
+    assert_eq!(ids, listing.iter().map(String::as_str).collect::<Vec<_>>());
+    assert!(ids.contains(&first.as_str()) && ids.contains(&second.as_str()));
+
+    let firmware = seen
+        .iter()
+        .find(|hits| hits.session_id == first)
+        .expect("firmware session listed");
+    assert_eq!(firmware.title.as_deref(), Some("GM1 firmware dig"));
+    assert_eq!(firmware.hits.len(), 1);
+    // The excerpt is the *tail* of the last entry — what the session
+    // was last about — bounded like any other excerpt.
+    let hit = &firmware.hits[0];
+    assert!(hit.excerpt.contains("AES table offset"), "{hit:?}");
+    assert!(hit.excerpt.chars().count() < 300, "{hit:?}");
+    assert!(hit.elided_before, "{hit:?}");
+
+    // A caller that stops is obeyed, same as a search.
+    let mut count = 0;
+    ilar::recall::tail_sessions(&store, |_, _| {
+        count += 1;
+        false
+    });
+    assert_eq!(count, 1);
+}
+
+#[test]
+fn hits_carry_their_session_modification_time() {
+    let (store, _dir) = temp_store();
+    session_with(&store, vec![user("needle here")]);
+    let listed = store.list();
+
+    let found = collect_all(&store, "needle", 5);
+    assert_eq!(found[0].modified, listed[0].modified);
+}
