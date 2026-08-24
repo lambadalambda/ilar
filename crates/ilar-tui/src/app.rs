@@ -2063,7 +2063,13 @@ impl App {
                 .end_symbol(None)
                 .track_symbol(Some("│"))
                 .thumb_symbol("┃");
-            let mut state = ScrollbarState::new(content_rows)
+            // Not `content_rows`: ratatui scrolls until the last line
+            // is at the *top* of the viewport, so it reads a content
+            // length as one-past-the-last scroll position. We stop when
+            // the last line reaches the bottom, and handing over the
+            // row count left the thumb a viewport short of the track
+            // end — the taller the terminal, the wider the gap.
+            let mut state = ScrollbarState::new(max_scroll.saturating_add(1))
                 .position(self.scroll_top)
                 .viewport_content_length(self.viewport_rows);
             let area = Rect::new(
@@ -3843,6 +3849,60 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(screen.contains("true tail marker"), "{screen}");
+    }
+
+    #[test]
+    fn the_scrollbar_thumb_reaches_both_ends_of_its_track() {
+        // The transcript's own right border is the last column; the
+        // track sits one column inside it.
+        let track = |terminal: &ratatui::Terminal<ratatui::backend::TestBackend>| {
+            let buffer = terminal.backend().buffer();
+            (0..buffer.area.height)
+                .map(|row| buffer[(buffer.area.width - 2, row)].symbol().to_string())
+                .filter(|symbol| symbol == "│" || symbol == "┃")
+                .collect::<Vec<_>>()
+        };
+
+        // Short and tall: the rounding that used to strand the thumb
+        // grew with the track.
+        for height in [20u16, 30, 40, 50] {
+            let backend = ratatui::backend::TestBackend::new(40, height);
+            let mut terminal = ratatui::Terminal::new(backend).unwrap();
+            let mut app = App::new();
+            app.lines = (0..200)
+                .map(|index| Line_::System(format!("row {index}")))
+                .collect();
+
+            // Following the tail: the thumb ends flush with the track.
+            terminal.draw(|frame| app.render(frame)).unwrap();
+            let tail = track(&terminal);
+            assert_eq!(app.scroll_top, app.max_scroll(), "height {height}");
+            assert_eq!(
+                tail.last().map(String::as_str),
+                Some("┃"),
+                "height {height}: {tail:?}"
+            );
+            assert_eq!(
+                tail.first().map(String::as_str),
+                Some("│"),
+                "height {height}: {tail:?}"
+            );
+
+            // At the top: the thumb starts flush with the track.
+            app.scroll_to_top();
+            terminal.draw(|frame| app.render(frame)).unwrap();
+            let top = track(&terminal);
+            assert_eq!(
+                top.first().map(String::as_str),
+                Some("┃"),
+                "height {height}: {top:?}"
+            );
+            assert_eq!(
+                top.last().map(String::as_str),
+                Some("│"),
+                "height {height}: {top:?}"
+            );
+        }
     }
 
     #[test]
