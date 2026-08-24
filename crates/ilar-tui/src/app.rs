@@ -1031,13 +1031,7 @@ impl App {
                     )
                 });
                 if *outcome == TurnOutcome::Aborted {
-                    for line in &mut self.lines {
-                        if let Line_::Tool { state, .. } = line
-                            && matches!(*state, ToolState::Running | ToolState::Complete)
-                        {
-                            *state = ToolState::Failed;
-                        }
-                    }
+                    close_running_tools(&mut self.lines);
                 }
                 self.status = match outcome {
                     TurnOutcome::Completed => "ready".into(),
@@ -2585,6 +2579,32 @@ const CONTENT_HORIZONTAL_PADDING: u16 = 2;
 /// Show "no data Ns" in the status line once the stream has been silent
 /// this long during thinking/responding.
 const STREAM_STALL_AFTER: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Close every tool row an abort left open, at any depth.
+///
+/// Aborting drops the parent's tool futures, which cancels a running
+/// subagent without it ever reporting back — so no `TurnDone` activity
+/// arrives to clear `child_running`, and the agent row would spin
+/// forever over work that has already stopped. A shallow sweep is not
+/// enough: the child's own rows are nested inside it, and
+/// `child_running` masks the parent row's state while it is set.
+fn close_running_tools(lines: &mut [Line_]) {
+    for line in lines {
+        if let Line_::Tool {
+            state,
+            child_running,
+            child_lines,
+            ..
+        } = line
+        {
+            if matches!(*state, ToolState::Running | ToolState::Complete) {
+                *state = ToolState::Failed;
+            }
+            *child_running = false;
+            close_running_tools(child_lines);
+        }
+    }
+}
 
 /// "12.3 KiB" while data flows, "12.3 KiB · no data Ns" once the stream
 /// has been silent past the stall threshold. `None` before any turn.
@@ -4963,6 +4983,69 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn aborting_a_turn_stops_the_subagent_spinner() {
+        let mut app = App::new();
+        app.session_id = "root".into();
+        app.push_loop_event(&LoopEvent::ToolStarted {
+            id: "call-1".into(),
+            name: "task".into(),
+        });
+        // A subagent reports in: the row now spins on its child's
+        // behalf, and the child has a tool of its own running.
+        for event in [
+            LoopEvent::TurnStarted,
+            LoopEvent::ToolStarted {
+                id: "child-1".into(),
+                name: "grep".into(),
+            },
+        ] {
+            app.push_subagent_activity(&ilar::subagent::SubagentActivity {
+                parent_session_id: "root".into(),
+                parent_call_id: "call-1".into(),
+                child_session_id: "child".into(),
+                event,
+            });
+        }
+        assert!(matches!(
+            app.lines.last(),
+            Some(Line_::Tool { child_running: true, child_lines, .. })
+                if child_lines.iter().any(|line| matches!(
+                    line,
+                    Line_::Tool { state: ToolState::Running, .. }
+                ))
+        ));
+
+        // The turn is aborted. Dropping the parent's tool futures
+        // cancels the child, so its final activity never arrives —
+        // nothing else will ever clear these rows.
+        app.push_loop_event(&LoopEvent::TurnDone {
+            outcome: TurnOutcome::Aborted,
+        });
+
+        let Some(Line_::Tool {
+            state,
+            child_running,
+            child_lines,
+            ..
+        }) = app.lines.last()
+        else {
+            panic!("{:?}", app.lines);
+        };
+        assert_eq!(*state, ToolState::Failed);
+        assert!(!child_running, "the agent row still claims to be working");
+        assert!(
+            child_lines.iter().all(|line| !matches!(
+                line,
+                Line_::Tool {
+                    state: ToolState::Running,
+                    ..
+                }
+            )),
+            "a child tool row is still running: {child_lines:?}"
+        );
     }
 
     #[test]

@@ -167,3 +167,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Reframe the summarizer prompt](issues/reframe-the-summarizer-prompt.md)
 - [x] [The summarizer is asked to continue the conversation](issues/summarizer-continues-the-conversation.md)
 - [x] [ilar exec: run a turn without a terminal](issues/headless-exec.md)
+- [x] [Aborted subagent rows keep spinning](issues/aborted-subagent-rows-keep-spinning.md)
