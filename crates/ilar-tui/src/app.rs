@@ -2799,12 +2799,12 @@ mod tests {
         let models: Vec<_> = ilar::model::catalog().iter().take(10).collect();
         let first = models[0].full_id();
         app.model_picker = Some(ModelPicker::new(models, &first));
-        assert_eq!(app.model_picker.as_ref().unwrap().selected, 0);
+        assert_eq!(app.model_picker.as_ref().unwrap().nav.selected, 0);
 
         assert!(app.scroll_active_modal(3));
-        assert_eq!(app.model_picker.as_ref().unwrap().selected, 3);
+        assert_eq!(app.model_picker.as_ref().unwrap().nav.selected, 3);
         assert!(app.scroll_active_modal(-3));
-        assert_eq!(app.model_picker.as_ref().unwrap().selected, 0);
+        assert_eq!(app.model_picker.as_ref().unwrap().nav.selected, 0);
     }
 
     /// The theme picker previews the highlighted theme across the whole
@@ -2857,7 +2857,7 @@ mod tests {
         // Click the row the buffer shows the target model on.
         let target_row = screen_row(&terminal, &expected);
         assert!(app.click_active_modal(hit.area.x, target_row));
-        assert_eq!(app.model_picker.as_ref().unwrap().selected, 3);
+        assert_eq!(app.model_picker.as_ref().unwrap().nav.selected, 3);
         assert_eq!(
             app.model_picker
                 .as_mut()
@@ -2871,17 +2871,17 @@ mod tests {
         // nothing.
         let header_row = screen_row(&terminal, "type to filter");
         assert!(app.click_active_modal(hit.area.x, header_row));
-        assert_eq!(app.model_picker.as_ref().unwrap().selected, 3);
+        assert_eq!(app.model_picker.as_ref().unwrap().nav.selected, 3);
 
         // A click outside the modal is consumed, not passed through to
         // the transcript underneath.
         assert!(app.click_active_modal(0, 0));
-        assert_eq!(app.model_picker.as_ref().unwrap().selected, 3);
+        assert_eq!(app.model_picker.as_ref().unwrap().nav.selected, 3);
 
         // The clamp is the stale-map defence: an index past the list
         // must land on the last entry, not panic or run off.
         app.model_picker.as_mut().unwrap().select(999);
-        assert_eq!(app.model_picker.as_ref().unwrap().selected, 4);
+        assert_eq!(app.model_picker.as_ref().unwrap().nav.selected, 4);
     }
 
     /// Clicking a theme previews it, exactly like the wheel and the

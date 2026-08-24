@@ -60,6 +60,48 @@ pub(crate) fn nav_delta(code: KeyCode, control: bool) -> Option<isize> {
     }
 }
 
+/// The selection cursor every picker embeds. `select` clamps because a
+/// click can arrive through a stale hit map; `move_by` wraps around the
+/// list because the arrow keys and the wheel rely on it. The list
+/// length is passed per call — most pickers select within a filtered
+/// view whose length changes under the cursor. Reset hooks (armed
+/// state, pending deletes, errors, the theme preview) stay in the
+/// pickers.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ListNav {
+    pub(crate) selected: usize,
+}
+
+impl ListNav {
+    /// Clamp to the list: a stale click index lands on the last entry.
+    fn select(&mut self, index: usize, len: usize) {
+        self.selected = index.min(len.saturating_sub(1));
+    }
+
+    /// Wrap around the list; an empty list pins the cursor at 0.
+    fn move_by(&mut self, delta: isize, len: usize) {
+        if len == 0 {
+            self.selected = 0;
+        } else {
+            self.selected = (self.selected as isize + delta).rem_euclid(len as isize) as usize;
+        }
+    }
+
+    /// Query edits reset to the top: the best match is the first row.
+    fn reset(&mut self) {
+        self.selected = 0;
+    }
+}
+
+/// First visible row of a scrolled list: the window is `visible_rows`
+/// tall, keeps the selection inside, and never scrolls past the end.
+fn list_window(selected: usize, len: usize, visible_rows: usize) -> usize {
+    selected
+        .saturating_add(1)
+        .saturating_sub(visible_rows)
+        .min(len.saturating_sub(visible_rows))
+}
+
 /// The overlay that owns the keyboard. Render and key dispatch both
 /// derive their precedence from `App::active_modal`, so adding a variant
 /// without wiring both is a compile error.
@@ -226,7 +268,7 @@ pub(crate) enum CommandPaletteAction {
 
 pub(crate) struct CommandPalette {
     query: String,
-    selected: usize,
+    nav: ListNav,
     pub(crate) items: Vec<PaletteItem>,
 }
 
@@ -234,7 +276,7 @@ impl CommandPalette {
     pub(crate) fn new(items: Vec<PaletteItem>) -> Self {
         Self {
             query: String::new(),
-            selected: 0,
+            nav: ListNav::default(),
             items,
         }
     }
@@ -254,22 +296,18 @@ impl CommandPalette {
 
     /// Click-to-select: the index is into the filtered list.
     pub(crate) fn select(&mut self, index: usize) {
-        self.selected = index.min(self.filtered_commands().len().saturating_sub(1));
+        self.nav.select(index, self.filtered_commands().len());
     }
 
     pub(crate) fn move_selection(&mut self, delta: isize) {
         let count = self.filtered_commands().len();
-        if count == 0 {
-            self.selected = 0;
-        } else {
-            self.selected = (self.selected as isize + delta).rem_euclid(count as isize) as usize;
-        }
+        self.nav.move_by(delta, count);
     }
 
     pub(crate) fn insert_query(&mut self, text: &str) {
         self.query
             .extend(text.chars().filter(|character| !character.is_control()));
-        self.selected = 0;
+        self.nav.reset();
     }
 
     pub(crate) fn handle_key(&mut self, code: KeyCode, control: bool) -> CommandPaletteAction {
@@ -281,22 +319,22 @@ impl CommandPalette {
             (KeyCode::Esc, _) => CommandPaletteAction::Dismiss,
             (KeyCode::Enter, _) => self
                 .filtered_commands()
-                .get(self.selected)
+                .get(self.nav.selected)
                 .map(|item| CommandPaletteAction::Choose(item.action.clone()))
                 .unwrap_or(CommandPaletteAction::Stay),
             (KeyCode::Home, _) => {
-                self.selected = 0;
+                self.nav.reset();
                 CommandPaletteAction::Stay
             }
             (KeyCode::End, _) => {
-                self.selected = self.filtered_commands().len().saturating_sub(1);
+                self.nav.selected = self.filtered_commands().len().saturating_sub(1);
                 CommandPaletteAction::Stay
             }
             (KeyCode::Backspace, _) => {
                 if let Some((index, _)) = self.query.grapheme_indices(true).next_back() {
                     self.query.truncate(index);
                 }
-                self.selected = 0;
+                self.nav.reset();
                 CommandPaletteAction::Stay
             }
             (KeyCode::Char(character), false) => {
@@ -620,29 +658,24 @@ pub(crate) struct PendingManager {
 
 pub(crate) struct SkillPicker {
     pub(crate) skills: Vec<(String, String)>,
-    selected: usize,
+    nav: ListNav,
 }
 
 impl SkillPicker {
     pub(crate) fn new(skills: Vec<(String, String)>) -> Self {
         Self {
             skills,
-            selected: 0,
+            nav: ListNav::default(),
         }
     }
 
     /// Click-to-select: the index comes from the frame's hit map.
     pub(crate) fn select(&mut self, index: usize) {
-        self.selected = index.min(self.skills.len().saturating_sub(1));
+        self.nav.select(index, self.skills.len());
     }
 
     pub(crate) fn move_selection(&mut self, delta: isize) {
-        let count = self.skills.len();
-        if count == 0 {
-            self.selected = 0;
-        } else {
-            self.selected = (self.selected as isize + delta).rem_euclid(count as isize) as usize;
-        }
+        self.nav.move_by(delta, self.skills.len());
     }
 
     pub(crate) fn handle_key(&mut self, code: KeyCode, control: bool) -> PickerAction {
@@ -654,7 +687,7 @@ impl SkillPicker {
             (KeyCode::Esc, _) => PickerAction::Dismiss,
             (KeyCode::Enter, _) => self
                 .skills
-                .get(self.selected)
+                .get(self.nav.selected)
                 .map(|(name, _)| PickerAction::Choose(name.clone()))
                 .unwrap_or(PickerAction::Dismiss),
             _ => PickerAction::Stay,
@@ -682,12 +715,12 @@ pub(crate) fn render_skill_picker(frame: &mut Frame, picker: &SkillPicker) -> Mo
     if inner.width == 0 || inner.height == 0 {
         return ModalHit::default();
     }
-    let selected = picker.selected.min(picker.skills.len().saturating_sub(1));
+    let selected = picker
+        .nav
+        .selected
+        .min(picker.skills.len().saturating_sub(1));
     let row_count = inner.height as usize;
-    let start = selected
-        .saturating_add(1)
-        .saturating_sub(row_count)
-        .min(picker.skills.len().saturating_sub(row_count));
+    let start = list_window(selected, picker.skills.len(), row_count);
     let mut lines = Vec::new();
     for (index, (name, description)) in picker.skills.iter().enumerate().skip(start).take(row_count)
     {
@@ -726,7 +759,7 @@ pub(crate) enum SessionPickerAction {
 pub(crate) struct SessionPicker {
     pub(crate) sessions: Vec<ilar::session::SessionSummary>,
     query: String,
-    pub(crate) selected: usize,
+    pub(crate) nav: ListNav,
     /// Session id armed for deletion; the next Ctrl-D confirms.
     pending_delete: Option<String>,
 }
@@ -736,7 +769,7 @@ impl SessionPicker {
         Self {
             sessions,
             query: String::new(),
-            selected: 0,
+            nav: ListNav::default(),
             pending_delete: None,
         }
     }
@@ -758,7 +791,7 @@ impl SessionPicker {
 
     fn selected_id(&self) -> Option<String> {
         self.filtered()
-            .get(self.selected)
+            .get(self.nav.selected)
             .map(|session| session.id.clone())
     }
 
@@ -766,17 +799,13 @@ impl SessionPicker {
     /// selection move.
     pub(crate) fn select(&mut self, index: usize) {
         self.pending_delete = None;
-        self.selected = index.min(self.filtered().len().saturating_sub(1));
+        self.nav.select(index, self.filtered().len());
     }
 
     pub(crate) fn move_selection(&mut self, delta: isize) {
         self.pending_delete = None;
         let count = self.filtered().len();
-        if count == 0 {
-            self.selected = 0;
-        } else {
-            self.selected = (self.selected as isize + delta).rem_euclid(count as isize) as usize;
-        }
+        self.nav.move_by(delta, count);
     }
 
     pub(crate) fn handle_key(&mut self, code: KeyCode, control: bool) -> SessionPickerAction {
@@ -804,13 +833,13 @@ impl SessionPicker {
                 .unwrap_or(SessionPickerAction::Stay),
             (KeyCode::Backspace, _) => {
                 self.query.pop();
-                self.selected = 0;
+                self.nav.reset();
                 self.pending_delete = None;
                 SessionPickerAction::Stay
             }
             (KeyCode::Char(character), false) if !character.is_control() => {
                 self.query.push(character);
-                self.selected = 0;
+                self.nav.reset();
                 self.pending_delete = None;
                 SessionPickerAction::Stay
             }
@@ -822,7 +851,7 @@ impl SessionPicker {
 pub(crate) struct LinkPicker {
     links: Vec<crate::links::LinkEntry>,
     query: String,
-    selected: usize,
+    nav: ListNav,
 }
 
 impl LinkPicker {
@@ -830,7 +859,7 @@ impl LinkPicker {
         Self {
             links,
             query: String::new(),
-            selected: 0,
+            nav: ListNav::default(),
         }
     }
 
@@ -848,16 +877,12 @@ impl LinkPicker {
     }
 
     pub(crate) fn select(&mut self, index: usize) {
-        self.selected = index.min(self.filtered().len().saturating_sub(1));
+        self.nav.select(index, self.filtered().len());
     }
 
     pub(crate) fn move_selection(&mut self, delta: isize) {
         let count = self.filtered().len();
-        if count == 0 {
-            self.selected = 0;
-        } else {
-            self.selected = (self.selected as isize + delta).rem_euclid(count as isize) as usize;
-        }
+        self.nav.move_by(delta, count);
     }
 
     pub(crate) fn handle_key(&mut self, code: KeyCode, control: bool) -> PickerAction {
@@ -869,17 +894,17 @@ impl LinkPicker {
             (KeyCode::Esc, _) => PickerAction::Dismiss,
             (KeyCode::Enter, _) => self
                 .filtered()
-                .get(self.selected)
+                .get(self.nav.selected)
                 .map(|link| PickerAction::Choose(link.url.clone()))
                 .unwrap_or(PickerAction::Dismiss),
             (KeyCode::Backspace, _) => {
                 self.query.pop();
-                self.selected = 0;
+                self.nav.reset();
                 PickerAction::Stay
             }
             (KeyCode::Char(character), false) if !character.is_control() => {
                 self.query.push(character);
-                self.selected = 0;
+                self.nav.reset();
                 PickerAction::Stay
             }
             _ => PickerAction::Stay,
@@ -923,12 +948,9 @@ pub(crate) fn render_link_picker(frame: &mut Frame, picker: &LinkPicker) -> Moda
         frame.render_widget(Paragraph::new(lines), inner);
         return ModalHit::default();
     }
-    let selected = picker.selected.min(links.len() - 1);
+    let selected = picker.nav.selected.min(links.len() - 1);
     let row_count = (inner.height as usize).saturating_sub(lines.len()).max(1);
-    let start = selected
-        .saturating_add(1)
-        .saturating_sub(row_count)
-        .min(links.len().saturating_sub(row_count));
+    let start = list_window(selected, links.len(), row_count);
     let mut rows: Vec<Option<usize>> = vec![None];
     for (index, link) in links.iter().enumerate().skip(start).take(row_count) {
         let marker = if index == selected { "> " } else { "  " };
@@ -1017,7 +1039,7 @@ pub(crate) enum TurnPickerAction {
 pub(crate) struct TurnPicker {
     turns: Vec<TurnEntry>,
     query: String,
-    selected: usize,
+    nav: ListNav,
     /// User-message id armed for rewind; the next Enter confirms. Any
     /// selection move or filter edit disarms.
     armed: Option<String>,
@@ -1028,7 +1050,7 @@ impl TurnPicker {
         Self {
             turns,
             query: String::new(),
-            selected: 0,
+            nav: ListNav::default(),
             armed: None,
         }
     }
@@ -1044,7 +1066,7 @@ impl TurnPicker {
     }
 
     fn selected_turn(&self) -> Option<&TurnEntry> {
-        self.filtered().get(self.selected).copied()
+        self.filtered().get(self.nav.selected).copied()
     }
 
     /// Discarded-turn count and tree flag for the armed confirmation.
@@ -1060,17 +1082,13 @@ impl TurnPicker {
 
     pub(crate) fn select(&mut self, index: usize) {
         self.armed = None;
-        self.selected = index.min(self.filtered().len().saturating_sub(1));
+        self.nav.select(index, self.filtered().len());
     }
 
     pub(crate) fn move_selection(&mut self, delta: isize) {
         self.armed = None;
         let count = self.filtered().len();
-        if count == 0 {
-            self.selected = 0;
-        } else {
-            self.selected = (self.selected as isize + delta).rem_euclid(count as isize) as usize;
-        }
+        self.nav.move_by(delta, count);
     }
 
     pub(crate) fn handle_key(&mut self, code: KeyCode, control: bool) -> TurnPickerAction {
@@ -1103,13 +1121,13 @@ impl TurnPicker {
                 .unwrap_or(TurnPickerAction::Stay),
             (KeyCode::Backspace, _) => {
                 self.query.pop();
-                self.selected = 0;
+                self.nav.reset();
                 self.armed = None;
                 TurnPickerAction::Stay
             }
             (KeyCode::Char(character), false) if !character.is_control() => {
                 self.query.push(character);
-                self.selected = 0;
+                self.nav.reset();
                 self.armed = None;
                 TurnPickerAction::Stay
             }
@@ -1162,12 +1180,9 @@ pub(crate) fn render_turn_picker(frame: &mut Frame, picker: &TurnPicker) -> Moda
         return ModalHit::default();
     }
     let now = std::time::SystemTime::now();
-    let selected = picker.selected.min(turns.len() - 1);
+    let selected = picker.nav.selected.min(turns.len() - 1);
     let row_count = (inner.height as usize).saturating_sub(lines.len()).max(1);
-    let start = selected
-        .saturating_add(1)
-        .saturating_sub(row_count)
-        .min(turns.len().saturating_sub(row_count));
+    let start = list_window(selected, turns.len(), row_count);
     let mut rows: Vec<Option<usize>> = vec![None];
     for (index, turn) in turns.iter().enumerate().skip(start).take(row_count) {
         let armed = index == selected && picker.armed.as_deref() == Some(turn.user_id.as_str());
@@ -1268,12 +1283,9 @@ pub(crate) fn render_session_picker(frame: &mut Frame, picker: &SessionPicker) -
         return ModalHit::default();
     }
     let now = std::time::SystemTime::now();
-    let selected = picker.selected.min(sessions.len() - 1);
+    let selected = picker.nav.selected.min(sessions.len() - 1);
     let row_count = (inner.height as usize).saturating_sub(lines.len()).max(1);
-    let start = selected
-        .saturating_add(1)
-        .saturating_sub(row_count)
-        .min(sessions.len().saturating_sub(row_count));
+    let start = list_window(selected, sessions.len(), row_count);
     for (index, session) in sessions.iter().enumerate().skip(start).take(row_count) {
         let marker = if index == selected {
             if picker.pending_delete.as_deref() == Some(session.id.as_str()) {
@@ -1321,7 +1333,7 @@ pub(crate) struct ModelPicker {
     models: Vec<&'static ilar::model::ModelInfo>,
     active_model: String,
     query: String,
-    pub(crate) selected: usize,
+    pub(crate) nav: ListNav,
     pub(crate) error: Option<String>,
 }
 
@@ -1335,7 +1347,7 @@ impl ModelPicker {
             models,
             active_model: active_model.to_string(),
             query: String::new(),
-            selected,
+            nav: ListNav { selected },
             error: None,
         }
     }
@@ -1357,31 +1369,27 @@ impl ModelPicker {
     #[cfg(test)]
     pub(crate) fn set_query(&mut self, query: &str) {
         self.query = query.to_string();
-        self.selected = 0;
+        self.nav.reset();
     }
 
     #[cfg(test)]
     fn selected_index(&self) -> usize {
-        self.selected
+        self.nav.selected
     }
 
     /// Click-to-select: the index is into the filtered list, which is
     /// what the hit map was built from.
     pub(crate) fn select(&mut self, index: usize) {
-        self.selected = index.min(self.filtered_models().len().saturating_sub(1));
+        self.nav.select(index, self.filtered_models().len());
     }
 
     pub(crate) fn move_selection(&mut self, delta: isize) {
         let count = self.filtered_models().len();
-        if count == 0 {
-            self.selected = 0;
-        } else {
-            self.selected = (self.selected as isize + delta).rem_euclid(count as isize) as usize;
-        }
+        self.nav.move_by(delta, count);
     }
 
     fn select_boundary(&mut self, end: bool) {
-        self.selected = if end {
+        self.nav.selected = if end {
             self.filtered_models().len().saturating_sub(1)
         } else {
             0
@@ -1397,7 +1405,7 @@ impl ModelPicker {
             (KeyCode::Esc, _) => PickerAction::Dismiss,
             (KeyCode::Enter, _) => self
                 .filtered_models()
-                .get(self.selected)
+                .get(self.nav.selected)
                 .map(|model| {
                     let id = model.full_id();
                     if id == self.active_model && model.variants().is_empty() {
@@ -1427,13 +1435,13 @@ impl ModelPicker {
                 if let Some((index, _)) = self.query.grapheme_indices(true).next_back() {
                     self.query.truncate(index);
                 }
-                self.selected = 0;
+                self.nav.reset();
                 self.error = None;
                 PickerAction::Stay
             }
             (KeyCode::Char(character), false) => {
                 self.query.push(character);
-                self.selected = 0;
+                self.nav.reset();
                 self.error = None;
                 PickerAction::Stay
             }
@@ -1452,7 +1460,7 @@ pub(crate) enum VariantPickerAction {
 pub(crate) struct VariantPicker {
     pub(crate) model: &'static ilar::model::ModelInfo,
     active_variant: Option<String>,
-    selected: usize,
+    nav: ListNav,
     pub(crate) error: Option<String>,
 }
 
@@ -1473,30 +1481,36 @@ impl VariantPicker {
         Self {
             model,
             active_variant: active_variant.map(String::from),
-            selected,
+            nav: ListNav { selected },
             error: None,
         }
     }
 
+    /// The list is the variants plus the synthetic "Provider default"
+    /// row at index 0.
+    fn choice_count(&self) -> usize {
+        self.model.variants().len() + 1
+    }
+
     #[cfg(test)]
     fn selected_index(&self) -> usize {
-        self.selected
+        self.nav.selected
     }
 
     /// Click-to-select. Clears the error like a selection move does.
     pub(crate) fn select(&mut self, index: usize) {
-        self.selected = index.min(self.model.variants().len());
+        self.nav.select(index, self.choice_count());
         self.error = None;
     }
 
     pub(crate) fn move_selection(&mut self, delta: isize) {
-        let count = self.model.variants().len() + 1;
-        self.selected = (self.selected as isize + delta).rem_euclid(count as isize) as usize;
+        self.nav.move_by(delta, self.choice_count());
         self.error = None;
     }
 
     fn selected_variant(&self) -> Option<String> {
-        self.selected
+        self.nav
+            .selected
             .checked_sub(1)
             .and_then(|index| self.model.variants().get(index))
             .map(|variant| variant.id.to_string())
@@ -1518,11 +1532,11 @@ impl VariantPicker {
                 }
             }
             (KeyCode::Home, _) => {
-                self.selected = 0;
+                self.nav.reset();
                 VariantPickerAction::Stay
             }
             (KeyCode::End, _) => {
-                self.selected = self.model.variants().len();
+                self.nav.selected = self.model.variants().len();
                 VariantPickerAction::Stay
             }
             _ => VariantPickerAction::Stay,
@@ -1544,7 +1558,7 @@ pub(crate) struct ThemePicker {
     /// matches nothing — it falls back to the full list, because an empty
     /// picker has nothing to preview.
     matches: Vec<theme::ThemeId>,
-    selected: usize,
+    nav: ListNav,
     pub(crate) error: Option<String>,
 }
 
@@ -1558,7 +1572,7 @@ impl ThemePicker {
             active_theme,
             query: String::new(),
             matches: theme::ThemeId::ALL.to_vec(),
-            selected,
+            nav: ListNav { selected },
             error: None,
         }
     }
@@ -1568,7 +1582,7 @@ impl ThemePicker {
     }
 
     pub(crate) fn selected_index(&self) -> usize {
-        self.selected.min(self.matches.len().saturating_sub(1))
+        self.nav.selected.min(self.matches.len().saturating_sub(1))
     }
 
     pub(crate) fn selected_theme(&self) -> theme::ThemeId {
@@ -1595,7 +1609,7 @@ impl ThemePicker {
         } else {
             ranked.into_iter().map(|(_, theme)| theme).collect()
         };
-        self.selected = self
+        self.nav.selected = self
             .matches
             .iter()
             .position(|candidate| *candidate == previous)
@@ -1605,14 +1619,15 @@ impl ThemePicker {
     }
 
     pub(crate) fn select(&mut self, selected: usize) -> ThemePickerAction {
-        self.selected = selected.min(self.matches.len().saturating_sub(1));
+        self.nav.select(selected, self.matches.len());
         self.error = None;
         ThemePickerAction::Preview(self.selected_theme())
     }
 
     pub(crate) fn move_selection(&mut self, delta: isize) -> ThemePickerAction {
-        let count = self.matches.len().max(1) as isize;
-        self.selected = (self.selected_index() as isize + delta).rem_euclid(count) as usize;
+        // Re-anchor the cursor first: it is only clamped on read.
+        self.nav.selected = self.selected_index();
+        self.nav.move_by(delta, self.matches.len());
         self.error = None;
         ThemePickerAction::Preview(self.selected_theme())
     }
@@ -1723,7 +1738,7 @@ pub(crate) fn render_command_palette(frame: &mut Frame, palette: &CommandPalette
             lines.push(Line::default());
         }
         let available = inner.height.saturating_sub(lines.len() as u16) as usize;
-        let selected = palette.selected.min(commands.len().saturating_sub(1));
+        let selected = palette.nav.selected.min(commands.len().saturating_sub(1));
         let (start, row_count) = palette_window(commands.len(), available, selected);
         if start > 0 {
             lines.push(Line::styled(
@@ -1818,12 +1833,9 @@ pub(crate) fn render_variant_picker(frame: &mut Frame, picker: &VariantPicker) -
     let mut rows: Vec<Option<usize>> = vec![None; lines.len()];
 
     let row_count = inner.height.saturating_sub(lines.len() as u16) as usize;
-    let choice_count = picker.model.variants().len() + 1;
-    let selected = picker.selected.min(choice_count.saturating_sub(1));
-    let start = selected
-        .saturating_add(1)
-        .saturating_sub(row_count)
-        .min(choice_count.saturating_sub(row_count));
+    let choice_count = picker.choice_count();
+    let selected = picker.nav.selected.min(choice_count.saturating_sub(1));
+    let start = list_window(selected, choice_count, row_count);
     for index in start..choice_count.min(start.saturating_add(row_count)) {
         let (id, name) = if index == 0 {
             ("default", "Provider default")
@@ -1926,10 +1938,7 @@ pub(crate) fn render_theme_picker(frame: &mut Frame, picker: &ThemePicker) -> Mo
         .saturating_sub(lines.len() as u16)
         .saturating_sub(u16::from(show_sample))
         .max(1) as usize;
-    let start = selected
-        .saturating_add(1)
-        .saturating_sub(row_count)
-        .min(choices.len().saturating_sub(row_count));
+    let start = list_window(selected, choices.len(), row_count);
     let mut rows: Vec<Option<usize>> = vec![None; lines.len()];
     for (index, choice) in choices.iter().enumerate().skip(start).take(row_count) {
         rows.push(Some(index));
@@ -2001,7 +2010,7 @@ pub(crate) fn render_model_picker(frame: &mut Frame, picker: &ModelPicker) -> Mo
     let models = picker.filtered_models();
     let count = format!(
         "{}/{}",
-        picker.selected.saturating_add(1).min(models.len()),
+        picker.nav.selected.saturating_add(1).min(models.len()),
         models.len()
     );
     let fixed_width = 7usize
@@ -2059,11 +2068,8 @@ pub(crate) fn render_model_picker(frame: &mut Frame, picker: &ModelPicker) -> Mo
             Style::default().fg(MUTED),
         ));
     } else if row_count > 0 {
-        let selected = picker.selected.min(models.len().saturating_sub(1));
-        let start = selected
-            .saturating_add(1)
-            .saturating_sub(row_count)
-            .min(models.len().saturating_sub(row_count));
+        let selected = picker.nav.selected.min(models.len().saturating_sub(1));
+        let start = list_window(selected, models.len(), row_count);
         rows.extend((start..models.len().min(start.saturating_add(row_count))).map(Some));
         for (index, model) in models.iter().enumerate().skip(start).take(row_count) {
             let full_id = model.full_id();
@@ -2276,6 +2282,38 @@ mod tests {
         );
         // F2 is portable and must always be offered.
         assert!(rendered(false).contains("F2"));
+    }
+
+    #[test]
+    fn list_nav_clamps_selection_and_wraps_moves() {
+        let mut nav = ListNav::default();
+        nav.select(7, 3);
+        assert_eq!(nav.selected, 2, "a stale click lands on the last entry");
+        nav.select(1, 3);
+        assert_eq!(nav.selected, 1);
+        nav.move_by(2, 3);
+        assert_eq!(nav.selected, 0, "moving past the end wraps to the top");
+        nav.move_by(-1, 3);
+        assert_eq!(nav.selected, 2, "moving before the start wraps to the end");
+        nav.move_by(5, 0);
+        assert_eq!(nav.selected, 0, "an empty list pins the cursor");
+        nav.select(0, 0);
+        assert_eq!(nav.selected, 0);
+    }
+
+    #[test]
+    fn list_window_tracks_the_selection_without_overshooting() {
+        // Everything fits: the window starts at the top.
+        assert_eq!(list_window(0, 3, 5), 0);
+        assert_eq!(list_window(2, 3, 5), 0);
+        // Clipped: the window slides to keep the selection visible.
+        assert_eq!(list_window(0, 10, 4), 0);
+        assert_eq!(list_window(3, 10, 4), 0);
+        assert_eq!(list_window(4, 10, 4), 1);
+        assert_eq!(list_window(9, 10, 4), 6);
+        // Degenerate sizes must not underflow.
+        assert_eq!(list_window(0, 0, 4), 0);
+        assert_eq!(list_window(5, 10, 0), 6, "a zero-row window draws nothing");
     }
 
     #[test]

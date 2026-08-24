@@ -2011,7 +2011,7 @@ async fn run_app(
                                     Ok(()) => {
                                         if let Some(picker) = app.session_picker.as_mut() {
                                             picker.sessions.retain(|session| session.id != id);
-                                            picker.selected = 0;
+                                            picker.nav.selected = 0;
                                         }
                                         app.set_notice(
                                             format!("deleted session {id}"),
