@@ -1032,3 +1032,75 @@ async fn the_request_being_served_survives_the_summarizer() {
         "{transcript}"
     );
 }
+
+#[tokio::test]
+async fn the_plan_survives_compaction() {
+    let (store, session_id) = temp_session();
+    seed_compactable_history(&store, &session_id);
+    {
+        let mut session = store.acquire_writer(&session_id).unwrap().load().unwrap();
+        session
+            .append(SessionEvent::AssistantMessage {
+                id: new_id(),
+                model: "zai/glm-4.7".into(),
+                content: vec![ilar::session::ContentBlock::ToolCall {
+                    id: "todo-1".into(),
+                    name: "todo".into(),
+                    input: serde_json::json!({}),
+                    item_id: None,
+                }],
+                usage: Usage::default(),
+                stop_reason: "tool_use".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        session
+            .append(SessionEvent::ToolResult {
+                id: new_id(),
+                tool_use_id: "todo-1".into(),
+                content: "[x] read the config\n[>] fix the parser\n[ ] add a test".into(),
+                is_error: false,
+                child_session_id: None,
+                state: Some(ilar::session::SessionState::TodoList {
+                    list: ilar::todo::TodoList {
+                        items: vec![
+                            ilar::todo::TodoItem {
+                                content: "read the config".into(),
+                                status: ilar::todo::Status::Completed,
+                            },
+                            ilar::todo::TodoItem {
+                                content: "fix the parser".into(),
+                                status: ilar::todo::Status::InProgress,
+                            },
+                            ilar::todo::TodoItem {
+                                content: "add a test".into(),
+                                status: ilar::todo::Status::Pending,
+                            },
+                        ],
+                    },
+                }),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+    }
+    // A summarizer that writes a decent summary and never mentions the plan.
+    let provider = MockProvider::new(vec![text_turn(
+        "## Objective\nfix the parser\n## Next Move\n1. keep going",
+    )]);
+    let cancel = tokio_util::sync::CancellationToken::new();
+
+    compact_session(&provider, &store, &session_id, Some("system"), &[], &cancel)
+        .await
+        .unwrap();
+
+    // The list is state and survives, as it always did...
+    let session = store.load(&session_id).unwrap();
+    assert_eq!(session.todo_list().unwrap().items.len(), 3);
+    // ...but now the model can see it too: before this, compaction
+    // dropped the tool results the list lived in and the plan simply
+    // vanished from the conversation.
+    let transcript = format!("{:?}", session.transcript());
+    assert!(transcript.contains("[>] fix the parser"), "{transcript}");
+    assert!(transcript.contains("[ ] add a test"), "{transcript}");
+    assert!(transcript.contains("todo"), "{transcript}");
+}

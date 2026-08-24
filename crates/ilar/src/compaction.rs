@@ -57,6 +57,8 @@ Rules:
 error strings verbatim. Never paraphrase an identifier.
 - Record what was ruled out and why, not only what succeeded: a summary of successes \
 invites repeating a rejected approach.
+- If the conversation shows a todo item is finished, obsolete or wrong, say so under Work \
+State: the list is appended below your summary and the next turn corrects it.
 - Terse bullets, not prose.
 - Do not mention summarizing, compaction, or context limits.
 
@@ -170,6 +172,25 @@ fn summarizer_messages(transcript: &[ChatMessage]) -> Vec<ChatMessage> {
     let mut messages = transcript.to_vec();
     messages.push(ChatMessage::user_text(instruction));
     messages
+}
+
+/// Pin the working plan below the summary. The todo list lives in tool
+/// results, so a compaction that drops them leaves the model with no
+/// evidence its own plan exists — it keeps working, having quietly
+/// forgotten what it meant to do next, while the sidebar still shows
+/// the list. State the model cannot see is state it cannot act on.
+fn pin_todos(summary: &str, todos: Option<&crate::todo::TodoList>) -> String {
+    let Some(checklist) = todos
+        .filter(|list| !list.items.is_empty())
+        .map(crate::todo::TodoList::checklist)
+    else {
+        return summary.to_string();
+    };
+    format!(
+        "{summary}\n\nThe todo list at this point, which the todo tool still owns:\n\
+{checklist}\nRe-read it before planning, and correct it with the todo tool if the work \
+above finished or invalidated an item."
+    )
 }
 
 /// Pin the user's own words above the summary. They are the cheapest
@@ -665,6 +686,7 @@ pub(crate) async fn compact_if_needed_locked(
     // The user's own words survive whatever the summarizer decided to
     // paraphrase away.
     let summary = pin_requests(&summary, &user_requests(&transcript));
+    let summary = pin_todos(&summary, session.todo_list());
     session.append(SessionEvent::Compaction {
         id: new_id(),
         summary: summary.clone(),
@@ -801,6 +823,38 @@ mod tests {
 
         // Nothing to pin: the summary passes through untouched.
         assert_eq!(pin_requests("MODEL SUMMARY", &[]), "MODEL SUMMARY");
+    }
+
+    #[test]
+    fn the_plan_is_pinned_only_when_there_is_one() {
+        let list = crate::todo::TodoList {
+            items: vec![
+                crate::todo::TodoItem {
+                    content: "read the config".into(),
+                    status: crate::todo::Status::Completed,
+                },
+                crate::todo::TodoItem {
+                    content: "fix the parser".into(),
+                    status: crate::todo::Status::InProgress,
+                },
+            ],
+        };
+
+        let pinned = pin_todos("SUMMARY", Some(&list));
+
+        assert!(pinned.starts_with("SUMMARY"), "{pinned}");
+        assert!(pinned.contains("[x] read the config"), "{pinned}");
+        assert!(pinned.contains("[>] fix the parser"), "{pinned}");
+        // The tool stays authoritative; the pin is a reminder, not a copy
+        // the model is invited to edit in place.
+        assert!(pinned.contains("todo tool"), "{pinned}");
+
+        // Nothing to pin: untouched.
+        assert_eq!(pin_todos("SUMMARY", None), "SUMMARY");
+        assert_eq!(
+            pin_todos("SUMMARY", Some(&crate::todo::TodoList::default())),
+            "SUMMARY"
+        );
     }
 
     #[test]

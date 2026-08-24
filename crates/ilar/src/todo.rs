@@ -39,6 +39,18 @@ pub struct TodoItem {
 }
 
 impl TodoList {
+    /// The checklist as the model wrote it and reads it back. Shared
+    /// with compaction, which pins the list into its summary: the list
+    /// lives in tool results, so a compaction that dropped them would
+    /// leave the model with no evidence its own plan exists.
+    pub fn checklist(&self) -> String {
+        self.items
+            .iter()
+            .map(|item| format!("{} {}", item.status.marker(), item.content))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     pub fn validate(&self) -> Result<(), &'static str> {
         if self
             .items
@@ -140,15 +152,11 @@ impl Tool for TodoTool {
             if let Err(error) = updated.validate() {
                 return ToolOutput::error(error);
             }
-            let rendered: Vec<String> = updated
-                .items
-                .iter()
-                .map(|i| format!("{} {}", i.status.marker(), i.content))
-                .collect();
+            let rendered = updated.checklist();
             ToolOutput::text(if rendered.is_empty() {
                 "(todo list cleared)".into()
             } else {
-                rendered.join("\n")
+                rendered
             })
             .with_todo_state(list, updated)
         })
