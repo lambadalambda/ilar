@@ -1322,3 +1322,13 @@ Smoke-ran in tmux against a synthetic session carrying a twelve-item
 list: forty rows shows all twelve wrapped, sixteen rows shows the
 active item and everything after it with `+4 hidden · ^T`, and Ctrl-T
 opens `todos · 4/12 done` over the lot.
+
+Same day, same panel-geometry theme: the transcript scrollbar never
+reached the end of its track. ratatui counts scroll positions up to
+`content_length - 1`, where that last position puts the final line at
+the *top* of the viewport; we stop scrolling when the final line
+reaches the bottom. Feeding it the row count therefore mapped our
+maximum position a whole viewport short of the track end — four rows
+above the bottom on a 40-row terminal, worse on bigger ones, so a
+transcript at its true tail still looked like it had more below. The
+scrollbar's content length is our position count, `max_scroll + 1`.
