@@ -2551,4 +2551,252 @@ mod tests {
             VariantPickerAction::Dismiss
         );
     }
+
+    /// Render one modal into a test terminal: the buffer text joined by
+    /// newlines, plus the hit map the renderer returned.
+    fn draw_modal(
+        width: u16,
+        height: u16,
+        render: impl Fn(&mut Frame) -> ModalHit,
+    ) -> (String, ModalHit) {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut hit = ModalHit::default();
+        terminal.draw(|frame| hit = render(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        (screen, hit)
+    }
+
+    fn link(label: &str, url: &str) -> crate::links::LinkEntry {
+        crate::links::LinkEntry {
+            label: label.into(),
+            url: url.into(),
+        }
+    }
+
+    #[test]
+    fn link_picker_navigates_filters_and_chooses() {
+        let mut picker = LinkPicker::new(vec![
+            link("docs", "https://docs.example/one"),
+            link("issue tracker", "https://bugs.example/two"),
+            link("https://plain.example/three", "https://plain.example/three"),
+        ]);
+
+        // Enter opens the selected link.
+        assert_eq!(
+            picker.handle_key(KeyCode::Enter, false),
+            PickerAction::Choose("https://docs.example/one".into())
+        );
+        picker.handle_key(KeyCode::Down, false);
+        assert_eq!(
+            picker.handle_key(KeyCode::Enter, false),
+            PickerAction::Choose("https://bugs.example/two".into())
+        );
+        // Up from the second lands on the first; Up again wraps to the last.
+        picker.handle_key(KeyCode::Up, false);
+        picker.handle_key(KeyCode::Up, false);
+        assert_eq!(
+            picker.handle_key(KeyCode::Enter, false),
+            PickerAction::Choose("https://plain.example/three".into())
+        );
+
+        // Typing filters (label and url both match) and resets the selection.
+        for character in "bugs".chars() {
+            picker.handle_key(KeyCode::Char(character), false);
+        }
+        assert_eq!(
+            picker.handle_key(KeyCode::Enter, false),
+            PickerAction::Choose("https://bugs.example/two".into())
+        );
+        // No match: Enter dismisses instead of choosing.
+        for character in "zzz".chars() {
+            picker.handle_key(KeyCode::Char(character), false);
+        }
+        assert!(picker.filtered().is_empty());
+        assert_eq!(
+            picker.handle_key(KeyCode::Enter, false),
+            PickerAction::Dismiss
+        );
+        // Backspace edits the query back to a match.
+        for _ in 0..7 {
+            picker.handle_key(KeyCode::Backspace, false);
+        }
+        assert_eq!(picker.filtered().len(), 3);
+        assert_eq!(
+            picker.handle_key(KeyCode::Esc, false),
+            PickerAction::Dismiss
+        );
+
+        let mut empty = LinkPicker::new(Vec::new());
+        assert_eq!(
+            empty.handle_key(KeyCode::Enter, false),
+            PickerAction::Dismiss
+        );
+    }
+
+    #[test]
+    fn link_picker_renders_filter_rows_and_click_map() {
+        let picker = LinkPicker::new(vec![
+            link("docs", "https://docs.example/one"),
+            link("https://plain.example/two", "https://plain.example/two"),
+        ]);
+        let (screen, hit) = draw_modal(80, 20, |frame| render_link_picker(frame, &picker));
+
+        assert!(screen.contains("links"), "{screen}");
+        assert!(screen.contains("filter"), "{screen}");
+        assert!(screen.contains("↵ open in browser"), "{screen}");
+        // A labelled link shows label then url; a bare one just the url.
+        assert!(
+            screen.contains("> docs https://docs.example/one"),
+            "{screen}"
+        );
+        assert!(screen.contains("  https://plain.example/two"), "{screen}");
+
+        // The filter header is unclickable; the rows map to link indices.
+        assert_eq!(hit.rows, vec![None, Some(0), Some(1)]);
+        assert_eq!(hit.item_at(hit.area.x, hit.area.y), None);
+        assert_eq!(hit.item_at(hit.area.x, hit.area.y + 1), Some(0));
+        assert_eq!(hit.item_at(hit.area.x, hit.area.y + 2), Some(1));
+
+        // The no-match state renders but maps no rows.
+        let mut picker = picker;
+        picker.handle_key(KeyCode::Char('z'), false);
+        picker.handle_key(KeyCode::Char('q'), false);
+        let (screen, hit) = draw_modal(80, 20, |frame| render_link_picker(frame, &picker));
+        assert!(screen.contains("no matches"), "{screen}");
+        assert_eq!(hit, ModalHit::default());
+    }
+
+    #[test]
+    fn skill_picker_navigates_wraps_and_chooses() {
+        let mut picker = SkillPicker::new(vec![
+            ("deploy".into(), "Ship it".into()),
+            ("review".into(), "Look closely".into()),
+        ]);
+
+        picker.handle_key(KeyCode::Down, false);
+        assert_eq!(
+            picker.handle_key(KeyCode::Enter, false),
+            PickerAction::Choose("review".into())
+        );
+        // Down from the last wraps to the first; Up wraps back.
+        picker.handle_key(KeyCode::Down, false);
+        assert_eq!(
+            picker.handle_key(KeyCode::Enter, false),
+            PickerAction::Choose("deploy".into())
+        );
+        picker.handle_key(KeyCode::Up, false);
+        assert_eq!(
+            picker.handle_key(KeyCode::Enter, false),
+            PickerAction::Choose("review".into())
+        );
+        assert_eq!(
+            picker.handle_key(KeyCode::Esc, false),
+            PickerAction::Dismiss
+        );
+
+        let mut empty = SkillPicker::new(Vec::new());
+        assert_eq!(
+            empty.handle_key(KeyCode::Enter, false),
+            PickerAction::Dismiss
+        );
+    }
+
+    #[test]
+    fn skill_picker_renders_rows_and_click_map() {
+        let picker = SkillPicker::new(vec![
+            ("deploy".into(), "Ship it".into()),
+            ("review".into(), "Look closely".into()),
+        ]);
+        let (screen, hit) = draw_modal(80, 20, |frame| render_skill_picker(frame, &picker));
+
+        assert!(screen.contains("skills"), "{screen}");
+        assert!(screen.contains("Enter insert"), "{screen}");
+        assert!(screen.contains("> /deploy — Ship it"), "{screen}");
+        assert!(screen.contains("  /review — Look closely"), "{screen}");
+
+        // No header line: the first drawn row is the first skill.
+        assert_eq!(hit.rows, vec![Some(0), Some(1)]);
+        assert_eq!(hit.item_at(hit.area.x, hit.area.y), Some(0));
+        assert_eq!(hit.item_at(hit.area.x, hit.area.y + 1), Some(1));
+    }
+
+    #[test]
+    fn turn_picker_renders_markers_armed_stakes_and_click_map() {
+        let events = vec![
+            meta_event(),
+            checkpoint("aaa"),
+            user("u1", "first question"),
+            user("u2", "a steer"),
+        ];
+        let mut picker = TurnPicker::new(turn_entries(&events));
+
+        // Unarmed: the tree-backed turn carries the ⎇ marker and an age.
+        let (screen, hit) = draw_modal(80, 20, |frame| render_turn_picker(frame, &picker));
+        assert!(screen.contains("rewind to turn"), "{screen}");
+        assert!(screen.contains("filter"), "{screen}");
+        assert!(screen.contains("> a steer"), "{screen}");
+        assert!(screen.contains("first question"), "{screen}");
+        assert!(screen.contains("⎇ now"), "{screen}");
+        assert_eq!(hit.rows, vec![None, Some(0), Some(1)]);
+        assert_eq!(hit.item_at(hit.area.x, hit.area.y), None);
+        assert_eq!(hit.item_at(hit.area.x, hit.area.y + 1), Some(0));
+        assert_eq!(hit.item_at(hit.area.x, hit.area.y + 2), Some(1));
+
+        // Armed on a treeless turn: the right column states the stakes.
+        picker.handle_key(KeyCode::Enter, false);
+        let (screen, _) = draw_modal(80, 20, |frame| render_turn_picker(frame, &picker));
+        assert!(screen.contains("✗ a steer"), "{screen}");
+        assert!(screen.contains("↵ drops 1, chat only"), "{screen}");
+
+        // Armed on the tree-backed turn: it promises the tree restore.
+        picker.handle_key(KeyCode::Down, false);
+        picker.handle_key(KeyCode::Enter, false);
+        let (screen, _) = draw_modal(80, 20, |frame| render_turn_picker(frame, &picker));
+        assert!(screen.contains("✗ first question"), "{screen}");
+        assert!(screen.contains("↵ drops 2, restores tree"), "{screen}");
+    }
+
+    #[test]
+    fn session_picker_renders_armed_deletion_and_click_map() {
+        let now = std::time::SystemTime::now();
+        let session = |id: &str, title: &str| ilar::session::SessionSummary {
+            id: id.into(),
+            title: Some(title.into()),
+            modified: now,
+        };
+        let mut picker = SessionPicker::new(vec![
+            session("aaa", "fix websearch fallback"),
+            session("bbb", "voxel pagoda benchmark"),
+        ]);
+
+        let (screen, hit) = draw_modal(80, 20, |frame| render_session_picker(frame, &picker));
+        assert!(screen.contains("sessions"), "{screen}");
+        assert!(screen.contains("filter"), "{screen}");
+        assert!(screen.contains("> fix websearch fallback"), "{screen}");
+        assert!(screen.contains("  voxel pagoda benchmark"), "{screen}");
+        assert!(screen.contains("now"), "{screen}");
+
+        // The filter header is unclickable; each session row maps to the
+        // filtered index the click selects.
+        assert_eq!(hit.rows, vec![None, Some(0), Some(1)]);
+        assert_eq!(hit.item_at(hit.area.x, hit.area.y), None);
+        assert_eq!(hit.item_at(hit.area.x, hit.area.y + 1), Some(0));
+        assert_eq!(hit.item_at(hit.area.x, hit.area.y + 2), Some(1));
+
+        // A first Ctrl-D arms deletion: the row shows the confirm column.
+        picker.handle_key(KeyCode::Char('d'), true);
+        let (screen, hit) = draw_modal(80, 20, |frame| render_session_picker(frame, &picker));
+        assert!(screen.contains("✗ fix websearch fallback"), "{screen}");
+        assert!(screen.contains("^D deletes"), "{screen}");
+        assert_eq!(hit.rows, vec![None, Some(0), Some(1)]);
+    }
 }
