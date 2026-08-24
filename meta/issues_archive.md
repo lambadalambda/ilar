@@ -162,3 +162,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Finish modal scaffold adoption](issues/finish-modal-scaffold-adoption.md)
 - [x] [Todos fill the space they have](issues/todos-fill-the-space-they-have.md)
 - [x] [Scrollbar thumb stops short of the bottom](issues/scrollbar-thumb-stops-short.md)
+- [x] [Let the agent revisit its subagents](issues/revisit-subagents.md)

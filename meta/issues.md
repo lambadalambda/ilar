@@ -40,5 +40,5 @@
 
 ## Milestone 10 — Everyday polish
 
-- [ ] [Let the agent revisit its subagents](issues/revisit-subagents.md)
+(all complete — see issues_archive.md)
 

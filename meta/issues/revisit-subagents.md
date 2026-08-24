@@ -39,6 +39,23 @@ subagents exist, which are still running, or what they last said.
   bounded, cap reported.
 - The full suite passes.
 
+## Outcome
+
+Two commits. Every task result now carries `task_id: <uuid>` — the
+foreground result, the background start notice and the completion
+notification — including failed runs, since an iteration-limited task
+is the one most worth resuming; the schema tells the model where ids
+come from and to prefer resuming for same-scope follow-ups. The
+`tasks` tool lists the invoking session's children (id, agent, model,
+running/finished, age, opening prompt, last-reply snippet), scoped the
+same way the resume guard is, and bounded at 200 characters per
+snippet and 20 tasks with the remainder counted. `SessionStore::list`
+already skipped children, so `children_of` reuses the same head scan.
+Running tasks show no snippet: their last word is mid-turn.
+
+Known cost: `children_of` scans every session file's head per call,
+the same scan `list()` already does for the session picker.
+
 ## Notes
 
 - Resume grows a child's context across follow-ups where one-shot
