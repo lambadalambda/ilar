@@ -1360,3 +1360,13 @@ avoid.
 
 Running tasks deliberately show no snippet: their "last word" is
 mid-turn and would read as a result.
+
+Delegation was invisible from the sidebar: the status line carried a
+background count, and nothing said what any of it was doing. The
+spawner could not have said either — background handles carried no
+description and the active-session set is bare ids — so it grew a
+`running_tasks()` registry (description, agent, background flag, start
+time), shared with child spawners the way the active-session set
+already is, emptied by an RAII guard however a run ends. The sidebar
+reads it every frame into an `agents` panel above services: two lines
+per agent, three agents then a count, gone when nothing is running.

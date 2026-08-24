@@ -226,7 +226,9 @@ guarded: the persisted agent, parent session and workspace must match, and a
 task that is still running refuses a second driver. The read-only `tasks` tool
 lists the current session's tasks (id, agent, model, running or finished, age,
 opening prompt, and a snippet of the last reply) so the agent can find the one
-worth resuming.
+worth resuming. On wide terminals an `agents` panel in the sidebar shows what
+is in flight right now — description, agent, a `bg` marker for detached work,
+and a live elapsed time — and disappears when nothing is running.
 
 ### Services
 
