@@ -545,6 +545,7 @@ pub struct ToolRegistry {
 pub fn child_tool_names() -> Vec<&'static str> {
     let mut names = ToolRegistry::builtin().tool_names();
     names.push("task");
+    names.push("tasks");
     names.push("service");
     names.push("models");
     names
@@ -676,7 +677,8 @@ impl ToolRegistry {
         self,
         spawner: Arc<crate::subagent::SubagentSpawner>,
     ) -> Result<Self, DuplicateToolError> {
-        self.with_tool(Arc::new(crate::subagent::TaskTool::new(spawner)))
+        self.with_tool(Arc::new(crate::subagent::TaskTool::new(spawner.clone())))?
+            .with_tool(Arc::new(crate::subagent::TasksTool::new(spawner)))
     }
 
     /// Advertise structured questions to the provider for a root agent.

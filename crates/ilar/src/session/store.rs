@@ -157,6 +157,27 @@ pub struct SessionSummary {
     pub modified: std::time::SystemTime,
 }
 
+/// A session file's head: enough to summarize it without reading the
+/// whole log.
+struct SessionHead {
+    id: String,
+    meta: SessionMeta,
+    title: Option<String>,
+    modified: std::time::SystemTime,
+}
+
+/// One subagent task belonging to a session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildSummary {
+    pub id: String,
+    /// The agent it runs as, from its persisted metadata.
+    pub agent: String,
+    pub model: String,
+    /// Its opening prompt, whitespace-collapsed and bounded.
+    pub title: Option<String>,
+    pub modified: std::time::SystemTime,
+}
+
 const SUMMARY_SCAN_BYTES: u64 = 256 * 1024;
 const SUMMARY_SCAN_EVENTS: usize = 40;
 const SUMMARY_TITLE_CHARS: usize = 80;
@@ -301,7 +322,54 @@ impl SessionStore {
         self.list().into_iter().next()
     }
 
+    /// The subagent tasks spawned by `parent_id`, newest first.
+    /// [`Self::list`] hides children by construction — this is the other
+    /// half, and it is scoped: a session sees its own tasks only.
+    pub fn children_of(&self, parent_id: &str) -> Vec<ChildSummary> {
+        let Ok(entries) = std::fs::read_dir(&self.root) else {
+            return Vec::new();
+        };
+        let mut children: Vec<(std::time::SystemTime, ChildSummary)> = entries
+            .flatten()
+            .filter_map(|entry| self.scan_head(&entry))
+            .filter(|head| head.meta.parent_id.as_deref() == Some(parent_id))
+            .map(|head| {
+                (
+                    head.modified,
+                    ChildSummary {
+                        id: head.id,
+                        agent: head.meta.agent,
+                        model: head.meta.model,
+                        title: head.title,
+                        modified: head.modified,
+                    },
+                )
+            })
+            .collect();
+        children.sort_by(|left, right| {
+            right
+                .0
+                .cmp(&left.0)
+                .then_with(|| left.1.id.cmp(&right.1.id))
+        });
+        children.into_iter().map(|(_, child)| child).collect()
+    }
+
     fn summarize_entry(&self, entry: &std::fs::DirEntry) -> Option<SessionSummary> {
+        let head = self.scan_head(entry)?;
+        if head.meta.parent_id.is_some() {
+            return None;
+        }
+        Some(SessionSummary {
+            id: head.id,
+            title: head.title,
+            modified: head.modified,
+        })
+    }
+
+    /// Parse a session file's head: its metadata and opening prompt,
+    /// without loading the whole log.
+    fn scan_head(&self, entry: &std::fs::DirEntry) -> Option<SessionHead> {
         let name = entry.file_name();
         let id = name.to_str()?.strip_suffix(".jsonl")?.to_string();
         SessionId::parse(&id).ok()?;
@@ -313,9 +381,6 @@ impl SessionStore {
         let SessionEvent::Meta { meta, .. } = serde_json::from_str(&meta_line).ok()? else {
             return None;
         };
-        if meta.parent_id.is_some() {
-            return None;
-        }
         let title = lines
             .take(SUMMARY_SCAN_EVENTS)
             .map_while(|line| line.ok())
@@ -324,8 +389,9 @@ impl SessionStore {
                 SessionEvent::UserMessage { text, .. } => Some(summary_title(&text)),
                 _ => None,
             });
-        Some(SessionSummary {
+        Some(SessionHead {
             id,
+            meta,
             title,
             modified,
         })

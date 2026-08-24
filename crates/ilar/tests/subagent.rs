@@ -2393,3 +2393,126 @@ async fn a_background_task_names_its_session_at_start_and_at_completion() {
 
     spawner.shutdown().await;
 }
+
+#[tokio::test]
+async fn the_tasks_tool_lists_this_session_s_children_with_their_last_word() {
+    let (store, parent_id) = temp_store();
+    let spawner = spawner(
+        Arc::new(ScriptedDelayProvider {
+            text: "the child's considered answer",
+            delay_ms: 0,
+        }),
+        &store,
+        10,
+        3,
+    );
+    let registry = parent_registry(spawner.clone());
+    let task = registry.get("task").unwrap();
+    let tasks = registry.get("tasks").expect("tasks tool is registered");
+
+    // Nothing spawned yet.
+    let empty = tasks
+        .run(serde_json::json!({}), task_context(&parent_id))
+        .await;
+    assert!(!empty.is_error, "{}", empty.content);
+    assert!(empty.content.contains("no tasks"), "{}", empty.content);
+
+    let first = task
+        .run(
+            serde_json::json!({
+                "description": "survey",
+                "prompt": "look around the repository",
+                "subagent_type": "explore",
+            }),
+            task_context(&parent_id),
+        )
+        .await;
+    let child_id = first.child_session_id().unwrap().to_string();
+
+    let listing = tasks
+        .run(serde_json::json!({}), task_context(&parent_id))
+        .await;
+
+    assert!(!listing.is_error, "{}", listing.content);
+    assert!(listing.content.contains(&child_id), "{}", listing.content);
+    assert!(listing.content.contains("explore"), "{}", listing.content);
+    assert!(
+        listing.content.contains("look around the repository"),
+        "{}",
+        listing.content
+    );
+    assert!(
+        listing.content.contains("the child's considered answer"),
+        "{}",
+        listing.content
+    );
+
+    // A different session sees none of it.
+    let stranger = tasks
+        .run(serde_json::json!({}), task_context(&new_id()))
+        .await;
+    assert!(
+        !stranger.content.contains(&child_id),
+        "{}",
+        stranger.content
+    );
+}
+
+#[tokio::test]
+async fn the_tasks_tool_marks_a_running_task_and_bounds_the_snippet() {
+    let (store, parent_id) = temp_store();
+    let long_answer = "sentence ".repeat(200);
+    let spawner = spawner(
+        Arc::new(ScriptedDelayProvider {
+            text: Box::leak(long_answer.into_boxed_str()),
+            delay_ms: 200,
+        }),
+        &store,
+        10,
+        3,
+    );
+    let registry = parent_registry(spawner.clone());
+    let task = registry.get("task").unwrap();
+    let tasks = registry.get("tasks").unwrap();
+
+    let started = task
+        .run(
+            serde_json::json!({
+                "description": "slow survey",
+                "prompt": "take your time",
+                "subagent_type": "explore",
+                "background": true,
+            }),
+            task_context(&parent_id),
+        )
+        .await;
+    let child_id = started.child_session_id().unwrap().to_string();
+
+    let running = tasks
+        .run(serde_json::json!({}), task_context(&parent_id))
+        .await;
+    assert!(running.content.contains("running"), "{}", running.content);
+
+    let notification = tokio::time::timeout(Duration::from_secs(10), spawner.subscribe().recv())
+        .await
+        .expect("notification arrives");
+    drop(notification);
+
+    let finished = tasks
+        .run(serde_json::json!({}), task_context(&parent_id))
+        .await;
+    assert!(finished.content.contains(&child_id), "{}", finished.content);
+    assert!(
+        !finished.content.contains("running"),
+        "{}",
+        finished.content
+    );
+    // The snippet is a snippet: a chatty child cannot flood the caller.
+    assert!(
+        finished.content.len() < 1_500,
+        "listing grew to {} chars",
+        finished.content.len()
+    );
+
+    spawner.shutdown().await;
+}

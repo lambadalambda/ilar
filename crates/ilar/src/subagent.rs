@@ -1286,6 +1286,13 @@ task's scope yourself; continue only clearly disjoint work."
         }))
     }
 
+    /// Whether a session is running right now — a claimed session is one
+    /// a turn is driving, and the listing says so rather than showing a
+    /// stale "last word".
+    pub fn session_is_active(&self, session_id: &str) -> bool {
+        self.active_sessions.lock().unwrap().contains(session_id)
+    }
+
     fn claim_session(&self, session_id: &str) -> Option<ActiveSessionGuard> {
         let mut active = self.active_sessions.lock().unwrap();
         if !active.insert(session_id.to_string()) {
@@ -1684,6 +1691,120 @@ impl Tool for TaskTool {
                 Err(e) => return ToolOutput::error(format!("invalid input for task: {e}")),
             };
             spawner.run_task_observed(input, &ctx, Some(on_start)).await
+        })
+    }
+}
+
+/// How many tasks the listing reports, newest first. A long session
+/// can accumulate dozens; the recent ones are the resumable ones.
+const TASK_LISTING_LIMIT: usize = 20;
+/// Display width of a task's last reply in the listing.
+const TASK_SNIPPET_CHARS: usize = 200;
+
+fn snippet(text: &str, limit: usize) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() > limit {
+        let mut short: String = collapsed.chars().take(limit).collect();
+        short.push('…');
+        short
+    } else {
+        collapsed
+    }
+}
+
+fn age_label(modified: std::time::SystemTime) -> String {
+    let Ok(elapsed) = modified.elapsed() else {
+        return "just now".to_string();
+    };
+    let seconds = elapsed.as_secs();
+    match seconds {
+        0..=59 => format!("{seconds}s ago"),
+        60..=3599 => format!("{}m ago", seconds / 60),
+        3600..=86_399 => format!("{}h ago", seconds / 3_600),
+        _ => format!("{}d ago", seconds / 86_400),
+    }
+}
+
+/// tasks: read-only listing of the subagent tasks this session has
+/// spawned, so the model can see what it delegated and resume one with
+/// the task tool instead of re-explaining a scope to a fresh agent.
+pub struct TasksTool {
+    spawner: Arc<SubagentSpawner>,
+}
+
+impl TasksTool {
+    pub fn new(spawner: Arc<SubagentSpawner>) -> Self {
+        Self { spawner }
+    }
+}
+
+impl Tool for TasksTool {
+    fn name(&self) -> &'static str {
+        "tasks"
+    }
+
+    fn description(&self) -> &'static str {
+        "List the subagent tasks this session has spawned: id, agent, \
+         model, whether one is still running, and a snippet of what it \
+         last said. Pass an id back as the task tool's task_id to ask a \
+         finished task a follow-up question with its context intact."
+    }
+
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::Concurrent
+    }
+
+    fn workspace_access(&self) -> WorkspaceAccess {
+        WorkspaceAccess::None
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object", "properties": {}})
+    }
+
+    fn run(&self, _input: serde_json::Value, ctx: ToolContext) -> ToolFuture {
+        let spawner = self.spawner.clone();
+        Box::pin(async move {
+            let children = spawner.store.children_of(&ctx.session_id);
+            if children.is_empty() {
+                return ToolOutput::text("no tasks spawned from this session yet");
+            }
+            let total = children.len();
+            let mut lines = children
+                .into_iter()
+                .take(TASK_LISTING_LIMIT)
+                .map(|child| {
+                    let running = spawner.session_is_active(&child.id);
+                    let status = if running { "running" } else { "finished" };
+                    let prompt = child.title.as_deref().unwrap_or("(no prompt)");
+                    let last = if running {
+                        // Its final text is not final yet.
+                        String::new()
+                    } else {
+                        match final_assistant_text(&spawner.store, &child.id) {
+                            Some(text) => {
+                                format!("\n  last: {}", snippet(&text, TASK_SNIPPET_CHARS))
+                            }
+                            None => String::new(),
+                        }
+                    };
+                    format!(
+                        "{} · {} · {} · {status} · {}\n  task: {}{last}",
+                        child.id,
+                        child.agent,
+                        child.model,
+                        age_label(child.modified),
+                        snippet(prompt, TASK_SNIPPET_CHARS),
+                    )
+                })
+                .collect::<Vec<_>>();
+            if total > TASK_LISTING_LIMIT {
+                lines.push(format!(
+                    "({} older tasks not shown)",
+                    total - TASK_LISTING_LIMIT
+                ));
+            }
+            ToolOutput::text(lines.join("\n"))
         })
     }
 }

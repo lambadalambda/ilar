@@ -2101,3 +2101,68 @@ fn indexed_and_canonical_replay_agree_after_a_rewind() {
     assert_eq!(indexed.events(), canonical.events());
     assert_eq!(indexed.transcript(), canonical.transcript());
 }
+
+#[test]
+fn children_of_lists_only_this_session_s_tasks_newest_first() {
+    let (store, _dir) = temp_store();
+    let parent = sample_meta();
+    let other_parent = sample_meta();
+    drop(store.create(parent.clone()).unwrap());
+    drop(store.create(other_parent.clone()).unwrap());
+
+    let mut child_ids = Vec::new();
+    for (index, agent) in ["explore", "build"].iter().enumerate() {
+        let child = SessionMeta {
+            session_id: new_id(),
+            parent_id: Some(parent.session_id.clone()),
+            agent: (*agent).into(),
+            model: "zai/glm-4.7".into(),
+            workspace: None,
+        };
+        let mut session = store.create(child.clone()).unwrap();
+        session
+            .append(SessionEvent::UserMessage {
+                id: new_id(),
+                text: format!("task {index} prompt"),
+                ts: Utc::now(),
+            })
+            .unwrap();
+        drop(session);
+        child_ids.push(child.session_id);
+        // Distinct mtimes so the ordering is not a coin flip.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let stranger = SessionMeta {
+        session_id: new_id(),
+        parent_id: Some(other_parent.session_id.clone()),
+        agent: "explore".into(),
+        model: "zai/glm-4.7".into(),
+        workspace: None,
+    };
+    drop(store.create(stranger.clone()).unwrap());
+
+    let children = store.children_of(&parent.session_id);
+
+    assert_eq!(children.len(), 2, "{children:?}");
+    // Newest first.
+    assert_eq!(children[0].id, child_ids[1]);
+    assert_eq!(children[0].agent, "build");
+    assert_eq!(children[1].id, child_ids[0]);
+    assert_eq!(children[1].agent, "explore");
+    assert_eq!(children[1].model, "zai/glm-4.7");
+    assert_eq!(children[1].title.as_deref(), Some("task 0 prompt"));
+    assert!(
+        !children.iter().any(|child| child.id == stranger.session_id),
+        "another session's task leaked: {children:?}"
+    );
+
+    // Roots are not children, and a session without tasks has none.
+    assert!(store.children_of(&other_parent.session_id).len() == 1);
+    assert!(store.children_of(&child_ids[0]).is_empty());
+    assert!(
+        !store
+            .list()
+            .iter()
+            .any(|session| child_ids.contains(&session.id))
+    );
+}
