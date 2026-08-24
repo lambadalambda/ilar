@@ -33,3 +33,7 @@
 - [ ] [Replay OpenAI items in the shape they arrived](issues/replay-openai-items-verbatim.md)
 - [ ] [Pin the Codex backend to a shard](issues/codex-session-affinity-headers.md)
 
+
+## Milestone 9 — Time travel follow-ups
+
+- [ ] [Open links from the transcript](issues/open-links-from-transcript.md)
