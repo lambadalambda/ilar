@@ -83,13 +83,6 @@ later conversation never mentions them, dropping only what is finished and no lo
 Where the two disagree the later conversation wins: state the corrected fact and drop the \
 old claim.";
 
-/// Below this a summary of a large conversation is not a summary.
-const MIN_SUMMARY_CHARS: usize = 200;
-/// Only conversations past this size are held to that floor. The rule
-/// exists for the pathological case — a quarter-million tokens
-/// summarized to "Done." — and a false positive here costs a retry and
-/// then a hard compaction failure, which is the symptom being fixed.
-const LARGE_CONVERSATION_CHARS: usize = 50_000;
 /// Openings that mean the model answered the conversation instead of
 /// summarizing it.
 const CONTINUATION_TELLS: &[&str] = &[
@@ -121,26 +114,6 @@ fn carries_prior_summary(messages: &[ChatMessage]) -> bool {
         .any(|block| matches!(block, ContentBlock::Text { text } if is_prior_summary(text)))
 }
 
-/// Rough size of the material a summary has to cover.
-fn transcript_chars(messages: &[ChatMessage]) -> usize {
-    messages
-        .iter()
-        .map(|message| {
-            message
-                .content
-                .iter()
-                .map(|block| match block {
-                    ContentBlock::Text { text } | ContentBlock::Thinking { text, .. } => {
-                        text.chars().count()
-                    }
-                    ContentBlock::ToolResult { content, .. } => content.chars().count(),
-                    _ => 0,
-                })
-                .sum::<usize>()
-        })
-        .sum()
-}
-
 /// The conversation exactly as the turn sent it, plus the instruction as
 /// a final user message. The shared prefix is what makes this cheap.
 fn summarizer_messages(transcript: &[ChatMessage]) -> Vec<ChatMessage> {
@@ -153,22 +126,19 @@ fn summarizer_messages(transcript: &[ChatMessage]) -> Vec<ChatMessage> {
     messages
 }
 
-/// Why this text is not a summary, or `None` when it is one. A stored
-/// summary replaces real history, so rejecting a bad one costs a retry
-/// and accepting it costs the session.
-fn degenerate_summary(summary: &str, conversation_chars: usize) -> Option<&'static str> {
+/// Why this text is not a summary, or `None` when it is one. This only
+/// catches the model failing to summarize at all — empty output or an
+/// answer to the conversation. Judging the *quality* of a summary is
+/// not its job: a model trusted to do the work is trusted to hand it
+/// over.
+fn degenerate_summary(summary: &str) -> Option<&'static str> {
     let trimmed = summary.trim();
     if trimmed.is_empty() {
         return Some("empty");
     }
-    // An apology is never a summary, whatever the size of the input.
     let opening = trimmed.chars().take(40).collect::<String>().to_lowercase();
     if CONTINUATION_TELLS.iter().any(|tell| opening.contains(tell)) {
         return Some("the model answered the conversation instead of summarizing it");
-    }
-    if conversation_chars >= LARGE_CONVERSATION_CHARS && trimmed.chars().count() < MIN_SUMMARY_CHARS
-    {
-        return Some("too short for the material it covers");
     }
     None
 }
@@ -486,19 +456,6 @@ pub(crate) async fn compact_if_needed_locked(
     if older.transcript().is_empty() {
         return Ok(None);
     }
-    let material = transcript_chars(&older.transcript());
-    // Nothing substantial to summarize means summarizing buys nothing:
-    // once a session is over the threshold on its system prompt, tools
-    // and last summary alone, compacting again would just replace one
-    // summary with another, every step, forever. This is the one place
-    // the rough estimate still lives, and it is only asked whether the
-    // material is large — an answer a 2x error cannot change.
-    if !options.force
-        && (material / 4) < (trigger_tokens(options.context_limit, options.threshold) / 4) as usize
-    {
-        return Ok(None);
-    }
-
     let transcript = older.transcript();
     // The request the turn itself would have sent, with the instruction
     // appended: same system prompt, same tools, same session cache key,
@@ -520,7 +477,7 @@ pub(crate) async fn compact_if_needed_locked(
     // A summary is the whole of what survives, so a bad one is not
     // something to paper over: say what went wrong and leave the
     // session alone.
-    if let Some(reason) = degenerate_summary(&summary, material) {
+    if let Some(reason) = degenerate_summary(&summary) {
         anyhow::bail!("compaction produced no usable summary: {reason}");
     }
 
@@ -621,26 +578,17 @@ mod tests {
 
     #[test]
     fn an_apology_is_not_a_summary() {
-        let long = LARGE_CONVERSATION_CHARS + 1;
         assert!(
             degenerate_summary(
                 "I\u{2019}m sorry, but I wasn\u{2019}t able to complete and push all four fixes within this run.",
-                long
             )
             .is_some()
         );
-        assert!(degenerate_summary("I cannot help with that.", long).is_some());
-        assert!(degenerate_summary("   ", long).is_some());
-        assert!(degenerate_summary("", 10).is_some());
-        // Short but honest summaries of short sessions stand.
-        assert!(degenerate_summary("Fixed the typo in README.", 200).is_none());
-        // A real summary of a long session stands.
-        assert!(degenerate_summary(&"## Objective\nship the thing\n".repeat(20), long).is_none());
-    }
-
-    #[test]
-    fn transcript_chars_counts_the_material_a_summary_must_cover() {
-        let transcript = vec![user_text("12345"), tool_result("call-1", "678")];
-        assert_eq!(transcript_chars(&transcript), 8);
+        assert!(degenerate_summary("I cannot help with that.").is_some());
+        assert!(degenerate_summary("   ").is_some());
+        assert!(degenerate_summary("").is_some());
+        // Length is not judged: a terse summary is the model's call.
+        assert!(degenerate_summary("Fixed the typo in README.").is_none());
+        assert!(degenerate_summary(&"## Objective\nship the thing\n".repeat(20)).is_none());
     }
 }

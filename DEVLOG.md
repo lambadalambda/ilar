@@ -1495,3 +1495,16 @@ session left untouched — no retry, no repair, no fallback. One
 estimate survives, asked only whether there is anything substantial to
 summarize, which keeps a session that is over the threshold on its
 summary alone from compacting on every step forever.
+
+That last estimate is gone too, on review. The loop it guarded against
+requires the irreducible baseline — system prompt, tools, one summary
+— to be near the trigger on its own, which no sane configuration can
+reach; when the context is genuinely full, the material is by
+definition large and the guard always passed. Meanwhile it carried a
+real bug (it never counted tool-call inputs, so a write-heavy session
+looked empty to it) and the summary size floor next to it was quality
+policing of a model we otherwise trust with the whole session. The
+trigger — the provider's reported token count against the threshold —
+is now the only thing that decides a compaction, and failure detection
+is exactly two checks: empty output, or an answer instead of a
+summary.
