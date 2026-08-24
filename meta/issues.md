@@ -45,5 +45,4 @@
 ## Milestone 11 — Beyond the terminal
 
 - [ ] [Find a session by something said in the middle of it](issues/search-across-sessions.md)
-- [ ] [Compaction as handover, with the archive one grep away](issues/compaction-as-handover.md)
 - [ ] [A web frontend](issues/web-frontend.md)

@@ -170,3 +170,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Aborted subagent rows keep spinning](issues/aborted-subagent-rows-keep-spinning.md)
 - [x] [Sessions know what they are about](issues/session-topics.md)
 - [x] [The compaction cut measures tokens with a prose ruler](issues/compaction-ruler.md)
+- [x] [Compaction as handover, with the archive one grep away](issues/compaction-as-handover.md)

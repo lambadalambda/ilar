@@ -81,6 +81,33 @@ prompt, its tools, and one summary. Everything else it can look up.
   session unchanged.
 - The full suite passes.
 
+## Outcome
+
+Landed in four commits: the scanner (e93ae38), the history tool
+(6459dda), the two read paths (f90aad8), and the handover itself
+(4633efe).
+
+`recent_steps_cut`, `event_tokens` and the estimate they shared are
+deleted, not calibrated — the cut is "everything before this point",
+so there is nothing left to measure. `CompactionCut` is down to two
+variants, both of which summarize everything before them; the
+turn-boundary one keeps the message that just arrived because that is
+the request, not history.
+
+The pins added earlier the same day are gone with it. The verbatim
+requests are unnecessary once `history` can list every instruction the
+user gave, and the todo pin was a workaround for a write-only tool
+that can now be read.
+
+Six existing tests encoded the old contract and were rewritten to the
+new one rather than patched — most usefully `oversize_transcript`,
+which asserted the opening question survived compaction and now
+asserts it does not, and the mid-turn test, which asserted a recency
+window kept the most recent step and now asserts both bulky results
+are gone.
+
+Not done, deliberately: no `compaction.mode`. One system.
+
 ## Notes
 
 - Prior art: Codex's `build_compacted_history` replaces history with
