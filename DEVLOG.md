@@ -1414,3 +1414,36 @@ replaces real history, so failing loudly leaves a session recoverable
 where storing the apology does not. The length rule is scoped to large
 conversations on purpose — a false positive there ends in exactly the
 hard compaction failure we set out to fix.
+
+## 2026-08-24 — A second driver, and what it found
+
+`ilar exec "…"` runs one turn without a terminal. The interesting part
+was not the feature but the seam it exposed. The TUI's main loop
+carried ~180 lines that were never terminal logic: resolving agent,
+model and reasoning variant, assembling the system prompt from project
+instructions, skills and the agent definition, creating or resuming
+the session, wiring spawner, services, todos and registry. A second
+driver either reimplements that or shares it, and two implementations
+of "which model does this session run" is how frontends drift apart.
+
+It moved to `ilar::runtime` in two phases, and the phases earn their
+keep: `resolve` decides what the session will be and writes nothing,
+`start` creates it and builds the tools. `--print-prompt` stops after
+the first, so asking what the prompt is no longer risks leaving an
+empty session behind. main.rs lost 312 lines and gained no behaviour.
+
+Two things a headless driver has to decide that a TUI never does.
+Questions: with nobody to answer, attaching the tool would hang the
+turn on a channel nobody reads, so whether it is attached is now the
+caller's choice and exec declines it — the model is told on the spot.
+Teardown: background tasks and services are stopped at exit and
+anything still running is named on stderr, because a detached
+subagent whose notification has nowhere to land is a leak, not a
+feature.
+
+The output split is the design: stdout carries the answer and nothing
+else, stderr carries how it was reached. `--json` swaps stdout for the
+loop's events as NDJSON — through a hand-written projection, because
+`LoopEvent` carries `Instant`s and a wire format should not change by
+accident every time the enum grows. That projection is also the first
+draft of the protocol a web frontend would speak.
