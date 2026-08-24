@@ -1977,6 +1977,26 @@ async fn run_app(
                             }
                             _ => {}
                         },
+                        Modal::Todos => match (code, control) {
+                            (KeyCode::Up, _) => {
+                                app.todos_scroll = app.todos_scroll.saturating_sub(1);
+                            }
+                            (KeyCode::Down, _) => {
+                                app.todos_scroll = app.todos_scroll.saturating_add(1);
+                            }
+                            (KeyCode::PageUp, _) => {
+                                app.todos_scroll = app.todos_scroll.saturating_sub(10);
+                            }
+                            (KeyCode::PageDown, _) => {
+                                app.todos_scroll = app.todos_scroll.saturating_add(10);
+                            }
+                            (KeyCode::Esc | KeyCode::Char('q'), false)
+                            | (KeyCode::Char('t'), true) => {
+                                app.todos_visible = false;
+                                app.todos_scroll = 0;
+                            }
+                            _ => {}
+                        },
                         Modal::ThemePicker => {
                             let action = {
                                 let picker = app.theme_picker.as_mut().unwrap();
@@ -2439,6 +2459,11 @@ async fn run_app(
                     }
                     (KeyCode::Char('o'), true) => {
                         app.open_link_picker();
+                    }
+                    // Read-only, like the link picker: no busy guard.
+                    (KeyCode::Char('t'), true) => {
+                        app.todos_visible = true;
+                        app.todos_scroll = 0;
                     }
                     (code, control)
                         if retry_requested(code, control)

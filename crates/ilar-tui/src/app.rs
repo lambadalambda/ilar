@@ -28,7 +28,8 @@ use crate::modals::{
     PendingItem, PendingManager, SessionPicker, SkillPicker, ThemePicker, ThemePickerAction,
     TurnPicker, VariantPicker, palette_items, render_command_palette, render_help,
     render_link_picker, render_model_picker, render_pending_manager, render_session_picker,
-    render_skill_picker, render_theme_picker, render_turn_picker, render_variant_picker,
+    render_skill_picker, render_theme_picker, render_todos, render_turn_picker,
+    render_variant_picker,
 };
 use crate::questions::QuestionModal;
 use crate::selection::{
@@ -161,6 +162,9 @@ pub(crate) struct App {
     pub(crate) session_picker_requested: bool,
     pub(crate) help_visible: bool,
     pub(crate) help_scroll: usize,
+    /// The full todo list overlay: what the sidebar had no room for.
+    pub(crate) todos_visible: bool,
+    pub(crate) todos_scroll: usize,
     pub(crate) skill_picker: Option<SkillPicker>,
     /// (name, description) pairs for slash invocation and the picker.
     pub(crate) skills: Vec<(String, String)>,
@@ -257,6 +261,8 @@ impl App {
             session_picker_requested: false,
             help_visible: false,
             help_scroll: 0,
+            todos_visible: false,
+            todos_scroll: 0,
             skill_picker: None,
             skills: Vec::new(),
             commands: Vec::new(),
@@ -304,6 +310,8 @@ impl App {
             Some(Modal::PendingManager)
         } else if self.help_visible {
             Some(Modal::Help)
+        } else if self.todos_visible {
+            Some(Modal::Todos)
         } else if self.theme_picker.is_some() {
             Some(Modal::ThemePicker)
         } else if self.skill_picker.is_some() {
@@ -461,6 +469,9 @@ impl App {
             Some(Modal::Help) => {
                 self.help_scroll = self.help_scroll.saturating_add_signed(rows);
             }
+            Some(Modal::Todos) => {
+                self.todos_scroll = self.todos_scroll.saturating_add_signed(rows);
+            }
             // The pending manager is a handful of rows; search leaves the
             // wheel to the transcript so results stay browsable.
             Some(Modal::Question) | Some(Modal::PendingManager) | Some(Modal::Search) | None => {
@@ -507,7 +518,7 @@ impl App {
                     manager.selected = index;
                     manager.armed = None;
                 }
-                Modal::Question | Modal::Help | Modal::Search => {}
+                Modal::Question | Modal::Help | Modal::Todos | Modal::Search => {}
             }
         }
         true
@@ -2346,6 +2357,11 @@ impl App {
                 render_help(frame, self.help_scroll, self.keyboard_enhanced);
                 None
             }
+            Some(Modal::Todos) => {
+                let todos = self.todos.lock().unwrap().clone();
+                render_todos(frame, &todos, self.todos_scroll);
+                None
+            }
             Some(Modal::ThemePicker) => Some(render_theme_picker(
                 frame,
                 self.theme_picker.as_ref().expect("theme picker"),
@@ -2511,6 +2527,10 @@ pub(crate) fn activate_palette_command(
         }
         PaletteCommand::Pending => {
             app.pending_manager = Some(PendingManager::default());
+        }
+        PaletteCommand::Todos => {
+            app.todos_visible = true;
+            app.todos_scroll = 0;
         }
         PaletteCommand::Help => {
             app.help_visible = true;
@@ -5681,6 +5701,71 @@ mod tests {
 
         app.begin_transcript_selection(110, 1);
         assert_eq!(app.transcript_selection, None);
+    }
+
+    #[test]
+    fn the_todo_overlay_shows_what_the_sidebar_had_no_room_for() {
+        let backend = ratatui::backend::TestBackend::new(140, 12);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.todos.lock().unwrap().items = (0..12)
+            .map(|index| ilar::todo::TodoItem {
+                content: format!("task {index}"),
+                status: if index == 0 {
+                    ilar::todo::Status::InProgress
+                } else {
+                    ilar::todo::Status::Pending
+                },
+            })
+            .collect();
+
+        let screen = |terminal: &ratatui::Terminal<ratatui::backend::TestBackend>| {
+            let buffer = terminal.backend().buffer();
+            (0..buffer.area.height)
+                .map(|row| {
+                    (0..buffer.area.width)
+                        .map(|column| buffer[(column, row)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        // The sidebar is a handful of rows tall here, so it hides most.
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let sidebar = screen(&terminal);
+        assert!(sidebar.contains("hidden"), "{sidebar}");
+        assert!(!sidebar.contains("task 11"), "{sidebar}");
+
+        app.todos_visible = true;
+        assert_eq!(app.active_modal(), Some(Modal::Todos));
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let overlay = screen(&terminal);
+        assert!(overlay.contains("▸ task 0"), "{overlay}");
+        assert!(overlay.contains("0/12 done"), "{overlay}");
+        // Rows the sidebar had no room for.
+        assert!(overlay.contains("task 7"), "{overlay}");
+
+        // The tail is a scroll away even on a short terminal.
+        app.scroll_active_modal(6);
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let scrolled = screen(&terminal);
+        assert!(scrolled.contains("task 11"), "{scrolled}");
+    }
+
+    #[test]
+    fn the_palette_opens_the_todo_overlay() {
+        let mut app = App::new();
+        app.todos_scroll = 7;
+
+        activate_palette_command(
+            &mut app,
+            PaletteAction::Command(PaletteCommand::Todos),
+            Vec::new(),
+        );
+
+        assert!(app.todos_visible);
+        assert_eq!(app.todos_scroll, 0);
     }
 
     #[test]

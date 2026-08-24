@@ -199,6 +199,7 @@ pub(crate) enum Modal {
     Question,
     PendingManager,
     Help,
+    Todos,
     ThemePicker,
     SkillPicker,
     SessionPicker,
@@ -218,6 +219,7 @@ pub(crate) enum PaletteCommand {
     Session,
     Rewind,
     Links,
+    Todos,
     Usage,
     Compact,
     Export,
@@ -277,6 +279,13 @@ pub(crate) static PALETTE_COMMANDS: &[PaletteCommandDefinition] = &[
         label: "Open link…",
         shortcut: "^O",
         search_terms: "link url open browser web markdown",
+    },
+    PaletteCommandDefinition {
+        id: PaletteCommand::Todos,
+        section: "General",
+        label: "Show todos",
+        shortcut: "^T",
+        search_terms: "todo todos tasks plan checklist list",
     },
     PaletteCommandDefinition {
         id: PaletteCommand::Usage,
@@ -500,6 +509,7 @@ static HELP_SECTIONS: &[HelpSection] = &[
         bindings: &[
             binding!("Ctrl-F", "search transcript"),
             binding!("Ctrl-O", "open a link from the transcript"),
+            binding!("Ctrl-T", "show the full todo list"),
             binding!("PgUp / PgDn", "scroll page"),
             binding!("Alt-U / Alt-D", "scroll half page"),
             binding!("Ctrl-Home / Ctrl-End", "jump to top / tail"),
@@ -686,6 +696,54 @@ pub(crate) fn render_help(frame: &mut Frame, scroll: usize, keyboard_enhanced: b
         .skip(start)
         .take(inner.height as usize)
         .collect();
+    frame.render_widget(Paragraph::new(visible), inner);
+}
+
+/// The whole todo list, wrapped for `width`. The sidebar shows what
+/// fits; this is where the rest lives.
+fn todo_overlay_lines(list: &ilar::todo::TodoList, width: usize) -> Vec<Line<'static>> {
+    if list.items.is_empty() {
+        return vec![Line::styled(
+            "— no todos yet; the model writes them as it plans",
+            Style::default().fg(MUTED),
+        )];
+    }
+    list.items
+        .iter()
+        .flat_map(|item| crate::sidebar::todo_item_lines(item, width as u16))
+        .collect()
+}
+
+/// Read-only overlay over the full todo list. The model owns the list,
+/// so there is nothing to select or activate — only to scroll.
+pub(crate) fn render_todos(frame: &mut Frame, list: &ilar::todo::TodoList, scroll: usize) {
+    let done = list
+        .items
+        .iter()
+        .filter(|item| item.status == ilar::todo::Status::Completed)
+        .count();
+    let title = if list.items.is_empty() {
+        " todos ".to_string()
+    } else {
+        format!(" todos · {done}/{} done ", list.items.len())
+    };
+    let area = centered_rect(frame.area(), 72, 24);
+    let Some(inner) = modal_frame(
+        frame,
+        area,
+        &title,
+        theme::MARKUP,
+        " ↑↓ scroll · Esc close ",
+    ) else {
+        return;
+    };
+    let lines = todo_overlay_lines(list, inner.width as usize);
+    let start = scroll.min(lines.len().saturating_sub(inner.height as usize));
+    let visible = lines
+        .into_iter()
+        .skip(start)
+        .take(inner.height as usize)
+        .collect::<Vec<_>>();
     frame.render_widget(Paragraph::new(visible), inner);
 }
 
@@ -2538,6 +2596,49 @@ mod tests {
                 assert!(line.width() <= width.max(1) + 1, "width {width}");
             }
         }
+    }
+
+    #[test]
+    fn the_todo_overlay_lists_everything_the_sidebar_hid() {
+        let list = ilar::todo::TodoList {
+            items: (0..12)
+                .map(|index| ilar::todo::TodoItem {
+                    content: format!("todo number {index}"),
+                    status: if index < 3 {
+                        ilar::todo::Status::Completed
+                    } else if index == 3 {
+                        ilar::todo::Status::InProgress
+                    } else {
+                        ilar::todo::Status::Pending
+                    },
+                })
+                .collect(),
+        };
+
+        let text = todo_overlay_lines(&list, 40)
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        for index in 0..12 {
+            assert!(
+                text.contains(&format!("todo number {index}")),
+                "missing {index}:\n{text}"
+            );
+        }
+        assert!(text.contains("✓ todo number 0"), "{text}");
+        assert!(text.contains("▸ todo number 3"), "{text}");
+        assert!(text.contains("○ todo number 4"), "{text}");
+        assert!(!text.contains("hidden"), "{text}");
+
+        // An empty list says so rather than drawing a blank box.
+        let empty = todo_overlay_lines(&ilar::todo::TodoList::default(), 40)
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(empty.contains("no todos"), "{empty}");
     }
 
     #[test]

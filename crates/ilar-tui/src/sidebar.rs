@@ -77,6 +77,57 @@ fn render_todo_sidebar_lines(
     render_todo_sidebar_snapshot(&snapshot, width, height)
 }
 
+/// One todo as the rows it needs at `width`: a status marker, then the
+/// content wrapped under a hanging indent. The sidebar and the overlay
+/// both draw todos this way, so a status only ever looks one way.
+pub(crate) fn todo_item_lines(item: &ilar::todo::TodoItem, width: u16) -> Vec<Line<'static>> {
+    let (marker, marker_style, content_style) = match item.status {
+        ilar::todo::Status::Completed => (
+            "✓ ",
+            Style::default().fg(theme::SUCCESS),
+            Style::default().fg(theme::SECONDARY),
+        ),
+        ilar::todo::Status::InProgress => (
+            "▸ ",
+            // Same colour as todo_summary: in progress is active
+            // work, not a wait state.
+            Style::default().fg(TOOL_ACTIVE),
+            Style::default()
+                .fg(theme::PRIMARY)
+                .add_modifier(Modifier::BOLD),
+        ),
+        ilar::todo::Status::Pending => (
+            "○ ",
+            Style::default().fg(MUTED),
+            Style::default().fg(theme::SECONDARY),
+        ),
+    };
+    let remaining = width as usize;
+    let marker = truncate_display(marker, remaining, Truncation::Right);
+    let remaining = remaining.saturating_sub(UnicodeWidthStr::width(marker.as_str()));
+    let content = item
+        .content
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let content = safe_text(&content);
+    let body = Line::from(Span::styled(content, content_style));
+    wrap_styled_line(body, remaining)
+        .into_iter()
+        .enumerate()
+        .map(move |(line_index, mut body)| {
+            let prefix = if line_index == 0 {
+                Span::styled(marker.clone(), marker_style)
+            } else {
+                Span::raw(" ".repeat(UnicodeWidthStr::width(marker.as_str())))
+            };
+            let mut spans = vec![prefix];
+            spans.append(&mut body.spans);
+            Line::from(spans)
+        })
+        .collect()
+}
+
 pub(crate) fn render_todo_sidebar_snapshot(
     snapshot: &TodoRenderSnapshot,
     width: u16,
@@ -94,53 +145,7 @@ pub(crate) fn render_todo_sidebar_snapshot(
     let rendered = snapshot
         .items
         .iter()
-        .map(|item| {
-            let (marker, marker_style, content_style) = match item.status {
-                ilar::todo::Status::Completed => (
-                    "✓ ",
-                    Style::default().fg(theme::SUCCESS),
-                    Style::default().fg(theme::SECONDARY),
-                ),
-                ilar::todo::Status::InProgress => (
-                    "▸ ",
-                    // Same colour as todo_summary: in progress is active
-                    // work, not a wait state.
-                    Style::default().fg(TOOL_ACTIVE),
-                    Style::default()
-                        .fg(theme::PRIMARY)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                ilar::todo::Status::Pending => (
-                    "○ ",
-                    Style::default().fg(MUTED),
-                    Style::default().fg(theme::SECONDARY),
-                ),
-            };
-            let remaining = width as usize;
-            let marker = truncate_display(marker, remaining, Truncation::Right);
-            let remaining = remaining.saturating_sub(UnicodeWidthStr::width(marker.as_str()));
-            let content = item
-                .content
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
-            let content = safe_text(&content);
-            let body = Line::from(Span::styled(content, content_style));
-            wrap_styled_line(body, remaining)
-                .into_iter()
-                .enumerate()
-                .map(move |(line_index, mut body)| {
-                    let prefix = if line_index == 0 {
-                        Span::styled(marker.clone(), marker_style)
-                    } else {
-                        Span::raw(" ".repeat(UnicodeWidthStr::width(marker.as_str())))
-                    };
-                    let mut spans = vec![prefix];
-                    spans.append(&mut body.spans);
-                    Line::from(spans)
-                })
-                .collect::<Vec<_>>()
-        })
+        .map(|item| todo_item_lines(item, width))
         .collect::<Vec<_>>();
 
     let height = height as usize;
@@ -163,11 +168,14 @@ pub(crate) fn render_todo_sidebar_snapshot(
     }
 
     let hidden = snapshot.hidden + rendered.len().saturating_sub(shown_items);
+    // Hiding is only fair if the way to see the rest is on screen. The
+    // hint costs five cells, so a cramped panel goes without.
+    let hint = if width >= 30 { " · ^T" } else { "" };
     if output.len() < height && (partial_item || hidden > 0) {
         let message = match (partial_item, hidden) {
-            (true, 0) => "…".to_string(),
-            (true, hidden) => format!("… · +{hidden} hidden"),
-            (false, hidden) => format!("+{hidden} hidden"),
+            (true, 0) => format!("…{hint}"),
+            (true, hidden) => format!("… · +{hidden} hidden{hint}"),
+            (false, hidden) => format!("+{hidden} hidden{hint}"),
         };
         output.push(Line::from(Span::styled(
             truncate_display(&message, width as usize, Truncation::Right),
@@ -175,9 +183,9 @@ pub(crate) fn render_todo_sidebar_snapshot(
         )));
     } else if partial_item || hidden > 0 {
         let message = match (partial_item, hidden) {
-            (true, 0) => " · …".to_string(),
-            (true, hidden) => format!(" · … · +{hidden} hidden"),
-            (false, hidden) => format!(" · +{hidden} hidden"),
+            (true, 0) => format!(" · …{hint}"),
+            (true, hidden) => format!(" · … · +{hidden} hidden{hint}"),
+            (false, hidden) => format!(" · +{hidden} hidden{hint}"),
         };
         if let Some(last) = output.pop() {
             output.push(append_todo_note(last, width as usize, &message));
@@ -605,15 +613,25 @@ mod tests {
             status: ilar::todo::Status::Pending,
         }));
 
-        let lines = render_todo_sidebar_lines(&ilar::todo::TodoList { items }, 26, 4);
+        let list = ilar::todo::TodoList { items };
+        let lines = render_todo_sidebar_lines(&list, 38, 4);
         let text = lines.iter().map(rendered_text).collect::<Vec<_>>();
 
         assert_eq!(text.len(), 4, "{text:?}");
         assert!(text[0].contains("▸ active one"), "{text:?}");
         assert!(text[1].contains("next 0"), "{text:?}");
         assert!(text[2].contains("next 1"), "{text:?}");
-        // 15 completed above and one pending below the window.
-        assert!(text[3].contains("+16 hidden"), "{text:?}");
+        // 15 completed above and one pending below the window, named
+        // alongside the key that shows them.
+        assert!(text[3].contains("+16 hidden · ^T"), "{text:?}");
+
+        // Too narrow for the hint: the count still has to fit.
+        let cramped = render_todo_sidebar_lines(&list, 20, 4)
+            .iter()
+            .map(rendered_text)
+            .collect::<Vec<_>>();
+        assert!(cramped[3].contains("+16 hidden"), "{cramped:?}");
+        assert!(!cramped[3].contains("^T"), "{cramped:?}");
     }
 
     #[test]
