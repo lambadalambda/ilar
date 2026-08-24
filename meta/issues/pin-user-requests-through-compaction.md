@@ -49,6 +49,25 @@ judgement.
   this issue guarantees the objective survives; that one improves
   everything around it.
 
+### Prior art
+
+Codex does exactly this, structurally. `build_compacted_history` in
+`codex-rs/core/src/compact.rs` builds the replacement history as
+initial context + **the user messages, verbatim** + the summary, with
+`COMPACT_USER_MESSAGE_MAX_TOKENS = 20_000`. It fills the budget
+newest-first and truncates the message that straddles the boundary,
+then restores chronological order; previous summaries are filtered out
+so they cannot accumulate. Codex keeps *no* verbatim tool output after
+compaction — user messages and the summary are the whole history.
+
+Filling newest-first means a very long session can still evict the
+oldest request. Keeping the first message plus newest-first for the
+rest is strictly better for objective retention, at the cost of one
+extra rule.
+
+opencode does not pin messages; it relies on an `## Objective` section
+in a structured template instead.
+
 ## Milestone
 
 10 — Everyday polish
