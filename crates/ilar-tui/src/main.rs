@@ -3,6 +3,7 @@
 mod app;
 mod decide;
 mod diff;
+mod exec;
 mod highlight;
 mod history;
 mod input;
@@ -82,6 +83,34 @@ const MAX_WHEEL_EVENTS_PER_BATCH: usize = 1024;
 enum Command {
     /// Log in to OpenAI with your ChatGPT account (OAuth in the browser)
     Login,
+    /// Run one turn without a terminal and print the answer
+    Exec(ExecArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct ExecArgs {
+    /// The prompt. Omit to read it from stdin.
+    prompt: Option<String>,
+
+    /// Model to use (provider/model-id); overrides config.
+    #[arg(long)]
+    model: Option<String>,
+
+    /// Agent name from config.
+    #[arg(long)]
+    agent: Option<String>,
+
+    /// Session id to continue.
+    #[arg(long)]
+    session: Option<String>,
+
+    /// Continue the most recently modified session.
+    #[arg(long = "continue", conflicts_with = "session")]
+    continue_last: bool,
+
+    /// Emit the loop's events as NDJSON on stdout instead of the answer.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -676,10 +705,102 @@ fn adopt_model_selection(
     Ok(())
 }
 
+/// `ilar exec`: resolve the same runtime the TUI would, run one turn,
+/// and return the exit code the shell should see.
+async fn run_exec(config: &ilar::config::Config, args: ExecArgs) -> Result<i32> {
+    use std::io::Write as _;
+    let prompt = match args.prompt {
+        Some(prompt) => prompt,
+        None => {
+            let mut buffer = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut buffer)
+                .context("reading the prompt from stdin")?;
+            buffer
+        }
+    };
+    if prompt.trim().is_empty() {
+        anyhow::bail!("no prompt given (pass one as an argument or on stdin)");
+    }
+
+    let store = ilar::runtime::session_store(config);
+    let resume = if args.continue_last {
+        Some(
+            store
+                .latest()
+                .map(|session| session.id)
+                .context("no sessions to continue (session directory is empty)")?,
+        )
+    } else {
+        args.session
+    };
+    let runtime = ilar::runtime::RuntimePlan::resolve(
+        config,
+        &ilar::runtime::RuntimeOptions {
+            model: args.model,
+            agent: args.agent,
+            resume,
+            cwd: std::env::current_dir().context("no cwd")?,
+            // Nobody is here to answer: the tool is left off so the
+            // model is told so on the spot instead of blocking.
+            questions: false,
+        },
+    )?
+    .start(config)?;
+
+    let format = if args.json {
+        exec::ExecFormat::Json
+    } else {
+        exec::ExecFormat::Text
+    };
+    let cancel = CancellationToken::new();
+    let interrupt = cancel.clone();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            interrupt.cancel();
+        }
+    });
+
+    let mut out = std::io::stdout();
+    let mut err = std::io::stderr();
+    let outcome = exec::exec_turn(
+        runtime.resolver.as_ref(),
+        &runtime.registry,
+        &runtime.store,
+        &runtime.session_id,
+        prompt.trim(),
+        Some(&runtime.system_prompt),
+        runtime.loop_config.clone(),
+        runtime.tool_ctx.clone(),
+        format,
+        cancel,
+        &mut out,
+        &mut err,
+    )
+    .await;
+
+    // Nothing outlives the process: a background task with no session
+    // to notify, or a service nobody will stop, is a leak.
+    let background = runtime.spawner.running_background();
+    if background > 0 {
+        let _ = writeln!(err, "{background} background task(s) cancelled at exit");
+    }
+    runtime.spawner.shutdown().await;
+    runtime.services.stop_all();
+
+    if let Err(error) = &outcome {
+        let _ = writeln!(err, "error: {error:#}");
+    }
+    Ok(exec::exit_code(&outcome))
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
     let config = Loader::new().resolve().context("loading config")?;
+    if let Some(Command::Exec(exec_args)) = args.command {
+        let code = run_exec(&config, exec_args).await?;
+        std::process::exit(code);
+    }
     if let Some(Command::Login) = args.command {
         let store = ilar::auth::AuthStore::open(config.state_dir().to_path_buf());
         let tokens = ilar::auth::login_flow(&store, std::time::Duration::from_secs(300), true)
