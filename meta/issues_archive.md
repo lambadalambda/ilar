@@ -176,3 +176,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [The session search opens like a picker](issues/session-search-opens-like-a-picker.md)
 - [x] [Enter submits a fully typed slash command](issues/enter-submits-a-fully-typed-slash-command.md)
 - [x] [Asides run beside the turn](issues/asides-run-beside-the-turn.md)
+- [x] [The README is the pitch; details live in docs/](issues/readme-is-the-pitch.md)
