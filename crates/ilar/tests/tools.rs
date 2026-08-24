@@ -1069,6 +1069,34 @@ async fn history_searches_this_session_and_no_other() {
         leak.content
     );
 
+    // A speaker lists what they said, with no query at all: "what was
+    // I actually asked?" in one call, which is why the handover does
+    // not carry the request verbatim.
+    let asked = history
+        .run(serde_json::json!({"speaker": "user"}), context(&ids[0]))
+        .await;
+    assert!(!asked.is_error, "{}", asked.content);
+    assert!(asked.content.contains("mine:"), "{}", asked.content);
+    assert!(!asked.content.contains("theirs:"), "{}", asked.content);
+
+    // A speaker narrows a search.
+    let narrowed = history
+        .run(
+            serde_json::json!({"query": "0x4f11b4", "speaker": "tool_result"}),
+            context(&ids[0]),
+        )
+        .await;
+    assert!(
+        narrowed.content.contains("no earlier mention"),
+        "the user's line matched a tool-result search: {}",
+        narrowed.content
+    );
+
+    let unknown = history
+        .run(serde_json::json!({"speaker": "nobody"}), context(&ids[0]))
+        .await;
+    assert!(unknown.is_error, "{}", unknown.content);
+
     // An event index reads the conversation around it.
     let around = history
         .run(serde_json::json!({"event": 1}), context(&ids[0]))

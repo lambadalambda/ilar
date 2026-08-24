@@ -67,7 +67,10 @@ impl TodoList {
 
 #[derive(Deserialize)]
 struct Input {
-    todos: Vec<ItemInput>,
+    /// Absent means "read": the model has no other way to see its own
+    /// plan, since the list lives in tool results that compaction
+    /// eventually drops.
+    todos: Option<Vec<ItemInput>>,
 }
 
 #[derive(Deserialize)]
@@ -92,8 +95,10 @@ impl Tool for TodoTool {
     }
 
     fn description(&self) -> &'static str {
-        "Write the full todo list for the current task. Replaces the previous \
-         list. Exactly one item may be in_progress."
+        "Read or write the todo list for the current task. Call with no arguments to read \
+         the current list — do that after a handover summary, or whenever you are unsure \
+         what you were doing. Passing `todos` replaces the list entirely; exactly one item \
+         may be in_progress."
     }
 
     fn concurrency(&self) -> ToolConcurrency {
@@ -109,7 +114,8 @@ impl Tool for TodoTool {
             "type": "object",
             "properties": {
                 "todos": {
-                    "type": "array",
+                    "type": ["array", "null"],
+                    "description": "The full replacement list. Omit to read the current one.",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -119,8 +125,7 @@ impl Tool for TodoTool {
                         "required": ["content", "status"]
                     }
                 }
-            },
-            "required": ["todos"]
+            }
         })
     }
 
@@ -131,8 +136,16 @@ impl Tool for TodoTool {
                 Ok(v) => v,
                 Err(e) => return ToolOutput::error(format!("invalid input for todo: {e}")),
             };
-            let mut items = Vec::with_capacity(input.todos.len());
-            for item in input.todos {
+            let Some(todos) = input.todos else {
+                let current = list.lock().unwrap().checklist();
+                return ToolOutput::text(if current.is_empty() {
+                    "(no todo list yet)".to_string()
+                } else {
+                    current
+                });
+            };
+            let mut items = Vec::with_capacity(todos.len());
+            for item in todos {
                 let status = match item.status.as_str() {
                     "pending" => Status::Pending,
                     "in_progress" => Status::InProgress,

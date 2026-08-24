@@ -152,3 +152,51 @@ async fn todo_replacements_apply_in_provider_call_order() {
     assert_eq!(snapshots, ["first", "second"]);
     assert!(todos.lock().unwrap().items.is_empty());
 }
+
+#[tokio::test]
+async fn the_list_can_be_read_back() {
+    let (reg, todos) = registry();
+
+    // Nothing yet, and asking is not an error.
+    let empty = run(&reg, serde_json::json!({})).await;
+    assert!(!empty.is_error, "{}", empty.content);
+    assert!(
+        empty.content.contains("no todo list yet"),
+        "{}",
+        empty.content
+    );
+
+    let written = run(
+        &reg,
+        serde_json::json!({"todos": [
+            {"content": "read the config", "status": "completed"},
+            {"content": "fix the parser", "status": "in_progress"}
+        ]}),
+    )
+    .await;
+    assert!(!written.is_error, "{}", written.content);
+    // The shared list is what a read sees; the write commits it the way
+    // the loop does.
+    *todos.lock().unwrap() = match written.session_state() {
+        Some(SessionState::TodoList { list }) => list.clone(),
+        other => panic!("{other:?}"),
+    };
+
+    // The model can now ask what it was doing — which is the only way
+    // to know, once compaction has dropped the write it echoed.
+    let read = run(&reg, serde_json::json!({})).await;
+    assert!(!read.is_error, "{}", read.content);
+    assert!(
+        read.content.contains("[x] read the config"),
+        "{}",
+        read.content
+    );
+    assert!(
+        read.content.contains("[>] fix the parser"),
+        "{}",
+        read.content
+    );
+
+    // Reading does not disturb the list.
+    assert_eq!(todos.lock().unwrap().items.len(), 2);
+}

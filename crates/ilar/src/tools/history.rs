@@ -64,6 +64,21 @@ fn render_context(entries: &[recall::Entry], event: usize) -> String {
         .join("\n")
 }
 
+fn render_listing(entries: &[recall::Entry], speaker: recall::Speaker) -> String {
+    if entries.is_empty() {
+        return format!("this session has nothing from {}", speaker.label());
+    }
+    let mut lines = vec![format!(
+        "{} entr(ies) from {}, oldest first:",
+        entries.len(),
+        speaker.label()
+    )];
+    for entry in entries {
+        lines.push(format!("event {}: {}", entry.event, entry.text));
+    }
+    lines.join("\n")
+}
+
 impl Tool for HistoryTool {
     fn name(&self) -> &'static str {
         "history"
@@ -73,8 +88,9 @@ impl Tool for HistoryTool {
         "Search this session's own history, including everything summarized away by \
          compaction. Use it whenever a detail you need is not in front of you — an earlier \
          instruction, a file path, an error, a decision and its reasoning — instead of \
-         guessing or asking the user to repeat themselves. Search with `query`; read the \
-         surrounding conversation with `event` from a result."
+         guessing or asking the user to repeat themselves. Search with `query`, narrow with \
+         `speaker`, read around a hit with `event`, or pass `speaker: \"user\"` alone to list \
+         every instruction you have been given in this session."
     }
 
     fn concurrency(&self) -> ToolConcurrency {
@@ -96,6 +112,11 @@ impl Tool for HistoryTool {
                 "event": {
                     "type": ["integer", "null"],
                     "description": "Event index from a search result; returns the conversation around it."
+                },
+                "speaker": {
+                    "type": ["string", "null"],
+                    "enum": ["user", "assistant", "thinking", "tool_call", "tool_result", "summary", "topic", null],
+                    "description": "Narrow a search to one speaker, or list everything one said when there is no query. `speaker: \"user\"` alone lists the instructions you were given."
                 }
             }
         })
@@ -109,6 +130,22 @@ impl Tool for HistoryTool {
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string);
             let event = input.get("event").and_then(serde_json::Value::as_u64);
+            let speaker_word = input
+                .get("speaker")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            let speaker = match speaker_word.as_deref() {
+                None => None,
+                Some(word) => match recall::parse_speaker(word) {
+                    Some(speaker) => Some(speaker),
+                    None => {
+                        return ToolOutput::error(format!(
+                            "unknown speaker {word:?}; use user, assistant, thinking, tool_call, \
+                             tool_result, summary or topic"
+                        ));
+                    }
+                },
+            };
             if ctx.session_id.is_empty() {
                 return ToolOutput::error("history is available only inside a session");
             }
@@ -128,10 +165,18 @@ impl Tool for HistoryTool {
                     ToolOutput::text(render_context(&around, event))
                 }
                 (Some(query), None) => {
-                    let matches = recall::search(&entries, &query, recall::MAX_MATCHES);
+                    let matches = recall::search(&entries, &query, speaker, recall::MAX_MATCHES);
                     ToolOutput::text(render_matches(&matches, &query))
                 }
-                (None, None) => ToolOutput::error("history needs a query or an event"),
+                // No query, just a speaker: list what they said. The
+                // usual case is "what was I actually asked?".
+                (None, None) => match speaker {
+                    Some(speaker) => {
+                        let listed = recall::by_speaker(&entries, speaker, CONTEXT_ENTRY_CHARS);
+                        ToolOutput::text(render_listing(&listed, speaker))
+                    }
+                    None => ToolOutput::error("history needs a query, an event, or a speaker"),
+                },
             }
         })
     }

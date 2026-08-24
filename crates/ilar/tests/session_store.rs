@@ -2327,7 +2327,7 @@ fn the_archive_outlives_the_context_window() {
 
     // ...and still findable in the archive.
     let entries = ilar::recall::session_entries(&store, &meta.session_id).unwrap();
-    let matches = ilar::recall::search(&entries, "0x4f11b4", ilar::recall::MAX_MATCHES);
+    let matches = ilar::recall::search(&entries, "0x4f11b4", None, ilar::recall::MAX_MATCHES);
     assert_eq!(matches.len(), 1, "{matches:?}");
     assert!(matches[0].excerpt.contains("0x4f11b4"), "{matches:?}");
     assert_eq!(matches[0].speaker, ilar::recall::Speaker::User);

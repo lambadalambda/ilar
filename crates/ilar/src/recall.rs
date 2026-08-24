@@ -142,17 +142,57 @@ fn excerpt(text: &str, at: usize, needle_len: usize) -> (String, bool, bool) {
     )
 }
 
-/// Case-insensitive substring search over a session's own history.
+/// Parse a speaker filter from a caller's word, e.g. the `history`
+/// tool's `speaker` argument. `None` means every speaker.
+pub fn parse_speaker(word: &str) -> Option<Speaker> {
+    match word.trim().to_lowercase().replace([' ', '-'], "_").as_str() {
+        "user" => Some(Speaker::User),
+        "assistant" => Some(Speaker::Assistant),
+        "thinking" => Some(Speaker::Thinking),
+        "tool_call" => Some(Speaker::ToolCall),
+        "tool_result" => Some(Speaker::ToolResult),
+        "summary" => Some(Speaker::Summary),
+        "topic" => Some(Speaker::Topic),
+        _ => None,
+    }
+}
+
+/// Everything one speaker said, newest last, each bounded. Listing the
+/// user's own messages answers "what was I actually asked?" without a
+/// query — which is why the handover does not need to carry the request
+/// verbatim.
+pub fn by_speaker(entries: &[Entry], speaker: Speaker, max_chars: usize) -> Vec<Entry> {
+    entries
+        .iter()
+        .filter(|entry| entry.speaker == speaker)
+        .map(|entry| Entry {
+            event: entry.event,
+            speaker: entry.speaker,
+            text: bound(&entry.text, max_chars),
+        })
+        .collect()
+}
+
+/// Case-insensitive substring search over a session's own history,
+/// optionally narrowed to one speaker.
 ///
 /// One match per entry: a query that appears fifty times in one hexdump
 /// should cost one row, not fifty.
-pub fn search(entries: &[Entry], query: &str, limit: usize) -> Vec<Match> {
+pub fn search(
+    entries: &[Entry],
+    query: &str,
+    speaker: Option<Speaker>,
+    limit: usize,
+) -> Vec<Match> {
     let needle = query.trim().to_lowercase();
     if needle.is_empty() {
         return Vec::new();
     }
     let mut matches = Vec::new();
     for entry in entries {
+        if speaker.is_some_and(|wanted| wanted != entry.speaker) {
+            continue;
+        }
         let Some(at) = entry.text.to_lowercase().find(&needle) else {
             continue;
         };
@@ -290,7 +330,7 @@ mod tests {
         let events = vec![result(&format!("{noise} the AES table lives here {noise}"))];
         let entries = entries(&events);
 
-        let matches = search(&entries, "aes table", MAX_MATCHES);
+        let matches = search(&entries, "aes table", None, MAX_MATCHES);
 
         assert_eq!(matches.len(), 1);
         let hit = &matches[0];
@@ -304,7 +344,7 @@ mod tests {
     #[test]
     fn one_row_per_entry_however_often_it_matches() {
         let events = vec![result(&"deadbeef ".repeat(500))];
-        let matches = search(&entries(&events), "deadbeef", MAX_MATCHES);
+        let matches = search(&entries(&events), "deadbeef", None, MAX_MATCHES);
         assert_eq!(matches.len(), 1, "a hexdump billed one row per byte");
     }
 
@@ -332,6 +372,6 @@ mod tests {
     #[test]
     fn an_empty_query_matches_nothing() {
         let entries = entries(&[user("anything")]);
-        assert!(search(&entries, "   ", MAX_MATCHES).is_empty());
+        assert!(search(&entries, "   ", None, MAX_MATCHES).is_empty());
     }
 }
