@@ -4,6 +4,7 @@
 //! with mock providers.
 
 pub mod agent;
+pub mod aside;
 mod atomic_file;
 pub mod auth;
 pub mod checkpoint;
