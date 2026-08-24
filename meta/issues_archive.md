@@ -158,3 +158,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Open links from the transcript](issues/open-links-from-transcript.md)
 - [x] [Replay OpenAI items in the shape they arrived](issues/replay-openai-items-verbatim.md)
 - [x] [Pin the Codex backend to a shard](issues/codex-session-affinity-headers.md)
+- [x] [Extract the picker core](issues/extract-picker-core.md)

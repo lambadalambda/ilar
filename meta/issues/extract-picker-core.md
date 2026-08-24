@@ -58,6 +58,23 @@ this; two more pickers have joined since.
   also out of scope: cosmetic, clipped by ratatui, and touching it
   perturbs the exact-text render tests.
 
+## Outcome
+
+Landed in five commits: pin tests first (six new render/key tests over
+the four unguarded pickers, verified to pass against the pre-refactor
+code), then `ListNav`, `list_window`, `edit_query`, `modal_frame`, and
+`ModalRows`. 802 -> 813 workspace tests; `rem_euclid` appears once. An
+adversarial review diffed every handle_key arm-by-arm against the old
+code and confirmed the bespoke asymmetries survived (theme preview on
+every path, variant/model error-clearing, wheel wrap, scrolled click
+maps). Two observable deltas beyond the sanctioned upgrades, both
+benign and pinned: palette control characters no longer reset the
+selection, and a model-picker control character no longer clears the
+error banner. The session picker's latent click off-by-one died with
+the post-hoc rows construction. Left for later: pending-manager and
+help still hand-roll the frame scaffold; the `{text:<width$}` padding
+quirk stands.
+
 ## Milestone
 
 9 — Time travel follow-ups
