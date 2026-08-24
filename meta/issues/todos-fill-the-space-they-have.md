@@ -36,6 +36,18 @@ end.
   sidebar hid.
 - The full suite passes.
 
+## Outcome
+
+Two commits. The sidebar cap is now the panel's rows, and the visible
+todos are a contiguous run anchored on the active item so the bigger
+cap could not push it off screen once wrapping ate the rows — the old
+scattered pick could show items 1, 2 and 17 as if consecutive. Ctrl-T
+and a palette entry open a read-only scrollable overlay over the whole
+list, titled with the done count, and the hidden note names the key
+when the panel is at least 30 cells wide. Sidebar and overlay share
+`todo_item_lines`. Smoke-ran in tmux against a synthetic twelve-item
+session at 40 and 16 rows.
+
 ## Notes
 
 - The wrapping trim already in `render_todo_sidebar_snapshot` stays:

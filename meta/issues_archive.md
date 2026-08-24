@@ -160,3 +160,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Pin the Codex backend to a shard](issues/codex-session-affinity-headers.md)
 - [x] [Extract the picker core](issues/extract-picker-core.md)
 - [x] [Finish modal scaffold adoption](issues/finish-modal-scaffold-adoption.md)
+- [x] [Todos fill the space they have](issues/todos-fill-the-space-they-have.md)
