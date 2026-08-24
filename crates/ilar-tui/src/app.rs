@@ -400,6 +400,12 @@ impl App {
             // submits it through the normal prompt path.
             KeyCode::Tab | KeyCode::Enter => {
                 let (name, _) = &candidates[self.slash_selected];
+                // Already typed in full: Enter means send, not "append
+                // a space and make me press Enter again". Tab still
+                // completes, for reaching the arguments.
+                if key.code == KeyCode::Enter && self.input.text() == format!("/{name}") {
+                    return false;
+                }
                 self.input = InputBuffer::from(format!("/{name} "));
                 self.slash_selected = 0;
             }
@@ -3434,6 +3440,30 @@ mod tests {
             app.handle_prompt_navigation_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE,))
         );
         assert!(app.input.is_blank());
+    }
+
+    #[test]
+    fn a_fully_typed_command_submits_on_enter_instead_of_completing() {
+        let mut app = App::new();
+        app.commands = Vec::new();
+
+        // Partial name: Enter completes, as before.
+        app.input = InputBuffer::from("/sess");
+        let consumed = app.handle_slash_completion_key(KeyEvent::from(KeyCode::Enter));
+        assert!(consumed);
+        assert_eq!(app.input.text(), "/sessions ");
+
+        // Exact name: Enter falls through to the submit path; a second
+        // Enter must not be needed.
+        app.input = InputBuffer::from("/sessions");
+        let consumed = app.handle_slash_completion_key(KeyEvent::from(KeyCode::Enter));
+        assert!(!consumed, "Enter was eaten by completion");
+        assert_eq!(app.input.text(), "/sessions");
+
+        // Tab keeps completing even on an exact match.
+        let consumed = app.handle_slash_completion_key(KeyEvent::from(KeyCode::Tab));
+        assert!(consumed);
+        assert_eq!(app.input.text(), "/sessions ");
     }
 
     #[test]
