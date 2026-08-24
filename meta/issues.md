@@ -45,4 +45,3 @@
 ## Milestone 11 — Beyond the terminal
 
 - [ ] [A web frontend](issues/web-frontend.md)
-- [ ] [Asides run beside the turn](issues/asides-run-beside-the-turn.md)

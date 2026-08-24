@@ -175,3 +175,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [/btw: ask an aside that leaves no trace](issues/btw-asides.md)
 - [x] [The session search opens like a picker](issues/session-search-opens-like-a-picker.md)
 - [x] [Enter submits a fully typed slash command](issues/enter-submits-a-fully-typed-slash-command.md)
+- [x] [Asides run beside the turn](issues/asides-run-beside-the-turn.md)
