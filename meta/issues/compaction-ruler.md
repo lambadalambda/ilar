@@ -32,11 +32,18 @@ both halves already — and then takes `max()`, throwing the ratio away.
 - Deliberately not a tokenizer dependency (heavyweight, and wrong for
   every non-OpenAI model) and not content sniffing for hex or base64
   (fragile, and it only papers over the same gap).
-- **Superseded, pending measurement, by
-  [compaction as handover](compaction-as-handover.md).** With no
-  token-budgeted window there is no estimate in the cut path at all;
-  the trigger already uses the provider's reported count, which is
-  ground truth. Reassess once the handover mode has run on real work.
+- **Superseded outright by
+  [compaction as handover](compaction-as-handover.md).** The cut is now
+  always "everything before this point", so `recent_steps_cut`,
+  `event_tokens` and the estimate they shared are gone from the cut
+  path entirely. The trigger uses the provider's reported count, which
+  is ground truth. Nothing left to calibrate.
+
+## Outcome
+
+Closed without implementation: the measurement stands as the evidence
+that motivated the handover design, and the code it would have fixed
+no longer exists.
 
 ## Milestone
 

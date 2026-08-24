@@ -46,5 +46,4 @@
 
 - [ ] [Find a session by something said in the middle of it](issues/search-across-sessions.md)
 - [ ] [Compaction as handover, with the archive one grep away](issues/compaction-as-handover.md)
-- [ ] [The compaction cut measures tokens with a prose ruler](issues/compaction-ruler.md)
 - [ ] [A web frontend](issues/web-frontend.md)
