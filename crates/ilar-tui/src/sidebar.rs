@@ -6,7 +6,8 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use crate::text::{
-    Truncation, safe_text, styled_graphemes, styled_line, truncate_display, wrap_styled_line,
+    Truncation, format_elapsed, safe_text, styled_graphemes, styled_line, truncate_display,
+    wrap_styled_line,
 };
 use crate::theme::{self, MUTED, RUNNING as TOOL_ACTIVE};
 
@@ -46,6 +47,62 @@ pub(crate) fn carve_panel(area: &mut Rect, content_rows: usize) -> Option<Rect> 
     let panel = Rect::new(area.x, area.y, area.width, height);
     *area = Rect::new(area.x, area.y + height, area.width, area.height - height);
     Some(panel)
+}
+
+/// One subagent working right now, as the sidebar shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentRow {
+    pub(crate) description: String,
+    pub(crate) agent: String,
+    pub(crate) background: bool,
+    pub(crate) elapsed: std::time::Duration,
+}
+
+/// How many agents the panel lists before counting the rest.
+const AGENT_PANEL_MAX: usize = 3;
+
+/// The running-agents panel: what was delegated, to whom, and for how
+/// long. Two lines each — the description earns a full line, since it
+/// is the only thing that says what the agent is actually doing.
+pub(crate) fn agent_panel_lines(agents: &[AgentRow], width: usize) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    for agent in agents.iter().take(AGENT_PANEL_MAX) {
+        // Truncate the marker too: at absurd widths it is the overflow.
+        let marker = truncate_display("▸ ", width, Truncation::Right);
+        let remaining = width.saturating_sub(UnicodeWidthStr::width(marker.as_str()));
+        lines.push(Line::from(vec![
+            Span::styled(marker, Style::default().fg(TOOL_ACTIVE)),
+            Span::styled(
+                truncate_display(&safe_text(&agent.description), remaining, Truncation::Right),
+                Style::default().fg(theme::PRIMARY),
+            ),
+        ]));
+        let background = if agent.background { " · bg" } else { "" };
+        lines.push(Line::styled(
+            truncate_display(
+                &format!(
+                    "  {}{background} · {}",
+                    safe_text(&agent.agent),
+                    format_elapsed(agent.elapsed)
+                ),
+                width,
+                Truncation::Right,
+            ),
+            Style::default().fg(MUTED),
+        ));
+    }
+    if agents.len() > AGENT_PANEL_MAX {
+        lines.push(Line::styled(
+            truncate_display(
+                &format!("  +{} more", agents.len() - AGENT_PANEL_MAX),
+                width,
+                Truncation::Right,
+            ),
+            Style::default().fg(MUTED),
+        ));
+    }
+    lines
 }
 
 pub(crate) struct TodoRenderSnapshot {
@@ -539,6 +596,37 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn the_agent_panel_caps_its_rows_and_counts_the_rest() {
+        let agents = (0..5)
+            .map(|index| AgentRow {
+                description: format!("task number {index} with a long description"),
+                agent: "explore".into(),
+                background: index % 2 == 1,
+                elapsed: std::time::Duration::from_secs(30),
+            })
+            .collect::<Vec<_>>();
+
+        let lines = agent_panel_lines(&agents, 24);
+        let text = lines.iter().map(rendered_text).collect::<Vec<_>>();
+
+        // Three agents, two lines each, then the tally.
+        assert_eq!(text.len(), 7, "{text:?}");
+        assert!(text[0].starts_with("▸ task number 0"), "{text:?}");
+        assert_eq!(text[1], "  explore · 30s");
+        assert_eq!(text[3], "  explore · bg · 30s");
+        assert_eq!(text[6], "  +2 more");
+        assert!(lines.iter().all(|line| line.width() <= 24), "{text:?}");
+
+        // A single agent needs no tally, and zero width does not panic.
+        assert_eq!(agent_panel_lines(&agents[..1], 24).len(), 2);
+        assert!(
+            agent_panel_lines(&agents, 0)
+                .iter()
+                .all(|line| line.width() <= 1)
+        );
     }
 
     #[test]

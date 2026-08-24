@@ -41,6 +41,7 @@ use modals::{
 };
 use questions::QuestionAction;
 use ratatui::style::Color;
+use sidebar::AgentRow;
 use tokio_util::sync::CancellationToken;
 use transcript::Line_;
 
@@ -1490,6 +1491,17 @@ impl schedule::Runtime for LoopRuntime<'_> {
             self.turn_handle.is_some(),
         );
         app.background_running = self.spawner.running_background();
+        app.agents_view = self
+            .spawner
+            .running_tasks()
+            .into_iter()
+            .map(|task| AgentRow {
+                description: task.description,
+                agent: task.agent,
+                background: task.background,
+                elapsed: task.started.elapsed(),
+            })
+            .collect();
         app.services_view = self.services.snapshot();
         app.services_running = app
             .services_view

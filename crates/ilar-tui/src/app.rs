@@ -41,7 +41,8 @@ use crate::session_view::{
     tool_notification_display,
 };
 use crate::sidebar::{
-    carve_panel, content_areas, render_todo_sidebar_snapshot, todo_render_snapshot, todo_summary,
+    AgentRow, agent_panel_lines, carve_panel, content_areas, render_todo_sidebar_snapshot,
+    todo_render_snapshot, todo_summary,
 };
 use crate::text::{
     Truncation, abbreviated_path, bounded_detail, cache_share, context_meter, context_usage,
@@ -134,6 +135,8 @@ pub(crate) struct App {
     pub(crate) services_running: usize,
     /// (name, running, detail) rows for the sidebar.
     pub(crate) services_view: Vec<(String, bool, String)>,
+    /// Subagents working right now, oldest first, for the sidebar.
+    pub(crate) agents_view: Vec<AgentRow>,
     /// Idle-session compaction waiting for the scheduler's operation slot.
     pub(crate) compact_requested: bool,
     pub(crate) search_active: bool,
@@ -239,6 +242,7 @@ impl App {
             background_running: 0,
             services_running: 0,
             services_view: Vec::new(),
+            agents_view: Vec::new(),
             compact_requested: false,
             search_active: false,
             search_query: String::new(),
@@ -2125,6 +2129,30 @@ impl App {
                     frame.render_widget(Paragraph::new(lines).block(goal_block), goal_area);
                 }
             }
+            if !self.agents_view.is_empty() {
+                let text_width = todo_area
+                    .width
+                    .saturating_sub(2 + CONTENT_HORIZONTAL_PADDING * 2)
+                    .max(1) as usize;
+                let lines = agent_panel_lines(&self.agents_view, text_width);
+                if let Some(agent_area) = carve_panel(&mut todo_area, lines.len()) {
+                    let agent_block = Block::default()
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .border_style(theme::panel_border())
+                        .padding(Padding::new(
+                            CONTENT_HORIZONTAL_PADDING,
+                            CONTENT_HORIZONTAL_PADDING,
+                            0,
+                            0,
+                        ))
+                        .title(Line::from(Span::styled(
+                            format!("agents ({})", self.agents_view.len()),
+                            theme::title(theme::SECONDARY),
+                        )));
+                    frame.render_widget(Paragraph::new(lines).block(agent_block), agent_area);
+                }
+            }
             if !self.services_view.is_empty() {
                 let text_width = todo_area
                     .width
@@ -3433,6 +3461,63 @@ mod tests {
         assert!(screen.contains("web · up 3m2s"), "{screen}");
         assert!(screen.contains("worker · exit 1"), "{screen}");
         assert!(screen.contains("todos"), "{screen}");
+    }
+
+    #[test]
+    fn running_agents_show_in_the_sidebar_until_they_finish() {
+        let mut app = App::new();
+        app.agents_view = vec![
+            AgentRow {
+                description: "survey the picker core".into(),
+                agent: "explore".into(),
+                background: false,
+                elapsed: std::time::Duration::from_secs(72),
+            },
+            AgentRow {
+                description: "rebuild the index".into(),
+                agent: "build".into(),
+                background: true,
+                elapsed: std::time::Duration::from_secs(5),
+            },
+        ];
+        let screen = |app: &mut App| {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
+            terminal.draw(|frame| app.render(frame)).unwrap();
+            (0..30)
+                .map(|row| {
+                    (0..140)
+                        .map(|column| terminal.backend().buffer()[(column, row)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let running = screen(&mut app);
+        assert!(running.contains("agents (2)"), "{running}");
+        assert!(running.contains("survey the picker core"), "{running}");
+        assert!(running.contains("explore · 1m 12s"), "{running}");
+        // Background work is marked; foreground is the default.
+        assert!(running.contains("build · bg · 5s"), "{running}");
+        // The panel never crowds out what it sits above.
+        assert!(running.contains("todos"), "{running}");
+
+        // Stacked with everything else the sidebar can carry, the
+        // panels share the space instead of evicting each other.
+        app.goal = Some(("finish the sidebar work".into(), 2));
+        app.services_view = vec![("web".into(), true, "up 3m2s".into())];
+        app.services_running = 1;
+        let stacked = screen(&mut app);
+        for section in ["goal 2/", "agents (2)", "services (1)", "todos"] {
+            assert!(stacked.contains(section), "missing {section}: {stacked}");
+        }
+
+        // Nothing running, no panel: the sidebar is not a museum.
+        app.agents_view.clear();
+        let idle = screen(&mut app);
+        assert!(!idle.contains("agents ("), "{idle}");
+        assert!(idle.contains("todos"), "{idle}");
     }
 
     #[test]
