@@ -41,3 +41,8 @@
 ## Milestone 10 — Everyday polish
 
 (all complete — see issues_archive.md)
+
+## Milestone 11 — Beyond the terminal
+
+- [ ] [ilar exec: run a turn without a terminal](issues/headless-exec.md)
+- [ ] [A web frontend](issues/web-frontend.md)
