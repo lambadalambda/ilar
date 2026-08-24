@@ -38,3 +38,7 @@
 
 (all complete — see issues_archive.md)
 
+## Milestone 10 — Everyday polish
+
+- [ ] [Todos fill the space they have](issues/todos-fill-the-space-they-have.md)
+

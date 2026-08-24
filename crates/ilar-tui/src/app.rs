@@ -40,8 +40,7 @@ use crate::session_view::{
     tool_notification_display,
 };
 use crate::sidebar::{
-    carve_panel, content_areas, render_todo_sidebar_snapshot, todo_render_snapshot,
-    todo_sidebar_snapshot, todo_summary,
+    carve_panel, content_areas, render_todo_sidebar_snapshot, todo_render_snapshot, todo_summary,
 };
 use crate::text::{
     Truncation, abbreviated_path, bounded_detail, cache_share, context_meter, context_usage,
@@ -2179,7 +2178,7 @@ impl App {
             let inner = todo_block.inner(todo_area);
             let snapshot = {
                 let todos = self.todos.lock().unwrap();
-                todo_sidebar_snapshot(&todos, inner.height as usize)
+                todo_render_snapshot(&todos, inner.height as usize)
             };
             let lines = render_todo_sidebar_snapshot(&snapshot, inner.width, inner.height);
             frame.render_widget(Paragraph::new(lines).block(todo_block), todo_area);
