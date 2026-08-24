@@ -24,6 +24,17 @@ both PR links it was given as source material.
   a summary that only records successes invites repeating rejected
   approaches.
 - Keep it dense; this is a prompt for a summarizer, not a template.
+- Say that the previous summary is destroyed. ilar chains summaries
+  destructively — `transcript_of` emits only the newest — and never
+  tells the summarizer, so a second compaction can silently drop what
+  the first preserved. opencode states it outright ("anything you do
+  not carry into the new summary is lost") and lists what must be
+  carried forward even when the recent conversation does not mention
+  it: objectives, constraints, user directives, decisions, parallel
+  workstreams.
+- Forbid continuing the conversation. See
+  [the summarizer continues the conversation](summarizer-continues-the-conversation.md),
+  which is the structural half of the same problem.
 
 ## Acceptance Criteria
 
