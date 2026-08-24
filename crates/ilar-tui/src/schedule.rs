@@ -28,11 +28,6 @@ pub(crate) enum Completion {
     Root(anyhow::Result<TurnOutcome>),
     Routed(anyhow::Result<RouteOutcome>),
     Compaction(anyhow::Result<ManualCompactionOutcome>),
-    /// A `/btw` question came back; `Ok(None)` means it was aborted.
-    Aside {
-        question: String,
-        result: anyhow::Result<Option<String>>,
-    },
     /// The turn task itself died.
     Crashed(String),
 }
@@ -255,52 +250,6 @@ fn complete<R: Runtime>(app: &mut App, completion: Completion, runtime: &mut R) 
                 QueueStep::Idle | QueueStep::Hold(_) => Vec::new(),
             };
         }
-        Completion::Aside { question, result } => {
-            // Same queue rule as compaction: an answered aside releases
-            // messages queued behind it; an abort or failure holds them
-            // for the user to reconsider.
-            let completed = matches!(&result, Ok(Some(_)));
-            let mut answered = None;
-            match result {
-                Ok(Some(answer)) => {
-                    app.busy = false;
-                    app.status = "ready".into();
-                    app.set_activity(Activity::Ready);
-                    answered = Some(answer);
-                }
-                Ok(None) => {
-                    app.busy = false;
-                    app.status = "aside aborted".into();
-                    app.set_activity(Activity::Ready);
-                    app.set_notice("aside aborted", NoticeLevel::Warning);
-                }
-                Err(error) => {
-                    app.busy = false;
-                    app.status = "aside failed".into();
-                    app.set_activity(Activity::Error);
-                    app.set_notice(format!("aside failed: {error:#}"), NoticeLevel::Error);
-                }
-            }
-            runtime.end_turn();
-            // The queue decision is taken *before* the modal opens: a
-            // message queued during the aside was promised a turn, and
-            // the answer is read-only — it can float above a streaming
-            // turn. Deciding after would hold the message behind the
-            // modal with nothing left to release it.
-            let state = runtime.observe(app);
-            let step = queue_step(&state, completed);
-            if let Some(answer) = answered {
-                app.aside = Some(crate::modals::AsideModal {
-                    question,
-                    answer,
-                    scroll: 0,
-                });
-            }
-            return match step {
-                QueueStep::Send => vec![Intent::SendQueued],
-                QueueStep::Idle | QueueStep::Hold(_) => Vec::new(),
-            };
-        }
         Completion::Routed(Ok(RouteOutcome::Propagate(notification))) => {
             app.busy = false;
             app.status = "ready".into();
@@ -380,8 +329,9 @@ pub(crate) fn settle<R: Runtime>(
         app.compact_requested = false;
         runtime.start_compaction(app);
     }
-    if app.aside_requested.is_some() && !runtime.observe(app).turn_running {
-        let question = app.aside_requested.take().expect("checked above");
+    // An aside runs beside whatever else is happening — read-only, no
+    // turn slot, no gate.
+    if let Some(question) = app.aside_requested.take() {
         runtime.start_aside(app, question);
     }
     let state = runtime.observe(app);
@@ -475,9 +425,8 @@ mod tests {
             self.log.push("start_compaction".into());
         }
 
-        fn start_aside(&mut self, app: &mut App, question: String) {
-            self.turn_running = true;
-            app.busy = true;
+        fn start_aside(&mut self, _app: &mut App, question: String) {
+            // Detached: neither the turn slot nor busy is touched.
             self.log.push(format!("start_aside:{question}"));
         }
 
@@ -597,70 +546,22 @@ mod tests {
     }
 
     #[test]
-    fn an_idle_aside_request_starts_and_the_answer_opens_the_modal() {
-        let mut app = App::new();
-        app.aside_requested = Some("which port?".into());
-        let mut runtime = FakeRuntime::new();
-
-        settle(&mut app, Vec::new(), &mut runtime).unwrap();
-        assert_eq!(runtime.log, vec!["start_aside:which port?"]);
-        assert_eq!(app.aside_requested, None);
-
-        app.queued_messages = vec!["typed during it".into()];
-        runtime.turn_running = false;
-        pass(
-            &mut app,
-            Some(Completion::Aside {
-                question: "which port?".into(),
-                result: Ok(Some("Port 8080, behind nginx.".into())),
-            }),
-            Vec::new(),
-            &mut runtime,
-        )
-        .unwrap();
-
-        let aside = app.aside.as_ref().expect("modal opened");
-        assert_eq!(aside.question, "which port?");
-        assert_eq!(aside.answer, "Port 8080, behind nginx.");
-        // The queued message got the turn it was promised — released
-        // before the modal opened, which would otherwise hold it with
-        // nothing left to let go.
-        assert_eq!(
-            runtime.log,
-            vec![
-                "start_aside:which port?",
-                "end_turn",
-                "start_turn:typed during it"
-            ]
-        );
-        assert!(app.queued_messages.is_empty(), "queued message stranded");
-        // The released turn shows in the transcript; the aside itself
-        // does not — the exchange lives only in the modal.
-        let rendered = format!("{:?}", app.lines);
-        assert!(!rendered.contains("which port?"), "{rendered}");
-        assert!(!rendered.contains("8080"), "{rendered}");
-    }
-
-    #[test]
-    fn a_failed_aside_is_a_notice_not_a_modal() {
+    fn an_aside_starts_even_mid_turn_and_touches_nothing() {
         let mut app = App::new();
         app.busy = true;
+        app.queued_messages = vec!["typed earlier".into()];
         let mut runtime = FakeRuntime::new();
+        runtime.turn_running = true;
 
-        pass(
-            &mut app,
-            Some(Completion::Aside {
-                question: "anything?".into(),
-                result: Err(anyhow::anyhow!("provider melted")),
-            }),
-            Vec::new(),
-            &mut runtime,
-        )
-        .unwrap();
+        app.aside_requested = Some("which port?".into());
+        settle(&mut app, Vec::new(), &mut runtime).unwrap();
 
-        assert!(app.aside.is_none());
-        assert!(!app.busy);
-        assert!(app.status.contains("failed"), "{}", app.status);
+        assert_eq!(runtime.log, vec!["start_aside:which port?"]);
+        assert_eq!(app.aside_requested, None);
+        // The aside borrowed nothing: the turn keeps running, the
+        // queue keeps waiting, busy stays whose it was.
+        assert!(app.busy);
+        assert_eq!(app.queued_messages, vec!["typed earlier"]);
     }
 
     #[test]

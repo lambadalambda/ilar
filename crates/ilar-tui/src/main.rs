@@ -442,6 +442,12 @@ fn apply_intent(
             app.queued_messages.push(text);
             None
         }
+        Intent::Aside(question) => {
+            // Consumed by settle, which hands it to the runtime's
+            // detached aside task.
+            app.aside_requested = Some(question);
+            None
+        }
         Intent::PastePalette(text) => {
             if let Some(palette) = app.command_palette.as_mut() {
                 palette.insert_query(&text);
@@ -1068,11 +1074,11 @@ enum TurnCompletion {
     Root(Result<TurnOutcome>),
     Routed(Result<ilar::subagent::RouteOutcome>),
     Compaction(Result<ilar::compaction::ManualCompactionOutcome>),
-    Aside {
-        question: String,
-        result: Result<Option<String>>,
-    },
 }
+
+/// A detached /btw in flight: the question, and eventually its answer
+/// (`Ok(None)` when cancelled or superseded).
+type AsideHandle = tokio::task::JoinHandle<(String, Result<Option<String>>)>;
 
 /// `settle`'s effectful edges over tokio and crossterm — see
 /// schedule.rs for the order it is driven in. Constructed fresh each
@@ -1080,6 +1086,10 @@ enum TurnCompletion {
 /// here is a spawn the rest of the iteration observes.
 struct LoopRuntime<'a> {
     turn_handle: &'a mut Option<tokio::task::JoinHandle<TurnCompletion>>,
+    /// A running /btw, beside the turn rather than in its slot; the
+    /// question rides along for the answer modal.
+    aside_handle: &'a mut Option<AsideHandle>,
+    aside_cancel: &'a mut Option<CancellationToken>,
     events_rx: &'a mut Option<LoopEventReceiver>,
     cancel: &'a mut Option<CancellationToken>,
     steer_tx: &'a mut Option<ilar::agent::SteerSender>,
@@ -1267,20 +1277,21 @@ impl schedule::Runtime for LoopRuntime<'_> {
     }
 
     fn start_aside(&mut self, app: &mut App, question: String) {
-        debug_assert!(self.turn_handle.is_none());
-        app.busy = true;
-        app.status = "asking aside".into();
-        app.clear_transient_notice();
-        app.set_activity(Activity::Thinking);
-
+        // Detached, like topic titling: the turn slot, the busy state
+        // and the queue all stay whose they were. A newer aside
+        // replaces a still-running one — newest question wins.
+        if let Some(previous) = self.aside_cancel.take() {
+            previous.cancel();
+        }
+        app.set_notice("asking aside…", NoticeLevel::Info);
         let token = CancellationToken::new();
-        *self.cancel = Some(token.clone());
+        *self.aside_cancel = Some(token.clone());
         let resolver = self.resolver.clone();
         let store = self.store.clone();
         let session_id = self.session_id.to_string();
         let system_prompt = self.system_prompt.to_string();
         let registry = self.registry.clone();
-        *self.turn_handle = Some(tokio::spawn(async move {
+        *self.aside_handle = Some(tokio::spawn(async move {
             let tools = registry.definitions();
             let result = ilar::aside::ask(
                 resolver.as_ref(),
@@ -1292,7 +1303,7 @@ impl schedule::Runtime for LoopRuntime<'_> {
                 &token,
             )
             .await;
-            TurnCompletion::Aside { question, result }
+            (question, result)
         }));
     }
 
@@ -1720,6 +1731,9 @@ async fn run_app(
     let mut steer_tx: Option<ilar::agent::SteerSender> = None;
     let mut turn_handle: Option<tokio::task::JoinHandle<TurnCompletion>> = None;
     let mut topic_handle: Option<tokio::task::JoinHandle<Option<String>>> = None;
+    // A running /btw, detached from the turn slot entirely.
+    let mut aside_handle: Option<AsideHandle> = None;
+    let mut aside_cancel: Option<CancellationToken> = None;
     let mut ring_on_turn_completion = false;
     let mut bell_pending = false;
     let mut pending_terminal_event = None;
@@ -1879,9 +1893,6 @@ async fn run_app(
                 Ok(TurnCompletion::Root(result)) => schedule::Completion::Root(result),
                 Ok(TurnCompletion::Routed(result)) => schedule::Completion::Routed(result),
                 Ok(TurnCompletion::Compaction(result)) => schedule::Completion::Compaction(result),
-                Ok(TurnCompletion::Aside { question, result }) => {
-                    schedule::Completion::Aside { question, result }
-                }
                 Err(error) => schedule::Completion::Crashed(error.to_string()),
             });
             // Name the session once it has something to be named after.
@@ -1920,6 +1931,14 @@ async fn run_app(
             app.topic = topic;
             apply_terminal_title(app.topic.as_deref());
         }
+        if let Some(handle) = aside_handle.as_mut()
+            && handle.is_finished()
+        {
+            aside_cancel = None;
+            if let Ok((question, result)) = aside_handle.take().unwrap().await {
+                app.finish_aside(question, result);
+            }
+        }
 
         // The whole iteration minus the dispatch — completion
         // bookkeeping and its after_turn decisions, the intent drain,
@@ -1932,6 +1951,8 @@ async fn run_app(
             std::mem::take(&mut intents),
             &mut LoopRuntime {
                 turn_handle: &mut turn_handle,
+                aside_handle: &mut aside_handle,
+                aside_cancel: &mut aside_cancel,
                 events_rx: &mut events_rx,
                 cancel: &mut cancel,
                 steer_tx: &mut steer_tx,

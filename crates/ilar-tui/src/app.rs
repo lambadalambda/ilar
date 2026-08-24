@@ -665,6 +665,30 @@ impl App {
         }
     }
 
+    /// A `/btw` came back. `Ok(None)` is an abandoned aside — cancelled
+    /// or superseded by a newer question — which merits neither a modal
+    /// nor a complaint.
+    pub(crate) fn finish_aside(
+        &mut self,
+        question: String,
+        result: anyhow::Result<Option<String>>,
+    ) {
+        match result {
+            Ok(Some(answer)) => {
+                self.clear_transient_notice();
+                self.aside = Some(AsideModal {
+                    question,
+                    answer,
+                    scroll: 0,
+                });
+            }
+            Ok(None) => self.clear_transient_notice(),
+            Err(error) => {
+                self.set_notice(format!("aside failed: {error:#}"), NoticeLevel::Error);
+            }
+        }
+    }
+
     pub(crate) fn push_loop_event(&mut self, event: &LoopEvent) {
         if !matches!(event, LoopEvent::ProviderRetry { .. })
             && self.notice.as_ref().is_some_and(|notice| {
@@ -6233,6 +6257,24 @@ mod tests {
         terminal.draw(|frame| app.render(frame)).unwrap();
         let scrolled = screen(&terminal);
         assert!(scrolled.contains("task 11"), "{scrolled}");
+    }
+
+    #[test]
+    fn a_finished_aside_opens_the_modal_and_a_failed_one_is_a_notice() {
+        let mut app = App::new();
+        app.finish_aside("which port?".into(), Ok(Some("8080.".into())));
+        let aside = app.aside.take().expect("modal opened");
+        assert_eq!(aside.question, "which port?");
+        assert_eq!(aside.answer, "8080.");
+
+        // Cancelled or superseded: silence, not a modal or complaint.
+        app.finish_aside("old question".into(), Ok(None));
+        assert!(app.aside.is_none());
+
+        app.finish_aside("anything".into(), Err(anyhow::anyhow!("provider melted")));
+        assert!(app.aside.is_none());
+        let notice = app.notice.as_ref().expect("failure notice");
+        assert!(notice.text.contains("aside failed"), "{}", notice.text);
     }
 
     #[test]

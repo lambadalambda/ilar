@@ -38,3 +38,23 @@ lease. Nothing about it needs the turn slot.
 ## Milestone
 
 11 — Beyond the terminal
+
+## Outcome
+
+Done as specified. `/btw` returns its own `Intent::Aside` from the
+submit decision — mid-turn included, where it previously would have
+been steering text — and the runtime spawns it on a detached
+`aside_handle` polled like topic titling. The turn slot, busy state,
+queue and steering are untouched, which the tests pin. A newer aside
+cancels a still-running one: newest question wins, and a superseded
+answer is silence rather than a modal.
+
+Core-side, `aside::settled` cuts the transcript back past a trailing
+assistant message whose tool calls have no results yet, so a mid-turn
+snapshot is a valid request. `TurnCompletion::Aside`, the schedule
+completion arm and its queue-release dance are deleted — an aside no
+longer occupies anything a message could queue behind.
+
+Verified live: an aside answered ("17.") in a modal floating over a
+still-streaming turn, the turn finishing underneath, the question in
+no session file.

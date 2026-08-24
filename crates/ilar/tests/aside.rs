@@ -144,6 +144,63 @@ async fn an_empty_question_is_refused_before_any_call() {
 }
 
 #[tokio::test]
+async fn a_mid_turn_aside_cuts_back_to_the_last_settled_point() {
+    let (store, session_id) = temp_session();
+    seed_conversation(&store, &session_id);
+    // The turn is mid-flight: the log ends with an assistant message
+    // whose tool calls have no results yet. Sending that to a provider
+    // is a rejected request, not a question.
+    {
+        let mut session = store.acquire_writer(&session_id).unwrap().load().unwrap();
+        session
+            .append(SessionEvent::AssistantMessage {
+                id: new_id(),
+                model: "zai/glm-4.7".into(),
+                content: vec![
+                    ContentBlock::Text {
+                        text: "let me check the config".into(),
+                    },
+                    ContentBlock::ToolCall {
+                        id: "dangling-1".into(),
+                        name: "read".into(),
+                        input: serde_json::json!({"path": "ilar.toml"}),
+                        item_id: None,
+                    },
+                ],
+                usage: Usage::default(),
+                stop_reason: "tool_use".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+    }
+    let provider = MockProvider::new(vec![text_turn("Port 8080.")]);
+
+    let answer = ask(
+        &provider,
+        &store,
+        &session_id,
+        None,
+        &[],
+        "which port again?",
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(answer.as_deref(), Some("Port 8080."));
+    let request = provider.requests().pop().unwrap();
+    let rendered = format!("{:?}", request.messages);
+    assert!(
+        !rendered.contains("dangling-1"),
+        "unpaired tool call sent to the provider: {rendered}"
+    );
+    // The settled conversation before it still rides along.
+    assert!(rendered.contains("nginx proxy"), "{rendered}");
+    let last = format!("{:?}", request.messages.last().unwrap());
+    assert!(last.contains("which port again?"), "{last}");
+}
+
+#[tokio::test]
 async fn cancellation_returns_no_answer() {
     let (store, session_id) = temp_session();
     seed_conversation(&store, &session_id);

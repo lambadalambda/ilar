@@ -14,7 +14,7 @@ use anyhow::Result;
 use futures::StreamExt;
 
 use crate::provider::{ProviderEvent, ProviderResolver, Request, StopReason, ToolDefinition};
-use crate::session::{ChatMessage, SessionStore};
+use crate::session::{ChatMessage, ContentBlock, Role, SessionStore};
 use tokio_util::sync::CancellationToken;
 
 /// Framing that keeps an aside an aside: no tools, no task-continuing.
@@ -22,6 +22,24 @@ const ASIDE_PREAMBLE: &str = "This is a quick aside, not part of the task. Answe
 below from the conversation so far. Do not call any tool, do not continue or change the work, \
 and keep the answer brief. Neither the question nor your answer will be recorded in the \
 session.\n\nQuestion: ";
+
+/// Cut the transcript back to its last settled point. Mid-turn, the
+/// log can end with an assistant message whose tool calls have no
+/// results yet; a provider rejects that request outright. Tool-call /
+/// result pairs are adjacent, so popping trailing unpaired assistant
+/// messages is the whole job.
+fn settled(mut messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    while messages.last().is_some_and(|message| {
+        message.role == Role::Assistant
+            && message
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::ToolCall { .. }))
+    }) {
+        messages.pop();
+    }
+    messages
+}
 
 /// Answer `question` over the session's live transcript. Returns
 /// `Ok(None)` when cancelled. Nothing is written anywhere.
@@ -42,10 +60,11 @@ pub async fn ask(
         return Ok(None);
     }
     // Read-only: an aside takes no writer lease, so it can never block
-    // (or be corrupted by) anything that owns the session.
+    // (or be corrupted by) anything that owns the session — which is
+    // what lets it run beside a live turn.
     let reader = store.load(session_id)?;
     let model = reader.effective_model();
-    let mut messages = reader.transcript();
+    let mut messages = settled(reader.transcript());
     messages.push(ChatMessage::user_text(format!(
         "{ASIDE_PREAMBLE}{question}"
     )));

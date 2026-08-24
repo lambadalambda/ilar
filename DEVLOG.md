@@ -1549,3 +1549,20 @@ messages queued during it — decided *before* the modal opens, because
 a modal blocks the synthetic submit and nothing would be left to let
 the queue go. Verified live: a session taught the word "pineapple"
 answered the aside with it, and the question appears in no JSONL.
+
+## 2026-08-24 — The UX batch
+
+Four fixes from a deliberate look at the seams. Enter on a fully
+typed slash command submits instead of demanding a second Enter. The
+session search opens as a picker: an empty query lists root sessions
+newest-first by topic, age and last words — fzf's empty-matches-all —
+so the grep is now the whole front door and the classic list is just
+where delete and fork live. The preview frame draws even with nothing
+selected, closing a bleed-through. And /btw detached from the turn
+slot entirely: it was refused mid-turn, which was backwards — an
+aside is read-only and mid-turn is when you want one. It now runs
+beside the turn on its own handle, with the transcript cut back to
+the last settled point so a mid-flight snapshot with unpaired tool
+calls is still a valid request. The queue-release dance from the
+first implementation went with it: an aside no longer occupies
+anything a message could queue behind.

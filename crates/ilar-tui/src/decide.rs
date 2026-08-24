@@ -63,6 +63,8 @@ pub(crate) enum Intent {
     /// channel is gone, because the turn ending mid-submit must not
     /// lose the message.
     Steer(String),
+    /// Ask a /btw question beside whatever is running.
+    Aside(String),
     /// Hold until the running turn completes.
     Queue(String),
     /// Pasted text, routed to whichever surface owned the keyboard.
@@ -239,18 +241,22 @@ pub(crate) fn after_turn(
 /// one way while believing it decided another.
 pub(crate) fn submit(state: &LoopState, busy: bool, text: String) -> Vec<Intent> {
     // Maintenance commands must never become steering text for the model.
-    if let Some((name @ ("compact" | "rewind" | "fork" | "sessions" | "btw"), args)) =
+    // An aside is read-only and runs beside anything — mid-turn is
+    // exactly when it is wanted, and it must never become steering
+    // text for the model.
+    if let Some(("btw", question)) = crate::parse_slash_invocation(&text) {
+        if question.trim().is_empty() {
+            return vec![Intent::Notice(
+                "usage: /btw <question>".into(),
+                NoticeLevel::Warning,
+            )];
+        }
+        return vec![Intent::Aside(question.to_string())];
+    }
+    if let Some((name @ ("compact" | "rewind" | "fork" | "sessions"), args)) =
         crate::parse_slash_invocation(&text)
     {
-        // /btw is the one that *takes* text; the rest refuse it.
-        if name == "btw" {
-            if args.trim().is_empty() {
-                return vec![Intent::Notice(
-                    "usage: /btw <question>".into(),
-                    NoticeLevel::Warning,
-                )];
-            }
-        } else if !args.is_empty() {
+        if !args.is_empty() {
             return vec![Intent::Notice(
                 format!("usage: /{name}"),
                 NoticeLevel::Warning,
@@ -363,6 +369,33 @@ mod tests {
             ..idle()
         };
         assert_eq!(submit_target(&aborting, true), SubmitTarget::Queue);
+    }
+
+    #[test]
+    fn a_mid_turn_btw_becomes_an_aside_never_steering_text() {
+        let running = LoopState {
+            turn_running: true,
+            steerable: true,
+            ..idle()
+        };
+
+        // Steerable and running — a plain message would steer, but a
+        // /btw runs beside the turn instead of talking into it.
+        assert_eq!(
+            submit(&running, true, "/btw which port was it?".into()),
+            vec![Intent::Aside("which port was it?".into())]
+        );
+        assert_eq!(
+            submit(&idle(), false, "/btw which port was it?".into()),
+            vec![Intent::Aside("which port was it?".into())]
+        );
+        assert_eq!(
+            submit(&running, true, "/btw".into()),
+            vec![Intent::Notice(
+                "usage: /btw <question>".into(),
+                NoticeLevel::Warning,
+            )]
+        );
     }
 
     #[test]
