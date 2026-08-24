@@ -46,6 +46,30 @@ the TUI is to build the smallest possible second driver.
   instead of hanging.
 - The full suite passes, and the TUI still starts.
 
+## Outcome
+
+Landed in two commits: the shared runtime, then the driver. The
+refactor the issue expected was real — `ilar::runtime` now owns agent,
+model and reasoning resolution, the system prompt, session creation
+and the tool wiring, in two phases so `--print-prompt` can answer
+without creating a session. main.rs lost 312 lines.
+
+Two headless-only decisions came out of it. Whether the `question`
+tool is attached is now the caller's choice, because a driver with
+nobody to answer would otherwise hang the turn on a channel nobody
+reads; exec declines it. And exec stops background tasks and services
+at exit, naming anything still running on stderr.
+
+The `--json` projection is hand-written rather than derived: the wire
+format should not change every time `LoopEvent` grows a variant. It is
+also the first draft of what a web frontend would consume.
+
+Verified against the real binary: answer on stdout with nothing else,
+progress on stderr, NDJSON on stdout under `--json`, prompt from
+stdin, `--continue` appending a second checkpointed turn to the same
+session, and non-zero exit with a clean stdout when the provider
+rejects the call.
+
 ## Notes
 
 - Expect refactoring: the per-session bootstrap (agent and model

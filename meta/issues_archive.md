@@ -166,3 +166,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Pin user requests through compaction](issues/pin-user-requests-through-compaction.md)
 - [x] [Reframe the summarizer prompt](issues/reframe-the-summarizer-prompt.md)
 - [x] [The summarizer is asked to continue the conversation](issues/summarizer-continues-the-conversation.md)
+- [x] [ilar exec: run a turn without a terminal](issues/headless-exec.md)
