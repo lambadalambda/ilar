@@ -1013,3 +1013,76 @@ async fn running_bash_reports_a_live_output_tail() {
         "tail should have been reported while the command was still running"
     );
 }
+
+#[tokio::test]
+async fn history_searches_this_session_and_no_other() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ilar::session::SessionStore::new(dir.path().to_path_buf());
+    let mut ids = Vec::new();
+    for (marker, text) in [
+        ("mine", "the AES table lives at offset 0x4f11b4"),
+        ("theirs", "a secret belonging to another session"),
+    ] {
+        let id = ilar::session::new_id();
+        let mut session = store
+            .create(ilar::session::SessionMeta {
+                session_id: id.clone(),
+                parent_id: None,
+                agent: "build".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+            })
+            .unwrap();
+        session
+            .append(ilar::session::SessionEvent::UserMessage {
+                id: ilar::session::new_id(),
+                text: format!("{marker}: {text}"),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        drop(session);
+        ids.push(id);
+    }
+
+    let registry = ToolRegistry::builtin().with_history(store).unwrap();
+    let history = registry.get("history").unwrap();
+    let context = |session: &str| {
+        let mut ctx = ToolContext::root(std::env::temp_dir());
+        ctx.session_id = session.to_string();
+        ctx
+    };
+
+    let found = history
+        .run(serde_json::json!({"query": "0x4f11b4"}), context(&ids[0]))
+        .await;
+    assert!(!found.is_error, "{}", found.content);
+    assert!(found.content.contains("0x4f11b4"), "{}", found.content);
+    assert!(found.content.contains("event 1"), "{}", found.content);
+
+    // Another session's log is not reachable.
+    let leak = history
+        .run(serde_json::json!({"query": "secret"}), context(&ids[0]))
+        .await;
+    assert!(
+        leak.content.contains("no earlier mention"),
+        "{}",
+        leak.content
+    );
+
+    // An event index reads the conversation around it.
+    let around = history
+        .run(serde_json::json!({"event": 1}), context(&ids[0]))
+        .await;
+    assert!(around.content.contains("AES table"), "{}", around.content);
+
+    // Outside a session, and with neither argument, it says so.
+    let homeless = history
+        .run(
+            serde_json::json!({"query": "anything"}),
+            ToolContext::root(std::env::temp_dir()),
+        )
+        .await;
+    assert!(homeless.is_error, "{}", homeless.content);
+    let empty = history.run(serde_json::json!({}), context(&ids[0])).await;
+    assert!(empty.is_error, "{}", empty.content);
+}

@@ -58,7 +58,10 @@ error strings verbatim. Never paraphrase an identifier.
 - Record what was ruled out and why, not only what succeeded: a summary of successes \
 invites repeating a rejected approach.
 - Terse bullets, not prose.
-- Do not mention summarizing, compaction, or context limits.";
+- Do not mention summarizing, compaction, or context limits.
+
+Everything from this conversation stays searchable with the history tool, so record what \
+matters and where to look rather than trying to preserve every detail.";
 
 /// Appended when the conversation already carries a summary. ilar keeps
 /// only the newest one, so anything this summary leaves out is gone —

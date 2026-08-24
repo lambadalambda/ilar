@@ -5,6 +5,7 @@ pub mod edit;
 pub mod executor;
 pub mod glob;
 pub mod grep;
+pub mod history;
 pub mod models;
 pub mod read;
 pub mod service;
@@ -548,6 +549,7 @@ pub fn child_tool_names() -> Vec<&'static str> {
     names.push("tasks");
     names.push("service");
     names.push("models");
+    names.push("history");
     names
 }
 
@@ -653,6 +655,15 @@ impl ToolRegistry {
         models: Vec<&'static crate::model::ModelInfo>,
     ) -> Result<Self, DuplicateToolError> {
         self.with_tool(std::sync::Arc::new(models::ModelsTool::new(models)))
+    }
+
+    /// Registry that can search its own session's past — everything
+    /// ever said, not just what is still in the window.
+    pub fn with_history(
+        self,
+        store: crate::session::SessionStore,
+    ) -> Result<Self, DuplicateToolError> {
+        self.with_tool(std::sync::Arc::new(history::HistoryTool::new(store)))
     }
 
     /// Registry with the service tool attached (shared per-session

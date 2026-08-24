@@ -359,6 +359,7 @@ impl RuntimePlan {
             .with_models(config.available_models())?
             .with_todos(todos.clone())?
             .with_web_tools()?
+            .with_history(store.clone())?
             .with_skills(self.skill_store)?;
         // No receiver, no question tool: a driver that cannot answer
         // makes the call fail immediately rather than hang on it.
