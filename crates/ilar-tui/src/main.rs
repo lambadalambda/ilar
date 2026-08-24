@@ -6,6 +6,7 @@ mod diff;
 mod highlight;
 mod history;
 mod input;
+mod links;
 mod markdown;
 mod modals;
 mod questions;
@@ -2198,6 +2199,26 @@ async fn run_app(
                                 }
                             }
                         }
+                        Modal::LinkPicker => {
+                            let picker = app.link_picker.as_mut().unwrap();
+                            match picker.handle_key(code, control) {
+                                PickerAction::Stay => {}
+                                PickerAction::Dismiss => {
+                                    app.link_picker = None;
+                                }
+                                PickerAction::Choose(url) => {
+                                    app.link_picker = None;
+                                    match links::open_in_browser(&url) {
+                                        Ok(()) => app
+                                            .set_notice(format!("opened {url}"), NoticeLevel::Info),
+                                        Err(error) => app.set_notice(
+                                            format!("cannot open link: {error}"),
+                                            NoticeLevel::Error,
+                                        ),
+                                    }
+                                }
+                            }
+                        }
                         Modal::ModelPicker => {
                             let picker = app.model_picker.as_mut().unwrap();
                             match picker.handle_key(code, control) {
@@ -2413,6 +2434,9 @@ async fn run_app(
                     }
                     (KeyCode::Char('q'), true) => {
                         app.pending_manager = Some(PendingManager::default());
+                    }
+                    (KeyCode::Char('o'), true) => {
+                        app.open_link_picker();
                     }
                     (code, control)
                         if retry_requested(code, control)

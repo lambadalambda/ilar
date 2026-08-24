@@ -72,6 +72,7 @@ pub(crate) enum Modal {
     SkillPicker,
     SessionPicker,
     TurnPicker,
+    LinkPicker,
     ModelPicker,
     VariantPicker,
     Search,
@@ -85,6 +86,7 @@ pub(crate) enum PaletteCommand {
     Theme,
     Session,
     Rewind,
+    Links,
     Usage,
     Compact,
     Export,
@@ -137,6 +139,13 @@ pub(crate) static PALETTE_COMMANDS: &[PaletteCommandDefinition] = &[
         label: "Rewind to a turn…",
         shortcut: "",
         search_terms: "rewind undo restore checkpoint fork turn back time travel",
+    },
+    PaletteCommandDefinition {
+        id: PaletteCommand::Links,
+        section: "General",
+        label: "Open link…",
+        shortcut: "^O",
+        search_terms: "link url open browser web markdown",
     },
     PaletteCommandDefinition {
         id: PaletteCommand::Usage,
@@ -363,6 +372,7 @@ static HELP_SECTIONS: &[HelpSection] = &[
         title: "Transcript",
         bindings: &[
             binding!("Ctrl-F", "search transcript"),
+            binding!("Ctrl-O", "open a link from the transcript"),
             binding!("PgUp / PgDn", "scroll page"),
             binding!("Alt-U / Alt-D", "scroll half page"),
             binding!("Ctrl-Home / Ctrl-End", "jump to top / tail"),
@@ -807,6 +817,145 @@ impl SessionPicker {
             _ => SessionPickerAction::Stay,
         }
     }
+}
+
+pub(crate) struct LinkPicker {
+    links: Vec<crate::links::LinkEntry>,
+    query: String,
+    selected: usize,
+}
+
+impl LinkPicker {
+    pub(crate) fn new(links: Vec<crate::links::LinkEntry>) -> Self {
+        Self {
+            links,
+            query: String::new(),
+            selected: 0,
+        }
+    }
+
+    fn filtered(&self) -> Vec<&crate::links::LinkEntry> {
+        let mut scored: Vec<(i64, &crate::links::LinkEntry)> = self
+            .links
+            .iter()
+            .filter_map(|link| {
+                let haystack = format!("{} {}", link.label, link.url);
+                fuzzy_score(&self.query, &haystack).map(|score| (score, link))
+            })
+            .collect();
+        scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+        scored.into_iter().map(|(_, link)| link).collect()
+    }
+
+    pub(crate) fn select(&mut self, index: usize) {
+        self.selected = index.min(self.filtered().len().saturating_sub(1));
+    }
+
+    pub(crate) fn move_selection(&mut self, delta: isize) {
+        let count = self.filtered().len();
+        if count == 0 {
+            self.selected = 0;
+        } else {
+            self.selected = (self.selected as isize + delta).rem_euclid(count as isize) as usize;
+        }
+    }
+
+    pub(crate) fn handle_key(&mut self, code: KeyCode, control: bool) -> PickerAction {
+        if let Some(delta) = nav_delta(code, control) {
+            self.move_selection(delta);
+            return PickerAction::Stay;
+        }
+        match (code, control) {
+            (KeyCode::Esc, _) => PickerAction::Dismiss,
+            (KeyCode::Enter, _) => self
+                .filtered()
+                .get(self.selected)
+                .map(|link| PickerAction::Choose(link.url.clone()))
+                .unwrap_or(PickerAction::Dismiss),
+            (KeyCode::Backspace, _) => {
+                self.query.pop();
+                self.selected = 0;
+                PickerAction::Stay
+            }
+            (KeyCode::Char(character), false) if !character.is_control() => {
+                self.query.push(character);
+                self.selected = 0;
+                PickerAction::Stay
+            }
+            _ => PickerAction::Stay,
+        }
+    }
+}
+
+pub(crate) fn render_link_picker(frame: &mut Frame, picker: &LinkPicker) -> ModalHit {
+    let area = centered_rect(frame.area(), 80, 16);
+    frame.render_widget(Clear, area);
+    let footer = " type to filter · ↵ open in browser · Esc ";
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .border_style(theme::focus_border())
+        .title(Line::styled(" links ", theme::title(theme::MARKUP)))
+        .title_bottom(Line::styled(footer, Style::default().fg(theme::MUTED)).right_aligned());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return ModalHit::default();
+    }
+    let mut lines = vec![Line::from(vec![
+        Span::styled("filter ", Style::default().fg(MUTED)),
+        Span::raw(truncate_display(
+            &picker.query,
+            (inner.width as usize).saturating_sub(8),
+            Truncation::Middle,
+        )),
+    ])];
+    let links = picker.filtered();
+    if links.is_empty() {
+        lines.push(Line::styled(
+            if picker.links.is_empty() {
+                "no links in this transcript"
+            } else {
+                "no matches"
+            },
+            Style::default().fg(MUTED),
+        ));
+        frame.render_widget(Paragraph::new(lines), inner);
+        return ModalHit::default();
+    }
+    let selected = picker.selected.min(links.len() - 1);
+    let row_count = (inner.height as usize).saturating_sub(lines.len()).max(1);
+    let start = selected
+        .saturating_add(1)
+        .saturating_sub(row_count)
+        .min(links.len().saturating_sub(row_count));
+    let mut rows: Vec<Option<usize>> = vec![None];
+    for (index, link) in links.iter().enumerate().skip(start).take(row_count) {
+        let marker = if index == selected { "> " } else { "  " };
+        let width = inner.width as usize;
+        let text = if link.label == link.url {
+            truncate_display(&format!("{marker}{}", link.url), width, Truncation::Middle)
+        } else {
+            let url_budget = width.saturating_sub(
+                UnicodeWidthStr::width(marker) + UnicodeWidthStr::width(link.label.as_str()) + 1,
+            );
+            let url = truncate_display(&link.url, url_budget, Truncation::Middle);
+            truncate_display(
+                &format!("{marker}{} {url}", link.label),
+                width,
+                Truncation::Middle,
+            )
+        };
+        let style = if index == selected {
+            theme::selected()
+        } else {
+            Style::default().fg(theme::PRIMARY)
+        };
+        lines.push(Line::styled(format!("{text:<width$}"), style));
+        rows.push(Some(index));
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
+    ModalHit { area: inner, rows }
 }
 
 /// One rewindable turn: a user message in the loaded session, newest
@@ -2257,6 +2406,8 @@ mod tests {
             "Ctrl-U",
             // The exit moved off Ctrl-C; help is where a user looks for it.
             "Ctrl-D",
+            "Ctrl-O",
+            "/rewind",
             "Resume session",
             "history",
             "--continue",

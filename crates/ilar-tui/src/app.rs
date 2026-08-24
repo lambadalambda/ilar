@@ -24,11 +24,11 @@ use crate::diff;
 use crate::input::slash_candidates;
 use crate::input::{InputBuffer, input_accepts_keys};
 use crate::modals::{
-    CommandPalette, Modal, ModelPicker, PaletteAction, PaletteCommand, PendingAction, PendingItem,
-    PendingManager, SessionPicker, SkillPicker, ThemePicker, ThemePickerAction, TurnPicker,
-    VariantPicker, palette_items, render_command_palette, render_help, render_model_picker,
-    render_pending_manager, render_session_picker, render_skill_picker, render_theme_picker,
-    render_turn_picker, render_variant_picker,
+    CommandPalette, LinkPicker, Modal, ModelPicker, PaletteAction, PaletteCommand, PendingAction,
+    PendingItem, PendingManager, SessionPicker, SkillPicker, ThemePicker, ThemePickerAction,
+    TurnPicker, VariantPicker, palette_items, render_command_palette, render_help,
+    render_link_picker, render_model_picker, render_pending_manager, render_session_picker,
+    render_skill_picker, render_theme_picker, render_turn_picker, render_variant_picker,
 };
 use crate::questions::QuestionModal;
 use crate::selection::{
@@ -152,6 +152,7 @@ pub(crate) struct App {
     pub(crate) variant_picker: Option<VariantPicker>,
     pub(crate) session_picker: Option<SessionPicker>,
     pub(crate) turn_picker: Option<TurnPicker>,
+    pub(crate) link_picker: Option<LinkPicker>,
     /// The turn picker needs the store; set by /rewind or the palette,
     /// consumed by run_app.
     pub(crate) turn_picker_requested: bool,
@@ -251,6 +252,7 @@ impl App {
             variant_picker: None,
             session_picker: None,
             turn_picker: None,
+            link_picker: None,
             turn_picker_requested: false,
             fork_requested: false,
             session_picker_requested: false,
@@ -311,6 +313,8 @@ impl App {
             Some(Modal::SessionPicker)
         } else if self.turn_picker.is_some() {
             Some(Modal::TurnPicker)
+        } else if self.link_picker.is_some() {
+            Some(Modal::LinkPicker)
         } else if self.model_picker.is_some() {
             Some(Modal::ModelPicker)
         } else if self.variant_picker.is_some() {
@@ -448,6 +452,9 @@ impl App {
             Some(Modal::TurnPicker) => {
                 self.turn_picker.as_mut().unwrap().move_selection(rows);
             }
+            Some(Modal::LinkPicker) => {
+                self.link_picker.as_mut().unwrap().move_selection(rows);
+            }
             Some(Modal::SkillPicker) => self.skill_picker.as_mut().unwrap().move_selection(rows),
             Some(Modal::CommandPalette) => {
                 self.command_palette.as_mut().unwrap().move_selection(rows);
@@ -493,6 +500,7 @@ impl App {
                 }
                 Modal::SessionPicker => self.session_picker.as_mut().unwrap().select(index),
                 Modal::TurnPicker => self.turn_picker.as_mut().unwrap().select(index),
+                Modal::LinkPicker => self.link_picker.as_mut().unwrap().select(index),
                 Modal::SkillPicker => self.skill_picker.as_mut().unwrap().select(index),
                 Modal::CommandPalette => self.command_palette.as_mut().unwrap().select(index),
                 Modal::PendingManager => {
@@ -504,6 +512,12 @@ impl App {
             }
         }
         true
+    }
+
+    /// Open the link picker over everything currently in the
+    /// transcript. Safe at any time: collection is read-only.
+    pub(crate) fn open_link_picker(&mut self) {
+        self.link_picker = Some(LinkPicker::new(crate::links::collect_links(&self.lines)));
     }
 
     pub(crate) fn configure_runtime(
@@ -2349,6 +2363,10 @@ impl App {
                 frame,
                 self.turn_picker.as_ref().expect("turn picker"),
             )),
+            Some(Modal::LinkPicker) => Some(render_link_picker(
+                frame,
+                self.link_picker.as_ref().expect("link picker"),
+            )),
             Some(Modal::ModelPicker) => Some(render_model_picker(
                 frame,
                 self.model_picker.as_ref().expect("model picker"),
@@ -2442,6 +2460,9 @@ pub(crate) fn activate_palette_command(
             // Sessions are loaded by the caller (needs the store); the
             // palette only records the request.
             app.session_picker_requested = true;
+        }
+        PaletteCommand::Links => {
+            app.open_link_picker();
         }
         PaletteCommand::Rewind => {
             // Turns are loaded by the caller (needs the store); the

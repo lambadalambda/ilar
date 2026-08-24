@@ -647,11 +647,15 @@ fn render_inline(text: &str, base: Style) -> Vec<Span<'static>> {
         {
             let url_start = label_end + 2;
             let url = &after[url_start..url_start + url_end];
+            let label = &after[..label_end];
             spans.push(Span::styled(
-                after[..label_end].to_string(),
+                label.to_string(),
                 base.add_modifier(Modifier::UNDERLINED),
             ));
-            spans.push(Span::styled(format!(" <{url}>"), base.fg(theme::MUTED)));
+            // Agents often write [url](url); printing it twice is noise.
+            if label != url {
+                spans.push(Span::styled(format!(" <{url}>"), base.fg(theme::MUTED)));
+            }
             rest = &after[url_start + url_end + 1..];
             continue;
         }
@@ -757,6 +761,18 @@ mod tests {
             span.content == "Ratatui" && span.style.add_modifier.contains(Modifier::UNDERLINED)
         }));
         assert!(text(&lines[0]).contains("<https://ratatui.rs>"));
+    }
+
+    #[test]
+    fn a_link_whose_label_is_its_url_renders_once() {
+        let lines = render("see [https://example.com/x](https://example.com/x) there");
+        let rendered = text(&lines[0]);
+        assert_eq!(rendered.matches("https://example.com/x").count(), 1);
+        assert!(!rendered.contains('<'));
+        assert!(lines[0].spans.iter().any(|span| {
+            span.content == "https://example.com/x"
+                && span.style.add_modifier.contains(Modifier::UNDERLINED)
+        }));
     }
 
     #[test]
