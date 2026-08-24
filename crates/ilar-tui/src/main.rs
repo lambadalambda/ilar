@@ -231,6 +231,15 @@ fn prepare_prompt(app: &mut App, text: String) -> Option<String> {
         }
         return None;
     }
+    if let Some(("sessions", args)) = parse_slash_invocation(&text) {
+        if args.is_empty() {
+            app.session_search = Some(modals::SessionSearch::new());
+        } else {
+            app.input = InputBuffer::from(text.as_str());
+            app.set_notice("usage: /sessions", NoticeLevel::Warning);
+        }
+        return None;
+    }
     if let Some(("fork", args)) = parse_slash_invocation(&text) {
         if args.is_empty() {
             app.fork_requested = true;
@@ -524,6 +533,10 @@ const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
         "pick a turn to rewind conversation and tree to (^Y forks instead)",
     ),
     ("fork", "fork this session under a new id"),
+    (
+        "sessions",
+        "grep every session's content and switch (^G: classic list)",
+    ),
 ];
 const MAX_GOAL_ROUNDS: u32 = 25;
 const GOAL_SENTINEL: &str = "GOAL_ACHIEVED";
@@ -2196,7 +2209,14 @@ async fn run_app(
                                     }
                                     search_rx = None;
                                     app.session_search = None;
-                                    // Back where the user came from.
+                                    app.clear_transient_notice();
+                                }
+                                SessionSearchAction::ListMode => {
+                                    if let Some(flag) = search_cancel.take() {
+                                        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                                    }
+                                    search_rx = None;
+                                    app.session_search = None;
                                     let sessions = store
                                         .list()
                                         .into_iter()
@@ -2488,14 +2508,6 @@ async fn run_app(
                                 }
                                 CommandPaletteAction::Choose(command) => {
                                     activate_palette_command(app, command, model_choices.clone());
-                                    if std::mem::take(&mut app.session_picker_requested) {
-                                        let sessions = store
-                                            .list()
-                                            .into_iter()
-                                            .filter(|session| session.id != app.session_id)
-                                            .collect();
-                                        app.session_picker = Some(SessionPicker::new(sessions));
-                                    }
                                 }
                             }
                         }

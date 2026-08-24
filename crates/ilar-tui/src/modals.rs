@@ -220,7 +220,6 @@ pub(crate) enum PaletteCommand {
     Session,
     Rewind,
     Links,
-    Todos,
     Usage,
     Compact,
     Export,
@@ -239,6 +238,13 @@ pub(crate) struct PaletteCommandDefinition {
 }
 
 pub(crate) static PALETTE_COMMANDS: &[PaletteCommandDefinition] = &[
+    PaletteCommandDefinition {
+        id: PaletteCommand::Session,
+        section: "General",
+        label: "Switch session",
+        shortcut: "",
+        search_terms: "session resume continue switch history recent grep search find content",
+    },
     PaletteCommandDefinition {
         id: PaletteCommand::Model,
         section: "General",
@@ -261,13 +267,6 @@ pub(crate) static PALETTE_COMMANDS: &[PaletteCommandDefinition] = &[
         search_terms: "theme appearance colors palette",
     },
     PaletteCommandDefinition {
-        id: PaletteCommand::Session,
-        section: "General",
-        label: "Resume session",
-        shortcut: "",
-        search_terms: "session resume continue switch history recent",
-    },
-    PaletteCommandDefinition {
         id: PaletteCommand::Rewind,
         section: "General",
         label: "Rewind to a turn…",
@@ -280,13 +279,6 @@ pub(crate) static PALETTE_COMMANDS: &[PaletteCommandDefinition] = &[
         label: "Open link…",
         shortcut: "^O",
         search_terms: "link url open browser web markdown",
-    },
-    PaletteCommandDefinition {
-        id: PaletteCommand::Todos,
-        section: "General",
-        label: "Show todos",
-        shortcut: "^T",
-        search_terms: "todo todos tasks plan checklist list",
     },
     PaletteCommandDefinition {
         id: PaletteCommand::Usage,
@@ -550,7 +542,11 @@ static HELP_SECTIONS: &[HelpSection] = &[
     HelpSection {
         title: "Session",
         bindings: &[
-            binding!("palette: Resume session", "switch to another session"),
+            binding!("/sessions", "grep every session's content; ↵ resumes"),
+            binding!(
+                "^G in that search",
+                "the classic list (filter, delete, fork)"
+            ),
             binding!("palette: Session usage", "token and cost totals"),
             binding!("/rewind", "pick a turn: Enter ×2 rewinds chat + tree"),
             binding!("^Y in that picker", "fork at the turn instead (keeps both)"),
@@ -982,9 +978,10 @@ pub(crate) enum SessionSearchAction {
     Stay,
     /// The query changed: the running scan is stale, start a new one.
     Rescan,
-    /// Back to the session picker.
     Dismiss,
     Resume(String),
+    /// Switch to the classic list picker (title filter, delete, fork).
+    ListMode,
 }
 
 /// Most rows kept for one query; a scan that delivered this many is
@@ -1053,6 +1050,7 @@ impl SessionSearch {
         }
         match (code, control) {
             (KeyCode::Esc, _) => SessionSearchAction::Dismiss,
+            (KeyCode::Char('g'), true) => SessionSearchAction::ListMode,
             (KeyCode::Enter, _) => self
                 .selected()
                 .map(|row| SessionSearchAction::Resume(row.session_id.clone()))
@@ -1606,7 +1604,7 @@ pub(crate) fn render_session_search(frame: &mut Frame, search: &SessionSearch) -
     } else {
         format!("{}", search.rows.len())
     };
-    let footer = " type to search · ↵ resume · Esc back ";
+    let footer = " type to search · ↵ resume · ^G list · Esc ";
     let Some(inner) = modal_frame(
         frame,
         list_area,
@@ -2822,9 +2820,10 @@ mod tests {
         let mut palette = CommandPalette::new(palette_items());
 
         assert_eq!(palette.filtered_commands().len(), PALETTE_COMMANDS.len());
+        // Switching sessions leads the list: the most-reached-for entry.
         assert_eq!(
             palette.handle_key(KeyCode::Enter, false),
-            CommandPaletteAction::Choose(PaletteAction::Command(PaletteCommand::Model))
+            CommandPaletteAction::Choose(PaletteAction::Command(PaletteCommand::Session))
         );
 
         palette.insert_query("sessio");
@@ -2891,7 +2890,7 @@ mod tests {
             "Ctrl-D",
             "Ctrl-O",
             "/rewind",
-            "Resume session",
+            "/sessions",
             "history",
             "--continue",
         ] {
@@ -3396,7 +3395,7 @@ mod tests {
     }
 
     #[test]
-    fn enter_resumes_the_selected_row_and_esc_goes_back() {
+    fn enter_resumes_esc_dismisses_and_ctrl_g_lists() {
         let mut search = SessionSearch::new();
         assert_eq!(
             search.handle_key(KeyCode::Enter, false),
@@ -3419,6 +3418,11 @@ mod tests {
         assert_eq!(
             search.handle_key(KeyCode::Esc, false),
             SessionSearchAction::Dismiss
+        );
+        // ^G reaches the classic list picker, where delete and fork live.
+        assert_eq!(
+            search.handle_key(KeyCode::Char('g'), true),
+            SessionSearchAction::ListMode
         );
     }
 

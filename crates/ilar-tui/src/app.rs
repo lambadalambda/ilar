@@ -163,8 +163,6 @@ pub(crate) struct App {
     pub(crate) turn_picker_requested: bool,
     /// A whole-session fork (/fork); consumed by run_app.
     pub(crate) fork_requested: bool,
-    /// Set by the palette; run_app opens the picker (it owns the store).
-    pub(crate) session_picker_requested: bool,
     /// What this session is about, once it has been named.
     pub(crate) topic: Option<String>,
     pub(crate) help_visible: bool,
@@ -267,7 +265,6 @@ impl App {
             link_picker: None,
             turn_picker_requested: false,
             fork_requested: false,
-            session_picker_requested: false,
             topic: None,
             help_visible: false,
             help_scroll: 0,
@@ -2533,9 +2530,10 @@ pub(crate) fn activate_palette_command(
             app.theme_picker = Some(ThemePicker::new(app.theme));
         }
         PaletteCommand::Session => {
-            // Sessions are loaded by the caller (needs the store); the
-            // palette only records the request.
-            app.session_picker_requested = true;
+            // The content search is the front door; ^G inside it
+            // reaches the classic list. Needs nothing at open — the
+            // scan starts with the first keystroke.
+            app.session_search = Some(SessionSearch::new());
         }
         PaletteCommand::Links => {
             app.open_link_picker();
@@ -2588,10 +2586,6 @@ pub(crate) fn activate_palette_command(
         }
         PaletteCommand::Pending => {
             app.pending_manager = Some(PendingManager::default());
-        }
-        PaletteCommand::Todos => {
-            app.todos_visible = true;
-            app.todos_scroll = 0;
         }
         PaletteCommand::Help => {
             app.help_visible = true;
@@ -3382,11 +3376,12 @@ mod tests {
         ];
         // All candidates on bare slash, fuzzy-filtered as the name grows.
         let all = slash_candidates("/", &skills);
-        assert_eq!(all.len(), 6);
+        assert_eq!(all.len(), 7);
         assert!(all.iter().any(|(name, _)| name == "goal"));
         assert!(all.iter().any(|(name, _)| name == "compact"));
         assert!(all.iter().any(|(name, _)| name == "rewind"));
         assert!(all.iter().any(|(name, _)| name == "fork"));
+        assert!(all.iter().any(|(name, _)| name == "sessions"));
         let filtered = slash_candidates("/go", &skills);
         assert_eq!(
             filtered.first().map(|(name, _)| name.as_str()),
@@ -4298,7 +4293,7 @@ mod tests {
             .join("\n");
         assert!(screen.contains("commands"), "{screen}");
         assert!(screen.contains("search"), "{screen}");
-        assert!(screen.contains("Switch model"), "{screen}");
+        assert!(screen.contains("Switch session"), "{screen}");
     }
 
     #[test]
@@ -6049,18 +6044,17 @@ mod tests {
     }
 
     #[test]
-    fn the_palette_opens_the_todo_overlay() {
+    fn the_palette_opens_the_session_search() {
         let mut app = App::new();
-        app.todos_scroll = 7;
 
         activate_palette_command(
             &mut app,
-            PaletteAction::Command(PaletteCommand::Todos),
+            PaletteAction::Command(PaletteCommand::Session),
             Vec::new(),
         );
 
-        assert!(app.todos_visible);
-        assert_eq!(app.todos_scroll, 0);
+        assert!(app.session_search.is_some());
+        assert_eq!(app.active_modal(), Some(Modal::SessionSearch));
     }
 
     #[test]
