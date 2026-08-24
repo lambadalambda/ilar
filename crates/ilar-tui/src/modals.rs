@@ -203,6 +203,7 @@ pub(crate) enum Modal {
     ThemePicker,
     SkillPicker,
     SessionPicker,
+    SessionSearch,
     TurnPicker,
     LinkPicker,
     ModelPicker,
@@ -869,6 +870,8 @@ pub(crate) enum SessionPickerAction {
     Resume(String),
     Delete(String),
     Fork(String),
+    /// Switch to the content search: grep what was *said*, not titles.
+    ContentSearch,
 }
 
 pub(crate) struct SessionPicker {
@@ -946,6 +949,7 @@ impl SessionPicker {
                 .selected_id()
                 .map(SessionPickerAction::Fork)
                 .unwrap_or(SessionPickerAction::Stay),
+            (KeyCode::Char('g'), true) => SessionPickerAction::ContentSearch,
             (KeyCode::Backspace, _) | (KeyCode::Char(_), _) => {
                 if edit_query(&mut self.query, code, control) {
                     self.nav.reset();
@@ -954,6 +958,116 @@ impl SessionPicker {
                 SessionPickerAction::Stay
             }
             _ => SessionPickerAction::Stay,
+        }
+    }
+}
+
+/// One hit of the cross-session content search, carrying everything
+/// both panes show so rendering never goes back to disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SearchRow {
+    pub(crate) session_id: String,
+    /// Topic, or opening message, or the id when the session has
+    /// neither — whatever the listing would call it.
+    pub(crate) title: String,
+    /// Event index of the hit inside its session, shown as an anchor.
+    pub(crate) event: usize,
+    pub(crate) excerpt: String,
+    /// (speaker label, text, is-the-hit) around the match, in order.
+    pub(crate) context: Vec<(String, String, bool)>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SessionSearchAction {
+    Stay,
+    /// The query changed: the running scan is stale, start a new one.
+    Rescan,
+    /// Back to the session picker.
+    Dismiss,
+    Resume(String),
+}
+
+/// Most rows kept for one query; a scan that delivered this many is
+/// told to stop. Past a screenful or two, narrowing the query beats
+/// scrolling.
+pub(crate) const MAX_SEARCH_ROWS: usize = 200;
+
+/// The two-pane content search over every session: matches on the
+/// left, the selected match in its surroundings on the right. The scan
+/// itself runs elsewhere and streams rows in; the modal only holds
+/// what it is shown.
+pub(crate) struct SessionSearch {
+    pub(crate) query: String,
+    pub(crate) rows: Vec<SearchRow>,
+    pub(crate) nav: ListNav,
+    /// Stamps scan output: rows arriving from an older query's scan
+    /// are dropped instead of mixing into the new list.
+    pub(crate) generation: u64,
+    pub(crate) scanning: bool,
+}
+
+impl SessionSearch {
+    pub(crate) fn new() -> Self {
+        Self {
+            query: String::new(),
+            rows: Vec::new(),
+            nav: ListNav::default(),
+            generation: 0,
+            scanning: false,
+        }
+    }
+
+    pub(crate) fn selected(&self) -> Option<&SearchRow> {
+        self.rows.get(self.nav.selected)
+    }
+
+    pub(crate) fn select(&mut self, index: usize) {
+        self.nav.select(index, self.rows.len());
+    }
+
+    pub(crate) fn move_selection(&mut self, delta: isize) {
+        self.nav.move_by(delta, self.rows.len());
+    }
+
+    /// Accept a batch from the scanner, unless it answers a query the
+    /// user has already typed past.
+    pub(crate) fn push_rows(&mut self, generation: u64, rows: Vec<SearchRow>) {
+        if generation != self.generation {
+            return;
+        }
+        let room = MAX_SEARCH_ROWS.saturating_sub(self.rows.len());
+        self.rows.extend(rows.into_iter().take(room));
+    }
+
+    /// The scan for `generation` has no more rows to deliver.
+    pub(crate) fn finish_scan(&mut self, generation: u64) {
+        if generation == self.generation {
+            self.scanning = false;
+        }
+    }
+
+    pub(crate) fn handle_key(&mut self, code: KeyCode, control: bool) -> SessionSearchAction {
+        if let Some(delta) = nav_delta(code, control) {
+            self.move_selection(delta);
+            return SessionSearchAction::Stay;
+        }
+        match (code, control) {
+            (KeyCode::Esc, _) => SessionSearchAction::Dismiss,
+            (KeyCode::Enter, _) => self
+                .selected()
+                .map(|row| SessionSearchAction::Resume(row.session_id.clone()))
+                .unwrap_or(SessionSearchAction::Stay),
+            (KeyCode::Backspace, _) | (KeyCode::Char(_), _) => {
+                if edit_query(&mut self.query, code, control) {
+                    self.nav.reset();
+                    self.rows.clear();
+                    self.generation += 1;
+                    self.scanning = !self.query.trim().is_empty();
+                    return SessionSearchAction::Rescan;
+                }
+                SessionSearchAction::Stay
+            }
+            _ => SessionSearchAction::Stay,
         }
     }
 }
@@ -1343,9 +1457,9 @@ fn session_age(modified: std::time::SystemTime, now: std::time::SystemTime) -> S
 pub(crate) fn render_session_picker(frame: &mut Frame, picker: &SessionPicker) -> ModalHit {
     let area = centered_rect(frame.area(), 72, 16);
     let footer = if area.width < 44 {
-        " ↵ resume · ^D del · ^Y fork "
+        " ↵ resume · ^D del · ^Y fork · ^G grep "
     } else {
-        " type to filter · ↵ resume · ^D delete ×2 · ^Y fork · Esc "
+        " type to filter · ↵ resume · ^D delete ×2 · ^Y fork · ^G grep content · Esc "
     };
     let Some(inner) = modal_frame(frame, area, " sessions ", theme::MARKUP, footer) else {
         return ModalHit::default();
@@ -1424,6 +1538,199 @@ pub(crate) fn render_session_picker(frame: &mut Frame, picker: &SessionPicker) -
         );
     }
     body.finish(frame, inner)
+}
+
+/// Spans for `text` with every case-insensitive occurrence of `needle`
+/// in the highlight style. Byte-exact against the original text: the
+/// scan is per-char because lowercasing can change a string's length.
+fn highlighted_spans(
+    text: &str,
+    needle: &str,
+    base: Style,
+    highlight: Style,
+) -> Vec<Span<'static>> {
+    let needle_lower = needle.trim().to_lowercase();
+    if needle_lower.is_empty() {
+        return vec![Span::styled(text.to_string(), base)];
+    }
+    let mut spans = Vec::new();
+    let mut plain_start = 0;
+    let mut index = 0;
+    while index < text.len() {
+        if text[index..].to_lowercase().starts_with(&needle_lower) {
+            let matched_len = text[index..]
+                .char_indices()
+                .nth(needle.trim().chars().count())
+                .map(|(offset, _)| offset)
+                .unwrap_or(text.len() - index);
+            if plain_start < index {
+                spans.push(Span::styled(text[plain_start..index].to_string(), base));
+            }
+            spans.push(Span::styled(
+                text[index..index + matched_len].to_string(),
+                highlight,
+            ));
+            index += matched_len;
+            plain_start = index;
+        } else {
+            index += text[index..].chars().next().map_or(1, char::len_utf8);
+        }
+    }
+    if plain_start < text.len() {
+        spans.push(Span::styled(text[plain_start..].to_string(), base));
+    }
+    spans
+}
+
+pub(crate) fn render_session_search(frame: &mut Frame, search: &SessionSearch) -> ModalHit {
+    let full = frame.area();
+    // A workspace, not a prompt: take nearly the whole terminal.
+    let area = centered_rect(
+        full,
+        full.width.saturating_sub(4).min(160),
+        full.height.saturating_sub(2),
+    );
+    // Two readable panes or one; never two unusable ones.
+    let wide = area.width >= 96;
+    let list_area = if wide {
+        Rect {
+            width: (area.width as usize * 45 / 100) as u16,
+            ..area
+        }
+    } else {
+        area
+    };
+
+    let status = if search.scanning {
+        format!("{} · scanning…", search.rows.len())
+    } else {
+        format!("{}", search.rows.len())
+    };
+    let footer = " type to search · ↵ resume · Esc back ";
+    let Some(inner) = modal_frame(
+        frame,
+        list_area,
+        &format!(" search sessions · {status} "),
+        theme::MARKUP,
+        footer,
+    ) else {
+        return ModalHit::default();
+    };
+
+    let mut body = ModalRows::default();
+    body.push(
+        Line::from(vec![
+            Span::styled("> ", theme::title(theme::MARKUP)),
+            Span::raw(truncate_display(
+                &search.query,
+                (inner.width as usize).saturating_sub(3),
+                Truncation::Middle,
+            )),
+        ]),
+        None,
+    );
+    if search.rows.is_empty() {
+        let hint = if search.query.trim().is_empty() {
+            "type to grep every session's history"
+        } else if search.scanning {
+            "scanning…"
+        } else {
+            "no matches"
+        };
+        body.push(Line::styled(hint, Style::default().fg(MUTED)), None);
+        return body.finish_unmapped(frame, inner);
+    }
+
+    let selected = search.nav.selected.min(search.rows.len() - 1);
+    let row_count = (inner.height as usize)
+        .saturating_sub(body.line_count())
+        .max(1);
+    let start = list_window(selected, search.rows.len(), row_count);
+    let width = inner.width as usize;
+    for (index, row) in search.rows.iter().enumerate().skip(start).take(row_count) {
+        let marker = if index == selected { "> " } else { "  " };
+        // The title gets a bounded column so the excerpt always shows.
+        let title_width = (width / 3).clamp(8, 28);
+        let title = truncate_display(&row.title, title_width, Truncation::Right);
+        let lead = format!("{marker}{title}: ");
+        let excerpt = truncate_display(
+            &row.excerpt,
+            width.saturating_sub(UnicodeWidthStr::width(lead.as_str())),
+            Truncation::Right,
+        );
+        let line = if index == selected {
+            // The bar owns the row; per-span colours would fight it.
+            Line::styled(
+                format!(
+                    "{lead}{excerpt:<rest$}",
+                    rest = width.saturating_sub(UnicodeWidthStr::width(lead.as_str()))
+                ),
+                theme::selected(),
+            )
+        } else {
+            let mut spans = vec![
+                Span::raw(marker.to_string()),
+                Span::styled(format!("{title}: "), Style::default().fg(theme::MARKUP)),
+            ];
+            spans.extend(highlighted_spans(
+                &excerpt,
+                &search.query,
+                Style::default().fg(theme::PRIMARY),
+                theme::title(theme::MARKUP),
+            ));
+            Line::from(spans)
+        };
+        body.push(line, Some(index));
+    }
+    let hit = body.finish(frame, inner);
+
+    if wide && let Some(row) = search.rows.get(selected) {
+        let preview_area = Rect {
+            x: area.x + list_area.width,
+            width: area.width - list_area.width,
+            ..area
+        };
+        let title = format!(
+            " {} ",
+            truncate_display(
+                &row.title,
+                preview_area.width.saturating_sub(4) as usize,
+                Truncation::Right
+            )
+        );
+        if let Some(preview_inner) = modal_frame(
+            frame,
+            preview_area,
+            &title,
+            theme::PRIMARY,
+            &format!(" event {} ", row.event),
+        ) {
+            let mut lines: Vec<Line> = Vec::new();
+            for (speaker, text, is_hit) in &row.context {
+                lines.push(Line::styled(
+                    format!("· {speaker}"),
+                    Style::default().fg(MUTED),
+                ));
+                let base = if *is_hit {
+                    Style::default().fg(theme::PRIMARY)
+                } else {
+                    Style::default().fg(MUTED)
+                };
+                lines.push(Line::from(highlighted_spans(
+                    text,
+                    if *is_hit { &search.query } else { "" },
+                    base,
+                    theme::title(theme::MARKUP),
+                )));
+                lines.push(Line::raw(""));
+            }
+            frame.render_widget(
+                Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false }),
+                preview_inner,
+            );
+        }
+    }
+    hit
 }
 
 pub(crate) struct ModelPicker {
@@ -3036,5 +3343,163 @@ mod tests {
         assert!(screen.contains("✗ fix websearch fallback"), "{screen}");
         assert!(screen.contains("^D deletes"), "{screen}");
         assert_eq!(hit.rows, vec![None, Some(0), Some(1)]);
+    }
+
+    fn search_row(session: &str, title: &str, excerpt: &str, context_line: &str) -> SearchRow {
+        SearchRow {
+            session_id: session.into(),
+            title: title.into(),
+            event: 7,
+            excerpt: excerpt.into(),
+            context: vec![
+                ("user".into(), "before the hit".into(), false),
+                ("assistant".into(), context_line.into(), true),
+            ],
+        }
+    }
+
+    #[test]
+    fn typing_restarts_the_scan_and_drops_stale_rows() {
+        let mut search = SessionSearch::new();
+
+        assert_eq!(
+            search.handle_key(KeyCode::Char('a'), false),
+            SessionSearchAction::Rescan
+        );
+        let first_generation = search.generation;
+        assert!(search.scanning);
+        search.push_rows(
+            first_generation,
+            vec![search_row("s1", "one", "a match", "ctx")],
+        );
+        assert_eq!(search.rows.len(), 1);
+
+        // Another keystroke: rows clear, and the old scan's late
+        // arrivals are dropped instead of mixing into the new list.
+        assert_eq!(
+            search.handle_key(KeyCode::Char('b'), false),
+            SessionSearchAction::Rescan
+        );
+        assert!(search.rows.is_empty());
+        search.push_rows(
+            first_generation,
+            vec![search_row("s1", "one", "stale", "ctx")],
+        );
+        assert!(search.rows.is_empty(), "stale rows accepted");
+        search.finish_scan(first_generation);
+        assert!(search.scanning, "a stale scan finishing ended the new one");
+
+        // Erasing the last character leaves an empty query: no scan.
+        search.handle_key(KeyCode::Backspace, false);
+        search.handle_key(KeyCode::Backspace, false);
+        assert!(!search.scanning);
+    }
+
+    #[test]
+    fn enter_resumes_the_selected_row_and_esc_goes_back() {
+        let mut search = SessionSearch::new();
+        assert_eq!(
+            search.handle_key(KeyCode::Enter, false),
+            SessionSearchAction::Stay,
+            "nothing selected, nothing resumed"
+        );
+        search.query = "match".into();
+        search.push_rows(
+            0,
+            vec![
+                search_row("s1", "one", "first match", "ctx"),
+                search_row("s2", "two", "second match", "ctx"),
+            ],
+        );
+        search.move_selection(1);
+        assert_eq!(
+            search.handle_key(KeyCode::Enter, false),
+            SessionSearchAction::Resume("s2".into())
+        );
+        assert_eq!(
+            search.handle_key(KeyCode::Esc, false),
+            SessionSearchAction::Dismiss
+        );
+    }
+
+    #[test]
+    fn the_row_cap_holds_whatever_the_scanner_sends() {
+        let mut search = SessionSearch::new();
+        let rows = (0..MAX_SEARCH_ROWS + 50)
+            .map(|index| search_row("s", "t", &format!("hit {index}"), "ctx"))
+            .collect();
+        search.push_rows(0, rows);
+        assert_eq!(search.rows.len(), MAX_SEARCH_ROWS);
+    }
+
+    #[test]
+    fn the_preview_follows_the_selection() {
+        let mut search = SessionSearch::new();
+        search.query = "needle".into();
+        search.push_rows(
+            0,
+            vec![
+                search_row("s1", "auth session", "needle in auth", "the auth context"),
+                search_row(
+                    "s2",
+                    "parser session",
+                    "needle in parser",
+                    "the parser context",
+                ),
+            ],
+        );
+
+        let (screen, hit) = draw_modal(120, 24, |frame| render_session_search(frame, &search));
+        assert!(screen.contains("auth session"), "{screen}");
+        assert!(screen.contains("the auth context"), "{screen}");
+        assert!(
+            !screen.contains("the parser context"),
+            "preview shows the unselected row: {screen}"
+        );
+        // Both rows are clickable in the left pane.
+        assert!(hit.rows.iter().flatten().count() >= 2, "{hit:?}");
+
+        search.move_selection(1);
+        let (screen, _) = draw_modal(120, 24, |frame| render_session_search(frame, &search));
+        assert!(screen.contains("the parser context"), "{screen}");
+        assert!(!screen.contains("the auth context"), "{screen}");
+    }
+
+    #[test]
+    fn a_narrow_terminal_gets_the_list_alone() {
+        let mut search = SessionSearch::new();
+        search.query = "needle".into();
+        search.push_rows(
+            0,
+            vec![search_row("s1", "one", "needle here", "context text")],
+        );
+
+        let (screen, _) = draw_modal(60, 20, |frame| render_session_search(frame, &search));
+        assert!(screen.contains("needle here"), "{screen}");
+        assert!(
+            !screen.contains("context text"),
+            "two unusable panes on a narrow terminal: {screen}"
+        );
+    }
+
+    #[test]
+    fn highlighted_spans_split_on_every_occurrence() {
+        let spans = highlighted_spans(
+            "AES table and aes TABLE",
+            "aes table",
+            Style::default(),
+            theme::selected(),
+        );
+        let highlighted: Vec<&str> = spans
+            .iter()
+            .filter(|span| span.style == theme::selected())
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(highlighted, vec!["AES table", "aes TABLE"]);
+        // No needle, one plain span.
+        assert_eq!(
+            highlighted_spans("text", "", Style::default(), theme::selected()).len(),
+            1
+        );
     }
 }

@@ -162,7 +162,10 @@ fn subagent_children_stay_hidden() {
 
     let found = collect_all(&store, "child-only secret", 5);
 
-    assert!(found.is_empty(), "matched inside a child session: {found:?}");
+    assert!(
+        found.is_empty(),
+        "matched inside a child session: {found:?}"
+    );
 }
 
 #[test]

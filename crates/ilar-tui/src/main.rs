@@ -36,8 +36,9 @@ use input::{
     retry_requested,
 };
 use modals::{
-    CommandPaletteAction, Modal, ModelPicker, PendingAction, PendingManager, PickerAction,
-    SessionPicker, SessionPickerAction, ThemePicker, TurnPicker, TurnPickerAction, VariantPicker,
+    CommandPaletteAction, MAX_SEARCH_ROWS, Modal, ModelPicker, PendingAction, PendingManager,
+    PickerAction, SearchRow, SessionPicker, SessionPickerAction, SessionSearch,
+    SessionSearchAction, ThemePicker, TurnPicker, TurnPickerAction, VariantPicker,
     VariantPickerAction, is_command_palette_shortcut, turn_entries,
 };
 use questions::QuestionAction;
@@ -1535,6 +1536,70 @@ enum AppExit {
     },
 }
 
+/// Hits shown per session in the content search; one chatty session
+/// must not bury the rest.
+const SEARCH_HITS_PER_SESSION: usize = 5;
+/// Events either side of a hit carried into the preview pane.
+const SEARCH_CONTEXT_RADIUS: usize = 2;
+/// Characters of any one entry in the preview.
+const SEARCH_CONTEXT_CHARS: usize = 500;
+
+/// Start a background walk of every session for the search modal.
+/// Rows stream through the channel as each session is read; setting
+/// the returned flag abandons the walk at the next session boundary.
+fn start_session_scan(
+    store: ilar::session::SessionStore,
+    query: String,
+) -> (
+    std::sync::mpsc::Receiver<Vec<SearchRow>>,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    use std::sync::atomic::Ordering;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = cancel.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut sent = 0usize;
+        ilar::recall::search_sessions(&store, &query, SEARCH_HITS_PER_SESSION, |entries, hits| {
+            if flag.load(Ordering::Relaxed) {
+                return false;
+            }
+            let title = hits
+                .title
+                .clone()
+                .unwrap_or_else(|| hits.session_id.clone());
+            let rows: Vec<SearchRow> = hits
+                .hits
+                .iter()
+                .map(|hit| SearchRow {
+                    session_id: hits.session_id.clone(),
+                    title: title.clone(),
+                    event: hit.event,
+                    excerpt: hit.excerpt.clone(),
+                    context: ilar::recall::around(
+                        entries,
+                        hit.event,
+                        SEARCH_CONTEXT_RADIUS,
+                        SEARCH_CONTEXT_CHARS,
+                    )
+                    .into_iter()
+                    .map(|entry| {
+                        (
+                            entry.speaker.label().to_string(),
+                            entry.text,
+                            entry.event == hit.event,
+                        )
+                    })
+                    .collect(),
+                })
+                .collect();
+            sent += rows.len();
+            tx.send(rows).is_ok() && sent < MAX_SEARCH_ROWS
+        });
+    });
+    (rx, cancel)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_app(
     terminal: &mut ratatui::DefaultTerminal,
@@ -1555,6 +1620,10 @@ async fn run_app(
     services: std::sync::Arc<ilar::tools::service::ServiceManager>,
 ) -> Result<AppExit> {
     let mut events_rx: Option<LoopEventReceiver> = None;
+    // The content-search scan: rows stream in stamped with the query
+    // generation they answer; the flag abandons a stale walk.
+    let mut search_rx: Option<(u64, std::sync::mpsc::Receiver<Vec<SearchRow>>)> = None;
+    let mut search_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>> = None;
     let mut pending_notification = None;
     let mut notifications_paused = false;
     let mut cancel: Option<CancellationToken> = None;
@@ -1596,6 +1665,31 @@ async fn run_app(
             while let Ok(event) = rx.try_recv() {
                 app.push_loop_event(&event);
             }
+        }
+        // Stream in content-search rows; a closed channel means the
+        // scan finished (or was told to stop, which no longer matters).
+        let mut scan_done = false;
+        if let Some((generation, rx)) = search_rx.as_ref() {
+            loop {
+                match rx.try_recv() {
+                    Ok(rows) => {
+                        if let Some(search) = app.session_search.as_mut() {
+                            search.push_rows(*generation, rows);
+                        }
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        if let Some(search) = app.session_search.as_mut() {
+                            search.finish_scan(*generation);
+                        }
+                        scan_done = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if scan_done {
+            search_rx = None;
         }
         app.retry_subagent_activity();
         for _ in 0..256 {
@@ -2052,6 +2146,87 @@ async fn run_app(
                                         .map(|session| ensure_direct_resume_allowed(session.meta()))
                                     {
                                         Ok(Ok(())) => {
+                                            spawner.shutdown().await;
+                                            return Ok(AppExit::Switch(new_session));
+                                        }
+                                        Ok(Err(error)) => {
+                                            app.set_notice(
+                                                format!("cannot resume {new_session}: {error}"),
+                                                NoticeLevel::Error,
+                                            );
+                                        }
+                                        Err(error) => {
+                                            app.set_notice(
+                                                format!("cannot resume {new_session}: {error}"),
+                                                NoticeLevel::Error,
+                                            );
+                                        }
+                                    }
+                                }
+                                SessionPickerAction::ContentSearch => {
+                                    app.session_picker = None;
+                                    app.session_search = Some(SessionSearch::new());
+                                }
+                            }
+                        }
+                        Modal::SessionSearch => {
+                            let action = app
+                                .session_search
+                                .as_mut()
+                                .unwrap()
+                                .handle_key(code, control);
+                            match action {
+                                SessionSearchAction::Stay => {}
+                                SessionSearchAction::Rescan => {
+                                    if let Some(flag) = search_cancel.take() {
+                                        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                                    }
+                                    search_rx = None;
+                                    let search = app.session_search.as_ref().unwrap();
+                                    if search.scanning {
+                                        let (rx, flag) =
+                                            start_session_scan(store.clone(), search.query.clone());
+                                        search_rx = Some((search.generation, rx));
+                                        search_cancel = Some(flag);
+                                    }
+                                }
+                                SessionSearchAction::Dismiss => {
+                                    if let Some(flag) = search_cancel.take() {
+                                        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                                    }
+                                    search_rx = None;
+                                    app.session_search = None;
+                                    // Back where the user came from.
+                                    let sessions = store
+                                        .list()
+                                        .into_iter()
+                                        .filter(|session| session.id != app.session_id)
+                                        .collect();
+                                    app.session_picker = Some(SessionPicker::new(sessions));
+                                }
+                                SessionSearchAction::Resume(new_session) => {
+                                    let blocked = switch_blocked(
+                                        turn_handle.is_some(),
+                                        spawner.running_background(),
+                                        !app.input.is_blank(),
+                                    );
+                                    if let Some(reason) = blocked {
+                                        app.set_notice(reason, NoticeLevel::Warning);
+                                        continue;
+                                    }
+                                    // Same validation as the picker: degrade a
+                                    // bad entry to a notice, not an exit.
+                                    match store
+                                        .load(&new_session)
+                                        .map(|session| ensure_direct_resume_allowed(session.meta()))
+                                    {
+                                        Ok(Ok(())) => {
+                                            if let Some(flag) = search_cancel.take() {
+                                                flag.store(
+                                                    true,
+                                                    std::sync::atomic::Ordering::Relaxed,
+                                                );
+                                            }
                                             spawner.shutdown().await;
                                             return Ok(AppExit::Switch(new_session));
                                         }

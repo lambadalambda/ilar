@@ -25,11 +25,11 @@ use crate::input::slash_candidates;
 use crate::input::{InputBuffer, input_accepts_keys};
 use crate::modals::{
     CommandPalette, LinkPicker, Modal, ModelPicker, PaletteAction, PaletteCommand, PendingAction,
-    PendingItem, PendingManager, SessionPicker, SkillPicker, ThemePicker, ThemePickerAction,
-    TurnPicker, VariantPicker, palette_items, render_command_palette, render_help,
-    render_link_picker, render_model_picker, render_pending_manager, render_session_picker,
-    render_skill_picker, render_theme_picker, render_todos, render_turn_picker,
-    render_variant_picker,
+    PendingItem, PendingManager, SessionPicker, SessionSearch, SkillPicker, ThemePicker,
+    ThemePickerAction, TurnPicker, VariantPicker, palette_items, render_command_palette,
+    render_help, render_link_picker, render_model_picker, render_pending_manager,
+    render_session_picker, render_session_search, render_skill_picker, render_theme_picker,
+    render_todos, render_turn_picker, render_variant_picker,
 };
 use crate::questions::QuestionModal;
 use crate::selection::{
@@ -154,6 +154,8 @@ pub(crate) struct App {
     pub(crate) model_picker: Option<ModelPicker>,
     pub(crate) variant_picker: Option<VariantPicker>,
     pub(crate) session_picker: Option<SessionPicker>,
+    /// The cross-session content search, reached from the picker.
+    pub(crate) session_search: Option<SessionSearch>,
     pub(crate) turn_picker: Option<TurnPicker>,
     pub(crate) link_picker: Option<LinkPicker>,
     /// The turn picker needs the store; set by /rewind or the palette,
@@ -260,6 +262,7 @@ impl App {
             model_picker: None,
             variant_picker: None,
             session_picker: None,
+            session_search: None,
             turn_picker: None,
             link_picker: None,
             turn_picker_requested: false,
@@ -323,6 +326,8 @@ impl App {
             Some(Modal::ThemePicker)
         } else if self.skill_picker.is_some() {
             Some(Modal::SkillPicker)
+        } else if self.session_search.is_some() {
+            Some(Modal::SessionSearch)
         } else if self.session_picker.is_some() {
             Some(Modal::SessionPicker)
         } else if self.turn_picker.is_some() {
@@ -463,6 +468,9 @@ impl App {
             Some(Modal::SessionPicker) => {
                 self.session_picker.as_mut().unwrap().move_selection(rows);
             }
+            Some(Modal::SessionSearch) => {
+                self.session_search.as_mut().unwrap().move_selection(rows);
+            }
             Some(Modal::TurnPicker) => {
                 self.turn_picker.as_mut().unwrap().move_selection(rows);
             }
@@ -516,6 +524,7 @@ impl App {
                     self.theme = self.theme_picker.as_ref().unwrap().selected_theme();
                 }
                 Modal::SessionPicker => self.session_picker.as_mut().unwrap().select(index),
+                Modal::SessionSearch => self.session_search.as_mut().unwrap().select(index),
                 Modal::TurnPicker => self.turn_picker.as_mut().unwrap().select(index),
                 Modal::LinkPicker => self.link_picker.as_mut().unwrap().select(index),
                 Modal::SkillPicker => self.skill_picker.as_mut().unwrap().select(index),
@@ -2421,6 +2430,10 @@ impl App {
             Some(Modal::SessionPicker) => Some(render_session_picker(
                 frame,
                 self.session_picker.as_ref().expect("session picker"),
+            )),
+            Some(Modal::SessionSearch) => Some(render_session_search(
+                frame,
+                self.session_search.as_ref().expect("session search"),
             )),
             Some(Modal::TurnPicker) => Some(render_turn_picker(
                 frame,
