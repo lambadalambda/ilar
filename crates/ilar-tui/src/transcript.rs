@@ -728,9 +728,16 @@ pub(crate) fn transcript_entry_rows(
 ) -> Vec<TranscriptRow> {
     match entry {
         TranscriptEntry::Item(item) => match item.as_ref() {
-            tool @ Line_::Tool { .. } => {
-                tool_entry_rows(tool, expanded_groups, width, now, activity_started, 0, None)
-            }
+            tool @ Line_::Tool { .. } => tool_entry_rows(
+                tool,
+                expanded_groups,
+                width,
+                now,
+                activity_started,
+                0,
+                None,
+                0,
+            ),
             item => {
                 // Expandable thoughts get a click target on their header row.
                 let thought_target = match item {
@@ -805,6 +812,18 @@ pub(crate) fn transcript_entry_rows(
                 .filter(|call| *expanded || tool_is_active(call))
                 .collect::<Vec<_>>();
             let visible_count = visible.len();
+            // Siblings align to their widest name — the exact padding
+            // alignment needs, not a fixed safe column.
+            let name_column = visible
+                .iter()
+                .filter_map(|call| match call {
+                    Line_::Tool { name, kind, .. } => {
+                        Some(UnicodeWidthStr::width(display_name(name, kind).as_str()))
+                    }
+                    _ => None,
+                })
+                .max()
+                .unwrap_or(0);
             for (index, call) in visible.into_iter().enumerate() {
                 let branch = show_hierarchy.then_some(if index + 1 == visible_count {
                     "└─"
@@ -820,6 +839,7 @@ pub(crate) fn transcript_entry_rows(
                     activity_started,
                     call_indent,
                     branch,
+                    name_column,
                 ));
             }
             rows
@@ -865,6 +885,7 @@ fn call_count(calls: usize) -> String {
     format!("{calls} {}", if calls == 1 { "call" } else { "calls" })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn tool_entry_rows(
     entry: &Line_,
     expanded_groups: &std::collections::HashSet<String>,
@@ -873,6 +894,7 @@ fn tool_entry_rows(
     activity_started: std::time::Instant,
     indent: usize,
     branch: Option<&str>,
+    name_column: usize,
 ) -> Vec<TranscriptRow> {
     let indent = indent.min(width as usize);
     let Line_::Tool {
@@ -911,6 +933,7 @@ fn tool_entry_rows(
         now,
         *expanded,
         *full,
+        name_column,
     );
     let mut spans = branch
         .map(|branch| {
@@ -1431,6 +1454,18 @@ pub(crate) fn append_thought_tail(text: &mut String, delta: &str) {
     }
 }
 
+/// The name a row shows: the tool's own, or `agent@model` when the
+/// task carries an explicit model override.
+fn display_name(tool_name: &str, kind: &ToolKind) -> String {
+    match kind {
+        ToolKind::Tool => tool_name.to_string(),
+        ToolKind::Agent { name, model } => match model {
+            Some(model) => format!("{name}@{}", model.split('/').next_back().unwrap_or(model)),
+            None => name.clone(),
+        },
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn tool_line(
     name: &str,
@@ -1443,7 +1478,7 @@ pub(crate) fn tool_line(
     now: std::time::Instant,
 ) -> Line<'static> {
     tool_line_with_disclosure(
-        name, kind, arguments, state, width, elapsed, progress, now, false, false,
+        name, kind, arguments, state, width, elapsed, progress, now, false, false, 0,
     )
 }
 
@@ -1459,6 +1494,7 @@ fn tool_line_with_disclosure(
     now: std::time::Instant,
     expanded: bool,
     full: bool,
+    name_column: usize,
 ) -> Line<'static> {
     let width = width as usize;
     let tool_name = name;
@@ -1466,18 +1502,10 @@ fn tool_line_with_disclosure(
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    let (label, name, label_color) = match kind {
-        ToolKind::Tool => ("tool", tool_name.to_string(), theme::SECONDARY),
-        ToolKind::Agent { name, model } => (
-            "agent",
-            match model {
-                // Show explicit model overrides; default-model agents
-                // stay uncluttered.
-                Some(model) => format!("{name}@{}", model.split('/').next_back().unwrap_or(model)),
-                None => name.clone(),
-            },
-            theme::REASONING,
-        ),
+    let name = display_name(tool_name, kind);
+    let (label, label_color) = match kind {
+        ToolKind::Tool => ("tool", theme::SECONDARY),
+        ToolKind::Agent { .. } => ("agent", theme::REASONING),
     };
     let label = if width >= 72 {
         format!("{label:<6}")
@@ -1560,13 +1588,15 @@ fn tool_line_with_disclosure(
         .map(|label| UnicodeWidthStr::width(label) + 2)
         .unwrap_or(0);
     let available_name = width.saturating_sub(fixed).saturating_sub(progress_reserve);
-    let name_column = available_name.clamp(1, 20);
-    let name = truncate_display(&name, name_column, Truncation::Right);
-    // Tools pad to a shared column so stacked rows in an expanded list
-    // align; an agent row stands alone between thoughts, where the
-    // column is just a hole before the task title.
-    let name_padding = if width >= 72 && matches!(kind, ToolKind::Tool) {
-        name_column.saturating_sub(UnicodeWidthStr::width(name.as_str()))
+    let name_limit = available_name.clamp(1, 20);
+    let name = truncate_display(&name, name_limit, Truncation::Right);
+    // Padded exactly to the widest sibling in the row's own group —
+    // that is what alignment costs, and no more. A standalone row has
+    // no siblings and no padding.
+    let name_padding = if width >= 72 {
+        name_column
+            .min(name_limit)
+            .saturating_sub(UnicodeWidthStr::width(name.as_str()))
     } else {
         0
     };
@@ -1732,6 +1762,65 @@ mod tests {
                 .iter()
                 .any(|row| rendered_text(&row.line).contains("… more"))
         );
+    }
+
+    fn finished_tool(id: &str, name: &str, arguments: &str) -> Line_ {
+        Line_::Tool {
+            id: id.into(),
+            group_id: "g".into(),
+            name: name.into(),
+            kind: ToolKind::Tool,
+            arguments: arguments.into(),
+            argument_detail: String::new(),
+            diff: Vec::new(),
+            tail: String::new(),
+            result: None,
+            state: ToolState::Succeeded,
+            progress: ToolProgress::None,
+            expanded: false,
+            full: false,
+            child_lines: Vec::new(),
+            child_group: 0,
+            child_running: false,
+            child_session_id: None,
+        }
+    }
+
+    /// Sibling rows in a group pad their names to the widest among
+    /// them — the exact cost of alignment, not a fixed column.
+    #[test]
+    fn grouped_tool_rows_align_to_their_widest_sibling() {
+        let group = TranscriptEntry::ToolGroup {
+            id: "g".into(),
+            calls: vec![
+                finished_tool("t1", "bash", "cargo test"),
+                finished_tool("t2", "webfetch", "https://x"),
+            ],
+            expanded: true,
+            child: false,
+        };
+
+        let now = std::time::Instant::now();
+        let rows = transcript_entry_rows(
+            &group,
+            &std::collections::HashSet::new(),
+            120,
+            now,
+            now,
+            false,
+        );
+        let rendered: Vec<String> = rows.iter().map(|row| rendered_text(&row.line)).collect();
+        let bash = rendered.iter().find(|row| row.contains("bash")).unwrap();
+        let fetch = rendered
+            .iter()
+            .find(|row| row.contains("webfetch"))
+            .unwrap();
+
+        // Both check marks land in the same column: bash is padded by
+        // exactly the four characters webfetch is longer.
+        assert_eq!(bash.find('✓'), fetch.find('✓'), "{bash:?} vs {fetch:?}");
+        assert!(bash.contains("bash     ✓"), "{bash}");
+        assert!(fetch.contains("webfetch ✓"), "{fetch}");
     }
 
     #[test]

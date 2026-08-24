@@ -3965,6 +3965,9 @@ mod tests {
     #[test]
     fn wide_tool_rows_align_state_and_nested_rows_have_tree_rails() {
         let now = std::time::Instant::now();
+        // Standalone rows pad nothing: alignment is the group's job
+        // (grouped_tool_rows_align_to_their_widest_sibling), and a row
+        // with no siblings has nothing to align with.
         let short = rendered_text(&tool_line(
             "read",
             &ToolKind::Tool,
@@ -3975,21 +3978,7 @@ mod tests {
             ToolProgress::None,
             now,
         ));
-        let long = rendered_text(&tool_line(
-            "a-much-longer-tool-name",
-            &ToolKind::Tool,
-            "src/main.rs",
-            ToolState::Succeeded,
-            100,
-            std::time::Duration::ZERO,
-            ToolProgress::None,
-            now,
-        ));
-        assert_eq!(
-            short.chars().position(|character| character == '✓'),
-            long.chars().position(|character| character == '✓'),
-            "{short:?} {long:?}"
-        );
+        assert!(short.contains("read ✓ src/main.rs"), "{short}");
 
         let mut app = App::new();
         app.lines.clear();
@@ -5408,9 +5397,8 @@ mod tests {
         ));
         assert!(narrow_agent.contains("queued"), "{narrow_agent}");
 
-        // An agent row is standalone prose, not part of a tool column:
-        // its task title follows the name directly instead of across a
-        // padded gap. Tools keep the column so stacked rows align.
+        // A standalone row has no siblings to align with, so its title
+        // follows the name directly — agent and tool alike.
         let agent_row = rendered_text(&tool_line(
             "task",
             &ToolKind::Agent {
@@ -5438,7 +5426,7 @@ mod tests {
             ToolProgress::None,
             now,
         ));
-        assert!(tool_row.contains("bash            "), "{tool_row}");
+        assert!(tool_row.contains("bash ✓ cargo test"), "{tool_row}");
 
         app.push_loop_event(&LoopEvent::ToolExecutionStarted {
             id: "write-1".into(),
