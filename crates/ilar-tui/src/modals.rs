@@ -49,6 +49,71 @@ impl ModalHit {
     }
 }
 
+/// The chrome every picker modal shares: clear the backdrop, draw the
+/// double border in the focus style with the title and the
+/// right-aligned muted footer, and hand back the inner area — or
+/// `None` when the terminal left no room, which is every caller's cue
+/// to bail with an empty hit map. Sizes, titles, colours and footer
+/// breakpoints stay with each picker; only the scaffold lives here.
+fn modal_frame(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    title_color: ratatui::style::Color,
+    footer: &str,
+) -> Option<Rect> {
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .border_style(theme::focus_border())
+        .title(Line::styled(title.to_string(), theme::title(title_color)))
+        .title_bottom(
+            Line::styled(footer.to_string(), Style::default().fg(theme::MUTED)).right_aligned(),
+        );
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    (inner.width > 0 && inner.height > 0).then_some(inner)
+}
+
+/// A modal's body under construction: every line is pushed together
+/// with the item it shows, so the click map cannot drift from what is
+/// drawn. (The session picker once counted its rows post-hoc from the
+/// line total — one extra header line away from off-by-one clicks.)
+#[derive(Default)]
+struct ModalRows {
+    lines: Vec<Line<'static>>,
+    rows: Vec<Option<usize>>,
+}
+
+impl ModalRows {
+    /// Append a line and, when it shows a selectable item, its index.
+    fn push(&mut self, line: Line<'static>, item: Option<usize>) {
+        self.lines.push(line);
+        self.rows.push(item);
+    }
+
+    fn line_count(&self) -> usize {
+        self.lines.len()
+    }
+
+    /// Draw the collected lines and hand back where the rows landed.
+    fn finish(self, frame: &mut Frame, inner: Rect) -> ModalHit {
+        frame.render_widget(Paragraph::new(self.lines), inner);
+        ModalHit {
+            area: inner,
+            rows: self.rows,
+        }
+    }
+
+    /// Draw the collected lines but map no rows: the empty and
+    /// no-match states keep clicks inert.
+    fn finish_unmapped(self, frame: &mut Frame, inner: Rect) -> ModalHit {
+        frame.render_widget(Paragraph::new(self.lines), inner);
+        ModalHit::default()
+    }
+}
+
 /// The one definition of which keys move a list selection. Every modal
 /// list answers the same keys because they all ask this; before, each
 /// carried its own copy of these two arms.
@@ -715,31 +780,22 @@ impl SkillPicker {
 
 pub(crate) fn render_skill_picker(frame: &mut Frame, picker: &SkillPicker) -> ModalHit {
     let area = centered_rect(frame.area(), 72, 14);
-    frame.render_widget(Clear, area);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Double)
-        .border_style(theme::focus_border())
-        .title(Line::styled(" skills ", theme::title(theme::MARKUP)))
-        .title_bottom(
-            Line::styled(
-                " ↑↓ select · Enter insert · Esc cancel ",
-                Style::default().fg(theme::MUTED),
-            )
-            .right_aligned(),
-        );
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    if inner.width == 0 || inner.height == 0 {
+    let Some(inner) = modal_frame(
+        frame,
+        area,
+        " skills ",
+        theme::MARKUP,
+        " ↑↓ select · Enter insert · Esc cancel ",
+    ) else {
         return ModalHit::default();
-    }
+    };
     let selected = picker
         .nav
         .selected
         .min(picker.skills.len().saturating_sub(1));
     let row_count = inner.height as usize;
     let start = list_window(selected, picker.skills.len(), row_count);
-    let mut lines = Vec::new();
+    let mut body = ModalRows::default();
     for (index, (name, description)) in picker.skills.iter().enumerate().skip(start).take(row_count)
     {
         let marker = if index == selected { "> " } else { "  " };
@@ -753,16 +809,15 @@ pub(crate) fn render_skill_picker(frame: &mut Frame, picker: &SkillPicker) -> Mo
         } else {
             Style::default().fg(theme::PRIMARY)
         };
-        lines.push(Line::styled(
-            format!("{text:<width$}", width = inner.width as usize),
-            style,
-        ));
+        body.push(
+            Line::styled(
+                format!("{text:<width$}", width = inner.width as usize),
+                style,
+            ),
+            Some(index),
+        );
     }
-    let rows = (start..start.saturating_add(lines.len()))
-        .map(Some)
-        .collect();
-    frame.render_widget(Paragraph::new(lines), inner);
-    ModalHit { area: inner, rows }
+    body.finish(frame, inner)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -923,44 +978,47 @@ impl LinkPicker {
 
 pub(crate) fn render_link_picker(frame: &mut Frame, picker: &LinkPicker) -> ModalHit {
     let area = centered_rect(frame.area(), 80, 16);
-    frame.render_widget(Clear, area);
-    let footer = " type to filter · ↵ open in browser · Esc ";
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Double)
-        .border_style(theme::focus_border())
-        .title(Line::styled(" links ", theme::title(theme::MARKUP)))
-        .title_bottom(Line::styled(footer, Style::default().fg(theme::MUTED)).right_aligned());
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    if inner.width == 0 || inner.height == 0 {
+    let Some(inner) = modal_frame(
+        frame,
+        area,
+        " links ",
+        theme::MARKUP,
+        " type to filter · ↵ open in browser · Esc ",
+    ) else {
         return ModalHit::default();
-    }
-    let mut lines = vec![Line::from(vec![
-        Span::styled("filter ", Style::default().fg(MUTED)),
-        Span::raw(truncate_display(
-            &picker.query,
-            (inner.width as usize).saturating_sub(8),
-            Truncation::Middle,
-        )),
-    ])];
+    };
+    let mut body = ModalRows::default();
+    body.push(
+        Line::from(vec![
+            Span::styled("filter ", Style::default().fg(MUTED)),
+            Span::raw(truncate_display(
+                &picker.query,
+                (inner.width as usize).saturating_sub(8),
+                Truncation::Middle,
+            )),
+        ]),
+        None,
+    );
     let links = picker.filtered();
     if links.is_empty() {
-        lines.push(Line::styled(
-            if picker.links.is_empty() {
-                "no links in this transcript"
-            } else {
-                "no matches"
-            },
-            Style::default().fg(MUTED),
-        ));
-        frame.render_widget(Paragraph::new(lines), inner);
-        return ModalHit::default();
+        body.push(
+            Line::styled(
+                if picker.links.is_empty() {
+                    "no links in this transcript"
+                } else {
+                    "no matches"
+                },
+                Style::default().fg(MUTED),
+            ),
+            None,
+        );
+        return body.finish_unmapped(frame, inner);
     }
     let selected = picker.nav.selected.min(links.len() - 1);
-    let row_count = (inner.height as usize).saturating_sub(lines.len()).max(1);
+    let row_count = (inner.height as usize)
+        .saturating_sub(body.line_count())
+        .max(1);
     let start = list_window(selected, links.len(), row_count);
-    let mut rows: Vec<Option<usize>> = vec![None];
     for (index, link) in links.iter().enumerate().skip(start).take(row_count) {
         let marker = if index == selected { "> " } else { "  " };
         let width = inner.width as usize;
@@ -982,11 +1040,9 @@ pub(crate) fn render_link_picker(frame: &mut Frame, picker: &LinkPicker) -> Moda
         } else {
             Style::default().fg(theme::PRIMARY)
         };
-        lines.push(Line::styled(format!("{text:<width$}"), style));
-        rows.push(Some(index));
+        body.push(Line::styled(format!("{text:<width$}"), style), Some(index));
     }
-    frame.render_widget(Paragraph::new(lines), inner);
-    ModalHit { area: inner, rows }
+    body.finish(frame, inner)
 }
 
 /// One rewindable turn: a user message in the loaded session, newest
@@ -1142,52 +1198,47 @@ impl TurnPicker {
 
 pub(crate) fn render_turn_picker(frame: &mut Frame, picker: &TurnPicker) -> ModalHit {
     let area = centered_rect(frame.area(), 72, 16);
-    frame.render_widget(Clear, area);
     let footer = if area.width < 48 {
         " ↵ rewind ×2 · ^Y fork · Esc "
     } else {
         " type to filter · ↵ rewind (×2 confirms) · ^Y fork here · Esc "
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Double)
-        .border_style(theme::focus_border())
-        .title(Line::styled(
-            " rewind to turn ",
-            theme::title(theme::MARKUP),
-        ))
-        .title_bottom(Line::styled(footer, Style::default().fg(theme::MUTED)).right_aligned());
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    if inner.width == 0 || inner.height == 0 {
+    let Some(inner) = modal_frame(frame, area, " rewind to turn ", theme::MARKUP, footer) else {
         return ModalHit::default();
-    }
-    let mut lines = vec![Line::from(vec![
-        Span::styled("filter ", Style::default().fg(MUTED)),
-        Span::raw(truncate_display(
-            &picker.query,
-            (inner.width as usize).saturating_sub(8),
-            Truncation::Middle,
-        )),
-    ])];
+    };
+    let mut body = ModalRows::default();
+    body.push(
+        Line::from(vec![
+            Span::styled("filter ", Style::default().fg(MUTED)),
+            Span::raw(truncate_display(
+                &picker.query,
+                (inner.width as usize).saturating_sub(8),
+                Truncation::Middle,
+            )),
+        ]),
+        None,
+    );
     let turns = picker.filtered();
     if turns.is_empty() {
-        lines.push(Line::styled(
-            if picker.turns.is_empty() {
-                "no turns to rewind to"
-            } else {
-                "no matches"
-            },
-            Style::default().fg(MUTED),
-        ));
-        frame.render_widget(Paragraph::new(lines), inner);
-        return ModalHit::default();
+        body.push(
+            Line::styled(
+                if picker.turns.is_empty() {
+                    "no turns to rewind to"
+                } else {
+                    "no matches"
+                },
+                Style::default().fg(MUTED),
+            ),
+            None,
+        );
+        return body.finish_unmapped(frame, inner);
     }
     let now = std::time::SystemTime::now();
     let selected = picker.nav.selected.min(turns.len() - 1);
-    let row_count = (inner.height as usize).saturating_sub(lines.len()).max(1);
+    let row_count = (inner.height as usize)
+        .saturating_sub(body.line_count())
+        .max(1);
     let start = list_window(selected, turns.len(), row_count);
-    let mut rows: Vec<Option<usize>> = vec![None];
     for (index, turn) in turns.iter().enumerate().skip(start).take(row_count) {
         let armed = index == selected && picker.armed.as_deref() == Some(turn.user_id.as_str());
         let marker = if index == selected {
@@ -1226,14 +1277,15 @@ pub(crate) fn render_turn_picker(frame: &mut Frame, picker: &TurnPicker) -> Moda
         } else {
             Style::default().fg(theme::PRIMARY)
         };
-        lines.push(Line::styled(
-            format!("{text:<width$}", width = inner.width as usize),
-            style,
-        ));
-        rows.push(Some(index));
+        body.push(
+            Line::styled(
+                format!("{text:<width$}", width = inner.width as usize),
+                style,
+            ),
+            Some(index),
+        );
     }
-    frame.render_widget(Paragraph::new(lines), inner);
-    ModalHit { area: inner, rows }
+    body.finish(frame, inner)
 }
 
 fn session_age(modified: std::time::SystemTime, now: std::time::SystemTime) -> String {
@@ -1248,47 +1300,46 @@ fn session_age(modified: std::time::SystemTime, now: std::time::SystemTime) -> S
 
 pub(crate) fn render_session_picker(frame: &mut Frame, picker: &SessionPicker) -> ModalHit {
     let area = centered_rect(frame.area(), 72, 16);
-    frame.render_widget(Clear, area);
     let footer = if area.width < 44 {
         " ↵ resume · ^D del · ^Y fork "
     } else {
         " type to filter · ↵ resume · ^D delete ×2 · ^Y fork · Esc "
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Double)
-        .border_style(theme::focus_border())
-        .title(Line::styled(" sessions ", theme::title(theme::MARKUP)))
-        .title_bottom(Line::styled(footer, Style::default().fg(theme::MUTED)).right_aligned());
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    if inner.width == 0 || inner.height == 0 {
+    let Some(inner) = modal_frame(frame, area, " sessions ", theme::MARKUP, footer) else {
         return ModalHit::default();
-    }
-    let mut lines = vec![Line::from(vec![
-        Span::styled("filter ", Style::default().fg(MUTED)),
-        Span::raw(truncate_display(
-            &picker.query,
-            (inner.width as usize).saturating_sub(8),
-            Truncation::Middle,
-        )),
-    ])];
+    };
+    let mut body = ModalRows::default();
+    body.push(
+        Line::from(vec![
+            Span::styled("filter ", Style::default().fg(MUTED)),
+            Span::raw(truncate_display(
+                &picker.query,
+                (inner.width as usize).saturating_sub(8),
+                Truncation::Middle,
+            )),
+        ]),
+        None,
+    );
     let sessions = picker.filtered();
     if sessions.is_empty() {
-        lines.push(Line::styled(
-            if picker.sessions.is_empty() {
-                "no other sessions"
-            } else {
-                "no matches"
-            },
-            Style::default().fg(MUTED),
-        ));
-        frame.render_widget(Paragraph::new(lines), inner);
-        return ModalHit::default();
+        body.push(
+            Line::styled(
+                if picker.sessions.is_empty() {
+                    "no other sessions"
+                } else {
+                    "no matches"
+                },
+                Style::default().fg(MUTED),
+            ),
+            None,
+        );
+        return body.finish_unmapped(frame, inner);
     }
     let now = std::time::SystemTime::now();
     let selected = picker.nav.selected.min(sessions.len() - 1);
-    let row_count = (inner.height as usize).saturating_sub(lines.len()).max(1);
+    let row_count = (inner.height as usize)
+        .saturating_sub(body.line_count())
+        .max(1);
     let start = list_window(selected, sessions.len(), row_count);
     for (index, session) in sessions.iter().enumerate().skip(start).take(row_count) {
         let marker = if index == selected {
@@ -1322,15 +1373,15 @@ pub(crate) fn render_session_picker(frame: &mut Frame, picker: &SessionPicker) -
         } else {
             Style::default().fg(theme::PRIMARY)
         };
-        lines.push(Line::styled(
-            format!("{text:<width$}", width = inner.width as usize),
-            style,
-        ));
+        body.push(
+            Line::styled(
+                format!("{text:<width$}", width = inner.width as usize),
+                style,
+            ),
+            Some(index),
+        );
     }
-    let mut rows = vec![None];
-    rows.extend((start..start.saturating_add(lines.len() - 1)).map(Some));
-    frame.render_widget(Paragraph::new(lines), inner);
-    ModalHit { area: inner, rows }
+    body.finish(frame, inner)
 }
 
 pub(crate) struct ModelPicker {
@@ -1685,24 +1736,14 @@ pub(crate) fn render_command_palette(frame: &mut Frame, palette: &CommandPalette
     // overflow markers take over.
     let desired_height = (palette.items.len() as u16).saturating_add(4);
     let area = centered_rect(frame.area(), 72, desired_height);
-    frame.render_widget(Clear, area);
-
     let footer = if area.width < 44 {
         " Enter select · Esc close "
     } else {
         " ↑↓ move · Enter select · Esc close "
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Double)
-        .border_style(theme::focus_border())
-        .title(Line::styled(" commands ", theme::title(theme::PRIMARY)))
-        .title_bottom(Line::styled(footer, Style::default().fg(theme::MUTED)).right_aligned());
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    if inner.width == 0 || inner.height == 0 {
+    let Some(inner) = modal_frame(frame, area, " commands ", theme::PRIMARY, footer) else {
         return ModalHit::default();
-    }
+    };
 
     let query_area_width = inner.width.saturating_sub(7);
     let (visible_query, query_cursor_offset) = text_field_view(&palette.query, query_area_width);
@@ -1718,34 +1759,35 @@ pub(crate) fn render_command_palette(frame: &mut Frame, palette: &CommandPalette
     } else {
         Span::raw(visible_query)
     };
-    let mut lines = vec![Line::from(vec![
-        Span::styled("search ", Style::default().fg(MUTED)),
-        query,
-    ])];
+    let mut body = ModalRows::default();
+    body.push(
+        Line::from(vec![
+            Span::styled("search ", Style::default().fg(MUTED)),
+            query,
+        ]),
+        None,
+    );
     let commands = palette.filtered_commands();
-    let mut rows: Vec<Option<usize>> = Vec::new();
     if commands.is_empty() {
         if inner.height > 1 {
-            lines.push(Line::styled(
-                " no matching commands",
-                Style::default().fg(MUTED),
-            ));
+            body.push(
+                Line::styled(" no matching commands", Style::default().fg(MUTED)),
+                None,
+            );
         }
     } else {
         if inner.height >= 4 {
-            lines.push(Line::default());
+            body.push(Line::default(), None);
         }
-        let available = inner.height.saturating_sub(lines.len() as u16) as usize;
+        let available = inner.height.saturating_sub(body.line_count() as u16) as usize;
         let selected = palette.nav.selected.min(commands.len().saturating_sub(1));
         let (start, row_count) = palette_window(commands.len(), available, selected);
         if start > 0 {
-            lines.push(Line::styled(
-                format!("  ↑ {start} more"),
-                Style::default().fg(MUTED),
-            ));
+            body.push(
+                Line::styled(format!("  ↑ {start} more"), Style::default().fg(MUTED)),
+                None,
+            );
         }
-        rows = vec![None; lines.len()];
-        rows.extend((start..commands.len().min(start.saturating_add(row_count))).map(Some));
         for (index, command) in commands.iter().enumerate().skip(start).take(row_count) {
             let marker = if index == selected { "> " } else { "  " };
             let shortcut = (inner.width >= 32 && !command.shortcut.is_empty())
@@ -1776,61 +1818,56 @@ pub(crate) fn render_command_palette(frame: &mut Frame, palette: &CommandPalette
             } else {
                 Style::default()
             };
-            lines.push(Line::styled(text, style));
+            body.push(Line::styled(text, style), Some(index));
         }
         let below = commands.len().saturating_sub(start + row_count);
         if below > 0 {
-            lines.push(Line::styled(
-                format!("  ↓ {below} more"),
-                Style::default().fg(MUTED),
-            ));
+            body.push(
+                Line::styled(format!("  ↓ {below} more"), Style::default().fg(MUTED)),
+                None,
+            );
         }
     }
 
-    frame.render_widget(Paragraph::new(lines), inner);
+    let hit = body.finish(frame, inner);
     let offset = 7usize
         .saturating_add(query_cursor_offset as usize)
         .min(inner.width.saturating_sub(1) as usize) as u16;
     frame.set_cursor_position((inner.x.saturating_add(offset), inner.y));
-    ModalHit { area: inner, rows }
+    hit
 }
 
 pub(crate) fn render_variant_picker(frame: &mut Frame, picker: &VariantPicker) -> ModalHit {
     let area = centered_rect(frame.area(), 54, 10);
-    frame.render_widget(Clear, area);
-
     let footer = if area.width < 38 {
         " Enter select · Esc close "
     } else {
         " ↑↓ move · Enter select · Esc close "
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Double)
-        .border_style(theme::focus_border())
-        .title(Line::styled(" reasoning ", theme::title(theme::REASONING)))
-        .title_bottom(Line::styled(footer, Style::default().fg(theme::MUTED)).right_aligned());
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    if inner.width == 0 || inner.height == 0 {
+    let Some(inner) = modal_frame(frame, area, " reasoning ", theme::REASONING, footer) else {
         return ModalHit::default();
-    }
+    };
 
-    let mut lines = Vec::new();
+    let mut body = ModalRows::default();
     if let Some(error) = &picker.error {
-        lines.push(Line::styled(
-            truncate_display(error, inner.width as usize, Truncation::Right),
-            Style::default().fg(ERROR),
-        ));
+        body.push(
+            Line::styled(
+                truncate_display(error, inner.width as usize, Truncation::Right),
+                Style::default().fg(ERROR),
+            ),
+            None,
+        );
     } else if inner.height >= 6 {
-        lines.push(Line::styled(
-            truncate_display(picker.model.name, inner.width as usize, Truncation::Right),
-            Style::default().fg(MUTED),
-        ));
+        body.push(
+            Line::styled(
+                truncate_display(picker.model.name, inner.width as usize, Truncation::Right),
+                Style::default().fg(MUTED),
+            ),
+            None,
+        );
     }
-    let mut rows: Vec<Option<usize>> = vec![None; lines.len()];
 
-    let row_count = inner.height.saturating_sub(lines.len() as u16) as usize;
+    let row_count = inner.height.saturating_sub(body.line_count() as u16) as usize;
     let choice_count = picker.choice_count();
     let selected = picker.nav.selected.min(choice_count.saturating_sub(1));
     let start = list_window(selected, choice_count, row_count);
@@ -1869,17 +1906,13 @@ pub(crate) fn render_variant_picker(frame: &mut Frame, picker: &VariantPicker) -
         } else {
             Style::default()
         };
-        rows.push(Some(index));
-        lines.push(Line::styled(text, style));
+        body.push(Line::styled(text, style), Some(index));
     }
-    frame.render_widget(Paragraph::new(lines), inner);
-    ModalHit { area: inner, rows }
+    body.finish(frame, inner)
 }
 
 pub(crate) fn render_theme_picker(frame: &mut Frame, picker: &ThemePicker) -> ModalHit {
     let area = centered_rect(frame.area(), 58, 20);
-    frame.render_widget(Clear, area);
-
     let footer = if area.width < 32 {
         " ↵ save · Esc undo "
     } else if area.width < 48 {
@@ -1887,59 +1920,58 @@ pub(crate) fn render_theme_picker(frame: &mut Frame, picker: &ThemePicker) -> Mo
     } else {
         " type to filter · ↑↓ preview · Enter save · Esc undo "
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Double)
-        .border_style(theme::focus_border())
-        .title(Line::styled(" themes ", theme::title(theme::MARKUP)))
-        .title_bottom(Line::styled(footer, Style::default().fg(theme::MUTED)).right_aligned());
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    if inner.width == 0 || inner.height == 0 {
+    let Some(inner) = modal_frame(frame, area, " themes ", theme::MARKUP, footer) else {
         return ModalHit::default();
-    }
+    };
 
     let choices = picker.matches();
     let selected = picker.selected_index();
-    let mut lines = Vec::new();
+    let mut body = ModalRows::default();
     if let Some(error) = &picker.error {
-        lines.push(Line::styled(
-            truncate_display(error, inner.width as usize, Truncation::Right),
-            Style::default().fg(ERROR),
-        ));
-    } else if picker.query.is_empty() {
-        lines.push(Line::styled(
-            truncate_display(
-                picker.selected_theme().description(),
-                inner.width as usize,
-                Truncation::Right,
+        body.push(
+            Line::styled(
+                truncate_display(error, inner.width as usize, Truncation::Right),
+                Style::default().fg(ERROR),
             ),
-            Style::default().fg(MUTED),
-        ));
-    } else {
-        lines.push(Line::from(vec![
-            Span::styled("/", Style::default().fg(theme::MARKUP)),
-            Span::styled(
+            None,
+        );
+    } else if picker.query.is_empty() {
+        body.push(
+            Line::styled(
                 truncate_display(
-                    &picker.query,
-                    (inner.width as usize).saturating_sub(1),
+                    picker.selected_theme().description(),
+                    inner.width as usize,
                     Truncation::Right,
                 ),
-                Style::default().fg(theme::PRIMARY),
+                Style::default().fg(MUTED),
             ),
-        ]));
+            None,
+        );
+    } else {
+        body.push(
+            Line::from(vec![
+                Span::styled("/", Style::default().fg(theme::MARKUP)),
+                Span::styled(
+                    truncate_display(
+                        &picker.query,
+                        (inner.width as usize).saturating_sub(1),
+                        Truncation::Right,
+                    ),
+                    Style::default().fg(theme::PRIMARY),
+                ),
+            ]),
+            None,
+        );
     }
 
     let show_sample = inner.height as usize > choices.len() + 1;
     let row_count = inner
         .height
-        .saturating_sub(lines.len() as u16)
+        .saturating_sub(body.line_count() as u16)
         .saturating_sub(u16::from(show_sample))
         .max(1) as usize;
     let start = list_window(selected, choices.len(), row_count);
-    let mut rows: Vec<Option<usize>> = vec![None; lines.len()];
     for (index, choice) in choices.iter().enumerate().skip(start).take(row_count) {
-        rows.push(Some(index));
         let active = *choice == picker.active_theme;
         let marker = if index == selected { "> " } else { "  " };
         let suffix = if active {
@@ -1959,51 +1991,46 @@ pub(crate) fn render_theme_picker(frame: &mut Frame, picker: &ThemePicker) -> Mo
         );
         let text = truncate_display(&text, inner.width as usize, Truncation::Right);
         let text = format!("{text:<width$}", width = inner.width as usize);
-        lines.push(Line::styled(
-            text,
-            if index == selected {
-                theme::selected()
-            } else if active {
-                Style::default().fg(theme::SUCCESS)
-            } else {
-                Style::default()
-            },
-        ));
+        body.push(
+            Line::styled(
+                text,
+                if index == selected {
+                    theme::selected()
+                } else if active {
+                    Style::default().fg(theme::SUCCESS)
+                } else {
+                    Style::default()
+                },
+            ),
+            Some(index),
+        );
     }
     if show_sample {
-        lines.push(Line::from(vec![
-            Span::styled("you ", theme::title(theme::USER)),
-            Span::styled("ilar ", theme::title(theme::ASSISTANT)),
-            Span::styled("thought ", Style::default().fg(theme::REASONING)),
-            Span::styled("tool ", Style::default().fg(theme::RUNNING)),
-            Span::styled("✓ ", Style::default().fg(theme::SUCCESS)),
-            Span::styled("×", Style::default().fg(theme::ERROR)),
-        ]));
+        body.push(
+            Line::from(vec![
+                Span::styled("you ", theme::title(theme::USER)),
+                Span::styled("ilar ", theme::title(theme::ASSISTANT)),
+                Span::styled("thought ", Style::default().fg(theme::REASONING)),
+                Span::styled("tool ", Style::default().fg(theme::RUNNING)),
+                Span::styled("✓ ", Style::default().fg(theme::SUCCESS)),
+                Span::styled("×", Style::default().fg(theme::ERROR)),
+            ]),
+            None,
+        );
     }
-    frame.render_widget(Paragraph::new(lines), inner);
-    ModalHit { area: inner, rows }
+    body.finish(frame, inner)
 }
 
 pub(crate) fn render_model_picker(frame: &mut Frame, picker: &ModelPicker) -> ModalHit {
     let area = centered_rect(frame.area(), 78, 20);
-    frame.render_widget(Clear, area);
-
     let footer = if area.width < 44 {
         " Enter select · Esc close "
     } else {
         " ↑↓ move · Enter select · Esc close "
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Double)
-        .border_style(theme::focus_border())
-        .title(Line::styled(" models ", theme::title(theme::PRIMARY)))
-        .title_bottom(Line::styled(footer, Style::default().fg(theme::MUTED)).right_aligned());
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    if inner.width == 0 || inner.height == 0 {
+    let Some(inner) = modal_frame(frame, area, " models ", theme::PRIMARY, footer) else {
         return ModalHit::default();
-    }
+    };
 
     let models = picker.filtered_models();
     let count = format!(
@@ -2032,43 +2059,48 @@ pub(crate) fn render_model_picker(frame: &mut Frame, picker: &ModelPicker) -> Mo
         .saturating_sub(7)
         .saturating_sub(UnicodeWidthStr::width(query.content.as_ref()))
         .saturating_sub(UnicodeWidthStr::width(count.as_str()));
-    let mut lines = vec![Line::from(vec![
+    let search_line = Line::from(vec![
         Span::styled("search ", Style::default().fg(MUTED)),
         query,
         Span::raw(" ".repeat(gap)),
         Span::styled(count, Style::default().fg(MUTED)),
-    ])];
+    ]);
+    let mut body = ModalRows::default();
     if let Some(error) = &picker.error {
         let error = Line::styled(
             truncate_display(error, inner.width as usize, Truncation::Right),
             Style::default().fg(ERROR),
         );
+        // On a squeezed terminal the error takes the search line's row.
         if inner.height >= 3 {
-            lines.push(error);
-        } else {
-            lines[0] = error;
+            body.push(search_line, None);
         }
-    } else if inner.height >= 6 {
-        lines.push(Line::styled(
-            truncate_display(
-                &format!("current {}", picker.active_model),
-                inner.width as usize,
-                Truncation::Middle,
-            ),
-            Style::default().fg(MUTED),
-        ));
+        body.push(error, None);
+    } else {
+        body.push(search_line, None);
+        if inner.height >= 6 {
+            body.push(
+                Line::styled(
+                    truncate_display(
+                        &format!("current {}", picker.active_model),
+                        inner.width as usize,
+                        Truncation::Middle,
+                    ),
+                    Style::default().fg(MUTED),
+                ),
+                None,
+            );
+        }
     }
-    let row_count = inner.height.saturating_sub(lines.len() as u16) as usize;
-    let mut rows: Vec<Option<usize>> = vec![None; lines.len()];
+    let row_count = inner.height.saturating_sub(body.line_count() as u16) as usize;
     if models.is_empty() && row_count > 0 {
-        lines.push(Line::styled(
-            " no matching models",
-            Style::default().fg(MUTED),
-        ));
+        body.push(
+            Line::styled(" no matching models", Style::default().fg(MUTED)),
+            None,
+        );
     } else if row_count > 0 {
         let selected = picker.nav.selected.min(models.len().saturating_sub(1));
         let start = list_window(selected, models.len(), row_count);
-        rows.extend((start..models.len().min(start.saturating_add(row_count))).map(Some));
         for (index, model) in models.iter().enumerate().skip(start).take(row_count) {
             let full_id = model.full_id();
             let active = full_id == picker.active_model;
@@ -2104,16 +2136,16 @@ pub(crate) fn render_model_picker(frame: &mut Frame, picker: &ModelPicker) -> Mo
             } else {
                 Style::default()
             };
-            lines.push(Line::styled(text, style));
+            body.push(Line::styled(text, style), Some(index));
         }
     }
 
-    frame.render_widget(Paragraph::new(lines), inner);
+    let hit = body.finish(frame, inner);
     let offset = 7usize
         .saturating_add(query_cursor_offset as usize)
         .min(inner.width.saturating_sub(1) as usize) as u16;
     frame.set_cursor_position((inner.x.saturating_add(offset), inner.y));
-    ModalHit { area: inner, rows }
+    hit
 }
 
 pub(crate) fn is_command_palette_shortcut(event: &Event) -> bool {
