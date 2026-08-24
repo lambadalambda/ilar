@@ -168,12 +168,13 @@ fn list_window(selected: usize, len: usize, visible_rows: usize) -> usize {
 }
 
 /// The one query editor. Backspace removes the last grapheme — the
-/// palette and the model picker always did, and the byte-popping
+/// palette and the model picker always did, and the codepoint-popping
 /// pickers now match. Typed characters append unless they are control
 /// characters (the model picker previously accepted them); Ctrl-chords
 /// stay free for the picker's own bindings. Returns true when the key
-/// edited the query, so the caller can reset its selection and disarm
-/// whatever it had pending.
+/// was a query edit, so the caller can reset its selection and disarm
+/// whatever it had pending — Backspace on an empty query still counts,
+/// preserving the old reset-and-disarm behaviour.
 fn edit_query(query: &mut String, code: KeyCode, control: bool) -> bool {
     match (code, control) {
         (KeyCode::Backspace, _) => {
@@ -2384,7 +2385,7 @@ mod tests {
 
     /// A combining mark arrives as its own key event, so the query can
     /// hold multi-codepoint graphemes. Backspace must remove the whole
-    /// grapheme in every query picker — the byte-popping pickers used
+    /// grapheme in every query picker — the codepoint-popping pickers used
     /// to strand the base character.
     #[test]
     fn query_backspace_removes_whole_graphemes_in_every_picker() {
@@ -2849,6 +2850,25 @@ mod tests {
         assert_eq!(hit.rows, vec![Some(0), Some(1)]);
         assert_eq!(hit.item_at(hit.area.x, hit.area.y), Some(0));
         assert_eq!(hit.item_at(hit.area.x, hit.area.y + 1), Some(1));
+    }
+
+    /// A scrolled list must keep its click map aligned with the drawn
+    /// window: the first drawn row is the window start, not item 0.
+    #[test]
+    fn a_scrolled_skill_picker_maps_clicks_to_the_visible_window() {
+        let skills: Vec<(String, String)> = (0..6)
+            .map(|index| (format!("skill{index}"), format!("Description {index}")))
+            .collect();
+        let mut picker = SkillPicker::new(skills);
+        picker.select(5);
+        // An 80x8 terminal caps the modal at 4 inner rows, so selecting
+        // the last of six skills scrolls the window down to items 2..=5.
+        let (screen, hit) = draw_modal(80, 8, |frame| render_skill_picker(frame, &picker));
+        assert!(screen.contains("> /skill5"), "{screen}");
+        assert!(!screen.contains("/skill1"), "{screen}");
+        assert_eq!(hit.rows, vec![Some(2), Some(3), Some(4), Some(5)]);
+        assert_eq!(hit.item_at(hit.area.x, hit.area.y), Some(2));
+        assert_eq!(hit.item_at(hit.area.x, hit.area.y + 3), Some(5));
     }
 
     #[test]
