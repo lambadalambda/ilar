@@ -130,7 +130,7 @@ by project files.
 | `providers.zai.api_key` | `ILAR_ZAI_API_KEY` | z.ai API key. |
 | `providers.zai.flavor` | `anthropic` | `anthropic` or `openai`. |
 | `agent.max_iterations` | `1000` | Max provider calls per user turn (runaway-loop backstop). |
-| `compaction.threshold` | `0.85` | Context fraction at which history is summarized; must be between 0 and 1. |
+| `compaction.threshold` | `0.85` | Context fraction at which history is handed over; must be between 0 and 1. |
 | `subagents.max_concurrent` | `10` | Maximum concurrent subagents; must be at least 1. |
 | `subagents.max_depth` | `3` | Maximum nested subagent depth; must be at least 1. |
 | `subagents.background_tool_timeout_ms` | `600000` | Background tool timeout in milliseconds; must be at least 1. |
@@ -248,6 +248,25 @@ opening prompt, and a snippet of the last reply) so the agent can find the one
 worth resuming. On wide terminals an `agents` panel in the sidebar shows what
 is in flight right now — description, agent, a `bg` marker for detached work,
 and a live elapsed time — and disappears when nothing is running.
+
+### Compaction
+
+Past the threshold, ilar replaces the conversation with a handover summary: after a
+compaction the model sees its system prompt, its tools, and that summary — no recency
+window, no kept tail. The summarization request is the turn's own request with the
+instruction appended last, so the conversation is served from the provider's prompt cache
+and the model summarizes instead of answering it.
+
+Nothing is lost, only put out of sight. The session's full log stays on disk and the
+`history` tool searches it: `query` finds excerpts addressed by event, `speaker` narrows a
+search or lists every instruction the user gave, and `event` reads the conversation around
+a hit. The `todo` tool called with no arguments returns the current plan. The handover
+template tells the model both of these, and asks it to record what it deliberately left
+behind and the words to find it with.
+
+A summary that answers the conversation instead of summarizing it — an apology, a refusal —
+is reported as an error and the session is left untouched, rather than replacing real
+history with something useless.
 
 ### Services
 

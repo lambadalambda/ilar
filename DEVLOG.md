@@ -1447,3 +1447,51 @@ loop's events as NDJSON — through a hand-written projection, because
 `LoopEvent` carries `Instant`s and a wire format should not change by
 accident every time the enum grows. That projection is also the first
 draft of the protocol a web frontend would speak.
+
+## 2026-08-24 — Compaction stops guessing what will matter
+
+Measuring the GM1 session settled an argument. Compaction there
+reclaimed 56% at one cut and 39% at the next — same code, same
+constants — because the recency window is sized with `chars/4 + 2` per
+event and the second window held a 102,476-character block of hex
+digests and 40k of ANSI-coloured disassembly, which tokenize near one
+token per two characters. It kept 148k believing it kept 77k, and the
+turn regrew to 237k of a 272k window before the turn ended.
+
+The obvious fix was to calibrate the ruler against the provider's
+reported counts, which are ground truth and already in the log. The
+better fix was to notice why the window was large enough to have the
+problem: dropped context was gone forever, so the heuristic had to be
+generous. Make the session's own archive searchable and that stops
+being true.
+
+So compaction is now a handover. After it the model has its system
+prompt, its tools, and one summary — no window, no pins, no tail, and
+mid-turn is not special-cased. `recent_steps_cut`, `event_tokens` and
+the ruler are deleted rather than fixed: the cut is "everything before
+this point" and needs no estimate. Codex arrived at nearly the same
+shape; what it lacks is the retrieval, which is the part that makes
+the aggressive cut defensible rather than lossy.
+
+`ilar::recall` is the scanner: session events flattened into
+speaker-tagged entries addressed by event index, searched, and read
+around. Everything it returns is bounded — an excerpt is the match
+plus 120 characters, one row per entry however often the query appears
+inside it, and reading around a hit truncates each entry. A search
+that returns the 100k blob it matched has recreated the problem it
+exists to solve. The `history` tool is its first front door; the
+cross-session picker will be the second, over the same walk.
+
+Two read paths the model never had, both of which the handover needs.
+`history` lists every instruction the user gave, which is why the
+summary need not carry the request verbatim. And `todo` became
+readable: it was write-only, so the model's only view of its own plan
+was the echo in the transcript — exactly what compaction deletes. It
+was not forgetting the list, it had no way to ask.
+
+What is left of policing is failure detection only. A summary that
+answers the conversation instead of summarizing it is reported and the
+session left untouched — no retry, no repair, no fallback. One
+estimate survives, asked only whether there is anything substantial to
+summarize, which keeps a session that is over the threshold on its
+summary alone from compacting on every step forever.
