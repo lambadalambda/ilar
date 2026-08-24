@@ -1651,6 +1651,24 @@ fn start_session_scan(
     (rx, cancel)
 }
 
+/// The terminal window's title: the session's topic once it has one.
+fn terminal_title(topic: Option<&str>) -> String {
+    match topic {
+        Some(topic) => format!("ilar — {topic}"),
+        None => "ilar".into(),
+    }
+}
+
+/// Best-effort OSC title update; a terminal that ignores the sequence
+/// simply keeps its own title, and the shell's prompt hook takes the
+/// window back after exit.
+fn apply_terminal_title(topic: Option<&str>) {
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        crossterm::terminal::SetTitle(terminal_title(topic))
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_app(
     terminal: &mut ratatui::DefaultTerminal,
@@ -1696,6 +1714,10 @@ async fn run_app(
     // Decisions accumulate here and are performed in one place below,
     // rather than each arm doing its own effects inline.
     let mut intents: Vec<Intent> = Vec::new();
+
+    // Name the window like the transcript header: the topic when the
+    // session has one, updated again if titling lands mid-run.
+    apply_terminal_title(app.topic.as_deref());
 
     loop {
         // A failed/cancelled resume may leave the persisted question pending.
@@ -1866,6 +1888,7 @@ async fn run_app(
             && let Ok(topic) = topic_handle.take().unwrap().await
         {
             app.topic = topic;
+            apply_terminal_title(app.topic.as_deref());
         }
 
         // The whole iteration minus the dispatch — completion
@@ -2806,6 +2829,15 @@ mod tests {
     use super::*;
     use ilar::runtime::{create_root_session, restored_todos};
     use ilar::session::{SessionMeta, new_id};
+
+    #[test]
+    fn the_window_title_is_the_topic_or_just_ilar() {
+        assert_eq!(terminal_title(None), "ilar");
+        assert_eq!(
+            terminal_title(Some("GM1 firmware dig")),
+            "ilar — GM1 firmware dig"
+        );
+    }
 
     /// The meter must not show the whole window while compaction is
     /// measuring against the input cap — that reads as comfortable
