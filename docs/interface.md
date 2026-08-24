@@ -68,6 +68,8 @@ cache, and a newer `/btw` replaces a still-running one.
 
 ## Switching sessions: `/sessions`
 
+![the session search: matches across four sessions for "timeout", the selected hit previewed in context](assets/sessions.svg)
+
 `/sessions` (or the palette's "Switch session", or just Ctrl-P → Enter)
 opens a two-pane grep over every session you have:
 

@@ -4,6 +4,8 @@ A personal coding agent in Rust. One binary, TUI-first, built around a
 simple conviction: **your sessions should remember everything, and you
 should never wait on the model to talk to it.**
 
+![the ilar TUI mid bug-hunt: thoughts, tool calls, a subagent, the todo sidebar](docs/assets/hero.svg)
+
 ## Safety
 
 > [!WARNING]

@@ -1,0 +1,289 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1133" height="746" viewBox="0 0 1133 746">
+<rect width="100%" height="100%" rx="8" fill="#101215"/>
+<g font-family="SF Mono, JetBrains Mono, Menlo, Consolas, monospace" font-size="14" font-variant-ligatures="none">
+<rect x="12.0" y="12.0" width="8.4" height="19.0" fill="#101318"/>
+<text x="12.0" y="26.0" fill="#8c96a2" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">┌</text>
+<rect x="20.4" y="12.0" width="33.6" height="19.0" fill="#101318"/>
+<text x="20.4" y="26.0" fill="#8fe388" font-weight="bold" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">ilar</text>
+<rect x="54.0" y="12.0" width="226.8" height="19.0" fill="#101318"/>
+<text x="54.0" y="26.0" fill="#bbc3cc" textLength="226.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> · Export endpoint hang fix</text>
+<rect x="280.8" y="12.0" width="495.6" height="19.0" fill="#101318"/>
+<text x="280.8" y="26.0" fill="#8c96a2" textLength="495.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> · tail──────────────────────────────────────────────────┐╭</text>
+<rect x="776.4" y="12.0" width="42.0" height="19.0" fill="#101318"/>
+<text x="776.4" y="26.0" fill="#bbc3cc" font-weight="bold" textLength="42.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">todos</text>
+<rect x="818.4" y="12.0" width="302.4" height="19.0" fill="#101318"/>
+<text x="818.4" y="26.0" fill="#8c96a2" textLength="302.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">───────────────────────────────────╮</text>
+<text x="12.0" y="45.0" fill="#c7ccd1" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="37.2" y="45.0" fill="#d5a6ff" textLength="92.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▸ Thought: </text>
+<text x="129.6" y="45.0" fill="#bbc3cc" textLength="495.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">Scoping the hang: reading the export handler and its writer</text>
+<text x="625.2" y="45.0" fill="#f0f3f6" textLength="134.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">               │</text>
+<text x="759.6" y="45.0" fill="#8c96a2" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">││</text>
+<text x="793.2" y="45.0" fill="#6fdb9a" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">✓ </text>
+<text x="810.0" y="45.0" fill="#bbc3cc" textLength="285.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">Reproduce the hang with a stalling</text>
+<text x="1112.4" y="45.0" fill="#8c96a2" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12.0" y="64.0" fill="#c7ccd1" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="37.2" y="64.0" fill="#8c96a2" textLength="159.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">└─tools ▸ 3 calls ✓</text>
+<text x="196.8" y="64.0" fill="#f0f3f6" textLength="562.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">                                                                  │</text>
+<text x="759.6" y="64.0" fill="#8c96a2" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">││</text>
+<text x="810.0" y="64.0" fill="#bbc3cc" textLength="50.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">client</text>
+<text x="1112.4" y="64.0" fill="#8c96a2" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12.0" y="83.0" fill="#c7ccd1" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="20.4" y="83.0" fill="#f0f3f6" textLength="739.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve">                                                                                       │</text>
+<text x="759.6" y="83.0" fill="#8c96a2" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">││</text>
+<text x="793.2" y="83.0" fill="#6fdb9a" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">✓ </text>
+<text x="810.0" y="83.0" fill="#bbc3cc" textLength="277.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve">Bound the exporter/writer channel</text>
+<text x="1112.4" y="83.0" fill="#8c96a2" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12.0" y="102.0" fill="#c7ccd1" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="37.2" y="102.0" fill="#d5a6ff" textLength="92.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▸ Thought: </text>
+<text x="129.6" y="102.0" fill="#bbc3cc" textLength="613.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve">Found it: a zero-capacity channel between the exporter and a blocking wr…</text>
+<text x="742.8" y="102.0" fill="#f0f3f6" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> │</text>
+<text x="759.6" y="102.0" fill="#8c96a2" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">││</text>
+<text x="793.2" y="102.0" fill="#54d6e8" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▸ </text>
+<text x="810.0" y="102.0" fill="#f0f3f6" font-weight="bold" textLength="268.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">Time out abandoned exports after</text>
+<rect x="1078.8" y="88.0" width="33.6" height="19.0" fill="#101318"/>
+<rect x="1112.4" y="88.0" width="8.4" height="19.0" fill="#101318"/>
+<text x="1112.4" y="102.0" fill="#8c96a2" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12.0" y="121.0" fill="#c7ccd1" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="37.2" y="121.0" fill="#8c96a2" textLength="151.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve">└─tools ▸ 1 call ✓</text>
+<text x="188.4" y="121.0" fill="#f0f3f6" textLength="571.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve">                                                                   ┃</text>
+<text x="759.6" y="121.0" fill="#8c96a2" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">││</text>
+<text x="810.0" y="121.0" fill="#f0f3f6" font-weight="bold" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve">30s</text>
+<rect x="835.2" y="107.0" width="277.2" height="19.0" fill="#101318"/>
+<rect x="1112.4" y="107.0" width="8.4" height="19.0" fill="#101318"/>
+<text x="1112.4" y="121.0" fill="#8c96a2" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12.0" y="140.0" fill="#c7ccd1" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="20.4" y="140.0" fill="#f0f3f6" textLength="739.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve">                                                                                       ┃</text>
+<text x="759.6" y="140.0" fill="#8c96a2" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">││</text>
+<text x="793.2" y="140.0" fill="#8c96a2" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">○ </text>
+<text x="810.0" y="140.0" fill="#bbc3cc" textLength="285.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">Regression test with a slow reader</text>
+<text x="1112.4" y="140.0" fill="#8c96a2" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12.0" y="159.0" fill="#c7ccd1" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="37.2" y="159.0" fill="#d5a6ff" textLength="92.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▸ Thought: </text>
+<text x="129.6" y="159.0" fill="#bbc3cc" textLength="478.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">Delegating a survey of every other channel(0) in the tree</text>
+<text x="608.4" y="159.0" fill="#f0f3f6" textLength="151.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve">                 ┃</text>
+<text x="759.6" y="159.0" fill="#8c96a2" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">││</text>
+<text x="1112.4" y="159.0" fill="#8c96a2" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12.0" y="178.0" fill="#c7ccd1" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="20.4" y="178.0" fill="#f0f3f6" textLength="739.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve">                                                                                       ┃</text>
+<text x="759.6" y="178.0" fill="#8c96a2" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">││</text>
+<text x="1112.4" y="178.0" fill="#8c96a2" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12.0" y="197.0" fill="#c7ccd1" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="37.2" y="197.0" fill="#d5a6ff" textLength="50.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">agent </text>
+<text x="87.6" y="197.0" fill="#bbc3cc" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▶ </text>
+<text x="104.4" y="197.0" fill="#f0f3f6" font-weight="bold" textLength="58.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">explore</text>
+<rect x="163.2" y="183.0" width="16.8" height="19.0" fill="#101318"/>
+<text x="163.2" y="197.0" fill="#6fdb9a" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> ✓</text>
+<rect x="180.0" y="183.0" width="294.0" height="19.0" fill="#101318"/>
+<text x="180.0" y="197.0" fill="#bbc3cc" textLength="294.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> Audit other zero-capacity channels</text>
+<rect x="474.0" y="183.0" width="285.6" height="19.0" fill="#101318"/>
+<text x="474.0" y="197.0" fill="#f0f3f6" textLength="285.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">                                 ┃</text>
+<rect x="759.6" y="183.0" width="16.8" height="19.0" fill="#101318"/>
+<text x="759.6" y="197.0" fill="#8c96a2" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">││</text>
+<rect x="776.4" y="183.0" width="336.0" height="19.0" fill="#101318"/>
+<rect x="1112.4" y="183.0" width="8.4" height="19.0" fill="#101318"/>
+<text x="1112.4" y="197.0" fill="#8c96a2" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12.0" y="216.0" fill="#c7ccd1" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="20.4" y="216.0" fill="#f0f3f6" textLength="739.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve">                                                                                       ┃</text>
+<text x="759.6" y="216.0" fill="#8c96a2" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">││</text>
+<text x="1112.4" y="216.0" fill="#8c96a2" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12.0" y="235.0" fill="#c7ccd1" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="37.2" y="235.0" fill="#d5a6ff" textLength="92.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▸ Thought: </text>
+<text x="129.6" y="235.0" fill="#bbc3cc" textLength="319.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve">Applying the fix and running the suite</text>
+<text x="448.8" y="235.0" fill="#f0f3f6" textLength="310.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">                                    ┃</text>
+<text x="759.6" y="235.0" fill="#8c96a2" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">││</text>
+<text x="1112.4" y="235.0" fill="#8c96a2" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12.0" y="254.0" fill="#c7ccd1" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="37.2" y="254.0" fill="#8c96a2" textLength="159.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">└─tools ▸ 2 calls ✓</text>
+<text x="196.8" y="254.0" fill="#f0f3f6" textLength="562.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">                                                                  ┃</text>
+<text x="759.6" y="254.0" fill="#8c96a2" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">││</text>
+<text x="1112.4" y="254.0" fill="#8c96a2" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12.0" y="273.0" fill="#c7ccd1" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="20.4" y="273.0" fill="#f0f3f6" textLength="739.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve">                                                                                       ┃</text>
+<text x="759.6" y="273.0" fill="#8c96a2" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">││</text>
+<text x="1112.4" y="273.0" fill="#8c96a2" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12.0" y="292.0" fill="#c7ccd1" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="37.2" y="292.0" fill="#8fe388" font-weight="bold" textLength="42.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">ilar </text>
+<rect x="79.2" y="278.0" width="680.4" height="19.0" fill="#101318"/>
+<text x="79.2" y="292.0" fill="#f0f3f6" textLength="680.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">Found and fixed. The hang was a deadlock between the export handler and its     ┃</text>
+<rect x="759.6" y="278.0" width="16.8" height="19.0" fill="#101318"/>
+<text x="759.6" y="292.0" fill="#8c96a2" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">││</text>
+<rect x="776.4" y="278.0" width="336.0" height="19.0" fill="#101318"/>
+<rect x="1112.4" y="278.0" width="8.4" height="19.0" fill="#101318"/>
+<text x="1112.4" y="292.0" fill="#8c96a2" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12.0" y="311.0" fill="#c7ccd1" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<rect x="79.2" y="297.0" width="680.4" height="19.0" fill="#101318"/>
+<text x="79.2" y="311.0" fill="#f0f3f6" textLength="680.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">writer:                                                                         ┃</text>
+<rect x="759.6" y="297.0" width="16.8" height="19.0" fill="#101318"/>
+<text x="759.6" y="311.0" fill="#8c96a2" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">││</text>
+<rect x="776.4" y="297.0" width="336.0" height="19.0" fill="#101318"/>
+<rect x="1112.4" y="297.0" width="8.4" height="19.0" fill="#101318"/>
+<text x="1112.4" y="311.0" fill="#8c96a2" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12.0" y="330.0" fill="#c7ccd1" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="20.4" y="330.0" fill="#f0f3f6" textLength="739.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve">                                                                                       ┃</text>
+<text x="759.6" y="330.0" fill="#8c96a2" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">││</text>
+<text x="1112.4" y="330.0" fill="#8c96a2" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12.0" y="349.0" fill="#c7ccd1" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<rect x="79.2" y="335.0" width="16.8" height="19.0" fill="#101318"/>
+<text x="79.2" y="349.0" fill="#82b7ff" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">• </text>
+<rect x="96.0" y="335.0" width="84.0" height="19.0" fill="#1c2129"/>
+<text x="96.0" y="349.0" fill="#60a5fa" textLength="84.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">export_all</text>
+<rect x="180.0" y="335.0" width="176.4" height="19.0" fill="#101318"/>
+<text x="180.0" y="349.0" fill="#f0f3f6" textLength="176.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> fed rows through an </text>
+<rect x="356.4" y="335.0" width="168.0" height="19.0" fill="#101318"/>
+<text x="356.4" y="349.0" fill="#f0f3f6" font-weight="bold" textLength="168.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">unbounded rendezvous</text>
+<rect x="524.4" y="335.0" width="25.2" height="19.0" fill="#101318"/>
+<text x="524.4" y="349.0" fill="#f0f3f6" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> — </text>
+<rect x="549.6" y="335.0" width="134.4" height="19.0" fill="#1c2129"/>
+<text x="549.6" y="349.0" fill="#60a5fa" textLength="134.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">mpsc::channel(0)</text>
+<rect x="684.0" y="335.0" width="75.6" height="19.0" fill="#101318"/>
+<text x="684.0" y="349.0" fill="#f0f3f6" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> — so   ┃</text>
+<rect x="759.6" y="335.0" width="16.8" height="19.0" fill="#101318"/>
+<text x="759.6" y="349.0" fill="#8c96a2" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">││</text>
+<rect x="776.4" y="335.0" width="336.0" height="19.0" fill="#101318"/>
+<rect x="1112.4" y="335.0" width="8.4" height="19.0" fill="#101318"/>
+<text x="1112.4" y="349.0" fill="#8c96a2" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12.0" y="368.0" fill="#c7ccd1" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<rect x="79.2" y="354.0" width="680.4" height="19.0" fill="#101318"/>
+<text x="79.2" y="368.0" fill="#f0f3f6" textLength="680.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">every send waited for the writer.                                               ┃</text>
+<rect x="759.6" y="354.0" width="16.8" height="19.0" fill="#101318"/>
+<text x="759.6" y="368.0" fill="#8c96a2" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">││</text>
+<rect x="776.4" y="354.0" width="336.0" height="19.0" fill="#101318"/>
+<rect x="1112.4" y="354.0" width="8.4" height="19.0" fill="#101318"/>
+<text x="1112.4" y="368.0" fill="#8c96a2" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12.0" y="387.0" fill="#c7ccd1" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<rect x="79.2" y="373.0" width="16.8" height="19.0" fill="#101318"/>
+<text x="79.2" y="387.0" fill="#82b7ff" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">• </text>
+<rect x="96.0" y="373.0" width="226.8" height="19.0" fill="#101318"/>
+<text x="96.0" y="387.0" fill="#f0f3f6" textLength="226.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">The writer drained it with </text>
+<rect x="322.8" y="373.0" width="109.2" height="19.0" fill="#1c2129"/>
+<text x="322.8" y="387.0" fill="#60a5fa" textLength="109.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve">blocking_recv</text>
+<rect x="432.0" y="373.0" width="327.6" height="19.0" fill="#101318"/>
+<text x="432.0" y="387.0" fill="#f0f3f6" textLength="327.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> on the same runtime; when a client   ┃</text>
+<rect x="759.6" y="373.0" width="16.8" height="19.0" fill="#101318"/>
+<text x="759.6" y="387.0" fill="#8c96a2" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">││</text>
+<rect x="776.4" y="373.0" width="336.0" height="19.0" fill="#101318"/>
+<rect x="1112.4" y="373.0" width="8.4" height="19.0" fill="#101318"/>
+<text x="1112.4" y="387.0" fill="#8c96a2" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12.0" y="406.0" fill="#c7ccd1" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<rect x="79.2" y="392.0" width="680.4" height="19.0" fill="#101318"/>
+<text x="79.2" y="406.0" fill="#f0f3f6" textLength="680.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">stalled mid-download, the writer never yielded and the task deadlocked with the ┃</text>
+<rect x="759.6" y="392.0" width="16.8" height="19.0" fill="#101318"/>
+<text x="759.6" y="406.0" fill="#8c96a2" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">││</text>
+<rect x="776.4" y="392.0" width="336.0" height="19.0" fill="#101318"/>
+<rect x="1112.4" y="392.0" width="8.4" height="19.0" fill="#101318"/>
+<text x="1112.4" y="406.0" fill="#8c96a2" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12.0" y="425.0" fill="#c7ccd1" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<rect x="79.2" y="411.0" width="680.4" height="19.0" fill="#101318"/>
+<text x="79.2" y="425.0" fill="#f0f3f6" textLength="680.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">row producer.                                                                   ┃</text>
+<rect x="759.6" y="411.0" width="16.8" height="19.0" fill="#101318"/>
+<text x="759.6" y="425.0" fill="#8c96a2" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">││</text>
+<rect x="776.4" y="411.0" width="336.0" height="19.0" fill="#101318"/>
+<rect x="1112.4" y="411.0" width="8.4" height="19.0" fill="#101318"/>
+<text x="1112.4" y="425.0" fill="#8c96a2" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12.0" y="444.0" fill="#c7ccd1" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="20.4" y="444.0" fill="#f0f3f6" textLength="739.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve">                                                                                       ┃</text>
+<text x="759.6" y="444.0" fill="#8c96a2" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">││</text>
+<text x="1112.4" y="444.0" fill="#8c96a2" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12.0" y="463.0" fill="#c7ccd1" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<rect x="79.2" y="449.0" width="680.4" height="19.0" fill="#101318"/>
+<text x="79.2" y="463.0" fill="#f0f3f6" textLength="680.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">The fix bounds the channel and abandons stalled clients:                        ┃</text>
+<rect x="759.6" y="449.0" width="16.8" height="19.0" fill="#101318"/>
+<text x="759.6" y="463.0" fill="#8c96a2" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">││</text>
+<rect x="776.4" y="449.0" width="336.0" height="19.0" fill="#101318"/>
+<rect x="1112.4" y="449.0" width="8.4" height="19.0" fill="#101318"/>
+<text x="1112.4" y="463.0" fill="#8c96a2" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12.0" y="482.0" fill="#c7ccd1" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="20.4" y="482.0" fill="#f0f3f6" textLength="739.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve">                                                                                       ┃</text>
+<text x="759.6" y="482.0" fill="#8c96a2" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">││</text>
+<text x="1112.4" y="482.0" fill="#8c96a2" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12.0" y="501.0" fill="#c7ccd1" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<rect x="79.2" y="487.0" width="50.4" height="19.0" fill="#101318"/>
+<text x="79.2" y="501.0" fill="#8c96a2" textLength="50.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">  rust</text>
+<rect x="129.6" y="487.0" width="630.0" height="19.0" fill="#101318"/>
+<text x="129.6" y="501.0" fill="#f0f3f6" textLength="630.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">                                                                          ┃</text>
+<rect x="759.6" y="487.0" width="16.8" height="19.0" fill="#101318"/>
+<text x="759.6" y="501.0" fill="#8c96a2" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">││</text>
+<rect x="776.4" y="487.0" width="336.0" height="19.0" fill="#101318"/>
+<rect x="1112.4" y="487.0" width="8.4" height="19.0" fill="#101318"/>
+<text x="1112.4" y="501.0" fill="#8c96a2" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12.0" y="520.0" fill="#c7ccd1" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<rect x="79.2" y="506.0" width="16.8" height="19.0" fill="#101318"/>
+<text x="79.2" y="520.0" fill="#60a5fa" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│ </text>
+<rect x="96.0" y="506.0" width="25.2" height="19.0" fill="#101318"/>
+<text x="96.0" y="520.0" fill="#c6a0f6" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve">let</text>
+<rect x="121.2" y="506.0" width="218.4" height="19.0" fill="#101318"/>
+<text x="121.2" y="520.0" fill="#f0f3f6" textLength="218.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> (tx, rx) = mpsc::channel(</text>
+<rect x="339.6" y="506.0" width="33.6" height="19.0" fill="#101318"/>
+<text x="339.6" y="520.0" fill="#f5a97f" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">1024</text>
+<rect x="373.2" y="506.0" width="386.4" height="19.0" fill="#101318"/>
+<text x="373.2" y="520.0" fill="#f0f3f6" textLength="386.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">);                                           ┃</text>
+<rect x="759.6" y="506.0" width="16.8" height="19.0" fill="#101318"/>
+<text x="759.6" y="520.0" fill="#8c96a2" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">││</text>
+<rect x="776.4" y="506.0" width="336.0" height="19.0" fill="#101318"/>
+<rect x="1112.4" y="506.0" width="8.4" height="19.0" fill="#101318"/>
+<text x="1112.4" y="520.0" fill="#8c96a2" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12.0" y="539.0" fill="#c7ccd1" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<rect x="79.2" y="525.0" width="16.8" height="19.0" fill="#101318"/>
+<text x="79.2" y="539.0" fill="#60a5fa" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│ </text>
+<rect x="96.0" y="525.0" width="344.4" height="19.0" fill="#101318"/>
+<text x="96.0" y="539.0" fill="#f0f3f6" textLength="344.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">tx.send_timeout(row, EXPORT_STALL_LIMIT).</text>
+<rect x="440.4" y="525.0" width="42.0" height="19.0" fill="#101318"/>
+<text x="440.4" y="539.0" fill="#c6a0f6" textLength="42.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">await</text>
+<rect x="482.4" y="525.0" width="277.2" height="19.0" fill="#101318"/>
+<text x="482.4" y="539.0" fill="#f0f3f6" textLength="277.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve">?;                              ┃</text>
+<rect x="759.6" y="525.0" width="16.8" height="19.0" fill="#101318"/>
+<text x="759.6" y="539.0" fill="#8c96a2" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">││</text>
+<rect x="776.4" y="525.0" width="336.0" height="19.0" fill="#101318"/>
+<rect x="1112.4" y="525.0" width="8.4" height="19.0" fill="#101318"/>
+<text x="1112.4" y="539.0" fill="#8c96a2" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12.0" y="558.0" fill="#c7ccd1" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="20.4" y="558.0" fill="#f0f3f6" textLength="739.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve">                                                                                       ┃</text>
+<text x="759.6" y="558.0" fill="#8c96a2" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">││</text>
+<text x="1112.4" y="558.0" fill="#8c96a2" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12.0" y="577.0" fill="#c7ccd1" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<rect x="79.2" y="563.0" width="680.4" height="19.0" fill="#101318"/>
+<text x="79.2" y="577.0" fill="#f0f3f6" textLength="680.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">All 14 export tests pass, including a new one that stalls the client on         ┃</text>
+<rect x="759.6" y="563.0" width="16.8" height="19.0" fill="#101318"/>
+<text x="759.6" y="577.0" fill="#8c96a2" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">││</text>
+<rect x="776.4" y="563.0" width="336.0" height="19.0" fill="#101318"/>
+<rect x="1112.4" y="563.0" width="8.4" height="19.0" fill="#101318"/>
+<text x="1112.4" y="577.0" fill="#8c96a2" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12.0" y="596.0" fill="#c7ccd1" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<rect x="79.2" y="582.0" width="428.4" height="19.0" fill="#101318"/>
+<text x="79.2" y="596.0" fill="#f0f3f6" textLength="428.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">purpose. The explore agent found the same shape in </text>
+<rect x="507.6" y="582.0" width="134.4" height="19.0" fill="#1c2129"/>
+<text x="507.6" y="596.0" fill="#60a5fa" textLength="134.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">src/backup.rs:77</text>
+<rect x="642.0" y="582.0" width="117.6" height="19.0" fill="#101318"/>
+<text x="642.0" y="596.0" fill="#f0f3f6" textLength="117.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> — left as a ┃</text>
+<rect x="759.6" y="582.0" width="16.8" height="19.0" fill="#101318"/>
+<text x="759.6" y="596.0" fill="#8c96a2" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">││</text>
+<rect x="776.4" y="582.0" width="336.0" height="19.0" fill="#101318"/>
+<rect x="1112.4" y="582.0" width="8.4" height="19.0" fill="#101318"/>
+<text x="1112.4" y="596.0" fill="#8c96a2" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12.0" y="615.0" fill="#c7ccd1" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<rect x="79.2" y="601.0" width="680.4" height="19.0" fill="#101318"/>
+<text x="79.2" y="615.0" fill="#f0f3f6" textLength="680.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">todo since it&#x27;s outside this fix.                                               ┃</text>
+<rect x="759.6" y="601.0" width="16.8" height="19.0" fill="#101318"/>
+<text x="759.6" y="615.0" fill="#8c96a2" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">││</text>
+<rect x="776.4" y="601.0" width="336.0" height="19.0" fill="#101318"/>
+<rect x="1112.4" y="601.0" width="8.4" height="19.0" fill="#101318"/>
+<text x="1112.4" y="615.0" fill="#8c96a2" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12.0" y="634.0" fill="#c7ccd1" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="20.4" y="634.0" fill="#f0f3f6" textLength="739.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve">                                                                                       ┃</text>
+<text x="759.6" y="634.0" fill="#8c96a2" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">││</text>
+<text x="1112.4" y="634.0" fill="#8c96a2" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12.0" y="653.0" fill="#c7ccd1" textLength="1108.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">└────────────────────────────────────────────────────────────────────────────────────────┘╰────────────────────────────────────────╯</text>
+<text x="12.0" y="672.0" fill="#6fdb9a" textLength="67.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> ● ready</text>
+<text x="79.2" y="672.0" fill="#8c96a2" textLength="302.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> · openai/gpt-5.6-sol · ~/repos/ilar</text>
+<text x="583.2" y="672.0" fill="#8c96a2" textLength="537.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">in 390 · out 480 · cache 90% · Σ 15k $0.050 · ctx [█░░░░░░░] ~1%</text>
+<text x="12.0" y="691.0" fill="#54d6e8" font-weight="bold" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">┏</text>
+<text x="20.4" y="691.0" fill="#79d7ff" font-weight="bold" textLength="58.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> input </text>
+<text x="79.2" y="691.0" fill="#54d6e8" font-weight="bold" textLength="1041.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓</text>
+<text x="12.0" y="710.0" fill="#c7ccd1" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">┃</text>
+<rect x="20.4" y="696.0" width="1092.0" height="19.0" fill="#101318"/>
+<rect x="1112.4" y="696.0" width="8.4" height="19.0" fill="#101318"/>
+<text x="1112.4" y="710.0" fill="#54d6e8" font-weight="bold" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">┃</text>
+<text x="12.0" y="729.0" fill="#c7ccd1" textLength="756.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</text>
+<text x="768.0" y="729.0" fill="#8c96a2" textLength="344.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> Enter send · Shift-Enter/Ctrl-J newline </text>
+<text x="1112.4" y="729.0" fill="#54d6e8" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">┛</text>
+</g></svg>
