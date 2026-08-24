@@ -61,6 +61,7 @@ pub struct Session {
     effective_model: String,
     effective_variant: Option<String>,
     todo_list: Option<crate::todo::TodoList>,
+    topic: Option<String>,
     checkpoint: Option<ReplayCheckpoint>,
     checkpoint_tail_start: usize,
     observed_stamp: FileStamp,
@@ -109,6 +110,8 @@ struct ReplayCheckpoint {
     #[serde(default)]
     effective_variant: Option<String>,
     todo_list: Option<crate::todo::TodoList>,
+    #[serde(default)]
+    topic: Option<String>,
     id_root: String,
     observed: FileStamp,
     checksum: String,
@@ -122,6 +125,7 @@ struct ReplayData {
     effective_model: String,
     effective_variant: Option<String>,
     todo_list: Option<crate::todo::TodoList>,
+    topic: Option<String>,
     checkpoint: Option<ReplayCheckpoint>,
     checkpoint_tail_start: usize,
     observed_stamp: FileStamp,
@@ -285,6 +289,7 @@ impl SessionStore {
             effective_model: meta.model.clone(),
             effective_variant: None,
             todo_list: None,
+            topic: None,
             checkpoint: None,
             checkpoint_tail_start: 0,
             observed_stamp,
@@ -381,14 +386,24 @@ impl SessionStore {
         let SessionEvent::Meta { meta, .. } = serde_json::from_str(&meta_line).ok()? else {
             return None;
         };
-        let title = lines
+        // A generated topic beats the opening message, which is often a
+        // stack trace or "hey can you look at something".
+        let mut opening = None;
+        let mut topic = None;
+        for event in lines
             .take(SUMMARY_SCAN_EVENTS)
             .map_while(|line| line.ok())
             .filter_map(|line| serde_json::from_str::<SessionEvent>(&line).ok())
-            .find_map(|event| match event {
-                SessionEvent::UserMessage { text, .. } => Some(summary_title(&text)),
-                _ => None,
-            });
+        {
+            match event {
+                SessionEvent::Topic { text, .. } => topic = Some(summary_title(&text)),
+                SessionEvent::UserMessage { text, .. } if opening.is_none() => {
+                    opening = Some(summary_title(&text));
+                }
+                _ => {}
+            }
+        }
+        let title = topic.or(opening);
         Some(SessionHead {
             id,
             meta,
@@ -515,6 +530,7 @@ impl SessionStore {
             effective_model: replay.effective_model,
             effective_variant: replay.effective_variant,
             todo_list: replay.todo_list,
+            topic: replay.topic,
             pending_question,
         })
     }
@@ -549,6 +565,7 @@ impl SessionWriter {
             effective_model: replay.effective_model,
             effective_variant: replay.effective_variant,
             todo_list: replay.todo_list,
+            topic: replay.topic,
             checkpoint: replay.checkpoint,
             checkpoint_tail_start: replay.checkpoint_tail_start,
             observed_stamp,
@@ -596,7 +613,7 @@ fn read_replay(
     }
     let (full_events, unanswered_calls, observed_stamp) = read_events(file, path, id, repair_tail)?;
     let canonical_event_count = full_events.len();
-    let (effective_model, effective_variant, todo_list) = replay_state(&full_events);
+    let (effective_model, effective_variant, todo_list, topic) = replay_state(&full_events);
     let (events, event_base) = if repair_tail {
         (full_events, 0)
     } else {
@@ -610,6 +627,7 @@ fn read_replay(
         effective_model,
         effective_variant,
         todo_list,
+        topic,
         checkpoint: None,
         checkpoint_tail_start: 0,
         observed_stamp,
@@ -684,12 +702,14 @@ fn read_indexed_replay(
     let mut effective_model = checkpoint.effective_model.clone();
     let mut effective_variant = checkpoint.effective_variant.clone();
     let mut todo_list = checkpoint.todo_list.clone();
+    let mut topic = checkpoint.topic.clone();
     let checkpoint_tail_start = checkpoint.events.len();
     apply_replay_state(
         &tail_events,
         &mut effective_model,
         &mut effective_variant,
         &mut todo_list,
+        &mut topic,
     );
     if file_stamp(&file.metadata()?)? != observed
         || file_stamp(&std::fs::metadata(path)?)? != observed
@@ -707,6 +727,7 @@ fn read_indexed_replay(
         effective_model,
         effective_variant,
         todo_list,
+        topic,
         checkpoint: Some(checkpoint),
         checkpoint_tail_start,
         observed_stamp: observed,
@@ -832,7 +853,12 @@ fn file_stamp(metadata: &std::fs::Metadata) -> std::io::Result<FileStamp> {
 
 fn replay_state(
     events: &[SessionEvent],
-) -> (String, Option<String>, Option<crate::todo::TodoList>) {
+) -> (
+    String,
+    Option<String>,
+    Option<crate::todo::TodoList>,
+    Option<String>,
+) {
     let mut effective_model = events
         .iter()
         .find_map(|event| match event {
@@ -842,13 +868,15 @@ fn replay_state(
         .unwrap_or_default();
     let mut todo_list = None;
     let mut effective_variant = None;
+    let mut topic = None;
     apply_replay_state(
         events,
         &mut effective_model,
         &mut effective_variant,
         &mut todo_list,
+        &mut topic,
     );
-    (effective_model, effective_variant, todo_list)
+    (effective_model, effective_variant, todo_list, topic)
 }
 
 /// Fold rewind markers out of a canonical event stream. Each marker
@@ -900,6 +928,7 @@ fn apply_replay_state(
     effective_model: &mut String,
     effective_variant: &mut Option<String>,
     todo_list: &mut Option<crate::todo::TodoList>,
+    topic: &mut Option<String>,
 ) {
     for event in events {
         match event {
@@ -911,6 +940,7 @@ fn apply_replay_state(
                 state: Some(crate::session::SessionState::TodoList { list }),
                 ..
             } => *todo_list = Some(list.clone()),
+            SessionEvent::Topic { text, .. } => *topic = Some(text.clone()),
             _ => {}
         }
     }
@@ -928,6 +958,7 @@ fn id_records(events: &[SessionEvent]) -> Vec<[u8; REPLAY_ID_RECORD_LEN as usize
             | SessionEvent::Checkpoint { id, .. }
             | SessionEvent::ModelChange { id, .. }
             | SessionEvent::Compaction { id, .. }
+            | SessionEvent::Topic { id, .. }
             | SessionEvent::Rewind { id, .. } => Some(id.as_str()),
         };
         if let Some(id) = event_id {
@@ -1221,6 +1252,7 @@ fn checkpoint_checksum(checkpoint: &ReplayCheckpoint) -> std::io::Result<String>
         &checkpoint.effective_model,
         &checkpoint.effective_variant,
         &checkpoint.todo_list,
+        &checkpoint.topic,
         &checkpoint.id_root,
         &checkpoint.observed,
     ))
@@ -1264,6 +1296,7 @@ fn validate_replay(events: &[SessionEvent], id: &str) -> std::io::Result<Vec<Str
             | SessionEvent::Checkpoint { id, .. }
             | SessionEvent::ModelChange { id, .. }
             | SessionEvent::Compaction { id, .. }
+            | SessionEvent::Topic { id, .. }
             | SessionEvent::Rewind { id, .. } => Some(id),
         };
         if let Some(event_id) = event_id
@@ -1594,6 +1627,10 @@ impl Session {
         self.todo_list.as_ref()
     }
 
+    pub fn topic(&self) -> Option<&str> {
+        self.topic.as_deref()
+    }
+
     fn canonical_index(&self, local: usize) -> std::io::Result<usize> {
         if self.event_base == 0 || local == 0 {
             Ok(local)
@@ -1691,6 +1728,7 @@ impl Session {
             effective_model: self.effective_model.clone(),
             effective_variant: self.effective_variant.clone(),
             todo_list: self.todo_list.clone(),
+            topic: self.topic.clone(),
             id_root,
             observed: self.observed_stamp.clone(),
             checksum: String::new(),
@@ -1745,12 +1783,13 @@ impl Session {
     /// In-memory view of `events[..cut]` for summarization (compaction).
     pub fn from_events_for_compaction(events: &[SessionEvent], cut: usize) -> SessionReader {
         let events = events[..cut.min(events.len())].to_vec();
-        let (effective_model, effective_variant, todo_list) = replay_state(&events);
+        let (effective_model, effective_variant, todo_list, topic) = replay_state(&events);
         SessionReader {
             events,
             effective_model,
             effective_variant,
             todo_list,
+            topic,
             pending_question: None,
         }
     }
@@ -1762,6 +1801,7 @@ pub struct SessionReader {
     effective_model: String,
     effective_variant: Option<String>,
     todo_list: Option<crate::todo::TodoList>,
+    topic: Option<String>,
     pending_question: Option<PendingQuestion>,
 }
 
@@ -1801,6 +1841,12 @@ impl SessionReader {
         self.todo_list.as_ref()
     }
 
+    /// A few words naming what this session is about, once one has been
+    /// generated.
+    pub fn topic(&self) -> Option<&str> {
+        self.topic.as_deref()
+    }
+
     /// Returns the sole validated question tool call awaiting a result.
     pub fn pending_question(&self) -> Option<&PendingQuestion> {
         self.pending_question.as_ref()
@@ -1836,6 +1882,7 @@ pub fn transcript_of(events: &[SessionEvent]) -> Vec<ChatMessage> {
             SessionEvent::Meta { .. }
             | SessionEvent::SubagentInvocation { .. }
             | SessionEvent::Checkpoint { .. }
+            | SessionEvent::Topic { .. }
             | SessionEvent::Rewind { .. } => {}
             SessionEvent::UserMessage { text, .. } => {
                 if !pending_results.is_empty() {

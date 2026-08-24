@@ -112,6 +112,14 @@ pub enum SessionEvent {
         kept_from: usize,
         ts: DateTime<Utc>,
     },
+    /// A few words naming what this session is about. Session state,
+    /// never conversation: it identifies the session in listings and
+    /// never reaches the model.
+    Topic {
+        id: String,
+        text: String,
+        ts: DateTime<Utc>,
+    },
     /// Rewind boundary: replay behaves as if the log ended just before
     /// canonical event `to` (a `UserMessage`, which becomes unsent).
     /// The log stays append-only — the discarded tail and this marker
@@ -142,6 +150,7 @@ impl SessionEvent {
             | SessionEvent::Checkpoint { ts, .. }
             | SessionEvent::ModelChange { ts, .. }
             | SessionEvent::Compaction { ts, .. }
+            | SessionEvent::Topic { ts, .. }
             | SessionEvent::Rewind { ts, .. } => *ts,
         }
     }

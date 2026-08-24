@@ -176,6 +176,9 @@ fn restored_session_invocation_view(
             ilar::session::SessionEvent::Meta { .. } => {}
             ilar::session::SessionEvent::SubagentInvocation { .. } => {}
             ilar::session::SessionEvent::Checkpoint { .. } => {}
+            // Session state, shown in the header and the picker, never
+            // in the transcript.
+            ilar::session::SessionEvent::Topic { .. } => {}
             // Folded out of replay before the view ever sees one; kept
             // total so a raw event stream renders as nothing.
             ilar::session::SessionEvent::Rewind { .. } => {}

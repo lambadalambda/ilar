@@ -921,6 +921,7 @@ async fn main() -> Result<()> {
         app.session_id = session_id.clone();
         app.todos = todos;
         if let Some(resumed) = &resumed {
+            app.topic = resumed.topic().map(str::to_string);
             app.restore_session(resumed, &store);
             if let Some(pending) = resumed.pending_question() {
                 app.question_modal = Some(questions::QuestionModal::new(pending.request.clone()));
@@ -1562,6 +1563,7 @@ async fn run_app(
     // channel and still queue.
     let mut steer_tx: Option<ilar::agent::SteerSender> = None;
     let mut turn_handle: Option<tokio::task::JoinHandle<TurnCompletion>> = None;
+    let mut topic_handle: Option<tokio::task::JoinHandle<Option<String>>> = None;
     let mut ring_on_turn_completion = false;
     let mut bell_pending = false;
     let mut pending_terminal_event = None;
@@ -1682,6 +1684,40 @@ async fn run_app(
                 Ok(TurnCompletion::Compaction(result)) => schedule::Completion::Compaction(result),
                 Err(error) => schedule::Completion::Crashed(error.to_string()),
             });
+            // Name the session once it has something to be named after.
+            // Detached and unawaited: a title is never worth delaying a
+            // prompt for, and a failure leaves the session as it was.
+            if app.topic.is_none()
+                && topic_handle.is_none()
+                && matches!(completion, Some(schedule::Completion::Root(Ok(_))))
+            {
+                let resolver = resolver.clone();
+                let store = store.clone();
+                let session_id = session_id.to_string();
+                let system_prompt = system_prompt.to_string();
+                topic_handle = Some(tokio::spawn(async move {
+                    let model = store
+                        .load(&session_id)
+                        .map(|session| session.effective_model())
+                        .unwrap_or_default();
+                    let provider = resolver.resolve_provider(&model).ok()?;
+                    ilar::topic::title_session(
+                        provider.as_provider(),
+                        &store,
+                        &session_id,
+                        Some(&system_prompt),
+                    )
+                    .await
+                    .ok()
+                    .flatten()
+                }));
+            }
+        }
+        if let Some(handle) = topic_handle.as_mut()
+            && handle.is_finished()
+            && let Ok(topic) = topic_handle.take().unwrap().await
+        {
+            app.topic = topic;
         }
 
         // The whole iteration minus the dispatch — completion

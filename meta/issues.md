@@ -40,7 +40,7 @@
 
 ## Milestone 10 — Everyday polish
 
-- [ ] [Sessions know what they are about](issues/session-topics.md)
+(all complete — see issues_archive.md)
 
 ## Milestone 11 — Beyond the terminal
 

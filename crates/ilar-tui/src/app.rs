@@ -163,6 +163,8 @@ pub(crate) struct App {
     pub(crate) fork_requested: bool,
     /// Set by the palette; run_app opens the picker (it owns the store).
     pub(crate) session_picker_requested: bool,
+    /// What this session is about, once it has been named.
+    pub(crate) topic: Option<String>,
     pub(crate) help_visible: bool,
     pub(crate) help_scroll: usize,
     /// The full todo list overlay: what the sidebar had no room for.
@@ -263,6 +265,7 @@ impl App {
             turn_picker_requested: false,
             fork_requested: false,
             session_picker_requested: false,
+            topic: None,
             help_visible: false,
             help_scroll: 0,
             todos_visible: false,
@@ -2002,6 +2005,23 @@ impl App {
             .border_style(theme::panel_border())
             .title(Line::from(vec![
                 Span::styled("ilar", theme::title(theme::ASSISTANT)),
+                // The session's own name, where a window title would be.
+                Span::styled(
+                    self.topic
+                        .as_deref()
+                        .map(|topic| {
+                            format!(
+                                " · {}",
+                                truncate_display(
+                                    topic,
+                                    (transcript_area.width as usize).saturating_sub(24),
+                                    Truncation::Right,
+                                )
+                            )
+                        })
+                        .unwrap_or_default(),
+                    Style::default().fg(theme::SECONDARY),
+                ),
                 Span::styled(scroll_label, Style::default().fg(theme::MUTED)),
             ]))
             .padding(Padding::new(
@@ -3481,6 +3501,31 @@ mod tests {
         assert!(screen.contains("web · up 3m2s"), "{screen}");
         assert!(screen.contains("worker · exit 1"), "{screen}");
         assert!(screen.contains("todos"), "{screen}");
+    }
+
+    #[test]
+    fn the_header_names_the_session_once_it_has_a_topic() {
+        let mut app = App::new();
+        let screen = |app: &mut App| {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 10)).unwrap();
+            terminal.draw(|frame| app.render(frame)).unwrap();
+            (0..10)
+                .map(|row| {
+                    (0..90)
+                        .map(|column| terminal.backend().buffer()[(column, row)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        // Untitled sessions look exactly as they did before.
+        assert!(screen(&mut app).contains("┌ilar"), "{}", screen(&mut app));
+
+        app.topic = Some("flaky auth test".into());
+        let titled = screen(&mut app);
+        assert!(titled.contains("ilar · flaky auth test"), "{titled}");
     }
 
     #[test]

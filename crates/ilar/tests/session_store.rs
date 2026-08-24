@@ -2166,3 +2166,122 @@ fn children_of_lists_only_this_session_s_tasks_newest_first() {
             .any(|session| child_ids.contains(&session.id))
     );
 }
+
+#[test]
+fn a_generated_topic_titles_the_session_and_the_listing() {
+    let (store, _dir) = temp_store();
+    let meta = sample_meta();
+    let mut session = store.create(meta.clone()).unwrap();
+    session
+        .append(SessionEvent::UserMessage {
+            id: new_id(),
+            text: "here is a stack trace, no idea what is going on\n\
+                   thread 'main' panicked at src/main.rs:42"
+                .into(),
+            ts: Utc::now(),
+        })
+        .unwrap();
+    // Before titling, the listing shows the opening message.
+    drop(session);
+    let listed = store.list();
+    assert!(
+        listed[0]
+            .title
+            .as_deref()
+            .unwrap()
+            .starts_with("here is a stack trace"),
+        "{listed:?}"
+    );
+
+    let mut session = store
+        .acquire_writer(&meta.session_id)
+        .unwrap()
+        .load()
+        .unwrap();
+    session
+        .append(SessionEvent::Topic {
+            id: new_id(),
+            text: "debugging a main.rs panic".into(),
+            ts: Utc::now(),
+        })
+        .unwrap();
+    drop(session);
+
+    // The topic wins, in the listing and on replay.
+    let listed = store.list();
+    assert_eq!(
+        listed[0].title.as_deref(),
+        Some("debugging a main.rs panic")
+    );
+    let session = store.load(&meta.session_id).unwrap();
+    assert_eq!(session.topic(), Some("debugging a main.rs panic"));
+    // A topic is state, not conversation: it never reaches the model.
+    let transcript = format!("{:?}", session.transcript());
+    assert!(
+        !transcript.contains("debugging a main.rs panic"),
+        "{transcript}"
+    );
+}
+
+#[tokio::test]
+async fn titling_records_a_topic_and_leaves_a_failure_alone() {
+    use ilar::provider::{MockProvider, ProviderEvent, StopReason};
+
+    let (store, _dir) = temp_store();
+    let meta = sample_meta();
+    let mut session = store.create(meta.clone()).unwrap();
+    session
+        .append(SessionEvent::UserMessage {
+            id: new_id(),
+            text: "the auth test fails every third run".into(),
+            ts: Utc::now(),
+        })
+        .unwrap();
+    drop(session);
+
+    // A provider that will not answer leaves the session as it was.
+    let broken = MockProvider::error("no provider");
+    assert!(
+        ilar::topic::title_session(&broken, &store, &meta.session_id, Some("system"))
+            .await
+            .is_err()
+    );
+    assert_eq!(store.load(&meta.session_id).unwrap().topic(), None);
+
+    let provider = MockProvider::new(vec![vec![
+        ProviderEvent::TextDelta("\"Flaky auth test\"".into()),
+        ProviderEvent::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+            usage: Default::default(),
+        },
+    ]]);
+    let topic = ilar::topic::title_session(&provider, &store, &meta.session_id, Some("system"))
+        .await
+        .unwrap();
+
+    assert_eq!(topic.as_deref(), Some("Flaky auth test"));
+    assert_eq!(
+        store.load(&meta.session_id).unwrap().topic(),
+        Some("Flaky auth test")
+    );
+    assert_eq!(store.list()[0].title.as_deref(), Some("Flaky auth test"));
+
+    // Titling an already-titled session is a no-op and costs nothing.
+    let second = MockProvider::new(vec![vec![
+        ProviderEvent::TextDelta("Something else".into()),
+        ProviderEvent::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+            usage: Default::default(),
+        },
+    ]]);
+    assert_eq!(
+        ilar::topic::title_session(&second, &store, &meta.session_id, Some("system"))
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(
+        second.requests().is_empty(),
+        "a titled session was re-titled"
+    );
+}
