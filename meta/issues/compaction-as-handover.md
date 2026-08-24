@@ -48,6 +48,12 @@ next, and that the rest is searchable.
 
 ### The handover
 
+- Session state the model can only see through tool results — the todo
+  list above all — is pinned into the summary. It survived compaction
+  in the sidebar while vanishing from the conversation, so the model
+  kept working having forgotten its own plan. *(Done ahead of the rest:
+  commit 78c781b.)*
+
 - A compaction mode that replaces history with system prompt, the
   pinned verbatim user requests, and the summary. No recency window.
 - The summary template teaches the model that the archive exists and
