@@ -62,7 +62,7 @@ fn session_with(store: &SessionStore, events: Vec<SessionEvent>) -> String {
 
 fn collect_all(store: &SessionStore, query: &str, per_session: usize) -> Vec<SessionHits> {
     let mut all = Vec::new();
-    search_sessions(store, query, per_session, |hits| {
+    search_sessions(store, query, per_session, |_, hits| {
         all.push(hits);
         true
     });
@@ -89,6 +89,17 @@ fn a_phrase_from_the_middle_finds_its_session() {
     // Identified by topic, not opening message.
     assert_eq!(found[0].title.as_deref(), Some("GM1 firmware dig"));
     assert!(found[0].hits[0].excerpt.contains("AES table"), "{found:?}");
+
+    // The entries handed to the callback are enough to build a preview
+    // around the hit — its neighbours, not just the matched line.
+    let mut context = Vec::new();
+    ilar::recall::search_sessions(&store, "aes table", 5, |entries, hits| {
+        context = ilar::recall::around(entries, hits.hits[0].event, 2, 400);
+        true
+    });
+    let rendered = format!("{context:?}");
+    assert!(rendered.contains("look at the firmware"), "{rendered}");
+    assert!(rendered.contains("0x4f11b4"), "{rendered}");
 }
 
 #[test]
@@ -130,7 +141,7 @@ fn emissions_follow_listing_order_and_stop_on_demand() {
     // stops the moment the caller loses interest — a new keystroke.
     let listing: Vec<String> = store.list().into_iter().map(|s| s.id).collect();
     let mut seen = Vec::new();
-    search_sessions(&store, "shared needle", 5, |hits| {
+    search_sessions(&store, "shared needle", 5, |_, hits| {
         seen.push(hits.session_id.clone());
         false
     });

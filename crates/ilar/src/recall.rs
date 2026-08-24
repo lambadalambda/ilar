@@ -270,8 +270,10 @@ pub struct SessionHits {
 /// `false` abandons the walk — the caller typed another key.
 ///
 /// Sessions are read one at a time, so results stream in listing order
-/// rather than arriving after the whole store has been scanned.
-pub fn search_sessions<F: FnMut(SessionHits) -> bool>(
+/// rather than arriving after the whole store has been scanned. The
+/// session's entries ride along so a caller can build context around a
+/// hit (via [`around`]) without reading the session a second time.
+pub fn search_sessions<F: FnMut(&[Entry], SessionHits) -> bool>(
     store: &SessionStore,
     query: &str,
     per_session: usize,
@@ -290,11 +292,14 @@ pub fn search_sessions<F: FnMut(SessionHits) -> bool>(
         if hits.is_empty() {
             continue;
         }
-        let keep_going = emit(SessionHits {
-            session_id: summary.id,
-            title: summary.title,
-            hits,
-        });
+        let keep_going = emit(
+            &entries,
+            SessionHits {
+                session_id: summary.id,
+                title: summary.title,
+                hits,
+            },
+        );
         if !keep_going {
             return;
         }
