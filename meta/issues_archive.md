@@ -154,3 +154,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Rewind a session in place](issues/rewind-in-place.md)
 - [x] [Fork a session at a point](issues/fork-at-a-point.md)
 - [x] [Rewind and fork in the TUI](issues/rewind-fork-tui.md)
+- [x] [Document checkpoints for users](issues/document-checkpoints-for-users.md)

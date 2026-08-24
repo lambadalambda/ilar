@@ -277,7 +277,16 @@ replay honours, and the discarded tail remains in the file for
 auditing. Rewind and fork rebuild the session runtime, so running
 services stop. HEAD and commits are never moved — restores are
 files-only — and outside a git repository (or for turns predating
-checkpoints) rewind still works on the conversation alone.
+checkpoints) rewind still works on the conversation alone. Ignored
+files are invisible in both directions: a rewind neither restores nor
+deletes `.env`, `target/`, or anything else your ignore rules match.
+
+Because checkpoints are plain git commits, the chain is inspectable
+without rewinding — `git diff refs/ilar/checkpoints/<id>~2 -- src/`
+shows what the agent changed between any two turns. See
+[Checkpoints, rewind, and recovery](docs/checkpoints.md) for
+inspection, the recovery recipe when a rewind was a mistake,
+limitations, and cleanup.
 
 ### Commands
 
