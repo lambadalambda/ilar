@@ -218,6 +218,16 @@ the agent definition's model or inherits the parent's model and reasoning. The
 read-only `models` tool lists available models with context windows, pricing,
 and reasoning variants so agents can choose informedly.
 
+A task's session outlives the call. Every task result names it
+(`task_id: <uuid>`), and passing that id back as the task tool's `task_id`
+resumes that subagent with its context intact — a follow-up question costs a
+sentence instead of re-explaining the scope to a fresh agent. Resuming is
+guarded: the persisted agent, parent session and workspace must match, and a
+task that is still running refuses a second driver. The read-only `tasks` tool
+lists the current session's tasks (id, agent, model, running or finished, age,
+opening prompt, and a snippet of the last reply) so the agent can find the one
+worth resuming.
+
 ### Services
 
 The `service` tool manages long-running processes (dev servers,

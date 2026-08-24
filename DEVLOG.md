@@ -1332,3 +1332,31 @@ maximum position a whole viewport short of the track end — four rows
 above the bottom on a 40-row terminal, worse on bigger ones, so a
 transcript at its true tail still looked like it had more below. The
 scrollbar's content length is our position count, `max_scroll + 1`.
+
+## 2026-08-24 — Subagents you can go back to
+
+The task tool has taken a `task_id` since milestone 2: pass one and the
+child session is loaded, its history replayed, the new prompt appended
+— guarded on persisted agent, parent session and workspace, and
+refused outright while that session is already being driven. It was
+implemented, tested, and completely unreachable, because nothing ever
+told the model an id. Foreground results were the child's final text
+alone; the background start notice was a fixed string; the completion
+notification carried description and result. Meanwhile the schema said
+"never invent a value". So every subagent was one-shot in practice: a
+follow-up meant a fresh agent and a re-explained scope.
+
+All three paths now name the session, failures included — an
+iteration-limited task is precisely the one worth resuming. The other
+half is the `tasks` tool: this session's children with id, agent,
+model, running-or-finished, age, opening prompt and a snippet of the
+last reply. Scoped to the invoking session's own children, matching
+the resume guard, so no session can enumerate another's tasks;
+`SessionStore::list` hides children by construction, so `children_of`
+fell out as the other half of the same head scan. Bounded twice — 200
+characters per snippet, 20 tasks, remainder counted — because a listing
+that can flood the caller's context is a listing the model learns to
+avoid.
+
+Running tasks deliberately show no snippet: their "last word" is
+mid-turn and would read as a result.
