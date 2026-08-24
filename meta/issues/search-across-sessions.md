@@ -41,6 +41,29 @@ Picking a match resumes that session.
 - A test pins that the preview follows the selection.
 - The full suite passes.
 
+## Outcome
+
+Landed in three commits: the store walk (b93154c), entries handed to
+the search callback so previews cost no second read (592ff9e), and the
+modal itself.
+
+`recall::search_sessions` walks the listing newest-first, reads each
+root session's full audit log — compacted material included — and
+emits per-session bounded hits through a callback whose return value
+abandons the walk. The TUI runs it on a blocking task, streams rows
+through a channel stamped with a query generation, and drops stale
+generations; every keystroke cancels the old scan and starts a new
+one. Hits are capped at 5 per session and 200 overall.
+
+Reached with `Ctrl-G` from the session picker; `Esc` returns there.
+Both decisions the issue left open were settled by use: scanning is
+live over the JSONL (no index until it measurably hurts), and Enter
+resumes at the tail — jumping to the match is the 1% case, and rewind
+already exists for it.
+
+Smoke-tested live in tmux over copied real sessions: two panes,
+preview follows selection, resume lands in the right session.
+
 ## Notes
 
 - Existing pieces: `Ctrl-F` already searches the *current* transcript
@@ -48,13 +71,6 @@ Picking a match resumes that session.
   and resumes them, and `ListNav`/`list_window`/`edit_query` already
   handle the interaction. This is a new modal that borrows all three,
   not a rewrite of any.
-- Open question: whether scanning is live over the JSONL or backed by
-  an index. Start live and measure — the store already reads session
-  heads for the listing, and the same file walk can carry a match
-  scan.
-- Open question: whether resuming from a match should jump the
-  transcript to that point. Rewind already knows how to address a
-  turn; the picker currently resumes at the tail.
 
 ## Milestone
 

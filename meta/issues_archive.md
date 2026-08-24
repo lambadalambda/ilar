@@ -171,3 +171,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Sessions know what they are about](issues/session-topics.md)
 - [x] [The compaction cut measures tokens with a prose ruler](issues/compaction-ruler.md)
 - [x] [Compaction as handover, with the archive one grep away](issues/compaction-as-handover.md)
+- [x] [Find a session by something said in the middle of it](issues/search-across-sessions.md)

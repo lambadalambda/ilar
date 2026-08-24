@@ -1508,3 +1508,25 @@ trigger — the provider's reported token count against the threshold —
 is now the only thing that decides a compaction, and failure detection
 is exactly two checks: empty output, or an answer instead of a
 summary.
+
+## 2026-08-24 — Sessions found by their middles
+
+Cross-session content search shipped, the second front door over the
+recall walk the compaction work left behind. `Ctrl-G` from the session
+picker opens a two-pane grep in the fzf mold: every root session's
+full history on the left — compacted material included, since the
+walk reads the audit log — and the selected match in its surrounding
+conversation on the right. Enter resumes at the tail; jumping to the
+match lost to the 99% case, and rewind already covers the rest.
+
+The scan is live over the JSONL, no index: sessions are read one at a
+time, rows stream through a channel stamped with a query generation,
+and a keystroke cancels the walk (the emit callback's return value)
+and bumps the generation so a stale scan's stragglers are dropped
+rather than mixed in. Previews cost no second read — the walk hands
+its entries to the callback and the context rides along with each row.
+Caps everywhere the compaction work taught us to put them: 5 hits per
+session, 200 rows total, bounded excerpts.
+
+Also this session, on review: the compaction material guard and the
+summary size floor are gone (see above) — the trigger alone decides.

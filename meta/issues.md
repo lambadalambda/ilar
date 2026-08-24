@@ -44,5 +44,4 @@
 
 ## Milestone 11 — Beyond the terminal
 
-- [ ] [Find a session by something said in the middle of it](issues/search-across-sessions.md)
 - [ ] [A web frontend](issues/web-frontend.md)
