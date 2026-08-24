@@ -42,6 +42,20 @@ Cmd+click; keyboard users and everyone else get nothing.
 - The visible muted URL stays: it is what terminals' own URL detection
   Cmd+clicks on.
 
+## Outcome
+
+Landed as the link picker plus render dedupe. Review hardened the exec
+surface: markdown-branch URLs and the opener now reject whitespace and
+control characters (the bare scanner already terminated on them), so
+nothing dirty can reach the `open`/`xdg-open` argv — a dirty markdown
+URL degrades to its clean prefix via the bare scanner, which the test
+pins as the property. Dedup keeps the newest occurrence but lets a
+labelled mention donate its label to a bare repost. Smoke-ran in tmux:
+Ctrl-O lists the links newest-first, filtering works, Esc dismisses;
+Enter was deliberately not pressed in the smoke (it would open a real
+browser tab). OSC 8 terminal hyperlinks remain future work if ratatui
+grows cell-level support.
+
 ## Milestone
 
 9 — Time travel follow-ups

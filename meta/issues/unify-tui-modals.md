@@ -9,7 +9,9 @@ each with its own bespoke `*Action` enum and its own dispatch arm in
 `run_app`. Five of the six `handle_key` implementations have
 copy-pasted `Esc`/`Enter`/`Up`/`Down`/`Ctrl-P`/`Ctrl-N` arms over a
 `selected` index and a `move_selection` helper. The dispatch chain they
-drive is roughly 220 lines of near-duplicate matching.
+drive is roughly 220 lines of near-duplicate matching. (Since written,
+`TurnPicker` and `LinkPicker` joined the pattern — eight pickers now,
+which strengthens the case rather than changing it.)
 
 Three concrete defects fall out of that shape:
 
