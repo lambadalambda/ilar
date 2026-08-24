@@ -60,6 +60,9 @@ pub struct SubagentSpawner {
     running: Arc<AtomicUsize>,
     active_sessions: Arc<Mutex<std::collections::HashSet<String>>>,
     active_sessions_changed: tokio::sync::watch::Sender<u64>,
+    /// Tasks working right now, nested ones included: the registry is
+    /// shared with every child spawner.
+    running_tasks: Arc<Mutex<Vec<RunningTask>>>,
     /// Background completions land here; the session owner consumes.
     notify_tx: tokio::sync::mpsc::Sender<Notification>,
     /// The single notification receiver, handed out by `subscribe`.
@@ -75,6 +78,33 @@ pub struct SubagentSpawner {
     services: Option<std::sync::Arc<crate::tools::service::ServiceManager>>,
     /// Models available for per-task overrides and the models tool.
     available_models: Vec<&'static crate::model::ModelInfo>,
+}
+
+/// A subagent that is working right now, for anything that wants to
+/// show live delegation — the TUI sidebar reads this every frame.
+#[derive(Debug, Clone)]
+pub struct RunningTask {
+    pub session_id: String,
+    pub description: String,
+    pub agent: String,
+    pub background: bool,
+    pub started: std::time::Instant,
+}
+
+/// Removes its task from the running registry however the run ends —
+/// completion, error, abort, or a dropped background future.
+struct RunningTaskGuard {
+    session_id: String,
+    registry: Arc<Mutex<Vec<RunningTask>>>,
+}
+
+impl Drop for RunningTaskGuard {
+    fn drop(&mut self) {
+        self.registry
+            .lock()
+            .unwrap()
+            .retain(|task| task.session_id != self.session_id);
+    }
 }
 
 struct BackgroundTask {
@@ -118,6 +148,7 @@ impl SubagentSpawner {
             running: Arc::new(AtomicUsize::new(0)),
             active_sessions: Arc::new(Mutex::new(std::collections::HashSet::new())),
             active_sessions_changed,
+            running_tasks: Arc::new(Mutex::new(Vec::new())),
             notify_tx,
             activity_tx,
             stall_timeout: std::time::Duration::from_secs(600),
@@ -251,6 +282,7 @@ impl SubagentSpawner {
             running: self.running.clone(),
             active_sessions: self.active_sessions.clone(),
             active_sessions_changed: self.active_sessions_changed.clone(),
+            running_tasks: self.running_tasks.clone(),
             notify_tx: self.notify_tx.clone(),
             notify_rx: self.notify_rx.clone(),
             activity_tx: self.activity_tx.clone(),
@@ -551,6 +583,15 @@ impl SubagentSpawner {
             active_session = self.claim_session(&session_id);
         }
         let _active_session = active_session.expect("new session id must be unique");
+        // From here the child is working: everything below either runs
+        // it or moves the guard into the task that will.
+        let _running_task = self.register_running(RunningTask {
+            session_id: session_id.clone(),
+            description: input.description.clone(),
+            agent: agent.name.clone(),
+            background: input.background == Some(true),
+            started: std::time::Instant::now(),
+        });
         let parent_call_id = ctx.call_id.clone().unwrap_or_default();
 
         let child_spawner = self.child_spawner(child_location.clone(), child_workspace.clone());
@@ -639,6 +680,7 @@ impl SubagentSpawner {
                     registry: task_registry,
                 };
                 let _active_session = _active_session;
+                let _running_task = _running_task; // deregisters when the task ends
                 let _slot = _guard; // hold the concurrency slot for the run
                 let lease = match inherited_lease {
                     Some(lease) => lease,
@@ -1137,6 +1179,7 @@ task's scope yourself; continue only clearly disjoint work."
             running: self.running.clone(),
             active_sessions: self.active_sessions.clone(),
             active_sessions_changed: self.active_sessions_changed.clone(),
+            running_tasks: self.running_tasks.clone(),
             notify_tx: self.notify_tx.clone(),
             notify_rx: self.notify_rx.clone(),
             activity_tx: self.activity_tx.clone(),
@@ -1291,6 +1334,21 @@ task's scope yourself; continue only clearly disjoint work."
     /// stale "last word".
     pub fn session_is_active(&self, session_id: &str) -> bool {
         self.active_sessions.lock().unwrap().contains(session_id)
+    }
+
+    /// The subagents working right now, oldest first, across every
+    /// depth — one shared registry, so a nested task shows up too.
+    pub fn running_tasks(&self) -> Vec<RunningTask> {
+        self.running_tasks.lock().unwrap().clone()
+    }
+
+    fn register_running(&self, task: RunningTask) -> RunningTaskGuard {
+        let session_id = task.session_id.clone();
+        self.running_tasks.lock().unwrap().push(task);
+        RunningTaskGuard {
+            session_id,
+            registry: self.running_tasks.clone(),
+        }
     }
 
     fn claim_session(&self, session_id: &str) -> Option<ActiveSessionGuard> {

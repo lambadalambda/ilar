@@ -2516,3 +2516,98 @@ async fn the_tasks_tool_marks_a_running_task_and_bounds_the_snippet() {
 
     spawner.shutdown().await;
 }
+
+#[tokio::test]
+async fn running_tasks_report_what_is_working_right_now() {
+    let (store, parent_id) = temp_store();
+    let spawner = spawner(
+        Arc::new(ScriptedDelayProvider {
+            text: "eventual answer",
+            delay_ms: 300,
+        }),
+        &store,
+        10,
+        3,
+    );
+    let task = parent_registry(spawner.clone()).get("task").unwrap();
+    assert!(spawner.running_tasks().is_empty());
+
+    let started = task
+        .run(
+            serde_json::json!({
+                "description": "survey the picker core",
+                "prompt": "look around",
+                "subagent_type": "explore",
+                "background": true,
+            }),
+            task_context(&parent_id),
+        )
+        .await;
+    let child_id = started.child_session_id().unwrap().to_string();
+
+    let running = spawner.running_tasks();
+    assert_eq!(running.len(), 1, "{running:?}");
+    assert_eq!(running[0].session_id, child_id);
+    assert_eq!(running[0].description, "survey the picker core");
+    assert_eq!(running[0].agent, "explore");
+    assert!(running[0].background);
+    assert!(running[0].started.elapsed() < Duration::from_secs(10));
+
+    let _ = tokio::time::timeout(Duration::from_secs(10), spawner.subscribe().recv()).await;
+    // The registry empties itself: a finished task is not running.
+    for _ in 0..50 {
+        if spawner.running_tasks().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        spawner.running_tasks().is_empty(),
+        "{:?}",
+        spawner.running_tasks()
+    );
+
+    spawner.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_foreground_task_is_running_while_it_runs() {
+    let (store, parent_id) = temp_store();
+    let spawner = spawner(
+        Arc::new(ScriptedDelayProvider {
+            text: "answer",
+            delay_ms: 200,
+        }),
+        &store,
+        10,
+        3,
+    );
+    let task = parent_registry(spawner.clone()).get("task").unwrap();
+    let observer = spawner.clone();
+    let watch = tokio::spawn(async move {
+        for _ in 0..100 {
+            let running = observer.running_tasks();
+            if let Some(first) = running.first() {
+                return Some((first.description.clone(), first.background));
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        None
+    });
+
+    let output = task
+        .run(
+            serde_json::json!({
+                "description": "read the config",
+                "prompt": "read it",
+                "subagent_type": "explore",
+            }),
+            task_context(&parent_id),
+        )
+        .await;
+
+    assert!(!output.is_error, "{}", output.content);
+    let seen = watch.await.unwrap();
+    assert_eq!(seen, Some(("read the config".to_string(), false)));
+    assert!(spawner.running_tasks().is_empty());
+}
