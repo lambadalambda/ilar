@@ -40,5 +40,6 @@
 
 ## Milestone 10 — Everyday polish
 
-(all complete — see issues_archive.md)
+- [ ] [Pin user requests through compaction](issues/pin-user-requests-through-compaction.md)
+- [ ] [Reframe the summarizer prompt](issues/reframe-the-summarizer-prompt.md)
 
