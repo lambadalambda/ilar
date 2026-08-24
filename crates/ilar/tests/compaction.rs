@@ -104,7 +104,7 @@ async fn manual_active_history_compaction_persists_without_a_new_user_message() 
     assert!(matches!(
         outcome,
         ManualCompactionOutcome::Compacted { ref summary, .. }
-            if summary == "handover: all important context"
+            if summary.contains("handover: all important context")
     ));
     assert_eq!(provider.requests().len(), 1);
     let session = store.load(&session_id).unwrap();
@@ -124,7 +124,9 @@ async fn manual_active_history_compaction_persists_without_a_new_user_message() 
     assert!(matches!(
         canonical_events.last(),
         Some(SessionEvent::Compaction { summary, .. })
-            if summary == "handover: all important context"
+            if summary.contains("handover: all important context")
+            // The user's own words ride above the model's prose.
+            && summary.contains("old question 0")
     ));
     let transcript = session.transcript();
     assert_eq!(transcript.len(), 1);
@@ -137,7 +139,7 @@ async fn manual_active_history_compaction_persists_without_a_new_user_message() 
     assert!(matches!(
         second,
         ManualCompactionOutcome::Compacted { ref summary, .. }
-            if summary == "handover: compacted context remains"
+            if summary.contains("handover: compacted context remains")
     ));
     assert_eq!(provider.requests().len(), 2);
     assert!(
@@ -354,23 +356,20 @@ async fn oversize_transcript_triggers_compaction() {
     // Two provider calls: compaction + real.
     assert!(resolver.zai.requests().is_empty());
     assert_eq!(resolver.openai.requests().len(), 2);
-    // The compaction request carried the old transcript + summarizer prompt.
+    // The compaction request is the turn's own request with the
+    // summarization instruction appended: same system prompt, same
+    // tools, same cache key, so the conversation is served from the
+    // provider's prompt cache instead of being re-read at full price.
     let requests = resolver.openai.requests();
     let first = &requests[0];
     assert_eq!(first.model, "openai/gpt-5.2");
+    assert_eq!(first.system_prompt, requests[1].system_prompt);
+    assert_eq!(first.tools.len(), requests[1].tools.len());
+    assert_eq!(first.cache_key, requests[1].cache_key);
+    let instruction = format!("{:?}", first.messages.last().unwrap());
     assert!(
-        first
-            .system_prompt
-            .as_deref()
-            .unwrap_or("")
-            .to_lowercase()
-            .contains("summar"),
-        "compaction system prompt missing: {:?}",
-        first.system_prompt
-    );
-    assert!(
-        first.tools.is_empty(),
-        "compaction call must not carry tools"
+        instruction.contains("Stop working on the task") && instruction.contains("## Objective"),
+        "compaction instruction missing: {instruction}"
     );
     assert_eq!(requests[1].model, "openai/gpt-5.2");
     let expected_options = serde_json::json!({"reasoning": {"effort": "high"}});
@@ -390,9 +389,15 @@ async fn oversize_transcript_triggers_compaction() {
     let rendered = format!("{transcript:?}");
     assert!(rendered.contains("SUMMARY: user asked"), "{rendered}");
     assert!(rendered.contains("next question"), "{rendered}");
+    // The bulk — old assistant turns — is gone; the user's own words
+    // are pinned above the summary on purpose.
     assert!(
-        !rendered.contains("question number 0"),
+        !rendered.contains("answer number 0"),
         "old turns leaked past compaction: {rendered}"
+    );
+    assert!(
+        rendered.contains("question number 0"),
+        "the request being served was summarized away: {rendered}"
     );
     assert!(rendered.contains("fresh answer"), "{rendered}");
     // Alternation invariant holds.
@@ -801,18 +806,18 @@ async fn context_growing_between_steps_compacts_without_a_new_user_message() {
         "expected step, step, mid-turn compaction, step; got {}",
         requests.len()
     );
-    // The third call is the summarizer: no tools, summarizer prompt.
+    // The third call is the summarizer. It is identified by its final
+    // message, not by a different system prompt: the whole prefix is
+    // deliberately identical to the surrounding steps so the provider
+    // serves it from its prompt cache.
+    let instruction = format!("{:?}", requests[2].messages.last().unwrap());
     assert!(
-        requests[2]
-            .system_prompt
-            .as_deref()
-            .unwrap_or("")
-            .to_lowercase()
-            .contains("summar"),
-        "third call was not a compaction: {:?}",
-        requests[2].system_prompt
+        instruction.contains("Stop working on the task"),
+        "third call was not a compaction: {instruction}"
     );
-    assert!(requests[2].tools.is_empty());
+    assert_eq!(requests[2].system_prompt, requests[3].system_prompt);
+    assert_eq!(requests[2].tools.len(), requests[3].tools.len());
+    assert_eq!(requests[2].cache_key, requests[3].cache_key);
 
     let session = store.load(&session_id).unwrap();
     assert!(
@@ -923,5 +928,107 @@ async fn turn_boundary_compaction_keeps_the_checkpoint_with_its_message() {
         matches!(events[user - 1], SessionEvent::Checkpoint { .. }),
         "the kept window must open with the turn's checkpoint, got {:?}",
         events[user - 1]
+    );
+}
+
+#[tokio::test]
+async fn an_apology_is_retried_and_then_refused() {
+    let (store, session_id) = temp_session();
+    seed_compactable_history(&store, &session_id);
+    // The failure observed in session 3d494ad6: the summarizer answered
+    // the conversation instead of summarizing it.
+    let apology = "I'm sorry, but I wasn't able to complete and push all four fixes.";
+    let provider = MockProvider::new(vec![
+        text_turn(apology),
+        text_turn("handover: recovered on the second ask"),
+    ]);
+    let cancel = tokio_util::sync::CancellationToken::new();
+
+    let outcome = compact_session(&provider, &store, &session_id, Some("system"), &[], &cancel)
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(outcome, ManualCompactionOutcome::Compacted { ref summary, .. }
+            if summary.contains("recovered on the second ask")),
+        "{outcome:?}"
+    );
+    assert_eq!(provider.requests().len(), 2, "the apology was not retried");
+    let stored = format!("{:?}", store.load(&session_id).unwrap().transcript());
+    assert!(
+        !stored.contains("I'm sorry"),
+        "the apology was stored: {stored}"
+    );
+
+    // Twice in a row is a failure, and the session is left alone.
+    let (store, session_id) = temp_session();
+    seed_compactable_history(&store, &session_id);
+    let stubborn = MockProvider::new(vec![text_turn(apology), text_turn(apology)]);
+    let error = compact_session(&stubborn, &store, &session_id, Some("system"), &[], &cancel)
+        .await
+        .expect_err("a session must not be replaced by an apology");
+    assert!(
+        format!("{error:#}").contains("answered the conversation"),
+        "{error:#}"
+    );
+    assert!(
+        !store
+            .load(&session_id)
+            .unwrap()
+            .events()
+            .iter()
+            .any(|event| matches!(event, SessionEvent::Compaction { .. })),
+        "a refused compaction still touched the session"
+    );
+}
+
+#[tokio::test]
+async fn the_request_being_served_survives_the_summarizer() {
+    let (store, session_id) = temp_session();
+    {
+        let mut session = store.acquire_writer(&session_id).unwrap().load().unwrap();
+        session
+            .append(SessionEvent::UserMessage {
+                id: new_id(),
+                text: "Can we do the necessary changes to firehose to support bundled \
+                       payments? https://github.com/yodlpay/yodl-lite/pull/396"
+                    .into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        for i in 0..6 {
+            session
+                .append(SessionEvent::AssistantMessage {
+                    id: new_id(),
+                    model: "zai/glm-4.7".into(),
+                    content: vec![ilar::session::ContentBlock::Text {
+                        text: format!("step {i} {}", "detail ".repeat(50)),
+                    }],
+                    usage: Usage::default(),
+                    stop_reason: "end_turn".into(),
+                    ts: chrono::Utc::now(),
+                })
+                .unwrap();
+        }
+    }
+    // A summarizer that does exactly what the real one did: writes a
+    // work log and forgets what was asked.
+    let provider = MockProvider::new(vec![text_turn(
+        "Implemented bundled-payment support across Firehose and its producers.",
+    )]);
+    let cancel = tokio_util::sync::CancellationToken::new();
+
+    compact_session(&provider, &store, &session_id, Some("system"), &[], &cancel)
+        .await
+        .unwrap();
+
+    let transcript = format!("{:?}", store.load(&session_id).unwrap().transcript());
+    assert!(
+        transcript.contains("https://github.com/yodlpay/yodl-lite/pull/396"),
+        "the PR link that defines the task was lost: {transcript}"
+    );
+    assert!(
+        transcript.contains("Can we do the necessary changes to firehose"),
+        "{transcript}"
     );
 }
