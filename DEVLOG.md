@@ -1530,3 +1530,22 @@ session, 200 rows total, bounded excerpts.
 
 Also this session, on review: the compaction material guard and the
 summary size floor are gone (see above) — the trigger alone decides.
+
+## 2026-08-24 — /btw, the question that leaves no trace
+
+A quick aside over the live session: `/btw which port was it again?`
+sends the untouched transcript with the question appended as the final
+user message — compaction's request shape, and for compaction's two
+reasons: asked last so the model answers it instead of the
+conversation, and byte-identical before it so the provider serves the
+whole session from prompt cache and the aside costs the question
+alone. The answer opens in a scrollable modal; Esc and it never
+existed. Nothing is appended to the log on either side of the
+exchange, which the tests pin by grepping the session file.
+
+It rides the compaction plumbing end to end: queued behind a running
+turn, busy while asking, cancellable, and its completion releases
+messages queued during it — decided *before* the modal opens, because
+a modal blocks the synthetic submit and nothing would be left to let
+the queue go. Verified live: a session taught the word "pineapple"
+answered the aside with it, and the question appears in no JSONL.

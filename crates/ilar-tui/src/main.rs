@@ -240,6 +240,15 @@ fn prepare_prompt(app: &mut App, text: String) -> Option<String> {
         }
         return None;
     }
+    if let Some(("btw", question)) = parse_slash_invocation(&text) {
+        if question.trim().is_empty() {
+            app.input = InputBuffer::from(text.as_str());
+            app.set_notice("usage: /btw <question>", NoticeLevel::Warning);
+        } else {
+            app.aside_requested = Some(question.to_string());
+        }
+        return None;
+    }
     if let Some(("fork", args)) = parse_slash_invocation(&text) {
         if args.is_empty() {
             app.fork_requested = true;
@@ -536,6 +545,10 @@ const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     (
         "sessions",
         "grep every session's content and switch (^G: classic list)",
+    ),
+    (
+        "btw",
+        "ask a quick aside about the session; nothing is recorded",
     ),
 ];
 const MAX_GOAL_ROUNDS: u32 = 25;
@@ -1064,6 +1077,10 @@ enum TurnCompletion {
     Root(Result<TurnOutcome>),
     Routed(Result<ilar::subagent::RouteOutcome>),
     Compaction(Result<ilar::compaction::ManualCompactionOutcome>),
+    Aside {
+        question: String,
+        result: Result<Option<String>>,
+    },
 }
 
 /// `settle`'s effectful edges over tokio and crossterm — see
@@ -1255,6 +1272,36 @@ impl schedule::Runtime for LoopRuntime<'_> {
             )
             .await;
             TurnCompletion::Compaction(result)
+        }));
+    }
+
+    fn start_aside(&mut self, app: &mut App, question: String) {
+        debug_assert!(self.turn_handle.is_none());
+        app.busy = true;
+        app.status = "asking aside".into();
+        app.clear_transient_notice();
+        app.set_activity(Activity::Thinking);
+
+        let token = CancellationToken::new();
+        *self.cancel = Some(token.clone());
+        let resolver = self.resolver.clone();
+        let store = self.store.clone();
+        let session_id = self.session_id.to_string();
+        let system_prompt = self.system_prompt.to_string();
+        let registry = self.registry.clone();
+        *self.turn_handle = Some(tokio::spawn(async move {
+            let tools = registry.definitions();
+            let result = ilar::aside::ask(
+                resolver.as_ref(),
+                &store,
+                &session_id,
+                Some(&system_prompt),
+                &tools,
+                &question,
+                &token,
+            )
+            .await;
+            TurnCompletion::Aside { question, result }
         }));
     }
 
@@ -1789,6 +1836,9 @@ async fn run_app(
                 Ok(TurnCompletion::Root(result)) => schedule::Completion::Root(result),
                 Ok(TurnCompletion::Routed(result)) => schedule::Completion::Routed(result),
                 Ok(TurnCompletion::Compaction(result)) => schedule::Completion::Compaction(result),
+                Ok(TurnCompletion::Aside { question, result }) => {
+                    schedule::Completion::Aside { question, result }
+                }
                 Err(error) => schedule::Completion::Crashed(error.to_string()),
             });
             // Name the session once it has something to be named after.
@@ -2066,6 +2116,28 @@ async fn run_app(
                             | (KeyCode::Char('t'), true) => {
                                 app.todos_visible = false;
                                 app.todos_scroll = 0;
+                            }
+                            _ => {}
+                        },
+                        Modal::Aside => match (code, control) {
+                            (KeyCode::Up, _) => {
+                                let aside = app.aside.as_mut().unwrap();
+                                aside.scroll = aside.scroll.saturating_sub(1);
+                            }
+                            (KeyCode::Down, _) => {
+                                let aside = app.aside.as_mut().unwrap();
+                                aside.scroll = aside.scroll.saturating_add(1);
+                            }
+                            (KeyCode::PageUp, _) => {
+                                let aside = app.aside.as_mut().unwrap();
+                                aside.scroll = aside.scroll.saturating_sub(10);
+                            }
+                            (KeyCode::PageDown, _) => {
+                                let aside = app.aside.as_mut().unwrap();
+                                aside.scroll = aside.scroll.saturating_add(10);
+                            }
+                            (KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter, false) => {
+                                app.aside = None;
                             }
                             _ => {}
                         },

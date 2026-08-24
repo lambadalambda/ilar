@@ -239,10 +239,18 @@ pub(crate) fn after_turn(
 /// one way while believing it decided another.
 pub(crate) fn submit(state: &LoopState, busy: bool, text: String) -> Vec<Intent> {
     // Maintenance commands must never become steering text for the model.
-    if let Some((name @ ("compact" | "rewind" | "fork" | "sessions"), args)) =
+    if let Some((name @ ("compact" | "rewind" | "fork" | "sessions" | "btw"), args)) =
         crate::parse_slash_invocation(&text)
     {
-        if !args.is_empty() {
+        // /btw is the one that *takes* text; the rest refuse it.
+        if name == "btw" {
+            if args.trim().is_empty() {
+                return vec![Intent::Notice(
+                    "usage: /btw <question>".into(),
+                    NoticeLevel::Warning,
+                )];
+            }
+        } else if !args.is_empty() {
             return vec![Intent::Notice(
                 format!("usage: /{name}"),
                 NoticeLevel::Warning,

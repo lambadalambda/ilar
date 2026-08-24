@@ -24,12 +24,12 @@ use crate::diff;
 use crate::input::slash_candidates;
 use crate::input::{InputBuffer, input_accepts_keys};
 use crate::modals::{
-    CommandPalette, LinkPicker, Modal, ModelPicker, PaletteAction, PaletteCommand, PendingAction,
-    PendingItem, PendingManager, SessionPicker, SessionSearch, SkillPicker, ThemePicker,
-    ThemePickerAction, TurnPicker, VariantPicker, palette_items, render_command_palette,
-    render_help, render_link_picker, render_model_picker, render_pending_manager,
-    render_session_picker, render_session_search, render_skill_picker, render_theme_picker,
-    render_todos, render_turn_picker, render_variant_picker,
+    AsideModal, CommandPalette, LinkPicker, Modal, ModelPicker, PaletteAction, PaletteCommand,
+    PendingAction, PendingItem, PendingManager, SessionPicker, SessionSearch, SkillPicker,
+    ThemePicker, ThemePickerAction, TurnPicker, VariantPicker, palette_items, render_aside,
+    render_command_palette, render_help, render_link_picker, render_model_picker,
+    render_pending_manager, render_session_picker, render_session_search, render_skill_picker,
+    render_theme_picker, render_todos, render_turn_picker, render_variant_picker,
 };
 use crate::questions::QuestionModal;
 use crate::selection::{
@@ -139,6 +139,10 @@ pub(crate) struct App {
     pub(crate) agents_view: Vec<AgentRow>,
     /// Idle-session compaction waiting for the scheduler's operation slot.
     pub(crate) compact_requested: bool,
+    /// `/btw` question waiting for an idle moment; consumed by settle.
+    pub(crate) aside_requested: Option<String>,
+    /// The answered aside, displayed until dismissed.
+    pub(crate) aside: Option<AsideModal>,
     pub(crate) search_active: bool,
     pub(crate) search_query: String,
     search_matches: Vec<usize>,
@@ -246,6 +250,8 @@ impl App {
             services_view: Vec::new(),
             agents_view: Vec::new(),
             compact_requested: false,
+            aside_requested: None,
+            aside: None,
             search_active: false,
             search_query: String::new(),
             search_matches: Vec::new(),
@@ -319,6 +325,8 @@ impl App {
             Some(Modal::Help)
         } else if self.todos_visible {
             Some(Modal::Todos)
+        } else if self.aside.is_some() {
+            Some(Modal::Aside)
         } else if self.theme_picker.is_some() {
             Some(Modal::ThemePicker)
         } else if self.skill_picker.is_some() {
@@ -484,6 +492,10 @@ impl App {
             Some(Modal::Todos) => {
                 self.todos_scroll = self.todos_scroll.saturating_add_signed(rows);
             }
+            Some(Modal::Aside) => {
+                let aside = self.aside.as_mut().unwrap();
+                aside.scroll = aside.scroll.saturating_add_signed(rows);
+            }
             // The pending manager is a handful of rows; search leaves the
             // wheel to the transcript so results stay browsable.
             Some(Modal::Question) | Some(Modal::PendingManager) | Some(Modal::Search) | None => {
@@ -531,7 +543,7 @@ impl App {
                     manager.selected = index;
                     manager.armed = None;
                 }
-                Modal::Question | Modal::Help | Modal::Todos | Modal::Search => {}
+                Modal::Question | Modal::Help | Modal::Todos | Modal::Aside | Modal::Search => {}
             }
         }
         true
@@ -2416,6 +2428,10 @@ impl App {
                 render_todos(frame, &todos, self.todos_scroll);
                 None
             }
+            Some(Modal::Aside) => {
+                render_aside(frame, self.aside.as_ref().expect("aside modal"));
+                None
+            }
             Some(Modal::ThemePicker) => Some(render_theme_picker(
                 frame,
                 self.theme_picker.as_ref().expect("theme picker"),
@@ -3376,12 +3392,13 @@ mod tests {
         ];
         // All candidates on bare slash, fuzzy-filtered as the name grows.
         let all = slash_candidates("/", &skills);
-        assert_eq!(all.len(), 7);
+        assert_eq!(all.len(), 8);
         assert!(all.iter().any(|(name, _)| name == "goal"));
         assert!(all.iter().any(|(name, _)| name == "compact"));
         assert!(all.iter().any(|(name, _)| name == "rewind"));
         assert!(all.iter().any(|(name, _)| name == "fork"));
         assert!(all.iter().any(|(name, _)| name == "sessions"));
+        assert!(all.iter().any(|(name, _)| name == "btw"));
         let filtered = slash_candidates("/go", &skills);
         assert_eq!(
             filtered.first().map(|(name, _)| name.as_str()),

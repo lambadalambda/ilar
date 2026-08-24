@@ -79,7 +79,9 @@ pub async fn ask(
                 ..
             } => break,
             ProviderEvent::TurnComplete { stop_reason, .. } => {
-                anyhow::bail!("the aside tried to {stop_reason:?} instead of answering (tool use is disabled here)")
+                anyhow::bail!(
+                    "the aside tried to {stop_reason:?} instead of answering (tool use is disabled here)"
+                )
             }
             ProviderEvent::Error(error) | ProviderEvent::RetryableError(error) => {
                 anyhow::bail!("aside call failed: {error}")

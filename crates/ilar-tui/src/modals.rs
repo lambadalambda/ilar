@@ -200,6 +200,7 @@ pub(crate) enum Modal {
     PendingManager,
     Help,
     Todos,
+    Aside,
     ThemePicker,
     SkillPicker,
     SessionPicker,
@@ -547,6 +548,7 @@ static HELP_SECTIONS: &[HelpSection] = &[
                 "^G in that search",
                 "the classic list (filter, delete, fork)"
             ),
+            binding!("/btw <question>", "quick aside; answered, never recorded"),
             binding!("palette: Session usage", "token and cost totals"),
             binding!("/rewind", "pick a turn: Enter ×2 rewinds chat + tree"),
             binding!("^Y in that picker", "fork at the turn instead (keeps both)"),
@@ -736,6 +738,43 @@ pub(crate) fn render_todos(frame: &mut Frame, list: &ilar::todo::TodoList, scrol
     };
     let lines = todo_overlay_lines(list, inner.width as usize);
     let start = scroll.min(lines.len().saturating_sub(inner.height as usize));
+    let visible = lines
+        .into_iter()
+        .skip(start)
+        .take(inner.height as usize)
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(visible), inner);
+}
+
+/// A `/btw` exchange: read it, close it. Neither half is part of the
+/// session, so the modal is the only place it ever exists.
+pub(crate) struct AsideModal {
+    pub(crate) question: String,
+    pub(crate) answer: String,
+    pub(crate) scroll: usize,
+}
+
+pub(crate) fn render_aside(frame: &mut Frame, aside: &AsideModal) {
+    let area = centered_rect(frame.area(), 90, 28);
+    let Some(inner) = modal_frame(
+        frame,
+        area,
+        " btw ",
+        theme::MARKUP,
+        " ↑↓ scroll · Esc close ",
+    ) else {
+        return;
+    };
+    let width = inner.width as usize;
+    let mut lines: Vec<Line> = crate::text::wrap_styled_line(
+        Line::styled(format!("> {}", aside.question), Style::default().fg(MUTED)),
+        width,
+    );
+    lines.push(Line::raw(""));
+    lines.extend(crate::markdown::render(&aside.answer, width));
+    let start = aside
+        .scroll
+        .min(lines.len().saturating_sub(inner.height as usize));
     let visible = lines
         .into_iter()
         .skip(start)
@@ -3484,6 +3523,35 @@ mod tests {
             !screen.contains("context text"),
             "two unusable panes on a narrow terminal: {screen}"
         );
+    }
+
+    #[test]
+    fn the_aside_modal_shows_question_then_answer_and_scrolls() {
+        let answer = (0..40)
+            .map(|index| format!("answer line {index}"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let mut aside = AsideModal {
+            question: "which port was it?".into(),
+            answer,
+            scroll: 0,
+        };
+
+        let (screen, _) = draw_modal(100, 30, |frame| {
+            render_aside(frame, &aside);
+            ModalHit::default()
+        });
+        assert!(screen.contains(" btw "), "{screen}");
+        assert!(screen.contains("> which port was it?"), "{screen}");
+        assert!(screen.contains("answer line 0"), "{screen}");
+        assert!(!screen.contains("answer line 39"), "{screen}");
+
+        aside.scroll = 1_000; // clamped to the tail, not past it
+        let (screen, _) = draw_modal(100, 30, |frame| {
+            render_aside(frame, &aside);
+            ModalHit::default()
+        });
+        assert!(screen.contains("answer line 39"), "{screen}");
     }
 
     #[test]
