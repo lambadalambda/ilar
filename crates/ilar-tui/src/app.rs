@@ -1935,6 +1935,48 @@ impl App {
         ])
     }
 
+    /// One row per message the model has not seen yet — steers first,
+    /// since they deliver at the next step, then the turn-end queue —
+    /// each stating when it will be sent. The count in the input title
+    /// says *how many* are waiting; this strip says *what*.
+    pub(crate) fn pending_strip_lines(&self, width: u16) -> Vec<Line<'static>> {
+        /// Rows before the strip collapses into a "+N more" count.
+        const SHOWN: usize = 4;
+        let entries: Vec<(&str, &String)> = self
+            .pending_steers
+            .iter()
+            .map(|text| ("steering · next step", text))
+            .chain(
+                self.queued_messages
+                    .iter()
+                    .map(|text| ("queued · when the turn ends", text)),
+            )
+            .collect();
+        if entries.is_empty() {
+            return Vec::new();
+        }
+        let mut lines = Vec::new();
+        for (label, text) in entries.iter().take(SHOWN) {
+            let lead = format!(" ↳ {label}: ");
+            let body = truncate_display(
+                text,
+                (width as usize).saturating_sub(UnicodeWidthStr::width(lead.as_str())),
+                Truncation::Right,
+            );
+            lines.push(Line::from(vec![
+                Span::styled(lead, Style::default().fg(MUTED)),
+                Span::styled(body, Style::default().fg(theme::USER)),
+            ]));
+        }
+        if entries.len() > SHOWN {
+            lines.push(Line::styled(
+                format!("   +{} more waiting", entries.len() - SHOWN),
+                Style::default().fg(MUTED),
+            ));
+        }
+        lines
+    }
+
     pub(crate) fn render(&mut self, frame: &mut Frame) {
         let input_width = frame.area().width.saturating_sub(2);
         let desired_input_height = self
@@ -1943,12 +1985,22 @@ impl App {
             .saturating_add(2)
             .min(u16::MAX as usize) as u16;
         let input_height = desired_input_height.min(frame.area().height.saturating_sub(4).max(3));
+        let mut pending_lines = self.pending_strip_lines(frame.area().width);
+        // The strip yields to the panes it sits between: on a cramped
+        // terminal the transcript and input win.
+        pending_lines
+            .truncate(frame.area().height.saturating_sub(input_height + 6).min(5) as usize);
         let chunks = Layout::vertical([
             Constraint::Min(3),
             Constraint::Length(1),
+            Constraint::Length(pending_lines.len() as u16),
             Constraint::Length(input_height),
         ])
         .split(frame.area());
+        let (pending_area, input_chunk) = (chunks[2], chunks[3]);
+        if !pending_lines.is_empty() {
+            frame.render_widget(Paragraph::new(pending_lines), pending_area);
+        }
 
         let content_areas = content_areas(chunks[0]);
         let transcript_area = content_areas.transcript;
@@ -2276,7 +2328,7 @@ impl App {
             } else {
                 theme::panel_border()
             });
-        let input_area = input_block.inner(chunks[2]);
+        let input_area = input_block.inner(input_chunk);
         let input_view = self
             .input
             .multiline_view(input_area.width, input_area.height);
@@ -2311,7 +2363,7 @@ impl App {
                 theme::SECONDARY
             }),
         ));
-        let input_help = if chunks[2].width >= 48 {
+        let input_help = if input_chunk.width >= 48 {
             " Enter send · Shift-Enter/Ctrl-J newline "
         } else {
             " Enter send "
@@ -2322,19 +2374,19 @@ impl App {
         let input = Paragraph::new(input_lines)
             .style(Style::default().fg(theme::PRIMARY))
             .block(input_block);
-        frame.render_widget(input, chunks[2]);
+        frame.render_widget(input, input_chunk);
 
         // Inline slash-completion popup anchored above the input.
         let candidates = slash_candidates(self.input.text(), &self.slash_inventory());
         if !candidates.is_empty() && !self.has_modal() {
             let rows = candidates.len().min(6) as u16;
             let height = rows + 2;
-            let width = chunks[2].width.clamp(20, 64);
+            let width = input_chunk.width.clamp(20, 64);
             let popup = Rect::new(
-                chunks[2].x,
-                chunks[2].y.saturating_sub(height),
+                input_chunk.x,
+                input_chunk.y.saturating_sub(height),
                 width,
-                height.min(chunks[2].y),
+                height.min(input_chunk.y),
             );
             if popup.height > 2 {
                 frame.render_widget(Clear, popup);
@@ -4288,6 +4340,79 @@ mod tests {
         assert!(screen.contains("Carbon"), "{screen}");
         assert!(screen.contains("save"), "{screen}");
         assert!(screen.contains("undo"), "{screen}");
+    }
+
+    #[test]
+    fn pending_messages_are_listed_with_their_fates() {
+        let mut app = App::new();
+        assert!(app.pending_strip_lines(80).is_empty());
+
+        app.pending_steers = vec!["go left".into(), "no wait, right".into()];
+        app.queued_messages = vec!["and then stop".into()];
+        let lines = app.pending_strip_lines(80);
+        let text = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(lines.len(), 3, "{text}");
+        // Steers first — they deliver sooner — each with its fate.
+        assert!(text.contains("steering"), "{text}");
+        assert!(text.contains("go left"), "{text}");
+        assert!(text.contains("no wait, right"), "{text}");
+        assert!(text.contains("queued"), "{text}");
+        assert!(text.contains("and then stop"), "{text}");
+        let steer_at = text.find("go left").unwrap();
+        let queued_at = text.find("and then stop").unwrap();
+        assert!(steer_at < queued_at, "queued shown before steering: {text}");
+    }
+
+    #[test]
+    fn the_pending_strip_caps_and_counts_the_rest() {
+        let mut app = App::new();
+        app.pending_steers = (0..6).map(|index| format!("steer {index}")).collect();
+        let lines = app.pending_strip_lines(80);
+        assert_eq!(lines.len(), 5);
+        let tail = lines
+            .last()
+            .unwrap()
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(tail.contains("+2 more"), "{tail}");
+    }
+
+    #[test]
+    fn pending_steers_show_above_the_input() {
+        let backend = ratatui::backend::TestBackend::new(80, 16);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.busy = true;
+        app.pending_steers = vec!["use the staging config instead".into()];
+
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let screen = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            screen.contains("use the staging config instead"),
+            "{screen}"
+        );
+        assert!(screen.contains("steering"), "{screen}");
     }
 
     #[test]

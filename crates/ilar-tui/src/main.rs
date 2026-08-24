@@ -430,11 +430,9 @@ fn apply_intent(
             // must not be lost with it.
             match steer {
                 Some(tx) if tx.send(text.clone()).is_ok() => {
+                    // No notice: the pending strip above the input now
+                    // shows the message itself, with its fate.
                     app.pending_steers.push(text);
-                    app.set_notice(
-                        "steering — reaches the model at the next step",
-                        NoticeLevel::Info,
-                    );
                     None
                 }
                 _ => apply_intent(app, Intent::Queue(text), steer),
@@ -442,13 +440,6 @@ fn apply_intent(
         }
         Intent::Queue(text) => {
             app.queued_messages.push(text);
-            app.set_notice(
-                format!(
-                    "queued ({} waiting) — sends when the turn completes",
-                    app.queued_messages.len()
-                ),
-                NoticeLevel::Info,
-            );
             None
         }
         Intent::PastePalette(text) => {
