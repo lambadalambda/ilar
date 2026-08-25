@@ -98,10 +98,23 @@ pub(crate) fn restored_session_view(session: &ilar::session::SessionReader) -> R
     restored_session_invocation_view(session, None)
 }
 
+/// Click-target id for a restored thought or note. Nested subagent lines
+/// get none: like the live path, they are previews, not expandable — and
+/// the click handler only ever scans top-level lines, so an id down here
+/// would toggle an unrelated line that happens to share it.
+fn restored_line_id(nested: bool, prefix: &str, index: usize) -> String {
+    if nested {
+        String::new()
+    } else {
+        format!("{prefix}:restored:{index}")
+    }
+}
+
 fn restored_session_invocation_view(
     session: &ilar::session::SessionReader,
     parent_tool_call_id: Option<&str>,
 ) -> RestoredSessionView {
+    let nested = parent_tool_call_id.is_some();
     let all_events = session.events();
     let events = match parent_tool_call_id {
         Some(parent_tool_call_id) => {
@@ -139,7 +152,7 @@ fn restored_session_invocation_view(
     let mut cut = 0usize;
     let mut summary = None;
     for (index, event) in events.iter().enumerate() {
-        if parent_tool_call_id.is_some() {
+        if nested {
             continue;
         }
         if let ilar::session::SessionEvent::Compaction {
@@ -185,13 +198,13 @@ fn restored_session_invocation_view(
             ilar::session::SessionEvent::UserMessage { text, images, .. } => {
                 match task_notification_display(text) {
                     Some(text) => lines.push(Line_::Task {
-                        id: format!("note:restored:{}", lines.len()),
+                        id: restored_line_id(nested, "note", lines.len()),
                         text,
                         expanded: false,
                     }),
                     None => match tool_notification_display(text) {
                         Some(text) => lines.push(Line_::Job {
-                            id: format!("note:restored:{}", lines.len()),
+                            id: restored_line_id(nested, "note", lines.len()),
                             text,
                             expanded: false,
                         }),
@@ -229,7 +242,7 @@ fn restored_session_invocation_view(
                             completed: true,
                         } => {
                             lines.push(Line_::Thought {
-                                id: format!("thought:restored:{}", lines.len()),
+                                id: restored_line_id(nested, "thought", lines.len()),
                                 text: text.clone(),
                                 complete: true,
                                 expanded: false,
@@ -794,5 +807,181 @@ mod tests {
                 .iter()
                 .any(|line| matches!(line, Line_::Assistant(text) if text == "Later answer"))
         }));
+    }
+
+    /// Click-target id of an expandable line, if it is one.
+    fn expandable_id(line: &Line_) -> Option<&str> {
+        match line {
+            Line_::Thought { id, .. } | Line_::Task { id, .. } | Line_::Job { id, .. } => {
+                Some(id.as_str())
+            }
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn restored_nested_thoughts_are_not_click_targets() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(directory.path().join("sessions"));
+        let parent_id = new_id();
+        let child_id = new_id();
+        let mut child = store
+            .create(SessionMeta {
+                session_id: child_id.clone(),
+                parent_id: Some(parent_id.clone()),
+                agent: "explore".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+            })
+            .unwrap();
+        child
+            .append(ilar::session::SessionEvent::SubagentInvocation {
+                id: new_id(),
+                parent_tool_call_id: "task-nested".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        child
+            .append(ilar::session::SessionEvent::UserMessage {
+                id: new_id(),
+                text: "Inspect rendering".into(),
+                images: Vec::new(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        child
+            .append(ilar::session::SessionEvent::AssistantMessage {
+                id: new_id(),
+                model: "zai/glm-4.7".into(),
+                content: vec![
+                    ilar::session::ContentBlock::ReasoningSummary {
+                        text: "Nested reasoning".into(),
+                        completed: true,
+                    },
+                    ilar::session::ContentBlock::Text {
+                        text: "Nested restored answer".into(),
+                    },
+                ],
+                usage: Default::default(),
+                stop_reason: "end_turn".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        child
+            .append(ilar::session::SessionEvent::UserMessage {
+                id: new_id(),
+                text: "<tool-notification>\nBackground job build finished.\n</tool-notification>"
+                    .into(),
+                images: Vec::new(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        drop(child);
+
+        let mut parent = store
+            .create(SessionMeta {
+                session_id: parent_id.clone(),
+                parent_id: None,
+                agent: "build".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+            })
+            .unwrap();
+        parent
+            .append(ilar::session::SessionEvent::AssistantMessage {
+                id: new_id(),
+                model: "zai/glm-4.7".into(),
+                content: vec![
+                    ilar::session::ContentBlock::ReasoningSummary {
+                        text: "Top-level reasoning".into(),
+                        completed: true,
+                    },
+                    ilar::session::ContentBlock::ToolCall {
+                        id: "task-nested".into(),
+                        name: "task".into(),
+                        input: serde_json::json!({
+                            "description": "Inspect rendering",
+                            "subagent_type": "explore"
+                        }),
+                        item_id: None,
+                    },
+                ],
+                usage: Default::default(),
+                stop_reason: "tool_use".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        parent
+            .append(ilar::session::SessionEvent::ToolResult {
+                id: new_id(),
+                tool_use_id: "task-nested".into(),
+                content: "Nested restored answer".into(),
+                is_error: false,
+                child_session_id: Some(child_id),
+                state: None,
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        drop(parent);
+
+        let restored = restored_session_view_with_store(&store.load(&parent_id).unwrap(), &store);
+        let Some(Line_::Tool { child_lines, .. }) = restored
+            .lines
+            .iter()
+            .find(|line| matches!(line, Line_::Tool { .. }))
+        else {
+            panic!("expected a restored agent tool: {:?}", restored.lines);
+        };
+        let nested_ids: Vec<&str> = child_lines.iter().filter_map(expandable_id).collect();
+        assert_eq!(
+            nested_ids.len(),
+            2,
+            "the child timeline keeps its thought and its job note: {child_lines:?}"
+        );
+        assert!(
+            nested_ids.iter().all(|id| id.is_empty()),
+            "nested restored rows are previews, not click targets: {nested_ids:?}"
+        );
+
+        // Top level keeps working, unique ids: the click handler scans
+        // only these, so each one must match exactly one line.
+        let top_ids: Vec<&str> = restored.lines.iter().filter_map(expandable_id).collect();
+        assert_eq!(top_ids.len(), 1, "{:?}", restored.lines);
+        for id in &top_ids {
+            assert!(!id.is_empty());
+            assert_eq!(
+                restored
+                    .lines
+                    .iter()
+                    .filter(|line| expandable_id(line) == Some(*id))
+                    .count(),
+                1,
+                "id {id} must toggle only itself"
+            );
+        }
+
+        // Rendered, an expanded agent row offers no nested thought target.
+        let mut lines = restored.lines.clone();
+        for line in &mut lines {
+            if let Line_::Tool { expanded, .. } = line {
+                *expanded = true;
+            }
+        }
+        let groups = std::collections::HashSet::new();
+        let now = std::time::Instant::now();
+        let targets: Vec<String> = crate::transcript::transcript_entries(&lines, &groups)
+            .iter()
+            .flat_map(|entry| {
+                crate::transcript::transcript_entry_rows(entry, &groups, 100, now, now, false)
+            })
+            .filter_map(|row| match row.target {
+                Some(crate::transcript::TranscriptHitTarget::Thought(id)) => Some(id),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            targets.iter().all(|id| top_ids.contains(&id.as_str())),
+            "only top-level thoughts are clickable: {targets:?}"
+        );
     }
 }
