@@ -28,3 +28,12 @@ character-identical.
 ## Milestone
 
 12 — Health sweep
+
+## Outcome
+
+`provider/mapper.rs`: `MapperCore` (terminal flag + tool-call
+ledger + per-flavor labels) now backs all three mappers for the
+five shared behaviors; the refusal/tool-call rule holds on the zai
+flavors too (deliberate fix, tested). One `merge_usage` reconciled
+to the union of fields (zai gains cache_write_tokens); one
+`required_str`. Wire formats untouched. (eb0f4ef)

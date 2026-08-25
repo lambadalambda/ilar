@@ -25,8 +25,58 @@ text-only on the wire.
 
 - This is the enabler for "spawn a vision subagent to look at this
   screenshot" — the workflow the terranigma session wanted.
-- Substantial: touches both providers' wire formats, the store,
-  and the TUI. Needs its own design pass before implementation.
+
+## Design (verified 2026-08-25, live probes on all three routes)
+
+Wire shapes — all three providers carry tool-result images natively,
+no synthetic-user-message fallback anywhere:
+
+- OpenAI Responses (verified on the ChatGPT/Codex backend; public
+  endpoint assumed identical): `function_call_output.output` becomes
+  an array `[{"type":"input_text",...},{"type":"input_image",
+  "image_url":"data:..."}]`. Text first.
+- zai OpenAI flavor: `role:"tool"` content array
+  `[{"type":"text",...},{"type":"image_url","image_url":{"url":
+  "data:..."}}]`. Text first.
+- zai Anthropic flavor: `tool_result.content` array with the image
+  block FIRST, then text — text-first was blind in 7 of 8 probe
+  samples on glm-5v-turbo. This ordering asymmetry is load-bearing;
+  the wire test must cite it. (4.6v/4.5v are blind on this flavor
+  entirely — see zai-anthropic-flavor-is-blind.)
+
+Rules: text-only results keep today's plain-string form on every arm
+(no cached prefix moves, old sessions byte-identical); non-vision
+models get the existing `[image omitted]` gap, gated per request so
+mid-session model switches degrade gracefully; images never upscale
+and never shrink below a sane floor (a 4x4 probe image was invisible
+to the model, 64x64 was read perfectly).
+
+Session shape: `ToolResult` (event + content block) gains
+serde-defaulted `images: Vec<ImageContent>` like `UserMessage`;
+`transcript_of` forwards them; compaction counts base64 length (the
+highest-value line — screenshots must trigger compaction on
+schedule); recall keeps skipping image payloads; `settled()` and
+replay/fork/rewind unaffected. `ToolOutput::with_images` enforces a
+5 MiB decoded per-result cap, dropping over-cap images with a note.
+
+Slices (each independently committable):
+- S1 `image.rs` in core: move downscale/encode/sniff pipeline out of
+  ilar-tui app.rs; `png` dependency moves to core.
+- S2 session shape (model/event/store/compaction + mechanical
+  construction sites).
+- S3 providers (needs S2): the three wire shapes + ordering tests +
+  plain-string regression + named-gap test.
+- S4 tools (needs S2): `ToolOutput::with_images` + cap;
+  `ToolContext::vision` set in run_turn from `supports_vision`.
+- S5 read (needs S1+S4): image file + vision session → description
+  ("the image itself follows") + downscaled image; every failure
+  degrades to today's description.
+- S6 TUI+docs (needs S2+S4): one `image::markers` helper feeding the
+  live ToolFinished path, session_view replay, and
+  user_text_with_images; docs/interface.md + agents-and-skills.md.
+
+Open: public-Responses parity unprobed (assumed); repeated reads of
+the same image are not deduplicated (defer until it bites).
 
 ## Milestone
 

@@ -30,3 +30,12 @@ exceeds max length", killing the subagent.
 ## Milestone
 
 12 — Health sweep
+
+## Outcome
+
+`tools/binary.rs` sniffs the first 8 KiB: image magic first (PNG
+dimensions from IHDR), then NUL / invalid-UTF-8 / >5% control
+density with a 4-control floor; ESC excluded so ANSI logs stay
+text. read returns a one-line description with a no-retry hint
+instead of the bytes — the 113k-token PNG dump from the terranigma
+session becomes ~30 tokens. (35afa82)

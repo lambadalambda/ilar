@@ -31,3 +31,12 @@ itself.
 ## Milestone
 
 12 — Health sweep
+
+## Outcome
+
+One `is_unfilled` predicate ("null"/blank → absent) wired via
+serde onto task_id/model/reasoning and the workspace object;
+required fields untouched. Variant errors now name their source —
+"from the task's reasoning input" vs "inherited from parent" — and
+list the model's valid variants (or say it takes none / is not
+cataloged). (97f5d92)

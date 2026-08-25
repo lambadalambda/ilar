@@ -50,21 +50,14 @@
 
 Refactors:
 
-- [ ] [Nine pickers, one skeleton](issues/nine-pickers-one-skeleton.md)
 - [ ] [Split app.rs](issues/split-app-rs.md)
-- [ ] [One SSE mapper core](issues/one-sse-mapper-core.md)
-- [ ] [One turn-spawn ritual](issues/one-turn-spawn-ritual.md)
-- [ ] [Subagent paths share their plumbing](issues/subagent-paths-share-their-plumbing.md)
 - [ ] [The render cache clones the world](issues/the-render-cache-clones-the-world.md)
 - [ ] [One truncation helper](issues/one-truncation-helper.md)
-- [ ] [Extract the replay index](issues/extract-the-replay-index.md)
 - [ ] [Single-source the catalogs](issues/single-source-the-catalogs.md)
 - [ ] [Sweep cleanups](issues/sweep-cleanups.md)
 
 Follow-ups:
 
 - [ ] [Resume leads with this directory's last session](issues/resume-leads-with-this-directorys-last-session.md)
-- [ ] [Reading binary files poisons the context](issues/reading-binary-files-poisons-the-context.md)
-- [ ] [Tolerate arguments before the tool name](issues/tolerate-arguments-before-the-tool-name.md)
-- [ ] [Task inputs survive model quirks](issues/task-inputs-survive-model-quirks.md)
 - [ ] [Tool results can carry images](issues/tool-results-can-carry-images.md)
+- [ ] [The zai Anthropic flavor is blind on 4.6v/4.5v](issues/zai-anthropic-flavor-is-blind.md)

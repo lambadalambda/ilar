@@ -32,3 +32,13 @@ numbers after any rewind.
 ## Milestone
 
 12 — Health sweep
+
+## Outcome
+
+Merkle index + checkpoint machinery moved verbatim to
+`session/replay_index.rs` (448 lines); unguarded
+`SessionStore::rewind` deleted with its nine tests ported to
+`rewind_session`; checkpoint `physical_line_count` now counts real
+file lines (REPLAY_INDEX_VERSION 2→3 so stale indexes self-heal),
+pinned by a red test proving the old off-by-three. store.rs
+1975→1695. (f9fd8a6)

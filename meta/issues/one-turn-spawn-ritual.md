@@ -26,3 +26,12 @@ block.
 ## Milestone
 
 12 — Health sweep
+
+## Outcome
+
+`spawn_root_turn(app, slots, deps, entry, bell)` with
+`RootTurn::{New,Resume,Answer}` and `Bell::{Ring,Silent}`; all
+three sites share the guard and the model-override adoption — the
+question-answer resume now honors a pending per-turn override
+(deliberate fix, tested). `perform` shrank ~93→9 lines; FakeRuntime
+untouched. (44fcf0f)

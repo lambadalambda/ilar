@@ -27,3 +27,13 @@ real.
 ## Milestone
 
 12 — Health sweep
+
+## Outcome
+
+The staging map buffers pre-name fragments (`StagedCall` with
+early-fragment lengths) and replays them as identical deltas when
+the name lands — the event sequence matches name-first ordering
+exactly. A complete stream that never names the index is a hard
+error from `map`; EOF with buffered fragments retries (a cut
+connection is timing, not malformedness). The captured GLM-4.6V
+chunk round-trips in a test. (2e801ac)

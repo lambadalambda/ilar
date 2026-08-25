@@ -29,3 +29,15 @@ times, the "filter " header three times.
 ## Milestone
 
 12 — Health sweep
+
+## Outcome
+
+A private `Picker` trait plus shared free helpers (fuzzy/term
+filter, row window, filter header, key skeleton, paste with
+QUERY_CAP) — a trait rather than a struct so app.rs/main.rs field
+access survives unchanged; per-picker chords stay ahead of the
+skeleton. Enter on an empty filtered list unified to Stay across
+all nine. Verified with a temporary golden differential harness:
+pre-refactor renderers mounted from HEAD, cell-for-cell buffer
+equality across sizes/queries/states, 30-key action scripts — only
+divergence the deliberate Stay. (bb339e8)

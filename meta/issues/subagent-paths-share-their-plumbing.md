@@ -32,3 +32,15 @@ the split is the direct cause of the duplication.
 ## Milestone
 
 12 — Health sweep
+
+## Outcome
+
+`SubagentSpawner::derived` is the one field-enumeration site;
+`agent_registry`/`agent_system_prompt`/`with_agent_prompt` collapse
+the registry and prompt copies (per-site error precedence
+preserved); the fg/bg run pipeline shares
+`acquire_task_lease`/`TaskOutcome`/`ActivityPublisher`/one
+cancelled-notification helper. Independent review confirmed every
+model-visible string byte-identical; `background_cancel` now a
+child token (equivalent, simpler). Residuals in sweep-cleanups.
+(977ceab)
