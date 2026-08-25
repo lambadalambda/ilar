@@ -69,9 +69,17 @@ only the V-series. Attaching on anything else is refused with a notice
 naming the model, and attachments only ride a *fresh* turn — while a
 turn runs, submit puts your text back and asks you to wait, because
 steering carries text only. Esc discards attachments along with the
-draft. Images are capped at 10 MB; switching a session with images to
-a text-only model replaces them with a named `[image omitted]` gap
-rather than an error.
+draft. Oversized images are downscaled to fit 2048 px on the longest
+edge before anything is stored or sent — providers shrink to that
+before tiling anyway, so a retina screenshot costs a fraction of the
+bytes with nothing lost. A 10 MB cap remains as the backstop.
+Switching a session with images to a text-only model replaces them
+with a named `[image omitted]` gap rather than an error.
+
+Because the image is stored once and replayed byte-identically, it
+becomes part of the provider's cached prefix like any other content —
+follow-up turns read it from the prompt cache instead of re-billing
+it.
 
 ## Asides: `/btw`
 

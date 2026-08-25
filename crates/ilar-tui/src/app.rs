@@ -1585,8 +1585,15 @@ impl App {
             Err(arboard::Error::ContentNotAvailable) => return Ok(None),
             Err(error) => return Err(error).context("reading clipboard image"),
         };
-        let png = encode_png(image.width as u32, image.height as u32, &image.bytes)
-            .context("encoding clipboard image")?;
+        /// Longest edge providers keep before tiling; larger is waste.
+        const MAX_IMAGE_DIM: usize = 2048;
+        let (width, height, pixels) =
+            match downscale_rgba(image.width, image.height, &image.bytes, MAX_IMAGE_DIM) {
+                Some((width, height, pixels)) => (width, height, std::borrow::Cow::from(pixels)),
+                None => (image.width, image.height, image.bytes),
+            };
+        let png =
+            encode_png(width as u32, height as u32, &pixels).context("encoding clipboard image")?;
         Ok(Some(ilar::session::ImageContent::png(&png)))
     }
 
@@ -2820,6 +2827,46 @@ const STREAM_STALL_AFTER: std::time::Duration = std::time::Duration::from_secs(3
 /// forever over work that has already stopped. A shallow sweep is not
 /// enough: the child's own rows are nested inside it, and
 /// `child_running` masks the parent row's state while it is set.
+/// Fit RGBA inside `max_dim` on the longest edge with an area-average
+/// filter; `None` when it already fits. Providers shrink to ~2048px
+/// before tiling anyway, so larger uploads buy nothing but bytes.
+fn downscale_rgba(
+    width: usize,
+    height: usize,
+    rgba: &[u8],
+    max_dim: usize,
+) -> Option<(usize, usize, Vec<u8>)> {
+    let longest = width.max(height);
+    if longest <= max_dim || width == 0 || height == 0 {
+        return None;
+    }
+    let out_width = (width * max_dim / longest).max(1);
+    let out_height = (height * max_dim / longest).max(1);
+    let mut out = Vec::with_capacity(out_width * out_height * 4);
+    for oy in 0..out_height {
+        let y0 = oy * height / out_height;
+        let y1 = ((oy + 1) * height / out_height).max(y0 + 1);
+        for ox in 0..out_width {
+            let x0 = ox * width / out_width;
+            let x1 = ((ox + 1) * width / out_width).max(x0 + 1);
+            let mut sum = [0u64; 4];
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let pixel = (y * width + x) * 4;
+                    for channel in 0..4 {
+                        sum[channel] += u64::from(rgba[pixel + channel]);
+                    }
+                }
+            }
+            let count = ((y1 - y0) * (x1 - x0)) as u64;
+            for channel in sum {
+                out.push((channel / count) as u8);
+            }
+        }
+    }
+    Some((out_width, out_height, out))
+}
+
 /// RGBA8 rows → PNG bytes, for clipboard images headed into a session.
 fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>> {
     let mut out = Vec::new();
@@ -4584,6 +4631,30 @@ mod tests {
             "{:?}",
             app.lines.last()
         );
+    }
+
+    #[test]
+    fn oversized_images_downscale_to_fit_and_small_ones_pass_through() {
+        // Already fits: untouched.
+        assert!(downscale_rgba(200, 100, &[0u8; 200 * 100 * 4], 2048).is_none());
+
+        // Longest edge maps to the cap, aspect preserved.
+        let (width, height, out) =
+            downscale_rgba(4000, 2000, &vec![128u8; 4000 * 2000 * 4], 2048).unwrap();
+        assert_eq!((width, height), (2048, 1024));
+        assert_eq!(out.len(), 2048 * 1024 * 4);
+        // Constant color survives averaging exactly.
+        assert!(out.iter().all(|&byte| byte == 128));
+
+        // Distinct halves average within themselves, not across.
+        let src = [
+            255, 0, 0, 255, 255, 0, 0, 255, // red, red
+            0, 0, 255, 255, 0, 0, 255, 255, // blue, blue
+        ];
+        let (width, height, out) = downscale_rgba(4, 1, &src, 2).unwrap();
+        assert_eq!((width, height), (2, 1));
+        assert_eq!(&out[..4], &[255, 0, 0, 255]);
+        assert_eq!(&out[4..], &[0, 0, 255, 255]);
     }
 
     #[test]
