@@ -877,6 +877,27 @@ fn required_index(value: &serde_json::Value) -> Result<usize, String> {
     usize::try_from(index).map_err(|_| "Anthropic content block index is too large".into())
 }
 
+/// A tool-call index the wire has started addressing, before (and while)
+/// it is a call in the ledger.
+///
+/// Chat-completions promises no order within the dribble: a live GLM-4.6V
+/// stream opened index 0 with an arguments-only chunk and named the call
+/// afterwards. Fragments that arrive that early are held until the name
+/// starts the call, then replay as deltas in arrival order — so the
+/// consumer sees one event sequence whichever order the wire used.
+#[derive(Default)]
+struct StagedCall {
+    id: String,
+    /// Every argument byte this index has sent, replayed or not — what
+    /// the completion parses, and what the size ceiling counts.
+    arguments: String,
+    /// Lengths of the fragments that arrived before the call entered the
+    /// ledger. Nothing else is appended until it does, so they are the
+    /// leading bytes of `arguments`: enough to replay each fragment as
+    /// the delta the wire sent it as.
+    early: Vec<usize>,
+}
+
 /// OpenAI chat-completions event mapping (z.ai paas v4 flavor).
 struct OpenAiMapper {
     /// Terminal state and the tool-call ledger, keyed by the tool-call
@@ -884,10 +905,10 @@ struct OpenAiMapper {
     core: MapperCore,
     usage: Usage,
     stop_reason: Option<StopReason>,
-    /// ledger key -> (id, args buffer). Chat-completions dribbles a
-    /// call's identity in over several chunks, so an index is staged here
-    /// until its name arrives and the call enters the ledger.
-    calls: HashMap<String, (String, String)>,
+    /// ledger key -> staged call. Chat-completions dribbles a call's
+    /// identity in over several chunks, so an index is staged here until
+    /// its name arrives and the call enters the ledger.
+    calls: HashMap<String, StagedCall>,
     /// Reasoning deltas seen since the last block boundary; chat-completions
     /// has no explicit boundary, so reasoning "completes" when content or a
     /// tool call arrives.
@@ -980,17 +1001,17 @@ impl OpenAiMapper {
                         && self
                             .calls
                             .iter()
-                            .any(|(other, (other_id, _))| other != &key && other_id == id)
+                            .any(|(other, staged)| other != &key && staged.id == id)
                     {
                         return Err(format!("duplicate OpenAI-compatible tool id {id:?}"));
                     }
                     let entry = self.calls.entry(key.clone()).or_default();
                     if let Some(id) = incoming_id {
-                        if !entry.0.is_empty() && entry.0 != id {
+                        if !entry.id.is_empty() && entry.id != id {
                             return Err(format!("OpenAI-compatible tool index {index} changed id"));
                         }
-                        if entry.0.is_empty() {
-                            entry.0 = id.into();
+                        if entry.id.is_empty() {
+                            entry.id = id.into();
                         }
                     }
                     if let Some(name) = function["name"].as_str()
@@ -1004,19 +1025,31 @@ impl OpenAiMapper {
                             }
                             Some(_) => {}
                             None => {
-                                if entry.0.is_empty() {
+                                if entry.id.is_empty() {
                                     return Err(
                                         "OpenAI-compatible tool name arrived before id".into()
                                     );
                                 }
                                 // The wire index is the order truncation
                                 // completes the calls in.
-                                self.core.start(key.clone(), index, entry.0.clone(), name);
+                                self.core.start(key.clone(), index, entry.id.clone(), name);
                                 events.push(ProviderEvent::ToolCallStarted {
-                                    id: entry.0.clone(),
+                                    id: entry.id.clone(),
                                     name: name.into(),
                                     item_id: None,
                                 });
+                                // Arguments the wire sent before the name:
+                                // the call exists now, so they stream in
+                                // arrival order, ahead of anything later.
+                                let mut offset = 0;
+                                for length in std::mem::take(&mut entry.early) {
+                                    let end = offset + length;
+                                    events.push(ProviderEvent::ToolCallInputDelta {
+                                        id: entry.id.clone(),
+                                        delta: entry.arguments[offset..end].into(),
+                                    });
+                                    offset = end;
+                                }
                             }
                         }
                     }
@@ -1026,19 +1059,22 @@ impl OpenAiMapper {
                     if let Some(args) = function["arguments"].as_str()
                         && !args.is_empty()
                     {
-                        if entry.0.is_empty() || self.core.call(&key).is_none() {
-                            return Err(
-                                "OpenAI-compatible arguments arrived before tool start".into()
-                            );
-                        }
-                        if entry.1.len().saturating_add(args.len()) > MAX_TOOL_ARGUMENT_BYTES {
+                        if entry.arguments.len().saturating_add(args.len())
+                            > MAX_TOOL_ARGUMENT_BYTES
+                        {
                             return Err("OpenAI-compatible tool arguments exceed size limit".into());
                         }
-                        entry.1.push_str(args);
-                        events.push(ProviderEvent::ToolCallInputDelta {
-                            id: entry.0.clone(),
-                            delta: args.into(),
-                        });
+                        entry.arguments.push_str(args);
+                        if self.core.call(&key).is_none() {
+                            // No name yet, so no call to attach this to:
+                            // it replays as a delta once one arrives.
+                            entry.early.push(args.len());
+                        } else {
+                            events.push(ProviderEvent::ToolCallInputDelta {
+                                id: entry.id.clone(),
+                                delta: args.into(),
+                            });
+                        }
                     }
                 }
             }
@@ -1059,17 +1095,14 @@ impl OpenAiMapper {
                     }
                 };
                 self.stop_reason = Some(stop_reason.clone());
+                // An index the wire staged but never named is not a call
+                // this mapper can complete — checked before the stop
+                // reason, whose "no tool calls" complaint would hide it.
+                if let Some((key, _)) = self.unnamed() {
+                    return Err(Self::unnamed_error(key));
+                }
                 self.core
                     .validate_stop(&stop_reason, stop_reason == StopReason::Refusal)?;
-                // An index the wire staged but never named is not a call
-                // this mapper can complete.
-                if self
-                    .calls
-                    .iter()
-                    .any(|(key, (id, _))| id.is_empty() || !self.core.has_key(key))
-                {
-                    return Err("OpenAI-compatible tool call has empty id or name".into());
-                }
                 // Complete calls: parsed args when the model finished them,
                 // null-input synthesis when truncated mid-arguments (event
                 // contract: every Started call is Completed).
@@ -1080,7 +1113,7 @@ impl OpenAiMapper {
                         let args = self
                             .calls
                             .get(&call.key)
-                            .map(|(_, args)| args.as_str())
+                            .map(|staged| staged.arguments.as_str())
                             .unwrap_or_default();
                         let input = self.core.parse_tool_input(args)?;
                         events.push(ProviderEvent::ToolCallCompleted {
@@ -1120,7 +1153,30 @@ impl OpenAiMapper {
         Ok(events)
     }
 
+    /// The lowest index the wire staged but never named, if any: it sent
+    /// an id, or arguments, or both, and never the name that starts a
+    /// call. Keys are [`block_key`] output, so the parse back to a number
+    /// always succeeds; an unparsable one would just report last.
+    fn unnamed(&self) -> Option<(&String, &StagedCall)> {
+        self.calls
+            .iter()
+            .filter(|(key, _)| !self.core.has_key(key))
+            .min_by_key(|(key, _)| key.parse::<usize>().unwrap_or(usize::MAX))
+    }
+
+    fn unnamed_error(key: &str) -> String {
+        format!("OpenAI-compatible tool index {key} never received a name")
+    }
+
     fn finish(&mut self) -> Option<ProviderEvent> {
+        // Arguments buffered under an index the stream never named, then
+        // EOF: whether a fragment beat the connection drop is timing, not
+        // malformedness — retry like any other cut stream. A *complete*
+        // stream (finish_reason arrived) that never named the index is
+        // the hard error, raised in `map`.
+        if let Some((key, _)) = self.unnamed().filter(|(_, staged)| !staged.early.is_empty()) {
+            return Some(ProviderEvent::RetryableError(Self::unnamed_error(key)));
+        }
         // Stream ended after finish_reason but without a usage chunk: the
         // turn is complete, only its accounting is short.
         if let Some(stop_reason) = self.stop_reason.clone().filter(|_| !self.core.is_completed()) {
@@ -1184,5 +1240,114 @@ mod tests {
         // And without vision, the named gap.
         let wire = anthropic_message(&image_message(), false).unwrap().unwrap();
         assert_eq!(wire["content"][1]["type"], "text");
+    }
+
+    /// One chat-completions stream through the mapper: the wire chunks in
+    /// order, plus whatever the end of the stream synthesizes.
+    fn openai_stream(chunks: &[&str]) -> Result<Vec<ProviderEvent>, String> {
+        let mut mapper = OpenAiMapper::new();
+        let mut events = Vec::new();
+        for chunk in chunks {
+            events.extend(mapper.map(chunk)?);
+        }
+        events.extend(mapper.finish());
+        Ok(events)
+    }
+
+    /// A tool-call index opened by an arguments-only chunk — no id, no
+    /// name — exactly as a live GLM-4.6V stream sent it.
+    const OPEN_ARGS: &str = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"type":"function","function":{"arguments":"{\"path\":"}}]},"finish_reason":null}]}"#;
+    const REST_ARGS: &str = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"type":"function","function":{"arguments":"\"x\"}"}}]},"finish_reason":null}]}"#;
+    const NAME: &str = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read"}}]},"finish_reason":null}]}"#;
+    const NAME_AND_REST: &str = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read","arguments":"\"x\"}"}}]},"finish_reason":null}]}"#;
+    const FINISH: &str = r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#;
+
+    /// Chat-completions dribbles a call's identity in over several chunks
+    /// and promises no order: arguments can arrive before the name that
+    /// starts the call. However the wire splits them, the consumer sees
+    /// the same events in the same order.
+    #[test]
+    fn openai_arguments_before_the_name_stream_like_arguments_after_it() {
+        let expected = vec![
+            ProviderEvent::ToolCallStarted {
+                id: "call_1".into(),
+                name: "read".into(),
+                item_id: None,
+            },
+            ProviderEvent::ToolCallInputDelta {
+                id: "call_1".into(),
+                delta: "{\"path\":".into(),
+            },
+            ProviderEvent::ToolCallInputDelta {
+                id: "call_1".into(),
+                delta: "\"x\"}".into(),
+            },
+            ProviderEvent::ToolCallCompleted {
+                id: "call_1".into(),
+                name: "read".into(),
+                input: serde_json::json!({"path": "x"}),
+            },
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+                usage: Usage::default(),
+            },
+        ];
+
+        // Name first: the ordering the wire usually uses.
+        assert_eq!(
+            openai_stream(&[NAME, OPEN_ARGS, REST_ARGS, FINISH]).unwrap(),
+            expected
+        );
+        // Arguments first, name last: the buffered fragments replay in
+        // arrival order the moment the call starts.
+        assert_eq!(
+            openai_stream(&[OPEN_ARGS, REST_ARGS, NAME, FINISH]).unwrap(),
+            expected
+        );
+        // The captured shape: an arguments-only chunk, then one chunk
+        // carrying the id, the name and the rest of the arguments.
+        assert_eq!(
+            openai_stream(&[OPEN_ARGS, NAME_AND_REST, FINISH]).unwrap(),
+            expected
+        );
+    }
+
+    /// Buffering is not forgiveness: an index that only ever sent
+    /// arguments is malformed, and the diagnostic names it.
+    #[test]
+    fn openai_arguments_that_never_get_a_name_are_an_error() {
+        // The stream ends without a finish reason: a cut connection may
+        // have beaten the naming chunk, so this retries.
+        let events = openai_stream(&[OPEN_ARGS]).unwrap();
+        assert!(
+            matches!(events.as_slice(), [ProviderEvent::RetryableError(error)] if error.contains("index 0")),
+            "{events:?}"
+        );
+        // The stream reaches its finish reason with the index still unnamed.
+        let error = openai_stream(&[OPEN_ARGS, FINISH]).expect_err("never named");
+        assert!(error.contains("index 0"), "{error}");
+
+        // An index that staged nothing but an id is a stream cut short,
+        // not a malformed one: that stays retryable.
+        let id_only = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1"}]}}]}"#;
+        let events = openai_stream(&[id_only]).unwrap();
+        assert!(
+            matches!(events.as_slice(), [ProviderEvent::RetryableError(_)]),
+            "{events:?}"
+        );
+    }
+
+    /// The argument-size ceiling applies to fragments held before the
+    /// name arrives too, or a nameless index would be an unbounded buffer.
+    #[test]
+    fn openai_buffered_arguments_still_respect_the_size_limit() {
+        let chunk = |args: &str| {
+            format!(
+                r#"{{"choices":[{{"delta":{{"tool_calls":[{{"index":0,"function":{{"arguments":"{args}"}}}}]}}}}]}}"#
+            )
+        };
+        let half = "a".repeat(MAX_TOOL_ARGUMENT_BYTES / 2 + 1);
+        let error = openai_stream(&[&chunk(&half), &chunk(&half)]).expect_err("over the limit");
+        assert!(error.contains("exceed size limit"), "{error}");
     }
 }

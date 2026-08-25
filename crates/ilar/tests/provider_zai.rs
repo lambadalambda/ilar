@@ -499,7 +499,7 @@ async fn malformed_openai_compatible_arguments_are_terminal() {
 }
 
 #[tokio::test]
-async fn openai_compatible_arguments_require_a_started_call() {
+async fn openai_compatible_arguments_without_a_name_are_terminal() {
     let body = concat!(
         "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"arguments\":\"{}\"}}]},\"finish_reason\":null}]}\n\n",
         "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{}}\n\n",
@@ -512,8 +512,103 @@ async fn openai_compatible_arguments_require_a_started_call() {
     let events = drain(provider.stream(request()).unwrap()).await;
 
     assert!(
-        matches!(events.last(), Some(ProviderEvent::Error(error)) if error.contains("before tool start")),
+        matches!(events.last(), Some(ProviderEvent::Error(error)) if error.contains("index 0")),
         "{events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, ProviderEvent::TurnComplete { .. }))
+    );
+}
+
+/// A live GLM-4.6V stream opened index 0 with an arguments-only chunk —
+/// no id, no name — and named the call one chunk later. The turn has to
+/// survive that ordering with its events intact.
+#[tokio::test]
+async fn openai_compatible_tolerates_arguments_before_the_tool_name() {
+    let body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"type\":\"function\",\"function\":{\"arguments\":\"{\"}}]},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"\\\"path\\\":\\\"x\\\"}\"}}]},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{}}\n\n",
+    );
+    let provider = ZaiProvider::new(
+        "k".into(),
+        Some(http_server(body.as_bytes().to_vec()).0),
+        Flavor::OpenAI,
+    );
+    let events = drain(provider.stream(request()).unwrap()).await;
+
+    assert_eq!(
+        events,
+        vec![
+            ProviderEvent::ToolCallStarted {
+                id: "call_1".into(),
+                name: "read".into(),
+                item_id: None,
+            },
+            ProviderEvent::ToolCallInputDelta {
+                id: "call_1".into(),
+                delta: "{".into(),
+            },
+            ProviderEvent::ToolCallInputDelta {
+                id: "call_1".into(),
+                delta: "\"path\":\"x\"}".into(),
+            },
+            ProviderEvent::ToolCallCompleted {
+                id: "call_1".into(),
+                name: "read".into(),
+                input: serde_json::json!({"path": "x"}),
+            },
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+                usage: Usage {
+                    input_token_accounting: Some(InputTokenAccounting::ExcludesCached),
+                    ..Usage::default()
+                },
+            },
+        ]
+    );
+}
+
+/// The captured chunk verbatim: a complete `{}` argument object arrives
+/// before the call has any identity at all.
+#[tokio::test]
+async fn openai_compatible_replays_arguments_captured_before_the_call_started() {
+    let body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"type\":\"function\",\"function\":{\"arguments\":\"{}\"}}]},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{}}\n\n",
+    );
+    let provider = ZaiProvider::new(
+        "k".into(),
+        Some(http_server(body.as_bytes().to_vec()).0),
+        Flavor::OpenAI,
+    );
+    let events = drain(provider.stream(request()).unwrap()).await;
+
+    assert_eq!(
+        events[..3],
+        [
+            ProviderEvent::ToolCallStarted {
+                id: "call_1".into(),
+                name: "read".into(),
+                item_id: None,
+            },
+            ProviderEvent::ToolCallInputDelta {
+                id: "call_1".into(),
+                delta: "{}".into(),
+            },
+            ProviderEvent::ToolCallCompleted {
+                id: "call_1".into(),
+                name: "read".into(),
+                input: serde_json::json!({}),
+            },
+        ]
+    );
+    assert_eq!(
+        events.last().and_then(ProviderEvent::stop_reason),
+        Some(StopReason::ToolUse)
     );
 }
 
