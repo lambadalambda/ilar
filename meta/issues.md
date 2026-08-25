@@ -50,7 +50,6 @@
 
 Refactors:
 
-- [ ] [Skip the project instructions](issues/skip-the-project-instructions.md)
 - [ ] [Sweep deferred decisions](issues/sweep-deferred-decisions.md)
 
 Follow-ups:

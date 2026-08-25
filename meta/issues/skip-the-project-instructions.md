@@ -37,3 +37,21 @@ file.
 ## Milestone
 
 12 — Health sweep
+
+## Outcome
+
+`system_prompt_for` returns a `SystemPrompt` whose skip branch never
+even opens the project file (an `is_file` probe only). Both flags
+(`--no-project-instructions` / `--project-instructions`,
+conflicting) on `ilar` and `ilar exec`, over a user-scoped
+`general.project_instructions` default — user-scoped deliberately,
+so an untrusted project's ilar.toml cannot vote itself trusted (a
+project declaring it gets the same startup warning as theme). The
+startup notice names the real file and the real cause. Resume
+honors the current launch (pinned by a three-way resolve test), the
+override applies on every rebuild (picker switches and forks
+included), and subagents inherit the refusal — pinned by
+`a_refused_project_file_never_reaches_a_subagent`. Docs are honest
+that the escape is prompt-level: the model can still `read` the
+file. (The spawner's Include default is recorded in
+sweep-deferred-decisions.)

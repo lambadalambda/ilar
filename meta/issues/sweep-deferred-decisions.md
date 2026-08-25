@@ -24,6 +24,11 @@ closed. Each needs a call, not just work:
   raw text, the TUI caps tab-expanded text — same limit and marker,
   but tab-heavy output can cut at a different character.
 
+- **`SubagentSpawner` project-instructions default**: defaults to
+  `Include`; a future call site that forgets
+  `.with_project_instructions` silently re-includes a refused file.
+  Making it a required constructor argument touches ~20 test sites.
+
 ## Milestone
 
 12 — Health sweep
