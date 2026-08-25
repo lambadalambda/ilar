@@ -221,3 +221,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Remove the zai Anthropic flavor](issues/remove-the-zai-anthropic-flavor.md)
 - [x] [Resume leads with this directory's last session](issues/resume-leads-with-this-directorys-last-session.md)
 - [x] [Tool results can carry images](issues/tool-results-can-carry-images.md)
+- [x] [One truncation helper](issues/one-truncation-helper.md)

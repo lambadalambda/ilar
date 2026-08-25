@@ -51,6 +51,12 @@ verified, and safe to do opportunistically:
   were the only coverage) — add one against the wire body;
   `ContentBlock::Thinking.signature` is now always `None` — keep
   (future native-Anthropic) or drop, decide once.
+- **Post-S6**: the live tool row bounds text with
+  `ilar::agent::bounded_tool_detail`, the restore path with
+  `ilar-tui::text::bounded_detail` — markers now match but the
+  description halves can diverge if the two limits ever differ;
+  unify. Also `ilar::image::format_bytes` and
+  `ilar-tui::text::format_bytes` are now two identical formatters.
 - **Post-S5**: read's `total_bytes` falls back to the sniff-window
   length when `file.metadata()` fails, which would let an
   unstatable oversized file past the 10 MiB pre-decode guard —

@@ -52,7 +52,6 @@ Refactors:
 
 - [ ] [Split app.rs](issues/split-app-rs.md)
 - [ ] [The render cache clones the world](issues/the-render-cache-clones-the-world.md)
-- [ ] [One truncation helper](issues/one-truncation-helper.md)
 - [ ] [Sweep cleanups](issues/sweep-cleanups.md)
 
 Follow-ups:

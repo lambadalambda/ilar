@@ -23,3 +23,15 @@ fresh chance to get the boundary loop wrong.
 ## Milestone
 
 12 — Health sweep
+
+## Outcome
+
+`ilar::text`: one private `floor_boundary` walk (the only
+`is_char_boundary` loop left in the crate, verified by grep) behind
+`truncate_bytes[_ellipsis]`, `truncate_chars[_ellipsis]`, and
+`tail_bytes`/`tail_str`. Eight sites adopted, five local copies
+deleted; the byte/char ellipsis semantics stay deliberately
+distinct (documented in the module header). transcript.rs's two
+tail-cuts genuinely matched and collapsed — their `.unwrap_or(0)`
+fallback was proven dead. The TUI's display-width text.rs is a
+different axis and untouched.
