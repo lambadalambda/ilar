@@ -51,6 +51,12 @@ verified, and safe to do opportunistically:
   were the only coverage) — add one against the wire body;
   `ContentBlock::Thinking.signature` is now always `None` — keep
   (future native-Anthropic) or drop, decide once.
+- **Post-S5**: read's `total_bytes` falls back to the sniff-window
+  length when `file.metadata()` fails, which would let an
+  unstatable oversized file past the 10 MiB pre-decode guard —
+  pre-existing fallback, now load-bearing; make the guard fail
+  closed on metadata errors. The read tool's `description()` string
+  should also mention the vision-session image attachment.
 - **Duplication (new)**: `tools/binary.rs` and `ilar::image` carry
   the same four image magic-number checks (binary.rs returns display
   names, image.rs media types) plus separate PNG IHDR readers —

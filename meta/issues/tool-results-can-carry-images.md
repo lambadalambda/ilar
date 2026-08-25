@@ -79,3 +79,19 @@ the same image are not deduplicated (defer until it bites).
 ## Milestone
 
 12 — Health sweep
+
+## Outcome
+
+Landed across six slices, each red-first: S1 moved the image
+pipeline into `ilar::image` (f9d2b84); S2 gave `ToolResult` a
+serde-defaulted `images` field with compaction counting the base64
+(6281106); S3 emitted both verified wire shapes with plain-string
+regression pins (e8f145b); S4 added `ToolOutput::with_images` (5 MiB
+prefix-drop cap) and per-session `ToolContext::vision` — children
+get their own model's flag (69190f6); S5 made read return the
+downscaled image in vision sessions with graceful degrades
+everywhere (41f6f84); S6 unified live/restored/user markers on one
+core helper and documented the vision-subagent recipe (48c00d9).
+The Anthropic-flavor shape from the original design was mooted by
+the flavor's removal. Vision subagents now work: save a screenshot,
+spawn a task on a V-model, point it at the file.

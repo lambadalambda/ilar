@@ -57,4 +57,3 @@ Refactors:
 
 Follow-ups:
 
-- [ ] [Tool results can carry images](issues/tool-results-can-carry-images.md)
