@@ -1530,7 +1530,8 @@ impl App {
     /// Attach an image to the next fresh turn, or say why not: mid-turn
     /// attachments would ride steering (text-only), and a model without
     /// vision would silently ignore what the user thinks it saw.
-    pub(crate) fn attach_image(&mut self, image: ilar::session::ImageContent) {
+    /// Returns whether it attached, so multi-file drops can summarize.
+    pub(crate) fn attach_image(&mut self, image: ilar::session::ImageContent) -> bool {
         /// Decoded payload cap; providers reject far larger, but a session
         /// line this size is already unpleasant to carry around.
         const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
@@ -1539,14 +1540,14 @@ impl App {
                 "a turn is running — images send with a fresh message; try again when it ends",
                 NoticeLevel::Warning,
             );
-            return;
+            return false;
         }
         if !ilar::model::supports_vision(&self.current_model) {
             self.set_notice(
                 format!("{} cannot view images", self.current_model),
                 NoticeLevel::Warning,
             );
-            return;
+            return false;
         }
         let bytes = image.byte_len();
         if bytes > MAX_IMAGE_BYTES {
@@ -1558,7 +1559,7 @@ impl App {
                 ),
                 NoticeLevel::Warning,
             );
-            return;
+            return false;
         }
         let kind = image
             .media_type
@@ -1573,14 +1574,15 @@ impl App {
             ),
             NoticeLevel::Info,
         );
+        true
     }
 
     /// A dropped image file: sniffed, bounded, attached — or a notice
-    /// saying why not.
-    pub(crate) fn attach_image_file(&mut self, path: &std::path::Path) {
+    /// saying why not. Returns whether it attached.
+    pub(crate) fn attach_image_file(&mut self, path: &std::path::Path) -> bool {
         match std::fs::read(path) {
             Ok(bytes) => match image_content_from_file_bytes(&bytes) {
-                Some(image) => self.attach_image(image),
+                Some(image) => return self.attach_image(image),
                 None => self.set_notice(
                     format!(
                         "{} is not a supported image (png, jpeg, webp, gif)",
@@ -1594,6 +1596,7 @@ impl App {
                 NoticeLevel::Error,
             ),
         }
+        false
     }
 
     /// The clipboard's image, PNG-encoded; `Ok(None)` when it holds none.
@@ -2854,37 +2857,51 @@ const STREAM_STALL_AFTER: std::time::Duration = std::time::Duration::from_secs(3
 /// Longest edge providers keep before tiling; larger is waste.
 const MAX_IMAGE_DIM: usize = 2048;
 
-/// The single image-file path a terminal drop pastes, if that is what
-/// the pasted text is: one line, optionally quoted or with
-/// backslash-escaped spaces, image extension. Anything else is text.
-pub(crate) fn dropped_image_path(text: &str) -> Option<std::path::PathBuf> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() || trimmed.contains('\n') {
-        return None;
-    }
-    let unquoted = trimmed
-        .strip_prefix('\'')
-        .and_then(|rest| rest.strip_suffix('\''))
-        .or_else(|| {
-            trimmed
-                .strip_prefix('"')
-                .and_then(|rest| rest.strip_suffix('"'))
-        });
-    let path = match unquoted {
-        Some(inner) => inner.to_string(),
-        None => {
-            let escaped = trimmed.replace("\\ ", "\u{0}");
-            if escaped.contains(' ') {
-                return None;
-            }
-            escaped.replace('\u{0}', " ")
-        }
+/// The image-file paths a terminal drop pastes, if that is what the
+/// pasted text is: one line of shell-style words (quotes and
+/// backslash escapes honored, as the common terminals emit them), all
+/// with image extensions. One stray word and the paste is text.
+pub(crate) fn dropped_image_paths(text: &str) -> Option<Vec<std::path::PathBuf>> {
+    let words = split_shell_words(text.trim())?;
+    let is_image = |word: &String| {
+        let lower = word.to_lowercase();
+        ["png", "jpg", "jpeg", "webp", "gif"]
+            .iter()
+            .any(|ext| lower.ends_with(&format!(".{ext}")))
     };
-    let lower = path.to_lowercase();
-    ["png", "jpg", "jpeg", "webp", "gif"]
-        .iter()
-        .any(|ext| lower.ends_with(&format!(".{ext}")))
-        .then(|| std::path::PathBuf::from(path))
+    (!words.is_empty() && words.iter().all(is_image))
+        .then(|| words.into_iter().map(std::path::PathBuf::from).collect())
+}
+
+/// One line into shell-style words; `None` on newlines or dangling
+/// quotes/escapes — those pastes are prose, not paths.
+fn split_shell_words(text: &str) -> Option<Vec<String>> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\n' => return None,
+            '\\' => current.push(chars.next()?),
+            '\'' | '"' => loop {
+                match chars.next() {
+                    Some('\n') | None => return None,
+                    Some(inner) if inner == c => break,
+                    Some(inner) => current.push(inner),
+                }
+            },
+            ' ' => {
+                if !current.is_empty() {
+                    words.push(std::mem::take(&mut current));
+                }
+            }
+            c => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    Some(words)
 }
 
 /// Media type by magic numbers — the extension may lie.
@@ -4750,30 +4767,71 @@ mod tests {
     }
 
     #[test]
-    fn a_pasted_image_path_is_recognized_in_the_common_quoting_styles() {
+    fn pasted_image_paths_are_recognized_in_the_common_quoting_styles() {
         use std::path::PathBuf;
+        let single = |text: &str| dropped_image_paths(text).map(|paths| paths[0].clone());
         // Plain, with the trailing space most terminals append.
         assert_eq!(
-            dropped_image_path("/tmp/shot.png "),
+            single("/tmp/shot.png "),
             Some(PathBuf::from("/tmp/shot.png"))
         );
         // Quoted (spaces in the name) and backslash-escaped.
         assert_eq!(
-            dropped_image_path("'/tmp/my shot.jpeg'"),
+            single("'/tmp/my shot.jpeg'"),
             Some(PathBuf::from("/tmp/my shot.jpeg"))
         );
+        assert_eq!(single("\"/tmp/x.gif\""), Some(PathBuf::from("/tmp/x.gif")));
         assert_eq!(
-            dropped_image_path("\"/tmp/x.gif\""),
-            Some(PathBuf::from("/tmp/x.gif"))
-        );
-        assert_eq!(
-            dropped_image_path("/tmp/my\\ shot.webp"),
+            single("/tmp/my\\ shot.webp"),
             Some(PathBuf::from("/tmp/my shot.webp"))
         );
-        // Prose, non-images and multiline pastes stay text.
-        assert_eq!(dropped_image_path("look at /tmp/shot.png"), None);
-        assert_eq!(dropped_image_path("/tmp/notes.txt"), None);
-        assert_eq!(dropped_image_path("a\nb.png"), None);
+        // A multi-file drop: several paths in one paste, styles mixed.
+        assert_eq!(
+            dropped_image_paths("/tmp/a.png '/tmp/b c.jpg' /tmp/d\\ e.webp "),
+            Some(vec![
+                PathBuf::from("/tmp/a.png"),
+                PathBuf::from("/tmp/b c.jpg"),
+                PathBuf::from("/tmp/d e.webp"),
+            ])
+        );
+        // One stray token poisons the whole paste back to text.
+        assert_eq!(dropped_image_paths("look at /tmp/shot.png"), None);
+        assert_eq!(dropped_image_paths("/tmp/a.png /tmp/notes.txt"), None);
+        assert_eq!(dropped_image_paths("/tmp/notes.txt"), None);
+        assert_eq!(dropped_image_paths("a\nb.png"), None);
+        assert_eq!(dropped_image_paths("   "), None);
+    }
+
+    #[test]
+    fn a_multi_file_drop_attaches_every_image() {
+        use crate::{Intent, apply_intent};
+
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("one.png");
+        let second = dir.path().join("two three.png");
+        std::fs::write(&first, encode_png(2, 2, &[1u8; 16]).unwrap()).unwrap();
+        std::fs::write(&second, encode_png(2, 2, &[2u8; 16]).unwrap()).unwrap();
+
+        let mut app = App::new();
+        app.current_model = "openai/gpt-5.6-sol".into();
+        let paste = format!("{} '{}'", first.display(), second.display());
+        apply_intent(&mut app, Intent::PasteInput(paste), None);
+
+        assert_eq!(app.pending_images.len(), 2);
+        assert!(app.input.is_blank(), "paths must not leak into the input");
+        assert!(
+            app.notice
+                .as_ref()
+                .is_some_and(|notice| notice.text.contains("2 images attached")),
+            "{:?}",
+            app.notice
+        );
+
+        // A missing file keeps the whole paste as text.
+        let broken = format!("{} /tmp/definitely-missing.png", first.display());
+        apply_intent(&mut app, Intent::PasteInput(broken.clone()), None);
+        assert_eq!(app.pending_images.len(), 2);
+        assert!(app.input.text().contains("definitely-missing"));
     }
 
     #[test]

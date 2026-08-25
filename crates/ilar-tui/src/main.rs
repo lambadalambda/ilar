@@ -468,12 +468,31 @@ fn apply_intent(
         Intent::PasteInput(text) => {
             app.model_key_pending = false;
             app.clear_transient_notice();
-            // A terminal drop arrives as a pasted file path; when that
-            // path is an existing image file, attaching is the intent.
-            if let Some(path) = crate::app::dropped_image_path(&text)
-                && path.is_file()
+            // A terminal drop arrives as pasted file paths; when every
+            // token is an existing image file, attaching is the intent.
+            if let Some(paths) = crate::app::dropped_image_paths(&text)
+                && paths.iter().all(|path| path.is_file())
             {
-                app.attach_image_file(&path);
+                let total = paths.len();
+                let attached = paths
+                    .iter()
+                    .filter(|path| app.attach_image_file(path))
+                    .count();
+                // One summary for a multi-file drop; a total refusal
+                // keeps the per-image reason already on screen.
+                if total > 1 && attached == total {
+                    app.set_notice(
+                        format!(
+                            "{total} images attached — send with your next message, Esc discards"
+                        ),
+                        NoticeLevel::Info,
+                    );
+                } else if total > 1 && attached > 0 {
+                    app.set_notice(
+                        format!("attached {attached} of {total} images — the rest were refused"),
+                        NoticeLevel::Warning,
+                    );
+                }
             } else {
                 app.input.insert(&text);
             }
@@ -2796,7 +2815,9 @@ async fn run_app(
                     // Ctrl-V attaches a clipboard *image*; text arrives
                     // as an ordinary terminal paste event regardless.
                     (KeyCode::Char('v'), true) => match app.read_clipboard_image() {
-                        Ok(Some(image)) => app.attach_image(image),
+                        Ok(Some(image)) => {
+                            app.attach_image(image);
+                        }
                         Ok(None) => app.set_notice(
                             "no image on the clipboard (text pastes normally)",
                             NoticeLevel::Info,

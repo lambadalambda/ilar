@@ -185,3 +185,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Clipboard images are downscaled before they enter the session](issues/downscale-clipboard-images.md)
 - [x] [GLM vision models are hidden on the coding plan and get no images](issues/glm-vision-on-the-coding-plan.md)
 - [x] [Drop an image file to attach it (png, jpeg, webp, gif)](issues/drop-an-image-file-to-attach-it.md)
+- [x] [Multi-file drops attach every image](issues/multi-file-drops-attach-every-image.md)
