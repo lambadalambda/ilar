@@ -542,9 +542,11 @@ impl AnthropicMapper {
         }
         let events = match kind {
             "message_start" => {
-                self.usage.input_tokens = value["message"]["usage"]["input_tokens"]
-                    .as_u64()
-                    .unwrap_or_default();
+                // The cache fields ride on message_start; message_delta
+                // usually reports output tokens only, or nothing at all.
+                let empty = serde_json::Map::new();
+                let usage = value["message"]["usage"].as_object().unwrap_or(&empty);
+                merge_usage(&mut self.usage, usage);
                 Vec::new()
             }
             "content_block_start" => {

@@ -184,6 +184,34 @@ async fn tool_call_fixture_maps_thinking_and_tool_use() {
 }
 
 #[tokio::test]
+async fn anthropic_message_start_usage_keeps_cache_fields() {
+    // Anthropic reports the cache fields on message_start only; this
+    // message_delta carries no usage at all.
+    let sse = concat!(
+        "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":300,\"cache_read_input_tokens\":1500,\"cache_creation_input_tokens\":50}}}\n\n",
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    );
+    let (base, _server) = http_server(sse.as_bytes().to_vec());
+    let events = drain(anthropic_provider(base).stream(request()).unwrap()).await;
+
+    let Some(ProviderEvent::TurnComplete { usage, .. }) = events.last() else {
+        panic!("expected TurnComplete, got {:?}", events.last());
+    };
+    assert_eq!(usage.input_tokens, 300);
+    assert_eq!(usage.cache_read_input_tokens, 1_500);
+    assert_eq!(usage.cache_creation_input_tokens, 50);
+    assert_eq!(
+        usage.input_token_accounting,
+        Some(InputTokenAccounting::ExcludesCached)
+    );
+    assert_eq!(usage.context_tokens(), 1_850);
+}
+
+#[tokio::test]
 async fn anthropic_signature_deltas_concatenate() {
     let sse = concat!(
         "data: {\"type\":\"message_start\",\"message\":{\"usage\":{}}}\n\n",
