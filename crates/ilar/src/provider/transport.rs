@@ -27,6 +27,10 @@ pub(super) fn streaming_client() -> reqwest::Client {
         .expect("valid provider HTTP client")
 }
 
+/// Anthropic's `overloaded_error` status. `StatusCode` has no named
+/// constant for it, so it is compared numerically.
+const OVERLOADED: u16 = 529;
+
 fn retryable_status(status: reqwest::StatusCode) -> bool {
     matches!(
         status,
@@ -37,7 +41,7 @@ fn retryable_status(status: reqwest::StatusCode) -> bool {
             | reqwest::StatusCode::BAD_GATEWAY
             | reqwest::StatusCode::SERVICE_UNAVAILABLE
             | reqwest::StatusCode::GATEWAY_TIMEOUT
-    )
+    ) || status.as_u16() == OVERLOADED
 }
 
 /// Full error chain — reqwest's Display alone hides the cause ("error
@@ -271,10 +275,15 @@ mod tests {
     }
 
     async fn response(body: &str) -> reqwest::Response {
+        status_response("200 OK", body).await
+    }
+
+    async fn status_response(status: &str, body: &str) -> reqwest::Response {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
+        let status = status.to_string();
         let body = body.to_string();
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
@@ -283,7 +292,7 @@ mod tests {
             socket
                 .write_all(
                     format!(
-                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{body}",
+                        "HTTP/1.1 {status}\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{body}",
                         body.len()
                     )
                     .as_bytes(),
@@ -301,6 +310,7 @@ mod tests {
             reqwest::StatusCode::CONFLICT,
             reqwest::StatusCode::TOO_MANY_REQUESTS,
             reqwest::StatusCode::BAD_GATEWAY,
+            reqwest::StatusCode::from_u16(OVERLOADED).unwrap(),
         ] {
             assert!(retryable_status(status), "{status}");
         }
@@ -314,6 +324,27 @@ mod tests {
         ] {
             assert!(!retryable_status(status), "{status}");
         }
+    }
+
+    #[tokio::test]
+    async fn overloaded_responses_are_retryable_stream_errors() {
+        let response = status_response("529 Overloaded", "{\"type\":\"overloaded_error\"}").await;
+        let events = stream(
+            async {
+                Ok(TransportResponse {
+                    response,
+                    secrets: Vec::new(),
+                })
+            },
+            TextMapper,
+        )
+        .collect::<Vec<_>>()
+        .await;
+
+        let [ProviderEvent::RetryableError(error)] = events.as_slice() else {
+            panic!("expected a single retryable error: {events:?}");
+        };
+        assert!(error.contains("overloaded_error"), "{error}");
     }
 
     #[tokio::test]
