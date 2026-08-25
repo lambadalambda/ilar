@@ -118,6 +118,20 @@ pub fn selected_reasoning(
     }
 }
 
+/// A base system prompt with the agent definition's own prompt hung off
+/// it. Every path that runs an agent — the root session here, a
+/// foreground or background task, a routed notification — assembles it
+/// the same way, so an agent reads identically wherever it is invoked.
+pub fn with_agent_prompt(system_prompt: String, agent: &AgentDefinition) -> String {
+    if agent.prompt.is_empty() {
+        return system_prompt;
+    }
+    format!(
+        "{system_prompt}\n\n# Agent: {}\n\n{}",
+        agent.name, agent.prompt
+    )
+}
+
 /// Child sessions belong to their parent task: resuming one directly
 /// would run it outside the workspace lease that governs it.
 pub fn ensure_direct_resume_allowed(meta: Option<&SessionMeta>) -> Result<()> {
@@ -266,12 +280,7 @@ impl RuntimePlan {
         if !skill_listing.is_empty() {
             system_prompt = format!("{system_prompt}\n\n{skill_listing}");
         }
-        if !agent.prompt.is_empty() {
-            system_prompt = format!(
-                "{system_prompt}\n\n# Agent: {}\n\n{}",
-                agent.name, agent.prompt
-            );
-        }
+        let system_prompt = with_agent_prompt(system_prompt, &agent);
 
         Ok(Self {
             session_id: options.resume.clone(),

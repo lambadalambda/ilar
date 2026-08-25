@@ -277,12 +277,16 @@ impl SubagentSpawner {
         &self.agents
     }
 
-    /// Spawner for children of this spawner: one level deeper, shared slot
-    /// counter and notification channel.
-    fn child_spawner(
-        self: &Arc<Self>,
+    /// A spawner sharing every collaborator with this one — slot counter,
+    /// session claims, notification channel, background registry — but
+    /// bound to another workspace and depth. The only place the fields are
+    /// enumerated: both derivation sites go through it, so a new field
+    /// cannot be forgotten on one of them.
+    fn derived(
+        &self,
         workspace_location: crate::tools::WorkspaceLocation,
         workspace: crate::tools::WorkspaceScheduler,
+        depth: usize,
     ) -> Arc<Self> {
         Arc::new(Self {
             resolver: self.resolver.clone(),
@@ -290,7 +294,7 @@ impl SubagentSpawner {
             agents: self.agents.clone(),
             user_config_dir: self.user_config_dir.clone(),
             workspace_location,
-            depth: self.depth + 1,
+            depth,
             max_concurrent: self.max_concurrent,
             max_depth: self.max_depth,
             running: self.running.clone(),
@@ -308,6 +312,47 @@ impl SubagentSpawner {
             services: self.services.clone(),
             available_models: self.available_models.clone(),
         })
+    }
+
+    /// The tool registry an agent runs with under this spawner. A
+    /// read-only agent gets the enforced read-only set — no delegation,
+    /// no shell; a mutable one gets the builtins plus delegation,
+    /// services and the model listing. Either way the agent definition's
+    /// `tools` allowlist narrows the result. Called on the spawner the
+    /// agent will itself delegate through, so its task tool and its
+    /// services can never come from two different spawners.
+    fn agent_registry(
+        self: &Arc<Self>,
+        agent: &AgentDefinition,
+    ) -> Result<ToolRegistry, crate::tools::DuplicateToolError> {
+        let registry = match agent.workspace_mode {
+            AgentWorkspaceMode::ReadOnly => ToolRegistry::read_only(),
+            AgentWorkspaceMode::Mutable => {
+                let registry = ToolRegistry::builtin().with_subagents(self.clone())?;
+                let registry = match self.services.clone() {
+                    Some(services) => registry.with_services(services)?,
+                    None => registry,
+                };
+                registry.with_models(self.available_models.clone())?
+            }
+        };
+        Ok(match &agent.tools {
+            Some(tools) => registry.restricted_to(tools),
+            None => registry,
+        })
+    }
+
+    /// The system prompt an agent runs with under this spawner: the
+    /// context of the workspace it will work in, plus its own prompt.
+    fn agent_system_prompt(
+        &self,
+        agent: &AgentDefinition,
+        cwd: &std::path::Path,
+    ) -> anyhow::Result<String> {
+        Ok(crate::runtime::with_agent_prompt(
+            system_prompt_for(&self.user_config_dir, cwd)?,
+            agent,
+        ))
     }
 
     /// Run one subagent task; returns its final text as the tool output.
@@ -410,19 +455,12 @@ impl SubagentSpawner {
             None
         };
         let child_workspace = ctx.workspace.scoped(&child_location);
-        let mut system_prompt = match system_prompt_for(&self.user_config_dir, child_location.cwd())
-        {
+        let system_prompt = match self.agent_system_prompt(agent, child_location.cwd()) {
             Ok(prompt) => prompt,
             Err(error) => {
                 return ToolOutput::error(format!("loading subagent context: {error:#}"));
             }
         };
-        if !agent.prompt.is_empty() {
-            system_prompt = format!(
-                "{system_prompt}\n\n# Agent: {}\n\n{}",
-                agent.name, agent.prompt
-            );
-        }
 
         let mut active_session = match &input.task_id {
             Some(id) => match self.claim_session(id) {
@@ -606,28 +644,15 @@ impl SubagentSpawner {
         });
         let parent_call_id = ctx.call_id.clone().unwrap_or_default();
 
-        let child_spawner = self.child_spawner(child_location.clone(), child_workspace.clone());
-        let registry = match agent.workspace_mode {
-            AgentWorkspaceMode::ReadOnly => ToolRegistry::read_only(),
-            AgentWorkspaceMode::Mutable => {
-                let registry = ToolRegistry::builtin()
-                    .with_subagents(child_spawner.clone())
-                    .and_then(|registry| match self.services.clone() {
-                        Some(services) => registry.with_services(services),
-                        None => Ok(registry),
-                    })
-                    .and_then(|registry| registry.with_models(self.available_models.clone()));
-                match registry {
-                    Ok(registry) => registry,
-                    Err(error) => {
-                        return ToolOutput::error(format!("building child tool registry: {error}"));
-                    }
-                }
+        // The child delegates one level deeper, sharing this spawner's
+        // slot counter, session claims and notification channel.
+        let child_spawner =
+            self.derived(child_location.clone(), child_workspace.clone(), self.depth + 1);
+        let registry = match child_spawner.agent_registry(agent) {
+            Ok(registry) => registry,
+            Err(error) => {
+                return ToolOutput::error(format!("building child tool registry: {error}"));
             }
-        };
-        let registry = match &agent.tools {
-            Some(tools) => registry.restricted_to(tools),
-            None => registry,
         };
         let mut workspace_ancestry = ctx.workspace_ancestry.clone();
         if !workspace_ancestry
@@ -660,7 +685,10 @@ impl SubagentSpawner {
             let prompt = input.prompt.clone();
             let parent_session_id = ctx.session_id.clone();
             let stall_timeout = self.stall_timeout;
-            let background_cancel = tokio_util::sync::CancellationToken::new();
+            // A child of the turn's token, so one token stands for "this
+            // task should stop": the parent turn ending cancels it, and
+            // `abort_all`/`shutdown` can still cancel it alone.
+            let background_cancel = ctx.cancel.child_token();
             let task_cancel = background_cancel.clone();
             let root_cancel = ctx.cancel.clone();
             let workspace = child_workspace.clone();
@@ -676,10 +704,12 @@ impl SubagentSpawner {
             let registry_id = new_id();
             let task_registry_id = registry_id.clone();
             let task_registry = self.background_tasks.clone();
-            let activity_tx = self.activity_tx.clone();
-            let activity_parent_session_id = parent_session_id.clone();
-            let activity_call_id = parent_call_id.clone();
-            let activity_session_id = session_id.clone();
+            let activity = ActivityPublisher {
+                tx: self.activity_tx.clone(),
+                parent_session_id: parent_session_id.clone(),
+                parent_call_id,
+                child_session_id: session_id.clone(),
+            };
             let returned_session_id = session_id.clone();
             let (registered_tx, registered_rx) = tokio::sync::oneshot::channel();
             let handle = tokio::spawn(async move {
@@ -694,116 +724,59 @@ impl SubagentSpawner {
                 let _active_session = _active_session;
                 let _running_task = _running_task; // deregisters when the task ends
                 let _slot = _guard; // hold the concurrency slot for the run
-                let lease = match inherited_lease {
-                    Some(lease) => lease,
-                    None if cross_workspace_nested => {
-                        let Some(lease) = workspace.try_acquire_lease(workspace_access) else {
-                            publish_reserved_notification(
-                                &mut notification_permit,
-                                Notification {
-                                    parent_session_id,
-                                    description: description.clone(),
-                                    text: format!(
-                                        "<task-notification>\nTask \"{description}\" failed: target workspace is busy; retry after the current task finishes\n</task-notification>"
-                                    ),
-                                    is_error: true,
-                                },
-                            );
-                            return;
-                        };
-                        lease
-                    }
-                    None => {
-                        tokio::select! {
-                            lease = workspace.acquire_lease(workspace_access) => lease,
-                            () = task_cancel.cancelled() => {
-                                publish_reserved_notification(&mut notification_permit, Notification {
-                                    parent_session_id,
-                                    description: description.clone(),
-                                    text: format!("<task-notification>\nTask \"{description}\" was cancelled.\n</task-notification>"),
-                                    is_error: true,
-                                });
-                                return;
-                            }
-                            () = root_cancel.cancelled() => {
-                                publish_reserved_notification(&mut notification_permit, Notification {
-                                    parent_session_id,
-                                    description: description.clone(),
-                                    text: format!("<task-notification>\nTask \"{description}\" was cancelled.\n</task-notification>"),
-                                    is_error: true,
-                                });
-                                return;
-                            }
-                        }
-                    }
+                // Nobody is waiting on a background task, so it stops the
+                // moment it is told to — including part-way through the
+                // revalidation, which may be a git call.
+                let acquired = tokio::select! {
+                    outcome = acquire_task_lease(
+                        &workspace,
+                        workspace_access,
+                        inherited_lease,
+                        cross_workspace_nested,
+                        &parent_location,
+                        &leased_location,
+                        &task_cancel,
+                    ) => outcome,
+                    () = task_cancel.cancelled() => LeaseOutcome::Cancelled,
                 };
-                let revalidated = tokio::select! {
-                    result = revalidate_after_lease(&parent_location, &leased_location) => result,
-                    () = task_cancel.cancelled() => {
-                        publish_reserved_notification(&mut notification_permit, Notification {
-                            parent_session_id,
-                            description: description.clone(),
-                            text: format!("<task-notification>\nTask \"{description}\" was cancelled.\n</task-notification>"),
-                            is_error: true,
-                        });
+                let lease = match acquired {
+                    LeaseOutcome::Acquired(lease) => lease,
+                    LeaseOutcome::Cancelled => {
+                        publish_reserved_notification(
+                            &mut notification_permit,
+                            cancelled_task_notification(&parent_session_id, &description),
+                        );
                         return;
                     }
-                    () = root_cancel.cancelled() => {
-                        publish_reserved_notification(&mut notification_permit, Notification {
-                            parent_session_id,
-                            description: description.clone(),
-                            text: format!("<task-notification>\nTask \"{description}\" was cancelled.\n</task-notification>"),
-                            is_error: true,
-                        });
+                    LeaseOutcome::Failed(failure) => {
+                        publish_reserved_notification(
+                            &mut notification_permit,
+                            task_notification(
+                                &parent_session_id,
+                                &description,
+                                &format!("Task \"{description}\" failed: {}", failure.message()),
+                                true,
+                            ),
+                        );
                         return;
                     }
                 };
-                if let Err(error) = revalidated.as_ref() {
-                    publish_reserved_notification(
-                        &mut notification_permit,
-                        Notification {
-                            parent_session_id,
-                            description: description.clone(),
-                            text: format!(
-                                "<task-notification>\nTask \"{description}\" failed: workspace changed while waiting for its lease: {error:#}\n</task-notification>"
-                            ),
-                            is_error: true,
-                        },
-                    );
-                    return;
-                }
-                if revalidated
-                    .as_ref()
-                    .is_ok_and(|location| location != &leased_location)
-                {
-                    publish_reserved_notification(
-                        &mut notification_permit,
-                        Notification {
-                            parent_session_id,
-                            description: description.clone(),
-                            text: format!(
-                                "<task-notification>\nTask \"{description}\" failed: workspace changed while waiting for its lease\n</task-notification>"
-                            ),
-                            is_error: true,
-                        },
-                    );
-                    return;
-                }
                 child_ctx.workspace_lease = Some(lease);
+                // Deliberately not a child of `task_cancel`: stopping the
+                // task must go through the select below, which cancels
+                // this token itself and then waits out the graceful
+                // abort. Wiring it to `task_cancel` would let the turn
+                // report a plain abort before the select noticed.
                 let cancel = root_cancel.child_token();
                 let (tx, mut rx_evt) = loop_event_channel(LOOP_EVENT_CAPACITY);
                 // Activity tracker: any child event counts as progress.
                 let last_activity = Arc::new(Mutex::new(std::time::Instant::now()));
                 let watcher_last = last_activity.clone();
+                let watcher_activity = activity.clone();
                 let watcher = tokio::spawn(async move {
                     while let Some(event) = rx_evt.recv().await {
                         *watcher_last.lock().unwrap() = std::time::Instant::now();
-                        let _ = activity_tx.send(SubagentActivity {
-                            parent_session_id: activity_parent_session_id.clone(),
-                            parent_call_id: activity_call_id.clone(),
-                            child_session_id: activity_session_id.clone(),
-                            event,
-                        });
+                        watcher_activity.publish(event);
                     }
                 });
                 let stall_watch = async {
@@ -836,7 +809,6 @@ impl SubagentSpawner {
                     tokio::select! {
                         () = stall_watch => false,
                         () = task_cancel.cancelled() => true,
-                        () = root_cancel.cancelled() => true,
                     }
                 };
                 let (outcome, was_cancelled) = tokio::select! {
@@ -851,73 +823,43 @@ impl SubagentSpawner {
                 // with it.
                 drop(turn);
                 let _ = watcher.await;
-                let activity_outcome = match &outcome {
-                    Some(Ok(outcome)) => *outcome,
-                    _ => TurnOutcome::Aborted,
+                let outcome = match outcome {
+                    Some(result) => TaskOutcome::from_turn(result),
+                    None if was_cancelled => TaskOutcome::Cancelled,
+                    None => TaskOutcome::Stalled,
                 };
-                let _ = spawner.activity_tx.send(SubagentActivity {
-                    parent_session_id: parent_session_id.clone(),
-                    parent_call_id: parent_call_id.clone(),
-                    child_session_id: session_id.clone(),
-                    event: LoopEvent::TurnDone {
-                        outcome: activity_outcome,
-                    },
-                });
+                activity.turn_done(outcome.activity());
 
-                let notification = match outcome {
-                    Some(Ok(TurnOutcome::Completed)) => {
+                let failed = |body: String| {
+                    task_notification(&parent_session_id, &description, &body, true)
+                };
+                let notification = match &outcome {
+                    TaskOutcome::Completed => {
                         let text = final_assistant_text(&spawner.store, &session_id)
                             .unwrap_or_else(|| "(finished with no text)".into());
-                        Notification {
-                            parent_session_id,
-                            description: description.clone(),
-                            text: format!(
-                                "<task-notification>\nTask \"{description}\" completed (task_id: {session_id}).\n<result>\n{text}\n</result>\n</task-notification>"
+                        task_notification(
+                            &parent_session_id,
+                            &description,
+                            &format!(
+                                "Task \"{description}\" completed (task_id: {session_id}).\n<result>\n{text}\n</result>"
                             ),
-                            is_error: false,
-                        }
+                            false,
+                        )
                     }
-                    Some(Ok(TurnOutcome::Aborted)) => Notification {
-                        parent_session_id,
-                        description: description.clone(),
-                        text: format!(
-                            "<task-notification>\nTask \"{description}\" was aborted.\n</task-notification>"
-                        ),
-                        is_error: true,
-                    },
-                    Some(Ok(TurnOutcome::MaxIterations)) => Notification {
-                        parent_session_id,
-                        description: description.clone(),
-                        text: format!(
-                            "<task-notification>\nTask \"{description}\" failed: subagent reached its iteration limit.\n</task-notification>"
-                        ),
-                        is_error: true,
-                    },
-                    Some(Err(e)) => Notification {
-                        parent_session_id,
-                        description: description.clone(),
-                        text: format!(
-                            "<task-notification>\nTask \"{description}\" failed: {e:#}\n</task-notification>"
-                        ),
-                        is_error: true,
-                    },
-                    None if was_cancelled => Notification {
-                        parent_session_id,
-                        description: description.clone(),
-                        text: format!(
-                            "<task-notification>\nTask \"{description}\" was cancelled.\n</task-notification>"
-                        ),
-                        is_error: true,
-                    },
-                    None => Notification {
-                        parent_session_id,
-                        description: description.clone(),
-                        text: format!(
-                            "<task-notification>\nTask \"{description}\" stalled: no progress for {}s. It has been stopped.\n</task-notification>",
-                            stall_timeout.as_secs()
-                        ),
-                        is_error: true,
-                    },
+                    TaskOutcome::Aborted => failed(format!("Task \"{description}\" was aborted.")),
+                    TaskOutcome::MaxIterations => failed(format!(
+                        "Task \"{description}\" failed: subagent reached its iteration limit."
+                    )),
+                    TaskOutcome::Failed(error) => {
+                        failed(format!("Task \"{description}\" failed: {error:#}"))
+                    }
+                    TaskOutcome::Cancelled => {
+                        cancelled_task_notification(&parent_session_id, &description)
+                    }
+                    TaskOutcome::Stalled => failed(format!(
+                        "Task \"{description}\" stalled: no progress for {}s. It has been stopped.",
+                        stall_timeout.as_secs()
+                    )),
                 };
                 publish_reserved_notification(&mut notification_permit, notification);
             });
@@ -938,43 +880,34 @@ task's scope yourself; continue only clearly disjoint work."
             .with_child_session(returned_session_id);
         }
 
-        let lease = match inherited_lease {
-            Some(lease) => lease,
-            None if cross_workspace_nested => {
-                let Some(lease) = child_workspace.try_acquire_lease(workspace_access) else {
-                    return ToolOutput::error(
-                        "target workspace is busy; retry after the current task finishes",
-                    );
-                };
-                lease
+        let lease = match acquire_task_lease(
+            &child_workspace,
+            workspace_access,
+            inherited_lease,
+            cross_workspace_nested,
+            &ctx.location,
+            &child_location,
+            &ctx.cancel,
+        )
+        .await
+        {
+            LeaseOutcome::Acquired(lease) => lease,
+            LeaseOutcome::Cancelled => {
+                return ToolOutput::error("subagent cancelled while waiting for workspace");
             }
-            None => {
-                tokio::select! {
-                    lease = child_workspace.acquire_lease(workspace_access) => lease,
-                    () = ctx.cancel.cancelled() => {
-                        return ToolOutput::error("subagent cancelled while waiting for workspace");
-                    }
-                }
-            }
+            LeaseOutcome::Failed(failure) => return ToolOutput::error(failure.message()),
         };
-        match revalidate_after_lease(&ctx.location, &child_location).await {
-            Ok(location) if location == child_location => {}
-            Ok(_) => return ToolOutput::error("workspace changed while waiting for its lease"),
-            Err(error) => {
-                return ToolOutput::error(format!(
-                    "workspace changed while waiting for its lease: {error:#}"
-                ));
-            }
-        }
         child_ctx.workspace_lease = Some(lease);
         if let Some(on_start) = on_start.take() {
             on_start();
         }
         let (tx, mut rx_evt) = loop_event_channel(LOOP_EVENT_CAPACITY);
-        let activity_tx = self.activity_tx.clone();
-        let activity_parent_session_id = ctx.session_id.clone();
-        let activity_call_id = parent_call_id;
-        let activity_session_id = session_id.clone();
+        let activity = ActivityPublisher {
+            tx: self.activity_tx.clone(),
+            parent_session_id: ctx.session_id.clone(),
+            parent_call_id,
+            child_session_id: session_id.clone(),
+        };
         let turn = run_turn(
             self.resolver.as_ref(),
             &registry,
@@ -995,49 +928,34 @@ task's scope yourself; continue only clearly disjoint work."
             tokio::select! {
                 event = rx_evt.recv() => {
                     if let Some(event) = event {
-                        let _ = activity_tx.send(SubagentActivity {
-                            parent_session_id: activity_parent_session_id.clone(),
-                            parent_call_id: activity_call_id.clone(),
-                            child_session_id: activity_session_id.clone(),
-                            event,
-                        });
+                        activity.publish(event);
                     }
                 }
                 outcome = &mut turn => break outcome,
             }
         };
         while let Ok(event) = rx_evt.try_recv() {
-            let _ = activity_tx.send(SubagentActivity {
-                parent_session_id: activity_parent_session_id.clone(),
-                parent_call_id: activity_call_id.clone(),
-                child_session_id: activity_session_id.clone(),
-                event,
-            });
+            activity.publish(event);
         }
-        let activity_outcome = match &outcome {
-            Ok(outcome) => *outcome,
-            Err(_) => TurnOutcome::Aborted,
-        };
-        let _ = activity_tx.send(SubagentActivity {
-            parent_session_id: activity_parent_session_id,
-            parent_call_id: activity_call_id,
-            child_session_id: activity_session_id,
-            event: LoopEvent::TurnDone {
-                outcome: activity_outcome,
-            },
-        });
+        let outcome = TaskOutcome::from_turn(outcome);
+        activity.turn_done(outcome.activity());
 
         let output = match outcome {
-            Ok(TurnOutcome::Completed) => {
+            TaskOutcome::Completed => {
                 let text = final_assistant_text(&self.store, &session_id)
                     .unwrap_or_else(|| "(subagent finished with no text)".into());
                 ToolOutput::text(text)
             }
-            Ok(TurnOutcome::Aborted) => ToolOutput::error("subagent aborted"),
-            Ok(TurnOutcome::MaxIterations) => {
+            TaskOutcome::MaxIterations => {
                 ToolOutput::error("subagent failed: iteration limit reached")
             }
-            Err(e) => ToolOutput::error(format!("subagent failed: {e:#}")),
+            TaskOutcome::Failed(error) => ToolOutput::error(format!("subagent failed: {error:#}")),
+            // `from_turn` never yields the last two: a foreground task
+            // has no watchdog, and its cancellation arrives as an
+            // aborted turn.
+            TaskOutcome::Aborted | TaskOutcome::Cancelled | TaskOutcome::Stalled => {
+                ToolOutput::error("subagent aborted")
+            }
         };
         // The session outlives the call, so name it: without this the
         // model cannot resume a task it just ran, and the resume path
@@ -1187,30 +1105,7 @@ task's scope yourself; continue only clearly disjoint work."
             }
         };
         let workspace = self.workspace.scoped(&workspace_location);
-        let runtime = Arc::new(Self {
-            resolver: self.resolver.clone(),
-            store: self.store.clone(),
-            agents: self.agents.clone(),
-            user_config_dir: self.user_config_dir.clone(),
-            workspace_location: workspace_location.clone(),
-            depth,
-            max_concurrent: self.max_concurrent,
-            max_depth: self.max_depth,
-            running: self.running.clone(),
-            active_sessions: self.active_sessions.clone(),
-            active_sessions_changed: self.active_sessions_changed.clone(),
-            running_tasks: self.running_tasks.clone(),
-            notify_tx: self.notify_tx.clone(),
-            notify_rx: self.notify_rx.clone(),
-            activity_tx: self.activity_tx.clone(),
-            stall_timeout: self.stall_timeout,
-            background_tasks: self.background_tasks.clone(),
-            workspace: workspace.clone(),
-            background_tool_timeout: self.background_tool_timeout,
-            loop_config: self.loop_config.clone(),
-            services: self.services.clone(),
-            available_models: self.available_models.clone(),
-        });
+        let runtime = self.derived(workspace_location.clone(), workspace.clone(), depth);
         let Some(_active_session) = self
             .wait_for_session_claim(&notification.parent_session_id, &cancel)
             .await
@@ -1221,32 +1116,11 @@ task's scope yourself; continue only clearly disjoint work."
             AgentWorkspaceMode::Mutable => WorkspaceAccess::Mutating,
             AgentWorkspaceMode::ReadOnly => WorkspaceAccess::ReadOnly,
         };
-        let registry = match agent.workspace_mode {
-            AgentWorkspaceMode::ReadOnly => ToolRegistry::read_only(),
-            AgentWorkspaceMode::Mutable => {
-                let registry = ToolRegistry::builtin().with_subagents(runtime.clone())?;
-                let registry = match runtime.services.clone() {
-                    Some(services) => registry.with_services(services)?,
-                    None => registry,
-                };
-                registry.with_models(runtime.available_models.clone())?
-            }
+        let registry = runtime.agent_registry(agent)?;
+        let system_prompt = match self.agent_system_prompt(agent, workspace_location.cwd()) {
+            Ok(prompt) => prompt,
+            Err(error) => return context_route_failure(&meta, notification, error),
         };
-        let registry = match &agent.tools {
-            Some(tools) => registry.restricted_to(tools),
-            None => registry,
-        };
-        let mut system_prompt =
-            match system_prompt_for(&self.user_config_dir, workspace_location.cwd()) {
-                Ok(prompt) => prompt,
-                Err(error) => return context_route_failure(&meta, notification, error),
-            };
-        if !agent.prompt.is_empty() {
-            system_prompt = format!(
-                "{system_prompt}\n\n# Agent: {}\n\n{}",
-                agent.name, agent.prompt
-            );
-        }
         let lease = tokio::select! {
             lease = workspace.acquire_lease(workspace_access) => lease,
             () = cancel.cancelled() => return Ok(RouteOutcome::Requeue(notification)),
@@ -1530,6 +1404,157 @@ async fn revalidate_after_lease(
             crate::tools::WorkspaceLocation::revalidate(parent, location).await
         }
     }
+}
+
+/// A task's workspace lease, or why the task never started.
+enum LeaseOutcome {
+    Acquired(Arc<crate::tools::WorkspaceLease>),
+    Cancelled,
+    Failed(LeaseFailure),
+}
+
+enum LeaseFailure {
+    /// The target workspace is held by another task right now.
+    Busy,
+    /// What the lease covers is no longer the workspace that was
+    /// validated; `Some` when deciding that failed outright.
+    Changed(Option<anyhow::Error>),
+}
+
+impl LeaseFailure {
+    /// Why the task could not start, in one wording for every caller.
+    fn message(&self) -> String {
+        match self {
+            Self::Busy => "target workspace is busy; retry after the current task finishes".into(),
+            Self::Changed(None) => "workspace changed while waiting for its lease".into(),
+            Self::Changed(Some(error)) => {
+                format!("workspace changed while waiting for its lease: {error:#}")
+            }
+        }
+    }
+}
+
+/// Take the lease a child will run under, then confirm its workspace
+/// survived the wait. An inherited lease already covers the child; a
+/// nested task reaching into another workspace only tries for it, since
+/// blocking there is how two tasks deadlock on each other's checkouts.
+///
+/// Both task paths funnel through here so the checks stay in step; they
+/// differ only in how they phrase the outcome. `cancel` ends the wait
+/// for the lease; a caller that also wants the revalidation abandoned
+/// races this whole call against its own token.
+async fn acquire_task_lease(
+    workspace: &crate::tools::WorkspaceScheduler,
+    access: WorkspaceAccess,
+    inherited: Option<Arc<crate::tools::WorkspaceLease>>,
+    cross_workspace_nested: bool,
+    parent_location: &crate::tools::WorkspaceLocation,
+    location: &crate::tools::WorkspaceLocation,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> LeaseOutcome {
+    let lease = match inherited {
+        Some(lease) => lease,
+        None if cross_workspace_nested => match workspace.try_acquire_lease(access) {
+            Some(lease) => lease,
+            None => return LeaseOutcome::Failed(LeaseFailure::Busy),
+        },
+        None => tokio::select! {
+            lease = workspace.acquire_lease(access) => lease,
+            () = cancel.cancelled() => return LeaseOutcome::Cancelled,
+        },
+    };
+    match revalidate_after_lease(parent_location, location).await {
+        Ok(revalidated) if &revalidated == location => LeaseOutcome::Acquired(lease),
+        Ok(_) => LeaseOutcome::Failed(LeaseFailure::Changed(None)),
+        Err(error) => LeaseOutcome::Failed(LeaseFailure::Changed(Some(error))),
+    }
+}
+
+/// How a child's turn ended, in the terms both task paths share. The
+/// foreground path phrases it as a tool result and the background one as
+/// a notification; neither re-derives it.
+enum TaskOutcome {
+    Completed,
+    Aborted,
+    MaxIterations,
+    Failed(anyhow::Error),
+    /// Background only: a cancellation token stopped the run.
+    Cancelled,
+    /// Background only: the stall watchdog fired.
+    Stalled,
+}
+
+impl TaskOutcome {
+    fn from_turn(result: anyhow::Result<TurnOutcome>) -> Self {
+        match result {
+            Ok(TurnOutcome::Completed) => Self::Completed,
+            Ok(TurnOutcome::Aborted) => Self::Aborted,
+            Ok(TurnOutcome::MaxIterations) => Self::MaxIterations,
+            Err(error) => Self::Failed(error),
+        }
+    }
+
+    /// What the terminal activity event carries: anything that is not a
+    /// clean finish or an iteration limit reads as an abort.
+    fn activity(&self) -> TurnOutcome {
+        match self {
+            Self::Completed => TurnOutcome::Completed,
+            Self::MaxIterations => TurnOutcome::MaxIterations,
+            _ => TurnOutcome::Aborted,
+        }
+    }
+}
+
+/// Fans a child's loop events out to whoever is watching this
+/// delegation, tagged with the call that started it.
+#[derive(Clone)]
+struct ActivityPublisher {
+    tx: tokio::sync::broadcast::Sender<SubagentActivity>,
+    parent_session_id: String,
+    parent_call_id: String,
+    child_session_id: String,
+}
+
+impl ActivityPublisher {
+    fn publish(&self, event: LoopEvent) {
+        let _ = self.tx.send(SubagentActivity {
+            parent_session_id: self.parent_session_id.clone(),
+            parent_call_id: self.parent_call_id.clone(),
+            child_session_id: self.child_session_id.clone(),
+            event,
+        });
+    }
+
+    fn turn_done(&self, outcome: TurnOutcome) {
+        self.publish(LoopEvent::TurnDone { outcome });
+    }
+}
+
+/// A background task's word to its parent, in the envelope the parent
+/// loop unwraps.
+fn task_notification(
+    parent_session_id: &str,
+    description: &str,
+    body: &str,
+    is_error: bool,
+) -> Notification {
+    Notification {
+        parent_session_id: parent_session_id.to_string(),
+        description: description.to_string(),
+        text: format!("<task-notification>\n{body}\n</task-notification>"),
+        is_error,
+    }
+}
+
+/// The one way a background task reports that it was stopped — it is
+/// reachable from the lease wait, the revalidation and the run itself.
+fn cancelled_task_notification(parent_session_id: &str, description: &str) -> Notification {
+    task_notification(
+        parent_session_id,
+        description,
+        &format!("Task \"{description}\" was cancelled."),
+        true,
+    )
 }
 
 /// Undo a session that was created moments ago but could not be
