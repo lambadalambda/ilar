@@ -49,3 +49,21 @@ screenshot is often the fastest way to explain a problem.
 ## Milestone
 
 11 — Beyond the terminal
+
+## Outcome
+
+Shipped across five commits: `supports_vision` on the catalog (all
+OpenAI, z.ai V-series only); `ContentBlock::Image` +
+`UserMessage.images` (serde-defaulted both ways — old logs read, new
+image-free logs stay byte-identical); `run_turn` threads images into
+the appended event; OpenAI sends `input_text` + `input_image` parts in
+one message item with the text-only wire shape pinned unchanged by
+test; zai degrades to a named `[image omitted]` text gap; the TUI
+attaches via Ctrl-V (PNG-encoded through arboard + png), gates on
+busy/vision/10 MB with naming notices, lists attachments in the
+pending strip, and marks the transcript row.
+
+Verified end to end: a generated red/blue "ILAR 42" test image pasted
+from the real macOS clipboard into a live gpt-5.6-sol session came
+back as "Red, blue; 'ILAR 42'" — and the marker survives
+`--continue`. Unit tests cover every gate and wire shape.

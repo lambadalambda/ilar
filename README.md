@@ -42,6 +42,9 @@ mechanisms, not security boundaries.
 - **Quick asides.** `/btw which port was it again?` answers over the
   live conversation — even mid-turn — in a throwaway modal. Nothing is
   recorded; the work is not steered.
+- **Paste a screenshot.** Ctrl-V attaches the clipboard image to your
+  next message on any vision model — often the fastest way to explain
+  what you're looking at.
 - **Parallel subagents with memory.** Read-only explorers fan out
   concurrently; every task's session survives the call and can be
   resumed by id — a follow-up costs a sentence, not a re-briefing.

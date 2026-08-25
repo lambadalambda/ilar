@@ -181,3 +181,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [The idle loop re-parses the session on every tick](issues/idle-loop-reparses-the-session-every-tick.md)
 - [x] [Mouse motion events drain one frame each](issues/mouse-motion-events-drain-one-frame-each.md)
 - [x] [Hover underlines clickable transcript rows](issues/hover-underlines-clickable-rows.md)
+- [x] [Image input: paste a screenshot, the model sees it](issues/image-input.md)

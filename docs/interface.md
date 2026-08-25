@@ -56,6 +56,23 @@ abort the goal or cancel background jobs (both confirmed with a second
 press). **Esc is strictly immediate-scope**: it aborts the running turn
 or clears the input, and never touches the queue or the goal.
 
+## Image input: Ctrl-V
+
+Copy a screenshot, press **Ctrl-V**, and the image attaches to your
+next message — listed above the input until it sends, shown as a size
+marker in the transcript, stored inline in the session so it survives
+restore and fork. Text on the clipboard still pastes the normal way;
+Ctrl-V only intercepts images.
+
+The catalog knows which models see: every OpenAI model does, on z.ai
+only the V-series. Attaching on anything else is refused with a notice
+naming the model, and attachments only ride a *fresh* turn — while a
+turn runs, submit puts your text back and asks you to wait, because
+steering carries text only. Esc discards attachments along with the
+draft. Images are capped at 10 MB; switching a session with images to
+a text-only model replaces them with a named `[image omitted]` gap
+rather than an error.
+
 ## Asides: `/btw`
 
 `/btw which port was it again?` answers a quick question over the live
