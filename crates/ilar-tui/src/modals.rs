@@ -191,6 +191,19 @@ fn edit_query(query: &mut String, code: KeyCode, control: bool) -> bool {
     }
 }
 
+/// The paste half of `edit_query`: clipboard text joins a query the
+/// way typed characters do. A filter is one line, so control
+/// characters — a pasted newline above all — are dropped rather than
+/// pushed, and tabs with them. Returns true when the query actually
+/// grew, the same signal `edit_query` gives, so every caller's reset
+/// hooks stay in one shape: a paste of nothing but control characters
+/// must not move a selection or disarm anything.
+fn insert_query(query: &mut String, text: &str) -> bool {
+    let before = query.len();
+    query.extend(text.chars().filter(|character| !character.is_control()));
+    query.len() != before
+}
+
 /// The overlay that owns the keyboard. Render and key dispatch both
 /// derive their precedence from `App::active_modal`, so adding a variant
 /// without wiring both is a compile error.
@@ -397,12 +410,7 @@ impl CommandPalette {
     }
 
     pub(crate) fn insert_query(&mut self, text: &str) {
-        let before = self.query.len();
-        self.query
-            .extend(text.chars().filter(|character| !character.is_control()));
-        // A paste that was entirely control characters changed nothing
-        // and must not move the selection, matching the keyboard path.
-        if self.query.len() != before {
+        if insert_query(&mut self.query, text) {
             self.nav.reset();
         }
     }
@@ -990,6 +998,13 @@ impl SessionPicker {
         self.nav.move_by(delta, count);
     }
 
+    pub(crate) fn insert_query(&mut self, text: &str) {
+        if insert_query(&mut self.query, text) {
+            self.nav.reset();
+            self.pending_delete = None;
+        }
+    }
+
     pub(crate) fn handle_key(&mut self, code: KeyCode, control: bool) -> SessionPickerAction {
         if let Some(delta) = nav_delta(code, control) {
             self.move_selection(delta);
@@ -1115,6 +1130,19 @@ impl SessionSearch {
         }
     }
 
+    /// Pasted text extends the grep query, which invalidates whatever
+    /// the running scan is about to deliver.
+    pub(crate) fn insert_query(&mut self, text: &str) -> SessionSearchAction {
+        if !insert_query(&mut self.query, text) {
+            return SessionSearchAction::Stay;
+        }
+        self.nav.reset();
+        self.rows.clear();
+        self.generation += 1;
+        self.scanning = true;
+        SessionSearchAction::Rescan
+    }
+
     pub(crate) fn handle_key(&mut self, code: KeyCode, control: bool) -> SessionSearchAction {
         if let Some(delta) = nav_delta(code, control) {
             self.move_selection(delta);
@@ -1179,6 +1207,12 @@ impl LinkPicker {
     pub(crate) fn move_selection(&mut self, delta: isize) {
         let count = self.filtered().len();
         self.nav.move_by(delta, count);
+    }
+
+    pub(crate) fn insert_query(&mut self, text: &str) {
+        if insert_query(&mut self.query, text) {
+            self.nav.reset();
+        }
     }
 
     pub(crate) fn handle_key(&mut self, code: KeyCode, control: bool) -> PickerAction {
@@ -1382,6 +1416,13 @@ impl TurnPicker {
         self.armed = None;
         let count = self.filtered().len();
         self.nav.move_by(delta, count);
+    }
+
+    pub(crate) fn insert_query(&mut self, text: &str) {
+        if insert_query(&mut self.query, text) {
+            self.nav.reset();
+            self.armed = None;
+        }
     }
 
     pub(crate) fn handle_key(&mut self, code: KeyCode, control: bool) -> TurnPickerAction {
@@ -1877,6 +1918,13 @@ impl ModelPicker {
         self.nav.move_by(delta, count);
     }
 
+    pub(crate) fn insert_query(&mut self, text: &str) {
+        if insert_query(&mut self.query, text) {
+            self.nav.reset();
+            self.error = None;
+        }
+    }
+
     fn select_boundary(&mut self, end: bool) {
         self.nav.selected = if end {
             self.filtered_models().len().saturating_sub(1)
@@ -2112,6 +2160,16 @@ impl ThemePicker {
         self.nav.move_by(delta, self.matches.len());
         self.error = None;
         ThemePickerAction::Preview(self.selected_theme())
+    }
+
+    /// Like the typed path, the selection is not reset: `refresh()`
+    /// re-anchors it on whatever theme was highlighted.
+    pub(crate) fn insert_query(&mut self, text: &str) -> ThemePickerAction {
+        if insert_query(&mut self.query, text) {
+            self.refresh()
+        } else {
+            ThemePickerAction::Preview(self.selected_theme())
+        }
     }
 
     pub(crate) fn handle_key(&mut self, code: KeyCode, control: bool) -> ThemePickerAction {
@@ -2815,6 +2873,125 @@ mod tests {
 
         picker.set_query("GPT-5.6 Sol");
         assert_eq!(picker.filtered_models()[0].full_id(), "openai/gpt-5.6-sol");
+    }
+
+    /// Pasting into a filter is typing into it: the text lands in the
+    /// query and the picker resets the way a keystroke would. Pastes
+    /// used to vanish everywhere but the palette.
+    #[test]
+    fn pasting_appends_to_the_query_of_every_filterable_picker() {
+        let now = std::time::SystemTime::now();
+        let mut session = SessionPicker::new(vec![ilar::session::SessionSummary {
+            id: "aaa".into(),
+            title: Some("fix websearch fallback".into()),
+            modified: now,
+        }]);
+        // Armed for deletion, then filtered: disarmed, like a keystroke.
+        session.handle_key(KeyCode::Char('d'), true);
+        session.insert_query("web");
+        assert_eq!(session.query, "web");
+        assert!(session.pending_delete.is_none());
+        assert_eq!(
+            session.handle_key(KeyCode::Char('d'), true),
+            SessionPickerAction::Stay
+        );
+
+        let events = vec![meta_event(), user("u1", "first"), user("u2", "second")];
+        let mut turn = TurnPicker::new(turn_entries(&events));
+        turn.handle_key(KeyCode::Enter, false);
+        turn.insert_query("sec");
+        assert_eq!(turn.query, "sec");
+        assert!(turn.armed.is_none(), "a filter paste must disarm");
+
+        let mut link = LinkPicker::new(Vec::new());
+        link.insert_query("docs");
+        assert_eq!(link.query, "docs");
+
+        let mut model = ModelPicker::new(ilar::model::catalog().iter().collect(), "none");
+        model.error = Some("stale".into());
+        model.nav.selected = 2;
+        model.insert_query("gpt");
+        assert_eq!(model.query, "gpt");
+        assert!(model.filtered_models().len() < model.models.len());
+        assert_eq!(model.selected_index(), 0);
+        assert!(model.error.is_none());
+
+        let mut theme = ThemePicker::new(theme::ThemeId::ALL[0]);
+        assert!(matches!(
+            theme.insert_query("gruv"),
+            ThemePickerAction::Preview(_)
+        ));
+        assert_eq!(theme.query, "gruv");
+        assert!(
+            theme.selected_theme().id().contains("gruv"),
+            "{}",
+            theme.selected_theme().id()
+        );
+
+        let mut palette = CommandPalette::new(palette_items());
+        palette.insert_query("theme");
+        assert_eq!(palette.filtered_commands().len(), 1);
+    }
+
+    /// The content search is a typed grep query, so a pasted term must
+    /// restart the scan exactly as a typed character does.
+    #[test]
+    fn pasting_into_the_session_search_restarts_the_scan() {
+        let mut search = SessionSearch::new();
+        search.handle_key(KeyCode::Char('a'), false);
+        let generation = search.generation;
+        search.push_rows(generation, vec![search_row("s1", "one", "a match", "ctx")]);
+
+        assert_eq!(search.insert_query("uth"), SessionSearchAction::Rescan);
+        assert_eq!(search.query, "auth");
+        assert!(search.rows.is_empty(), "stale rows survived the paste");
+        assert_ne!(search.generation, generation);
+        assert!(search.scanning);
+
+        // Nothing to add is not an edit: no rescan, no cleared rows.
+        search.push_rows(search.generation, vec![search_row("s1", "one", "hit", "c")]);
+        assert_eq!(search.insert_query("\n\t"), SessionSearchAction::Stay);
+        assert_eq!(search.query, "auth");
+        assert_eq!(search.rows.len(), 1);
+    }
+
+    /// A single-line filter must survive a multi-line clipboard: the
+    /// control characters are dropped rather than pushed into it.
+    #[test]
+    fn a_pasted_newline_never_reaches_a_single_line_query() {
+        let mut link = LinkPicker::new(Vec::new());
+        link.insert_query("one\ntwo\r\n\tthree\u{7}");
+        assert_eq!(link.query, "onetwothree");
+
+        // The one query that leaves the process: a stray newline would
+        // ride into the cross-session grep.
+        let mut search = SessionSearch::new();
+        assert_eq!(
+            search.insert_query("needle\nhere\n"),
+            SessionSearchAction::Rescan
+        );
+        assert_eq!(search.query, "needlehere");
+
+        // A theme paste with nothing in it previews where it stood
+        // rather than re-ranking.
+        let mut theme = ThemePicker::new(theme::ThemeId::ALL[0]);
+        theme.move_selection(1);
+        let standing = theme.selected_theme();
+        assert_eq!(
+            theme.insert_query("\n"),
+            ThemePickerAction::Preview(standing)
+        );
+        assert_eq!(theme.query, "");
+
+        let mut model = ModelPicker::new(ilar::model::catalog().iter().take(3).collect(), "none");
+        model.nav.selected = 2;
+        model.insert_query("\n\r\t");
+        assert_eq!(model.query, "");
+        assert_eq!(
+            model.selected_index(),
+            2,
+            "a paste that changed nothing must not move the selection"
+        );
     }
 
     /// A combining mark arrives as its own key event, so the query can

@@ -71,6 +71,8 @@ pub(crate) enum Intent {
     PastePalette(String),
     PasteSearch(String),
     PasteQuestion(String),
+    /// The filter of whichever picker owns the keyboard.
+    PasteModalQuery(String),
     PasteInput(String),
     /// Drop the goal, having finished or run out of rounds.
     ClearGoal,
@@ -87,6 +89,9 @@ pub(crate) enum PasteTarget {
     Palette,
     Search,
     Question,
+    /// The typed filter of a picker — the session search's grep query
+    /// included, which is nothing but a typed query.
+    ModalQuery,
     Input,
     /// A modal with nowhere to put it.
     Discard,
@@ -97,7 +102,28 @@ pub(crate) fn paste_target(state: &LoopState) -> PasteTarget {
         Some(Modal::CommandPalette) => PasteTarget::Palette,
         Some(Modal::Search) => PasteTarget::Search,
         Some(Modal::Question) => PasteTarget::Question,
-        Some(_) => PasteTarget::Discard,
+        // Anything that takes typed characters takes pasted ones: the
+        // user filtering by hand and filtering by clipboard are the
+        // same intent.
+        Some(
+            Modal::SessionSearch
+            | Modal::SessionPicker
+            | Modal::TurnPicker
+            | Modal::LinkPicker
+            | Modal::ModelPicker
+            | Modal::ThemePicker,
+        ) => PasteTarget::ModalQuery,
+        // Spelled out rather than a wildcard: a new modal with a filter
+        // must fail to compile here instead of silently swallowing
+        // pastes, the way the pickers used to.
+        Some(
+            Modal::Help
+            | Modal::Todos
+            | Modal::Aside
+            | Modal::PendingManager
+            | Modal::SkillPicker
+            | Modal::VariantPicker,
+        ) => PasteTarget::Discard,
         None => PasteTarget::Input,
     }
 }
@@ -295,14 +321,15 @@ pub(crate) fn submit(
     }
 }
 
-/// What pasted text becomes. A picker returns nothing: it has nowhere
-/// to put text, and falling through to the prompt behind it would edit
-/// something the user cannot see.
+/// What pasted text becomes. A modal with no text field returns
+/// nothing: it has nowhere to put text, and falling through to the
+/// prompt behind it would edit something the user cannot see.
 pub(crate) fn paste(state: &LoopState, text: String) -> Vec<Intent> {
     match paste_target(state) {
         PasteTarget::Palette => vec![Intent::PastePalette(text)],
         PasteTarget::Search => vec![Intent::PasteSearch(text)],
         PasteTarget::Question => vec![Intent::PasteQuestion(text)],
+        PasteTarget::ModalQuery => vec![Intent::PasteModalQuery(text)],
         PasteTarget::Input => vec![Intent::PasteInput(text)],
         PasteTarget::Discard => Vec::new(),
     }
@@ -345,6 +372,46 @@ mod tests {
         }
     }
 
+    /// Every modal with a typed query takes a paste; the ones with no
+    /// text field are the only ones that may swallow it.
+    #[test]
+    fn paste_reaches_every_modal_that_accepts_typed_characters() {
+        for modal in [
+            Modal::SessionSearch,
+            Modal::SessionPicker,
+            Modal::TurnPicker,
+            Modal::LinkPicker,
+            Modal::ModelPicker,
+            Modal::ThemePicker,
+        ] {
+            let state = LoopState {
+                modal: Some(modal),
+                ..idle()
+            };
+            assert_eq!(paste_target(&state), PasteTarget::ModalQuery, "{modal:?}");
+            assert_eq!(
+                paste(&state, "needle".into()),
+                vec![Intent::PasteModalQuery("needle".into())],
+                "{modal:?}"
+            );
+        }
+        for modal in [
+            Modal::Help,
+            Modal::Todos,
+            Modal::Aside,
+            Modal::PendingManager,
+            Modal::SkillPicker,
+            Modal::VariantPicker,
+        ] {
+            let state = LoopState {
+                modal: Some(modal),
+                ..idle()
+            };
+            assert_eq!(paste_target(&state), PasteTarget::Discard, "{modal:?}");
+            assert_eq!(paste(&state, "needle".into()), Vec::new(), "{modal:?}");
+        }
+    }
+
     #[test]
     fn paste_follows_whichever_surface_owns_the_keyboard() {
         assert_eq!(paste_target(&idle()), PasteTarget::Input);
@@ -363,13 +430,18 @@ mod tests {
             ..idle()
         };
         assert_eq!(paste_target(&question), PasteTarget::Question);
-        // A picker has nowhere to put it; it must not fall through to
-        // the prompt behind it.
+        // A filterable picker takes it as filter text; a text-less one
+        // drops it rather than falling through to the prompt behind it.
         let picker = LoopState {
             modal: Some(Modal::ModelPicker),
             ..idle()
         };
-        assert_eq!(paste_target(&picker), PasteTarget::Discard);
+        assert_eq!(paste_target(&picker), PasteTarget::ModalQuery);
+        let help = LoopState {
+            modal: Some(Modal::Help),
+            ..idle()
+        };
+        assert_eq!(paste_target(&help), PasteTarget::Discard);
     }
 
     #[test]
@@ -678,7 +750,15 @@ mod tests {
             modal: Some(Modal::ModelPicker),
             ..idle()
         };
-        assert_eq!(paste(&picker, "text".into()), Vec::new());
+        assert_eq!(
+            paste(&picker, "text".into()),
+            vec![Intent::PasteModalQuery("text".into())]
+        );
+        let help = LoopState {
+            modal: Some(Modal::Help),
+            ..idle()
+        };
+        assert_eq!(paste(&help, "text".into()), Vec::new());
     }
 
     /// Retry must not overwrite a draft — an unsubmitted one is not in

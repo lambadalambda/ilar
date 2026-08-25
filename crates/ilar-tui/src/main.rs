@@ -38,8 +38,8 @@ use input::{
 use modals::{
     CommandPaletteAction, MAX_SEARCH_ROWS, Modal, ModelPicker, PendingAction, PendingManager,
     PickerAction, SearchRow, SessionPicker, SessionPickerAction, SessionSearch,
-    SessionSearchAction, ThemePicker, TurnPicker, TurnPickerAction, VariantPicker,
-    VariantPickerAction, is_command_palette_shortcut, turn_entries,
+    SessionSearchAction, ThemePicker, ThemePickerAction, TurnPicker, TurnPickerAction,
+    VariantPicker, VariantPickerAction, is_command_palette_shortcut, turn_entries,
 };
 use questions::QuestionAction;
 use ratatui::style::Color;
@@ -462,6 +462,55 @@ fn apply_intent(
         Intent::PasteQuestion(text) => {
             if let Some(question) = app.question_modal.as_mut() {
                 question.paste(&text);
+            }
+            None
+        }
+        Intent::PasteModalQuery(text) => {
+            // Whichever picker owns the keyboard filters on it, exactly
+            // as if the text had been typed. The modal decided this, so
+            // only the ones with a query can arrive here.
+            match app.active_modal() {
+                Some(Modal::SessionSearch) => {
+                    if let Some(search) = app.session_search.as_mut() {
+                        // The Rescan is acted on by the loop, which owns
+                        // the scan handles; the modal already marked
+                        // itself as wanting one.
+                        search.insert_query(&text);
+                    }
+                }
+                Some(Modal::SessionPicker) => {
+                    if let Some(picker) = app.session_picker.as_mut() {
+                        picker.insert_query(&text);
+                    }
+                }
+                Some(Modal::TurnPicker) => {
+                    if let Some(picker) = app.turn_picker.as_mut() {
+                        picker.insert_query(&text);
+                    }
+                }
+                Some(Modal::LinkPicker) => {
+                    if let Some(picker) = app.link_picker.as_mut() {
+                        picker.insert_query(&text);
+                    }
+                }
+                Some(Modal::ModelPicker) => {
+                    if let Some(picker) = app.model_picker.as_mut() {
+                        picker.insert_query(&text);
+                    }
+                }
+                Some(Modal::ThemePicker) => {
+                    // A filter paste can only preview; choosing and
+                    // dismissing stay on the key path, so there is
+                    // nothing to persist here.
+                    if let Some(ThemePickerAction::Preview(preview)) = app
+                        .theme_picker
+                        .as_mut()
+                        .map(|picker| picker.insert_query(&text))
+                    {
+                        app.theme = preview;
+                    }
+                }
+                other => debug_assert!(false, "{other:?} was routed a query paste it cannot hold"),
             }
             None
         }
@@ -2903,8 +2952,20 @@ async fn run_app(
                     &steer_tx,
                     notifications_paused,
                 );
+                // A paste into the content search invalidates the scan
+                // in flight, exactly as a keystroke does; the generation
+                // moving is how the modal says the query changed. Only
+                // the cancellation happens here — the spawner below the
+                // drain starts the new scan.
+                let scan = app.session_search.as_ref().map(|search| search.generation);
                 let decided = decide::paste(&state, text);
                 apply_event_intents(app, decided, &mut intents, steer_tx.as_ref());
+                if scan != app.session_search.as_ref().map(|search| search.generation) {
+                    if let Some(flag) = search_cancel.take() {
+                        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    search_rx = None;
+                }
             }
             Event::Mouse(mouse)
                 if matches!(
@@ -3002,6 +3063,119 @@ mod tests {
     use super::*;
     use ilar::runtime::{create_root_session, restored_todos};
     use ilar::session::{SessionMeta, new_id};
+
+    /// Every modal `decide` routes a query paste to must reach its own
+    /// filter: the decision and the methods are tested apart, and only
+    /// this pins the wiring between them.
+    #[test]
+    fn a_query_paste_reaches_the_filter_of_the_modal_that_owns_the_keyboard() {
+        use modals::{LinkPicker, SessionPickerAction};
+
+        let paste = |app: &mut App, text: &str| {
+            let state = decide::LoopState {
+                modal: app.active_modal(),
+                ..decide::LoopState::default()
+            };
+            for intent in decide::paste(&state, text.into()) {
+                apply_intent(app, intent, None);
+            }
+        };
+
+        let mut app = App::new();
+        app.session_picker = Some(SessionPicker::new(vec![ilar::session::SessionSummary {
+            id: "aaa".into(),
+            title: Some("fix websearch fallback".into()),
+            modified: std::time::SystemTime::now(),
+        }]));
+        paste(&mut app, "websearch");
+        let picker = app.session_picker.as_mut().expect("picker open");
+        assert_eq!(
+            picker.handle_key(KeyCode::Enter, false),
+            SessionPickerAction::Resume("aaa".into())
+        );
+        app.session_picker = None;
+
+        app.session_search = Some(SessionSearch::new());
+        paste(&mut app, "needle");
+        let search = app.session_search.as_ref().expect("search open");
+        assert_eq!(search.query, "needle");
+        assert!(search.scanning, "a pasted query must rescan");
+        app.session_search = None;
+
+        app.turn_picker = Some(TurnPicker::new(turn_entries(&[
+            ilar::session::SessionEvent::UserMessage {
+                id: "u1".into(),
+                text: "rewrite the parser".into(),
+                images: Vec::new(),
+                ts: chrono::Utc::now(),
+            },
+            ilar::session::SessionEvent::UserMessage {
+                id: "u2".into(),
+                text: "ship the release".into(),
+                images: Vec::new(),
+                ts: chrono::Utc::now(),
+            },
+        ])));
+        paste(&mut app, "parser");
+        let picker = app.turn_picker.as_mut().expect("picker open");
+        // Filtered to one turn, so the first Enter arms that one.
+        assert_eq!(
+            picker.handle_key(KeyCode::Enter, false),
+            TurnPickerAction::Stay
+        );
+        assert_eq!(
+            picker.handle_key(KeyCode::Enter, false),
+            TurnPickerAction::Rewind {
+                cut: 0,
+                target: "u1".into(),
+                discarded: 2,
+            }
+        );
+        app.turn_picker = None;
+
+        app.link_picker = Some(LinkPicker::new(vec![
+            links::LinkEntry {
+                label: "docs".into(),
+                url: "https://docs.example/one".into(),
+            },
+            links::LinkEntry {
+                label: "issue tracker".into(),
+                url: "https://bugs.example/two".into(),
+            },
+        ]));
+        paste(&mut app, "tracker");
+        let picker = app.link_picker.as_mut().expect("picker open");
+        assert_eq!(
+            picker.handle_key(KeyCode::Enter, false),
+            PickerAction::Choose("https://bugs.example/two".into())
+        );
+        app.link_picker = None;
+
+        app.model_picker = Some(ModelPicker::new(
+            ilar::model::catalog().iter().collect(),
+            "missing/model",
+        ));
+        paste(&mut app, "glm-4.7");
+        let picker = app.model_picker.as_mut().expect("picker open");
+        assert_eq!(
+            picker.handle_key(KeyCode::Enter, false),
+            PickerAction::Choose("zai/glm-4.7".into())
+        );
+        app.model_picker = None;
+
+        // The theme picker previews as it filters, so the paste has to
+        // land on the app's live theme too.
+        app.theme_picker = Some(ThemePicker::new(app.theme));
+        paste(&mut app, "gruv");
+        assert!(app.theme.id().contains("gruv"), "{}", app.theme.id());
+        app.theme_picker = None;
+
+        // A modal with no text field still swallows it rather than
+        // typing into the prompt behind it.
+        app.help_visible = true;
+        paste(&mut app, "into the void");
+        assert!(app.input.is_blank(), "help let a paste through");
+    }
 
     #[test]
     fn the_window_title_is_the_topic_or_just_ilar() {
