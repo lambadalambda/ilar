@@ -28,12 +28,16 @@ impl ImageContent {
         format!("data:{};base64,{}", self.media_type, self.data)
     }
 
-    pub fn png(bytes: &[u8]) -> Self {
+    pub fn new(media_type: impl Into<String>, bytes: &[u8]) -> Self {
         use base64::Engine as _;
         Self {
-            media_type: "image/png".into(),
+            media_type: media_type.into(),
             data: base64::engine::general_purpose::STANDARD.encode(bytes),
         }
+    }
+
+    pub fn png(bytes: &[u8]) -> Self {
+        Self::new("image/png", bytes)
     }
 
     /// Decoded payload size, for caps and display.

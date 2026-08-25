@@ -468,7 +468,15 @@ fn apply_intent(
         Intent::PasteInput(text) => {
             app.model_key_pending = false;
             app.clear_transient_notice();
-            app.input.insert(&text);
+            // A terminal drop arrives as a pasted file path; when that
+            // path is an existing image file, attaching is the intent.
+            if let Some(path) = crate::app::dropped_image_path(&text)
+                && path.is_file()
+            {
+                app.attach_image_file(&path);
+            } else {
+                app.input.insert(&text);
+            }
             None
         }
         Intent::SendQueued => {

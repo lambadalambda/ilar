@@ -1560,14 +1560,40 @@ impl App {
             );
             return;
         }
+        let kind = image
+            .media_type
+            .strip_prefix("image/")
+            .unwrap_or(&image.media_type)
+            .to_string();
         self.pending_images.push(image);
         self.set_notice(
             format!(
-                "image attached ({}) — sends with your next message, Esc discards",
+                "image attached ({kind} · {}) — sends with your next message, Esc discards",
                 crate::text::format_bytes(bytes as u64)
             ),
             NoticeLevel::Info,
         );
+    }
+
+    /// A dropped image file: sniffed, bounded, attached — or a notice
+    /// saying why not.
+    pub(crate) fn attach_image_file(&mut self, path: &std::path::Path) {
+        match std::fs::read(path) {
+            Ok(bytes) => match image_content_from_file_bytes(&bytes) {
+                Some(image) => self.attach_image(image),
+                None => self.set_notice(
+                    format!(
+                        "{} is not a supported image (png, jpeg, webp, gif)",
+                        path.display()
+                    ),
+                    NoticeLevel::Warning,
+                ),
+            },
+            Err(error) => self.set_notice(
+                format!("cannot read {}: {error}", path.display()),
+                NoticeLevel::Error,
+            ),
+        }
     }
 
     /// The clipboard's image, PNG-encoded; `Ok(None)` when it holds none.
@@ -1585,8 +1611,6 @@ impl App {
             Err(arboard::Error::ContentNotAvailable) => return Ok(None),
             Err(error) => return Err(error).context("reading clipboard image"),
         };
-        /// Longest edge providers keep before tiling; larger is waste.
-        const MAX_IMAGE_DIM: usize = 2048;
         let (width, height, pixels) =
             match downscale_rgba(image.width, image.height, &image.bytes, MAX_IMAGE_DIM) {
                 Some((width, height, pixels)) => (width, height, std::borrow::Cow::from(pixels)),
@@ -2827,6 +2851,98 @@ const STREAM_STALL_AFTER: std::time::Duration = std::time::Duration::from_secs(3
 /// forever over work that has already stopped. A shallow sweep is not
 /// enough: the child's own rows are nested inside it, and
 /// `child_running` masks the parent row's state while it is set.
+/// Longest edge providers keep before tiling; larger is waste.
+const MAX_IMAGE_DIM: usize = 2048;
+
+/// The single image-file path a terminal drop pastes, if that is what
+/// the pasted text is: one line, optionally quoted or with
+/// backslash-escaped spaces, image extension. Anything else is text.
+pub(crate) fn dropped_image_path(text: &str) -> Option<std::path::PathBuf> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed.contains('\n') {
+        return None;
+    }
+    let unquoted = trimmed
+        .strip_prefix('\'')
+        .and_then(|rest| rest.strip_suffix('\''))
+        .or_else(|| {
+            trimmed
+                .strip_prefix('"')
+                .and_then(|rest| rest.strip_suffix('"'))
+        });
+    let path = match unquoted {
+        Some(inner) => inner.to_string(),
+        None => {
+            let escaped = trimmed.replace("\\ ", "\u{0}");
+            if escaped.contains(' ') {
+                return None;
+            }
+            escaped.replace('\u{0}', " ")
+        }
+    };
+    let lower = path.to_lowercase();
+    ["png", "jpg", "jpeg", "webp", "gif"]
+        .iter()
+        .any(|ext| lower.ends_with(&format!(".{ext}")))
+        .then(|| std::path::PathBuf::from(path))
+}
+
+/// Media type by magic numbers — the extension may lie.
+fn image_media_type(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(b"\xFF\xD8\xFF") {
+        Some("image/jpeg")
+    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else {
+        None
+    }
+}
+
+/// File bytes → attachment. Formats pass through as themselves (every
+/// provider takes png/jpeg/webp/gif); only an oversized PNG — the
+/// retina-screenshot case — is decoded, downscaled and re-encoded.
+fn image_content_from_file_bytes(bytes: &[u8]) -> Option<ilar::session::ImageContent> {
+    let media_type = image_media_type(bytes)?;
+    if media_type == "image/png"
+        && let Some(downscaled) = downscaled_png(bytes)
+    {
+        return Some(downscaled);
+    }
+    Some(ilar::session::ImageContent::new(media_type, bytes))
+}
+
+/// `Some` only when the PNG decodes cleanly and needed shrinking;
+/// anything else falls back to the original bytes.
+fn downscaled_png(bytes: &[u8]) -> Option<ilar::session::ImageContent> {
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    decoder.set_transformations(png::Transformations::normalize_to_color8());
+    let mut reader = decoder.read_info().ok()?;
+    let mut buf = vec![0; reader.output_buffer_size()?];
+    let info = reader.next_frame(&mut buf).ok()?;
+    buf.truncate(info.buffer_size());
+    let (width, height) = (info.width as usize, info.height as usize);
+    let rgba: Vec<u8> = match info.color_type {
+        png::ColorType::Rgba => buf,
+        png::ColorType::Rgb => buf
+            .chunks_exact(3)
+            .flat_map(|pixel| [pixel[0], pixel[1], pixel[2], 255])
+            .collect(),
+        png::ColorType::Grayscale => buf.iter().flat_map(|&v| [v, v, v, 255]).collect(),
+        png::ColorType::GrayscaleAlpha => buf
+            .chunks_exact(2)
+            .flat_map(|pixel| [pixel[0], pixel[0], pixel[0], pixel[1]])
+            .collect(),
+        png::ColorType::Indexed => return None,
+    };
+    let (out_width, out_height, small) = downscale_rgba(width, height, &rgba, MAX_IMAGE_DIM)?;
+    let png = encode_png(out_width as u32, out_height as u32, &small).ok()?;
+    Some(ilar::session::ImageContent::png(&png))
+}
+
 /// Fit RGBA inside `max_dim` on the longest edge with an area-average
 /// filter; `None` when it already fits. Providers shrink to ~2048px
 /// before tiling anyway, so larger uploads buy nothing but bytes.
@@ -4631,6 +4747,73 @@ mod tests {
             "{:?}",
             app.lines.last()
         );
+    }
+
+    #[test]
+    fn a_pasted_image_path_is_recognized_in_the_common_quoting_styles() {
+        use std::path::PathBuf;
+        // Plain, with the trailing space most terminals append.
+        assert_eq!(
+            dropped_image_path("/tmp/shot.png "),
+            Some(PathBuf::from("/tmp/shot.png"))
+        );
+        // Quoted (spaces in the name) and backslash-escaped.
+        assert_eq!(
+            dropped_image_path("'/tmp/my shot.jpeg'"),
+            Some(PathBuf::from("/tmp/my shot.jpeg"))
+        );
+        assert_eq!(
+            dropped_image_path("\"/tmp/x.gif\""),
+            Some(PathBuf::from("/tmp/x.gif"))
+        );
+        assert_eq!(
+            dropped_image_path("/tmp/my\\ shot.webp"),
+            Some(PathBuf::from("/tmp/my shot.webp"))
+        );
+        // Prose, non-images and multiline pastes stay text.
+        assert_eq!(dropped_image_path("look at /tmp/shot.png"), None);
+        assert_eq!(dropped_image_path("/tmp/notes.txt"), None);
+        assert_eq!(dropped_image_path("a\nb.png"), None);
+    }
+
+    #[test]
+    fn image_bytes_are_sniffed_and_oversized_pngs_downscale_on_the_way_in() {
+        // Magic numbers, not extensions.
+        assert_eq!(
+            image_media_type(b"\x89PNG\r\n\x1a\nrest"),
+            Some("image/png")
+        );
+        assert_eq!(
+            image_media_type(b"\xFF\xD8\xFF\xE0rest"),
+            Some("image/jpeg")
+        );
+        assert_eq!(
+            image_media_type(b"RIFF\x00\x00\x00\x00WEBPVP8 "),
+            Some("image/webp")
+        );
+        assert_eq!(image_media_type(b"GIF89arest"), Some("image/gif"));
+        assert_eq!(image_media_type(b"plain text"), None);
+
+        // A jpeg passes through byte-identically with its own type.
+        let jpeg = b"\xFF\xD8\xFF\xE0fake jpeg body";
+        let content = image_content_from_file_bytes(jpeg).unwrap();
+        assert_eq!(
+            content,
+            ilar::session::ImageContent::new("image/jpeg", jpeg)
+        );
+
+        // A small png passes through untouched.
+        let small = encode_png(4, 4, &[9u8; 4 * 4 * 4]).unwrap();
+        let content = image_content_from_file_bytes(&small).unwrap();
+        assert_eq!(content, ilar::session::ImageContent::png(&small));
+
+        // An oversized png is decoded, downscaled and re-encoded.
+        let pixels = vec![7u8; 3000 * 1000 * 4];
+        let big = encode_png(3000, 1000, &pixels).unwrap();
+        let content = image_content_from_file_bytes(&big).unwrap();
+        let (width, height, downscaled) = downscale_rgba(3000, 1000, &pixels, 2048).unwrap();
+        let expected = encode_png(width as u32, height as u32, &downscaled).unwrap();
+        assert_eq!(content, ilar::session::ImageContent::png(&expected));
     }
 
     #[test]

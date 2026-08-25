@@ -64,6 +64,12 @@ marker in the transcript, stored inline in the session so it survives
 restore and fork. Text on the clipboard still pastes the normal way;
 Ctrl-V only intercepts images.
 
+**Dropping a file** onto the terminal works too: the drop arrives as a
+pasted path, and when that path is an existing image file it attaches
+instead of landing in the input. PNG, JPEG, WebP and GIF are accepted
+(sniffed from the bytes, not the extension) and travel as themselves —
+only oversized PNGs are re-encoded on the way in.
+
 The catalog knows which models see: every OpenAI model does, on z.ai
 only the V-series (available on the coding plan too). Attaching on anything else is refused with a notice
 naming the model, and attachments only ride a *fresh* turn — while a
