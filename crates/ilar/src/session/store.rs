@@ -15,6 +15,7 @@ use super::replay_index::{
     replay_ids_path, write_checkpoint, write_id_records,
 };
 use crate::question::{QUESTION_TOOL_NAME, QuestionRequest, validate_request};
+use crate::text::truncate_chars_ellipsis;
 
 /// Owns the session directory; creates/loads sessions.
 #[derive(Clone)]
@@ -160,13 +161,7 @@ const SUMMARY_TITLE_CHARS: usize = 80;
 
 fn summary_title(text: &str) -> String {
     let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if collapsed.chars().count() > SUMMARY_TITLE_CHARS {
-        let mut title: String = collapsed.chars().take(SUMMARY_TITLE_CHARS).collect();
-        title.push('…');
-        title
-    } else {
-        collapsed
-    }
+    truncate_chars_ellipsis(&collapsed, SUMMARY_TITLE_CHARS)
 }
 
 impl SessionStore {

@@ -2,10 +2,11 @@
 
 use serde::Deserialize;
 
-use super::process::{Captured, ProcessGroup, drain, shell_command, tail};
+use super::process::{Captured, ProcessGroup, drain, shell_command};
 use super::{
     Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, WorkspaceAccess, parse_input,
 };
+use crate::text::{tail_bytes, truncate_chars_ellipsis};
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MAX_OUTPUT: usize = 100 * 1024;
@@ -50,8 +51,8 @@ fn stream_budgets(stdout_len: usize, stderr_len: usize) -> (usize, usize) {
 fn render_output(out: Captured, err: Captured) -> String {
     let total = out.total.saturating_add(err.total);
     let (stdout_keep, stderr_keep) = stream_budgets(out.retained.len(), err.retained.len());
-    let stdout_tail = tail(&out.retained, stdout_keep);
-    let stderr_tail = tail(&err.retained, stderr_keep);
+    let stdout_tail = tail_bytes(&out.retained, stdout_keep);
+    let stderr_tail = tail_bytes(&err.retained, stderr_keep);
     let rendered = stdout_tail.len() + stderr_tail.len();
     let mut content = String::from_utf8_lossy(stdout_tail).into_owned();
     content.push_str(&String::from_utf8_lossy(stderr_tail));
@@ -148,12 +149,7 @@ impl Tool for BashTool {
                     .timeout_ms
                     .map(std::time::Duration::from_millis)
                     .unwrap_or_else(|| spawner.background_tool_timeout());
-                let command_preview: String = input.command.chars().take(120).collect();
-                let description = if command_preview.len() < input.command.len() {
-                    format!("bash: {command_preview}…")
-                } else {
-                    format!("bash: {command_preview}")
-                };
+                let description = format!("bash: {}", truncate_chars_ellipsis(&input.command, 120));
                 let parent_session_id = ctx.session_id.clone();
                 // Background jobs surface through notifications, not
                 // live tool rows; no tail reporter.

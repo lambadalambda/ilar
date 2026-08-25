@@ -1,5 +1,7 @@
 use futures::StreamExt;
 
+use crate::text::truncate_bytes;
+
 const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
 const MAX_STREAM_ERROR_BYTES: usize = 4096;
 const TRUNCATED: &str = "...[truncated]";
@@ -71,7 +73,7 @@ pub(super) fn stream_error_message(value: &serde_json::Value) -> String {
 
 fn bounded_stream_text(mut value: String) -> String {
     if value.len() > MAX_STREAM_ERROR_BYTES {
-        truncate_utf8(&mut value, MAX_STREAM_ERROR_BYTES - TRUNCATED.len());
+        truncate_bytes(&mut value, MAX_STREAM_ERROR_BYTES - TRUNCATED.len());
         value.push_str(TRUNCATED);
     }
     value
@@ -108,10 +110,10 @@ pub(super) async fn bounded_error_body(response: reqwest::Response, secrets: &[&
         .unwrap_or_else(|_| redact_text(&raw));
     redact_explicit_secrets(&mut sanitized, secrets, truncated);
     if truncated {
-        truncate_utf8(&mut sanitized, MAX_ERROR_BODY_BYTES - TRUNCATED.len());
+        truncate_bytes(&mut sanitized, MAX_ERROR_BODY_BYTES - TRUNCATED.len());
         sanitized.push_str(TRUNCATED);
     } else {
-        truncate_utf8(&mut sanitized, MAX_ERROR_BODY_BYTES);
+        truncate_bytes(&mut sanitized, MAX_ERROR_BODY_BYTES);
     }
     sanitized
 }
@@ -212,17 +214,6 @@ fn sensitive_key(key: &str) -> bool {
     ]
     .iter()
     .any(|needle| key.contains(needle))
-}
-
-fn truncate_utf8(value: &mut String, limit: usize) {
-    if value.len() <= limit {
-        return;
-    }
-    let mut boundary = limit;
-    while !value.is_char_boundary(boundary) {
-        boundary -= 1;
-    }
-    value.truncate(boundary);
 }
 
 #[cfg(test)]

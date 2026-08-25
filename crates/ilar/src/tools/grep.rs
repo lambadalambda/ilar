@@ -7,6 +7,7 @@ use std::sync::atomic::Ordering;
 use super::{
     Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, WorkspaceAccess, parse_input,
 };
+use crate::text::truncate_bytes_ellipsis;
 
 const MAX_MATCHES: usize = 200;
 const MAX_MATCHES_PER_FILE: usize = 50;
@@ -150,7 +151,7 @@ fn grep_one_file(
         let text = String::from_utf8_lossy(&line);
         if regex.is_match(&text) {
             let mut rendered = format!("{relative}:{line_number}:{}", text.trim_end());
-            truncate_utf8(&mut rendered, MAX_OUTPUT_LINE_BYTES);
+            truncate_bytes_ellipsis(&mut rendered, MAX_OUTPUT_LINE_BYTES);
             hits.push(Hit {
                 path: relative.to_string(),
                 line: line_number,
@@ -264,22 +265,10 @@ fn grep_files(
         ));
     } else if truncated {
         const MARKER: &str = "…(truncated)\n";
-        truncate_utf8(&mut out, MAX_OUTPUT_BYTES.saturating_sub(MARKER.len()));
+        truncate_bytes_ellipsis(&mut out, MAX_OUTPUT_BYTES.saturating_sub(MARKER.len()));
         out.push_str(MARKER);
     }
     ToolOutput::text(out)
-}
-
-fn truncate_utf8(value: &mut String, max_bytes: usize) {
-    if value.len() <= max_bytes {
-        return;
-    }
-    let mut end = max_bytes.saturating_sub('…'.len_utf8());
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    value.truncate(end);
-    value.push('…');
 }
 
 #[cfg(test)]

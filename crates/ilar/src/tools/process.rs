@@ -27,19 +27,6 @@ impl Captured {
     }
 }
 
-/// Last `keep` bytes of `bytes`, starting on a UTF-8 boundary so a tail
-/// cut mid-codepoint does not open with a replacement character.
-pub(crate) fn tail(bytes: &[u8], keep: usize) -> &[u8] {
-    if keep >= bytes.len() {
-        return bytes;
-    }
-    let mut start = bytes.len() - keep;
-    while start < bytes.len() && bytes[start] & 0b1100_0000 == 0b1000_0000 {
-        start += 1;
-    }
-    &bytes[start..]
-}
-
 /// Read `reader` to EOF into `captured`, keeping at most `cap` bytes.
 pub(crate) async fn drain<R: tokio::io::AsyncRead + Unpin>(
     mut reader: R,
@@ -139,14 +126,5 @@ mod tests {
         let state = captured(&[b"0123456789"], 3);
         assert_eq!(state.retained, b"789");
         assert_eq!(state.total, 10);
-    }
-
-    #[test]
-    fn tail_starts_on_a_utf8_boundary() {
-        let bytes = "aé".as_bytes(); // 61 c3 a9
-        assert_eq!(tail(bytes, 3), bytes);
-        assert_eq!(tail(bytes, 2), "é".as_bytes());
-        // Cutting inside the codepoint skips its stray continuation byte.
-        assert_eq!(tail(bytes, 1), b"");
     }
 }

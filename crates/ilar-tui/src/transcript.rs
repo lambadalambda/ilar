@@ -1077,19 +1077,12 @@ fn preview_tail(text: &str) -> String {
         .filter(|line| !line.trim().is_empty())
         .collect();
     let tail_start = lines.len().saturating_sub(PREVIEW_LINES);
-    let mut tail = lines[tail_start..].join("\n");
-    if tail.len() > PREVIEW_CHARS {
-        let cut = tail
-            .char_indices()
-            .map(|(index, _)| index)
-            .find(|index| *index >= tail.len() - PREVIEW_CHARS)
-            .unwrap_or(0);
-        tail = tail[cut..].to_string();
-    }
+    let joined = lines[tail_start..].join("\n");
+    let tail = ilar::text::tail_str(&joined, PREVIEW_CHARS);
     if tail_start > 0 || tail.len() < text.trim().len() {
         format!("… {tail}")
     } else {
-        tail
+        tail.to_string()
     }
 }
 
@@ -1489,13 +1482,7 @@ const MAX_THOUGHT_CHARS: usize = 64 * 1024;
 pub(crate) fn append_thought_tail(text: &mut String, delta: &str) {
     text.push_str(delta);
     if text.len() > MAX_THOUGHT_CHARS {
-        let cut = text.len() - MAX_THOUGHT_CHARS;
-        let cut = text
-            .char_indices()
-            .map(|(index, _)| index)
-            .find(|index| *index >= cut)
-            .unwrap_or(0);
-        *text = format!("…{}", &text[cut..]);
+        *text = format!("…{}", ilar::text::tail_str(text, MAX_THOUGHT_CHARS));
     }
 }
 

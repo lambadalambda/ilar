@@ -9,6 +9,7 @@ use std::sync::atomic::Ordering;
 use super::{
     Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, WorkspaceAccess, parse_input,
 };
+use crate::text::truncate_bytes;
 
 const MAX_LINES: usize = 2000;
 const MAX_OUTPUT_BYTES: usize = 256 * 1024;
@@ -139,7 +140,7 @@ fn read_window(
             break;
         }
         let mut text = String::from_utf8_lossy(&line.prefix).into_owned();
-        truncate_utf8(&mut text, keep);
+        truncate_bytes(&mut text, keep);
         let _ = writeln!(out, "{line_number}→{}", text.trim_end_matches('\r'));
         emitted += 1;
         if line.truncated || out.len() >= MAX_OUTPUT_BYTES {
@@ -158,7 +159,7 @@ fn read_window(
     }
     if truncated {
         const MARKER: &str = "…\n(truncated)\n";
-        truncate_utf8(&mut out, MAX_OUTPUT_BYTES.saturating_sub(MARKER.len()));
+        truncate_bytes(&mut out, MAX_OUTPUT_BYTES.saturating_sub(MARKER.len()));
         out.push_str(MARKER);
     }
     ToolOutput::text(out)
@@ -207,17 +208,6 @@ fn sniff_binary<R: BufRead>(
 fn attached_output(description: String, image: crate::session::ImageContent) -> Option<ToolOutput> {
     let output = ToolOutput::text(description).with_images(vec![image]);
     (!output.images().is_empty()).then_some(output)
-}
-
-fn truncate_utf8(value: &mut String, max_bytes: usize) {
-    if value.len() <= max_bytes {
-        return;
-    }
-    let mut end = max_bytes;
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    value.truncate(end);
 }
 
 struct LinePrefix {

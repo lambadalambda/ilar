@@ -9,6 +9,7 @@ use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use serde::Deserialize;
 use url::{Host, Url};
 
+use crate::text::truncate_chars;
 use crate::tools::{Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, WorkspaceAccess};
 
 const MAX_FETCH_BYTES: usize = 2 * 1024 * 1024;
@@ -487,7 +488,7 @@ impl Tool for WebFetchTool {
                             if text.chars().count() > MAX_TEXT_CHARS {
                                 ToolOutput::text(format!(
                                     "{}\n\n…(truncated at {MAX_TEXT_CHARS} chars)",
-                                    text.chars().take(MAX_TEXT_CHARS).collect::<String>()
+                                    truncate_chars(&text, MAX_TEXT_CHARS)
                                 ))
                             } else {
                                 ToolOutput::text(text)
@@ -633,10 +634,6 @@ impl Tool for WebSearchTool {
     }
 }
 
-fn truncate_chars(value: &str, limit: usize) -> String {
-    value.chars().take(limit).collect()
-}
-
 struct LimitedWriter {
     output: String,
     remaining: usize,
@@ -695,7 +692,7 @@ fn redacted_url(url: &Url) -> String {
     url.set_path("/");
     url.set_query(None);
     url.set_fragment(None);
-    truncate_chars(url.as_str(), MAX_FETCH_URL_CHARS)
+    truncate_chars(url.as_str(), MAX_FETCH_URL_CHARS).to_string()
 }
 
 /// Tavily backend (ILAR_TAVILY_API_KEY).

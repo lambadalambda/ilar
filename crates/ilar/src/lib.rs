@@ -21,6 +21,7 @@ pub mod runtime;
 pub mod session;
 pub mod skill;
 pub mod subagent;
+pub mod text;
 pub mod todo;
 pub mod tools;
 pub mod topic;
