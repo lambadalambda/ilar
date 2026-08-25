@@ -284,6 +284,9 @@ fn complete<R: Runtime>(app: &mut App, completion: Completion, runtime: &mut R) 
         }
         Completion::Crashed(error) => {
             app.busy = false;
+            // A crash delivers no TurnDone and no error event, so this
+            // is the only place the transcript gets closed out.
+            app.close_open_rows();
             app.status = "error".into();
             app.set_activity(Activity::Error);
             let message = format!("operation crashed: {error}");
@@ -908,6 +911,63 @@ mod tests {
             runtime.log,
             vec!["start_turn:typed while idle", "present", "poll"]
         );
+    }
+
+    /// A crashed turn task delivers no `TurnDone` and no error event,
+    /// so the transcript it left mid-flight is the pass's to close:
+    /// otherwise an idle app keeps spinning over work that is gone.
+    #[test]
+    fn a_crash_closes_what_the_turn_left_open() {
+        use crate::transcript::ToolState;
+        let mut app = App::new();
+        app.busy = true;
+        app.session_id = "root".into();
+        app.push_loop_event(&ilar::agent::LoopEvent::ToolStarted {
+            id: "call-1".into(),
+            name: "task".into(),
+        });
+        app.push_subagent_activity(&ilar::subagent::SubagentActivity {
+            parent_session_id: "root".into(),
+            parent_call_id: "call-1".into(),
+            child_session_id: "child".into(),
+            event: ilar::agent::LoopEvent::TurnStarted,
+        });
+        app.push_loop_event(&ilar::agent::LoopEvent::ThinkingDelta("half a thou".into()));
+        let mut runtime = FakeRuntime::new();
+
+        pass(
+            &mut app,
+            Some(Completion::Crashed("turn task panicked".into())),
+            Vec::new(),
+            &mut runtime,
+        )
+        .unwrap();
+
+        assert!(!app.busy);
+        assert!(
+            app.lines.iter().all(|line| !matches!(
+                line,
+                Line_::Thought {
+                    complete: false,
+                    ..
+                }
+            )),
+            "an incomplete thought survived the crash: {:?}",
+            app.lines
+        );
+        let Some(Line_::Tool {
+            state,
+            child_running,
+            ..
+        }) = app
+            .lines
+            .iter()
+            .find(|line| matches!(line, Line_::Tool { .. }))
+        else {
+            panic!("{:?}", app.lines);
+        };
+        assert_eq!(*state, ToolState::Failed);
+        assert!(!child_running, "the agent row still claims to be working");
     }
 
     /// An idle pass lets the notification through: same-session starts

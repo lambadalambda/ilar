@@ -1094,17 +1094,10 @@ impl App {
                     .push(Line_::System(format!("transcript compacted\n{summary}")));
             }
             LoopEvent::TurnDone { outcome } => {
-                self.lines.retain(|line| {
-                    !matches!(
-                        line,
-                        Line_::Thought {
-                            complete: false,
-                            ..
-                        }
-                    )
-                });
                 if *outcome == TurnOutcome::Aborted {
-                    close_running_tools(&mut self.lines);
+                    self.close_open_rows();
+                } else {
+                    self.prune_incomplete_thoughts();
                 }
                 self.status = match outcome {
                     TurnOutcome::Completed => "ready".into(),
@@ -1154,26 +1147,33 @@ impl App {
         }
     }
 
+    /// Streaming thoughts that will never finish: whatever arrived is
+    /// a fragment of a sentence, and keeping it would read as content.
+    fn prune_incomplete_thoughts(&mut self) {
+        self.lines.retain(|line| {
+            !matches!(
+                line,
+                Line_::Thought {
+                    complete: false,
+                    ..
+                }
+            )
+        });
+    }
+
+    /// Everything a turn that ended badly left mid-flight. Whatever
+    /// would have closed these rows is gone with the turn, so an idle
+    /// app would otherwise spin over work that has already stopped.
+    pub(crate) fn close_open_rows(&mut self) {
+        self.prune_incomplete_thoughts();
+        close_running_tools(&mut self.lines);
+    }
+
     pub(crate) fn finish_turn(&mut self, result: anyhow::Result<TurnOutcome>) {
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
         self.retry_subagent_activity();
         if let Err(error) = result {
-            self.lines.retain(|line| {
-                !matches!(
-                    line,
-                    Line_::Thought {
-                        complete: false,
-                        ..
-                    }
-                )
-            });
-            for line in &mut self.lines {
-                if let Line_::Tool { state, .. } = line
-                    && matches!(*state, ToolState::Running | ToolState::Complete)
-                {
-                    *state = ToolState::Failed;
-                }
-            }
+            self.close_open_rows();
             let mut message = format!("error: {error:#}");
             self.lines.push(Line_::System(message.clone()));
             if self.turn_committed {
@@ -2922,14 +2922,6 @@ const CONTENT_HORIZONTAL_PADDING: u16 = 2;
 /// this long during thinking/responding.
 const STREAM_STALL_AFTER: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// Close every tool row an abort left open, at any depth.
-///
-/// Aborting drops the parent's tool futures, which cancels a running
-/// subagent without it ever reporting back — so no `TurnDone` activity
-/// arrives to clear `child_running`, and the agent row would spin
-/// forever over work that has already stopped. A shallow sweep is not
-/// enough: the child's own rows are nested inside it, and
-/// `child_running` masks the parent row's state while it is set.
 /// Longest edge providers keep before tiling; larger is waste.
 const MAX_IMAGE_DIM: usize = 2048;
 
@@ -3088,6 +3080,14 @@ fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// Close every tool row a turn left open, at any depth.
+///
+/// An abort drops the parent's tool futures and an error or a crash
+/// takes the channel with it, so a running subagent never reports
+/// back — no `TurnDone` activity arrives to clear `child_running`, and
+/// the agent row would spin forever. A shallow sweep is not enough:
+/// the child's own rows are nested inside it, and `child_running`
+/// masks the parent row's state while it is set.
 fn close_running_tools(lines: &mut [Line_]) {
     for line in lines {
         if let Line_::Tool {
@@ -5962,6 +5962,60 @@ mod tests {
             child_lines,
             ..
         }) = app.lines.last()
+        else {
+            panic!("{:?}", app.lines);
+        };
+        assert_eq!(*state, ToolState::Failed);
+        assert!(!child_running, "the agent row still claims to be working");
+        assert!(
+            child_lines.iter().all(|line| !matches!(
+                line,
+                Line_::Tool {
+                    state: ToolState::Running,
+                    ..
+                }
+            )),
+            "a child tool row is still running: {child_lines:?}"
+        );
+    }
+
+    /// The other way a live Task loses its child: the turn errors out
+    /// instead of being aborted. The child is just as unreachable, so
+    /// the same teardown has to happen.
+    #[test]
+    fn a_turn_error_stops_the_subagent_spinner() {
+        let mut app = App::new();
+        app.session_id = "root".into();
+        app.push_loop_event(&LoopEvent::ToolStarted {
+            id: "call-1".into(),
+            name: "task".into(),
+        });
+        for event in [
+            LoopEvent::TurnStarted,
+            LoopEvent::ToolStarted {
+                id: "child-1".into(),
+                name: "grep".into(),
+            },
+        ] {
+            app.push_subagent_activity(&ilar::subagent::SubagentActivity {
+                parent_session_id: "root".into(),
+                parent_call_id: "call-1".into(),
+                child_session_id: "child".into(),
+                event,
+            });
+        }
+
+        app.finish_turn(Err(anyhow::anyhow!("provider hung up")));
+
+        let Some(Line_::Tool {
+            state,
+            child_running,
+            child_lines,
+            ..
+        }) = app
+            .lines
+            .iter()
+            .find(|line| matches!(line, Line_::Tool { .. }))
         else {
             panic!("{:?}", app.lines);
         };
