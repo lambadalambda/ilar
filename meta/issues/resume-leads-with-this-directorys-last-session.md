@@ -38,3 +38,18 @@ titles.
 ## Milestone
 
 12 — Health sweep
+
+## Outcome
+
+Two halves: d430e1b gave both resume surfaces last-used stamps
+("35m ago" within a day, dates beyond) and the here-first ordering
+machinery; 69190f6 made it live with a new informational
+`SessionMeta.cwd` (canonicalized at root creation, byte-identical
+to what the picker predicate compares; `workspace` keeps its
+child-session meaning and the resume guard is untouched). Old logs
+without the key group under "elsewhere"; other-directory rows carry
+a `· ~/repos/other` marker. Pinned by render-to-buffer acceptance
+tests on both surfaces plus store round-trips. Deferred (recorded
+by the agent): >200-session scans truncate before the partition;
+the id→cwd map could ride recall.SessionHits; a third open-coded
+HOME lookup wants a shared helper.

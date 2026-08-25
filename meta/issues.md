@@ -57,5 +57,4 @@ Refactors:
 
 Follow-ups:
 
-- [ ] [Resume leads with this directory's last session](issues/resume-leads-with-this-directorys-last-session.md)
 - [ ] [Tool results can carry images](issues/tool-results-can-carry-images.md)
