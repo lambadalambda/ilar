@@ -369,6 +369,23 @@ pub(crate) fn transcript_entries(
     entries
 }
 
+/// The hover affordance: underline what a click on this row would
+/// act on. Whitespace and box-drawing spans (indent, branch glyphs)
+/// are structure, not content, and stay bare.
+pub(crate) fn underline_content_spans(line: &mut Line<'static>) {
+    for span in &mut line.spans {
+        let structural = span
+            .content
+            .chars()
+            .all(|c| c.is_whitespace() || ('\u{2500}'..='\u{257F}').contains(&c));
+        if !structural {
+            span.style = span
+                .style
+                .add_modifier(ratatui::style::Modifier::UNDERLINED);
+        }
+    }
+}
+
 pub(crate) fn toggle_tool_expansion(lines: &mut [Line_], id: &str) -> bool {
     for line in lines {
         if let Line_::Tool {
@@ -1693,6 +1710,36 @@ fn notification_lines(
 mod tests {
     use super::*;
     use crate::text::tests::rendered_text;
+
+    #[test]
+    fn hover_underline_marks_content_and_skips_structure() {
+        let mut line = Line::from(vec![
+            Span::raw("  └─ "),
+            Span::raw("read"),
+            Span::raw(" main.rs"),
+        ]);
+        underline_content_spans(&mut line);
+
+        assert!(
+            !line.spans[0]
+                .style
+                .add_modifier
+                .contains(ratatui::style::Modifier::UNDERLINED),
+            "branch glyphs and indent stay bare"
+        );
+        assert!(
+            line.spans[1]
+                .style
+                .add_modifier
+                .contains(ratatui::style::Modifier::UNDERLINED)
+        );
+        assert!(
+            line.spans[2]
+                .style
+                .add_modifier
+                .contains(ratatui::style::Modifier::UNDERLINED)
+        );
+    }
 
     #[test]
     fn the_transcript_tail_keeps_a_blank_row_off_the_input() {

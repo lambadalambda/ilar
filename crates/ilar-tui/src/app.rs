@@ -194,6 +194,9 @@ pub(crate) struct App {
     /// scrolls between press and release, so a release-time lookup
     /// would hit whatever moved under the cursor.
     transcript_pressed_target: Option<TranscriptHitTarget>,
+    /// Pointer position within the transcript, viewport-relative; the
+    /// row under it gets the hover underline when it is clickable.
+    hover: Option<crate::selection::SelectionPoint>,
     transcript_cells: Vec<RenderedRow>,
     transcript_selection: Option<TranscriptSelection>,
     selecting_transcript: bool,
@@ -293,6 +296,7 @@ impl App {
             transcript_cache: TranscriptRenderCache::default(),
             transcript_hit_targets: Vec::new(),
             transcript_pressed_target: None,
+            hover: None,
             transcript_cells: Vec::new(),
             transcript_selection: None,
             selecting_transcript: false,
@@ -1420,6 +1424,10 @@ impl App {
         self.transcript_pressed_target = None;
     }
 
+    pub(crate) fn update_hover(&mut self, column: u16, row: u16) {
+        self.hover = selection_point(self.transcript_text_area, column, row, false);
+    }
+
     pub(crate) fn begin_transcript_selection(&mut self, column: u16, row: u16) {
         self.clear_transcript_selection();
         let Some(point) = selection_point(self.transcript_text_area, column, row, false) else {
@@ -2153,11 +2161,21 @@ impl App {
             self.transcript_cache
                 .visible_rows(self.scroll_top, viewport_rows, &activity_rows);
         self.transcript_hit_targets = visible.iter().map(|row| row.target.clone()).collect();
+        // Hover marks what a click would hit right now — positional,
+        // and off when a modal in front owns the mouse.
+        let hover_row = match self.active_modal() {
+            None | Some(Modal::Search) => self.hover.map(|point| point.row),
+            Some(_) => None,
+        };
         let text = visible
             .into_iter()
             .enumerate()
             .map(|(offset, row)| {
+                let clickable = row.target.is_some();
                 let mut line = row.line;
+                if clickable && hover_row == Some(offset) {
+                    crate::transcript::underline_content_spans(&mut line);
+                }
                 if self.search_active
                     && !self.search_query.is_empty()
                     && self
@@ -5209,6 +5227,47 @@ mod tests {
 
         assert!(app.expanded_tool_groups.contains("group-1"));
         assert!(app.transcript_selection.is_none());
+    }
+
+    #[test]
+    fn hovering_a_clickable_row_underlines_it_and_a_plain_row_stays_bare() {
+        let mut app = App::new();
+        app.push_loop_event(&LoopEvent::ToolStarted {
+            id: "call-1".into(),
+            name: "read".into(),
+        });
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let row_underlined =
+            |terminal: &ratatui::Terminal<ratatui::backend::TestBackend>, area: Rect, row: u16| {
+                (area.x..area.right()).any(|column| {
+                    let cell = &terminal.backend().buffer()[(column, row)];
+                    !cell.symbol().trim().is_empty() && cell.modifier.contains(Modifier::UNDERLINED)
+                })
+            };
+        let area = app.transcript_text_area;
+        let clickable = app
+            .transcript_hit_targets
+            .iter()
+            .position(|target| target.is_some())
+            .expect("a clickable row") as u16;
+        // The greeting is plain text: hovering it must change nothing.
+        let plain = app
+            .transcript_hit_targets
+            .iter()
+            .position(|target| target.is_none())
+            .expect("a plain row") as u16;
+
+        app.update_hover(area.x + 2, area.y + clickable);
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert!(row_underlined(&terminal, area, area.y + clickable));
+
+        app.update_hover(area.x + 2, area.y + plain);
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert!(!row_underlined(&terminal, area, area.y + plain));
+        assert!(!row_underlined(&terminal, area, area.y + clickable));
     }
 
     #[test]

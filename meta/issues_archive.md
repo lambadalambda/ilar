@@ -179,3 +179,5 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [The README is the pitch; details live in docs/](issues/readme-is-the-pitch.md)
 - [x] [Transcript clicks drift under a streaming turn](issues/transcript-clicks-drift-under-streaming.md)
 - [x] [The idle loop re-parses the session on every tick](issues/idle-loop-reparses-the-session-every-tick.md)
+- [x] [Mouse motion events drain one frame each](issues/mouse-motion-events-drain-one-frame-each.md)
+- [x] [Hover underlines clickable transcript rows](issues/hover-underlines-clickable-rows.md)

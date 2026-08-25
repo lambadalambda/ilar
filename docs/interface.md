@@ -120,7 +120,11 @@ diffs for edits. **Ctrl-F** searches it, **Ctrl-O** opens any link it
 contains, mouse drag selects and copies, and the palette's "Export
 transcript" writes the session as a Markdown file. Tool rows expand on
 click (or Enter targeting) to show arguments, diffs and output; grouped
-tool calls align their columns to the widest sibling.
+tool calls align their columns to the widest sibling. Anything
+clickable underlines itself when the pointer hovers over it, and
+clicks resolve against the row that was under the pointer when the
+button went down — a streaming turn cannot pull the target out from
+under a click.
 
 ## Themes
 

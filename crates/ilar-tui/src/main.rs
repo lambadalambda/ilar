@@ -1567,6 +1567,52 @@ fn drain_wheel_batch(
     })
 }
 
+struct MotionBatch {
+    column: u16,
+    row: u16,
+    deferred: Option<Event>,
+}
+
+/// Motion tracking emits an event per cell crossed; a sweep would
+/// otherwise cost one frame per event, and a click behind the flood
+/// would wait its turn. Collapse a run to its newest position, like
+/// the wheel batch.
+fn drain_motion_batch(
+    initial: (u16, u16),
+    max_events: usize,
+    mut try_next: impl FnMut() -> Result<Option<Event>>,
+) -> Result<MotionBatch> {
+    let (mut column, mut row) = initial;
+    let mut deferred = None;
+    let mut events = 1usize;
+    while events < max_events.max(1) {
+        let Some(event) = try_next()? else {
+            break;
+        };
+        match event {
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Moved,
+                column: next_column,
+                row: next_row,
+                ..
+            }) => {
+                column = next_column;
+                row = next_row;
+                events += 1;
+            }
+            other => {
+                deferred = Some(other);
+                break;
+            }
+        }
+    }
+    Ok(MotionBatch {
+        column,
+        row,
+        deferred,
+    })
+}
+
 /// The reasons a session switch (resume, fork, rewind) must wait; the
 /// same triple guards every path that tears the runtime down.
 fn switch_blocked(
@@ -2832,6 +2878,21 @@ async fn run_app(
                     app.scroll_wheel(batch.rows);
                 }
             }
+            Event::Mouse(mouse) if mouse.kind == MouseEventKind::Moved => {
+                let batch = drain_motion_batch(
+                    (mouse.column, mouse.row),
+                    MAX_WHEEL_EVENTS_PER_BATCH,
+                    || {
+                        if crossterm::event::poll(std::time::Duration::ZERO)? {
+                            Ok(Some(crossterm::event::read()?))
+                        } else {
+                            Ok(None)
+                        }
+                    },
+                )?;
+                pending_terminal_event = batch.deferred;
+                app.update_hover(batch.column, batch.row);
+            }
             // A modal in front owns the mouse: a click on one of its
             // rows selects that row, anywhere else is consumed.
             Event::Mouse(MouseEvent {
@@ -3182,6 +3243,39 @@ mod tests {
             queued.next(),
             Some(Event::Mouse(crossterm::event::MouseEvent {
                 kind: MouseEventKind::ScrollUp,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn queued_motion_events_collapse_to_the_newest_position() {
+        let moved = |column, row| {
+            Event::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::Moved,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        let key = Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        let mut queued = vec![moved(4, 5), moved(9, 9), key, moved(1, 1)].into_iter();
+
+        let batch = drain_motion_batch((2, 2), 32, || Ok(queued.next())).unwrap();
+
+        assert_eq!((batch.column, batch.row), (9, 9));
+        assert!(matches!(
+            batch.deferred,
+            Some(Event::Key(KeyEvent {
+                code: KeyCode::Char('x'),
+                ..
+            }))
+        ));
+        // The event behind the deferred one stays queued for later.
+        assert!(matches!(
+            queued.next(),
+            Some(Event::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::Moved,
                 ..
             }))
         ));
