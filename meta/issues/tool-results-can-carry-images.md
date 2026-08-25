@@ -38,11 +38,9 @@ no synthetic-user-message fallback anywhere:
 - zai OpenAI flavor: `role:"tool"` content array
   `[{"type":"text",...},{"type":"image_url","image_url":{"url":
   "data:..."}}]`. Text first.
-- zai Anthropic flavor: `tool_result.content` array with the image
-  block FIRST, then text — text-first was blind in 7 of 8 probe
-  samples on glm-5v-turbo. This ordering asymmetry is load-bearing;
-  the wire test must cite it. (4.6v/4.5v are blind on this flavor
-  entirely — see zai-anthropic-flavor-is-blind.)
+- (The zai Anthropic flavor and its image-first ordering asymmetry
+  are moot: the flavor was removed wholesale in be56531. Two wire
+  shapes remain.)
 
 Rules: text-only results keep today's plain-string form on every arm
 (no cached prefix moves, old sessions byte-identical); non-vision

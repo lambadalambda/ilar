@@ -39,3 +39,10 @@ failing in the worst possible way.
 ## Milestone
 
 12 — Health sweep
+
+## Outcome
+
+Superseded: the Anthropic flavor was removed wholesale (see
+remove-the-zai-anthropic-flavor, be56531). The OpenAI-compatible
+route — where all three V-models see correctly per the probes — is
+now the only route, so the blind combination no longer exists.

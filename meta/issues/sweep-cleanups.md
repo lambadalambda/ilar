@@ -42,6 +42,15 @@ verified, and safe to do opportunistically:
   (`start_tool_call` covers every announced id); abort/error paths
   publish no `StepComplete`, so live TUI totals and reloaded totals
   diverge by the recovered usage.
+- **Post-removal (be56531)**: `ModelAccess::Zai` catalog rows
+  (glm-4.6, glm-5.1, glm-5, glm-4.5*) are permanently unlistable
+  now that only the coding-plan route exists — prune them or
+  re-tier the ones the coding endpoint actually serves (probe
+  first); the zai OpenAI route has no prompt-cache
+  prefix-stability test (the deleted Anthropic breakpoint tests
+  were the only coverage) — add one against the wire body;
+  `ContentBlock::Thinking.signature` is now always `None` — keep
+  (future native-Anthropic) or drop, decide once.
 - **Duplication (new)**: `tools/binary.rs` and `ilar::image` carry
   the same four image magic-number checks (binary.rs returns display
   names, image.rs media types) plus separate PNG IHDR readers —

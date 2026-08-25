@@ -46,3 +46,20 @@ be deleted without parse tolerance.
 ## Milestone
 
 12 — Health sweep
+
+## Outcome
+
+Gone: `Flavor`, the Anthropic wire branch, `anthropic_message`/
+`anthropic_tool`, `AnthropicMapper` (+336 lines of mapper),
+`max_output_tokens`, `Request::continuations`, the entire turn.rs
+pause machinery, `StopReason::Paused`,
+`ContentBlock::ProviderReplay`, and the orphaned
+`ProviderEvent::ResponseContent`; the config `flavor` key deleted
+outright, zai reach reduced to the coding-plan route; four
+Anthropic SSE fixtures, 20 wire/mapper tests, 9 pause tests, 3 live
+smoke tests removed; docs and ilar.toml.example updated. Net ~1,900
+lines gone. A wire test pins the single remaining request shape.
+Full workspace green, clippy clean. Follow-ups recorded in
+sweep-cleanups: `ModelAccess::Zai` rows are now unlistable (prune
+or re-tier), the zai prompt-cache prefix-stability coverage gap,
+and the now-always-None thinking `signature` field. (be56531)

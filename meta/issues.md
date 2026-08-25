@@ -59,5 +59,3 @@ Follow-ups:
 
 - [ ] [Resume leads with this directory's last session](issues/resume-leads-with-this-directorys-last-session.md)
 - [ ] [Tool results can carry images](issues/tool-results-can-carry-images.md)
-- [ ] [The zai Anthropic flavor is blind on 4.6v/4.5v](issues/zai-anthropic-flavor-is-blind.md)
-- [ ] [Remove the zai Anthropic flavor](issues/remove-the-zai-anthropic-flavor.md)
