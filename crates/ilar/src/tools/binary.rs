@@ -50,27 +50,17 @@ fn line(display_path: &str, kind: &str, total_bytes: u64, hint: &str) -> String 
     format!("(binary file: {display_path} — {kind}, {total_bytes} bytes; {hint})")
 }
 
-/// Magic-byte image formats, with dimensions where they are a cheap read.
+/// Magic-byte image formats, with dimensions where they are a cheap
+/// read. The magic numbers themselves are `crate::image`'s table: what
+/// this tool calls an image and what the vision pipeline will accept
+/// have to be the same set, or the read tool would name a format it then
+/// declines to attach.
 fn image_kind(head: &[u8]) -> Option<String> {
-    let format = image_format(head)?;
+    let format = crate::image::format_name(head)?;
     Some(match png_dimensions(head) {
         Some((width, height)) => format!("{format} image, {width}x{height}"),
         None => format!("{format} image"),
     })
-}
-
-fn image_format(head: &[u8]) -> Option<&'static str> {
-    if head.starts_with(b"\x89PNG\r\n\x1a\n") {
-        Some("PNG")
-    } else if head.starts_with(b"\xFF\xD8\xFF") {
-        Some("JPEG")
-    } else if head.len() >= 12 && head.starts_with(b"RIFF") && &head[8..12] == b"WEBP" {
-        Some("WebP")
-    } else if head.starts_with(b"GIF87a") || head.starts_with(b"GIF89a") {
-        Some("GIF")
-    } else {
-        None
-    }
 }
 
 /// PNG puts IHDR first: width and height are big-endian u32 at 16..24.

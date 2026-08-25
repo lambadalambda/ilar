@@ -116,6 +116,10 @@ fn restored_session_invocation_view(
 ) -> RestoredSessionView {
     let nested = parent_tool_call_id.is_some();
     let all_events = session.events();
+    // Where this view's slice begins in the event list. A child view
+    // starts partway in and `Compaction.kept_from` indexes the whole
+    // list, so the two have to be rebased against each other.
+    let mut slice_start = 0usize;
     let events = match parent_tool_call_id {
         Some(parent_tool_call_id) => {
             let start = all_events.iter().position(|event| {
@@ -145,6 +149,7 @@ fn restored_session_invocation_view(
                 })
                 .map(|offset| start + 1 + offset)
                 .unwrap_or(all_events.len());
+            slice_start = start + 1;
             &all_events[start + 1..end]
         }
         None => all_events,
@@ -152,16 +157,18 @@ fn restored_session_invocation_view(
     let mut cut = 0usize;
     let mut summary = None;
     for (index, event) in events.iter().enumerate() {
-        if nested {
-            continue;
-        }
         if let ilar::session::SessionEvent::Compaction {
             kept_from,
             summary: current,
             ..
         } = event
         {
-            cut = (*kept_from).min(index).max(cut);
+            // `kept_from` indexes the event list the reader hands out
+            // (the store rebases it onto the active window on load), so
+            // a nested slice has to subtract its own start before
+            // clamping — otherwise a child's compaction would cut its
+            // timeline at an index belonging to the whole session.
+            cut = kept_from.saturating_sub(slice_start).min(index).max(cut);
             summary = Some(current.as_str());
         }
     }
@@ -405,8 +412,12 @@ fn restore_child_activity(
         }
         let mut restored =
             restored_session_invocation_view(&session, Some(parent_tool_call_id)).lines;
-        if matches!(restored.first(), Some(Line_::User(_))) {
-            restored.remove(0);
+        // The agent row already shows the task prompt, so the child's
+        // copy of it is dropped. A compacted child leads with its
+        // handover summary instead, and the prompt sits behind it.
+        let prompt = usize::from(matches!(restored.first(), Some(Line_::System(_))));
+        if matches!(restored.get(prompt), Some(Line_::User(_))) {
+            restored.remove(prompt);
         }
         restore_child_activity(&mut restored, store, session_id, depth + 1);
         *child_lines = restored;
@@ -694,6 +705,63 @@ mod tests {
         assert!(!rendered.contains("obsolete history"), "{rendered}");
         assert!(rendered.contains("decisions retained here"), "{rendered}");
         assert!(rendered.contains("current history"), "{rendered}");
+    }
+
+    /// A child session compacts like any other, and `kept_from` indexes
+    /// the whole log while the nested view is a slice starting at the
+    /// invocation. The guard that skipped compaction for nested views
+    /// dropped the child's summary marker entirely and left its
+    /// compacted-away turns on screen.
+    #[test]
+    fn a_child_timeline_honours_its_own_compaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf());
+        let child_id = new_id();
+        let mut child = store
+            .create(SessionMeta {
+                session_id: child_id.clone(),
+                parent_id: Some(new_id()),
+                agent: "explore".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+                cwd: None,
+            })
+            .unwrap();
+        let user = |text: &str| ilar::session::SessionEvent::UserMessage {
+            id: new_id(),
+            text: text.into(),
+            images: Vec::new(),
+            ts: chrono::Utc::now(),
+        };
+        // Compaction cuts at a turn boundary and carries the invocation
+        // link with its user message, so the surviving window opens on
+        // the invocation this view is keyed to — the one arrangement
+        // that puts a Compaction inside a nested slice.
+        child.append(user("child obsolete history")).unwrap();
+        child
+            .append(ilar::session::SessionEvent::SubagentInvocation {
+                id: new_id(),
+                parent_tool_call_id: "task-restore".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        child.append(user("child current history")).unwrap();
+        child
+            .append(ilar::session::SessionEvent::Compaction {
+                id: new_id(),
+                summary: "child decisions retained".into(),
+                kept_from: 2,
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        drop(child);
+
+        let view =
+            restored_session_invocation_view(&store.load(&child_id).unwrap(), Some("task-restore"));
+        let rendered = format!("{:?}", view.lines);
+        assert!(rendered.contains("child decisions retained"), "{rendered}");
+        assert!(rendered.contains("child current history"), "{rendered}");
+        assert!(!rendered.contains("child obsolete history"), "{rendered}");
     }
 
     #[test]

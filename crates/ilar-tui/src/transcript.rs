@@ -330,6 +330,13 @@ impl TranscriptRenderCache {
             + TAIL_PADDING_ROWS
     }
 
+    /// Whether the transcript has said anything yet. `row_count` cannot
+    /// answer this: it always counts [`TAIL_PADDING_ROWS`], so it is
+    /// never zero and an emptiness test against it is always false.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.entries.iter().all(|entry| entry.rows.is_empty())
+    }
+
     /// Absolute indices of rows whose text contains `query`
     /// (case-insensitive), in row order. Per-entry results are kept, so
     /// a streaming delta only rescans the entry it re-rendered.
@@ -1754,6 +1761,12 @@ pub(crate) fn transcript_entry_lines(
         Line_::Job { text, expanded, .. } => {
             notification_lines(text, *expanded, "job  ", theme::WAITING, width)
         }
+        // Production tool rendering goes through `tool_entry_rows`,
+        // which owns disclosure, grouping and child timelines;
+        // `transcript_entry_rows` routes every tool line there before
+        // this function is reached. The flat single-row form survives
+        // for exhaustiveness and for the tests that render one row in
+        // isolation.
         Line_::Tool {
             name,
             kind,
@@ -1761,7 +1774,7 @@ pub(crate) fn transcript_entry_lines(
             state,
             progress,
             ..
-        } => vec![tool_line(
+        } => vec![tool_line_with_disclosure(
             name,
             kind,
             arguments,
@@ -1770,6 +1783,9 @@ pub(crate) fn transcript_entry_lines(
             now.saturating_duration_since(activity_started),
             *progress,
             now,
+            false,
+            false,
+            0,
         )],
         Line_::System(text) => safe_lines(text)
             .into_iter()
@@ -1865,6 +1881,10 @@ fn display_name(tool_name: &str, kind: &ToolKind) -> String {
     }
 }
 
+/// One tool row with no disclosure state — a test seam. Nothing in the
+/// running TUI renders a tool line this way: `tool_entry_rows` owns the
+/// real path, expansion and all.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn tool_line(
     name: &str,

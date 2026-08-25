@@ -12,8 +12,6 @@ pub struct ModelInfo {
     pub name: &'static str,
     /// Conservative working window used by telemetry and compaction.
     pub context_limit: u64,
-    /// Provider-advertised upper bound retained for future configuration.
-    pub max_context_limit: u64,
     pub input_limit: u64,
     pub output_limit: u64,
     pub(crate) reasoning_summaries: bool,
@@ -350,7 +348,6 @@ impl ModelInfo {
             id,
             name,
             context_limit,
-            max_context_limit: context_limit,
             input_limit: context_limit - output_limit,
             output_limit,
             reasoning_summaries: false,
@@ -358,12 +355,6 @@ impl ModelInfo {
             variants: NO_VARIANTS,
             access,
         }
-    }
-
-    /// Provider-advertised window above the working one.
-    const fn max_context(mut self, limit: u64) -> Self {
-        self.max_context_limit = limit;
-        self
     }
 
     /// Declared input cap, where it is not the window minus a full reply.
@@ -442,7 +433,6 @@ static CATALOG: &[ModelInfo] = &[
         128_000,
         OpenAiBoth
     )
-    .max_context(1_050_000)
     .input(272_000)
     .vision()
     .reasoning(OPENAI_GPT52_VARIANTS),
@@ -457,7 +447,6 @@ static CATALOG: &[ModelInfo] = &[
         128_000,
         OpenAiBoth
     )
-    .max_context(1_050_000)
     .input(272_000)
     .vision()
     .reasoning(OPENAI_GPT52_VARIANTS),
@@ -469,7 +458,6 @@ static CATALOG: &[ModelInfo] = &[
         128_000,
         OpenAiBoth
     )
-    .max_context(1_050_000)
     .input(272_000)
     .vision()
     .reasoning(OPENAI_GPT52_VARIANTS),
@@ -874,7 +862,6 @@ mod tests {
         assert_eq!(future.variants(), OPENAI_GPT51_VARIANTS);
         assert!(future.reasoning_summaries);
         assert_eq!(future.input_limit, 272_000);
-        assert_eq!(future.max_context_limit, 400_000);
 
         // A row that claims nothing gets nothing.
         const PLAIN: ModelInfo = model!("acme", "q-1", "Q-1", 100_000, 10_000, OpenAi);
@@ -894,8 +881,7 @@ mod tests {
                 model.full_id()
             );
             assert!(
-                model.input_limit <= model.context_limit
-                    && model.context_limit <= model.max_context_limit,
+                model.input_limit <= model.context_limit,
                 "{} has an incoherent window",
                 model.full_id()
             );

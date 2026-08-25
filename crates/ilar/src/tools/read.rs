@@ -40,7 +40,9 @@ impl Tool for ReadTool {
     fn description(&self) -> &'static str {
         "Read a text file. Returns numbered lines (N→line). Use offset/limit \
          for large files. Binary files (images, archives, executables) return \
-         a one-line description instead of their bytes."
+         a one-line description instead of their bytes; when the session's \
+         model accepts images, reading a small enough image file attaches \
+         the image itself alongside that description."
     }
 
     fn concurrency(&self) -> ToolConcurrency {
@@ -184,14 +186,16 @@ fn sniff_binary<R: BufRead>(
     vision: bool,
 ) -> std::io::Result<Option<ToolOutput>> {
     let head = reader.fill_buf()?;
-    let total_bytes = total_bytes.unwrap_or(head.len() as u64);
-    let Some(description) = super::binary::describe(display_path, head, total_bytes) else {
+    // The description reports whatever size is known; without a stat
+    // that is only the sniff window, which is a poor answer but still an
+    // answer. The attachment guard below does not get that latitude.
+    let reported_bytes = total_bytes.unwrap_or(head.len() as u64);
+    let Some(description) = super::binary::describe(display_path, head, reported_bytes) else {
         return Ok(None);
     };
-    if vision
-        && total_bytes <= MAX_IMAGE_BYTES
+    if may_attach_image(vision, total_bytes)
         && let Some(attached) =
-            super::binary::describe_attached_image(display_path, head, total_bytes)
+            super::binary::describe_attached_image(display_path, head, reported_bytes)
         && let Some(image) = std::fs::read(path)
             .ok()
             .as_deref()
@@ -201,6 +205,15 @@ fn sniff_binary<R: BufRead>(
         return Ok(Some(output));
     }
     Ok(Some(ToolOutput::text(description)))
+}
+
+/// Whether the result may carry the image itself. Attaching means
+/// reading the whole file into memory before anything checks its size,
+/// so a file that would not stat gets no attachment: with no length
+/// there is nothing to weigh against [`MAX_IMAGE_BYTES`], and the guard
+/// has to fail closed rather than trust the sniff window's length.
+fn may_attach_image(vision: bool, total_bytes: Option<u64>) -> bool {
+    vision && total_bytes.is_some_and(|bytes| bytes <= MAX_IMAGE_BYTES)
 }
 
 /// `None` when the per-result cap dropped the image: the text must not
@@ -245,5 +258,29 @@ fn read_line_prefix<R: BufRead>(
         if newline.is_some() {
             return Ok(Some(LinePrefix { prefix, truncated }));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The pre-decode size guard is the only thing between a malformed
+    /// header and reading an arbitrarily large file into memory, and the
+    /// size it checks comes from `file.metadata()`. When that fails the
+    /// caller used to substitute the sniff window's length, which is
+    /// always under the cap — so the guard has to refuse instead.
+    #[test]
+    fn an_unstatable_file_is_never_attached() {
+        assert!(may_attach_image(true, Some(0)));
+        assert!(may_attach_image(true, Some(MAX_IMAGE_BYTES)));
+        assert!(!may_attach_image(true, Some(MAX_IMAGE_BYTES + 1)));
+        assert!(
+            !may_attach_image(true, None),
+            "an unknown size must not pass the pre-decode cap"
+        );
+        // A text-only session attaches nothing whatever the size.
+        assert!(!may_attach_image(false, Some(0)));
+        assert!(!may_attach_image(false, None));
     }
 }

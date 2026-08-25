@@ -292,25 +292,6 @@ fn estimate_tokens_from(
     estimated.max(reported)
 }
 
-/// Compact a session according to the supplied threshold and cut policy.
-///
-/// Agent turns use the boundary and recent-step policies. Interactive manual
-/// compaction should use [`compact_session`] instead of assembling options.
-pub async fn compact_if_needed(
-    resolver: &dyn ProviderResolver,
-    store: &SessionStore,
-    session_id: &str,
-    options: CompactionOptions<'_>,
-) -> Result<Option<String>> {
-    if options.cancel.is_cancelled() {
-        return Ok(None);
-    }
-    let mut session = store.acquire_writer(session_id)?.load()?;
-    let model = session.effective_model();
-    let provider = resolver.resolve_provider(&model)?;
-    compact_if_needed_locked(provider.as_provider(), &model, &mut session, options).await
-}
-
 /// Immediately replace the complete active provider transcript with one
 /// handover summary. Canonical audit history remains append-only.
 pub async fn compact_session(

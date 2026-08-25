@@ -47,9 +47,6 @@ pub struct TokenSet {
     pub id_token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_id: Option<String>,
-    /// Unix seconds.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expires_at: Option<i64>,
 }
 
 /// chatgpt_account_id from the id_token JWT claims (no signature check:
@@ -194,6 +191,9 @@ fn read_store(path: &std::path::Path) -> std::io::Result<Option<String>> {
     }
 }
 
+/// `expires_in` is deliberately not kept: refresh is driven by the 401
+/// the provider returns, so a stored expiry would be a second source of
+/// truth that nothing consults.
 #[derive(Deserialize)]
 struct TokenResponse {
     access_token: String,
@@ -201,8 +201,6 @@ struct TokenResponse {
     refresh_token: Option<String>,
     #[serde(default)]
     id_token: Option<String>,
-    #[serde(default)]
-    expires_in: Option<i64>,
 }
 
 const TOKEN_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -239,7 +237,6 @@ async fn token_post(
         anyhow::bail!("token endpoint HTTP {status}: {body}");
     }
     let parsed: TokenResponse = serde_json::from_str(&body).context("token response")?;
-    let expires_at = chrono::Utc::now().timestamp() + parsed.expires_in.unwrap_or(3600).max(60);
     let account_id = parsed
         .id_token
         .as_deref()
@@ -249,7 +246,6 @@ async fn token_post(
         refresh_token: parsed.refresh_token,
         id_token: parsed.id_token,
         account_id,
-        expires_at: Some(expires_at),
     })
 }
 
@@ -530,21 +526,39 @@ pub async fn login_flow(
     );
 
     if open_browser {
-        let _ = std::process::Command::new("open").arg(&url).spawn();
+        open_in_browser(&url);
     }
     println!("Log in with your ChatGPT account:\n\n{url}\n");
 
     let code = callback_code(&listener, &state, timeout).await?;
 
-    let mut tokens = exchange_code(&code, &verifier).await?;
-    if tokens.account_id.is_none() {
-        tokens.account_id = tokens
-            .id_token
-            .as_deref()
-            .and_then(account_id_from_id_token);
-    }
+    // `exchange_code` already derives `account_id` from the id_token.
+    let tokens = exchange_code(&code, &verifier).await?;
     store.save(&tokens).await?;
     Ok(tokens)
+}
+
+/// Hand the URL to the platform's opener. Best effort by design: the URL
+/// is printed either way, so a missing opener costs the user a copy and
+/// paste rather than the login.
+fn open_in_browser(url: &str) {
+    let (program, leading_args): (&str, &[&str]) = if cfg!(target_os = "macos") {
+        ("open", &[])
+    } else if cfg!(target_os = "windows") {
+        // Not `cmd /C start`: cmd re-parses its command line and would
+        // split the authorize URL at its first `&`. `rundll32` is an
+        // ordinary program and takes the URL as one argument.
+        ("rundll32", &["url.dll,FileProtocolHandler"])
+    } else {
+        ("xdg-open", &[])
+    };
+    let _ = std::process::Command::new(program)
+        .args(leading_args)
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }
 
 #[cfg(test)]
@@ -584,7 +598,6 @@ mod tests {
                 refresh_token: Some("refresh".into()),
                 id_token: None,
                 account_id: None,
-                expires_at: Some(0),
             })
             .await
             .unwrap();

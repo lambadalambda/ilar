@@ -262,6 +262,24 @@ pub(crate) fn after_turn(
     intents
 }
 
+/// The maintenance commands: they open or run something in the client
+/// and take no arguments. Both the submit decision and `prepare_prompt`
+/// match on this list, so neither can grow a command the other misses.
+pub(crate) const MAINTENANCE_COMMANDS: [&str; 4] = ["compact", "rewind", "fork", "sessions"];
+
+/// The one-line usage a maintenance command shows when handed arguments
+/// it does not take. One text per command, so the two validation sites
+/// cannot drift apart the way they had.
+pub(crate) fn maintenance_usage(name: &str) -> String {
+    match name {
+        "fork" => "usage: /fork — Ctrl-Y in the /rewind picker forks at a turn".into(),
+        _ => format!("usage: /{name}"),
+    }
+}
+
+/// The same, for the aside command, which does take an argument.
+pub(crate) const ASIDE_USAGE: &str = "usage: /btw <question>";
+
 /// What a submitted prompt becomes. The decision (`submit_target`) and
 /// the payload travel together, so a call site cannot route the text
 /// one way while believing it decided another.
@@ -277,19 +295,16 @@ pub(crate) fn submit(
     // text for the model.
     if let Some(("btw", question)) = crate::parse_slash_invocation(&text) {
         if question.trim().is_empty() {
-            return vec![Intent::Notice(
-                "usage: /btw <question>".into(),
-                NoticeLevel::Warning,
-            )];
+            return vec![Intent::Notice(ASIDE_USAGE.into(), NoticeLevel::Warning)];
         }
         return vec![Intent::Aside(question.to_string())];
     }
-    if let Some((name @ ("compact" | "rewind" | "fork" | "sessions"), args)) =
-        crate::parse_slash_invocation(&text)
+    if let Some((name, args)) = crate::parse_slash_invocation(&text)
+        && MAINTENANCE_COMMANDS.contains(&name)
     {
         if !args.is_empty() {
             return vec![Intent::Notice(
-                format!("usage: /{name}"),
+                maintenance_usage(name),
                 NoticeLevel::Warning,
             )];
         }

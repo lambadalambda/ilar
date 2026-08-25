@@ -825,17 +825,12 @@ pub fn summarize_task_input(input: &serde_json::Value) -> Option<(String, String
 }
 
 fn bounded_tool_detail(text: &str) -> String {
-    const MAX_DETAIL_CHARS: usize = 16 * 1024;
-    let mut output = text
-        .chars()
-        .filter(|character| matches!(character, '\n' | '\t') || !character.is_control())
-        .take(MAX_DETAIL_CHARS + 1)
-        .collect::<String>();
-    if output.chars().count() > MAX_DETAIL_CHARS {
-        output = output.chars().take(MAX_DETAIL_CHARS).collect();
-        output.push_str("\n… output truncated");
-    }
-    output
+    crate::text::truncate_detail(
+        text.chars()
+            .filter(|character| matches!(character, '\n' | '\t') || !character.is_control())
+            .take(crate::text::MAX_DETAIL_CHARS + 1)
+            .collect::<String>(),
+    )
 }
 
 pub fn tool_argument_detail(name: &str, input: &serde_json::Value) -> String {

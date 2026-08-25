@@ -2,6 +2,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
+use crate::text::expand_tabs;
 use crate::theme;
 
 #[derive(Clone, Copy)]
@@ -73,7 +74,7 @@ pub fn render(source: &str, width: usize) -> Vec<Line<'static>> {
         }
 
         if code_fence.is_some() {
-            let mut spans = vec![Span::styled("│ ", Style::default().fg(theme::CODE))];
+            let mut spans = vec![crate::text::code_gutter_span()];
             match code_language {
                 Some(language) => {
                     let expanded = expand_tabs(raw);
@@ -183,8 +184,9 @@ fn parse_table(lines: &[&str], start: usize) -> Option<(MarkdownTable, usize)> {
         let Some(mut row) = split_table_row(raw) else {
             break;
         };
+        // `resize` both pads a short row and drops the cells of a long
+        // one, so the header decides the width either way.
         row.resize(column_count, String::new());
-        row.truncate(column_count);
         rows.push(row);
         consumed += 1;
     }
@@ -527,22 +529,6 @@ fn sanitize(source: &str) -> String {
         .chars()
         .filter(|c| *c == '\n' || *c == '\t' || !c.is_control())
         .collect()
-}
-
-fn expand_tabs(line: &str) -> String {
-    let mut output = String::new();
-    let mut column = 0usize;
-    for character in line.chars() {
-        if character == '\t' {
-            let spaces = 4 - column % 4;
-            output.push_str(&" ".repeat(spaces));
-            column += spaces;
-        } else {
-            output.push(character);
-            column += 1;
-        }
-    }
-    output
 }
 
 fn fence(line: &str) -> Option<(char, usize, &str)> {

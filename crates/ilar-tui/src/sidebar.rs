@@ -122,12 +122,15 @@ pub(crate) fn service_panel(
     show_exited: bool,
     width: usize,
 ) -> ServicePanel {
+    // Service names and details come from the process registry, which
+    // takes them from user configuration and program output: sanitize
+    // them like every other borrowed string that reaches a row.
     let row = |marker: &'static str, marker_color, name: &str, detail: &str, text_color| {
         Line::from(vec![
             Span::styled(marker, Style::default().fg(marker_color)),
             Span::styled(
                 truncate_display(
-                    &format!("{name} · {detail}"),
+                    &safe_text(&format!("{name} · {detail}")),
                     width.saturating_sub(2),
                     Truncation::Right,
                 ),

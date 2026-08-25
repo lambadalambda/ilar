@@ -22,7 +22,7 @@ fn write(path: &std::path::Path, content: &str) {
 #[test]
 fn defaults_when_no_config_exists() {
     let (_g, empty) = tempdir();
-    let config = Loader::with_env(vec![("ILAR_ZAI_API_KEY", "zk".to_string())], vec![])
+    let config = Loader::with_env(vec![("ILAR_ZAI_API_KEY", "zk".to_string())])
         .config_dir(empty)
         .resolve()
         .unwrap();
@@ -118,6 +118,29 @@ fn theme_is_a_user_preference_not_a_project_override() {
 
     assert_eq!(config.general.model, "openai/gpt-5.2");
     assert_eq!(config.general.theme, "frost");
+    // Ignoring it silently reads as a bug in the program rather than a
+    // rule about the setting, so say so — naming the file that set it.
+    assert_eq!(config.warnings.len(), 1, "{:?}", config.warnings);
+    assert!(
+        config.warnings[0].contains("general.theme") && config.warnings[0].contains("ilar.toml"),
+        "{:?}",
+        config.warnings
+    );
+
+    // A project that says nothing about the theme gets no warning.
+    let (_user_guard, user) = tempdir();
+    write(&user.join("ilar.toml"), "[general]\ntheme = \"frost\"\n");
+    let (_project_guard, project) = tempdir();
+    write(
+        &project.join("ilar.toml"),
+        "[general]\nmodel = \"zai/glm-4.7\"\n",
+    );
+    let quiet = Loader::no_env()
+        .config_dir(user)
+        .project_dir(project)
+        .resolve()
+        .unwrap();
+    assert!(quiet.warnings.is_empty(), "{:?}", quiet.warnings);
 }
 
 #[test]
@@ -400,7 +423,6 @@ fn model_catalog_drives_context_limits() {
         let full_id = format!("openai/{id}");
         let model = ilar::model::find(&full_id).unwrap();
         assert_eq!(model.context_limit, 272_000);
-        assert_eq!(model.max_context_limit, 1_050_000);
         assert_eq!(config.context_limit(&full_id), Some(272_000));
         assert_eq!(config.input_limit(&full_id), Some(272_000));
     }
@@ -597,13 +619,10 @@ fn injected_environment_resolves_the_config_directory() {
         "[general]\nmodel = \"openai/gpt-5.6-sol\"\n",
     );
 
-    let config = Loader::with_env(
-        vec![
-            ("ILAR_CONFIG_DIR", dir.display().to_string()),
-            ("ILAR_STATE_DIR", state.display().to_string()),
-        ],
-        vec![],
-    )
+    let config = Loader::with_env(vec![
+        ("ILAR_CONFIG_DIR", dir.display().to_string()),
+        ("ILAR_STATE_DIR", state.display().to_string()),
+    ])
     .project_dir(project)
     .resolve()
     .unwrap();

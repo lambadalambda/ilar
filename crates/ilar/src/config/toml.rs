@@ -228,6 +228,10 @@ pub struct Config {
     pub agent: AgentConfig,
     pub compaction: CompactionConfig,
     pub subagents: SubagentConfig,
+    /// Settings that parsed but were not honoured, one line each, for
+    /// the frontend to show. A silently ignored setting reads as a bug
+    /// in the program rather than a rule about the setting.
+    pub warnings: Vec<String>,
     user_dir: PathBuf,
     project_dir: PathBuf,
     state_dir: PathBuf,
@@ -283,7 +287,7 @@ impl Loader {
     }
 
     /// Loader with an explicit environment for hermetic tests.
-    pub fn with_env(env: Vec<(&str, String)>, _unused: Vec<()>) -> Self {
+    pub fn with_env(env: Vec<(&str, String)>) -> Self {
         Self {
             env: env.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
             project_dir: Some(PathBuf::from("/nonexistent")),
@@ -366,11 +370,18 @@ impl Config {
             .general
             .as_ref()
             .and_then(|general| general.theme.clone());
+        let mut warnings = Vec::new();
         for path in [
             project_dir.join("ilar.toml"),
             project_dir.join(".ilar/ilar.toml"),
         ] {
             if let Some(text) = read_config_file(&path)? {
+                if declares_theme(&text) {
+                    warnings.push(format!(
+                        "{}: general.theme is a user preference and is ignored in project config",
+                        path.display()
+                    ));
+                }
                 merged = merge_file(merged, &text, &path)?;
             }
         }
@@ -430,6 +441,7 @@ impl Config {
             user_dir,
             project_dir,
             state_dir,
+            warnings,
         })
     }
 
@@ -510,6 +522,7 @@ impl Config {
             providers,
             compaction: CompactionConfig::default(),
             subagents: SubagentConfig::default(),
+            warnings: Vec::new(),
             user_dir: PathBuf::from("/nonexistent"),
             project_dir: PathBuf::from("/nonexistent"),
             state_dir: PathBuf::from("/nonexistent"),
@@ -595,6 +608,16 @@ fn fallback_context_limit(model: &str, kinds: &[ProviderKind]) -> Option<u64> {
         .ok()
         .and_then(|(provider, _)| provider_kind(provider, kinds))
         .map(|kind| kind.fallback_context_limit)
+}
+
+/// Whether a config layer sets `general.theme`. Checked on the text
+/// rather than on the merge result, so a project file that repeats the
+/// user's own theme is still reported.
+fn declares_theme(text: &str) -> bool {
+    toml::from_str::<FileConfig>(text)
+        .ok()
+        .and_then(|parsed| parsed.general)
+        .is_some_and(|general| general.theme.is_some())
 }
 
 fn read_config_file(path: &Path) -> anyhow::Result<Option<String>> {
@@ -938,7 +961,7 @@ mod tests {
 
         // Resolution: the row's environment variable supplies the key,
         // and the provider appears alongside the built-in ones.
-        let env = Loader::with_env(vec![("ILAR_ACME_API_KEY", "acme-key".into())], vec![]);
+        let env = Loader::with_env(vec![("ILAR_ACME_API_KEY", "acme-key".into())]);
         let resolved = resolve_providers(&FileConfig::default(), &env, &kinds);
         assert_eq!(resolved.len(), 3);
         assert_eq!(resolved["acme"].api_key.as_deref(), Some("acme-key"));

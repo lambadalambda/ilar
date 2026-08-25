@@ -32,35 +32,39 @@ fn marker_lines(images: &[ImageContent], label: &str) -> String {
                 .media_type
                 .strip_prefix("image/")
                 .unwrap_or(&image.media_type);
-            format!("\n[{label}: {kind} · {}]", format_bytes(image.byte_len()))
+            format!(
+                "\n[{label}: {kind} · {}]",
+                crate::text::format_bytes(image.byte_len() as u64)
+            )
         })
         .collect()
 }
 
-/// Byte counts as the transcript writes them everywhere else.
-fn format_bytes(bytes: usize) -> String {
-    if bytes < 1024 {
-        format!("{bytes} B")
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1} KiB", bytes as f64 / 1024.0)
+/// The image formats every provider accepts, by magic number — the
+/// extension may lie. One row per format carries both the wire media
+/// type and the name the `read` tool shows, so the two cannot drift.
+fn sniff(bytes: &[u8]) -> Option<(&'static str, &'static str)> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some(("image/png", "PNG"))
+    } else if bytes.starts_with(b"\xFF\xD8\xFF") {
+        Some(("image/jpeg", "JPEG"))
+    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        Some(("image/webp", "WebP"))
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some(("image/gif", "GIF"))
     } else {
-        format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+        None
     }
 }
 
 /// Media type by magic numbers — the extension may lie.
 pub fn media_type(bytes: &[u8]) -> Option<&'static str> {
-    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        Some("image/png")
-    } else if bytes.starts_with(b"\xFF\xD8\xFF") {
-        Some("image/jpeg")
-    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
-        Some("image/webp")
-    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        Some("image/gif")
-    } else {
-        None
-    }
+    sniff(bytes).map(|(media_type, _)| media_type)
+}
+
+/// The same sniff, as the format name a human-readable line uses.
+pub fn format_name(bytes: &[u8]) -> Option<&'static str> {
+    sniff(bytes).map(|(_, name)| name)
 }
 
 /// File bytes → attachment. Formats pass through as themselves (every

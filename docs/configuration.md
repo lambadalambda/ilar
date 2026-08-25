@@ -4,7 +4,8 @@ The user configuration is `${ILAR_CONFIG_DIR:-~/.config/ilar}/ilar.toml`; see
 [`ilar.toml.example`](../ilar.toml.example). `./ilar.toml` and
 `./.ilar/ilar.toml` layer project settings over it, in that order. Nested
 sections merge by field. `general.theme` is user-scoped and is not overridden
-by project files.
+by project files; a project file that sets it is reported in the transcript at
+startup rather than silently ignored.
 
 | Setting | Default | Description |
 | --- | --- | --- |

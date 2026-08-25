@@ -213,52 +213,39 @@ impl Drop for TerminalSession {
 /// interactive Enter did, a queued `/goal ship it` was sent to the model
 /// as literal text once the turn it was waiting on finished.
 fn prepare_prompt(app: &mut App, text: String) -> Option<String> {
-    if let Some(("compact", args)) = parse_slash_invocation(&text) {
-        if args.is_empty() {
-            app.compact_requested = true;
-            app.set_notice("compaction starting", NoticeLevel::Info);
-        } else {
+    if let Some((name, args)) = parse_slash_invocation(&text)
+        && decide::MAINTENANCE_COMMANDS.contains(&name)
+    {
+        if !args.is_empty() {
             app.input = InputBuffer::from(text.as_str());
-            app.set_notice("usage: /compact", NoticeLevel::Warning);
+            app.set_notice(decide::maintenance_usage(name), NoticeLevel::Warning);
+            return None;
         }
-        return None;
-    }
-    if let Some(("rewind", args)) = parse_slash_invocation(&text) {
-        if args.is_empty() {
-            app.turn_picker_requested = true;
-        } else {
-            app.input = InputBuffer::from(text.as_str());
-            app.set_notice("usage: /rewind", NoticeLevel::Warning);
-        }
-        return None;
-    }
-    if let Some(("sessions", args)) = parse_slash_invocation(&text) {
-        if args.is_empty() {
-            app.session_search = Some(modals::SessionSearch::new());
-        } else {
-            app.input = InputBuffer::from(text.as_str());
-            app.set_notice("usage: /sessions", NoticeLevel::Warning);
+        match name {
+            "compact" => {
+                app.compact_requested = true;
+                app.set_notice("compaction starting", NoticeLevel::Info);
+            }
+            "rewind" => app.turn_picker_requested = true,
+            "sessions" => app.session_search = Some(modals::SessionSearch::new()),
+            "fork" => app.fork_requested = true,
+            // Structurally unreachable — the guard above matched this
+            // name against the same list — but a panic here would take
+            // the whole TUI down over a typo in one of the two.
+            other => {
+                debug_assert!(false, "unhandled maintenance command /{other}");
+                app.input = InputBuffer::from(text.as_str());
+                app.set_notice(format!("/{other} is not wired up"), NoticeLevel::Error);
+            }
         }
         return None;
     }
     if let Some(("btw", question)) = parse_slash_invocation(&text) {
         if question.trim().is_empty() {
             app.input = InputBuffer::from(text.as_str());
-            app.set_notice("usage: /btw <question>", NoticeLevel::Warning);
+            app.set_notice(decide::ASIDE_USAGE, NoticeLevel::Warning);
         } else {
             app.aside_requested = Some(question.to_string());
-        }
-        return None;
-    }
-    if let Some(("fork", args)) = parse_slash_invocation(&text) {
-        if args.is_empty() {
-            app.fork_requested = true;
-        } else {
-            app.input = InputBuffer::from(text.as_str());
-            app.set_notice(
-                "usage: /fork — Ctrl-Y in the /rewind picker forks at a turn",
-                NoticeLevel::Warning,
-            );
         }
         return None;
     }
@@ -281,14 +268,7 @@ fn prepare_prompt(app: &mut App, text: String) -> Option<String> {
             return None;
         }
         if goal_text == "abort" {
-            let notice = match app.goal.take() {
-                Some((goal, round)) => {
-                    let message = format!("goal aborted after {round} round(s): {goal}");
-                    app.push_transcript_line(Line_::System(message.clone()));
-                    message
-                }
-                None => "no active goal".into(),
-            };
+            let notice = app.abort_goal().unwrap_or_else(|| "no active goal".into());
             app.set_notice(notice, NoticeLevel::Info);
             return None;
         }
@@ -752,32 +732,59 @@ fn resolve_slash(app: &App, name: &str, args: &str) -> SlashResolution {
     if app.skills.iter().any(|(skill, _)| skill == name) {
         return SlashResolution::Skill(skill_invocation_prompt(name, args));
     }
-    let mut inventory = app.slash_inventory();
-    inventory.retain(|(name, _)| {
-        !BUILTIN_SLASH_COMMANDS
-            .iter()
-            .any(|(builtin, _)| name == builtin)
-    });
-    inventory.extend(
-        BUILTIN_SLASH_COMMANDS
-            .iter()
-            .map(|(name, description)| ((*name).into(), (*description).into())),
-    );
-    SlashResolution::Unknown(close_skill_matches(&inventory, name))
+    SlashResolution::Unknown(close_skill_matches(&app.slash_inventory(), name))
 }
 
-fn close_skill_matches(skills: &[(String, String)], name: &str) -> Vec<String> {
+/// Why a session cannot be resumed directly, if it cannot. Both the
+/// picker and the content search validate before switching, so a bad
+/// entry degrades to a notice here instead of failing the app's restart
+/// after the modal is gone.
+fn direct_resume_blocked(store: &SessionStore, id: &str) -> Option<String> {
+    match store
+        .load(id)
+        .map(|session| ensure_direct_resume_allowed(session.meta()))
+    {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) => Some(format!("cannot resume {id}: {error}")),
+        Err(error) => Some(format!("cannot resume {id}: {error}")),
+    }
+}
+
+/// Abandon the content-search walk in flight: the flag stops the worker
+/// and dropping the receiver stops draining rows it already queued. A
+/// modal that wants a fresh scan just leaves `scanning` set — the
+/// spawner above the dispatch starts the next one.
+fn stop_session_scan(
+    cancel: &mut Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    rx: &mut Option<(u64, std::sync::mpsc::Receiver<Vec<SearchRow>>)>,
+) {
+    if let Some(flag) = cancel.take() {
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    *rx = None;
+}
+
+fn close_skill_matches(inventory: &[(String, String)], name: &str) -> Vec<String> {
     let lowered = name.to_lowercase();
-    let mut matches: Vec<String> = skills
+    let mut matches: Vec<String> = inventory
         .iter()
         .filter(|(candidate, _)| candidate.to_lowercase().contains(&lowered))
         .map(|(candidate, _)| candidate.clone())
         .collect();
     if matches.is_empty() {
-        matches = skills
+        matches = inventory
             .iter()
             .map(|(candidate, _)| candidate.clone())
             .collect();
+        // Nothing looked like it, so this is a bare listing — and the
+        // inventory leads with the six built-ins, which would fill the
+        // whole list and hide every command and skill the user has. They
+        // are in the help; what the typo was aiming at probably is not.
+        matches.sort_by_key(|candidate| {
+            BUILTIN_SLASH_COMMANDS
+                .iter()
+                .any(|(builtin, _)| candidate == builtin)
+        });
     }
     matches.truncate(6);
     matches
@@ -947,6 +954,9 @@ async fn main() -> Result<()> {
     let mut first_run = true;
     let mut terminal_hold: Option<(ratatui::DefaultTerminal, TerminalSession)> = None;
     let mut active_theme = configured_theme;
+    // Settings that parsed but were not honoured. Shown once, on the
+    // first session: they are a property of the config, not the session.
+    let mut config_warnings = config.warnings.clone();
 
     loop {
         let resume_target = if first_run {
@@ -1049,6 +1059,9 @@ async fn main() -> Result<()> {
         );
         if app.question_modal.is_some() {
             app.status = "waiting for your answer".into();
+        }
+        for warning in config_warnings.drain(..) {
+            app.push_transcript_line(Line_::System(warning));
         }
         if let Some((prefill, notice)) = carried.take() {
             if let Some(prefill) = prefill {
@@ -2341,10 +2354,7 @@ async fn run_app(
                                 }
                             }
                             PendingAction::AbortGoal => {
-                                if let Some((goal, round)) = app.goal.take() {
-                                    let message =
-                                        format!("goal aborted after {round} round(s): {goal}");
-                                    app.push_transcript_line(Line_::System(message.clone()));
+                                if let Some(message) = app.abort_goal() {
                                     app.set_notice(message, NoticeLevel::Info);
                                 }
                             }
@@ -2529,27 +2539,11 @@ async fn run_app(
                                         app.set_notice(reason, NoticeLevel::Warning);
                                         continue;
                                     }
-                                    // Validate now so a bad entry degrades to a
-                                    // notice instead of exiting the app later.
-                                    match store
-                                        .load(&new_session)
-                                        .map(|session| ensure_direct_resume_allowed(session.meta()))
-                                    {
-                                        Ok(Ok(())) => {
+                                    match direct_resume_blocked(store, &new_session) {
+                                        Some(reason) => app.set_notice(reason, NoticeLevel::Error),
+                                        None => {
                                             spawner.shutdown().await;
                                             return Ok(AppExit::Switch(new_session));
-                                        }
-                                        Ok(Err(error)) => {
-                                            app.set_notice(
-                                                format!("cannot resume {new_session}: {error}"),
-                                                NoticeLevel::Error,
-                                            );
-                                        }
-                                        Err(error) => {
-                                            app.set_notice(
-                                                format!("cannot resume {new_session}: {error}"),
-                                                NoticeLevel::Error,
-                                            );
                                         }
                                     }
                                 }
@@ -2568,28 +2562,15 @@ async fn run_app(
                             match action {
                                 SessionSearchAction::Stay => {}
                                 SessionSearchAction::Rescan => {
-                                    // Only the cancellation happens here;
-                                    // the spawner below the drain starts
-                                    // the new scan, same as it starts the
-                                    // opening one.
-                                    if let Some(flag) = search_cancel.take() {
-                                        flag.store(true, std::sync::atomic::Ordering::Relaxed);
-                                    }
-                                    search_rx = None;
+                                    stop_session_scan(&mut search_cancel, &mut search_rx);
                                 }
                                 SessionSearchAction::Dismiss => {
-                                    if let Some(flag) = search_cancel.take() {
-                                        flag.store(true, std::sync::atomic::Ordering::Relaxed);
-                                    }
-                                    search_rx = None;
+                                    stop_session_scan(&mut search_cancel, &mut search_rx);
                                     app.session_search = None;
                                     app.clear_transient_notice();
                                 }
                                 SessionSearchAction::ListMode => {
-                                    if let Some(flag) = search_cancel.take() {
-                                        flag.store(true, std::sync::atomic::Ordering::Relaxed);
-                                    }
-                                    search_rx = None;
+                                    stop_session_scan(&mut search_cancel, &mut search_rx);
                                     app.session_search = None;
                                     let sessions = store
                                         .list()
@@ -2611,33 +2592,12 @@ async fn run_app(
                                         app.set_notice(reason, NoticeLevel::Warning);
                                         continue;
                                     }
-                                    // Same validation as the picker: degrade a
-                                    // bad entry to a notice, not an exit.
-                                    match store
-                                        .load(&new_session)
-                                        .map(|session| ensure_direct_resume_allowed(session.meta()))
-                                    {
-                                        Ok(Ok(())) => {
-                                            if let Some(flag) = search_cancel.take() {
-                                                flag.store(
-                                                    true,
-                                                    std::sync::atomic::Ordering::Relaxed,
-                                                );
-                                            }
+                                    match direct_resume_blocked(store, &new_session) {
+                                        Some(reason) => app.set_notice(reason, NoticeLevel::Error),
+                                        None => {
+                                            stop_session_scan(&mut search_cancel, &mut search_rx);
                                             spawner.shutdown().await;
                                             return Ok(AppExit::Switch(new_session));
-                                        }
-                                        Ok(Err(error)) => {
-                                            app.set_notice(
-                                                format!("cannot resume {new_session}: {error}"),
-                                                NoticeLevel::Error,
-                                            );
-                                        }
-                                        Err(error) => {
-                                            app.set_notice(
-                                                format!("cannot resume {new_session}: {error}"),
-                                                NoticeLevel::Error,
-                                            );
                                         }
                                     }
                                 }
@@ -3069,10 +3029,7 @@ async fn run_app(
                 let decided = decide::paste(&state, text);
                 apply_event_intents(app, decided, &mut intents, steer_tx.as_ref());
                 if scan != app.session_search.as_ref().map(|search| search.generation) {
-                    if let Some(flag) = search_cancel.take() {
-                        flag.store(true, std::sync::atomic::Ordering::Relaxed);
-                    }
-                    search_rx = None;
+                    stop_session_scan(&mut search_cancel, &mut search_rx);
                 }
             }
             Event::Mouse(mouse)

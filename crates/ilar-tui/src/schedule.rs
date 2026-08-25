@@ -181,7 +181,7 @@ fn complete<R: Runtime>(app: &mut App, completion: Completion, runtime: &mut R) 
             // satisfy; every other turn pays nothing.
             let achieved = round.is_some()
                 && app
-                    .lines
+                    .lines()
                     .iter()
                     .rev()
                     .find_map(|line| match line {
@@ -514,7 +514,9 @@ mod tests {
         assert_eq!(runtime.log, vec!["start_compaction"]);
         assert!(app.queued_messages.is_empty());
         assert!(
-            app.lines.iter().all(|line| !matches!(line, Line_::User(_))),
+            app.lines()
+                .iter()
+                .all(|line| !matches!(line, Line_::User(_))),
             "/compact leaked into the transcript"
         );
     }
@@ -543,7 +545,7 @@ mod tests {
         assert_eq!(runtime.log, vec!["end_turn", "start_turn:wait for me"]);
         assert_eq!(app.goal, Some(("ship it".into(), 3)));
         assert!(app.queued_messages.is_empty());
-        assert!(app.lines.iter().any(
+        assert!(app.lines().iter().any(
             |line| matches!(line, Line_::System(text) if text.contains("handover keeps the migration plan"))
         ));
     }
@@ -945,7 +947,7 @@ mod tests {
 
         assert!(!app.busy);
         assert!(
-            app.lines.iter().all(|line| !matches!(
+            app.lines().iter().all(|line| !matches!(
                 line,
                 Line_::Thought {
                     complete: false,
@@ -953,18 +955,18 @@ mod tests {
                 }
             )),
             "an incomplete thought survived the crash: {:?}",
-            app.lines
+            app.lines()
         );
         let Some(Line_::Tool {
             state,
             child_running,
             ..
         }) = app
-            .lines
+            .lines()
             .iter()
             .find(|line| matches!(line, Line_::Tool { .. }))
         else {
-            panic!("{:?}", app.lines);
+            panic!("{:?}", app.lines());
         };
         assert_eq!(*state, ToolState::Failed);
         assert!(!child_running, "the agent row still claims to be working");

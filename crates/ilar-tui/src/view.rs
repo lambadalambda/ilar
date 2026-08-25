@@ -52,7 +52,7 @@ impl App {
         use crate::transcript::{transcript_entries, transcript_entry_rows};
 
         let mut output = Vec::new();
-        for (index, entry) in transcript_entries(&self.lines, &self.expanded_tool_groups)
+        for (index, entry) in transcript_entries(self.lines(), &self.expanded_tool_groups)
             .iter()
             .enumerate()
         {
@@ -507,14 +507,7 @@ impl App {
             .width
             .saturating_sub(2 + CONTENT_HORIZONTAL_PADDING * 2);
         let now = std::time::Instant::now();
-        self.transcript_cache.update(
-            &self.lines,
-            &self.expanded_tool_groups,
-            self.transcript_revision,
-            text_width,
-            now,
-            self.activity_started,
-        );
+        self.refresh_transcript_cache(text_width, now);
         // Streaming shifts row indices; keep search matches in sync with
         // the rows actually on screen.
         if self.search_active && self.search_computed_revision != Some(self.transcript_revision) {
@@ -540,7 +533,9 @@ impl App {
         .into_iter()
         .flat_map(|line| wrap_styled_line(line, text_width as usize))
         .collect::<Vec<_>>();
-        if !activity_rows.is_empty() && self.transcript_cache.row_count() > 0 {
+        // A blank spacer row only earns its place under something; on a
+        // fresh session the activity line is all there is.
+        if !activity_rows.is_empty() && !self.transcript_cache.is_empty() {
             activity_rows.insert(0, Line::default());
         }
         let viewport_rows = transcript_area.height.saturating_sub(2) as usize;

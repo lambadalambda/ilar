@@ -56,7 +56,7 @@ impl ModalHit {
 /// `None` when the terminal left no room, which is every caller's cue
 /// to bail with an empty hit map. Sizes, titles, colours and footer
 /// breakpoints stay with each picker; only the scaffold lives here.
-fn modal_frame(
+pub(crate) fn modal_frame(
     frame: &mut Frame,
     area: Rect,
     title: &str,
@@ -611,14 +611,9 @@ pub(crate) static PALETTE_COMMANDS: &[PaletteCommandDefinition] = &[
     },
 ];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PaletteAction {
-    Command(PaletteCommand),
-}
-
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct PaletteItem {
-    action: PaletteAction,
+    command: PaletteCommand,
     label: String,
     shortcut: String,
     search_terms: String,
@@ -629,7 +624,7 @@ pub(crate) fn palette_items() -> Vec<PaletteItem> {
     PALETTE_COMMANDS
         .iter()
         .map(|command| PaletteItem {
-            action: PaletteAction::Command(command.id),
+            command: command.id,
             label: command.label.to_string(),
             shortcut: command.shortcut.to_string(),
             search_terms: format!("{} {}", command.section, command.search_terms),
@@ -641,7 +636,7 @@ pub(crate) fn palette_items() -> Vec<PaletteItem> {
 pub(crate) enum CommandPaletteAction {
     Stay,
     Dismiss,
-    Choose(PaletteAction),
+    Choose(PaletteCommand),
 }
 
 pub(crate) struct CommandPalette {
@@ -715,7 +710,7 @@ impl Picker for CommandPalette {
     fn choose(&mut self) -> Self::Action {
         self.filtered_commands()
             .get(self.nav.selected)
-            .map(|item| CommandPaletteAction::Choose(item.action.clone()))
+            .map(|item| CommandPaletteAction::Choose(item.command))
             .unwrap_or(CommandPaletteAction::Stay)
     }
 
@@ -794,7 +789,7 @@ static HELP_SECTIONS: &[HelpSection] = &[
             binding!("PgUp / PgDn", "scroll page"),
             binding!("Alt-U / Alt-D", "scroll half page"),
             binding!("Ctrl-Home / Ctrl-End", "jump to top / tail"),
-            binding!("Up / Down", "scroll line (while input has text)"),
+            binding!("Up / Down", "scroll line (at the edges of the draft)"),
             binding!("mouse wheel / drag", "scroll · select and copy"),
             binding!("click ▸/▾", "fold or expand tool details"),
         ],
@@ -969,14 +964,12 @@ pub(crate) fn render_help(frame: &mut Frame, scroll: usize, keyboard_enhanced: b
     ) else {
         return;
     };
-    let lines = help_lines(inner.width as usize, keyboard_enhanced);
-    let start = scroll.min(lines.len().saturating_sub(inner.height as usize));
-    let visible: Vec<Line<'static>> = lines
-        .into_iter()
-        .skip(start)
-        .take(inner.height as usize)
-        .collect();
-    frame.render_widget(Paragraph::new(visible), inner);
+    render_scrolled(
+        frame,
+        inner,
+        help_lines(inner.width as usize, keyboard_enhanced),
+        scroll,
+    );
 }
 
 /// The whole todo list, wrapped for `width`. The sidebar shows what
@@ -1017,14 +1010,12 @@ pub(crate) fn render_todos(frame: &mut Frame, list: &ilar::todo::TodoList, scrol
     ) else {
         return;
     };
-    let lines = todo_overlay_lines(list, inner.width as usize);
-    let start = scroll.min(lines.len().saturating_sub(inner.height as usize));
-    let visible = lines
-        .into_iter()
-        .skip(start)
-        .take(inner.height as usize)
-        .collect::<Vec<_>>();
-    frame.render_widget(Paragraph::new(visible), inner);
+    render_scrolled(
+        frame,
+        inner,
+        todo_overlay_lines(list, inner.width as usize),
+        scroll,
+    );
 }
 
 /// A `/btw` exchange: read it, close it. Neither half is part of the
@@ -1053,15 +1044,7 @@ pub(crate) fn render_aside(frame: &mut Frame, aside: &AsideModal) {
     );
     lines.push(Line::raw(""));
     lines.extend(crate::markdown::render(&aside.answer, width));
-    let start = aside
-        .scroll
-        .min(lines.len().saturating_sub(inner.height as usize));
-    let visible = lines
-        .into_iter()
-        .skip(start)
-        .take(inner.height as usize)
-        .collect::<Vec<_>>();
-    frame.render_widget(Paragraph::new(visible), inner);
+    render_scrolled(frame, inner, lines, aside.scroll);
 }
 
 /// One latent thing the user may want to inspect, edit, or cancel.
@@ -2676,7 +2659,20 @@ impl Picker for ThemePicker {
     }
 }
 
-fn centered_rect(area: Rect, max_width: u16, max_height: u16) -> Rect {
+/// Draw a read-only body at a scroll offset. The offset is clamped to
+/// the last full screen, so a stale scroll from a taller frame cannot
+/// leave the modal blank.
+fn render_scrolled(frame: &mut Frame, inner: Rect, lines: Vec<Line<'_>>, scroll: usize) {
+    let start = scroll.min(lines.len().saturating_sub(inner.height as usize));
+    let visible = lines
+        .into_iter()
+        .skip(start)
+        .take(inner.height as usize)
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(visible), inner);
+}
+
+pub(crate) fn centered_rect(area: Rect, max_width: u16, max_height: u16) -> Rect {
     let width = max_width.min(area.width.saturating_sub(2).max(1));
     let height = max_height.min(area.height.saturating_sub(2).max(1));
     Rect::new(
@@ -3554,13 +3550,13 @@ mod tests {
         // Switching sessions leads the list: the most-reached-for entry.
         assert_eq!(
             palette.handle_key(KeyCode::Enter, false),
-            CommandPaletteAction::Choose(PaletteAction::Command(PaletteCommand::Session))
+            CommandPaletteAction::Choose(PaletteCommand::Session)
         );
 
         palette.insert_query("sessio");
         assert_eq!(
             palette.handle_key(KeyCode::Enter, false),
-            CommandPaletteAction::Choose(PaletteAction::Command(PaletteCommand::Session))
+            CommandPaletteAction::Choose(PaletteCommand::Session)
         );
 
         palette.insert_query("nomatchhere");
@@ -3585,7 +3581,7 @@ mod tests {
         assert_eq!(palette.filtered_commands().len(), 1);
         assert_eq!(
             palette.handle_key(KeyCode::Enter, false),
-            CommandPaletteAction::Choose(PaletteAction::Command(PaletteCommand::Theme))
+            CommandPaletteAction::Choose(PaletteCommand::Theme)
         );
     }
 

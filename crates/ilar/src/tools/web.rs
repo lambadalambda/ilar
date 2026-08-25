@@ -176,14 +176,17 @@ fn is_block_tag(name: &str) -> bool {
     )
 }
 
+/// `&amp;` goes last on purpose: decoding it first turns `&amp;lt;`
+/// into `&lt;` and the next pass decodes that again, so escaped markup
+/// would come out as the markup it was escaping.
 fn decode_entities(text: &str) -> String {
-    text.replace("&amp;", "&")
-        .replace("&lt;", "<")
+    text.replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
         .replace("&#39;", "'")
         .replace("&apos;", "'")
         .replace("&nbsp;", " ")
+        .replace("&amp;", "&")
 }
 
 fn normalize_text(text: &str) -> String {
@@ -1401,5 +1404,18 @@ mod tests {
             .await;
         assert!(output.is_error);
         assert!(output.content.contains("timed out"));
+    }
+
+    /// `&amp;` is decoded last: an escaped entity must survive as text,
+    /// not be decoded a second time into the markup it was escaping.
+    #[test]
+    fn entity_decoding_does_not_double_decode_an_escaped_ampersand() {
+        assert_eq!(decode_entities("&amp;lt;script&amp;gt;"), "&lt;script&gt;");
+        assert_eq!(decode_entities("&amp;amp;"), "&amp;");
+        // The ordinary entities still decode exactly once.
+        assert_eq!(
+            decode_entities("a &amp; b &lt;c&gt; &quot;d&quot; &#39;e&#39; &apos;f&apos;&nbsp;g"),
+            "a & b <c> \"d\" 'e' 'f' g"
+        );
     }
 }

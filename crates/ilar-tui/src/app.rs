@@ -15,9 +15,9 @@ use ilar::session::SessionStore;
 
 use crate::input::{InputBuffer, slash_candidates};
 use crate::modals::{
-    AsideModal, CommandPalette, LinkPicker, Modal, ModelPicker, PaletteAction, PaletteCommand,
-    PendingAction, PendingItem, PendingManager, SessionPicker, SessionSearch, SkillPicker,
-    ThemePicker, ThemePickerAction, TurnPicker, VariantPicker, palette_items,
+    AsideModal, CommandPalette, LinkPicker, Modal, ModelPicker, PaletteCommand, PendingAction,
+    PendingItem, PendingManager, SessionPicker, SessionSearch, SkillPicker, ThemePicker,
+    ThemePickerAction, TurnPicker, VariantPicker, palette_items,
 };
 use crate::questions::QuestionModal;
 use crate::selection::{
@@ -51,7 +51,11 @@ pub(crate) struct SubtaskRequest {
 }
 
 pub(crate) struct App {
-    pub(crate) lines: Vec<Line_>,
+    /// Private on purpose: every mutation has to be paired with a
+    /// `touch_transcript` so the render cache learns which rows moved,
+    /// and that pairing is only checkable where both live. Other modules
+    /// read through [`App::lines`]; nothing outside this one writes.
+    lines: Vec<Line_>,
     pub(crate) input: InputBuffer,
     pub(crate) history: history::PromptHistory,
     pub(crate) busy: bool,
@@ -381,20 +385,32 @@ impl App {
     }
 
     /// Everything `/` can invoke, in the precedence the dispatcher
-    /// uses: the built-in, then commands, then skills a command has not
-    /// shadowed. Completion, the picker and near-match suggestions all
-    /// read this, so they cannot disagree about what exists.
+    /// uses: the built-ins, then commands, then skills a command has not
+    /// shadowed. Completion, the skill picker and near-match suggestions
+    /// all read this, so they cannot disagree about what exists — and a
+    /// name a built-in already owns is dropped, because `prepare_prompt`
+    /// claims it before any command or skill is consulted.
     pub(crate) fn slash_inventory(&self) -> Vec<(String, String)> {
-        let mut entries: Vec<(String, String)> = self
-            .commands
+        let builtin = |name: &str| {
+            crate::BUILTIN_SLASH_COMMANDS
+                .iter()
+                .any(|(builtin, _)| name == *builtin)
+        };
+        let mut entries: Vec<(String, String)> = crate::BUILTIN_SLASH_COMMANDS
             .iter()
-            .map(|command| (command.name.clone(), command.description.clone()))
+            .map(|(name, description)| ((*name).into(), (*description).into()))
             .collect();
         entries.extend(
-            self.skills
+            self.commands
                 .iter()
-                .filter(|(skill, _)| !self.commands.iter().any(|c| &c.name == skill))
-                .cloned(),
+                .map(|command| (command.name.clone(), command.description.clone()))
+                .chain(
+                    self.skills
+                        .iter()
+                        .filter(|(skill, _)| !self.commands.iter().any(|c| &c.name == skill))
+                        .cloned(),
+                )
+                .filter(|(name, _)| !builtin(name)),
         );
         entries
     }
@@ -534,9 +550,17 @@ impl App {
                 let aside = self.aside.as_mut().unwrap();
                 aside.scroll = aside.scroll.saturating_add_signed(rows);
             }
-            // The pending manager is a handful of rows; search leaves the
-            // wheel to the transcript so results stay browsable.
-            Some(Modal::Question) | Some(Modal::PendingManager) | Some(Modal::Search) | None => {
+            Some(Modal::PendingManager) => {
+                let len = self.pending_items().len();
+                self.pending_manager
+                    .as_mut()
+                    .unwrap()
+                    .move_selection(rows, len);
+            }
+            // The question modal navigates its own rows with the arrows;
+            // search leaves the wheel to the transcript so results stay
+            // browsable underneath it.
+            Some(Modal::Question) | Some(Modal::Search) | None => {
                 return false;
             }
         }
@@ -670,6 +694,34 @@ impl App {
         }
     }
 
+    pub(crate) fn lines(&self) -> &[Line_] {
+        &self.lines
+    }
+
+    /// Bring the render cache up to date with the transcript. Lives here
+    /// rather than in the render pass because it is the one place that
+    /// needs the lines and the cache mutably at once, which only the
+    /// module owning both fields can express.
+    pub(crate) fn refresh_transcript_cache(&mut self, width: u16, now: std::time::Instant) {
+        self.transcript_cache.update(
+            &self.lines,
+            &self.expanded_tool_groups,
+            self.transcript_revision,
+            width,
+            now,
+            self.activity_started,
+        );
+    }
+
+    /// The transcript, for an edit whose extent is not tracked: marking
+    /// happens here, before the edit, so a caller cannot forget it and
+    /// leave the render cache showing stale rows. Marking early only
+    /// ever over-invalidates, which costs work rather than correctness.
+    fn lines_mut(&mut self) -> &mut Vec<Line_> {
+        self.touch_whole_transcript();
+        &mut self.lines
+    }
+
     pub(crate) fn push_transcript_line(&mut self, line: Line_) {
         self.lines.push(line);
         self.touch_transcript(Some(self.lines.len() - 1));
@@ -776,22 +828,16 @@ impl App {
                 let appended = append_text_delta(&mut self.lines, t);
                 Some(closed.unwrap_or(appended))
             }
-            LoopEvent::ThinkingDelta(delta) => {
+            // Raw thinking and provider-written summaries are the same
+            // thing to the transcript: both accumulate into one
+            // expandable Thought line (bounded to a tail) so the user
+            // can watch the model work live.
+            LoopEvent::ThinkingDelta(delta) | LoopEvent::ReasoningSummaryDelta(delta) => {
                 self.note_stream_data(delta.len());
-                // Raw thinking accumulates into an expandable Thought line
-                // (bounded to a tail) so the user can watch it live.
-                let next = &mut self.next_thought;
-                let index = append_thought_delta(&mut self.lines, delta, || next_thought_id(next));
-                self.status = "thinking".into();
-                self.set_activity(Activity::Thinking);
-                Some(index)
-            }
-            LoopEvent::ReasoningSummaryDelta(summary) => {
-                self.note_stream_data(summary.len());
                 self.status = "thinking".into();
                 self.set_activity(Activity::Thinking);
                 let next = &mut self.next_thought;
-                Some(append_thought_delta(&mut self.lines, summary, || {
+                Some(append_thought_delta(&mut self.lines, delta, || {
                     next_thought_id(next)
                 }))
             }
@@ -1014,6 +1060,15 @@ impl App {
         self.touch_transcript(touched);
         self.busy = false;
         self.turn_committed = false;
+    }
+
+    /// End the goal loop and record it. `None` when no goal was running,
+    /// so a caller can say so in whatever way suits it.
+    pub(crate) fn abort_goal(&mut self) -> Option<String> {
+        let (goal, round) = self.goal.take()?;
+        let message = format!("goal aborted after {round} round(s): {goal}");
+        self.push_transcript_line(Line_::System(message.clone()));
+        Some(message)
     }
 
     pub(crate) fn pending_items(&self) -> Vec<PendingItem> {
@@ -1345,12 +1400,15 @@ impl App {
                 if !self.expanded_tool_groups.remove(&id) {
                     self.expanded_tool_groups.insert(id);
                 }
+                // The expansion state lives in the entries the cache
+                // holds, and every row below the group moves.
+                self.touch_whole_transcript();
             }
             TranscriptHitTarget::Tool(id) => {
-                toggle_tool_expansion(&mut self.lines, &id);
+                toggle_tool_expansion(self.lines_mut(), &id);
             }
             TranscriptHitTarget::Thought(id) => {
-                for line in &mut self.lines {
+                for line in self.lines_mut() {
                     match line {
                         Line_::Thought {
                             id: line_id,
@@ -1375,9 +1433,6 @@ impl App {
                 }
             }
         }
-        // An expansion toggle can move every row below it, and the
-        // expansion state lives in the entries the cache holds.
-        self.touch_whole_transcript();
     }
 
     /// Attach an image to the next fresh turn, or say why not: mid-turn
@@ -1612,11 +1667,10 @@ pub(crate) fn apply_theme_picker_action(
 
 pub(crate) fn activate_palette_command(
     app: &mut App,
-    action: PaletteAction,
+    command: PaletteCommand,
     model_choices: Vec<&'static ilar::model::ModelInfo>,
 ) {
     app.command_palette = None;
-    let PaletteAction::Command(command) = action;
     match command {
         PaletteCommand::Model if !model_choices.is_empty() => {
             app.model_picker = Some(ModelPicker::new(model_choices, &app.current_model));
@@ -1966,6 +2020,28 @@ mod tests {
         assert_eq!(app.model_picker.as_ref().unwrap().nav.selected, 3);
         assert!(app.scroll_active_modal(-3));
         assert_eq!(app.model_picker.as_ref().unwrap().nav.selected, 0);
+    }
+
+    /// The pending manager grew a scrolling list, but the wheel was
+    /// still declining it on the grounds that it was "a handful of
+    /// rows" — so the modal moved under the arrows and sat still under
+    /// the wheel.
+    #[test]
+    fn the_wheel_moves_the_pending_manager_selection() {
+        let mut app = App::new();
+        app.queued_messages = vec!["one".into(), "two".into(), "three".into()];
+        app.pending_manager = Some(PendingManager::default());
+        assert_eq!(app.pending_manager.as_ref().unwrap().selected(), 0);
+
+        assert!(app.scroll_active_modal(2));
+        assert_eq!(app.pending_manager.as_ref().unwrap().selected(), 2);
+        assert!(app.scroll_active_modal(-1));
+        assert_eq!(app.pending_manager.as_ref().unwrap().selected(), 1);
+
+        // An empty list has nothing to move to and must not index it.
+        app.queued_messages.clear();
+        assert!(app.scroll_active_modal(1));
+        assert_eq!(app.pending_manager.as_ref().unwrap().selected(), 0);
     }
 
     /// The theme picker previews the highlighted theme across the whole
@@ -2513,34 +2589,48 @@ mod tests {
         assert_eq!(app.input.text(), "/sessions ");
     }
 
+    /// One inventory feeds completion, the skill picker and the
+    /// near-match suggestions, and it is where the built-ins live: a
+    /// skill that shadows a built-in name is unreachable (the built-in
+    /// is claimed first), so it must not be offered either.
     #[test]
     fn slash_input_shows_inline_completion_including_builtins() {
         let skills = vec![
             ("deploy".to_string(), "Deploy things".to_string()),
             ("greptile".to_string(), "Review comments".to_string()),
+            ("compact".to_string(), "external duplicate".to_string()),
         ];
+        let mut app = App::new();
+        app.skills = skills;
+        let inventory = app.slash_inventory();
+
         // All candidates on bare slash, fuzzy-filtered as the name grows.
-        let all = slash_candidates("/", &skills);
+        let all = slash_candidates("/", &inventory);
         assert_eq!(all.len(), 8);
-        assert!(all.iter().any(|(name, _)| name == "goal"));
-        assert!(all.iter().any(|(name, _)| name == "compact"));
-        assert!(all.iter().any(|(name, _)| name == "rewind"));
-        assert!(all.iter().any(|(name, _)| name == "fork"));
-        assert!(all.iter().any(|(name, _)| name == "sessions"));
-        assert!(all.iter().any(|(name, _)| name == "btw"));
-        let filtered = slash_candidates("/go", &skills);
+        for builtin in ["goal", "compact", "rewind", "fork", "sessions", "btw"] {
+            assert_eq!(
+                all.iter().filter(|(name, _)| name == builtin).count(),
+                1,
+                "{builtin} in {all:?}"
+            );
+        }
+        // The built-in's own wording wins over the shadowing skill's.
+        assert!(
+            all.iter()
+                .any(|(name, description)| name == "compact" && description.contains("session")),
+            "{all:?}"
+        );
+        let filtered = slash_candidates("/go", &inventory);
         assert_eq!(
             filtered.first().map(|(name, _)| name.as_str()),
             Some("goal")
         );
         // Finished name (whitespace) or non-slash input: no popup.
-        assert!(slash_candidates("/goal recover", &skills).is_empty());
-        assert!(slash_candidates("plain text", &skills).is_empty());
-        assert!(slash_candidates("/zzz", &skills).is_empty());
+        assert!(slash_candidates("/goal recover", &inventory).is_empty());
+        assert!(slash_candidates("plain text", &inventory).is_empty());
+        assert!(slash_candidates("/zzz", &inventory).is_empty());
 
         // The popup renders above the input.
-        let mut app = App::new();
-        app.skills = skills;
         app.input = InputBuffer::from("/go");
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
@@ -3304,18 +3394,18 @@ mod tests {
         palette.insert_query("skill");
         assert_eq!(
             palette.handle_key(KeyCode::Enter, false),
-            CommandPaletteAction::Choose(PaletteAction::Command(PaletteCommand::Skills))
+            CommandPaletteAction::Choose(PaletteCommand::Skills)
         );
 
         let mut app = App::new();
         app.skills = vec![("deploy".into(), "Deploy things".into())];
-        activate_palette_command(
-            &mut app,
-            PaletteAction::Command(PaletteCommand::Skills),
-            Vec::new(),
-        );
+        activate_palette_command(&mut app, PaletteCommand::Skills, Vec::new());
         let picker = app.skill_picker.as_ref().expect("skill picker opens");
-        assert_eq!(picker.skills.len(), 1);
+        // The picker lists the whole slash inventory, built-ins first:
+        // `/goal` is invocable from the prompt and so from here too.
+        assert_eq!(picker.skills.len(), crate::BUILTIN_SLASH_COMMANDS.len() + 1);
+        assert!(picker.skills.iter().any(|(name, _)| name == "goal"));
+        assert!(picker.skills.iter().any(|(name, _)| name == "deploy"));
         assert!(app.command_palette.is_none());
     }
 
@@ -3349,7 +3439,7 @@ mod tests {
 
         activate_palette_command(
             &mut app,
-            PaletteAction::Command(PaletteCommand::Model),
+            PaletteCommand::Model,
             ilar::model::catalog().iter().collect(),
         );
         assert!(app.command_palette.is_none());
@@ -3362,7 +3452,7 @@ mod tests {
         app.command_palette = Some(CommandPalette::new(palette_items()));
         activate_palette_command(
             &mut app,
-            PaletteAction::Command(PaletteCommand::Reasoning),
+            PaletteCommand::Reasoning,
             ilar::model::catalog().iter().collect(),
         );
         assert!(app.command_palette.is_none());
@@ -3372,7 +3462,7 @@ mod tests {
         app.command_palette = Some(CommandPalette::new(palette_items()));
         activate_palette_command(
             &mut app,
-            PaletteAction::Command(PaletteCommand::Theme),
+            PaletteCommand::Theme,
             ilar::model::catalog().iter().collect(),
         );
         assert!(app.command_palette.is_none());
@@ -5375,6 +5465,36 @@ mod tests {
         assert_eq!(app.transcript_cache.rebuilds, 4);
     }
 
+    /// `row_count` always counts the tail padding, so `row_count() > 0`
+    /// — which the render pass used to ask before inserting a blank row
+    /// above the activity line — is true even on a fresh session. The
+    /// spacer only earns its place under something.
+    #[test]
+    fn an_empty_transcript_gets_no_spacer_above_the_activity_line() {
+        let mut app = App::new();
+        assert!(app.transcript_cache.is_empty());
+        assert!(
+            app.transcript_cache.row_count() > 0,
+            "the padding row is why an emptiness test cannot use row_count"
+        );
+
+        app.busy = true;
+        app.set_activity(Activity::Thinking);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let bare = app.content_rows;
+
+        app.push_transcript_line(Line_::System("something happened".into()));
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert!(!app.transcript_cache.is_empty());
+        assert_eq!(
+            app.content_rows,
+            bare + 2,
+            "the new row and, now that there is one, its spacer"
+        );
+    }
+
     /// One appended token must cost one entry, whatever is behind it.
     /// The cache used to clone and deep-compare the whole model per
     /// delta; now the mutation says where it happened and everything
@@ -5953,11 +6073,7 @@ mod tests {
     fn the_palette_opens_the_session_search() {
         let mut app = App::new();
 
-        activate_palette_command(
-            &mut app,
-            PaletteAction::Command(PaletteCommand::Session),
-            Vec::new(),
-        );
+        activate_palette_command(&mut app, PaletteCommand::Session, Vec::new());
 
         assert!(app.session_search.is_some());
         assert_eq!(app.active_modal(), Some(Modal::SessionSearch));
@@ -6143,8 +6259,16 @@ mod tests {
             1,
             "the shadowed skill must not also be listed: {inventory:?}"
         );
-        assert_eq!(inventory[0].1, "Command review");
+        assert_eq!(
+            inventory
+                .iter()
+                .find(|(name, _)| name == "review")
+                .map(|(_, description)| description.as_str()),
+            Some("Command review")
+        );
         assert!(inventory.iter().any(|(name, _)| name == "other"));
+        // The built-ins lead the list, ahead of anything user-supplied.
+        assert_eq!(inventory[0].0, "goal");
     }
 
     /// A body of only placeholders with no arguments expands to nothing,
@@ -6394,9 +6518,7 @@ mod tests {
         let palette = app.command_palette.as_mut().expect("palette open");
         assert_eq!(
             palette.handle_key(KeyCode::Enter, false),
-            crate::modals::CommandPaletteAction::Choose(PaletteAction::Command(
-                PaletteCommand::Pending
-            )),
+            crate::modals::CommandPaletteAction::Choose(PaletteCommand::Pending),
             "the pasted query should filter the palette"
         );
         // A palette paste with no palette open is dropped, not a panic.

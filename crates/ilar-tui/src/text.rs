@@ -6,7 +6,7 @@ use crate::theme;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub(crate) fn format_cost(cost: f64) -> String {
     if cost >= 0.995 {
@@ -27,11 +27,24 @@ pub(crate) struct StyledGrapheme {
     pub(crate) width: usize,
 }
 
+/// The gutter a fenced code block is drawn with. It doubles as the
+/// marker `wrap_markdown_line` looks for to hard-wrap the block instead
+/// of breaking it on words — so the glyph and the colour are one pair
+/// here rather than a string and a style repeated at both ends. (A
+/// blockquote draws the same glyph in a different colour, which is
+/// exactly why the colour is part of the test.)
+pub(crate) const CODE_GUTTER: &str = "│ ";
+
+pub(crate) fn code_gutter_span() -> Span<'static> {
+    Span::styled(CODE_GUTTER, Style::default().fg(theme::CODE))
+}
+
+fn is_code_gutter(span: &Span<'_>) -> bool {
+    span.content == CODE_GUTTER && span.style.fg == Some(theme::CODE)
+}
+
 pub(crate) fn wrap_markdown_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
-    let preformatted = line
-        .spans
-        .first()
-        .is_some_and(|span| span.content == "│ " && span.style.fg == Some(theme::CODE));
+    let preformatted = line.spans.first().is_some_and(is_code_gutter);
     if preformatted {
         hard_wrap_styled_line(line, width)
     } else {
@@ -227,15 +240,7 @@ pub(crate) enum Truncation {
     Middle,
 }
 
-pub(crate) fn format_bytes(bytes: u64) -> String {
-    if bytes < 1024 {
-        format!("{bytes} B")
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1} KiB", bytes as f64 / 1024.0)
-    } else {
-        format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
-    }
-}
+pub(crate) use ilar::text::format_bytes;
 
 pub(crate) fn format_elapsed(duration: std::time::Duration) -> String {
     let seconds = duration.as_secs();
@@ -370,20 +375,31 @@ pub(crate) fn context_meter(
     ))
 }
 
-pub(crate) fn safe_text(text: &str) -> String {
+/// Tabs to the next four-column stop. Columns are display cells, not
+/// characters: a line of CJK or emoji counts double per glyph, and
+/// counting characters instead put every stop after one out of place.
+fn tabs_to_stops(characters: impl Iterator<Item = char>) -> String {
     let mut output = String::new();
     let mut column = 0usize;
-    for character in text.chars().filter(|c| *c == '\t' || !c.is_control()) {
+    for character in characters {
         if character == '\t' {
             let spaces = 4 - column % 4;
             output.push_str(&" ".repeat(spaces));
             column += spaces;
         } else {
             output.push(character);
-            column += 1;
+            column += UnicodeWidthChar::width(character).unwrap_or(0);
         }
     }
     output
+}
+
+pub(crate) fn expand_tabs(text: &str) -> String {
+    tabs_to_stops(text.chars())
+}
+
+pub(crate) fn safe_text(text: &str) -> String {
+    tabs_to_stops(text.chars().filter(|c| *c == '\t' || !c.is_control()))
 }
 
 pub(crate) fn safe_lines(text: &str) -> Vec<String> {
@@ -395,14 +411,13 @@ pub(crate) fn safe_lines(text: &str) -> Vec<String> {
     }
 }
 
+/// The restore path's half of the tool-detail bound. The live row uses
+/// `ilar::agent`'s `bounded_tool_detail`; both go through
+/// `ilar::text::truncate_detail`, so the length and the marker are one
+/// definition. (What each feeds it still differs: this one expands tabs
+/// first, so a tab-heavy result can cut at a different character.)
 pub(crate) fn bounded_detail(text: &str) -> String {
-    const MAX_DETAIL_CHARS: usize = 16 * 1024;
-    let mut detail = text.lines().map(safe_text).collect::<Vec<_>>().join("\n");
-    if detail.chars().count() > MAX_DETAIL_CHARS {
-        detail = detail.chars().take(MAX_DETAIL_CHARS).collect();
-        detail.push_str("\n… output truncated");
-    }
-    detail
+    ilar::text::truncate_detail(text.lines().map(safe_text).collect::<Vec<_>>().join("\n"))
 }
 pub(crate) fn fuzzy_score(needle: &str, haystack: &str) -> Option<i64> {
     if needle.trim().is_empty() {
@@ -442,6 +457,25 @@ pub(crate) mod tests {
         // provider that over-reports must not print 103%.
         assert_eq!(cache_share(0, 0), None);
         assert_eq!(cache_share(1_000, 1_100), Some(100));
+    }
+
+    /// Tab stops are columns on the terminal, not characters. Counting
+    /// characters put every stop after a wide glyph one cell out, so a
+    /// tabbed table of CJK text drifted a column per row.
+    #[test]
+    fn tab_stops_are_measured_in_display_cells() {
+        assert_eq!(expand_tabs("\tx"), "    x");
+        assert_eq!(expand_tabs("ab\tx"), "ab  x");
+        assert_eq!(expand_tabs("abcd\tx"), "abcd    x");
+        // Two double-width glyphs fill the first stop exactly.
+        assert_eq!(expand_tabs("世界\tx"), "世界    x");
+        // One fills half of it, so two cells remain.
+        assert_eq!(expand_tabs("世\tx"), "世  x");
+        // A zero-width character occupies no column of its own, so the
+        // stop is reached from column 1, not column 2.
+        assert_eq!(expand_tabs("a\u{200b}\tx"), "a\u{200b}   x");
+        // safe_text drops the controls and then tabs the same way.
+        assert_eq!(safe_text("世\u{7}\tx"), "世  x");
     }
 
     #[test]

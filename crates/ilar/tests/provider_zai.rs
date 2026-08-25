@@ -719,3 +719,82 @@ async fn reserved_options_are_rejected_before_zai_network_io() {
     request.options = serde_json::json!(true);
     assert!(provider.stream(request).is_err());
 }
+
+/// Prompt caching on the OpenAI-compatible route is prefix matching on
+/// the serialized request: z.ai bills a cache hit only for the leading
+/// messages that are byte-identical to the previous call. So a turn that
+/// only appends must leave every earlier message — and the system
+/// prompt, and the tool declarations — exactly where and as they were.
+///
+/// This is the coverage the removed Anthropic flavor's cache-breakpoint
+/// tests used to provide; nothing else watches the wire body for it.
+#[test]
+fn appending_a_turn_leaves_the_cached_prefix_byte_identical() {
+    let provider = ZaiProvider::new("k".into(), None);
+    let mut req = request();
+    req.system_prompt = Some("follow instructions".into());
+    req.messages = vec![
+        ChatMessage::user_text("read both"),
+        ChatMessage {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolCall {
+                id: "call_1".into(),
+                name: "read".into(),
+                input: serde_json::json!({"path": "one"}),
+                item_id: None,
+            }],
+        },
+        ChatMessage {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_1".into(),
+                content: "one result".into(),
+                is_error: false,
+                images: Vec::new(),
+            }],
+        },
+    ];
+
+    let first = provider.wire_body_for_test(&req);
+    let prefix_len = first["messages"].as_array().unwrap().len();
+
+    // The next round of the same conversation: one more exchange on the
+    // end, nothing else touched.
+    req.messages.push(ChatMessage {
+        role: Role::Assistant,
+        content: vec![ContentBlock::Text {
+            text: "the file says one".into(),
+        }],
+    });
+    req.messages.push(ChatMessage::user_text("now the other"));
+    let second = provider.wire_body_for_test(&req);
+
+    // Everything a cache prefix covers is unchanged, in place and as
+    // text: comparing serialized forms catches key reordering too.
+    assert_eq!(
+        serde_json::to_string(&first["tools"]).unwrap(),
+        serde_json::to_string(&second["tools"]).unwrap(),
+        "tool declarations sit in the cached prefix"
+    );
+    assert_eq!(first["model"], second["model"]);
+    let before = first["messages"].as_array().unwrap();
+    let after = second["messages"].as_array().unwrap();
+    assert!(after.len() > prefix_len);
+    for index in 0..prefix_len {
+        assert_eq!(
+            serde_json::to_string(&before[index]).unwrap(),
+            serde_json::to_string(&after[index]).unwrap(),
+            "message {index} moved or changed and would miss the cache"
+        );
+    }
+    // The system prompt is the very front of the prefix and stays there.
+    assert_eq!(after[0]["role"], "system");
+    assert_eq!(after[0]["content"], "follow instructions");
+
+    // The same request built twice is byte-identical: nothing in the
+    // body is clock-, order- or identity-dependent.
+    assert_eq!(
+        serde_json::to_string(&provider.wire_body_for_test(&req)).unwrap(),
+        serde_json::to_string(&second).unwrap()
+    );
+}

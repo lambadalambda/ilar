@@ -549,9 +549,10 @@ pub(crate) fn input_accepts_keys(_busy: bool, has_modal: bool) -> bool {
     !has_modal
 }
 
-/// Inline completion candidates for a slash input: built-in commands
-/// plus skills, fuzzy-ranked. Empty once the name is finished (whitespace)
-/// or the input is not a slash command.
+/// Inline completion candidates for a slash input, fuzzy-ranked over
+/// `App::slash_inventory` — which is where the built-ins are merged in.
+/// Empty once the name is finished (whitespace) or the input is not a
+/// slash command.
 pub(crate) fn slash_candidates(
     input: &str,
     inventory: &[(String, String)],
@@ -562,22 +563,9 @@ pub(crate) fn slash_candidates(
     if token.contains(char::is_whitespace) {
         return Vec::new();
     }
-    let mut candidates: Vec<(String, String)> = crate::BUILTIN_SLASH_COMMANDS
+    let mut scored: Vec<(i64, (String, String))> = inventory
         .iter()
-        .map(|(name, description)| ((*name).into(), (*description).into()))
-        .collect();
-    candidates.extend(
-        inventory
-            .iter()
-            .filter(|(name, _)| {
-                !crate::BUILTIN_SLASH_COMMANDS
-                    .iter()
-                    .any(|(builtin, _)| name == builtin)
-            })
-            .cloned(),
-    );
-    let mut scored: Vec<(i64, (String, String))> = candidates
-        .into_iter()
+        .cloned()
         .filter_map(|(name, description)| {
             crate::text::fuzzy_score(token, &name).map(|score| (score, (name, description)))
         })
@@ -592,19 +580,24 @@ pub(crate) fn slash_candidates(
 mod tests {
     use super::*;
 
+    /// Ranking only: what exists (and which duplicate wins) is
+    /// `App::slash_inventory`'s business, and this must not add to it.
     #[test]
-    fn slash_completion_lists_compact_as_a_unique_builtin() {
-        let candidates =
-            slash_candidates("/comp", &[("compact".into(), "external duplicate".into())]);
-
+    fn slash_completion_ranks_the_inventory_it_is_given_and_nothing_else() {
+        let inventory = [
+            ("compact".to_string(), "external duplicate".to_string()),
+            ("comparison".to_string(), "another".to_string()),
+        ];
+        let candidates = slash_candidates("/comp", &inventory);
         assert_eq!(
             candidates
                 .iter()
-                .filter(|(name, _)| name == "compact")
-                .count(),
-            1
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            ["compact", "comparison"]
         );
-        assert!(candidates[0].1.contains("session"));
+        assert_eq!(candidates[0].1, "external duplicate");
+        assert!(slash_candidates("/comp", &[]).is_empty());
     }
 
     #[test]

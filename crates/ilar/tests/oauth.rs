@@ -100,7 +100,6 @@ async fn auth_store_round_trip() {
             refresh_token: Some("r1".into()),
             id_token: None,
             account_id: Some("acc".into()),
-            expires_at: Some(4102444800),
         })
         .await
         .unwrap();
@@ -226,7 +225,6 @@ async fn concurrent_refreshes_rotate_once_and_share_the_result() {
             refresh_token: Some("r1".into()),
             id_token: None,
             account_id: Some("account".into()),
-            expires_at: Some(0),
         })
         .await
         .unwrap();
@@ -364,7 +362,6 @@ async fn chatgpt_auth_refreshes_on_401_and_retries() {
             refresh_token: Some("r1".into()),
             id_token: None,
             account_id: None,
-            expires_at: Some(0),
         })
         .await
         .unwrap();

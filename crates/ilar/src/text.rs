@@ -17,6 +17,36 @@
 
 const ELLIPSIS: char = '…';
 
+/// Byte counts the way every surface writes them: the live tool row, the
+/// restored row, image markers and the attachment notices.
+pub fn format_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+/// How much of a tool result any surface keeps.
+pub const MAX_DETAIL_CHARS: usize = 16 * 1024;
+
+/// Marker appended when [`truncate_detail`] cut something.
+pub const DETAIL_TRUNCATED: &str = "\n… output truncated";
+
+/// Cap a tool detail at [`MAX_DETAIL_CHARS`]. The live row bounds the
+/// text as it streams and the restored row bounds it again on reload;
+/// both call this, so the two halves of a description cannot be cut at
+/// different lengths or marked with different words.
+pub fn truncate_detail(mut detail: String) -> String {
+    if detail.chars().count() > MAX_DETAIL_CHARS {
+        detail = detail.chars().take(MAX_DETAIL_CHARS).collect();
+        detail.push_str(DETAIL_TRUNCATED);
+    }
+    detail
+}
+
 /// The largest char-boundary index at or below `end`.
 ///
 /// This is the only UTF-8 boundary walk in the crate; everything that
