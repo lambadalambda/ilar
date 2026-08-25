@@ -130,6 +130,114 @@ struct SubagentLayer {
     background_tool_timeout_ms: Option<u64>,
 }
 
+/// One row per supported provider. Resolution, model listing, semantic
+/// validation and fallback windows all read this table, so adding a
+/// provider is this entry plus the two functions it names.
+#[derive(Clone, Copy)]
+struct ProviderKind {
+    name: &'static str,
+    /// Consulted when the configuration carries no `api_key`.
+    api_key_env: &'static str,
+    /// Accepted `auth` values; empty when the key is unsupported.
+    auth_values: &'static [&'static str],
+    /// Accepted `flavor` values; empty when the key is unsupported.
+    flavor_values: &'static [&'static str],
+    /// Window assumed for a model the catalog does not list.
+    fallback_context_limit: u64,
+    /// Whether this configuration can reach a catalog row.
+    reaches: fn(&ProviderConfigResolved, crate::model::ModelAccess) -> bool,
+    /// The concrete client, or None when the configuration is incomplete.
+    build: fn(&Config, &ProviderConfigResolved) -> Option<Box<dyn crate::provider::Provider>>,
+}
+
+static PROVIDERS: &[ProviderKind] = &[
+    ProviderKind {
+        name: "openai",
+        api_key_env: "ILAR_OPENAI_API_KEY",
+        auth_values: &["api_key", "chatgpt"],
+        flavor_values: &[],
+        fallback_context_limit: 128_000,
+        reaches: openai_reaches,
+        build: openai_provider,
+    },
+    ProviderKind {
+        name: "zai",
+        api_key_env: "ILAR_ZAI_API_KEY",
+        auth_values: &[],
+        flavor_values: &["anthropic", "openai"],
+        fallback_context_limit: 200_000,
+        reaches: zai_reaches,
+        build: zai_provider,
+    },
+];
+
+fn provider_kind<'a>(name: &str, kinds: &'a [ProviderKind]) -> Option<&'a ProviderKind> {
+    kinds.iter().find(|kind| kind.name == name)
+}
+
+fn chatgpt_auth(settings: &ProviderConfigResolved) -> bool {
+    settings.auth.as_deref() == Some("chatgpt")
+}
+
+fn openai_reaches(settings: &ProviderConfigResolved, access: crate::model::ModelAccess) -> bool {
+    use crate::model::ModelAccess;
+    match access {
+        ModelAccess::OpenAi => settings.api_key.is_some() && !chatgpt_auth(settings),
+        ModelAccess::OpenAiBoth => chatgpt_auth(settings) || settings.api_key.is_some(),
+        _ => false,
+    }
+}
+
+fn openai_provider(
+    config: &Config,
+    settings: &ProviderConfigResolved,
+) -> Option<Box<dyn crate::provider::Provider>> {
+    if chatgpt_auth(settings) {
+        // OAuth mode needs no api_key — tokens come from the store.
+        return Some(Box::new(
+            crate::provider::openai::OpenAIProvider::with_chatgpt_auth(
+                crate::auth::AuthStore::open(config.state_dir.clone()),
+                settings.base_url.clone(),
+            ),
+        ));
+    }
+    Some(Box::new(crate::provider::openai::OpenAIProvider::new(
+        settings.api_key.clone()?,
+        settings.base_url.clone(),
+    )))
+}
+
+fn zai_openai_flavor(settings: &ProviderConfigResolved) -> bool {
+    settings.flavor.as_deref() == Some("openai")
+}
+
+fn zai_reaches(settings: &ProviderConfigResolved, access: crate::model::ModelAccess) -> bool {
+    use crate::model::ModelAccess;
+    settings.api_key.is_some()
+        && match access {
+            ModelAccess::Zai => !zai_openai_flavor(settings),
+            ModelAccess::ZaiCodingPlan => zai_openai_flavor(settings),
+            ModelAccess::ZaiBoth => true,
+            _ => false,
+        }
+}
+
+fn zai_provider(
+    _config: &Config,
+    settings: &ProviderConfigResolved,
+) -> Option<Box<dyn crate::provider::Provider>> {
+    use crate::provider::zai::Flavor;
+    Some(Box::new(crate::provider::zai::ZaiProvider::new(
+        settings.api_key.clone()?,
+        settings.base_url.clone(),
+        if zai_openai_flavor(settings) {
+            Flavor::OpenAI
+        } else {
+            Flavor::Anthropic
+        },
+    )))
+}
+
 /// Fully-resolved configuration.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -286,51 +394,7 @@ impl Config {
             }
         }
 
-        let mut providers = HashMap::new();
-        providers.insert(
-            "openai".to_string(),
-            ProviderConfigResolved {
-                base_url: merged
-                    .providers
-                    .as_ref()
-                    .and_then(|p| p.get("openai"))
-                    .and_then(|c| c.base_url.clone()),
-                api_key: merged
-                    .providers
-                    .as_ref()
-                    .and_then(|p| p.get("openai"))
-                    .and_then(|c| c.api_key.clone())
-                    .or_else(|| env.env_lookup("ILAR_OPENAI_API_KEY")),
-                flavor: None,
-                auth: merged
-                    .providers
-                    .as_ref()
-                    .and_then(|p| p.get("openai"))
-                    .and_then(|c| c.auth.clone()),
-            },
-        );
-        providers.insert(
-            "zai".to_string(),
-            ProviderConfigResolved {
-                base_url: merged
-                    .providers
-                    .as_ref()
-                    .and_then(|p| p.get("zai"))
-                    .and_then(|c| c.base_url.clone()),
-                api_key: merged
-                    .providers
-                    .as_ref()
-                    .and_then(|p| p.get("zai"))
-                    .and_then(|c| c.api_key.clone())
-                    .or_else(|| env.env_lookup("ILAR_ZAI_API_KEY")),
-                flavor: merged
-                    .providers
-                    .as_ref()
-                    .and_then(|p| p.get("zai"))
-                    .and_then(|c| c.flavor.clone()),
-                auth: None,
-            },
-        );
+        let providers = resolve_providers(&merged, env, PROVIDERS);
 
         let model = merged
             .general
@@ -418,63 +482,13 @@ impl Config {
     pub fn provider_for(&self, model: &str) -> Option<Box<dyn crate::provider::Provider>> {
         let (provider_name, _model_id) = crate::provider::resolve_model(model).ok()?;
         let settings = self.providers.get(provider_name)?;
-        let provider: Box<dyn crate::provider::Provider> = match provider_name {
-            "openai" if settings.auth.as_deref() == Some("chatgpt") => {
-                // OAuth mode needs no api_key — tokens come from the store.
-                Box::new(crate::provider::openai::OpenAIProvider::with_chatgpt_auth(
-                    crate::auth::AuthStore::open(self.state_dir.clone()),
-                    settings.base_url.clone(),
-                ))
-            }
-            "openai" => {
-                let api_key = settings.api_key.clone()?;
-                Box::new(crate::provider::openai::OpenAIProvider::new(
-                    api_key,
-                    settings.base_url.clone(),
-                ))
-            }
-            "zai" => {
-                let api_key = settings.api_key.clone()?;
-                use crate::provider::zai::Flavor;
-                let flavor = match settings.flavor.as_deref() {
-                    Some("openai") => Flavor::OpenAI,
-                    _ => Flavor::Anthropic,
-                };
-                Box::new(crate::provider::zai::ZaiProvider::new(
-                    api_key,
-                    settings.base_url.clone(),
-                    flavor,
-                ))
-            }
-            _ => return None,
-        };
-        Some(provider)
+        let kind = provider_kind(provider_name, PROVIDERS)?;
+        (kind.build)(self, settings)
     }
 
     /// Chat-capable catalog models exposed by currently configured providers.
     pub fn available_models(&self) -> Vec<&'static crate::model::ModelInfo> {
-        use crate::model::ModelAccess;
-
-        crate::model::catalog()
-            .iter()
-            .filter(|model| {
-                let Some(provider) = self.providers.get(model.provider) else {
-                    return false;
-                };
-                let chatgpt = provider.auth.as_deref() == Some("chatgpt");
-                match model.access {
-                    ModelAccess::OpenAi => provider.api_key.is_some() && !chatgpt,
-                    ModelAccess::OpenAiBoth => chatgpt || provider.api_key.is_some(),
-                    ModelAccess::Zai => {
-                        provider.api_key.is_some() && provider.flavor.as_deref() != Some("openai")
-                    }
-                    ModelAccess::ZaiCodingPlan => {
-                        provider.api_key.is_some() && provider.flavor.as_deref() == Some("openai")
-                    }
-                    ModelAccess::ZaiBoth => provider.api_key.is_some(),
-                }
-            })
-            .collect()
+        available_models_in(&self.providers, PROVIDERS)
     }
 
     /// User + project config dirs (agents searched in both).
@@ -534,7 +548,7 @@ impl crate::provider::ProviderResolver for Config {
     fn context_limit(&self, model: &str) -> Option<u64> {
         crate::model::find(model)
             .map(|model| model.context_limit)
-            .or_else(|| fallback_context_limit(model))
+            .or_else(|| fallback_context_limit(model, PROVIDERS))
     }
 
     fn input_limit(&self, model: &str) -> Option<u64> {
@@ -557,7 +571,7 @@ impl crate::provider::ProviderResolver for Config {
                     model.input_limit
                 }
             })
-            .or_else(|| fallback_context_limit(model))
+            .or_else(|| fallback_context_limit(model, PROVIDERS))
     }
 
     fn compaction_limit(&self, model: &str) -> Option<u64> {
@@ -567,18 +581,60 @@ impl crate::provider::ProviderResolver for Config {
             // Anthropic flavour reserves its own output headroom).
             .zip(self.input_limit(model))
             .map(|(compaction, input)| compaction.min(input))
-            .or_else(|| fallback_context_limit(model))
+            .or_else(|| fallback_context_limit(model, PROVIDERS))
     }
 }
 
-fn fallback_context_limit(model: &str) -> Option<u64> {
+/// Resolved settings for every known provider: file values, then the
+/// provider's environment variable for the key. Keys a provider does not
+/// support are rejected by validation, so copying them is a no-op.
+fn resolve_providers(
+    merged: &FileConfig,
+    env: &Loader,
+    kinds: &[ProviderKind],
+) -> HashMap<String, ProviderConfigResolved> {
+    kinds
+        .iter()
+        .map(|kind| {
+            let configured = merged
+                .providers
+                .as_ref()
+                .and_then(|providers| providers.get(kind.name));
+            let field = |pick: fn(&ProviderConfig) -> Option<String>| configured.and_then(pick);
+            (
+                kind.name.to_string(),
+                ProviderConfigResolved {
+                    base_url: field(|config| config.base_url.clone()),
+                    api_key: field(|config| config.api_key.clone())
+                        .or_else(|| env.env_lookup(kind.api_key_env)),
+                    flavor: field(|config| config.flavor.clone()),
+                    auth: field(|config| config.auth.clone()),
+                },
+            )
+        })
+        .collect()
+}
+
+fn available_models_in(
+    providers: &HashMap<String, ProviderConfigResolved>,
+    kinds: &[ProviderKind],
+) -> Vec<&'static crate::model::ModelInfo> {
+    crate::model::catalog()
+        .iter()
+        .filter(|model| {
+            providers
+                .get(model.provider)
+                .zip(provider_kind(model.provider, kinds))
+                .is_some_and(|(settings, kind)| (kind.reaches)(settings, model.access))
+        })
+        .collect()
+}
+
+fn fallback_context_limit(model: &str, kinds: &[ProviderKind]) -> Option<u64> {
     crate::provider::resolve_model(model)
         .ok()
-        .and_then(|(provider, _)| match provider {
-            "openai" => Some(128_000),
-            "zai" => Some(200_000),
-            _ => None,
-        })
+        .and_then(|(provider, _)| provider_kind(provider, kinds))
+        .map(|kind| kind.fallback_context_limit)
 }
 
 fn read_config_file(path: &Path) -> anyhow::Result<Option<String>> {
@@ -589,66 +645,71 @@ fn read_config_file(path: &Path) -> anyhow::Result<Option<String>> {
     }
 }
 
+/// Lay a parsed layer's set fields over the inherited ones; an omitted
+/// field keeps whatever the layer below it resolved to.
+macro_rules! overlay {
+    ($current:expr, $incoming:expr, $($field:ident),+ $(,)?) => {{
+        let current = $current;
+        let incoming = $incoming;
+        $(
+            if incoming.$field.is_some() {
+                current.$field = incoming.$field;
+            }
+        )+
+    }};
+}
+
 fn merge_file(base: FileConfig, text: &str, origin: &Path) -> anyhow::Result<FileConfig> {
     let parsed: FileConfig =
         toml::from_str(text).with_context(|| format!("parsing config {}", origin.display()))?;
     validate_file(&parsed, origin)?;
     let mut merged = base;
-    if let Some(g) = parsed.general {
-        let current = merged.general.get_or_insert_with(GeneralConfig::default);
-        if g.model.is_some() {
-            current.model = g.model;
-        }
-        if g.reasoning.is_some() {
-            current.reasoning = g.reasoning;
-        }
-        if g.theme.is_some() {
-            current.theme = g.theme;
-        }
+    if let Some(general) = parsed.general {
+        overlay!(
+            merged.general.get_or_insert_with(GeneralConfig::default),
+            general,
+            model,
+            reasoning,
+            theme,
+        );
     }
-    if let Some(p) = parsed.providers {
+    if let Some(providers) = parsed.providers {
         let map = merged.providers.get_or_insert_with(HashMap::new);
-        for (k, v) in p {
-            let current = map.entry(k).or_default();
-            if v.base_url.is_some() {
-                current.base_url = v.base_url;
-            }
-            if v.api_key.is_some() {
-                current.api_key = v.api_key;
-            }
-            if v.flavor.is_some() {
-                current.flavor = v.flavor;
-            }
-            if v.auth.is_some() {
-                current.auth = v.auth;
-            }
+        for (name, provider) in providers {
+            overlay!(
+                map.entry(name).or_default(),
+                provider,
+                base_url,
+                api_key,
+                flavor,
+                auth,
+            );
         }
     }
-    if let Some(a) = parsed.agent {
-        let current = merged.agent.get_or_insert_with(AgentLayer::default);
-        if a.max_iterations.is_some() {
-            current.max_iterations = a.max_iterations;
-        }
+    if let Some(agent) = parsed.agent {
+        overlay!(
+            merged.agent.get_or_insert_with(AgentLayer::default),
+            agent,
+            max_iterations,
+        );
     }
-    if let Some(c) = parsed.compaction {
-        let current = merged
-            .compaction
-            .get_or_insert_with(CompactionLayer::default);
-        if c.threshold.is_some() {
-            current.threshold = c.threshold;
-        }
+    if let Some(compaction) = parsed.compaction {
+        overlay!(
+            merged
+                .compaction
+                .get_or_insert_with(CompactionLayer::default),
+            compaction,
+            threshold,
+        );
     }
-    if let Some(s) = parsed.subagents {
-        let current = merged.subagents.get_or_insert_with(SubagentLayer::default);
-        if s.max_concurrent.is_some() {
-            current.max_concurrent = s.max_concurrent;
-        }
-        if s.max_depth.is_some() {
-            current.max_depth = s.max_depth;
-        }
-        if s.background_tool_timeout_ms.is_some() {
-            current.background_tool_timeout_ms = s.background_tool_timeout_ms;
-        }
+    if let Some(subagents) = parsed.subagents {
+        overlay!(
+            merged.subagents.get_or_insert_with(SubagentLayer::default),
+            subagents,
+            max_concurrent,
+            max_depth,
+            background_tool_timeout_ms,
+        );
     }
     Ok(merged)
 }
@@ -779,42 +840,57 @@ fn validate_file(config: &FileConfig, origin: &Path) -> anyhow::Result<()> {
         );
     }
     if let Some(providers) = &config.providers {
-        for (name, provider) in providers {
-            match name.as_str() {
-                "openai" => {
-                    anyhow::ensure!(
-                        provider
-                            .auth
-                            .as_deref()
-                            .is_none_or(|auth| matches!(auth, "api_key" | "chatgpt")),
-                        "{}: providers.openai.auth must be `api_key` or `chatgpt`",
-                        origin.display()
-                    );
-                    anyhow::ensure!(
-                        provider.flavor.is_none(),
-                        "{}: providers.openai.flavor is not supported",
-                        origin.display()
-                    );
-                }
-                "zai" => {
-                    anyhow::ensure!(
-                        provider
-                            .flavor
-                            .as_deref()
-                            .is_none_or(|flavor| matches!(flavor, "anthropic" | "openai")),
-                        "{}: providers.zai.flavor must be `anthropic` or `openai`",
-                        origin.display()
-                    );
-                    anyhow::ensure!(
-                        provider.auth.is_none(),
-                        "{}: providers.zai.auth is not supported",
-                        origin.display()
-                    );
-                }
-                _ => anyhow::bail!("{}: unsupported provider {name:?}", origin.display()),
-            }
-        }
+        validate_providers(providers, origin, PROVIDERS)?;
     }
+    Ok(())
+}
+
+fn validate_providers(
+    providers: &HashMap<String, ProviderConfig>,
+    origin: &Path,
+    kinds: &[ProviderKind],
+) -> anyhow::Result<()> {
+    for (name, provider) in providers {
+        let Some(kind) = provider_kind(name, kinds) else {
+            anyhow::bail!("{}: unsupported provider {name:?}", origin.display());
+        };
+        validate_provider_value(origin, kind.name, "auth", &provider.auth, kind.auth_values)?;
+        validate_provider_value(
+            origin,
+            kind.name,
+            "flavor",
+            &provider.flavor,
+            kind.flavor_values,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_provider_value(
+    origin: &Path,
+    provider: &str,
+    field: &str,
+    value: &Option<String>,
+    allowed: &[&str],
+) -> anyhow::Result<()> {
+    let Some(value) = value.as_deref() else {
+        return Ok(());
+    };
+    anyhow::ensure!(
+        !allowed.is_empty(),
+        "{}: providers.{provider}.{field} is not supported",
+        origin.display()
+    );
+    anyhow::ensure!(
+        allowed.contains(&value),
+        "{}: providers.{provider}.{field} must be {}",
+        origin.display(),
+        allowed
+            .iter()
+            .map(|allowed| format!("`{allowed}`"))
+            .collect::<Vec<_>>()
+            .join(" or ")
+    );
     Ok(())
 }
 
@@ -877,4 +953,124 @@ fn parse_agent_md(name: &str, text: &str) -> anyhow::Result<Option<AgentDefiniti
         },
         tools: fm.tools,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A hypothetical provider, written the way a real one is: one row.
+    const ACME: ProviderKind = ProviderKind {
+        name: "acme",
+        api_key_env: "ILAR_ACME_API_KEY",
+        auth_values: &["api_key"],
+        flavor_values: &[],
+        fallback_context_limit: 64_000,
+        reaches: |settings, _| settings.api_key.is_some(),
+        build: |_, _| None,
+    };
+
+    fn with_acme() -> Vec<ProviderKind> {
+        PROVIDERS.iter().copied().chain([ACME]).collect()
+    }
+
+    fn provider_section(entries: [(&str, ProviderConfig); 1]) -> HashMap<String, ProviderConfig> {
+        entries
+            .into_iter()
+            .map(|(name, config)| (name.to_string(), config))
+            .collect()
+    }
+
+    #[test]
+    fn one_table_row_is_all_a_new_provider_needs() {
+        let kinds = with_acme();
+
+        // Resolution: the row's environment variable supplies the key,
+        // and the provider appears alongside the built-in ones.
+        let env = Loader::with_env(vec![("ILAR_ACME_API_KEY", "acme-key".into())], vec![]);
+        let resolved = resolve_providers(&FileConfig::default(), &env, &kinds);
+        assert_eq!(resolved.len(), 3);
+        assert_eq!(resolved["acme"].api_key.as_deref(), Some("acme-key"));
+        assert_eq!(resolved["openai"].api_key, None);
+
+        // Fallback windows: the row's own number, not a match arm.
+        assert_eq!(fallback_context_limit("acme/q-1", &kinds), Some(64_000));
+        assert_eq!(fallback_context_limit("nope/q-1", &kinds), None);
+
+        // Validation: accepted values pass, everything else is refused
+        // in the wording every provider shares.
+        let origin = Path::new("ilar.toml");
+        let good = provider_section([(
+            "acme",
+            ProviderConfig {
+                auth: Some("api_key".into()),
+                ..ProviderConfig::default()
+            },
+        )]);
+        validate_providers(&good, origin, &kinds).unwrap();
+        let bad_auth = provider_section([(
+            "acme",
+            ProviderConfig {
+                auth: Some("mystery".into()),
+                ..ProviderConfig::default()
+            },
+        )]);
+        assert_eq!(
+            validate_providers(&bad_auth, origin, &kinds)
+                .unwrap_err()
+                .to_string(),
+            "ilar.toml: providers.acme.auth must be `api_key`"
+        );
+        let bad_flavor = provider_section([(
+            "acme",
+            ProviderConfig {
+                flavor: Some("fast".into()),
+                ..ProviderConfig::default()
+            },
+        )]);
+        assert_eq!(
+            validate_providers(&bad_flavor, origin, &kinds)
+                .unwrap_err()
+                .to_string(),
+            "ilar.toml: providers.acme.flavor is not supported"
+        );
+        // Still unknown while the row is absent from the table.
+        assert_eq!(
+            validate_providers(&good, origin, PROVIDERS)
+                .unwrap_err()
+                .to_string(),
+            "ilar.toml: unsupported provider \"acme\""
+        );
+    }
+
+    #[test]
+    fn model_listing_asks_the_table_which_rows_are_reachable() {
+        let keyed = |name: &str| ProviderConfigResolved {
+            base_url: None,
+            api_key: Some(format!("{name}-key")),
+            flavor: None,
+            auth: None,
+        };
+        let providers: HashMap<String, ProviderConfigResolved> = ["openai", "zai"]
+            .into_iter()
+            .map(|name| (name.to_string(), keyed(name)))
+            .collect();
+
+        assert!(
+            available_models_in(&providers, PROVIDERS)
+                .iter()
+                .any(|model| model.provider == "zai")
+        );
+
+        // Silence one row and only that provider's models disappear.
+        let mut muted = PROVIDERS.to_vec();
+        muted
+            .iter_mut()
+            .find(|kind| kind.name == "zai")
+            .expect("z.ai is a known provider")
+            .reaches = |_, _| false;
+        let listed = available_models_in(&providers, &muted);
+        assert!(listed.iter().all(|model| model.provider == "openai"));
+        assert!(!listed.is_empty());
+    }
 }

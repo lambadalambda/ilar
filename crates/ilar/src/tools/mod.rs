@@ -543,15 +543,46 @@ pub struct ToolRegistry {
     questions: Option<crate::question::QuestionSender>,
 }
 
+/// A tool an agent `tools:` allowlist may name on top of the builtins.
+/// Every `ToolRegistry::with_*` constructor that installs one names its
+/// entry here, and the allowlist below is read from the same list — so
+/// what agents may ask for is what the constructors build. An entry a
+/// child registry never receives (history is installed for the root
+/// session only) is simply never granted: allowlists intersect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChildTool(&'static str);
+
+impl ChildTool {
+    pub const TASK: Self = Self("task");
+    pub const TASKS: Self = Self("tasks");
+    pub const SERVICE: Self = Self("service");
+    pub const MODELS: Self = Self("models");
+    pub const HISTORY: Self = Self("history");
+
+    /// Every non-builtin tool an allowlist may name.
+    pub const ALL: &'static [Self] = &[
+        Self::TASK,
+        Self::TASKS,
+        Self::SERVICE,
+        Self::MODELS,
+        Self::HISTORY,
+    ];
+
+    pub const fn name(self) -> &'static str {
+        self.0
+    }
+}
+
 /// Tool names an agent `tools:` allowlist may reference — everything a
-/// child registry can contain (builtins plus the task tool).
+/// child registry can contain: the builtin registry's own tools plus
+/// [`ChildTool::ALL`].
 pub fn child_tool_names() -> Vec<&'static str> {
+    child_tool_names_from(ChildTool::ALL)
+}
+
+fn child_tool_names_from(optional: &[ChildTool]) -> Vec<&'static str> {
     let mut names = ToolRegistry::builtin().tool_names();
-    names.push("task");
-    names.push("tasks");
-    names.push("service");
-    names.push("models");
-    names.push("history");
+    names.extend(optional.iter().map(|tool| tool.name()));
     names
 }
 
@@ -625,6 +656,22 @@ impl ToolRegistry {
         Ok(self)
     }
 
+    /// Registry with an optional child tool attached. The [`ChildTool`]
+    /// entry is what the allowlist publishes; the assertion keeps the
+    /// published name and the registered one from parting ways.
+    fn with_child_tool(
+        self,
+        kind: ChildTool,
+        tool: Arc<dyn Tool>,
+    ) -> Result<Self, DuplicateToolError> {
+        debug_assert_eq!(
+            kind.name(),
+            tool.name(),
+            "child tool registered under another name"
+        );
+        self.with_tool(tool)
+    }
+
     /// Registry with the skill tool attached.
     pub fn with_skills(
         self,
@@ -656,7 +703,10 @@ impl ToolRegistry {
         self,
         models: Vec<&'static crate::model::ModelInfo>,
     ) -> Result<Self, DuplicateToolError> {
-        self.with_tool(std::sync::Arc::new(models::ModelsTool::new(models)))
+        self.with_child_tool(
+            ChildTool::MODELS,
+            std::sync::Arc::new(models::ModelsTool::new(models)),
+        )
     }
 
     /// Registry that can search its own session's past — everything
@@ -665,7 +715,10 @@ impl ToolRegistry {
         self,
         store: crate::session::SessionStore,
     ) -> Result<Self, DuplicateToolError> {
-        self.with_tool(std::sync::Arc::new(history::HistoryTool::new(store)))
+        self.with_child_tool(
+            ChildTool::HISTORY,
+            std::sync::Arc::new(history::HistoryTool::new(store)),
+        )
     }
 
     /// Registry with the service tool attached (shared per-session
@@ -674,7 +727,10 @@ impl ToolRegistry {
         self,
         manager: std::sync::Arc<service::ServiceManager>,
     ) -> Result<Self, DuplicateToolError> {
-        self.with_tool(std::sync::Arc::new(service::ServiceTool::new(manager)))
+        self.with_child_tool(
+            ChildTool::SERVICE,
+            std::sync::Arc::new(service::ServiceTool::new(manager)),
+        )
     }
 
     /// Registry with the todo tool attached (shared list for TUI display).
@@ -690,8 +746,14 @@ impl ToolRegistry {
         self,
         spawner: Arc<crate::subagent::SubagentSpawner>,
     ) -> Result<Self, DuplicateToolError> {
-        self.with_tool(Arc::new(crate::subagent::TaskTool::new(spawner.clone())))?
-            .with_tool(Arc::new(crate::subagent::TasksTool::new(spawner)))
+        self.with_child_tool(
+            ChildTool::TASK,
+            Arc::new(crate::subagent::TaskTool::new(spawner.clone())),
+        )?
+        .with_child_tool(
+            ChildTool::TASKS,
+            Arc::new(crate::subagent::TasksTool::new(spawner)),
+        )
     }
 
     /// Advertise structured questions to the provider for a root agent.
@@ -798,6 +860,35 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::{ChildTool, ToolRegistry, child_tool_names, child_tool_names_from};
+
+    #[test]
+    fn one_table_entry_is_all_a_new_child_tool_needs() {
+        // A hypothetical tool added to the table alone is allowlistable;
+        // nothing else in this module lists tool names.
+        const TELEPORT: ChildTool = ChildTool("teleport");
+        let names = child_tool_names_from(&[ChildTool::TASK, TELEPORT]);
+        assert_eq!(
+            names,
+            [
+                ToolRegistry::builtin().tool_names(),
+                vec!["task", "teleport"]
+            ]
+            .concat()
+        );
+    }
+
+    #[test]
+    fn the_published_allowlist_is_the_builtin_registry_plus_the_table() {
+        let builtin = ToolRegistry::builtin().tool_names();
+        let expected = [
+            builtin,
+            ChildTool::ALL.iter().map(|tool| tool.name()).collect(),
+        ]
+        .concat();
+        assert_eq!(child_tool_names(), expected);
+    }
+
     #[test]
     fn identifies_every_git_environment_variable() {
         assert!(super::is_git_environment_variable("GIT_DIR".as_ref()));

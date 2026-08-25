@@ -718,11 +718,7 @@ fn semantic_ranges_and_provider_modes_are_validated() {
         write(&path, content);
         let error = Loader::no_env().config_dir(dir).resolve().expect_err(name);
         let rendered = format!("{error:#}");
-        assert_eq!(
-            rendered,
-            format!("{}: {message}", path.display()),
-            "{name}"
-        );
+        assert_eq!(rendered, format!("{}: {message}", path.display()), "{name}");
     }
 }
 

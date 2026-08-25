@@ -17,6 +17,12 @@ pub struct ModelInfo {
     pub input_limit: u64,
     pub output_limit: u64,
     pub(crate) reasoning_summaries: bool,
+    /// Accepts image input.
+    pub(crate) vision: bool,
+    /// Effort ladder this model exposes; empty when it has none. Carried
+    /// per row so a new id cannot inherit another one's ladder by
+    /// spelling.
+    pub(crate) variants: &'static [ModelVariant],
     pub(crate) access: ModelAccess,
 }
 
@@ -328,62 +334,74 @@ const ZAI_EFFORT_VARIANTS: &[ModelVariant] = &[
 ];
 
 impl ModelInfo {
+    /// A row with no optional capabilities: text in, no effort ladder,
+    /// and an input budget that assumes a maximum-length reply. The
+    /// builders below add whatever the model actually has.
+    const fn new(
+        provider: &'static str,
+        id: &'static str,
+        name: &'static str,
+        context_limit: u64,
+        output_limit: u64,
+        access: ModelAccess,
+    ) -> Self {
+        Self {
+            provider,
+            id,
+            name,
+            context_limit,
+            max_context_limit: context_limit,
+            input_limit: context_limit - output_limit,
+            output_limit,
+            reasoning_summaries: false,
+            vision: false,
+            variants: NO_VARIANTS,
+            access,
+        }
+    }
+
+    /// Provider-advertised window above the working one.
+    const fn max_context(mut self, limit: u64) -> Self {
+        self.max_context_limit = limit;
+        self
+    }
+
+    /// Declared input cap, where it is not the window minus a full reply.
+    const fn input(mut self, limit: u64) -> Self {
+        self.input_limit = limit;
+        self
+    }
+
+    /// Accepts image input.
+    const fn vision(mut self) -> Self {
+        self.vision = true;
+        self
+    }
+
+    /// Emits reasoning summaries and exposes this effort ladder.
+    const fn reasoning(mut self, variants: &'static [ModelVariant]) -> Self {
+        self.reasoning_summaries = true;
+        self.variants = variants;
+        self
+    }
+
+    /// Exposes an effort ladder without emitting reasoning summaries.
+    const fn effort(mut self, variants: &'static [ModelVariant]) -> Self {
+        self.variants = variants;
+        self
+    }
+
     pub fn full_id(&self) -> String {
         format!("{}/{}", self.provider, self.id)
     }
 
-    /// Whether the model accepts image input. Every cataloged OpenAI
-    /// model is multimodal; on z.ai only the V-series sees.
+    /// Whether the model accepts image input.
     pub fn supports_vision(&self) -> bool {
-        match self.provider {
-            "openai" => true,
-            "zai" => matches!(self.id, "glm-5v-turbo" | "glm-4.6v" | "glm-4.5v"),
-            _ => false,
-        }
+        self.vision
     }
 
     pub fn variants(&self) -> &'static [ModelVariant] {
-        if self.provider == "zai" {
-            return if self.id == "glm-5.3" {
-                ZAI_EFFORT_VARIANTS
-            } else {
-                NO_VARIANTS
-            };
-        }
-        if self.provider != "openai" {
-            return NO_VARIANTS;
-        }
-        if self.id == "gpt-5.2-chat-latest" {
-            return OPENAI_CHAT_VARIANTS;
-        }
-        if !self.reasoning_summaries {
-            return NO_VARIANTS;
-        }
-        if self.id == "gpt-5-pro" {
-            return OPENAI_PRO_VARIANTS;
-        }
-        if self.id.starts_with("gpt-5.") && self.id.contains("-pro") {
-            return OPENAI_VERSIONED_PRO_VARIANTS;
-        }
-        if let Some(version) = self
-            .id
-            .strip_prefix("gpt-5.")
-            .and_then(|id| id.split('-').next())
-            .and_then(|version| version.parse::<u8>().ok())
-        {
-            return if version == 1 {
-                OPENAI_GPT51_VARIANTS
-            } else {
-                OPENAI_GPT52_VARIANTS
-            };
-        }
-        if self.id.starts_with("gpt-5") {
-            return OPENAI_GPT5_VARIANTS;
-        }
-        if self.id.starts_with("o3") {
-            return OPENAI_WIDE_VARIANTS;
-        }
-        NO_VARIANTS
+        self.variants
     }
 }
 
@@ -396,72 +414,18 @@ pub(crate) enum ModelAccess {
     ZaiBoth,
 }
 
+/// A base catalog row; capabilities are appended with the builders on
+/// [`ModelInfo`], so every row states its own.
 macro_rules! model {
     ($provider:literal, $id:literal, $name:literal, $context:literal, $output:literal, $access:ident) => {
-        model!($provider, $id, $name, $context, $output, $access, false)
-    };
-    ($provider:literal, $id:literal, $name:literal, $context:literal, $output:literal, $access:ident, $reasoning_summaries:literal) => {
-        ModelInfo {
-            provider: $provider,
-            id: $id,
-            name: $name,
-            context_limit: $context,
-            max_context_limit: $context,
-            input_limit: $context - $output,
-            output_limit: $output,
-            reasoning_summaries: $reasoning_summaries,
-            access: ModelAccess::$access,
-        }
-    };
-}
-
-macro_rules! model_input {
-    ($provider:literal, $id:literal, $name:literal, $context:literal, $input:literal, $output:literal, $access:ident) => {
-        model_input!(
-            $provider, $id, $name, $context, $input, $output, $access, false
-        )
-    };
-    ($provider:literal, $id:literal, $name:literal, $context:literal, $input:literal, $output:literal, $access:ident, $reasoning_summaries:literal) => {
-        ModelInfo {
-            provider: $provider,
-            id: $id,
-            name: $name,
-            context_limit: $context,
-            max_context_limit: $context,
-            input_limit: $input,
-            output_limit: $output,
-            reasoning_summaries: $reasoning_summaries,
-            access: ModelAccess::$access,
-        }
-    };
-}
-
-macro_rules! model_window {
-    ($provider:literal, $id:literal, $name:literal, $context:literal, $max_context:literal, $input:literal, $output:literal, $access:ident) => {
-        model_window!(
+        ModelInfo::new(
             $provider,
             $id,
             $name,
             $context,
-            $max_context,
-            $input,
             $output,
-            $access,
-            false
+            ModelAccess::$access,
         )
-    };
-    ($provider:literal, $id:literal, $name:literal, $context:literal, $max_context:literal, $input:literal, $output:literal, $access:ident, $reasoning_summaries:literal) => {
-        ModelInfo {
-            provider: $provider,
-            id: $id,
-            name: $name,
-            context_limit: $context,
-            max_context_limit: $max_context,
-            input_limit: $input,
-            output_limit: $output,
-            reasoning_summaries: $reasoning_summaries,
-            access: ModelAccess::$access,
-        }
     };
 }
 
@@ -470,103 +434,114 @@ macro_rules! model_window {
 // and deprecated models are intentionally excluded. GPT-5.6 coding defaults
 // follow Codex while models.dev remains the source for their maximum windows.
 static CATALOG: &[ModelInfo] = &[
-    model_window!(
+    model!(
         "openai",
         "gpt-5.6-sol",
         "GPT-5.6 Sol",
         272_000,
-        1_050_000,
-        272_000,
         128_000,
-        OpenAiBoth,
-        true
-    ),
+        OpenAiBoth
+    )
+    .max_context(1_050_000)
+    .input(272_000)
+    .vision()
+    .reasoning(OPENAI_GPT52_VARIANTS),
+    model!("openai", "gpt-5.6", "GPT-5.6", 1_050_000, 128_000, OpenAi)
+        .vision()
+        .reasoning(OPENAI_GPT52_VARIANTS),
     model!(
-        "openai", "gpt-5.6", "GPT-5.6", 1_050_000, 128_000, OpenAi, true
-    ),
-    model_window!(
         "openai",
         "gpt-5.6-luna",
         "GPT-5.6 Luna",
         272_000,
-        1_050_000,
-        272_000,
         128_000,
-        OpenAiBoth,
-        true
-    ),
-    model_window!(
+        OpenAiBoth
+    )
+    .max_context(1_050_000)
+    .input(272_000)
+    .vision()
+    .reasoning(OPENAI_GPT52_VARIANTS),
+    model!(
         "openai",
         "gpt-5.6-terra",
         "GPT-5.6 Terra",
         272_000,
-        1_050_000,
-        272_000,
         128_000,
-        OpenAiBoth,
-        true
-    ),
+        OpenAiBoth
+    )
+    .max_context(1_050_000)
+    .input(272_000)
+    .vision()
+    .reasoning(OPENAI_GPT52_VARIANTS),
     model!(
         "openai",
         "gpt-5.5-pro",
         "GPT-5.5 Pro",
         1_050_000,
         128_000,
-        OpenAi,
-        true
-    ),
+        OpenAi
+    )
+    .vision()
+    .reasoning(OPENAI_VERSIONED_PRO_VARIANTS),
     model!(
-        "openai", "gpt-5.5", "GPT-5.5", 1_050_000, 128_000, OpenAiBoth, true
-    ),
+        "openai", "gpt-5.5", "GPT-5.5", 1_050_000, 128_000, OpenAiBoth
+    )
+    .vision()
+    .reasoning(OPENAI_GPT52_VARIANTS),
     model!(
         "openai",
         "gpt-5.4-pro",
         "GPT-5.4 Pro",
         1_050_000,
         128_000,
-        OpenAi,
-        true
-    ),
-    model!(
-        "openai", "gpt-5.4", "GPT-5.4", 1_050_000, 128_000, OpenAi, true
-    ),
+        OpenAi
+    )
+    .vision()
+    .reasoning(OPENAI_VERSIONED_PRO_VARIANTS),
+    model!("openai", "gpt-5.4", "GPT-5.4", 1_050_000, 128_000, OpenAi)
+        .vision()
+        .reasoning(OPENAI_GPT52_VARIANTS),
     model!(
         "openai",
         "gpt-5.4-mini",
         "GPT-5.4 mini",
         400_000,
         128_000,
-        OpenAi,
-        true
-    ),
+        OpenAi
+    )
+    .vision()
+    .reasoning(OPENAI_GPT52_VARIANTS),
     model!(
         "openai",
         "gpt-5.4-nano",
         "GPT-5.4 nano",
         400_000,
         128_000,
-        OpenAi,
-        true
-    ),
+        OpenAi
+    )
+    .vision()
+    .reasoning(OPENAI_GPT52_VARIANTS),
     model!(
         "openai",
         "gpt-5.3-codex",
         "GPT-5.3 Codex",
         400_000,
         128_000,
-        OpenAi,
-        true
-    ),
-    model_input!(
+        OpenAi
+    )
+    .vision()
+    .reasoning(OPENAI_GPT52_VARIANTS),
+    model!(
         "openai",
         "gpt-5.3-codex-spark",
         "GPT-5.3 Codex Spark",
         128_000,
-        100_000,
         32_000,
-        OpenAiBoth,
-        true
-    ),
+        OpenAiBoth
+    )
+    .input(100_000)
+    .vision()
+    .reasoning(OPENAI_GPT52_VARIANTS),
     model!(
         "openai",
         "gpt-5.3-chat-latest",
@@ -574,19 +549,21 @@ static CATALOG: &[ModelInfo] = &[
         128_000,
         16_384,
         OpenAi
-    ),
+    )
+    .vision(),
     model!(
         "openai",
         "gpt-5.2-pro",
         "GPT-5.2 Pro",
         400_000,
         128_000,
-        OpenAi,
-        true
-    ),
-    model!(
-        "openai", "gpt-5.2", "GPT-5.2", 400_000, 128_000, OpenAi, true
-    ),
+        OpenAi
+    )
+    .vision()
+    .reasoning(OPENAI_VERSIONED_PRO_VARIANTS),
+    model!("openai", "gpt-5.2", "GPT-5.2", 400_000, 128_000, OpenAi)
+        .vision()
+        .reasoning(OPENAI_GPT52_VARIANTS),
     model!(
         "openai",
         "gpt-5.2-chat-latest",
@@ -594,42 +571,46 @@ static CATALOG: &[ModelInfo] = &[
         128_000,
         16_384,
         OpenAi
-    ),
-    model!(
-        "openai", "gpt-5.1", "GPT-5.1", 400_000, 128_000, OpenAi, true
-    ),
-    model_input!(
-        "openai",
-        "gpt-5-pro",
-        "GPT-5 Pro",
-        400_000,
-        272_000,
-        272_000,
-        OpenAi,
-        true
-    ),
-    model!("openai", "gpt-5", "GPT-5", 400_000, 128_000, OpenAi, true),
+    )
+    .vision()
+    .effort(OPENAI_CHAT_VARIANTS),
+    model!("openai", "gpt-5.1", "GPT-5.1", 400_000, 128_000, OpenAi)
+        .vision()
+        .reasoning(OPENAI_GPT51_VARIANTS),
+    model!("openai", "gpt-5-pro", "GPT-5 Pro", 400_000, 272_000, OpenAi)
+        .input(272_000)
+        .vision()
+        .reasoning(OPENAI_PRO_VARIANTS),
+    model!("openai", "gpt-5", "GPT-5", 400_000, 128_000, OpenAi)
+        .vision()
+        .reasoning(OPENAI_GPT5_VARIANTS),
     model!(
         "openai",
         "gpt-5-mini",
         "GPT-5 Mini",
         400_000,
         128_000,
-        OpenAi,
-        true
-    ),
+        OpenAi
+    )
+    .vision()
+    .reasoning(OPENAI_GPT5_VARIANTS),
     model!(
         "openai",
         "gpt-5-nano",
         "GPT-5 Nano",
         400_000,
         128_000,
-        OpenAi,
-        true
-    ),
-    model!("openai", "o3-pro", "o3-pro", 200_000, 100_000, OpenAi, true),
-    model!("openai", "o3", "o3", 200_000, 100_000, OpenAi, true),
-    model!("openai", "gpt-4.1", "GPT-4.1", 1_047_576, 32_768, OpenAi),
+        OpenAi
+    )
+    .vision()
+    .reasoning(OPENAI_GPT5_VARIANTS),
+    model!("openai", "o3-pro", "o3-pro", 200_000, 100_000, OpenAi)
+        .vision()
+        .reasoning(OPENAI_WIDE_VARIANTS),
+    model!("openai", "o3", "o3", 200_000, 100_000, OpenAi)
+        .vision()
+        .reasoning(OPENAI_WIDE_VARIANTS),
+    model!("openai", "gpt-4.1", "GPT-4.1", 1_047_576, 32_768, OpenAi).vision(),
     model!(
         "openai",
         "gpt-4.1-mini",
@@ -637,8 +618,9 @@ static CATALOG: &[ModelInfo] = &[
         1_047_576,
         32_768,
         OpenAi
-    ),
-    model!("openai", "gpt-4o", "GPT-4o", 128_000, 16_384, OpenAi),
+    )
+    .vision(),
+    model!("openai", "gpt-4o", "GPT-4o", 128_000, 16_384, OpenAi).vision(),
     model!(
         "openai",
         "gpt-4o-mini",
@@ -646,7 +628,8 @@ static CATALOG: &[ModelInfo] = &[
         128_000,
         16_384,
         OpenAi
-    ),
+    )
+    .vision(),
     model!(
         "openai",
         "gpt-4o-2024-11-20",
@@ -654,7 +637,8 @@ static CATALOG: &[ModelInfo] = &[
         128_000,
         16_384,
         OpenAi
-    ),
+    )
+    .vision(),
     model!(
         "openai",
         "gpt-4o-2024-08-06",
@@ -662,7 +646,8 @@ static CATALOG: &[ModelInfo] = &[
         128_000,
         16_384,
         OpenAi
-    ),
+    )
+    .vision(),
     model!(
         "zai",
         "glm-5.3",
@@ -670,7 +655,8 @@ static CATALOG: &[ModelInfo] = &[
         1_000_000,
         131_072,
         ZaiCodingPlan
-    ),
+    )
+    .effort(ZAI_EFFORT_VARIANTS),
     model!(
         "zai",
         "glm-5.2-highspeed",
@@ -697,7 +683,8 @@ static CATALOG: &[ModelInfo] = &[
         200_000,
         131_072,
         ZaiBoth
-    ),
+    )
+    .vision(),
     model!("zai", "glm-4.7", "GLM-4.7", 204_800, 131_072, ZaiBoth),
     model!(
         "zai",
@@ -715,9 +702,9 @@ static CATALOG: &[ModelInfo] = &[
         131_072,
         Zai
     ),
-    model!("zai", "glm-4.6v", "GLM-4.6V", 128_000, 32_768, ZaiBoth),
+    model!("zai", "glm-4.6v", "GLM-4.6V", 128_000, 32_768, ZaiBoth).vision(),
     model!("zai", "glm-4.6", "GLM-4.6", 204_800, 131_072, Zai),
-    model!("zai", "glm-4.5v", "GLM-4.5V", 64_000, 16_384, ZaiBoth),
+    model!("zai", "glm-4.5v", "GLM-4.5V", 64_000, 16_384, ZaiBoth).vision(),
     model!("zai", "glm-4.5-air", "GLM-4.5-Air", 131_072, 98_304, Zai),
     model!(
         "zai",
@@ -741,7 +728,7 @@ pub fn catalog() -> &'static [ModelInfo] {
 /// cap with the trigger sitting at 108.8k.
 ///
 /// This is deliberately the conservative reading. For models with an
-/// explicitly declared cap (`model_input!`, and OpenAI's 272k of 400k)
+/// explicitly declared cap (`.input(n)`, and OpenAI's 272k of 400k)
 /// it is exactly right. For models where `input_limit` is merely
 /// `context_limit - output_limit` it assumes a maximum-length reply and
 /// so triggers earlier than strictly necessary — GLM-4.7 compacts around
@@ -859,6 +846,71 @@ mod tests {
     }
 
     #[test]
+    fn pricing_and_catalog_rows_cover_each_other() {
+        // The two arrays stay separate, so every price has to name a row
+        // that exists — a typo here would silently show no dollars.
+        for (provider, id, _) in PRICING {
+            let full_id = format!("{provider}/{id}");
+            assert!(
+                find(&full_id).is_some(),
+                "{full_id} is priced but absent from the catalog"
+            );
+        }
+    }
+
+    #[test]
+    fn a_catalog_row_is_the_only_site_a_model_is_added_at() {
+        // Everything this module reports about a model is on its row, so
+        // a hypothetical GPT-5.10 needs no edit anywhere else. The
+        // prefix parser this replaced read that id as version 10 and
+        // handed it the 5.2 ladder.
+        const FUTURE: ModelInfo =
+            model!("openai", "gpt-5.10", "GPT-5.10", 400_000, 128_000, OpenAi)
+                .input(272_000)
+                .vision()
+                .reasoning(OPENAI_GPT51_VARIANTS);
+        let future = &FUTURE;
+        assert!(future.supports_vision());
+        assert_eq!(future.variants(), OPENAI_GPT51_VARIANTS);
+        assert!(future.reasoning_summaries);
+        assert_eq!(future.input_limit, 272_000);
+        assert_eq!(future.max_context_limit, 400_000);
+
+        // A row that claims nothing gets nothing.
+        const PLAIN: ModelInfo = model!("acme", "q-1", "Q-1", 100_000, 10_000, OpenAi);
+        let plain = &PLAIN;
+        assert!(!plain.supports_vision());
+        assert!(plain.variants().is_empty());
+        assert!(!plain.reasoning_summaries);
+        assert_eq!(plain.input_limit, 90_000);
+    }
+
+    #[test]
+    fn declared_capabilities_are_internally_consistent() {
+        for model in CATALOG {
+            assert!(
+                !model.reasoning_summaries || !model.variants().is_empty(),
+                "{} claims reasoning summaries without an effort ladder",
+                model.full_id()
+            );
+            assert!(
+                model.input_limit <= model.context_limit
+                    && model.context_limit <= model.max_context_limit,
+                "{} has an incoherent window",
+                model.full_id()
+            );
+        }
+        // Vision is a row flag, so the z.ai V-series is exactly the set
+        // that carries it.
+        let seeing = CATALOG
+            .iter()
+            .filter(|model| model.provider == "zai" && model.supports_vision())
+            .map(|model| model.id)
+            .collect::<Vec<_>>();
+        assert_eq!(seeing, ["glm-5v-turbo", "glm-4.6v", "glm-4.5v"]);
+    }
+
+    #[test]
     fn openai_reasoning_variants_are_model_specific() {
         let ids = |model: &str| {
             find(model)
@@ -879,10 +931,27 @@ mod tests {
             ids("openai/gpt-5"),
             vec!["minimal", "low", "medium", "high"]
         );
+        assert_eq!(ids("openai/gpt-5-pro"), vec!["high"]);
+        assert_eq!(ids("openai/o3"), vec!["low", "medium", "high"]);
+        assert_eq!(ids("openai/o3-pro"), vec!["low", "medium", "high"]);
         assert_eq!(ids("openai/gpt-5.2-chat-latest"), vec!["medium"]);
         assert!(ids("openai/gpt-5.3-chat-latest").is_empty());
         assert!(ids("openai/gpt-4.1").is_empty());
         assert!(ids("zai/glm-5.2").is_empty());
+    }
+
+    #[test]
+    fn declared_input_caps_are_the_ones_compaction_measures_against() {
+        // The window this model rejects requests on is well below its
+        // context limit, which is what compaction has to see.
+        let spark = find("openai/gpt-5.3-codex-spark").unwrap();
+        assert_eq!(spark.input_limit, 100_000);
+        assert_eq!(spark.context_limit, 128_000);
+        assert_eq!(compaction_limit(spark), 100_000);
+
+        let pro = find("openai/gpt-5-pro").unwrap();
+        assert_eq!(pro.input_limit, 272_000);
+        assert_eq!(pro.context_limit, 400_000);
     }
 
     #[test]

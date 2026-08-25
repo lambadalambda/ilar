@@ -1139,6 +1139,60 @@ fn restricted_registry_intersects_with_the_base_set() {
     }
 }
 
+#[test]
+fn the_allowlist_is_derived_from_what_the_constructors_register() {
+    use ilar::tools::ChildTool;
+
+    let known = ilar::tools::child_tool_names();
+    // The builtins are the builtin registry's own tools, in its order.
+    assert_eq!(
+        &known[..ToolRegistry::builtin().tool_names().len()],
+        ToolRegistry::builtin().tool_names()
+    );
+    // The rest is the child-tool table, and nothing else.
+    assert_eq!(
+        &known[ToolRegistry::builtin().tool_names().len()..],
+        ChildTool::ALL
+            .iter()
+            .map(|tool| tool.name())
+            .collect::<Vec<_>>()
+    );
+
+    // Each table entry is the name its constructor actually installs.
+    let dir = tempfile::tempdir().unwrap();
+    let installed = |registry: ToolRegistry| {
+        let builtin = ToolRegistry::builtin().tool_names();
+        registry
+            .tool_names()
+            .into_iter()
+            .filter(|name| !builtin.contains(name))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        installed(ToolRegistry::builtin().with_models(Vec::new()).unwrap()),
+        [ChildTool::MODELS.name()]
+    );
+    assert_eq!(
+        installed(
+            ToolRegistry::builtin()
+                .with_history(ilar::session::SessionStore::new(dir.path().to_path_buf()))
+                .unwrap()
+        ),
+        [ChildTool::HISTORY.name()]
+    );
+    assert_eq!(
+        installed(
+            ToolRegistry::builtin()
+                .with_services(ilar::tools::service::ServiceManager::new())
+                .unwrap()
+        ),
+        [ChildTool::SERVICE.name()]
+    );
+    // task/tasks need a live spawner; their registration is checked by
+    // the assertion inside `with_child_tool`, which every subagent test
+    // exercises.
+}
+
 #[tokio::test]
 async fn running_bash_reports_a_live_output_tail() {
     let dir = tempfile::tempdir().unwrap();
