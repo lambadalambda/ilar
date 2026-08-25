@@ -1160,6 +1160,178 @@ enum TurnCompletion {
     Compaction(Result<ilar::compaction::ManualCompactionOutcome>),
 }
 
+/// Where a root turn picks up: the one thing the start sites disagree
+/// on beyond the bell.
+enum RootTurn {
+    /// A prompt to send — the user's own, or a subagent notification
+    /// delivered as one (nothing rides along with those).
+    New(String, Vec<ilar::session::ImageContent>),
+    /// Retry a turn that failed after committing its chain.
+    Resume,
+    /// The answer to a question the model paused on.
+    Answer(ilar::question::QuestionResponse),
+}
+
+/// Whether the turn's completion arms the terminal bell. A turn the
+/// loop started for itself — a subagent notification — is not one the
+/// user is waiting on.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Bell {
+    Ring,
+    Silent,
+}
+
+/// The slots one root turn owns for its lifetime, borrowed out of the
+/// loop's own locals.
+struct TurnSlots<'a> {
+    handle: &'a mut Option<tokio::task::JoinHandle<TurnCompletion>>,
+    events_rx: &'a mut Option<LoopEventReceiver>,
+    cancel: &'a mut Option<CancellationToken>,
+    steer_tx: &'a mut Option<ilar::agent::SteerSender>,
+    ring_on_completion: &'a mut bool,
+}
+
+/// What every root turn in the session is built from.
+struct TurnDeps<'a> {
+    resolver: &'a Arc<dyn ProviderResolver>,
+    store: &'a SessionStore,
+    session_id: &'a str,
+    system_prompt: &'a str,
+    registry: &'a ToolRegistry,
+    tool_ctx: &'a ToolContext,
+    loop_config: &'a LoopConfig,
+}
+
+/// A command's one-turn model override, validated by prepare_prompt;
+/// the provider check happens in the adopt. On failure the turn still
+/// runs — its prompt is already in the transcript — just under the
+/// session's own model.
+///
+/// The override belongs to the turn the command started, so the answer
+/// that resumes that turn across a question pause claims it too. A
+/// retry-resume does not: it continues a turn that already adopted
+/// whatever it was going to.
+fn adopt_pending_model_override(app: &mut App, entry: &RootTurn, deps: &TurnDeps<'_>) {
+    if matches!(entry, RootTurn::Resume) {
+        return;
+    }
+    let Some((model, variant)) = app.pending_model_override.take() else {
+        return;
+    };
+    let target = model.unwrap_or_else(|| app.current_model.clone());
+    let revert = (app.current_model.clone(), app.current_variant.clone());
+    match adopt_model_selection(
+        app,
+        deps.resolver.as_ref(),
+        deps.store,
+        deps.session_id,
+        deps.system_prompt,
+        deps.registry,
+        target,
+        variant,
+    ) {
+        Ok(()) => app.model_revert = Some(revert),
+        Err(error) => app.set_notice(
+            format!(
+                "command model override failed ({error:#}) — running with {}",
+                revert.0
+            ),
+            NoticeLevel::Warning,
+        ),
+    }
+}
+
+/// The one root-turn spawn ritual, shared by every site that starts
+/// one: a loop-event channel the frame drains, a fresh cancellation
+/// token, a steer channel for messages typed mid-turn, and the agent
+/// entry point on a task whose `TurnCompletion::Root` the loop joins.
+fn spawn_root_turn(
+    app: &mut App,
+    slots: TurnSlots<'_>,
+    deps: TurnDeps<'_>,
+    entry: RootTurn,
+    bell: Bell,
+) {
+    // Every start site is guarded against starting a turn while one
+    // runs. If that ever slips, the running turn would be orphaned —
+    // its cancellation token dropped without firing, still writing to
+    // the same session.
+    debug_assert!(
+        slots.handle.is_none(),
+        "starting a turn while one is already running"
+    );
+    adopt_pending_model_override(app, &entry, &deps);
+    let (tx, rx) = loop_event_channel(LOOP_EVENT_CAPACITY);
+    *slots.events_rx = Some(rx);
+    let token = CancellationToken::new();
+    *slots.cancel = Some(token.clone());
+    if bell == Bell::Ring {
+        *slots.ring_on_completion = true;
+    }
+    let (tx_steer, steer_rx) = ilar::agent::steer_channel();
+    *slots.steer_tx = Some(tx_steer);
+    let resolver = deps.resolver.clone();
+    let store = deps.store.clone();
+    let session_id = deps.session_id.to_string();
+    let system_prompt = deps.system_prompt.to_string();
+    let registry = deps.registry.clone();
+    let turn_ctx = deps.tool_ctx.clone();
+    let loop_config = deps.loop_config.clone();
+    *slots.handle = Some(tokio::spawn(async move {
+        let result = match entry {
+            RootTurn::New(text, images) => {
+                run_turn(
+                    resolver.as_ref(),
+                    &registry,
+                    &store,
+                    &session_id,
+                    &text,
+                    &images,
+                    Some(&system_prompt),
+                    loop_config,
+                    tx,
+                    token,
+                    turn_ctx,
+                    Some(steer_rx),
+                )
+                .await
+            }
+            RootTurn::Resume => {
+                ilar::agent::resume_turn(
+                    resolver.as_ref(),
+                    &registry,
+                    &store,
+                    &session_id,
+                    Some(&system_prompt),
+                    loop_config,
+                    tx,
+                    token,
+                    turn_ctx,
+                    Some(steer_rx),
+                )
+                .await
+            }
+            RootTurn::Answer(response) => {
+                ilar::agent::resume_pending_question(
+                    resolver.as_ref(),
+                    &registry,
+                    &store,
+                    &session_id,
+                    response,
+                    Some(&system_prompt),
+                    loop_config,
+                    tx,
+                    token,
+                    turn_ctx,
+                    Some(steer_rx),
+                )
+                .await
+            }
+        };
+        TurnCompletion::Root(result)
+    }));
+}
+
 /// A detached /btw in flight: the question, and eventually its answer
 /// (`Ok(None)` when cancelled or superseded).
 type AsideHandle = tokio::task::JoinHandle<(String, Result<Option<String>>)>;
@@ -1195,6 +1367,35 @@ struct LoopRuntime<'a> {
     bell_pending: &'a mut bool,
 }
 
+impl LoopRuntime<'_> {
+    /// Start a root turn through the shared ritual. The question-answer
+    /// resume lives in the key dispatch, outside any `LoopRuntime`, and
+    /// calls [`spawn_root_turn`] with the loop's own locals instead.
+    fn spawn_root_turn(&mut self, app: &mut App, entry: RootTurn, bell: Bell) {
+        spawn_root_turn(
+            app,
+            TurnSlots {
+                handle: &mut *self.turn_handle,
+                events_rx: &mut *self.events_rx,
+                cancel: &mut *self.cancel,
+                steer_tx: &mut *self.steer_tx,
+                ring_on_completion: &mut *self.ring_on_turn_completion,
+            },
+            TurnDeps {
+                resolver: self.resolver,
+                store: self.store,
+                session_id: self.session_id,
+                system_prompt: self.system_prompt,
+                registry: self.registry,
+                tool_ctx: self.tool_ctx,
+                loop_config: self.loop_config,
+            },
+            entry,
+            bell,
+        );
+    }
+}
+
 impl schedule::Runtime for LoopRuntime<'_> {
     fn observe(&self, app: &App) -> LoopState {
         observe(
@@ -1210,94 +1411,11 @@ impl schedule::Runtime for LoopRuntime<'_> {
         let Some(request) = apply_intent(app, intent, self.steer_tx.as_ref()) else {
             return Ok(());
         };
-        // Every push site is guarded against starting a turn while
-        // one runs. If that ever slips, the running turn would be
-        // orphaned — its cancellation token dropped without firing,
-        // still writing to the same session.
-        debug_assert!(
-            self.turn_handle.is_none(),
-            "starting a turn while one is already running"
-        );
-        // A command's one-turn model override, validated by
-        // prepare_prompt; the provider check happens in the adopt.
-        // On failure the turn still runs — its prompt is already in
-        // the transcript — just under the session's own model.
-        if matches!(&request, TurnRequest::New(..))
-            && let Some((model, variant)) = app.pending_model_override.take()
-        {
-            let target = model.unwrap_or_else(|| app.current_model.clone());
-            let revert = (app.current_model.clone(), app.current_variant.clone());
-            match adopt_model_selection(
-                app,
-                self.resolver.as_ref(),
-                self.store,
-                self.session_id,
-                self.system_prompt,
-                self.registry,
-                target,
-                variant,
-            ) {
-                Ok(()) => app.model_revert = Some(revert),
-                Err(error) => app.set_notice(
-                    format!(
-                        "command model override failed ({error:#}) — running with {}",
-                        revert.0
-                    ),
-                    NoticeLevel::Warning,
-                ),
-            }
-        }
-        let (tx, rx) = loop_event_channel(LOOP_EVENT_CAPACITY);
-        *self.events_rx = Some(rx);
-        let token = CancellationToken::new();
-        *self.cancel = Some(token.clone());
-        let resolver = self.resolver.clone();
-        let store = self.store.clone();
-        let session_id = self.session_id.to_string();
-        let system_prompt = self.system_prompt.to_string();
-        let registry = self.registry.clone();
-        let turn_ctx = self.tool_ctx.clone();
-        let loop_config = self.loop_config.clone();
-        *self.ring_on_turn_completion = true;
-        let (tx_steer, steer_rx) = ilar::agent::steer_channel();
-        *self.steer_tx = Some(tx_steer);
-        *self.turn_handle = Some(tokio::spawn(async move {
-            let result = match request {
-                TurnRequest::New(text, images) => {
-                    run_turn(
-                        resolver.as_ref(),
-                        &registry,
-                        &store,
-                        &session_id,
-                        &text,
-                        &images,
-                        Some(&system_prompt),
-                        loop_config,
-                        tx,
-                        token,
-                        turn_ctx,
-                        Some(steer_rx),
-                    )
-                    .await
-                }
-                TurnRequest::Resume => {
-                    ilar::agent::resume_turn(
-                        resolver.as_ref(),
-                        &registry,
-                        &store,
-                        &session_id,
-                        Some(&system_prompt),
-                        loop_config,
-                        tx,
-                        token,
-                        turn_ctx,
-                        Some(steer_rx),
-                    )
-                    .await
-                }
-            };
-            TurnCompletion::Root(result)
-        }));
+        let entry = match request {
+            TurnRequest::New(text, images) => RootTurn::New(text, images),
+            TurnRequest::Resume => RootTurn::Resume,
+        };
+        self.spawn_root_turn(app, entry, Bell::Ring);
         Ok(())
     }
 
@@ -1412,44 +1530,14 @@ impl schedule::Runtime for LoopRuntime<'_> {
     ) {
         let text = notification.text;
         app.push_notification(&notification.description, &text);
-        let (tx, rx) = loop_event_channel(LOOP_EVENT_CAPACITY);
-        *self.events_rx = Some(rx);
-        let token = CancellationToken::new();
-        *self.cancel = Some(token.clone());
         app.busy = true;
         app.turn_committed = false;
         app.retry_available = false;
         app.status = "thinking".into();
         app.clear_transient_notice();
         app.set_activity(Activity::Thinking);
-        let resolver = self.resolver.clone();
-        let store = self.store.clone();
-        let session_id = self.session_id.to_string();
-        let system_prompt = self.system_prompt.to_string();
-        let registry = self.registry.clone();
-        let turn_ctx = self.tool_ctx.clone();
-        let loop_config = self.loop_config.clone();
-        let (tx_steer, steer_rx) = ilar::agent::steer_channel();
-        *self.steer_tx = Some(tx_steer);
-        *self.turn_handle = Some(tokio::spawn(async move {
-            TurnCompletion::Root(
-                run_turn(
-                    resolver.as_ref(),
-                    &registry,
-                    &store,
-                    &session_id,
-                    &text,
-                    &[],
-                    Some(&system_prompt),
-                    loop_config,
-                    tx,
-                    token,
-                    turn_ctx,
-                    Some(steer_rx),
-                )
-                .await,
-            )
-        }));
+        // The loop started this one on its own: no bell when it lands.
+        self.spawn_root_turn(app, RootTurn::New(text, Vec::new()), Bell::Silent);
     }
 
     fn session_id(&self) -> &str {
@@ -2181,38 +2269,27 @@ async fn run_app(
                                 } else if pending_question_id.take().is_some() {
                                     app.turn_committed = false;
                                     app.retry_available = false;
-                                    let (tx, rx) = loop_event_channel(LOOP_EVENT_CAPACITY);
-                                    events_rx = Some(rx);
-                                    let token = CancellationToken::new();
-                                    cancel = Some(token.clone());
-                                    let resolver = resolver.clone();
-                                    let store = store.clone();
-                                    let session_id = session_id.to_string();
-                                    let system_prompt = system_prompt.to_string();
-                                    let registry = registry.clone();
-                                    let turn_ctx = tool_ctx.clone();
-                                    let loop_config = loop_config.clone();
-                                    let (tx_steer, steer_rx) = ilar::agent::steer_channel();
-                                    steer_tx = Some(tx_steer);
-                                    ring_on_turn_completion = true;
-                                    turn_handle = Some(tokio::spawn(async move {
-                                        TurnCompletion::Root(
-                                            ilar::agent::resume_pending_question(
-                                                resolver.as_ref(),
-                                                &registry,
-                                                &store,
-                                                &session_id,
-                                                response,
-                                                Some(&system_prompt),
-                                                loop_config,
-                                                tx,
-                                                token,
-                                                turn_ctx,
-                                                Some(steer_rx),
-                                            )
-                                            .await,
-                                        )
-                                    }));
+                                    spawn_root_turn(
+                                        app,
+                                        TurnSlots {
+                                            handle: &mut turn_handle,
+                                            events_rx: &mut events_rx,
+                                            cancel: &mut cancel,
+                                            steer_tx: &mut steer_tx,
+                                            ring_on_completion: &mut ring_on_turn_completion,
+                                        },
+                                        TurnDeps {
+                                            resolver: &resolver,
+                                            store,
+                                            session_id,
+                                            system_prompt,
+                                            registry,
+                                            tool_ctx: &tool_ctx,
+                                            loop_config: &loop_config,
+                                        },
+                                        RootTurn::Answer(response),
+                                        Bell::Ring,
+                                    );
                                 }
                             }
                         }
@@ -3637,5 +3714,73 @@ mod tests {
                 .description,
             "propagated"
         );
+    }
+
+    /// A command's one-turn model override belongs to the turn that
+    /// command started — including the stretch of it after the model
+    /// paused to ask a question. The answer resumes the same turn, so
+    /// it adopts the override the same way a fresh prompt does; a
+    /// retry-resume, which is not that command's turn, leaves it
+    /// pending.
+    #[test]
+    fn a_question_answer_adopts_a_pending_model_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf());
+        let session_id = new_id();
+        drop(
+            store
+                .create(SessionMeta {
+                    session_id: session_id.clone(),
+                    parent_id: None,
+                    agent: "build".into(),
+                    model: "zai/glm-4.7".into(),
+                    workspace: None,
+                })
+                .unwrap(),
+        );
+        let resolver: Arc<dyn ProviderResolver> =
+            Arc::new(ilar::provider::MockProvider::default());
+        let registry = ToolRegistry::read_only();
+        let tool_ctx = ToolContext::root(dir.path().to_path_buf());
+        let loop_config = LoopConfig::default();
+        let deps = TurnDeps {
+            resolver: &resolver,
+            store: &store,
+            session_id: &session_id,
+            system_prompt: "",
+            registry: &registry,
+            tool_ctx: &tool_ctx,
+            loop_config: &loop_config,
+        };
+        let pending = || Some((Some("openai/gpt-5.2".to_string()), Some("high".to_string())));
+
+        let mut app = App::new();
+        app.current_model = "zai/glm-4.7".into();
+        app.pending_model_override = pending();
+
+        adopt_pending_model_override(
+            &mut app,
+            &RootTurn::Answer(ilar::question::QuestionResponse::Cancelled),
+            &deps,
+        );
+
+        assert_eq!(app.current_model, "openai/gpt-5.2");
+        assert_eq!(app.current_variant.as_deref(), Some("high"));
+        assert_eq!(
+            store.load(&session_id).unwrap().effective_model(),
+            "openai/gpt-5.2"
+        );
+        assert_eq!(
+            app.model_revert,
+            Some(("zai/glm-4.7".to_string(), None)),
+            "the answer turn must still hand the session back afterwards"
+        );
+        assert!(app.pending_model_override.is_none());
+
+        // A retry-resume is a continuation of a turn that already
+        // adopted whatever it was going to adopt.
+        app.pending_model_override = pending();
+        adopt_pending_model_override(&mut app, &RootTurn::Resume, &deps);
+        assert_eq!(app.pending_model_override, pending());
     }
 }
