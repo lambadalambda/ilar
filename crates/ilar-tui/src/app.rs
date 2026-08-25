@@ -567,9 +567,11 @@ impl App {
                 Modal::SkillPicker => self.skill_picker.as_mut().unwrap().select(index),
                 Modal::CommandPalette => self.command_palette.as_mut().unwrap().select(index),
                 Modal::PendingManager => {
-                    let manager = self.pending_manager.as_mut().expect("pending manager");
-                    manager.selected = index;
-                    manager.armed = None;
+                    let len = self.pending_items().len();
+                    self.pending_manager
+                        .as_mut()
+                        .expect("pending manager")
+                        .select(index, len);
                 }
                 Modal::Question | Modal::Help | Modal::Todos | Modal::Aside | Modal::Search => {}
             }
@@ -1212,7 +1214,7 @@ impl App {
     pub(crate) fn pending_snapshot(&self) -> Option<crate::modals::PendingSnapshot> {
         let manager = self.pending_manager.as_ref()?;
         let items = self.pending_items();
-        let selected = manager.selected.min(items.len().saturating_sub(1));
+        let selected = manager.selected().min(items.len().saturating_sub(1));
         let mut armed = false;
         let rows = items
             .iter()
@@ -1281,12 +1283,10 @@ impl App {
                 _ => PendingAction::Stay,
             };
         }
-        manager.selected = manager.selected.min(items.len() - 1);
-        let selected = items[manager.selected];
+        manager.clamp(items.len());
+        let selected = items[manager.selected()];
         if let Some(delta) = crate::modals::nav_delta(code, control) {
-            manager.selected =
-                (manager.selected as isize + delta).rem_euclid(items.len() as isize) as usize;
-            manager.armed = None;
+            manager.move_selection(delta, items.len());
             return PendingAction::Stay;
         }
         match (code, control) {
@@ -3984,6 +3984,47 @@ mod tests {
         assert_eq!(
             app.pending_manager_key(KeyCode::Esc, false),
             PendingAction::Close
+        );
+    }
+
+    /// Navigation wraps over the whole list — the list is longer than
+    /// the modal, so the far end is only reachable by wrapping.
+    #[test]
+    fn pending_manager_navigation_wraps_over_the_whole_list() {
+        let mut app = App::new();
+        app.queued_messages = (0..20).map(|index| format!("message {index}")).collect();
+        app.pending_manager = Some(PendingManager::default());
+
+        app.pending_manager_key(KeyCode::Up, false);
+        assert_eq!(
+            app.pending_snapshot().expect("manager is open").selected,
+            19,
+            "Up from the top wraps to the last item"
+        );
+        app.pending_manager_key(KeyCode::Down, false);
+        assert_eq!(
+            app.pending_snapshot().expect("manager is open").selected,
+            0,
+            "Down from the last item wraps to the top"
+        );
+    }
+
+    /// Hit maps go stale the moment the pending list changes under
+    /// them, so a click can name a row that no longer exists.
+    #[test]
+    fn a_stale_pending_click_lands_on_the_last_row() {
+        let mut app = App::new();
+        app.queued_messages = (0..20).map(|index| format!("message {index}")).collect();
+        app.pending_manager = Some(PendingManager::default());
+        app.modal_hit = Some(crate::modals::ModalHit {
+            area: Rect::new(0, 0, 10, 1),
+            rows: vec![Some(99)],
+        });
+
+        assert!(app.click_active_modal(0, 0));
+        assert_eq!(
+            app.pending_snapshot().expect("manager is open").selected,
+            19
         );
     }
 

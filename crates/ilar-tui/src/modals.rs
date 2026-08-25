@@ -643,10 +643,13 @@ pub(crate) fn render_pending_manager(frame: &mut Frame, snapshot: &PendingSnapsh
         );
         return ModalHit::default();
     }
+    let selected = snapshot.selected.min(snapshot.rows.len().saturating_sub(1));
+    let row_count = inner.height as usize;
+    let start = list_window(selected, snapshot.rows.len(), row_count);
     let mut body = ModalRows::default();
-    for (index, label) in snapshot.rows.iter().enumerate().take(inner.height as usize) {
-        let armed = snapshot.armed && index == snapshot.selected;
-        let marker = if index == snapshot.selected {
+    for (index, label) in snapshot.rows.iter().enumerate().skip(start).take(row_count) {
+        let armed = snapshot.armed && index == selected;
+        let marker = if index == selected {
             if armed { "✗ " } else { "> " }
         } else {
             "  "
@@ -656,7 +659,7 @@ pub(crate) fn render_pending_manager(frame: &mut Frame, snapshot: &PendingSnapsh
             inner.width as usize,
             Truncation::Right,
         );
-        let style = if index == snapshot.selected {
+        let style = if index == selected {
             if armed {
                 // Armed deletion is the one place a full bar is the
                 // point; it is still a colour, not inverted video.
@@ -814,8 +817,33 @@ pub(crate) enum PendingAction {
 /// first press and fire on the second.
 #[derive(Default)]
 pub(crate) struct PendingManager {
-    pub(crate) selected: usize,
+    nav: ListNav,
     pub(crate) armed: Option<PendingItem>,
+}
+
+impl PendingManager {
+    pub(crate) fn selected(&self) -> usize {
+        self.nav.selected
+    }
+
+    /// Re-clamp: items come and go under the cursor while the modal is
+    /// open, so the list can shrink past it between keys.
+    pub(crate) fn clamp(&mut self, len: usize) {
+        self.nav.select(self.nav.selected, len);
+    }
+
+    /// Click-to-select: the index comes from the frame's hit map.
+    /// Disarms, like any other selection change.
+    pub(crate) fn select(&mut self, index: usize, len: usize) {
+        self.nav.select(index, len);
+        self.armed = None;
+    }
+
+    /// Arrow keys wrap around the list, and moving disarms.
+    pub(crate) fn move_selection(&mut self, delta: isize, len: usize) {
+        self.nav.move_by(delta, len);
+        self.armed = None;
+    }
 }
 
 pub(crate) struct SkillPicker {
@@ -3331,6 +3359,49 @@ mod tests {
         assert_eq!(hit.rows, vec![Some(2), Some(3), Some(4), Some(5)]);
         assert_eq!(hit.item_at(hit.area.x, hit.area.y), Some(2));
         assert_eq!(hit.item_at(hit.area.x, hit.area.y + 3), Some(5));
+    }
+
+    /// The pending manager is fixed at 14 rows, so 20 pending items do
+    /// not fit. The window has to follow the selection: rendering from
+    /// item 0 armed deletes on rows nobody could see.
+    #[test]
+    fn a_scrolled_pending_manager_keeps_the_selection_on_screen() {
+        let rows: Vec<String> = (0..20).map(|index| format!("item {index}")).collect();
+        // 12 inner rows: the top of the list, the last row that fits
+        // unscrolled, the first selection that has to scroll, and the
+        // far end the arrow keys reach by wrapping.
+        for selected in [0, 11, 12, 19] {
+            let snapshot = PendingSnapshot {
+                selected,
+                armed: false,
+                rows: rows.clone(),
+            };
+            let (screen, hit) =
+                draw_modal(80, 24, |frame| render_pending_manager(frame, &snapshot));
+            assert!(
+                screen.contains(&format!("> item {selected} ")),
+                "selection {selected} off-screen: {screen}"
+            );
+            assert!(
+                hit.rows.contains(&Some(selected)),
+                "selection {selected} unmapped: {:?}",
+                hit.rows
+            );
+        }
+
+        // The last item scrolls the window to items 8..=19, and the
+        // armed marker rides along with it.
+        let snapshot = PendingSnapshot {
+            selected: 19,
+            armed: true,
+            rows,
+        };
+        let (screen, hit) = draw_modal(80, 24, |frame| render_pending_manager(frame, &snapshot));
+        assert!(screen.contains("✗ item 19 "), "{screen}");
+        assert!(!screen.contains("item 7 "), "{screen}");
+        assert_eq!(hit.rows, (8..20).map(Some).collect::<Vec<_>>());
+        assert_eq!(hit.item_at(hit.area.x, hit.area.y), Some(8));
+        assert_eq!(hit.item_at(hit.area.x, hit.area.y + 11), Some(19));
     }
 
     #[test]
