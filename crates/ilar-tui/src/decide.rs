@@ -319,6 +319,14 @@ pub(crate) fn retry(state: &LoopState) -> Vec<Intent> {
     vec![Intent::ResumeTurn]
 }
 
+/// Whether a retry decision dismisses the pending manager that raised
+/// it. Only a resume does: the modal owns the keyboard and would sit
+/// over the turn it just restarted. A warning leaves it open, because
+/// the draft it complains about is cleared from behind it.
+pub(crate) fn retry_dismisses_manager(intents: &[Intent]) -> bool {
+    intents.iter().any(|i| matches!(i, Intent::ResumeTurn))
+}
+
 /// Whether a background completion may start a turn now. An overlay
 /// owning the keyboard counts: a turn starting underneath a picker or
 /// the search bar moves the transcript out from under the user.
@@ -686,5 +694,19 @@ mod tests {
             [Intent::Notice(text, NoticeLevel::Warning)] if text.contains("draft")
         ));
         assert_eq!(retry(&idle()), vec![Intent::ResumeTurn]);
+    }
+
+    /// The pending manager must not linger over a resumed turn: it owns
+    /// the keyboard and blocks notification routing until dismissed.
+    /// The draft warning is the one case that keeps it open, so the
+    /// user can act on it where they raised it.
+    #[test]
+    fn retry_dismisses_the_manager_only_when_it_resumes() {
+        assert!(retry_dismisses_manager(&retry(&idle())));
+        let drafting = LoopState {
+            input_blank: false,
+            ..idle()
+        };
+        assert!(!retry_dismisses_manager(&retry(&drafting)));
     }
 }

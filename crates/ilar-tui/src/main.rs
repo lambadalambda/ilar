@@ -30,7 +30,7 @@ use crossterm::event::{
     MouseEvent, MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::supports_keyboard_enhancement;
-use decide::{Intent, LoopState, retry as retry_intents};
+use decide::{Intent, LoopState, retry as retry_intents, retry_dismisses_manager};
 use input::{
     InputBuffer, Interrupt, PromptAction, handle_prompt_key, interrupt, quit_requested,
     retry_requested,
@@ -2228,7 +2228,7 @@ async fn run_app(
                                         notifications_paused,
                                     );
                                     let decided = retry_intents(&state);
-                                    if decided.iter().any(|i| matches!(i, Intent::StartTurn(_))) {
+                                    if retry_dismisses_manager(&decided) {
                                         app.pending_manager = None;
                                     }
                                     intents.extend(decided);
