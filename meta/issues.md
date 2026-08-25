@@ -60,3 +60,7 @@ Refactors:
 - [ ] [Extract the replay index](issues/extract-the-replay-index.md)
 - [ ] [Single-source the catalogs](issues/single-source-the-catalogs.md)
 - [ ] [Sweep cleanups](issues/sweep-cleanups.md)
+
+Follow-ups:
+
+- [ ] [Resume leads with this directory's last session](issues/resume-leads-with-this-directorys-last-session.md)
