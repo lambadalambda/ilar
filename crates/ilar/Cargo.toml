@@ -26,6 +26,7 @@ regex = "1.13.1"
 tokio-util = "0.7.19"
 sha2 = "0.11.0"
 base64 = "0.23.1"
+png = "0.18"
 url = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
