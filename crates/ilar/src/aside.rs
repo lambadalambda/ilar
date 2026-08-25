@@ -23,19 +23,60 @@ below from the conversation so far. Do not call any tool, do not continue or cha
 and keep the answer brief. Neither the question nor your answer will be recorded in the \
 session.\n\nQuestion: ";
 
-/// Cut the transcript back to its last settled point. Mid-turn, the
-/// log can end with an assistant message whose tool calls have no
-/// results yet; a provider rejects that request outright. Tool-call /
-/// result pairs are adjacent, so popping trailing unpaired assistant
-/// messages is the whole job.
+/// The call ids a message makes.
+fn tool_call_ids(message: &ChatMessage) -> impl Iterator<Item = &str> {
+    message.content.iter().filter_map(|block| match block {
+        ContentBlock::ToolCall { id, .. } => Some(id.as_str()),
+        _ => None,
+    })
+}
+
+/// The call ids a message answers.
+fn tool_result_ids(message: &ChatMessage) -> impl Iterator<Item = &str> {
+    message.content.iter().filter_map(|block| match block {
+        ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
+        _ => None,
+    })
+}
+
+/// Is the transcript's last message a loose end — something a provider
+/// would reject the request for?
+///
+/// Two shapes end a request mid-step. The plain one is an assistant
+/// message whose tool calls have no results yet. The subtler one is a
+/// *user* message carrying only some of that step's results: the turn
+/// appends results one at a time, and the store flushes whatever is
+/// pending as a trailing user message, so a snapshot taken between two
+/// appends answers M of N calls. Either way the request would carry
+/// unanswered calls.
+fn unsettled_tail(messages: &[ChatMessage]) -> bool {
+    let Some(last) = messages.last() else {
+        return false;
+    };
+    match last.role {
+        Role::Assistant => tool_call_ids(last).next().is_some(),
+        Role::User => {
+            let answered: Vec<&str> = tool_result_ids(last).collect();
+            // A user message with no results at all is a question, not a
+            // half-answered step.
+            !answered.is_empty()
+                && messages.iter().rev().nth(1).is_some_and(|step| {
+                    step.role == Role::Assistant
+                        && tool_call_ids(step).next().is_some()
+                        && !tool_call_ids(step).all(|id| answered.contains(&id))
+                })
+        }
+    }
+}
+
+/// Cut the transcript back to its last settled point. Tool-call /
+/// result pairs are adjacent, so dropping trailing loose ends — a
+/// half-answered step's partial results, then the step they left
+/// unanswered — is the whole job. Repeats until the transcript ends on
+/// a settled boundary, keeping every settled step before it: an aside
+/// wants as much context as it can legally send.
 fn settled(mut messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
-    while messages.last().is_some_and(|message| {
-        message.role == Role::Assistant
-            && message
-                .content
-                .iter()
-                .any(|block| matches!(block, ContentBlock::ToolCall { .. }))
-    }) {
+    while unsettled_tail(&messages) {
         messages.pop();
     }
     messages
@@ -109,4 +150,111 @@ pub async fn ask(
         }
     }
     Ok(Some(answer))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assistant_calls(ids: &[&str]) -> ChatMessage {
+        ChatMessage {
+            role: Role::Assistant,
+            content: ids
+                .iter()
+                .map(|id| ContentBlock::ToolCall {
+                    id: (*id).into(),
+                    name: "read".into(),
+                    input: serde_json::json!({"path": "ilar.toml"}),
+                    item_id: None,
+                })
+                .collect(),
+        }
+    }
+
+    fn results(ids: &[&str]) -> ChatMessage {
+        ChatMessage {
+            role: Role::User,
+            content: ids
+                .iter()
+                .map(|id| ContentBlock::ToolResult {
+                    tool_use_id: (*id).into(),
+                    content: "ok".into(),
+                    is_error: false,
+                })
+                .collect(),
+        }
+    }
+
+    fn assistant_text(text: &str) -> ChatMessage {
+        ChatMessage {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text { text: text.into() }],
+        }
+    }
+
+    /// The invariant a provider enforces: every call in the request is
+    /// answered somewhere in it.
+    fn unanswered_calls(messages: &[ChatMessage]) -> Vec<String> {
+        let answered: Vec<&str> = messages.iter().flat_map(tool_result_ids).collect();
+        messages
+            .iter()
+            .flat_map(tool_call_ids)
+            .filter(|id| !answered.contains(id))
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn a_half_answered_step_is_dropped_results_and_all() {
+        // What a snapshot mid-step looks like: the results land one at a
+        // time, so the transcript ends on a *user* message that answers
+        // only some of the calls above it.
+        let transcript = vec![
+            ChatMessage::user_text("check the config"),
+            assistant_text("on it"),
+            assistant_calls(&["call-1", "call-2"]),
+            results(&["call-1"]),
+        ];
+
+        let messages = settled(transcript.clone());
+
+        assert!(
+            unanswered_calls(&messages).is_empty(),
+            "unpaired tool call survived: {messages:?}"
+        );
+        assert_eq!(messages, transcript[..2]);
+    }
+
+    #[test]
+    fn a_fully_answered_step_rides_along() {
+        // Asides want maximal settled context: a finished step is context,
+        // not a loose end.
+        let transcript = vec![
+            ChatMessage::user_text("check the config"),
+            assistant_calls(&["call-1", "call-2"]),
+            results(&["call-2", "call-1"]),
+        ];
+
+        assert_eq!(settled(transcript.clone()), transcript);
+    }
+
+    #[test]
+    fn cutting_back_repeats_until_the_transcript_settles() {
+        let transcript = vec![
+            ChatMessage::user_text("check the config"),
+            assistant_calls(&["call-1"]),
+            results(&["call-1"]),
+            assistant_calls(&["call-2", "call-3"]),
+            results(&["call-2"]),
+            assistant_calls(&["call-4"]),
+        ];
+
+        let messages = settled(transcript.clone());
+
+        assert!(
+            unanswered_calls(&messages).is_empty(),
+            "unpaired tool call survived: {messages:?}"
+        );
+        assert_eq!(messages, transcript[..3]);
+    }
 }
