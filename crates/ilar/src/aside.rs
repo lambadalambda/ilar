@@ -116,7 +116,6 @@ pub async fn ask(
         // The turn's own tools, unused but present: dropping them would
         // change the request prefix and forfeit the cache.
         tools: tools.to_vec(),
-        continuations: Vec::new(),
         cache_key: Some(session_id.to_string()),
         options: crate::model::variant_options(&model, reader.effective_variant().as_deref())?,
     };

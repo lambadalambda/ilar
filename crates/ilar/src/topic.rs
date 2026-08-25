@@ -100,7 +100,6 @@ pub fn topic_request(
         system_prompt: system_prompt.map(str::to_string),
         messages,
         tools: Vec::new(),
-        continuations: Vec::new(),
         cache_key: None,
         options,
     }

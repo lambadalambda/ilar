@@ -220,7 +220,7 @@ fn provider_settings_parsed() {
         &dir.join("ilar.toml"),
         r#"
 [providers.zai]
-base_url = "https://proxy.example/api/anthropic"
+base_url = "https://proxy.example/api/coding/paas/v4"
 
 [providers.openai]
 api_key = "inline-key"
@@ -229,7 +229,7 @@ api_key = "inline-key"
     let config = Loader::no_env().config_dir(dir).resolve().unwrap();
     assert_eq!(
         config.providers["zai"].base_url.as_deref(),
-        Some("https://proxy.example/api/anthropic")
+        Some("https://proxy.example/api/coding/paas/v4")
     );
     assert_eq!(
         config.providers["openai"].api_key.as_deref(),
@@ -420,39 +420,23 @@ fn configured_providers_expose_their_supported_models() {
             .any(|model| model.full_id() == "openai/gpt-5.6-sol")
     );
     assert!(models.iter().any(|model| model.full_id() == "zai/glm-4.7"));
-    assert!(!models.iter().any(|model| model.full_id() == "zai/glm-5.3"));
 }
 
+/// The only z.ai route is the coding-plan endpoint, so the models the
+/// plan carries are exactly the models a keyed z.ai config can list.
 #[test]
-fn zai_anthropic_input_limit_reserves_the_wire_max_tokens() {
-    // The Anthropic flavor puts the catalog output limit on the wire, so
-    // the input budget has to reserve exactly that much.
-    let config = Config::default_for_tests();
-    let reserved = ilar::provider::zai::max_output_tokens("zai/glm-4.7");
-    assert_eq!(reserved, 131_072);
-    assert_eq!(config.input_limit("zai/glm-4.7"), Some(204_800 - reserved));
-
-    // The OpenAI-compatible flavor sends no max_tokens and keeps the
-    // catalog's own input limit.
+fn zai_lists_the_coding_plan_catalog() {
     let (_g, dir) = tempdir();
     write(
         &dir.join("ilar.toml"),
-        "[providers.zai]\napi_key = \"zk\"\nflavor = \"openai\"\n",
-    );
-    let config = Loader::no_env().config_dir(dir).resolve().unwrap();
-    let model = ilar::model::find("zai/glm-4.7").unwrap();
-    assert_eq!(config.input_limit("zai/glm-4.7"), Some(model.input_limit));
-}
-
-#[test]
-fn zai_openai_flavor_uses_coding_plan_catalog() {
-    let (_g, dir) = tempdir();
-    write(
-        &dir.join("ilar.toml"),
-        "[providers.zai]\napi_key = \"zk\"\nflavor = \"openai\"\n",
+        "[providers.zai]\napi_key = \"zk\"\n",
     );
     let config = Loader::no_env().config_dir(dir).resolve().unwrap();
     let models = config.available_models();
+
+    // The catalog's own input limit stands: nothing is reserved on the wire.
+    let model = ilar::model::find("zai/glm-4.7").unwrap();
+    assert_eq!(config.input_limit("zai/glm-4.7"), Some(model.input_limit));
 
     assert!(models.iter().any(|model| model.full_id() == "zai/glm-5.3"));
     assert!(!models.iter().any(|model| model.full_id() == "zai/glm-4.6"));
@@ -691,16 +675,6 @@ fn semantic_ranges_and_provider_modes_are_validated() {
             "OpenAI auth",
             "[providers.openai]\nauth = \"mystery\"\n",
             "providers.openai.auth must be `api_key` or `chatgpt`",
-        ),
-        (
-            "OpenAI flavor",
-            "[providers.openai]\nflavor = \"anthropic\"\n",
-            "providers.openai.flavor is not supported",
-        ),
-        (
-            "z.ai flavor",
-            "[providers.zai]\nflavor = \"mystery\"\n",
-            "providers.zai.flavor must be `anthropic` or `openai`",
         ),
         (
             "z.ai auth",

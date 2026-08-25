@@ -255,19 +255,7 @@ fn estimate_tokens_from(
     let chars: usize = transcript
         .iter()
         .map(|m| {
-            let replay = m
-                .content
-                .iter()
-                .filter_map(|block| match block {
-                    crate::session::ContentBlock::ProviderReplay { content, .. } => {
-                        Some(content.to_string().chars().count())
-                    }
-                    _ => None,
-                })
-                .max()
-                .unwrap_or(0);
-            let neutral = m
-                .content
+            m.content
                 .iter()
                 .map(|block| match block {
                     crate::session::ContentBlock::Text { text } => text.chars().count(),
@@ -278,7 +266,6 @@ fn estimate_tokens_from(
                     crate::session::ContentBlock::Reasoning { item } => {
                         item.to_string().chars().count()
                     }
-                    crate::session::ContentBlock::ProviderReplay { .. } => 0,
                     crate::session::ContentBlock::Diagnostic { .. } => 0,
                     crate::session::ContentBlock::ToolCall { input, .. } => {
                         input.to_string().chars().count()
@@ -290,8 +277,8 @@ fn estimate_tokens_from(
                             + images.iter().map(|image| image.data.len()).sum::<usize>()
                     }
                 })
-                .sum::<usize>();
-            replay.max(neutral) + 8
+                .sum::<usize>()
+                + 8
         })
         .sum::<usize>()
         + system_prompt
@@ -475,7 +462,6 @@ pub(crate) async fn compact_if_needed_locked(
         system_prompt: options.system_prompt.map(str::to_string),
         messages: summarizer_messages(&transcript),
         tools: options.tools.to_vec(),
-        continuations: Vec::new(),
         cache_key: Some(session.session_id().to_string()),
         options: crate::model::variant_options(model, session.effective_variant().as_deref())?,
     };

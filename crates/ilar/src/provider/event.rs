@@ -12,8 +12,6 @@ pub enum StopReason {
     MaxTokens,
     /// The model declined (content refusal / filter).
     Refusal,
-    /// Server-side pause (Anthropic `pause_turn`): re-issue the request.
-    Paused,
     Stopped,
 }
 
@@ -67,12 +65,6 @@ pub enum ProviderEvent {
         id: String,
         name: String,
         input: serde_json::Value,
-    },
-    /// Exact provider assistant content for replaying a continued response.
-    /// Emitted immediately before the terminal event when available.
-    ResponseContent {
-        provider: String,
-        content: serde_json::Value,
     },
     /// The API call finished. Always terminal (on success).
     TurnComplete {

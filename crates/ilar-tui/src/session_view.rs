@@ -295,7 +295,6 @@ fn restored_session_invocation_view(
                         }
                         ilar::session::ContentBlock::Thinking { .. }
                         | ilar::session::ContentBlock::Reasoning { .. }
-                        | ilar::session::ContentBlock::ProviderReplay { .. }
                         | ilar::session::ContentBlock::Diagnostic { .. }
                         | ilar::session::ContentBlock::ToolResult { .. } => {}
                     }

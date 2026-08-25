@@ -101,9 +101,6 @@ impl OpenAIProvider {
         if provider != "openai" {
             anyhow::bail!("model provider mismatch: expected openai, got {provider}");
         }
-        if !req.continuations.is_empty() {
-            anyhow::bail!("OpenAI does not support opaque paused continuations");
-        }
         let input = req
             .messages
             .iter()
@@ -195,7 +192,6 @@ fn wire_input_items(msg: &ChatMessage) -> Vec<serde_json::Value> {
             ContentBlock::Thinking { .. } => {} // reasoning items are server-managed
             ContentBlock::ReasoningSummary { .. } => {}
             ContentBlock::Diagnostic { .. } => {}
-            ContentBlock::ProviderReplay { .. } => {}
             ContentBlock::Reasoning { item } => {
                 flush_parts(&mut parts, &mut items);
                 items.push(item.clone());

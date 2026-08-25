@@ -1,6 +1,0 @@
-event: message_start
-data: {"type":"message_start","message":{"id":"msg_3","usage":{"input_tokens":5,"output_tokens":1}}}
-
-event: error
-data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}
-

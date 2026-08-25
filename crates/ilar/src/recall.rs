@@ -104,9 +104,7 @@ pub fn entries(events: &[SessionEvent]) -> Vec<Entry> {
                         ContentBlock::ReasoningSummary { text, .. } => {
                             push(Speaker::Thinking, text);
                         }
-                        ContentBlock::Reasoning { .. }
-                        | ContentBlock::ProviderReplay { .. }
-                        | ContentBlock::Diagnostic { .. } => {}
+                        ContentBlock::Reasoning { .. } | ContentBlock::Diagnostic { .. } => {}
                     }
                 }
             }

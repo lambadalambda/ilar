@@ -74,12 +74,6 @@ pub enum ContentBlock {
     Reasoning {
         item: serde_json::Value,
     },
-    /// Exact provider assistant content retained alongside neutral display
-    /// blocks when a paused response had to be resumed.
-    ProviderReplay {
-        provider: String,
-        content: serde_json::Value,
-    },
     /// Locally visible provider diagnostics that must never be replayed.
     Diagnostic {
         text: String,
@@ -139,7 +133,7 @@ pub struct Usage {
     /// field plus the cache fields below.
     pub input_tokens: u64,
     pub output_tokens: u64,
-    /// Prompt-caching accounting (Anthropic-style providers).
+    /// Prompt-caching accounting.
     #[serde(default)]
     pub cache_read_input_tokens: u64,
     #[serde(default)]

@@ -25,11 +25,8 @@ theme = "carbon"
 # automatically.
 
 [providers.zai]
-# z.ai Anthropic-compatible endpoint (default):
-base_url = "https://api.z.ai/api/anthropic"
-# For the OpenAI-compatible endpoint use:
+# OpenAI-compatible coding-plan endpoint (default):
 #   base_url = "https://api.z.ai/api/coding/paas/v4"
-#   flavor = "openai"
 # api_key from ILAR_ZAI_API_KEY (env).
 
 [agent]

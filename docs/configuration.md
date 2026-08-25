@@ -14,9 +14,8 @@ by project files.
 | `providers.openai.base_url` | API or ChatGPT endpoint | Override the Responses API base URL selected by `auth`. |
 | `providers.openai.api_key` | `ILAR_OPENAI_API_KEY` | OpenAI API key. |
 | `providers.openai.auth` | `api_key` | `api_key` or `chatgpt`; see [OpenAI ChatGPT OAuth](#openai-chatgpt-oauth). |
-| `providers.zai.base_url` | z.ai endpoint for `flavor` | Override the z.ai API base URL selected by `flavor`. |
+| `providers.zai.base_url` | `https://api.z.ai/api/coding/paas/v4` | Override the z.ai OpenAI-compatible base URL. |
 | `providers.zai.api_key` | `ILAR_ZAI_API_KEY` | z.ai API key. |
-| `providers.zai.flavor` | `anthropic` | `anthropic` or `openai`. |
 | `agent.max_iterations` | `1000` | Max provider calls per user turn (runaway-loop backstop). |
 | `compaction.threshold` | `0.85` | Context fraction at which history is handed over; must be between 0 and 1. |
 | `subagents.max_concurrent` | `10` | Maximum concurrent subagents; must be at least 1. |

@@ -502,7 +502,6 @@ async fn compaction_rejects_non_end_turn_terminal_states() {
         StopReason::ToolUse,
         StopReason::MaxTokens,
         StopReason::Refusal,
-        StopReason::Paused,
         StopReason::Stopped,
     ] {
         let (store, session_id) = temp_session();

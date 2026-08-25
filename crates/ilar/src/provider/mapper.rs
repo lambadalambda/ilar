@@ -1,13 +1,13 @@
-//! One core for the three SSE mappers.
+//! One core for the SSE mappers.
 //!
-//! OpenAI Responses, z.ai's Anthropic flavor and z.ai's chat-completions
-//! flavor decode three different wire formats, but the contract they owe
-//! the neutral event stream is a single contract: nothing after the
-//! terminal event, a stop reason consistent with the tool calls that were
-//! started, a `ToolCallCompleted` for every `ToolCallStarted` (null input
-//! when the turn was truncated), tool arguments that parse to a JSON
-//! object, and one shape for a stream that ends early. This module owns
-//! all five, so a contract fix lands once instead of three times.
+//! OpenAI Responses and z.ai's chat-completions decode different wire
+//! formats, but the contract they owe the neutral event stream is a single
+//! contract: nothing after the terminal event, a stop reason consistent
+//! with the tool calls that were started, a `ToolCallCompleted` for every
+//! `ToolCallStarted` (null input when the turn was truncated), tool
+//! arguments that parse to a JSON object, and one shape for a stream that
+//! ends early. This module owns all five, so a contract fix lands once
+//! instead of once per mapper.
 
 use serde_json::Value;
 
@@ -18,7 +18,7 @@ use crate::session::{InputTokenAccounting, Usage};
 /// name the wire format the offending event came from.
 #[derive(Clone, Copy)]
 pub(super) struct MapperLabels {
-    /// Names the wire flavor: "OpenAI", "Anthropic", "OpenAI-compatible".
+    /// Names the wire dialect: "OpenAI", "OpenAI-compatible".
     pub flavor: &'static str,
     /// Names the terminal event, for the after-terminal guard.
     pub terminal: &'static str,
@@ -216,9 +216,7 @@ impl MapperCore {
             StopReason::ToolUse if self.calls.is_empty() => {
                 Err(format!("{flavor} tool_use stop has no tool calls"))
             }
-            StopReason::EndTurn | StopReason::Refusal | StopReason::Paused
-                if !self.calls.is_empty() =>
-            {
+            StopReason::EndTurn | StopReason::Refusal if !self.calls.is_empty() => {
                 Err(format!("{flavor} {stop:?} stop contradicts tool calls"))
             }
             _ => Ok(()),
@@ -263,7 +261,7 @@ pub(super) fn required_str<'a>(
 
 /// Folds one wire usage payload into an accumulating [`Usage`].
 ///
-/// One function for three wire dialects, so a field only has to be learned
+/// One function for every wire dialect, so a field only has to be learned
 /// once:
 ///
 /// - Responses (`input_tokens`, `input_tokens_details.*`) and
@@ -272,13 +270,12 @@ pub(super) fn required_str<'a>(
 ///   cache, so both are carved back out — the cost is identical (models
 ///   without a separate write price bill writes at the input rate) and the
 ///   split becomes visible.
-/// - Anthropic messages report `cache_read_input_tokens` /
-///   `cache_creation_input_tokens` alongside an input total that already
-///   excludes them, so those are taken as-is.
+/// - A gateway that instead reports `cache_read_input_tokens` /
+///   `cache_creation_input_tokens` beside an input total that already
+///   excludes them has those taken as-is.
 ///
-/// Zero is "not reported": usage arrives spread over several events (the
-/// cache fields ride on `message_start`, output tokens on `message_delta`),
-/// and a later event carrying only some of them must not zero the rest.
+/// Zero is "not reported": usage can arrive spread over several events, and
+/// a later event carrying only some of the fields must not zero the rest.
 pub(super) fn merge_usage(usage: &mut Usage, wire: &Value) {
     usage.input_token_accounting = Some(InputTokenAccounting::ExcludesCached);
     let field = |key: &str| wire.get(key).and_then(Value::as_u64).unwrap_or_default();
@@ -395,7 +392,7 @@ mod tests {
         assert!(called.validate_stop(&StopReason::ToolUse, false).is_ok());
         // Truncation is the one stop reason that may leave calls dangling.
         assert!(called.validate_stop(&StopReason::MaxTokens, false).is_ok());
-        for stop in [StopReason::EndTurn, StopReason::Paused] {
+        for stop in [StopReason::EndTurn, StopReason::Refusal] {
             assert!(
                 called
                     .validate_stop(&stop, false)
@@ -462,8 +459,8 @@ mod tests {
     }
 
     /// Responses and chat-completions report an input total that includes
-    /// the cached and written tokens; Anthropic reports them beside a
-    /// total that already excludes them. One function reads both.
+    /// the cached and written tokens; a gateway may instead report them
+    /// beside a total that already excludes them. One function reads both.
     ///
     /// The Responses case is the example from OpenAI's prompt-caching
     /// guide, verbatim: reads and writes are both carved out of the input
@@ -500,15 +497,15 @@ mod tests {
         assert_eq!(chat.cache_read_input_tokens, 1_500);
         assert_eq!(chat.cache_creation_input_tokens, 100);
 
-        let anthropic = wire_usage(&serde_json::json!({
+        let excluded_cache = wire_usage(&serde_json::json!({
             "input_tokens": 300,
             "cache_read_input_tokens": 1_500,
             "cache_creation_input_tokens": 50,
         }));
-        assert_eq!(anthropic.input_tokens, 300);
-        assert_eq!(anthropic.cache_read_input_tokens, 1_500);
-        assert_eq!(anthropic.cache_creation_input_tokens, 50);
-        assert_eq!(anthropic.context_tokens(), 1_850);
+        assert_eq!(excluded_cache.input_tokens, 300);
+        assert_eq!(excluded_cache.cache_read_input_tokens, 1_500);
+        assert_eq!(excluded_cache.cache_creation_input_tokens, 50);
+        assert_eq!(excluded_cache.context_tokens(), 1_850);
     }
 
     /// Usage arrives spread over several events; a later one carrying only

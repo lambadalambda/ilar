@@ -22,7 +22,6 @@ pub struct GeneralConfig {
 pub struct ProviderConfig {
     pub base_url: Option<String>,
     pub api_key: Option<String>,
-    pub flavor: Option<String>,
     /// "chatgpt" -> OAuth mode (run `ilar login`).
     pub auth: Option<String>,
 }
@@ -140,8 +139,6 @@ struct ProviderKind {
     api_key_env: &'static str,
     /// Accepted `auth` values; empty when the key is unsupported.
     auth_values: &'static [&'static str],
-    /// Accepted `flavor` values; empty when the key is unsupported.
-    flavor_values: &'static [&'static str],
     /// Window assumed for a model the catalog does not list.
     fallback_context_limit: u64,
     /// Whether this configuration can reach a catalog row.
@@ -155,7 +152,6 @@ static PROVIDERS: &[ProviderKind] = &[
         name: "openai",
         api_key_env: "ILAR_OPENAI_API_KEY",
         auth_values: &["api_key", "chatgpt"],
-        flavor_values: &[],
         fallback_context_limit: 128_000,
         reaches: openai_reaches,
         build: openai_provider,
@@ -164,7 +160,6 @@ static PROVIDERS: &[ProviderKind] = &[
         name: "zai",
         api_key_env: "ILAR_ZAI_API_KEY",
         auth_values: &[],
-        flavor_values: &["anthropic", "openai"],
         fallback_context_limit: 200_000,
         reaches: zai_reaches,
         build: zai_provider,
@@ -207,34 +202,21 @@ fn openai_provider(
     )))
 }
 
-fn zai_openai_flavor(settings: &ProviderConfigResolved) -> bool {
-    settings.flavor.as_deref() == Some("openai")
-}
-
+/// The only z.ai route is the coding-plan endpoint, so a model the plan
+/// does not carry is not reachable however the key is configured.
 fn zai_reaches(settings: &ProviderConfigResolved, access: crate::model::ModelAccess) -> bool {
     use crate::model::ModelAccess;
     settings.api_key.is_some()
-        && match access {
-            ModelAccess::Zai => !zai_openai_flavor(settings),
-            ModelAccess::ZaiCodingPlan => zai_openai_flavor(settings),
-            ModelAccess::ZaiBoth => true,
-            _ => false,
-        }
+        && matches!(access, ModelAccess::ZaiCodingPlan | ModelAccess::ZaiBoth)
 }
 
 fn zai_provider(
     _config: &Config,
     settings: &ProviderConfigResolved,
 ) -> Option<Box<dyn crate::provider::Provider>> {
-    use crate::provider::zai::Flavor;
     Some(Box::new(crate::provider::zai::ZaiProvider::new(
         settings.api_key.clone()?,
         settings.base_url.clone(),
-        if zai_openai_flavor(settings) {
-            Flavor::OpenAI
-        } else {
-            Flavor::Anthropic
-        },
     )))
 }
 
@@ -262,7 +244,6 @@ pub struct GeneralConfigResolved {
 pub struct ProviderConfigResolved {
     pub base_url: Option<String>,
     pub api_key: Option<String>,
-    pub flavor: Option<String>,
     pub auth: Option<String>,
 }
 
@@ -508,7 +489,6 @@ impl Config {
             ProviderConfigResolved {
                 base_url: None,
                 api_key: Some("test-openai-key".into()),
-                flavor: None,
                 auth: None,
             },
         );
@@ -517,7 +497,6 @@ impl Config {
             ProviderConfigResolved {
                 base_url: None,
                 api_key: Some("test-zai-key".into()),
-                flavor: None,
                 auth: None,
             },
         );
@@ -553,32 +532,14 @@ impl crate::provider::ProviderResolver for Config {
 
     fn input_limit(&self, model: &str) -> Option<u64> {
         crate::model::find(model)
-            .map(|model| {
-                let zai_anthropic = model.provider == "zai"
-                    && self
-                        .providers
-                        .get("zai")
-                        .is_some_and(|provider| provider.flavor.as_deref() != Some("openai"));
-                if zai_anthropic {
-                    // The flavor reserves its own output headroom on the
-                    // wire, so subtract the very same number here; never
-                    // above the model's declared input cap.
-                    let reserved = crate::provider::zai::max_output_tokens(&model.full_id());
-                    model
-                        .input_limit
-                        .min(model.context_limit.saturating_sub(reserved))
-                } else {
-                    model.input_limit
-                }
-            })
+            .map(|model| model.input_limit)
             .or_else(|| fallback_context_limit(model, PROVIDERS))
     }
 
     fn compaction_limit(&self, model: &str) -> Option<u64> {
         crate::model::find(model)
             .map(crate::model::compaction_limit)
-            // Never exceed a provider-specific input cap (the z.ai
-            // Anthropic flavour reserves its own output headroom).
+            // Never exceed the model's own input cap.
             .zip(self.input_limit(model))
             .map(|(compaction, input)| compaction.min(input))
             .or_else(|| fallback_context_limit(model, PROVIDERS))
@@ -607,7 +568,6 @@ fn resolve_providers(
                     base_url: field(|config| config.base_url.clone()),
                     api_key: field(|config| config.api_key.clone())
                         .or_else(|| env.env_lookup(kind.api_key_env)),
-                    flavor: field(|config| config.flavor.clone()),
                     auth: field(|config| config.auth.clone()),
                 },
             )
@@ -681,7 +641,6 @@ fn merge_file(base: FileConfig, text: &str, origin: &Path) -> anyhow::Result<Fil
                 provider,
                 base_url,
                 api_key,
-                flavor,
                 auth,
             );
         }
@@ -855,13 +814,6 @@ fn validate_providers(
             anyhow::bail!("{}: unsupported provider {name:?}", origin.display());
         };
         validate_provider_value(origin, kind.name, "auth", &provider.auth, kind.auth_values)?;
-        validate_provider_value(
-            origin,
-            kind.name,
-            "flavor",
-            &provider.flavor,
-            kind.flavor_values,
-        )?;
     }
     Ok(())
 }
@@ -964,7 +916,6 @@ mod tests {
         name: "acme",
         api_key_env: "ILAR_ACME_API_KEY",
         auth_values: &["api_key"],
-        flavor_values: &[],
         fallback_context_limit: 64_000,
         reaches: |settings, _| settings.api_key.is_some(),
         build: |_, _| None,
@@ -1021,19 +972,6 @@ mod tests {
                 .to_string(),
             "ilar.toml: providers.acme.auth must be `api_key`"
         );
-        let bad_flavor = provider_section([(
-            "acme",
-            ProviderConfig {
-                flavor: Some("fast".into()),
-                ..ProviderConfig::default()
-            },
-        )]);
-        assert_eq!(
-            validate_providers(&bad_flavor, origin, &kinds)
-                .unwrap_err()
-                .to_string(),
-            "ilar.toml: providers.acme.flavor is not supported"
-        );
         // Still unknown while the row is absent from the table.
         assert_eq!(
             validate_providers(&good, origin, PROVIDERS)
@@ -1048,7 +986,6 @@ mod tests {
         let keyed = |name: &str| ProviderConfigResolved {
             base_url: None,
             api_key: Some(format!("{name}-key")),
-            flavor: None,
             auth: None,
         };
         let providers: HashMap<String, ProviderConfigResolved> = ["openai", "zai"]
