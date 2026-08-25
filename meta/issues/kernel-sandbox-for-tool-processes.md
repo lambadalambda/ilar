@@ -68,6 +68,31 @@ that matters. Mechanisms, all required:
   strict (no baked allowlist, read shielding, every escalation
   asks).
 
+## Reference baseline
+
+The user's real, evolved safehouse invocation (2026-08-25) — the
+policy to match or beat with fewer and narrower grants:
+
+`safe-agent --browser --ssh --ro ~/Downloads/ --enable xcode
+--keychain --rw ~/Documents --rw ~/repos --ro ~/ --podman
+--rw ~/Library/ --rw ~/.local/state/ --rw ~/.config/ilar
+--agent-browser ilar`
+
+Readings: (a) `--rw ~/Library/` is a forced over-grant — macOS
+toolchains write there (DerivedData, caches), and static
+granularity made all-of-Library the only workable scope; observe
+mode should identify the actual subpaths so the rest of Library —
+where the "whoops" damage lives — stays protected. (b) the
+`~/.local/state` and `~/.config/ilar` grants exist only because an
+external wrapper covers the whole tree; under asymmetric
+confinement children never need them — they disappear. (c) half
+the flags are capabilities, not paths (ssh, keychain, xcode,
+podman, browser) — these become named toolchain profiles that
+project inference enables (an .xcodeproj turns on the xcode
+profile unprompted). Shape of the evolved default: RO-broad home,
+RW islands for work areas, capability profiles, nothing granted to
+children that only the host process needs.
+
 ## Requirements
 
 - A probing design pass first (like the image feature): verify
