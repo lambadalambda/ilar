@@ -2,6 +2,7 @@
 
 mod error_body;
 mod event;
+mod mapper;
 mod mock;
 mod request;
 mod sse;

@@ -571,6 +571,55 @@ async fn incomplete_refusal_remains_token_truncation() {
     );
 }
 
+/// A refusal and a tool call cannot both be what the turn did — and
+/// truncation does not excuse the combination, which is the one case where
+/// the refusal signal is not the stop reason. Both terminal events have to
+/// enforce it, and neither may leak the completions it built first.
+#[tokio::test]
+async fn a_refusal_combined_with_tool_calls_is_terminal() {
+    let truncated = concat!(
+        "data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"read\"}}\n\n",
+        "data: {\"type\":\"response.refusal.delta\",\"delta\":\"I cannot\"}\n\n",
+        "data: {\"type\":\"response.incomplete\",\"response\":{\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"usage\":{}}}\n\n",
+    );
+    // The same combination on a *finished* response, where the call was
+    // completed normally.
+    let completed = concat!(
+        "data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"read\"}}\n\n",
+        "data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_1\",\"arguments\":\"{}\"}\n\n",
+        "data: {\"type\":\"response.refusal.delta\",\"delta\":\"I cannot\"}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{}}}\n\n",
+    );
+    for body in [truncated, completed] {
+        let events = drain(
+            provider(http_server(body.as_bytes().to_vec()).0)
+                .stream(request_with_tool())
+                .unwrap(),
+        )
+        .await;
+
+        assert!(
+            matches!(events.last(), Some(ProviderEvent::Error(error))
+                if error.contains("combined refusal and tool calls")),
+            "{events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ProviderEvent::TurnComplete { .. }))
+        );
+        // The mapper builds the truncation completions before it validates
+        // the stop reason; rejecting the turn must discard them.
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                ProviderEvent::ToolCallCompleted { input, .. } if input.is_null()
+            )),
+            "{events:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn terminal_event_stops_pump_before_trailing_payloads() {
     let body = concat!(

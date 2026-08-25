@@ -605,6 +605,175 @@ async fn anthropic_stop_reason_must_match_tool_calls() {
     );
 }
 
+/// A refusal and a tool call cannot both be what the turn did. The rule
+/// used to live only in the OpenAI Responses mapper; it is now part of the
+/// shared mapper core, so both z.ai flavors enforce it too.
+#[tokio::test]
+async fn a_refusal_combined_with_tool_calls_is_terminal_on_both_zai_flavors() {
+    let anthropic = concat!(
+        "data: {\"type\":\"message_start\",\"message\":{\"usage\":{}}}\n\n",
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tool_1\",\"name\":\"read\"}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{}\"}}\n\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"refusal\"},\"usage\":{}}\n\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    );
+    let events = drain(
+        anthropic_provider(http_server(anthropic.as_bytes().to_vec()).0)
+            .stream(request())
+            .unwrap(),
+    )
+    .await;
+    assert!(
+        matches!(events.last(), Some(ProviderEvent::Error(error))
+            if error.contains("combined refusal and tool calls")),
+        "{events:?}"
+    );
+    assert_no_dangling_completion(&events);
+
+    let openai = concat!(
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"read\",\"arguments\":\"{}\"}}]},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"content_filter\"}],\"usage\":{}}\n\n",
+    );
+    let provider = ZaiProvider::new(
+        "k".into(),
+        Some(http_server(openai.as_bytes().to_vec()).0),
+        Flavor::OpenAI,
+    );
+    let events = drain(provider.stream(request()).unwrap()).await;
+    assert!(
+        matches!(events.last(), Some(ProviderEvent::Error(error))
+            if error.contains("combined refusal and tool calls")),
+        "{events:?}"
+    );
+    assert_no_dangling_completion(&events);
+}
+
+/// A rejected turn must not leak the null-input completions the mapper
+/// builds before it validates the stop reason.
+fn assert_no_dangling_completion(events: &[ProviderEvent]) {
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, ProviderEvent::TurnComplete { .. })),
+        "{events:?}"
+    );
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            ProviderEvent::ToolCallCompleted { input, .. } if input.is_null()
+        )),
+        "{events:?}"
+    );
+}
+
+/// The rule is about the *combination*: a refusal on its own is a normal,
+/// completed turn on both flavors.
+#[tokio::test]
+async fn a_refusal_without_tool_calls_completes_the_turn() {
+    let anthropic = concat!(
+        "data: {\"type\":\"message_start\",\"message\":{\"usage\":{}}}\n\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"refusal\"},\"usage\":{}}\n\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    );
+    let events = drain(
+        anthropic_provider(http_server(anthropic.as_bytes().to_vec()).0)
+            .stream(request())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        events.last().and_then(ProviderEvent::stop_reason),
+        Some(StopReason::Refusal),
+        "{events:?}"
+    );
+
+    let openai = "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"content_filter\"}],\"usage\":{}}\n\n";
+    let provider = ZaiProvider::new(
+        "k".into(),
+        Some(http_server(openai.as_bytes().to_vec()).0),
+        Flavor::OpenAI,
+    );
+    let events = drain(provider.stream(request()).unwrap()).await;
+    assert_eq!(
+        events.last().and_then(ProviderEvent::stop_reason),
+        Some(StopReason::Refusal),
+        "{events:?}"
+    );
+}
+
+/// Truncated calls are completed in *wire* order, which chat-completions
+/// states as the tool-call index — not the order the chunks announced them
+/// in. A server that interleaves two calls announces whichever emits a
+/// name first.
+#[tokio::test]
+async fn truncated_openai_compatible_calls_complete_in_tool_index_order() {
+    let body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call_b\",\"function\":{\"name\":\"edit\",\"arguments\":\"{\\\"path\\\"\"}}]},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_a\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\"\"}}]},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}],\"usage\":{}}\n\n",
+    );
+    let provider = ZaiProvider::new(
+        "k".into(),
+        Some(http_server(body.as_bytes().to_vec()).0),
+        Flavor::OpenAI,
+    );
+    let events = drain(provider.stream(request()).unwrap()).await;
+
+    // Announced 1 then 0 …
+    let started = events
+        .iter()
+        .filter_map(|event| match event {
+            ProviderEvent::ToolCallStarted { id, .. } => Some(id.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(started, vec!["call_b", "call_a"], "{events:?}");
+    // … completed 0 then 1, both null-input per the truncation contract.
+    let completed = events
+        .iter()
+        .filter_map(|event| match event {
+            ProviderEvent::ToolCallCompleted { id, input, .. } => {
+                Some((id.as_str(), input.is_null()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(completed, vec![("call_a", true), ("call_b", true)]);
+    assert_eq!(
+        events.last().and_then(ProviderEvent::stop_reason),
+        Some(StopReason::MaxTokens)
+    );
+}
+
+/// Cache *writes* were only ever read by the OpenAI mapper. With one
+/// usage normalizer they are read here too: without them a z.ai request
+/// that wrote a prefix looked like it wrote nothing, and the written
+/// tokens stayed folded into the plain input count.
+#[tokio::test]
+async fn openai_flavor_usage_reports_cache_writes() {
+    let body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":2600,\"completion_tokens\":50,\"prompt_tokens_details\":{\"cached_tokens\":2000,\"cache_write_tokens\":400}}}\n\n",
+    );
+    let provider = ZaiProvider::new(
+        "k".into(),
+        Some(http_server(body.as_bytes().to_vec()).0),
+        Flavor::OpenAI,
+    );
+    let events = drain(provider.stream(request()).unwrap()).await;
+
+    let Some(ProviderEvent::TurnComplete { usage, .. }) = events.last() else {
+        panic!("expected TurnComplete, got {events:?}");
+    };
+    assert_eq!(usage.cache_read_input_tokens, 2_000);
+    assert_eq!(usage.cache_creation_input_tokens, 400);
+    // Reads and writes are both carved out of the reported prompt total.
+    assert_eq!(usage.input_tokens, 200);
+    assert_eq!(usage.output_tokens, 50);
+    assert_eq!(usage.context_tokens(), 2_650);
+}
+
 #[tokio::test]
 async fn anthropic_content_after_stop_reason_is_terminal() {
     let body = concat!(

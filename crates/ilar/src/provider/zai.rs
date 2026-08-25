@@ -1,13 +1,14 @@
 //! z.ai GLM provider: Anthropic-compatible (`/v1/messages`) and
 //! OpenAI-compatible (`/chat/completions`) flavors.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use super::event::{ProviderEvent, StopReason};
+use super::mapper::{MapperCore, MapperLabels, merge_usage, required_str};
 use super::request::{Request, ToolDefinition, merge_options, resolve_model};
 use super::transport::{self, EventMapper as TransportEventMapper, TransportResponse};
 use super::{EventStream, Provider};
-use crate::session::{ChatMessage, ContentBlock, InputTokenAccounting, Role, Usage};
+use crate::session::{ChatMessage, ContentBlock, Role, Usage};
 
 /// Output budget for models the catalog does not know. Conservative on
 /// purpose: an unknown model's real ceiling could be anything, and asking
@@ -245,9 +246,9 @@ fn anthropic_message(msg: &ChatMessage, vision: bool) -> anyhow::Result<Option<s
                 .filter(|block_type| !block_type.is_empty())
                 .ok_or_else(|| anyhow::anyhow!("invalid block in z.ai Anthropic replay"))?;
             if block_type == "tool_use" {
-                let id = required_zai_str(block, "id", "replayed Anthropic tool id")
+                let id = required_str(block, "id", "replayed Anthropic tool id")
                     .map_err(anyhow::Error::msg)?;
-                let name = required_zai_str(block, "name", "replayed Anthropic tool name")
+                let name = required_str(block, "name", "replayed Anthropic tool name")
                     .map_err(anyhow::Error::msg)?;
                 let input = block
                     .get("input")
@@ -493,8 +494,8 @@ impl Provider for ZaiProvider {
             })
         };
         let mapper = match flavor {
-            Flavor::Anthropic => PumpMapper::Anthropic(AnthropicMapper::default()),
-            Flavor::OpenAI => PumpMapper::OpenAI(OpenAiMapper::default()),
+            Flavor::Anthropic => PumpMapper::Anthropic(AnthropicMapper::new()),
+            Flavor::OpenAI => PumpMapper::OpenAI(OpenAiMapper::new()),
         };
         Ok(transport::stream(send, mapper))
     }
@@ -522,43 +523,55 @@ impl TransportEventMapper for PumpMapper {
 }
 
 /// Anthropic /v1/messages event mapping.
-#[derive(Default)]
 struct AnthropicMapper {
+    /// Terminal state and the tool-call ledger, keyed by the content-block
+    /// index the wire addresses deltas by.
+    core: MapperCore,
     /// content-block index -> block state.
     blocks: HashMap<usize, Block>,
     usage: Usage,
     stop_reason: Option<StopReason>,
-    tool_ids: HashSet<String>,
     wire_blocks: HashMap<usize, serde_json::Value>,
-    completed: bool,
 }
 
 enum Block {
     Text,
-    Thinking {
-        signature: Option<String>,
-    },
-    ToolUse {
-        id: String,
-        name: String,
-        args: String,
-    },
-    ServerToolUse {
-        args: String,
-    },
+    Thinking { signature: Option<String> },
+    /// A client tool call; identity lives in the ledger.
+    ToolUse { args: String },
+    ServerToolUse { args: String },
     Raw,
 }
 
 const MAX_TOOL_ARGUMENT_BYTES: usize = 1024 * 1024;
 
+/// The ledger key for a wire index: the Anthropic flavor addresses tool
+/// calls by content-block index, the chat-completions flavor by tool-call
+/// index, and both are also the order truncation completes them in.
+fn block_key(index: usize) -> String {
+    index.to_string()
+}
+
 impl AnthropicMapper {
-    fn map(&mut self, data: &str) -> Result<Vec<ProviderEvent>, String> {
-        if self.completed {
-            return Err("Anthropic event arrived after message_stop".into());
+    fn new() -> Self {
+        Self {
+            core: MapperCore::new(MapperLabels {
+                flavor: "Anthropic",
+                terminal: "message_stop",
+                expected: "message_stop",
+            }),
+            blocks: HashMap::new(),
+            usage: Usage::default(),
+            stop_reason: None,
+            wire_blocks: HashMap::new(),
         }
+    }
+
+    fn map(&mut self, data: &str) -> Result<Vec<ProviderEvent>, String> {
+        self.core.guard_open()?;
         let value = serde_json::from_str::<serde_json::Value>(data)
             .map_err(|error| format!("invalid Anthropic event JSON: {error}"))?;
-        let kind = required_zai_str(&value, "type", "Anthropic event type")?;
+        let kind = required_str(&value, "type", "Anthropic event type")?;
         if self.stop_reason.is_some()
             && matches!(
                 kind,
@@ -571,9 +584,7 @@ impl AnthropicMapper {
             "message_start" => {
                 // The cache fields ride on message_start; message_delta
                 // usually reports output tokens only, or nothing at all.
-                let empty = serde_json::Map::new();
-                let usage = value["message"]["usage"].as_object().unwrap_or(&empty);
-                merge_usage(&mut self.usage, usage);
+                merge_usage(&mut self.usage, &value["message"]["usage"]);
                 Vec::new()
             }
             "content_block_start" => {
@@ -582,21 +593,22 @@ impl AnthropicMapper {
                     return Err(format!("duplicate Anthropic content block index {index}"));
                 }
                 let block = &value["content_block"];
-                let block_type = required_zai_str(block, "type", "Anthropic content block type")?;
+                let block_type = required_str(block, "type", "Anthropic content block type")?;
                 self.wire_blocks.insert(index, block.clone());
                 match block_type {
                     "tool_use" => {
-                        let id = required_zai_str(block, "id", "Anthropic tool id")?.to_string();
-                        let name =
-                            required_zai_str(block, "name", "Anthropic tool name")?.to_string();
-                        if !self.tool_ids.insert(id.clone()) {
+                        let id = required_str(block, "id", "Anthropic tool id")?.to_string();
+                        let name = required_str(block, "name", "Anthropic tool name")?.to_string();
+                        if self.core.has_id(&id) {
                             return Err(format!("duplicate Anthropic tool id {id:?}"));
                         }
+                        // Content blocks are addressed by index, and that
+                        // index is the order truncation completes them in.
+                        self.core
+                            .start(block_key(index), index, id.clone(), name.clone());
                         self.blocks.insert(
                             index,
                             Block::ToolUse {
-                                id: id.clone(),
-                                name: name.clone(),
                                 args: String::new(),
                             },
                         );
@@ -616,8 +628,8 @@ impl AnthropicMapper {
                         Vec::new()
                     }
                     "server_tool_use" | "mcp_tool_use" => {
-                        required_zai_str(block, "id", "Anthropic server tool id")?;
-                        required_zai_str(block, "name", "Anthropic server tool name")?;
+                        required_str(block, "id", "Anthropic server tool id")?;
+                        required_str(block, "name", "Anthropic server tool name")?;
                         self.blocks.insert(
                             index,
                             Block::ServerToolUse {
@@ -635,12 +647,12 @@ impl AnthropicMapper {
             "content_block_delta" => {
                 let index = required_index(&value)?;
                 let delta = &value["delta"];
-                match required_zai_str(delta, "type", "Anthropic delta type")? {
+                match required_str(delta, "type", "Anthropic delta type")? {
                     "text_delta" => {
                         if !matches!(self.blocks.get(&index), Some(Block::Text)) {
                             return Err(format!("text delta references non-text block {index}"));
                         }
-                        let text = required_zai_str(delta, "text", "Anthropic text delta")?;
+                        let text = required_str(delta, "text", "Anthropic text delta")?;
                         append_wire_string(&mut self.wire_blocks, index, "text", text)?;
                         vec![ProviderEvent::TextDelta(text.into())]
                     }
@@ -651,13 +663,13 @@ impl AnthropicMapper {
                             ));
                         }
                         let thinking =
-                            required_zai_str(delta, "thinking", "Anthropic thinking delta")?;
+                            required_str(delta, "thinking", "Anthropic thinking delta")?;
                         append_wire_string(&mut self.wire_blocks, index, "thinking", thinking)?;
                         vec![ProviderEvent::ThinkingDelta(thinking.into())]
                     }
                     "signature_delta" => {
                         let signature_delta =
-                            required_zai_str(delta, "signature", "Anthropic signature delta")?;
+                            required_str(delta, "signature", "Anthropic signature delta")?;
                         let Some(Block::Thinking { signature, .. }) = self.blocks.get_mut(&index)
                         else {
                             return Err(format!(
@@ -680,9 +692,9 @@ impl AnthropicMapper {
                             .get("partial_json")
                             .and_then(serde_json::Value::as_str)
                             .ok_or_else(|| "missing Anthropic argument delta".to_string())?;
-                        let (id, args) = match self.blocks.get_mut(&index) {
-                            Some(Block::ToolUse { id, args, .. }) => (Some(id.clone()), args),
-                            Some(Block::ServerToolUse { args }) => (None, args),
+                        let id = self.core.call(&block_key(index)).map(|call| call.id.clone());
+                        let args = match self.blocks.get_mut(&index) {
+                            Some(Block::ToolUse { args } | Block::ServerToolUse { args }) => args,
                             _ => {
                                 return Err(format!(
                                     "argument delta references non-tool block {index}"
@@ -735,12 +747,17 @@ impl AnthropicMapper {
                     Some(Block::Thinking { signature, .. }) => {
                         vec![ProviderEvent::ThinkingCompleted { signature }]
                     }
-                    Some(Block::ToolUse { id, name, args }) => {
-                        let input = finish_wire_tool_input(&mut self.wire_blocks, index, &args)?;
+                    Some(Block::ToolUse { args }) => {
+                        let input =
+                            finish_wire_tool_input(&self.core, &mut self.wire_blocks, index, &args)?;
+                        let (id, name) = self
+                            .core
+                            .complete_call(&block_key(index))
+                            .ok_or_else(|| format!("unknown Anthropic tool block {index}"))?;
                         vec![ProviderEvent::ToolCallCompleted { id, name, input }]
                     }
                     Some(Block::ServerToolUse { args }) => {
-                        finish_wire_tool_input(&mut self.wire_blocks, index, &args)?;
+                        finish_wire_tool_input(&self.core, &mut self.wire_blocks, index, &args)?;
                         Vec::new()
                     }
                     Some(Block::Text | Block::Raw) => Vec::new(),
@@ -761,50 +778,27 @@ impl AnthropicMapper {
                         _ => return Err(format!("unknown Anthropic stop reason {stop:?}")),
                     });
                 }
-                if let Some(usage) = value["usage"].as_object() {
-                    merge_usage(&mut self.usage, usage);
+                if value["usage"].is_object() {
+                    merge_usage(&mut self.usage, &value["usage"]);
                 }
                 Vec::new()
             }
             "message_stop" => {
-                self.completed = true;
+                self.core.complete();
                 let mut events = Vec::new();
                 let stop_reason = self
                     .stop_reason
                     .clone()
                     .ok_or_else(|| "Anthropic message_stop missing stop reason".to_string())?;
-                let truncated = self.stop_reason == Some(StopReason::MaxTokens);
+                let truncated = stop_reason == StopReason::MaxTokens;
                 if truncated {
-                    // Synthesize completions for any pending calls,
-                    // in content-block order.
-                    let blocks = std::mem::take(&mut self.blocks);
-                    let mut ordered: Vec<_> = blocks.into_iter().collect();
-                    ordered.sort_by_key(|(i, _)| *i);
-                    for (_, block) in ordered {
-                        if let Block::ToolUse { id, name, .. } = block {
-                            events.push(ProviderEvent::ToolCallCompleted {
-                                id,
-                                name,
-                                input: serde_json::Value::Null,
-                            });
-                        }
-                    }
+                    self.blocks.clear();
+                    events.extend(self.core.truncated_completions());
                 } else if !self.blocks.is_empty() {
                     return Err("Anthropic message stopped with unfinished content blocks".into());
                 }
-                match &stop_reason {
-                    StopReason::ToolUse if self.tool_ids.is_empty() => {
-                        return Err("Anthropic tool_use stop has no tool calls".into());
-                    }
-                    StopReason::EndTurn | StopReason::Refusal | StopReason::Paused
-                        if !self.tool_ids.is_empty() =>
-                    {
-                        return Err(format!(
-                            "Anthropic {stop_reason:?} stop contradicts tool calls"
-                        ));
-                    }
-                    _ => {}
-                }
+                self.core
+                    .validate_stop(&stop_reason, stop_reason == StopReason::Refusal)?;
                 if !truncated {
                     let mut blocks: Vec<_> = self.wire_blocks.iter().collect();
                     blocks.sort_by_key(|(index, _)| **index);
@@ -822,7 +816,7 @@ impl AnthropicMapper {
                 events
             }
             "error" => {
-                self.completed = true;
+                self.core.complete();
                 vec![super::error_body::stream_error_event(&value)]
             }
             _ => Vec::new(),
@@ -831,13 +825,7 @@ impl AnthropicMapper {
     }
 
     fn finish(&mut self) -> Option<ProviderEvent> {
-        if self.completed {
-            None
-        } else {
-            Some(ProviderEvent::RetryableError(
-                "stream ended before message_stop".into(),
-            ))
-        }
+        self.core.finish()
     }
 }
 
@@ -861,6 +849,7 @@ fn append_wire_string(
 }
 
 fn finish_wire_tool_input(
+    core: &MapperCore,
     blocks: &mut HashMap<usize, serde_json::Value>,
     index: usize,
     arguments: &str,
@@ -869,32 +858,15 @@ fn finish_wire_tool_input(
         .get_mut(&index)
         .and_then(serde_json::Value::as_object_mut)
         .ok_or_else(|| format!("Anthropic tool block {index} is missing"))?;
+    // No argument deltas at all: the start block may have carried the
+    // whole input inline.
     let input = if arguments.is_empty() {
-        block
-            .get("input")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null)
+        core.require_object_input(block.get("input").cloned().unwrap_or(serde_json::Value::Null))?
     } else {
-        serde_json::from_str(arguments)
-            .map_err(|error| format!("invalid Anthropic tool arguments: {error}"))?
+        core.parse_tool_input(arguments)?
     };
-    if !input.is_object() {
-        return Err("Anthropic tool arguments must be a JSON object".into());
-    }
     block.insert("input".into(), input.clone());
     Ok(input)
-}
-
-fn required_zai_str<'a>(
-    value: &'a serde_json::Value,
-    key: &str,
-    label: &str,
-) -> Result<&'a str, String> {
-    value
-        .get(key)
-        .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| format!("missing or empty {label}"))
 }
 
 fn required_index(value: &serde_json::Value) -> Result<usize, String> {
@@ -906,20 +878,37 @@ fn required_index(value: &serde_json::Value) -> Result<usize, String> {
 }
 
 /// OpenAI chat-completions event mapping (z.ai paas v4 flavor).
-#[derive(Default)]
 struct OpenAiMapper {
+    /// Terminal state and the tool-call ledger, keyed by the tool-call
+    /// index the wire addresses deltas by.
+    core: MapperCore,
     usage: Usage,
     stop_reason: Option<StopReason>,
-    /// tool-call index -> (id, name, args buffer).
-    calls: HashMap<usize, (String, String, String)>,
+    /// ledger key -> (id, args buffer). Chat-completions dribbles a
+    /// call's identity in over several chunks, so an index is staged here
+    /// until its name arrives and the call enters the ledger.
+    calls: HashMap<String, (String, String)>,
     /// Reasoning deltas seen since the last block boundary; chat-completions
     /// has no explicit boundary, so reasoning "completes" when content or a
     /// tool call arrives.
     thinking_open: bool,
-    completed: bool,
 }
 
 impl OpenAiMapper {
+    fn new() -> Self {
+        Self {
+            core: MapperCore::new(MapperLabels {
+                flavor: "OpenAI-compatible",
+                terminal: "completion",
+                expected: "finish_reason",
+            }),
+            usage: Usage::default(),
+            stop_reason: None,
+            calls: HashMap::new(),
+            thinking_open: false,
+        }
+    }
+
     /// Close an open reasoning run (chat-completions has no explicit
     /// boundary; reasoning ends when content/tool calls/finish arrive).
     fn close_thinking(&mut self, events: &mut Vec<ProviderEvent>) {
@@ -931,22 +920,20 @@ impl OpenAiMapper {
 
     fn map(&mut self, data: &str) -> Result<Vec<ProviderEvent>, String> {
         if data == "[DONE]" {
-            if self.completed {
+            if self.core.is_completed() {
                 return Ok(Vec::new());
             }
             let stop_reason = self
                 .stop_reason
                 .clone()
                 .ok_or_else(|| "OpenAI-compatible stream ended before finish_reason".to_string())?;
-            self.completed = true;
+            self.core.complete();
             return Ok(vec![ProviderEvent::TurnComplete {
                 stop_reason,
                 usage: self.usage,
             }]);
         }
-        if self.completed {
-            return Err("OpenAI-compatible event arrived after completion".into());
-        }
+        self.core.guard_open()?;
         let value = serde_json::from_str::<serde_json::Value>(data)
             .map_err(|error| format!("invalid OpenAI-compatible event JSON: {error}"))?;
         let mut events = Vec::new();
@@ -986,19 +973,18 @@ impl OpenAiMapper {
                         .as_u64()
                         .ok_or_else(|| "missing OpenAI-compatible tool index".to_string())?
                         as usize;
+                    let key = block_key(index);
                     let function = &call["function"];
                     let incoming_id = call["id"].as_str().filter(|id| !id.is_empty());
                     if let Some(id) = incoming_id
-                        && self.calls.iter().any(|(other_index, (other_id, _, _))| {
-                            *other_index != index && other_id == id
-                        })
+                        && self
+                            .calls
+                            .iter()
+                            .any(|(other, (other_id, _))| other != &key && other_id == id)
                     {
                         return Err(format!("duplicate OpenAI-compatible tool id {id:?}"));
                     }
-                    let entry = self
-                        .calls
-                        .entry(index)
-                        .or_insert_with(|| (String::new(), String::new(), String::new()));
+                    let entry = self.calls.entry(key.clone()).or_default();
                     if let Some(id) = incoming_id {
                         if !entry.0.is_empty() && entry.0 != id {
                             return Err(format!("OpenAI-compatible tool index {index} changed id"));
@@ -1010,21 +996,28 @@ impl OpenAiMapper {
                     if let Some(name) = function["name"].as_str()
                         && !name.is_empty()
                     {
-                        if !entry.1.is_empty() && entry.1 != name {
-                            return Err(format!(
-                                "OpenAI-compatible tool index {index} changed name"
-                            ));
-                        }
-                        if entry.1.is_empty() {
-                            if entry.0.is_empty() {
-                                return Err("OpenAI-compatible tool name arrived before id".into());
+                        match self.core.call(&key) {
+                            Some(started) if started.name != name => {
+                                return Err(format!(
+                                    "OpenAI-compatible tool index {index} changed name"
+                                ));
                             }
-                            entry.1 = name.into();
-                            events.push(ProviderEvent::ToolCallStarted {
-                                id: entry.0.clone(),
-                                name: name.into(),
-                                item_id: None,
-                            });
+                            Some(_) => {}
+                            None => {
+                                if entry.0.is_empty() {
+                                    return Err(
+                                        "OpenAI-compatible tool name arrived before id".into()
+                                    );
+                                }
+                                // The wire index is the order truncation
+                                // completes the calls in.
+                                self.core.start(key.clone(), index, entry.0.clone(), name);
+                                events.push(ProviderEvent::ToolCallStarted {
+                                    id: entry.0.clone(),
+                                    name: name.into(),
+                                    item_id: None,
+                                });
+                            }
                         }
                     }
                     if function.get("arguments").is_some() && !function["arguments"].is_string() {
@@ -1033,15 +1026,15 @@ impl OpenAiMapper {
                     if let Some(args) = function["arguments"].as_str()
                         && !args.is_empty()
                     {
-                        if entry.0.is_empty() || entry.1.is_empty() {
+                        if entry.0.is_empty() || self.core.call(&key).is_none() {
                             return Err(
                                 "OpenAI-compatible arguments arrived before tool start".into()
                             );
                         }
-                        if entry.2.len().saturating_add(args.len()) > MAX_TOOL_ARGUMENT_BYTES {
+                        if entry.1.len().saturating_add(args.len()) > MAX_TOOL_ARGUMENT_BYTES {
                             return Err("OpenAI-compatible tool arguments exceed size limit".into());
                         }
-                        entry.2.push_str(args);
+                        entry.1.push_str(args);
                         events.push(ProviderEvent::ToolCallInputDelta {
                             id: entry.0.clone(),
                             delta: args.into(),
@@ -1054,7 +1047,7 @@ impl OpenAiMapper {
                     return Err("duplicate OpenAI-compatible finish reason".into());
                 }
                 self.close_thinking(&mut events);
-                self.stop_reason = Some(match finish {
+                let stop_reason = match finish {
                     "stop" => StopReason::EndTurn,
                     "tool_calls" | "function_call" => StopReason::ToolUse,
                     "length" => StopReason::MaxTokens,
@@ -1064,62 +1057,58 @@ impl OpenAiMapper {
                             "unknown OpenAI-compatible finish reason {finish:?}"
                         ));
                     }
-                });
-                match self.stop_reason.as_ref() {
-                    Some(StopReason::ToolUse) if self.calls.is_empty() => {
-                        return Err("OpenAI-compatible tool finish has no tool calls".into());
-                    }
-                    Some(StopReason::EndTurn | StopReason::Refusal) if !self.calls.is_empty() => {
-                        return Err(format!(
-                            "OpenAI-compatible {finish:?} finish contradicts tool calls"
-                        ));
-                    }
-                    _ => {}
+                };
+                self.stop_reason = Some(stop_reason.clone());
+                self.core
+                    .validate_stop(&stop_reason, stop_reason == StopReason::Refusal)?;
+                // An index the wire staged but never named is not a call
+                // this mapper can complete.
+                if self
+                    .calls
+                    .iter()
+                    .any(|(key, (id, _))| id.is_empty() || !self.core.has_key(key))
+                {
+                    return Err("OpenAI-compatible tool call has empty id or name".into());
                 }
                 // Complete calls: parsed args when the model finished them,
                 // null-input synthesis when truncated mid-arguments (event
                 // contract: every Started call is Completed).
-                let calls = std::mem::take(&mut self.calls);
-                let mut ordered: Vec<_> = calls.into_iter().collect();
-                ordered.sort_by_key(|(i, _)| *i);
-                for (_, (id, name, args)) in ordered {
-                    if id.is_empty() || name.is_empty() {
-                        return Err("OpenAI-compatible tool call has empty id or name".into());
+                if stop_reason == StopReason::MaxTokens {
+                    events.extend(self.core.truncated_completions());
+                } else {
+                    for call in self.core.take_open() {
+                        let args = self
+                            .calls
+                            .get(&call.key)
+                            .map(|(_, args)| args.as_str())
+                            .unwrap_or_default();
+                        let input = self.core.parse_tool_input(args)?;
+                        events.push(ProviderEvent::ToolCallCompleted {
+                            id: call.id,
+                            name: call.name,
+                            input,
+                        });
                     }
-                    let input = if self.stop_reason == Some(StopReason::MaxTokens) {
-                        serde_json::Value::Null
-                    } else {
-                        let input: serde_json::Value =
-                            serde_json::from_str(&args).map_err(|error| {
-                                format!("invalid OpenAI-compatible tool arguments: {error}")
-                            })?;
-                        if !input.is_object() {
-                            return Err(
-                                "OpenAI-compatible tool arguments must be a JSON object".into()
-                            );
-                        }
-                        input
-                    };
-                    events.push(ProviderEvent::ToolCallCompleted { id, name, input });
                 }
+                self.calls.clear();
             }
         }
         // Mid-stream error payloads (chat-completions reports failures as
         // error chunks rather than terminating the HTTP response).
         if value["error"].is_object() {
-            self.completed = true;
+            self.core.complete();
             return Ok(vec![super::error_body::stream_error_event(&value)]);
         }
-        if let Some(usage) = value["usage"].as_object() {
-            merge_usage(&mut self.usage, usage);
+        if value["usage"].is_object() {
+            merge_usage(&mut self.usage, &value["usage"]);
             // Guard: some compat servers attach usage to every chunk;
             // TurnComplete must fire exactly once.
-            if !self.completed && self.stop_reason.is_some() {
+            if !self.core.is_completed() && self.stop_reason.is_some() {
                 events.push(ProviderEvent::TurnComplete {
                     stop_reason: self.stop_reason.clone().unwrap_or(StopReason::EndTurn),
                     usage: self.usage,
                 });
-                self.completed = true;
+                self.core.complete();
             }
         }
         if value.get("choices").is_none()
@@ -1132,49 +1121,16 @@ impl OpenAiMapper {
     }
 
     fn finish(&mut self) -> Option<ProviderEvent> {
-        if self.completed {
-            None
-        } else if self.stop_reason.is_some() {
-            // Stream ended after finish_reason but without a usage chunk.
-            Some(ProviderEvent::TurnComplete {
-                stop_reason: self.stop_reason.clone().unwrap(),
+        // Stream ended after finish_reason but without a usage chunk: the
+        // turn is complete, only its accounting is short.
+        if let Some(stop_reason) = self.stop_reason.clone().filter(|_| !self.core.is_completed()) {
+            self.core.complete();
+            return Some(ProviderEvent::TurnComplete {
+                stop_reason,
                 usage: self.usage,
-            })
-        } else {
-            Some(ProviderEvent::RetryableError(
-                "stream ended before finish_reason".into(),
-            ))
+            });
         }
-    }
-}
-
-fn merge_usage(usage: &mut Usage, wire: &serde_json::Map<String, serde_json::Value>) {
-    usage.input_token_accounting = Some(InputTokenAccounting::ExcludesCached);
-    let get = |k: &str| wire.get(k).and_then(|v| v.as_u64()).unwrap_or_default();
-    // OpenAI-style nested cached tokens (z.ai openai flavor).
-    let nested_cached = wire
-        .get("prompt_tokens_details")
-        .and_then(|d| d.get("cached_tokens"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or_default();
-    if nested_cached > 0 {
-        usage.cache_read_input_tokens = nested_cached;
-    }
-    let input = get("input_tokens").max(get("prompt_tokens"));
-    if input > 0 {
-        usage.input_tokens = input.saturating_sub(nested_cached);
-    }
-    let output = get("output_tokens").max(get("completion_tokens"));
-    if output > 0 {
-        usage.output_tokens = output;
-    }
-    let cache_read = get("cache_read_input_tokens");
-    if cache_read > 0 {
-        usage.cache_read_input_tokens = cache_read;
-    }
-    let cache_create = get("cache_creation_input_tokens");
-    if cache_create > 0 {
-        usage.cache_creation_input_tokens = cache_create;
+        self.core.finish()
     }
 }
 
@@ -1228,19 +1184,5 @@ mod tests {
         // And without vision, the named gap.
         let wire = anthropic_message(&image_message(), false).unwrap().unwrap();
         assert_eq!(wire["content"][1]["type"], "text");
-    }
-
-    #[test]
-    fn openai_flavor_cached_input_is_normalized_out_of_prompt_total() {
-        let mut usage = Usage::default();
-        let wire = serde_json::json!({
-            "prompt_tokens": 1_800,
-            "completion_tokens": 50,
-            "prompt_tokens_details": {"cached_tokens": 1_500}
-        });
-        merge_usage(&mut usage, wire.as_object().unwrap());
-        assert_eq!(usage.input_tokens, 300);
-        assert_eq!(usage.cache_read_input_tokens, 1_500);
-        assert_eq!(usage.context_tokens(), 1_850);
     }
 }
