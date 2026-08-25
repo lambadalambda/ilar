@@ -546,7 +546,13 @@ impl crate::provider::ProviderResolver for Config {
                         .get("zai")
                         .is_some_and(|provider| provider.flavor.as_deref() != Some("openai"));
                 if zai_anthropic {
-                    model.context_limit.saturating_sub(16_384)
+                    // The flavor reserves its own output headroom on the
+                    // wire, so subtract the very same number here; never
+                    // above the model's declared input cap.
+                    let reserved = crate::provider::zai::max_output_tokens(&model.full_id());
+                    model
+                        .input_limit
+                        .min(model.context_limit.saturating_sub(reserved))
                 } else {
                     model.input_limit
                 }

@@ -405,7 +405,7 @@ fn model_catalog_drives_context_limits() {
         assert_eq!(config.input_limit(&full_id), Some(272_000));
     }
     assert_eq!(config.context_limit("zai/glm-4.7"), Some(204_800));
-    assert_eq!(config.input_limit("zai/glm-4.7"), Some(188_416));
+    assert_eq!(config.input_limit("zai/glm-4.7"), Some(73_728));
     assert_eq!(config.context_limit("openai/not-in-catalog"), Some(128_000));
 }
 
@@ -421,6 +421,27 @@ fn configured_providers_expose_their_supported_models() {
     );
     assert!(models.iter().any(|model| model.full_id() == "zai/glm-4.7"));
     assert!(!models.iter().any(|model| model.full_id() == "zai/glm-5.3"));
+}
+
+#[test]
+fn zai_anthropic_input_limit_reserves_the_wire_max_tokens() {
+    // The Anthropic flavor puts the catalog output limit on the wire, so
+    // the input budget has to reserve exactly that much.
+    let config = Config::default_for_tests();
+    let reserved = ilar::provider::zai::max_output_tokens("zai/glm-4.7");
+    assert_eq!(reserved, 131_072);
+    assert_eq!(config.input_limit("zai/glm-4.7"), Some(204_800 - reserved));
+
+    // The OpenAI-compatible flavor sends no max_tokens and keeps the
+    // catalog's own input limit.
+    let (_g, dir) = tempdir();
+    write(
+        &dir.join("ilar.toml"),
+        "[providers.zai]\napi_key = \"zk\"\nflavor = \"openai\"\n",
+    );
+    let config = Loader::no_env().config_dir(dir).resolve().unwrap();
+    let model = ilar::model::find("zai/glm-4.7").unwrap();
+    assert_eq!(config.input_limit("zai/glm-4.7"), Some(model.input_limit));
 }
 
 #[test]

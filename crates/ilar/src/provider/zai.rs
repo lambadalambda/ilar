@@ -9,6 +9,18 @@ use super::transport::{self, EventMapper as TransportEventMapper, TransportRespo
 use super::{EventStream, Provider};
 use crate::session::{ChatMessage, ContentBlock, InputTokenAccounting, Role, Usage};
 
+/// Output budget for models the catalog does not know. Conservative on
+/// purpose: an unknown model's real ceiling could be anything, and asking
+/// for more than it allows fails the whole request.
+const FALLBACK_MAX_OUTPUT_TOKENS: u64 = 16_384;
+
+/// The output budget a z.ai request reserves, in tokens. Single source of
+/// truth for the Anthropic flavor's wire `max_tokens` and for the input
+/// budget that has to leave room for it (`Config::input_limit`).
+pub fn max_output_tokens(model: &str) -> u64 {
+    crate::model::find(model).map_or(FALLBACK_MAX_OUTPUT_TOKENS, |model| model.output_limit)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Flavor {
     #[default]
@@ -67,7 +79,12 @@ impl ZaiProvider {
                         }]),
                     );
                 }
-                body.insert("max_tokens".into(), serde_json::json!(16_384));
+                // Thinking counts against max_tokens on GLM, so anything
+                // short of the model's real ceiling truncates long turns.
+                body.insert(
+                    "max_tokens".into(),
+                    serde_json::json!(max_output_tokens(&req.model)),
+                );
                 // Messages: moving cache breakpoint on the last block of the
                 // last message (the canonical incremental-caching pattern —
                 // each turn's entry covers everything up to that turn's end).
@@ -168,7 +185,17 @@ impl ZaiProvider {
             }
         }
         let reserved: &[&str] = match self.flavor {
-            Flavor::Anthropic => &["model", "system", "messages", "tools", "stream"],
+            // max_tokens is derived from the catalog and mirrored by
+            // `Config::input_limit`; an override would move only one of
+            // the two, so it is refused rather than silently honoured.
+            Flavor::Anthropic => &[
+                "model",
+                "system",
+                "messages",
+                "tools",
+                "stream",
+                "max_tokens",
+            ],
             Flavor::OpenAI => &[
                 "model",
                 "messages",

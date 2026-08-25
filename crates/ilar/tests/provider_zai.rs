@@ -753,6 +753,23 @@ async fn wire_format_anthropic_flavor() {
     assert_eq!(messages[2]["content"][0]["tool_use_id"], "toolu_01");
 }
 
+#[test]
+fn anthropic_max_tokens_comes_from_the_catalog_output_limit() {
+    let provider = ZaiProvider::new("k".into(), None, Flavor::Anthropic);
+    let model = ilar::model::find("zai/glm-4.7").expect("cataloged model");
+    assert_eq!(model.output_limit, 131_072);
+    let body = provider.wire_body_for_test(&request());
+    assert_eq!(body["max_tokens"], model.output_limit);
+    assert_eq!(
+        ilar::provider::zai::max_output_tokens("zai/glm-4.7"),
+        model.output_limit
+    );
+
+    // Models outside the catalog keep the conservative floor.
+    let body = provider.wire_body_for_test(&Request::with_model("zai/glm-not-in-catalog"));
+    assert_eq!(body["max_tokens"], 16_384);
+}
+
 #[tokio::test]
 async fn openai_flavor_uses_chat_completions_endpoint() {
     let listener = futures::executor::block_on(async {
@@ -901,7 +918,9 @@ async fn reserved_options_are_rejected_before_zai_network_io() {
     for flavor in [Flavor::Anthropic, Flavor::OpenAI] {
         let provider = ZaiProvider::new("k".into(), Some("http://127.0.0.1:1".into()), flavor);
         let keys: &[&str] = match flavor {
-            Flavor::Anthropic => &["model", "messages", "tools", "stream"],
+            // max_tokens is derived from the catalog and mirrored by the
+            // input budget, so an override would desynchronize the two.
+            Flavor::Anthropic => &["model", "messages", "tools", "stream", "max_tokens"],
             Flavor::OpenAI => &[
                 "model",
                 "messages",
