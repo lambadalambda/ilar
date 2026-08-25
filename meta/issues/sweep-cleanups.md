@@ -42,6 +42,10 @@ verified, and safe to do opportunistically:
   (`start_tool_call` covers every announced id); abort/error paths
   publish no `StepComplete`, so live TUI totals and reloaded totals
   diverge by the recovered usage.
+- **Duplication (new)**: `tools/binary.rs` and `ilar::image` carry
+  the same four image magic-number checks (binary.rs returns display
+  names, image.rs media types) plus separate PNG IHDR readers —
+  derive one from the other so the tables cannot drift.
 - **Small bugs**: the questions modal's free-text draft has the
   same edge-arrow dead keys fixed in 3c28c6c
   (questions.rs:88-91 maps `Unhandled` to `Stay`); the F1 help

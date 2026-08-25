@@ -216,3 +216,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Reading binary files poisons the context](issues/reading-binary-files-poisons-the-context.md)
 - [x] [Tolerate arguments before the tool name](issues/tolerate-arguments-before-the-tool-name.md)
 - [x] [Task inputs survive model quirks](issues/task-inputs-survive-model-quirks.md)
+- [x] [Single-source the catalogs](issues/single-source-the-catalogs.md)

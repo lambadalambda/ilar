@@ -53,7 +53,6 @@ Refactors:
 - [ ] [Split app.rs](issues/split-app-rs.md)
 - [ ] [The render cache clones the world](issues/the-render-cache-clones-the-world.md)
 - [ ] [One truncation helper](issues/one-truncation-helper.md)
-- [ ] [Single-source the catalogs](issues/single-source-the-catalogs.md)
 - [ ] [Sweep cleanups](issues/sweep-cleanups.md)
 
 Follow-ups:
@@ -61,3 +60,4 @@ Follow-ups:
 - [ ] [Resume leads with this directory's last session](issues/resume-leads-with-this-directorys-last-session.md)
 - [ ] [Tool results can carry images](issues/tool-results-can-carry-images.md)
 - [ ] [The zai Anthropic flavor is blind on 4.6v/4.5v](issues/zai-anthropic-flavor-is-blind.md)
+- [ ] [Remove the zai Anthropic flavor](issues/remove-the-zai-anthropic-flavor.md)
