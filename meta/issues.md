@@ -51,6 +51,7 @@
 Refactors:
 
 - [ ] [Sweep cleanups](issues/sweep-cleanups.md)
+- [ ] [Skip the project instructions](issues/skip-the-project-instructions.md)
 
 Follow-ups:
 
