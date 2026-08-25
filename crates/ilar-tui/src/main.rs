@@ -455,8 +455,11 @@ fn apply_intent(
             None
         }
         Intent::PasteSearch(text) => {
-            app.search_query.push_str(text.trim());
-            app.search_refresh();
+            // Same single-line policy as the modal queries: control
+            // characters dropped, capped, and a no-growth paste is inert.
+            if modals::insert_query(&mut app.search_query, text.trim()) {
+                app.search_refresh();
+            }
             None
         }
         Intent::PasteQuestion(text) => {

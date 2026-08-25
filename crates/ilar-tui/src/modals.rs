@@ -198,11 +198,21 @@ fn edit_query(query: &mut String, code: KeyCode, control: bool) -> bool {
 /// grew, the same signal `edit_query` gives, so every caller's reset
 /// hooks stay in one shape: a paste of nothing but control characters
 /// must not move a selection or disarm anything.
-fn insert_query(query: &mut String, text: &str) -> bool {
+pub(crate) fn insert_query(query: &mut String, text: &str) -> bool {
     let before = query.len();
-    query.extend(text.chars().filter(|character| !character.is_control()));
+    let room = QUERY_CAP.saturating_sub(query.chars().count());
+    query.extend(
+        text.chars()
+            .filter(|character| !character.is_control())
+            .take(room),
+    );
     query.len() != before
 }
+
+/// Longest query a paste may grow: filters and search strings are a
+/// line at most, and the fuzzy scorer re-runs over every candidate per
+/// render — an unbounded clipboard would stall the draw loop.
+const QUERY_CAP: usize = 256;
 
 /// The overlay that owns the keyboard. Render and key dispatch both
 /// derive their precedence from `App::active_modal`, so adding a variant
@@ -2953,6 +2963,23 @@ mod tests {
         assert_eq!(search.insert_query("\n\t"), SessionSearchAction::Stay);
         assert_eq!(search.query, "auth");
         assert_eq!(search.rows.len(), 1);
+    }
+
+    /// The fuzzy scorer re-runs per render over every candidate, so a
+    /// multi-megabyte clipboard must not become the query.
+    #[test]
+    fn a_pasted_novel_is_capped_to_a_filter_sized_query() {
+        let mut link = LinkPicker::new(Vec::new());
+        link.insert_query(&"x".repeat(1_000_000));
+        assert_eq!(link.query.chars().count(), QUERY_CAP);
+
+        // A query already at the cap absorbs nothing: no growth means
+        // no reset hooks fire.
+        let mut palette = CommandPalette::new(Vec::new());
+        palette.insert_query(&"y".repeat(QUERY_CAP + 10));
+        let before = palette.query.clone();
+        palette.insert_query("z");
+        assert_eq!(palette.query, before);
     }
 
     /// A single-line filter must survive a multi-line clipboard: the
