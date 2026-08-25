@@ -332,6 +332,16 @@ impl ModelInfo {
         format!("{}/{}", self.provider, self.id)
     }
 
+    /// Whether the model accepts image input. Every cataloged OpenAI
+    /// model is multimodal; on z.ai only the V-series sees.
+    pub fn supports_vision(&self) -> bool {
+        match self.provider {
+            "openai" => true,
+            "zai" => matches!(self.id, "glm-5v-turbo" | "glm-4.6v" | "glm-4.5v"),
+            _ => false,
+        }
+    }
+
     pub fn variants(&self) -> &'static [ModelVariant] {
         if self.provider == "zai" {
             return if self.id == "glm-5.3" {
@@ -744,6 +754,11 @@ pub fn find(full_id: &str) -> Option<&'static ModelInfo> {
     })
 }
 
+/// Vision by full id; unknown models refuse conservatively.
+pub fn supports_vision(full_id: &str) -> bool {
+    find(full_id).is_some_and(ModelInfo::supports_vision)
+}
+
 pub fn variant_options(full_id: &str, variant: Option<&str>) -> anyhow::Result<serde_json::Value> {
     let Some(variant) = variant else {
         return Ok(serde_json::Value::Null);
@@ -771,6 +786,24 @@ pub fn variant_options(full_id: &str, variant: Option<&str>) -> anyhow::Result<s
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vision_is_every_openai_model_and_only_the_v_series_on_zai() {
+        // The whole cataloged OpenAI lineup is multimodal.
+        assert!(
+            catalog()
+                .iter()
+                .filter(|model| model.provider == "openai")
+                .all(|model| model.supports_vision())
+        );
+        assert!(supports_vision("zai/glm-4.6v"));
+        assert!(supports_vision("zai/glm-4.5v"));
+        assert!(supports_vision("zai/glm-5v-turbo"));
+        assert!(!supports_vision("zai/glm-5.3"));
+        assert!(!supports_vision("zai/glm-4.7"));
+        // Unknown models refuse conservatively.
+        assert!(!supports_vision("custom/mystery"));
+    }
 
     #[test]
     fn pricing_lookup_and_cost_arithmetic() {
