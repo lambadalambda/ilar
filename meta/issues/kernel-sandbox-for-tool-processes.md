@@ -35,9 +35,38 @@ anything tighter viable.
 - Asymmetric by construction: ilar keeps provider access while
   children have none. Stacks under an external sandbox (defense in
   depth, keep safehouse supported/documented).
-- Staging: (1) write-confinement + network-deny + grant flow,
-  Seatbelt; (2) Landlock parity; (3) opt-in strict read/secrets
-  shielding. README's "no sandbox" warning retires at stage 1.
+- Staging: (0) observe mode — log-only, no enforcement, to measure
+  what real sessions touch and tune defaults empirically before
+  they ever block anything; (1) write-confinement + network-deny +
+  grant flow, Seatbelt; (2) Landlock parity; (3) opt-in strict
+  read/secrets shielding. README's "no sandbox" warning retires at
+  stage 1.
+
+## Defaults & UX principles (binding)
+
+The product is the middle ground between "annoyed every other
+turn" and yolo. A question must be an event, not a rhythm — every
+low-signal prompt trains reflexive allowing and devalues the one
+that matters. Mechanisms, all required:
+
+- Capability-shaped defaults: workspace/tmp/toolchain-cache writes
+  silent; network to a curated infra allowlist (package registries,
+  git hosts, localhost) silent. Arbitrary external hosts ask.
+  Default mode targets accidents and casual injection; determined
+  exfil (e.g. via github.com) is strict mode's problem.
+- Project-inferred grants: lockfiles/toolchains/git remotes
+  generate per-project policy (Cargo.toml → crates.io + ~/.cargo,
+  package.json → npm, remotes → their hosts). This is the
+  advantage over static external wrappers — use it.
+- "Allow for this project" is the default answer scope; persisted,
+  so each unique question fires once per project ever. Coalesce
+  multiple denials from one command into one question.
+- Transparent retry: after a grant, ilar re-runs the denied call
+  itself — the model never sees the denial in the common case, no
+  wasted turns.
+- Three modes: off (yolo), default (the above — the product),
+  strict (no baked allowlist, read shielding, every escalation
+  asks).
 
 ## Requirements
 
