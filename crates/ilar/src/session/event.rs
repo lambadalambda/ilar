@@ -160,6 +160,25 @@ impl SessionEvent {
     }
 }
 
+/// The `type` tag of a well-formed event object this build cannot name —
+/// the signature of a log written by a newer ilar. `None` for everything
+/// else, so a known event with broken fields stays plain corruption.
+pub(crate) fn unknown_event_type(line: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(line).ok()?;
+    let tag = value.get("type")?.as_str()?;
+    (!is_known_event_type(tag)).then(|| tag.to_string())
+}
+
+/// Asks serde's own variant table instead of duplicating it here: a bare
+/// tag never deserializes into a whole event, but only an unrecognized
+/// one fails as an unknown variant.
+fn is_known_event_type(tag: &str) -> bool {
+    match serde_json::from_value::<SessionEvent>(serde_json::json!({ "type": tag })) {
+        Ok(_) => true,
+        Err(error) => !error.to_string().starts_with("unknown variant"),
+    }
+}
+
 pub fn new_id() -> String {
     Uuid::new_v4().to_string()
 }

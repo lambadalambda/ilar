@@ -1138,6 +1138,60 @@ fn middle_corruption_with_torn_tail_is_rejected_without_mutating_log() {
     assert_eq!(std::fs::read(path).unwrap(), before);
 }
 
+/// Commits one raw line after a fresh session's metadata and returns the
+/// message readers reject it with.
+fn error_for_committed_line(line: &str) -> String {
+    let (store, _dir) = temp_store();
+    let meta = sample_meta();
+    drop(store.create(meta.clone()).unwrap());
+    let path = store.session_path(&meta.session_id).unwrap();
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    writeln!(file, "{line}").unwrap();
+    drop(file);
+
+    let error = store
+        .load(&meta.session_id)
+        .err()
+        .expect("unreadable line must be rejected");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    error.to_string()
+}
+
+#[test]
+fn an_event_type_from_a_newer_ilar_is_named_instead_of_called_malformed() {
+    let message = error_for_committed_line(
+        "{\"type\":\"from_the_future\",\"id\":\"a\",\"ts\":\"2026-01-01T00:00:00Z\"}",
+    );
+    assert!(message.contains("from_the_future"), "{message}");
+    assert!(message.contains("newer ilar"), "{message}");
+    assert!(message.contains("line 2"), "{message}");
+    assert!(!message.contains("malformed"), "{message}");
+}
+
+#[test]
+fn a_known_event_type_with_broken_fields_is_still_malformed() {
+    let message = error_for_committed_line("{\"type\":\"user_message\",\"id\":\"a\"}");
+    assert!(message.contains("malformed line 2"), "{message}");
+    assert!(!message.contains("newer ilar"), "{message}");
+}
+
+#[test]
+fn json_garbage_is_still_malformed() {
+    for line in [
+        "not json at all",
+        "{\"type\":",
+        "[1, 2, 3]",
+        "{\"id\":\"a\"}",
+    ] {
+        let message = error_for_committed_line(line);
+        assert!(message.contains("malformed line 2"), "{message}");
+        assert!(!message.contains("newer ilar"), "{message}");
+    }
+}
+
 fn question_request() -> QuestionRequest {
     QuestionRequest {
         questions: vec![Question {

@@ -9,7 +9,7 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::event::{SessionEvent, SessionMeta, new_id};
+use super::event::{SessionEvent, SessionMeta, new_id, unknown_event_type};
 use super::model::{ChatMessage, ContentBlock, Role};
 use crate::question::{QUESTION_TOOL_NAME, QuestionRequest, validate_request};
 
@@ -755,10 +755,15 @@ fn parse_event_bytes(
             )
         })?;
         let event = serde_json::from_str::<SessionEvent>(line).map_err(|error| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("session {id}: malformed line {line_number}: {error}"),
-            )
+            // Fail closed either way: an audit log never skips records.
+            // Only the diagnosis differs.
+            let message = match unknown_event_type(line) {
+                Some(tag) => format!(
+                    "session {id}: line {line_number} has unknown event type {tag:?}; written by a newer ilar?"
+                ),
+                None => format!("session {id}: malformed line {line_number}: {error}"),
+            };
+            std::io::Error::new(std::io::ErrorKind::InvalidData, message)
         })?;
         events.push(event);
     }
