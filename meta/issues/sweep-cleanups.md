@@ -26,6 +26,13 @@ verified, and safe to do opportunistically:
   ReasoningSummaryDelta append-or-create; `slash_candidates` vs
   `resolve_slash` builtins merge (and `slash_inventory`'s doc lies —
   SkillPicker consequently omits builtins like `/goal`).
+- **Subagent residuals** (from 977ceab, deferred as behavior
+  changes/out of scope): `child_ctx.cancel` in the background branch
+  is the root token, so tools running inside an aborted background
+  child never see cancellation (one-liner, but observable);
+  `spawn_background_tool` still hand-rolls the select shape
+  `run_task_observed` now shares; `revalidate_after_lease_for_session`
+  is a deletable pure alias of `session_workspace_location`.
 - **Pause-path residuals** (found while fixing
   server-pauses-lose-usage-and-content, deliberately deferred): a
   cancel with a *contentless* pause still drops usage (persist is

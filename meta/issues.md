@@ -64,3 +64,7 @@ Refactors:
 Follow-ups:
 
 - [ ] [Resume leads with this directory's last session](issues/resume-leads-with-this-directorys-last-session.md)
+- [ ] [Reading binary files poisons the context](issues/reading-binary-files-poisons-the-context.md)
+- [ ] [Tolerate arguments before the tool name](issues/tolerate-arguments-before-the-tool-name.md)
+- [ ] [Task inputs survive model quirks](issues/task-inputs-survive-model-quirks.md)
+- [ ] [Tool results can carry images](issues/tool-results-can-carry-images.md)
