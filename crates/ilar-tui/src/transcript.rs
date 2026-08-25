@@ -774,21 +774,28 @@ pub(crate) fn transcript_entry_rows(
                 0,
             ),
             item => {
-                // Expandable thoughts get a click target on their header row.
-                let thought_target = match item {
-                    Line_::Thought { id, .. } | Line_::Task { id, .. } | Line_::Job { id, .. }
+                // Expandable thoughts get a click target on their header
+                // row — and while collapsed, on every preview row and
+                // the "click to expand" hint, since that is where the
+                // eye (and the pointer) lands. Expanded, the body stays
+                // bare so a stray click cannot collapse a wall of text.
+                let (thought_target, whole_preview) = match item {
+                    Line_::Thought { id, expanded, .. }
+                    | Line_::Task { id, expanded, .. }
+                    | Line_::Job { id, expanded, .. }
                         if !id.is_empty() =>
                     {
-                        Some(TranscriptHitTarget::Thought(id.clone()))
+                        (Some(TranscriptHitTarget::Thought(id.clone())), !*expanded)
                     }
-                    _ => None,
+                    _ => (None, false),
                 };
                 let mut first_line = true;
                 transcript_entry_lines(item, width, now, activity_started)
                     .into_iter()
                     .flat_map(|line| wrap_styled_line(line, width as usize))
                     .map(|line| {
-                        let target = if std::mem::take(&mut first_line) {
+                        let first = std::mem::take(&mut first_line);
+                        let target = if first || whole_preview {
                             thought_target.clone()
                         } else {
                             None
@@ -984,6 +991,9 @@ fn tool_entry_rows(
         target: Some(TranscriptHitTarget::Tool(id.clone())),
     }];
     if *expanded {
+        // A truncated block's "… more" row advances the expansion,
+        // exactly like clicking the header again.
+        let more = Some(TranscriptHitTarget::Tool(id.clone()));
         if diff.is_empty() {
             rows.extend(tool_detail_rows(
                 "args",
@@ -992,6 +1002,7 @@ fn tool_entry_rows(
                 indent + 4,
                 if *full { usize::MAX } else { 4 },
                 false,
+                more.clone(),
             ));
         } else {
             rows.extend(tool_diff_rows(
@@ -999,6 +1010,7 @@ fn tool_entry_rows(
                 width,
                 indent + 4,
                 if *full { usize::MAX } else { 8 },
+                more.clone(),
             ));
         }
         if *state == ToolState::Running && !tail.is_empty() {
@@ -1009,6 +1021,7 @@ fn tool_entry_rows(
                 indent + 4,
                 if *full { usize::MAX } else { 6 },
                 false,
+                more.clone(),
             ));
         }
         if matches!(kind, ToolKind::Tool) || child_lines.is_empty() || *state == ToolState::Failed {
@@ -1019,6 +1032,7 @@ fn tool_entry_rows(
                 indent + 4,
                 if *full { usize::MAX } else { 8 },
                 *state == ToolState::Failed,
+                more,
             ));
         }
     }
@@ -1171,6 +1185,7 @@ fn labeled_rows(
     layout: &DetailLayout,
     limit: usize,
     error: bool,
+    more_target: Option<TranscriptHitTarget>,
 ) -> Vec<TranscriptRow> {
     let truncated = content.len() > limit;
     content.truncate(limit);
@@ -1183,12 +1198,17 @@ fn labeled_rows(
     if content.is_empty() {
         content.push(Line::default());
     }
+    let last_index = content.len() - 1;
     let label_width = layout.label_width;
     let label_style = Style::default().fg(if error { ERROR } else { MUTED });
     content
         .into_iter()
         .enumerate()
         .map(|(index, mut line)| {
+            // The "… more" row takes the click that reveals the rest.
+            let target = (truncated && index == last_index)
+                .then(|| more_target.clone())
+                .flatten();
             let mut spans = vec![
                 Span::raw(" ".repeat(layout.indent)),
                 Span::styled(
@@ -1206,7 +1226,7 @@ fn labeled_rows(
             spans.append(&mut line.spans);
             TranscriptRow {
                 line: Line::from(spans),
-                target: None,
+                target,
             }
         })
         .collect()
@@ -1219,6 +1239,7 @@ fn tool_detail_rows(
     indent: usize,
     limit: usize,
     error: bool,
+    more_target: Option<TranscriptHitTarget>,
 ) -> Vec<TranscriptRow> {
     let width = width as usize;
     if width == 0 {
@@ -1232,7 +1253,7 @@ fn tool_detail_rows(
         .into_iter()
         .flat_map(|line| wrap_styled_line(Line::raw(line), layout.content_width))
         .collect::<Vec<_>>();
-    labeled_rows(label, content, &layout, limit, error)
+    labeled_rows(label, content, &layout, limit, error, more_target)
 }
 
 fn tool_diff_rows(
@@ -1240,6 +1261,7 @@ fn tool_diff_rows(
     width: u16,
     indent: usize,
     limit: usize,
+    more_target: Option<TranscriptHitTarget>,
 ) -> Vec<TranscriptRow> {
     let width = width as usize;
     if width == 0 {
@@ -1273,7 +1295,7 @@ fn tool_diff_rows(
             .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
-    labeled_rows("diff", content, &layout, limit, false)
+    labeled_rows("diff", content, &layout, limit, false, more_target)
 }
 
 pub(crate) fn transcript_entry_lines(
@@ -1730,6 +1752,87 @@ mod tests {
     use crate::text::tests::rendered_text;
 
     #[test]
+    fn truncated_detail_rows_and_collapsed_thought_previews_take_clicks() {
+        let now = std::time::Instant::now();
+        let tool = Line_::Tool {
+            id: "call-1".into(),
+            group_id: "g".into(),
+            name: "read".into(),
+            kind: ToolKind::Tool,
+            arguments: "x".into(),
+            argument_detail: "{}".into(),
+            diff: Vec::new(),
+            tail: String::new(),
+            result: Some(
+                (0..40)
+                    .map(|index| format!("line {index}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            state: ToolState::Succeeded,
+            progress: ToolProgress::None,
+            expanded: true,
+            full: false,
+            child_lines: Vec::new(),
+            child_group: 0,
+            child_running: false,
+            child_session_id: None,
+        };
+        let mut expanded_groups = std::collections::HashSet::new();
+        expanded_groups.insert("g:call-1".to_string());
+        let entries = transcript_entries(std::slice::from_ref(&tool), &expanded_groups);
+        let rows = transcript_entry_rows(&entries[0], &expanded_groups, 100, now, now, false);
+        let more_row = rows
+            .iter()
+            .find(|row| rendered_text(&row.line).contains("… more"))
+            .expect("a truncated result row");
+        assert_eq!(
+            more_row.target,
+            Some(TranscriptHitTarget::Tool("call-1".into())),
+            "clicking the more row must advance the expansion"
+        );
+
+        // A collapsed notification row: the headline and its "… N more
+        // line(s) — click to expand" hint both take the click.
+        let text = (0..8)
+            .map(|index| format!("body {index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let task = Line_::Task {
+            id: "t1".into(),
+            text: text.clone(),
+            expanded: false,
+        };
+        let entries = transcript_entries(std::slice::from_ref(&task), &expanded_groups);
+        let rows = transcript_entry_rows(&entries[0], &expanded_groups, 100, now, now, false);
+        assert!(rows.len() > 1);
+        assert!(
+            rows.iter()
+                .any(|row| rendered_text(&row.line).contains("click to expand"))
+        );
+        assert!(
+            rows.iter()
+                .all(|row| row.target == Some(TranscriptHitTarget::Thought("t1".into()))),
+            "every collapsed-preview row is a click target"
+        );
+
+        // Expanded, only the header keeps it: a stray click on a wall
+        // of text must not collapse it.
+        let task = Line_::Task {
+            id: "t1".into(),
+            text,
+            expanded: true,
+        };
+        let entries = transcript_entries(std::slice::from_ref(&task), &expanded_groups);
+        let rows = transcript_entry_rows(&entries[0], &expanded_groups, 100, now, now, false);
+        assert_eq!(
+            rows[0].target,
+            Some(TranscriptHitTarget::Thought("t1".into()))
+        );
+        assert!(rows[1..].iter().all(|row| row.target.is_none()));
+    }
+
+    #[test]
     fn hover_underline_marks_content_and_skips_structure() {
         let mut line = Line::from(vec![
             Span::raw("  └─ "),
@@ -1807,7 +1910,7 @@ mod tests {
                 text: format!("added line {index}"),
             })
             .collect();
-        let limited = tool_diff_rows(&diff, 80, 4, 8);
+        let limited = tool_diff_rows(&diff, 80, 4, 8, None);
         assert_eq!(limited.len(), 8);
         assert!(rendered_text(&limited.last().unwrap().line).contains("… more"));
         assert!(
@@ -1816,7 +1919,7 @@ mod tests {
                 .any(|row| rendered_text(&row.line).contains("added line 11"))
         );
 
-        let full = tool_diff_rows(&diff, 80, 4, usize::MAX);
+        let full = tool_diff_rows(&diff, 80, 4, usize::MAX, None);
         assert_eq!(full.len(), 12);
         assert!(
             full.iter()
@@ -2035,6 +2138,7 @@ mod tests {
             60,
             0,
             10,
+            None,
         );
         let added = &rows[0].line;
         assert_eq!(
