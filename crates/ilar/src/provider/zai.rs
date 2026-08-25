@@ -340,6 +340,7 @@ fn anthropic_message(msg: &ChatMessage, vision: bool) -> anyhow::Result<Option<s
                 tool_use_id,
                 content,
                 is_error,
+                ..
             } => Some(serde_json::json!({
                 "type": "tool_result",
                 "tool_use_id": tool_use_id,
@@ -536,10 +537,16 @@ struct AnthropicMapper {
 
 enum Block {
     Text,
-    Thinking { signature: Option<String> },
+    Thinking {
+        signature: Option<String>,
+    },
     /// A client tool call; identity lives in the ledger.
-    ToolUse { args: String },
-    ServerToolUse { args: String },
+    ToolUse {
+        args: String,
+    },
+    ServerToolUse {
+        args: String,
+    },
     Raw,
 }
 
@@ -662,8 +669,7 @@ impl AnthropicMapper {
                                 "thinking delta references non-thinking block {index}"
                             ));
                         }
-                        let thinking =
-                            required_str(delta, "thinking", "Anthropic thinking delta")?;
+                        let thinking = required_str(delta, "thinking", "Anthropic thinking delta")?;
                         append_wire_string(&mut self.wire_blocks, index, "thinking", thinking)?;
                         vec![ProviderEvent::ThinkingDelta(thinking.into())]
                     }
@@ -692,7 +698,10 @@ impl AnthropicMapper {
                             .get("partial_json")
                             .and_then(serde_json::Value::as_str)
                             .ok_or_else(|| "missing Anthropic argument delta".to_string())?;
-                        let id = self.core.call(&block_key(index)).map(|call| call.id.clone());
+                        let id = self
+                            .core
+                            .call(&block_key(index))
+                            .map(|call| call.id.clone());
                         let args = match self.blocks.get_mut(&index) {
                             Some(Block::ToolUse { args } | Block::ServerToolUse { args }) => args,
                             _ => {
@@ -748,8 +757,12 @@ impl AnthropicMapper {
                         vec![ProviderEvent::ThinkingCompleted { signature }]
                     }
                     Some(Block::ToolUse { args }) => {
-                        let input =
-                            finish_wire_tool_input(&self.core, &mut self.wire_blocks, index, &args)?;
+                        let input = finish_wire_tool_input(
+                            &self.core,
+                            &mut self.wire_blocks,
+                            index,
+                            &args,
+                        )?;
                         let (id, name) = self
                             .core
                             .complete_call(&block_key(index))
@@ -861,7 +874,12 @@ fn finish_wire_tool_input(
     // No argument deltas at all: the start block may have carried the
     // whole input inline.
     let input = if arguments.is_empty() {
-        core.require_object_input(block.get("input").cloned().unwrap_or(serde_json::Value::Null))?
+        core.require_object_input(
+            block
+                .get("input")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+        )?
     } else {
         core.parse_tool_input(arguments)?
     };
@@ -1174,12 +1192,19 @@ impl OpenAiMapper {
         // malformedness — retry like any other cut stream. A *complete*
         // stream (finish_reason arrived) that never named the index is
         // the hard error, raised in `map`.
-        if let Some((key, _)) = self.unnamed().filter(|(_, staged)| !staged.early.is_empty()) {
+        if let Some((key, _)) = self
+            .unnamed()
+            .filter(|(_, staged)| !staged.early.is_empty())
+        {
             return Some(ProviderEvent::RetryableError(Self::unnamed_error(key)));
         }
         // Stream ended after finish_reason but without a usage chunk: the
         // turn is complete, only its accounting is short.
-        if let Some(stop_reason) = self.stop_reason.clone().filter(|_| !self.core.is_completed()) {
+        if let Some(stop_reason) = self
+            .stop_reason
+            .clone()
+            .filter(|_| !self.core.is_completed())
+        {
             self.core.complete();
             return Some(ProviderEvent::TurnComplete {
                 stop_reason,

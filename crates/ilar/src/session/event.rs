@@ -76,6 +76,11 @@ pub enum SessionEvent {
         tool_use_id: String,
         content: String,
         is_error: bool,
+        /// Images the tool returned with its text; absent in sessions
+        /// from before tool results could carry them, and never written
+        /// for a text-only result.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<crate::session::ImageContent>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         child_session_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

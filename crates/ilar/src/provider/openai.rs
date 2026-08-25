@@ -230,7 +230,7 @@ fn wire_input_items(msg: &ChatMessage) -> Vec<serde_json::Value> {
             ContentBlock::ToolResult {
                 tool_use_id,
                 content,
-                is_error: _,
+                ..
             } => {
                 flush_parts(&mut parts, &mut items);
                 items.push(serde_json::json!({
@@ -934,6 +934,7 @@ mod tests {
                 tool_use_id: "call_1".into(),
                 content: "ok".into(),
                 is_error: false,
+                images: Vec::new(),
             }],
         });
         assert_eq!(items[0]["type"], "function_call_output");
@@ -1068,6 +1069,7 @@ mod tests {
                     tool_use_id: "call_1".into(),
                     content: "contents".into(),
                     is_error: false,
+                    images: Vec::new(),
                 }],
             },
         ];

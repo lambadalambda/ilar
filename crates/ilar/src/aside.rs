@@ -180,6 +180,7 @@ mod tests {
                     tool_use_id: (*id).into(),
                     content: "ok".into(),
                     is_error: false,
+                    images: Vec::new(),
                 })
                 .collect(),
         }

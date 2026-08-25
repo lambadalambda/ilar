@@ -389,12 +389,12 @@ async fn mutable_tasks_sharing_a_checkout_are_serialized_and_merge_in_order() {
     let results = &transcript[2].content;
     assert!(matches!(
         &results[0],
-        ContentBlock::ToolResult { tool_use_id, content, is_error: false }
+        ContentBlock::ToolResult { tool_use_id, content, is_error: false, .. }
             if tool_use_id == "t1" && content.contains("alpha")
     ));
     assert!(matches!(
         &results[1],
-        ContentBlock::ToolResult { tool_use_id, content, is_error: false }
+        ContentBlock::ToolResult { tool_use_id, content, is_error: false, .. }
             if tool_use_id == "t2" && content.contains("beta")
     ));
     let started = |id: &str| {

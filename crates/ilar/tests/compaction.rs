@@ -248,6 +248,55 @@ fn estimate_includes_system_prompt_and_tool_definitions() {
     );
 }
 
+/// A screenshot handed back by a tool is real context. Base64
+/// tokenizes roughly like text, so the estimate has to grow with the
+/// payload — otherwise an image-heavy session sails past the
+/// compaction threshold reporting a few hundred tokens.
+#[test]
+fn estimate_counts_tool_result_image_payloads() {
+    let data = "A".repeat(4_000);
+    let text_only = estimate_with_tool_result_images(Vec::new());
+    let with_image = estimate_with_tool_result_images(vec![ilar::session::ImageContent {
+        media_type: "image/png".into(),
+        data: data.clone(),
+    }]);
+
+    assert_eq!(with_image - text_only, (data.len() / 4) as u64);
+}
+
+fn estimate_with_tool_result_images(images: Vec<ilar::session::ImageContent>) -> u64 {
+    let (store, session_id) = temp_session();
+    let mut session = store.acquire_writer(&session_id).unwrap().load().unwrap();
+    session
+        .append(SessionEvent::AssistantMessage {
+            id: new_id(),
+            model: "zai/glm-4.7".into(),
+            content: vec![ilar::session::ContentBlock::ToolCall {
+                id: "shot-1".into(),
+                name: "read".into(),
+                input: serde_json::json!({"path": "shot.png"}),
+                item_id: None,
+            }],
+            usage: Usage::default(),
+            stop_reason: "tool_use".into(),
+            ts: chrono::Utc::now(),
+        })
+        .unwrap();
+    session
+        .append(SessionEvent::ToolResult {
+            id: new_id(),
+            tool_use_id: "shot-1".into(),
+            content: "the image itself follows".into(),
+            is_error: false,
+            images,
+            child_session_id: None,
+            state: None,
+            ts: chrono::Utc::now(),
+        })
+        .unwrap();
+    ilar::compaction::estimate_tokens(&session)
+}
+
 #[test]
 fn estimate_treats_unversioned_legacy_usage_as_ambiguous() {
     let (store, session_id) = temp_session();
@@ -1067,6 +1116,7 @@ async fn the_plan_is_state_not_conversation() {
                 tool_use_id: "todo-1".into(),
                 content: "[x] read the config\n[>] fix the parser\n[ ] add a test".into(),
                 is_error: false,
+                images: Vec::new(),
                 child_session_id: None,
                 state: Some(ilar::session::SessionState::TodoList {
                     list: ilar::todo::TodoList {

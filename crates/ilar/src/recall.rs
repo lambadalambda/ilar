@@ -69,7 +69,9 @@ pub struct Match {
 /// Tool calls contribute their arguments and tool results their output:
 /// both are places a half-remembered detail actually lives. Provider
 /// reasoning blobs and replay items do not — they are machine state, not
-/// something anyone remembers reading.
+/// something anyone remembers reading. Image payloads are skipped
+/// deliberately, on user and tool-result events alike: base64 is not
+/// text anyone searches, and indexing it would bury real hits.
 pub fn entries(events: &[SessionEvent]) -> Vec<Entry> {
     let mut entries = Vec::new();
     for (index, event) in events.iter().enumerate() {
@@ -380,6 +382,7 @@ mod tests {
             tool_use_id: "call-1".into(),
             content: text.into(),
             is_error: false,
+            images: Vec::new(),
             child_session_id: None,
             state: None,
             ts: chrono::Utc::now(),

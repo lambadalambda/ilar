@@ -729,6 +729,7 @@ async fn item_id_cache_arm(state_dir: &str, model: &str, session_headers: bool) 
                     tool_use_id: id.clone(),
                     content: bulky_result.clone(),
                     is_error: false,
+                    images: Vec::new(),
                 })
                 .collect(),
         });

@@ -568,6 +568,7 @@ impl SessionWriter {
                 tool_use_id,
                 content: "Tool call interrupted before completion.".into(),
                 is_error: true,
+                images: Vec::new(),
                 child_session_id: None,
                 state: None,
                 ts: chrono::Utc::now(),
@@ -1575,12 +1576,14 @@ pub fn transcript_of(events: &[SessionEvent]) -> Vec<ChatMessage> {
                 tool_use_id,
                 content,
                 is_error,
+                images,
                 ..
             } => {
                 pending_results.push(ContentBlock::ToolResult {
                     tool_use_id: tool_use_id.clone(),
                     content: content.clone(),
                     is_error: *is_error,
+                    images: images.clone(),
                 });
             }
             SessionEvent::ModelChange { .. } | SessionEvent::Compaction { .. } => {}

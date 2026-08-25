@@ -1356,12 +1356,12 @@ async fn multi_turn_tool_conversation_end_to_end() {
     let results = &transcript[2];
     assert!(matches!(
         &results.content[0],
-        ContentBlock::ToolResult { tool_use_id, content, is_error: false }
+        ContentBlock::ToolResult { tool_use_id, content, is_error: false, .. }
             if tool_use_id == "t1" && content.contains("alpha")
     ));
     assert!(matches!(
         &results.content[1],
-        ContentBlock::ToolResult { tool_use_id, content, is_error: false }
+        ContentBlock::ToolResult { tool_use_id, content, is_error: false, .. }
             if tool_use_id == "t2" && content.contains("beta")
     ));
     assert!(matches!(
@@ -2520,7 +2520,7 @@ async fn abort_after_tool_call_keeps_transcript_valid() {
     ));
     assert!(matches!(
         &transcript[2].content[0],
-        ContentBlock::ToolResult { tool_use_id, is_error: true, content }
+        ContentBlock::ToolResult { tool_use_id, is_error: true, content, .. }
             if tool_use_id == "t1" && content.contains("aborted")
     ));
 }

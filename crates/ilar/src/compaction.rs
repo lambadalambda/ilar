@@ -283,8 +283,11 @@ fn estimate_tokens_from(
                     crate::session::ContentBlock::ToolCall { input, .. } => {
                         input.to_string().chars().count()
                     }
-                    crate::session::ContentBlock::ToolResult { content, .. } => {
+                    crate::session::ContentBlock::ToolResult {
+                        content, images, ..
+                    } => {
                         content.chars().count()
+                            + images.iter().map(|image| image.data.len()).sum::<usize>()
                     }
                 })
                 .sum::<usize>();
@@ -512,6 +515,7 @@ mod tests {
                 tool_use_id: id.into(),
                 content: content.into(),
                 is_error: false,
+                images: Vec::new(),
             }],
         }
     }

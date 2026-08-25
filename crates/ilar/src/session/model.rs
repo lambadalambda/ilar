@@ -101,6 +101,12 @@ pub enum ContentBlock {
         tool_use_id: String,
         content: String,
         is_error: bool,
+        /// Images the tool handed back alongside its text. Absent in
+        /// sessions from before tool results could carry them, and left
+        /// out of the wire form when empty so text-only results stay
+        /// byte-identical.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<ImageContent>,
     },
 }
 

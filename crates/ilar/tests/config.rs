@@ -659,23 +659,69 @@ fn project_agents_override_user_agents_and_accept_crlf() {
 
 #[test]
 fn semantic_ranges_and_provider_modes_are_validated() {
-    for (name, content) in [
-        ("threshold", "[compaction]\nthreshold = 1.0\n"),
-        ("concurrency", "[subagents]\nmax_concurrent = 0\n"),
-        ("depth", "[subagents]\nmax_depth = 0\n"),
+    // The wording is what a user sees when their config is wrong, so it
+    // is pinned here rather than merely "an error happened".
+    for (name, content, message) in [
+        (
+            "threshold",
+            "[compaction]\nthreshold = 1.0\n",
+            "compaction.threshold must be finite and between 0 and 1",
+        ),
+        (
+            "concurrency",
+            "[subagents]\nmax_concurrent = 0\n",
+            "subagents.max_concurrent must be at least 1",
+        ),
+        (
+            "depth",
+            "[subagents]\nmax_depth = 0\n",
+            "subagents.max_depth must be at least 1",
+        ),
         (
             "background timeout",
             "[subagents]\nbackground_tool_timeout_ms = 0\n",
+            "subagents.background_tool_timeout_ms must be at least 1",
         ),
-        ("OpenAI auth", "[providers.openai]\nauth = \"mystery\"\n"),
-        ("z.ai flavor", "[providers.zai]\nflavor = \"mystery\"\n"),
+        (
+            "agent iterations",
+            "[agent]\nmax_iterations = 0\n",
+            "agent.max_iterations must be at least 1",
+        ),
+        (
+            "OpenAI auth",
+            "[providers.openai]\nauth = \"mystery\"\n",
+            "providers.openai.auth must be `api_key` or `chatgpt`",
+        ),
+        (
+            "OpenAI flavor",
+            "[providers.openai]\nflavor = \"anthropic\"\n",
+            "providers.openai.flavor is not supported",
+        ),
+        (
+            "z.ai flavor",
+            "[providers.zai]\nflavor = \"mystery\"\n",
+            "providers.zai.flavor must be `anthropic` or `openai`",
+        ),
+        (
+            "z.ai auth",
+            "[providers.zai]\nauth = \"chatgpt\"\n",
+            "providers.zai.auth is not supported",
+        ),
+        (
+            "unknown provider",
+            "[providers.mystery]\napi_key = \"k\"\n",
+            "unsupported provider \"mystery\"",
+        ),
     ] {
         let (_g, dir) = tempdir();
-        write(&dir.join("ilar.toml"), content);
+        let path = dir.join("ilar.toml");
+        write(&path, content);
         let error = Loader::no_env().config_dir(dir).resolve().expect_err(name);
-        assert!(
-            format!("{error:#}").contains("ilar.toml"),
-            "{name}: {error:#}"
+        let rendered = format!("{error:#}");
+        assert_eq!(
+            rendered,
+            format!("{}: {message}", path.display()),
+            "{name}"
         );
     }
 }

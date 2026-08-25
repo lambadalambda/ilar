@@ -987,6 +987,7 @@ async fn wire_format_anthropic_flavor() {
                 tool_use_id: "toolu_01".into(),
                 content: "1: model".into(),
                 is_error: false,
+                images: Vec::new(),
             }],
         },
     ];
@@ -1126,6 +1127,7 @@ fn openai_flavor_serializes_system_and_tool_results_in_protocol_order() {
                     tool_use_id: "call_1".into(),
                     content: "one result".into(),
                     is_error: false,
+                    images: Vec::new(),
                 },
                 ContentBlock::Text {
                     text: "continue with this context".into(),
@@ -1134,6 +1136,7 @@ fn openai_flavor_serializes_system_and_tool_results_in_protocol_order() {
                     tool_use_id: "call_2".into(),
                     content: "two result".into(),
                     is_error: false,
+                    images: Vec::new(),
                 },
             ],
         },
@@ -1241,6 +1244,7 @@ async fn cache_breakpoints_placed() {
                 tool_use_id: "toolu_01".into(),
                 content: "out".into(),
                 is_error: false,
+                images: Vec::new(),
             }],
         },
     ];
@@ -1316,6 +1320,7 @@ fn wire_prefix_stable_across_turns() {
             tool_use_id: "toolu_01".into(),
             content: "1: model = zai/glm-4.7".into(),
             is_error: false,
+            images: Vec::new(),
         }],
     };
 

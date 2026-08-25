@@ -717,6 +717,7 @@ async fn neutral_request_serializes_to_wire_format() {
                 tool_use_id: "call_1".into(),
                 content: "1: model".into(),
                 is_error: false,
+                images: Vec::new(),
             }],
         },
     ];
@@ -809,6 +810,7 @@ async fn stateless_tool_continuation_replays_opaque_reasoning_in_order() {
                 tool_use_id: "call_1".into(),
                 content: "contents".into(),
                 is_error: false,
+                images: Vec::new(),
             }],
         },
     ];

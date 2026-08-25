@@ -3628,6 +3628,7 @@ mod tests {
                 tool_use_id: "todo-resume".into(),
                 content: "updated".into(),
                 is_error: false,
+                images: Vec::new(),
                 child_session_id: None,
                 state: Some(ilar::session::SessionState::TodoList {
                     list: ilar::todo::TodoList {
@@ -3738,8 +3739,7 @@ mod tests {
                 })
                 .unwrap(),
         );
-        let resolver: Arc<dyn ProviderResolver> =
-            Arc::new(ilar::provider::MockProvider::default());
+        let resolver: Arc<dyn ProviderResolver> = Arc::new(ilar::provider::MockProvider::default());
         let registry = ToolRegistry::read_only();
         let tool_ctx = ToolContext::root(dir.path().to_path_buf());
         let loop_config = LoopConfig::default();

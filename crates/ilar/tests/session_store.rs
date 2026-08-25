@@ -64,6 +64,7 @@ fn sample_log(meta: &SessionMeta) -> Vec<SessionEvent> {
             tool_use_id: "toolu_1".into(),
             content: "1: model = ...".into(),
             is_error: false,
+            images: Vec::new(),
             child_session_id: None,
             state: None,
             ts,
@@ -130,6 +131,7 @@ fn todo_snapshots_round_trip_and_latest_replacement_wins() {
                 tool_use_id: tool_use_id.into(),
                 content: "updated".into(),
                 is_error: false,
+                images: Vec::new(),
                 child_session_id: None,
                 state: Some(SessionState::TodoList { list }),
                 ts,
@@ -176,6 +178,7 @@ fn replay_rejects_todo_state_from_a_non_todo_tool() {
             tool_use_id: "read-call".into(),
             content: "done".into(),
             is_error: false,
+            images: Vec::new(),
             child_session_id: None,
             state: Some(SessionState::TodoList {
                 list: TodoList::default(),
@@ -537,6 +540,67 @@ fn user_images_ride_the_transcript_and_old_logs_read_without_them() {
 }
 
 #[test]
+fn tool_result_images_ride_the_transcript_and_old_logs_read_without_them() {
+    let (store, _dir) = temp_store();
+    let meta = sample_meta();
+    let mut session = store.create(meta.clone()).unwrap();
+    session
+        .append(assistant_with_calls(&new_id(), &["shot-1"]))
+        .unwrap();
+    session
+        .append(SessionEvent::ToolResult {
+            id: new_id(),
+            tool_use_id: "shot-1".into(),
+            content: "the image itself follows".into(),
+            is_error: false,
+            images: vec![ilar::session::ImageContent {
+                media_type: "image/png".into(),
+                data: "aGVsbG8=".into(),
+            }],
+            child_session_id: None,
+            state: None,
+            ts: Utc::now(),
+        })
+        .unwrap();
+    drop(session);
+
+    let transcript = store.load(&meta.session_id).unwrap().transcript();
+    let results = transcript.last().expect("a tool result message");
+    assert_eq!(results.role, Role::User);
+    assert!(matches!(
+        &results.content[0],
+        ContentBlock::ToolResult { tool_use_id, images, .. }
+            if tool_use_id == "shot-1"
+                && images.len() == 1
+                && images[0].media_type == "image/png"
+                && images[0].data == "aGVsbG8="
+    ));
+
+    // A pre-image log line deserializes with no images at all.
+    let old: SessionEvent = serde_json::from_str(
+        r#"{"type":"tool_result","id":"t1","tool_use_id":"c1","content":"done","is_error":false,"ts":"2026-01-01T00:00:00Z"}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        old,
+        SessionEvent::ToolResult { images, .. } if images.is_empty()
+    ));
+    // And a text-only result writes no `images` key, so old logs and new
+    // ones stay byte-identical where no image was ever involved.
+    let plain = SessionEvent::ToolResult {
+        id: "t2".into(),
+        tool_use_id: "c2".into(),
+        content: "done".into(),
+        is_error: false,
+        images: Vec::new(),
+        child_session_id: None,
+        state: None,
+        ts: Utc::now(),
+    };
+    assert!(!serde_json::to_string(&plain).unwrap().contains("images"));
+}
+
+#[test]
 fn transcript_honors_compaction_boundary() {
     let (store, _dir) = temp_store();
     let meta = sample_meta();
@@ -830,6 +894,7 @@ fn replay_index_preserves_folded_model_and_todo_state() {
             tool_use_id: "todo-before-cut".into(),
             content: "updated".into(),
             is_error: false,
+            images: Vec::new(),
             child_session_id: None,
             state: Some(SessionState::TodoList {
                 list: expected_todos.clone(),
@@ -1436,6 +1501,7 @@ fn unanswered_tool_calls_are_repaired_once_by_writer() {
             tool_use_id: "answered".into(),
             content: "ok".into(),
             is_error: false,
+            images: Vec::new(),
             child_session_id: None,
             state: None,
             ts: Utc::now(),
@@ -1479,6 +1545,7 @@ fn orphan_tool_results_are_rejected_without_mutation() {
             tool_use_id: "missing-call".into(),
             content: "impossible".into(),
             is_error: false,
+            images: Vec::new(),
             child_session_id: None,
             state: None,
             ts: Utc::now(),

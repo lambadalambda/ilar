@@ -106,6 +106,7 @@ async fn live_anthropic_flavor_tool_roundtrip() {
             tool_use_id: call_id,
             content: "22C, clear skies, wind 3m/s".into(),
             is_error: false,
+            images: Vec::new(),
         }],
     });
     let request2 = Request {
