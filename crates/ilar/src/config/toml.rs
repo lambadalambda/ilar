@@ -15,6 +15,10 @@ pub struct GeneralConfig {
     pub model: Option<String>,
     pub reasoning: Option<String>,
     pub theme: Option<String>,
+    /// Whether the working directory's own AGENTS.md/CLAUDE.md is used.
+    /// A project file is unauthenticated third-party input, so this can
+    /// be turned off wholesale and opted into per launch instead.
+    pub project_instructions: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -242,6 +246,9 @@ pub struct GeneralConfigResolved {
     pub model: String,
     pub reasoning: Option<String>,
     pub theme: String,
+    /// Trusting the working directory's context file is the default;
+    /// `--no-project-instructions` overrides it for one launch.
+    pub project_instructions: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -370,15 +377,19 @@ impl Config {
             .general
             .as_ref()
             .and_then(|general| general.theme.clone());
+        let user_project_instructions = merged
+            .general
+            .as_ref()
+            .and_then(|general| general.project_instructions);
         let mut warnings = Vec::new();
         for path in [
             project_dir.join("ilar.toml"),
             project_dir.join(".ilar/ilar.toml"),
         ] {
             if let Some(text) = read_config_file(&path)? {
-                if declares_theme(&text) {
+                for key in user_scoped_general_keys(&text) {
                     warnings.push(format!(
-                        "{}: general.theme is a user preference and is ignored in project config",
+                        "{}: {key} is a user preference and is ignored in project config",
                         path.display()
                     ));
                 }
@@ -408,6 +419,9 @@ impl Config {
                 // A tuned dark theme, not the adaptive one: the surfaces and
                 // damped chrome it encodes are what a first run should show.
                 theme: user_theme.unwrap_or_else(|| "carbon".into()),
+                // User-scoped like the theme: a project may not vote on
+                // whether its own instructions are trusted.
+                project_instructions: user_project_instructions.unwrap_or(true),
             },
             providers,
             agent: AgentConfig {
@@ -517,6 +531,7 @@ impl Config {
                 model: "zai/glm-4.7".into(),
                 reasoning: None,
                 theme: "carbon".into(),
+                project_instructions: true,
             },
             agent: AgentConfig::default(),
             providers,
@@ -610,14 +625,31 @@ fn fallback_context_limit(model: &str, kinds: &[ProviderKind]) -> Option<u64> {
         .map(|kind| kind.fallback_context_limit)
 }
 
-/// Whether a config layer sets `general.theme`. Checked on the text
-/// rather than on the merge result, so a project file that repeats the
-/// user's own theme is still reported.
-fn declares_theme(text: &str) -> bool {
-    toml::from_str::<FileConfig>(text)
+/// The `[general]` keys a layer sets that resolve from user
+/// configuration only. The theme is a preference an in-app selection
+/// must survive; `project_instructions` decides whether the project
+/// directory is trusted at all, and letting that directory answer its
+/// own question would defeat the setting. Checked on the text rather
+/// than on the merge result, so a project file that merely repeats the
+/// user's own value is still reported.
+fn user_scoped_general_keys(text: &str) -> Vec<&'static str> {
+    let Some(general) = toml::from_str::<FileConfig>(text)
         .ok()
         .and_then(|parsed| parsed.general)
-        .is_some_and(|general| general.theme.is_some())
+    else {
+        return Vec::new();
+    };
+    [
+        ("general.theme", general.theme.is_some()),
+        (
+            "general.project_instructions",
+            general.project_instructions.is_some(),
+        ),
+    ]
+    .into_iter()
+    .filter(|(_, declared)| *declared)
+    .map(|(key, _)| key)
+    .collect()
 }
 
 fn read_config_file(path: &Path) -> anyhow::Result<Option<String>> {
@@ -654,6 +686,7 @@ fn merge_file(base: FileConfig, text: &str, origin: &Path) -> anyhow::Result<Fil
             model,
             reasoning,
             theme,
+            project_instructions,
         );
     }
     if let Some(providers) = parsed.providers {

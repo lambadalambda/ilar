@@ -1,8 +1,8 @@
 use std::fs;
 
 use ilar::config::{
-    AgentWorkspaceMode, CompactionConfig, Config, Loader, SubagentConfig, ThemePersistOutcome,
-    persist_general_theme, system_prompt_for,
+    AgentWorkspaceMode, CompactionConfig, Config, Loader, ProjectInstructions, SubagentConfig,
+    ThemePersistOutcome, persist_general_theme, system_prompt_for,
 };
 use ilar::provider::ProviderResolver;
 
@@ -141,6 +141,56 @@ fn theme_is_a_user_preference_not_a_project_override() {
         .resolve()
         .unwrap();
     assert!(quiet.warnings.is_empty(), "{:?}", quiet.warnings);
+}
+
+#[test]
+fn project_instructions_default_to_on_and_are_user_scoped() {
+    let (_g, empty) = tempdir();
+    let default = Loader::no_env().config_dir(empty).resolve().unwrap();
+    assert!(default.general.project_instructions);
+
+    // A user who does not trust project files flips the default and
+    // opts in per launch instead.
+    let (_user_guard, user) = tempdir();
+    write(
+        &user.join("ilar.toml"),
+        "[general]\nproject_instructions = false\n",
+    );
+    let off = Loader::no_env().config_dir(user.clone()).resolve().unwrap();
+    assert!(!off.general.project_instructions);
+    assert!(off.warnings.is_empty(), "{:?}", off.warnings);
+
+    // The project directory is exactly the third-party input this
+    // setting is about, so its own config does not get a vote.
+    let (_project_guard, project) = tempdir();
+    write(
+        &project.join("ilar.toml"),
+        "[general]\nproject_instructions = true\n",
+    );
+    let hostile = Loader::no_env()
+        .config_dir(user)
+        .project_dir(project)
+        .resolve()
+        .unwrap();
+    assert!(!hostile.general.project_instructions);
+    assert_eq!(hostile.warnings.len(), 1, "{:?}", hostile.warnings);
+    assert!(
+        hostile.warnings[0].contains("general.project_instructions"),
+        "{:?}",
+        hostile.warnings
+    );
+}
+
+#[test]
+fn project_instructions_must_be_a_boolean() {
+    let (_g, dir) = tempdir();
+    write(
+        &dir.join("ilar.toml"),
+        "[general]\nproject_instructions = \"no\"\n",
+    );
+    let error = Loader::no_env().config_dir(dir).resolve().unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("project_instructions"), "{message}");
 }
 
 #[test]
@@ -338,7 +388,9 @@ fn user_and_working_directory_context_are_combined_without_parent_search() {
     write(&parent.join("AGENTS.md"), "parent rules\n");
     write(&cwd.join("CLAUDE.md"), "working rules\n");
 
-    let prompt = system_prompt_for(&user, &cwd).unwrap();
+    let prompt = system_prompt_for(&user, &cwd, ProjectInstructions::Include)
+        .unwrap()
+        .prompt;
 
     assert!(prompt.contains("global rules"), "{prompt}");
     assert!(prompt.contains("working rules"), "{prompt}");
@@ -353,7 +405,9 @@ fn user_and_working_directory_context_are_combined_without_parent_search() {
 fn no_agents_md_yields_base_prompt() {
     let (_user_guard, user) = tempdir();
     let (_cwd_guard, cwd) = tempdir();
-    let prompt = system_prompt_for(&user, &cwd).unwrap();
+    let prompt = system_prompt_for(&user, &cwd, ProjectInstructions::Include)
+        .unwrap()
+        .prompt;
     assert!(!prompt.to_lowercase().contains("agents.md"));
     assert!(!prompt.to_lowercase().contains("claude.md"));
 }
@@ -368,7 +422,9 @@ fn agents_md_wins_over_claude_md_in_each_context_location() {
     write(&cwd.join("AGENTS.md"), "project agents\n");
     write(&cwd.join("CLAUDE.md"), "project claude\n");
 
-    let prompt = system_prompt_for(&user, &cwd).unwrap();
+    let prompt = system_prompt_for(&user, &cwd, ProjectInstructions::Include)
+        .unwrap()
+        .prompt;
 
     assert!(prompt.contains("user agents"), "{prompt}");
     assert!(prompt.contains("project agents"), "{prompt}");
@@ -386,7 +442,9 @@ fn invalid_agents_md_is_reported_instead_of_falling_back() {
     fs::write(user.join("AGENTS.md"), [0xff]).unwrap();
     write(&user.join("CLAUDE.md"), "must not be used\n");
 
-    let error = system_prompt_for(&user, &cwd).unwrap_err().to_string();
+    let error = system_prompt_for(&user, &cwd, ProjectInstructions::Include)
+        .unwrap_err()
+        .to_string();
 
     assert!(error.contains("AGENTS.md"), "{error}");
 }

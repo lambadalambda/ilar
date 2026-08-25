@@ -13,7 +13,8 @@ this order:
 2. User instructions from `${ILAR_CONFIG_DIR:-~/.config/ilar}/AGENTS.md`, or
    `CLAUDE.md` when `AGENTS.md` is absent.
 3. Working-directory instructions from `./AGENTS.md`, with the same
-   `CLAUDE.md` fallback.
+   `CLAUDE.md` fallback. Omitted when the launch refused them — see
+   [Skipping the project's file](configuration.md#skipping-the-projects-file).
 4. The names, descriptions, and trigger cues of the currently discovered
    skills.
 5. The selected agent definition's prompt, when it has one.
@@ -67,7 +68,9 @@ A subagent builds its instruction-file portion for each explicit task start or
 resume, using the child task's effective working directory. Notification-routed
 follow-up turns rebuild it again. This matters for isolated worktrees: their
 working-directory `AGENTS.md` or `CLAUDE.md` is read from the child workspace,
-not blindly inherited from the root workspace.
+not blindly inherited from the root workspace. A launch that refused
+working-directory instructions refuses them here too: the child prompt is
+assembled without that section whatever workspace it runs in.
 
 The chosen subagent definition is taken from the agent inventory loaded for the
 current root-session runtime, and its prompt is appended to those instructions.

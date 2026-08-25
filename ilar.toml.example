@@ -10,6 +10,13 @@ model = "zai/glm-4.7"
 # gruvbox-light, solarized-dark, solarized-light, tokyo-night,
 # catppuccin-mocha, one-dark, rose-pine.
 theme = "carbon"
+# Whether the working directory's AGENTS.md/CLAUDE.md joins the system
+# prompt. A project file is unauthenticated third-party input; set this
+# to false to distrust it by default and opt a directory in per launch
+# with --project-instructions, or leave it on and pass
+# --no-project-instructions for a single launch. User-scoped: a
+# project's own config cannot set it.
+# project_instructions = true
 
 [providers.openai]
 # api_key from ILAR_OPENAI_API_KEY (env) by default; can be set here.

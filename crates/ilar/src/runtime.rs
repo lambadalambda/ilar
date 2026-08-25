@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result};
 
 use crate::agent::LoopConfig;
-use crate::config::{AgentDefinition, Config, system_prompt_for};
+use crate::config::{AgentDefinition, Config, ProjectInstructions, system_prompt_for};
 use crate::provider::ProviderResolver;
 use crate::question::QuestionReceiver;
 use crate::session::{SessionMeta, SessionReader, SessionStore, new_id};
@@ -41,6 +41,9 @@ pub struct RuntimeOptions {
     /// Attach the `question` tool. A driver with nobody to answer
     /// leaves it off, and the tool call fails instead of hanging.
     pub questions: bool,
+    /// `--project-instructions` / `--no-project-instructions`, for one
+    /// launch. `None` leaves the decision to configuration.
+    pub project_instructions: Option<bool>,
 }
 
 /// The session a driver is about to run, before anything is written.
@@ -54,10 +57,15 @@ pub struct RuntimePlan {
     pub skills: Vec<(String, String)>,
     pub commands: Vec<crate::command::Command>,
     pub resumed: Option<SessionReader>,
+    /// The name of the working directory's context file when it exists
+    /// and this launch left it out; the driver says so rather than
+    /// dropping it in silence.
+    pub skipped_project_instructions: Option<&'static str>,
     skill_store: Arc<crate::skill::SkillStore>,
     persisted_model: Option<String>,
     cwd: PathBuf,
     questions: bool,
+    project_instructions: ProjectInstructions,
 }
 
 /// A session, its tools, and the channels a driver listens on.
@@ -96,6 +104,19 @@ pub fn selected_model(
     general: &str,
 ) -> String {
     cli.or(persisted).or(agent).unwrap_or(general).to_string()
+}
+
+/// The flag wins over configuration, in both directions: a user who
+/// distrusts project files by default still has to be able to opt one
+/// in. Both are read at launch and neither is stored on the session —
+/// that is the point, since resuming must not smuggle back the project
+/// file the current launch refused.
+pub fn selected_project_instructions(cli: Option<bool>, configured: bool) -> ProjectInstructions {
+    if cli.unwrap_or(configured) {
+        ProjectInstructions::Include
+    } else {
+        ProjectInstructions::Skip
+    }
 }
 
 /// A resumed session keeps the variant it was running, but only while
@@ -286,8 +307,14 @@ impl RuntimePlan {
         .list()
         .context("loading commands")?;
 
-        let mut system_prompt = system_prompt_for(config.dirs().0, &options.cwd)
+        let project_instructions = selected_project_instructions(
+            options.project_instructions,
+            config.general.project_instructions,
+        );
+        let assembled = system_prompt_for(config.dirs().0, &options.cwd, project_instructions)
             .context("loading project instructions")?;
+        let skipped_project_instructions = assembled.skipped_project_file;
+        let mut system_prompt = assembled.prompt;
         if !skill_listing.is_empty() {
             system_prompt = format!("{system_prompt}\n\n{skill_listing}");
         }
@@ -303,10 +330,12 @@ impl RuntimePlan {
             skills,
             commands,
             resumed,
+            skipped_project_instructions,
             skill_store,
             persisted_model,
             cwd: options.cwd.clone(),
             questions: options.questions,
+            project_instructions,
         })
     }
 
@@ -369,6 +398,10 @@ impl RuntimePlan {
                 config.subagents.max_depth,
             )
             .with_user_config_dir(config.dirs().0.to_path_buf())
+            // A refused project file stays refused for the agents this
+            // session delegates to: injecting it one level down would
+            // hand back exactly what the launch declined.
+            .with_project_instructions(self.project_instructions)
             .with_background_tool_timeout(std::time::Duration::from_millis(
                 config.subagents.background_tool_timeout_ms,
             ))
@@ -420,6 +453,81 @@ impl RuntimePlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Resuming must not smuggle back the project file the current
+    /// launch refused: the prompt is rebuilt from configuration, this
+    /// launch's flag and the cwd every time, and nothing about the
+    /// decision is stored on the session. Pinned rather than arranged —
+    /// this is how the two-phase plan already works, and a change that
+    /// started caching the prompt on the session would break it.
+    #[test]
+    fn a_resumed_session_obeys_the_current_launch_not_the_one_that_created_it() {
+        let guard = tempfile::tempdir().unwrap();
+        let user = guard.path().join("config");
+        let cwd = guard.path().join("project");
+        std::fs::create_dir_all(&user).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::write(user.join("AGENTS.md"), "user rules\n").unwrap();
+        std::fs::write(cwd.join("AGENTS.md"), "project rules\n").unwrap();
+
+        let config = crate::config::Loader::no_env()
+            .config_dir(user)
+            .state_dir(guard.path().join("state"))
+            .resolve()
+            .unwrap();
+        let options = |resume: Option<String>, cli: Option<bool>| RuntimeOptions {
+            resume,
+            cwd: cwd.clone(),
+            project_instructions: cli,
+            ..RuntimeOptions::default()
+        };
+
+        // A session on disk, and a launch that trusts the project file.
+        // (Written directly: `start` would need a reachable provider,
+        // and resolve is the phase that assembles the prompt anyway.)
+        let store = session_store(&config);
+        let session_id = new_id();
+        store
+            .create(SessionMeta {
+                session_id: session_id.clone(),
+                parent_id: None,
+                agent: "build".into(),
+                model: config.general.model.clone(),
+                workspace: None,
+                cwd: Some(cwd.clone()),
+            })
+            .unwrap();
+        let trusting = RuntimePlan::resolve(&config, &options(None, None)).unwrap();
+        assert!(trusting.system_prompt.contains("project rules"));
+        assert_eq!(trusting.skipped_project_instructions, None);
+
+        // Resumed under the flag: the file is out, the user's own
+        // context stays, and the driver is told to say so.
+        let resumed =
+            RuntimePlan::resolve(&config, &options(Some(session_id.clone()), Some(false)))
+                .expect("the session resumes");
+        assert!(!resumed.system_prompt.contains("project rules"));
+        assert!(resumed.system_prompt.contains("user rules"));
+        assert_eq!(resumed.skipped_project_instructions, Some("AGENTS.md"));
+
+        // And resuming again without the flag brings it back: the
+        // refusal is a property of the launch, not of the session.
+        let again = RuntimePlan::resolve(&config, &options(Some(session_id), None)).unwrap();
+        assert!(again.system_prompt.contains("project rules"));
+        assert_eq!(again.skipped_project_instructions, None);
+    }
+
+    #[test]
+    fn the_flag_wins_over_configuration_in_both_directions() {
+        use crate::config::ProjectInstructions::{Include, Skip};
+        // Nothing on the command line: configuration decides.
+        assert_eq!(selected_project_instructions(None, true), Include);
+        assert_eq!(selected_project_instructions(None, false), Skip);
+        // --no-project-instructions against the permissive default, and
+        // --project-instructions against the paranoid one.
+        assert_eq!(selected_project_instructions(Some(false), true), Skip);
+        assert_eq!(selected_project_instructions(Some(true), false), Include);
+    }
 
     /// The recorded launch directory is compared against a running
     /// ilar's workspace cwd by exact equality, and that one is

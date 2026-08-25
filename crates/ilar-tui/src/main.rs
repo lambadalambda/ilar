@@ -113,6 +113,14 @@ struct ExecArgs {
     /// Emit the loop's events as NDJSON on stdout instead of the answer.
     #[arg(long)]
     json: bool,
+
+    /// Ignore the working directory's AGENTS.md/CLAUDE.md.
+    #[arg(long)]
+    no_project_instructions: bool,
+
+    /// Use them even when general.project_instructions is off.
+    #[arg(long, conflicts_with = "no_project_instructions")]
+    project_instructions: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -139,6 +147,14 @@ struct Args {
     /// Print the resolved system prompt and exit (debugging).
     #[arg(long)]
     print_prompt: bool,
+
+    /// Ignore the working directory's AGENTS.md/CLAUDE.md.
+    #[arg(long)]
+    no_project_instructions: bool,
+
+    /// Use them even when general.project_instructions is off.
+    #[arg(long, conflicts_with = "no_project_instructions")]
+    project_instructions: bool,
 }
 
 struct TerminalSession {
@@ -859,6 +875,10 @@ async fn run_exec(config: &ilar::config::Config, args: ExecArgs) -> Result<i32> 
             // Nobody is here to answer: the tool is left off so the
             // model is told so on the spot instead of blocking.
             questions: false,
+            project_instructions: cli_project_instructions(
+                args.project_instructions,
+                args.no_project_instructions,
+            ),
         },
     )?
     .start(config)?;
@@ -907,6 +927,46 @@ async fn run_exec(config: &ilar::config::Config, args: ExecArgs) -> Result<i32> 
         let _ = writeln!(err, "error: {error:#}");
     }
     Ok(exec::exit_code(&outcome))
+}
+
+/// `None` when neither flag was given, leaving the decision to
+/// configuration. Clap rules the pair out together; if that ever
+/// changes, refusing the file is the safe reading.
+fn cli_project_instructions(include: bool, skip: bool) -> Option<bool> {
+    match (include, skip) {
+        (_, true) => Some(false),
+        (true, false) => Some(true),
+        (false, false) => None,
+    }
+}
+
+/// The line a session opens with when the project put instructions in
+/// the working directory and this launch did not use them — named as
+/// written, and blaming whichever of the two knobs actually did it.
+/// Telling someone a flag they never typed dropped their file is worse
+/// than saying nothing.
+fn project_instructions_notice(skipped: Option<&str>, by_flag: bool) -> Option<String> {
+    let file = skipped?;
+    let cause = if by_flag {
+        "--no-project-instructions"
+    } else {
+        "general.project_instructions = false"
+    };
+    Some(format!("project {file} present but skipped ({cause})"))
+}
+
+/// The system lines a session opens with: settings that parsed but were
+/// not honoured, then the project file that exists but was left out.
+/// Both say out loud that something the user wrote was not used —
+/// silence there reads as a bug in the program.
+fn startup_notices(
+    config_warnings: Vec<String>,
+    skipped: Option<&str>,
+    by_flag: bool,
+) -> Vec<String> {
+    let mut lines = config_warnings;
+    lines.extend(project_instructions_notice(skipped, by_flag));
+    lines
 }
 
 #[tokio::main]
@@ -995,12 +1055,22 @@ async fn main() -> Result<()> {
                 resume: resume_target.clone(),
                 cwd: cwd.clone(),
                 questions: true,
+                // Not first-run-only like the model and agent
+                // overrides: what this launch does with the project
+                // file is a property of the launch, so every session
+                // this process opens — resumed, switched or forked —
+                // honours it.
+                project_instructions: cli_project_instructions(
+                    args.project_instructions,
+                    args.no_project_instructions,
+                ),
             },
         )?;
         if args.print_prompt {
             println!("{}", plan.system_prompt);
             return Ok(());
         }
+        let skipped_project_instructions = plan.skipped_project_instructions;
         let model_for_session = plan.model.clone();
         let skill_inventory = plan.skills.clone();
         let command_inventory = plan.commands.clone();
@@ -1060,8 +1130,16 @@ async fn main() -> Result<()> {
         if app.question_modal.is_some() {
             app.status = "waiting for your answer".into();
         }
-        for warning in config_warnings.drain(..) {
-            app.push_transcript_line(Line_::System(warning));
+        // The config warnings are drained: they are a property of the
+        // configuration and are said once. The skipped project file is
+        // a property of every prompt this launch assembles, so a
+        // session entered later through the picker says it again.
+        for line in startup_notices(
+            std::mem::take(&mut config_warnings),
+            skipped_project_instructions,
+            args.no_project_instructions,
+        ) {
+            app.push_transcript_line(Line_::System(line));
         }
         if let Some((prefill, notice)) = carried.take() {
             if let Some(prefill) = prefill {
@@ -3128,6 +3206,43 @@ mod tests {
     use super::*;
     use ilar::runtime::{create_root_session, restored_todos};
     use ilar::session::{SessionMeta, new_id};
+
+    /// A project file that exists but was refused is reported, after
+    /// the config warnings and in the same transcript channel: a launch
+    /// that quietly ignores the project's instructions is unreadable
+    /// from inside the session.
+    #[test]
+    fn a_refused_project_file_is_announced_at_startup() {
+        // Nothing to report when nothing was dropped.
+        assert!(startup_notices(Vec::new(), None, false).is_empty());
+        assert!(startup_notices(Vec::new(), None, true).is_empty());
+
+        // Named as written, after the config warnings, and blaming the
+        // knob that actually did it.
+        assert_eq!(
+            startup_notices(vec!["theme ignored".into()], Some("AGENTS.md"), true),
+            vec![
+                "theme ignored".to_string(),
+                "project AGENTS.md present but skipped (--no-project-instructions)".to_string(),
+            ]
+        );
+        assert_eq!(
+            startup_notices(Vec::new(), Some("CLAUDE.md"), false),
+            vec![
+                "project CLAUDE.md present but skipped (general.project_instructions = false)"
+                    .to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn neither_flag_leaves_the_decision_to_configuration() {
+        assert_eq!(cli_project_instructions(false, false), None);
+        assert_eq!(cli_project_instructions(true, false), Some(true));
+        assert_eq!(cli_project_instructions(false, true), Some(false));
+        // Clap refuses the pair; if it ever stopped, the file stays out.
+        assert_eq!(cli_project_instructions(true, true), Some(false));
+    }
 
     /// Every modal `decide` routes a query paste to must reach its own
     /// filter: the decision and the methods are tested apart, and only

@@ -7,8 +7,7 @@ use crate::agent::{
     LOOP_EVENT_CAPACITY, LoopConfig, LoopEvent, LoopEventSender, TurnOutcome, loop_event_channel,
     run_turn,
 };
-use crate::config::system_prompt_for;
-use crate::config::{AgentDefinition, AgentWorkspaceMode};
+use crate::config::{AgentDefinition, AgentWorkspaceMode, ProjectInstructions, system_prompt_for};
 use crate::provider::ProviderResolver;
 use crate::session::{ContentBlock, SessionMeta, SessionStore, new_id};
 use crate::tools::{
@@ -66,6 +65,9 @@ pub struct SubagentSpawner {
     store: SessionStore,
     agents: Vec<AgentDefinition>,
     user_config_dir: std::path::PathBuf,
+    /// Whether the workspace's own context file is trusted for this
+    /// launch; inherited from the session that owns the spawner.
+    project_instructions: ProjectInstructions,
     workspace_location: crate::tools::WorkspaceLocation,
     depth: usize,
     max_concurrent: usize,
@@ -154,6 +156,7 @@ impl SubagentSpawner {
             store,
             agents,
             user_config_dir: std::path::PathBuf::from("/nonexistent"),
+            project_instructions: ProjectInstructions::Include,
             workspace_location,
             depth,
             max_concurrent,
@@ -182,6 +185,11 @@ impl SubagentSpawner {
 
     pub fn with_user_config_dir(mut self, dir: std::path::PathBuf) -> Self {
         self.user_config_dir = dir;
+        self
+    }
+
+    pub fn with_project_instructions(mut self, project: ProjectInstructions) -> Self {
+        self.project_instructions = project;
         self
     }
 
@@ -293,6 +301,7 @@ impl SubagentSpawner {
             store: self.store.clone(),
             agents: self.agents.clone(),
             user_config_dir: self.user_config_dir.clone(),
+            project_instructions: self.project_instructions,
             workspace_location,
             depth,
             max_concurrent: self.max_concurrent,
@@ -350,7 +359,7 @@ impl SubagentSpawner {
         cwd: &std::path::Path,
     ) -> anyhow::Result<String> {
         Ok(crate::runtime::with_agent_prompt(
-            system_prompt_for(&self.user_config_dir, cwd)?,
+            system_prompt_for(&self.user_config_dir, cwd, self.project_instructions)?.prompt,
             agent,
         ))
     }

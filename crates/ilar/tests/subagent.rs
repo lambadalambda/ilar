@@ -5,7 +5,7 @@ use futures::StreamExt;
 use ilar::agent::{
     LOOP_EVENT_CAPACITY, LoopConfig, LoopEvent, TurnOutcome, loop_event_channel, run_turn,
 };
-use ilar::config::{AgentDefinition, AgentWorkspaceMode};
+use ilar::config::{AgentDefinition, AgentWorkspaceMode, ProjectInstructions};
 use ilar::provider::{
     EventStream, FixedProviderResolver, MockProvider, Provider, ProviderEvent, ProviderHandle,
     ProviderResolver, Request, StopReason, resolve_model,
@@ -212,6 +212,68 @@ async fn foreground_subagent_receives_user_and_exact_workspace_context() {
         prompt.find("user context") < prompt.find("workspace context"),
         "{prompt}"
     );
+}
+
+/// The security property of the skip: a launch that refused the
+/// project file must not have it reach the model one level down.
+#[tokio::test]
+async fn a_refused_project_file_never_reaches_a_subagent() {
+    let user = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(user.path().join("AGENTS.md"), "user context\n").unwrap();
+    std::fs::write(workspace.path().join("AGENTS.md"), "workspace context\n").unwrap();
+    let provider = Arc::new(MockProvider::new(vec![vec![
+        ProviderEvent::TextDelta("done".into()),
+        ProviderEvent::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        },
+    ]]));
+    let (store, parent_id) = temp_store();
+    let spawner = Arc::new(
+        SubagentSpawner::new(
+            Arc::new(FixedProviderResolver::new(provider.clone())),
+            store,
+            vec![AgentDefinition {
+                name: "explore".into(),
+                description: "explores things".into(),
+                model: None,
+                prompt: String::new(),
+                workspace_mode: AgentWorkspaceMode::ReadOnly,
+                tools: None,
+            }],
+            workspace.path().to_path_buf(),
+            0,
+            1,
+            1,
+        )
+        .with_user_config_dir(user.path().to_path_buf())
+        .with_project_instructions(ProjectInstructions::Skip),
+    );
+    let mut context = ToolContext::root(workspace.path().to_path_buf());
+    context.session_id = parent_id;
+
+    let output = spawner
+        .run_task(
+            TaskInput {
+                description: "inspect".into(),
+                prompt: "inspect this workspace".into(),
+                subagent_type: "explore".into(),
+                task_id: None,
+                background: None,
+                workspace: None,
+                model: None,
+                reasoning: None,
+            },
+            &context,
+        )
+        .await;
+
+    assert!(!output.is_error, "{}", output.content);
+    let requests = provider.requests();
+    let prompt = requests[0].system_prompt.as_deref().unwrap();
+    assert!(prompt.contains("user context"), "{prompt}");
+    assert!(!prompt.contains("workspace context"), "{prompt}");
 }
 
 #[tokio::test]

@@ -3,15 +3,16 @@
 The user configuration is `${ILAR_CONFIG_DIR:-~/.config/ilar}/ilar.toml`; see
 [`ilar.toml.example`](../ilar.toml.example). `./ilar.toml` and
 `./.ilar/ilar.toml` layer project settings over it, in that order. Nested
-sections merge by field. `general.theme` is user-scoped and is not overridden
-by project files; a project file that sets it is reported in the transcript at
-startup rather than silently ignored.
+sections merge by field. `general.theme` and `general.project_instructions` are
+user-scoped and are not overridden by project files; a project file that sets
+one is reported in the transcript at startup rather than silently ignored.
 
 | Setting | Default | Description |
 | --- | --- | --- |
 | `general.model` | `zai/glm-4.7` | Default `provider/model-id`. |
 | `general.reasoning` | provider default | Default reasoning variant for new sessions (for example `low`, `high`, or `max`; model-specific). Set `default` in a higher config layer to clear an inherited value. |
 | `general.theme` | `carbon` | See [themes](interface.md#themes). F3 opens the picker. |
+| `general.project_instructions` | `true` | Whether the working directory's `AGENTS.md`/`CLAUDE.md` is part of the system prompt. See [Project instructions](#project-instructions). User-scoped. |
 | `providers.openai.base_url` | API or ChatGPT endpoint | Override the Responses API base URL selected by `auth`. |
 | `providers.openai.api_key` | `ILAR_OPENAI_API_KEY` | OpenAI API key. |
 | `providers.openai.auth` | `api_key` | `api_key` or `chatgpt`; see [OpenAI ChatGPT OAuth](#openai-chatgpt-oauth). |
@@ -93,3 +94,42 @@ and working-directory instructions second. ilar does not search parent
 directories or combine instructions from an ancestor tree. See
 [System prompts and session context](system-prompts.md) for prompt
 composition, refresh timing, subagents, and compaction handovers.
+
+### Skipping the project's file
+
+A project's `AGENTS.md` is unauthenticated third-party input: often a year
+stale, occasionally written to steer an agent somewhere you did not ask it to
+go. Two knobs leave it out without deleting or editing the file:
+
+- `--no-project-instructions` on `ilar` and `ilar exec`, for one launch.
+- `general.project_instructions = false` in your **user** config, to distrust
+  project files by default; `--project-instructions` then opts a directory in
+  for one launch. A project's own `ilar.toml` cannot set the key — the
+  directory under suspicion does not get to vote on whether it is trusted —
+  and a project file that tries is reported at startup.
+
+The flags win over configuration in both directions and cannot be combined.
+Either way only the "Working directory context" section is dropped: your own
+`${ILAR_CONFIG_DIR:-~/.config/ilar}/AGENTS.md` and the base prompt are
+unaffected, subagents spawned by the session inherit the refusal, and prompt
+assembly never opens the file — it only checks whether it is there.
+
+The escape is prompt-level. It stops the file being handed to the model
+unasked; it does not stop the model reading it with a tool, and a session
+resumed from a launch that trusted the file may still quote it in transcript
+or compaction summaries.
+
+When a project file exists but was skipped, the TUI opens the session with a
+system line naming it and the knob responsible:
+
+```
+project AGENTS.md present but skipped (--no-project-instructions)
+project CLAUDE.md present but skipped (general.project_instructions = false)
+```
+
+The decision is made at launch and nothing about it is stored on the session:
+the system prompt is rebuilt from configuration, the flags and the working
+directory every time. Resuming a session started without the flag, under the
+flag, gets a prompt without the project file — and resuming it again without
+the flag brings the file back. Escaping a hostile file must not be undone by
+`--continue`.
