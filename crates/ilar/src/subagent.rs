@@ -554,13 +554,15 @@ impl SubagentSpawner {
             },
             None => {
                 let id = new_id();
-                let (model, inherited_variant) = match (&input.model, &agent.model) {
-                    (Some(model), _) => (model.clone(), input.reasoning.clone()),
-                    (None, Some(model)) => (model.clone(), input.reasoning.clone()),
+                let requested_variant = input.reasoning.clone().map(TaskVariant::from_input);
+                let (model, child_variant) = match (&input.model, &agent.model) {
+                    (Some(model), _) | (None, Some(model)) => (model.clone(), requested_variant),
                     (None, None) => match self.store.load(&ctx.session_id) {
                         Ok(parent) => (
                             parent.effective_model(),
-                            input.reasoning.clone().or(parent.effective_variant()),
+                            requested_variant.or_else(|| {
+                                parent.effective_variant().map(TaskVariant::from_parent)
+                            }),
                         ),
                         Err(error) => {
                             return ToolOutput::error(format!(
@@ -588,12 +590,10 @@ impl SubagentSpawner {
                         ));
                     }
                 }
-                if let Err(error) =
-                    crate::model::variant_options(&model, inherited_variant.as_deref())
+                if let Some(variant) = &child_variant
+                    && crate::model::variant_options(&model, Some(&variant.id)).is_err()
                 {
-                    return ToolOutput::error(format!(
-                        "validating inherited subagent reasoning variant: {error}"
-                    ));
+                    return ToolOutput::error(variant.rejection(&model));
                 }
                 let created = self.store.create(SessionMeta {
                     session_id: id.clone(),
@@ -604,20 +604,20 @@ impl SubagentSpawner {
                 });
                 match created {
                     Ok(mut session) => {
-                        let inherited_model = session.effective_model();
-                        if let Some(variant) = inherited_variant
+                        let child_model = session.effective_model();
+                        if let Some(variant) = child_variant
                             && let Err(error) =
                                 session.append(crate::session::SessionEvent::ModelChange {
                                     id: new_id(),
-                                    model: inherited_model,
-                                    variant: Some(variant),
+                                    model: child_model,
+                                    variant: Some(variant.id),
                                     ts: chrono::Utc::now(),
                                 })
                         {
                             drop(session);
                             rollback_created_session(&self.store, &id);
                             return ToolOutput::error(format!(
-                                "persisting inherited subagent reasoning variant: {error}"
+                                "persisting subagent reasoning variant: {error}"
                             ));
                         }
                         drop(session);
@@ -1406,6 +1406,65 @@ async fn revalidate_after_lease(
     }
 }
 
+/// A child's reasoning variant together with where it came from. A
+/// rejected variant has to name its source: reporting an explicit
+/// `reasoning` input as "inherited" sends the model looking for a
+/// setting it just passed in, and reporting an inherited one as an input
+/// sends it looking for one it never wrote.
+struct TaskVariant {
+    id: String,
+    source: TaskVariantSource,
+}
+
+enum TaskVariantSource {
+    /// The task call's own `reasoning` field.
+    Input,
+    /// The parent session's current variant, carried into the child.
+    Parent,
+}
+
+impl TaskVariant {
+    fn from_input(id: String) -> Self {
+        Self {
+            id,
+            source: TaskVariantSource::Input,
+        }
+    }
+
+    fn from_parent(id: String) -> Self {
+        Self {
+            id,
+            source: TaskVariantSource::Parent,
+        }
+    }
+
+    /// Why this variant cannot be used, naming both the source the model
+    /// can act on and the variants the model does take — a rejection
+    /// without the list is one it can only fix by guessing.
+    fn rejection(&self, model: &str) -> String {
+        let source = match self.source {
+            TaskVariantSource::Input => "from the task's reasoning input",
+            TaskVariantSource::Parent => "inherited from parent",
+        };
+        let options = match crate::model::find(model) {
+            Some(info) if !info.variants().is_empty() => format!(
+                "this model's variants: {}",
+                info.variants()
+                    .iter()
+                    .map(|variant| variant.id)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Some(_) => "this model takes no reasoning variants; omit reasoning".to_string(),
+            None => "this model is not in the catalog; omit reasoning".to_string(),
+        };
+        format!(
+            "unsupported reasoning {:?} for {model} ({source}) — {options}",
+            self.id
+        )
+    }
+}
+
 /// A task's workspace lease, or why the task never started.
 enum LeaseOutcome {
     Acquired(Arc<crate::tools::WorkspaceLease>),
@@ -1654,27 +1713,65 @@ pub struct TaskInput {
     pub description: String,
     pub prompt: String,
     pub subagent_type: String,
-    #[serde(default, deserialize_with = "deserialize_task_id")]
+    #[serde(default, deserialize_with = "deserialize_optional_text")]
     pub task_id: Option<String>,
     /// Run detached; completion arrives as a notification.
     #[serde(default)]
     pub background: Option<bool>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_workspace")]
     pub workspace: Option<TaskWorkspaceInput>,
     /// Model override for this task; omit to use the agent definition's
     /// model or inherit the parent's.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_text")]
     pub model: Option<String>,
     /// Reasoning variant for the chosen model; omit for its default.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_text")]
     pub reasoning: Option<String>,
 }
 
-fn deserialize_task_id<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+/// Whether an optional field was left unfilled rather than answered.
+///
+/// GLM-5.3 writes the *string* "null" into optional task fields it means
+/// to skip — `"task_id": "null"`, `"model": "null"`, `"reasoning":
+/// "null"` — and taking that literally cost three failed round trips in
+/// one session: resuming task "null", validating variant "null". Blank
+/// strings arrive the same way. Both mean "not set", so every optional
+/// field of `TaskInput` goes through here. Required fields deliberately
+/// do not: a prompt of "null" is a prompt.
+fn is_unfilled(text: &str) -> bool {
+    let text = text.trim();
+    text.is_empty() || text == "null"
+}
+
+fn deserialize_optional_text<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    Ok(Option::<String>::deserialize(deserializer)?.filter(|task_id| !task_id.trim().is_empty()))
+    Ok(Option::<String>::deserialize(deserializer)?.filter(|text| !is_unfilled(text)))
+}
+
+/// The same quirk for the one optional field that is an object: a string
+/// where a workspace belongs is the model writing "null". Anything else
+/// is decoded as a workspace, so a genuinely malformed one still gets
+/// its own error rather than a mismatched-variant one.
+fn deserialize_optional_workspace<'de, D>(
+    deserializer: D,
+) -> Result<Option<TaskWorkspaceInput>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    if value.is_null() {
+        return Ok(None);
+    }
+    if let Some(text) = value.as_str()
+        && is_unfilled(text)
+    {
+        return Ok(None);
+    }
+    serde_json::from_value(value)
+        .map(Some)
+        .map_err(serde::de::Error::custom)
 }
 
 #[derive(Debug, Clone, Deserialize)]

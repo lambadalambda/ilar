@@ -2334,6 +2334,158 @@ async fn task_model_override_pins_child_model_and_rejects_unknown() {
     assert_eq!(child_models, vec!["zai/glm-4.7-flash".to_string()]);
 }
 
+/// GLM-5.3 fills optional task fields with the literal string "null"
+/// rather than omitting them; taking that at face value tried to resume
+/// session "null" and to validate variant "null".
+#[tokio::test]
+async fn literal_null_strings_in_optional_task_fields_spawn_as_if_omitted() {
+    let (store, parent_id) = temp_store();
+    let turn = vec![
+        ProviderEvent::TextDelta("fresh child".into()),
+        ProviderEvent::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        },
+    ];
+    let provider = Arc::new(MockProvider::new(vec![turn.clone(), turn]));
+    let task = parent_registry(spawner(provider, &store, 10, 3))
+        .get("task")
+        .unwrap();
+
+    let output = task
+        .run(
+            serde_json::json!({
+                "description": "new child",
+                "prompt": "work",
+                "subagent_type": "explore",
+                "task_id": "null",
+                "model": "null",
+                "reasoning": "null",
+                "workspace": "null",
+            }),
+            task_context(&parent_id),
+        )
+        .await;
+
+    assert!(!output.is_error, "{}", output.content);
+    assert!(
+        output.content.starts_with("fresh child"),
+        "{}",
+        output.content
+    );
+    let child_id = output
+        .child_session_id()
+        .expect("a fresh child session")
+        .to_string();
+    assert_ne!(child_id, "null");
+    let child = store.load(&child_id).unwrap();
+    // "model": "null" pinned nothing: the parent's model is inherited.
+    assert_eq!(child.meta().unwrap().model, "zai/glm-4.7");
+    assert_eq!(child.effective_variant(), None);
+
+    // Required fields are not normalized: a prompt of "null" is a prompt.
+    let output = task
+        .run(
+            serde_json::json!({
+                "description": "null",
+                "prompt": "null",
+                "subagent_type": "explore",
+            }),
+            task_context(&parent_id),
+        )
+        .await;
+    assert!(!output.is_error, "{}", output.content);
+    let literal_child = store
+        .load(output.child_session_id().expect("a fresh child session"))
+        .unwrap();
+    assert!(matches!(
+        &literal_child.transcript()[0].content[0],
+        ContentBlock::Text { text } if text == "null"
+    ));
+}
+
+#[tokio::test]
+async fn an_explicit_bad_reasoning_variant_names_the_reasoning_input() {
+    let (store, parent_id) = temp_store();
+    let task = parent_registry(spawner(Arc::new(MockProvider::new(vec![])), &store, 10, 3))
+        .get("task")
+        .unwrap();
+
+    let output = task
+        .run(
+            serde_json::json!({
+                "description": "think hard",
+                "prompt": "work",
+                "subagent_type": "explore",
+                "model": "openai/gpt-5.2",
+                "reasoning": "max",
+            }),
+            task_context(&parent_id),
+        )
+        .await;
+
+    assert!(output.is_error, "{}", output.content);
+    assert!(
+        output.content.contains("reasoning input"),
+        "{}",
+        output.content
+    );
+    assert!(!output.content.contains("inherited"), "{}", output.content);
+    assert!(
+        output.content.contains("openai/gpt-5.2"),
+        "{}",
+        output.content
+    );
+    // The variants the model can actually pick from, so it self-corrects.
+    assert!(output.content.contains("xhigh"), "{}", output.content);
+    assert!(store.children_of(&parent_id).is_empty());
+}
+
+#[tokio::test]
+async fn an_inherited_bad_reasoning_variant_still_says_inherited() {
+    let (store, parent_id) = temp_store();
+    store
+        .acquire_writer(&parent_id)
+        .unwrap()
+        .load()
+        .unwrap()
+        .append(SessionEvent::ModelChange {
+            id: new_id(),
+            model: "openai/gpt-5.2".into(),
+            variant: Some("max".into()),
+            ts: chrono::Utc::now(),
+        })
+        .unwrap();
+    let task = parent_registry(spawner(Arc::new(MockProvider::new(vec![])), &store, 10, 3))
+        .get("task")
+        .unwrap();
+
+    let output = task
+        .run(
+            serde_json::json!({
+                "description": "inherit",
+                "prompt": "work",
+                "subagent_type": "explore",
+            }),
+            task_context(&parent_id),
+        )
+        .await;
+
+    assert!(output.is_error, "{}", output.content);
+    assert!(
+        output.content.contains("inherited from parent"),
+        "{}",
+        output.content
+    );
+    assert!(
+        output.content.contains("openai/gpt-5.2"),
+        "{}",
+        output.content
+    );
+    assert!(output.content.contains("xhigh"), "{}", output.content);
+    assert!(store.children_of(&parent_id).is_empty());
+}
+
 #[tokio::test]
 async fn a_task_result_names_the_session_the_model_can_resume() {
     let (store, parent_id) = temp_store();
