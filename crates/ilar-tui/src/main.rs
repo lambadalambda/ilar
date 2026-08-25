@@ -392,9 +392,9 @@ fn apply_command_overrides(
     Some(expanded)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 enum TurnRequest {
-    New(String),
+    New(String, Vec<ilar::session::ImageContent>),
     Resume,
 }
 
@@ -491,15 +491,20 @@ fn apply_intent(
             // Starting a new turn preserves the raw text only in prompt history;
             // failed-turn resume uses persisted conversation state.
             let text = prepare_prompt(app, text)?;
+            // Whatever is attached rides this turn; the transcript row
+            // shows a marker per image in place of the payload.
+            let images = std::mem::take(&mut app.pending_images);
             app.retry_available = false;
             app.turn_committed = false;
             app.clear_notice();
-            app.push_transcript_line(Line_::User(text.clone()));
+            app.push_transcript_line(Line_::User(crate::transcript::user_text_with_images(
+                &text, &images,
+            )));
             app.follow_tail = true;
             app.busy = true;
             app.status = "thinking".into();
             app.set_activity(Activity::Thinking);
-            Some(TurnRequest::New(text))
+            Some(TurnRequest::New(text, images))
         }
     }
 }
@@ -1138,7 +1143,7 @@ impl schedule::Runtime for LoopRuntime<'_> {
         // prepare_prompt; the provider check happens in the adopt.
         // On failure the turn still runs — its prompt is already in
         // the transcript — just under the session's own model.
-        if matches!(&request, TurnRequest::New(_))
+        if matches!(&request, TurnRequest::New(..))
             && let Some((model, variant)) = app.pending_model_override.take()
         {
             let target = model.unwrap_or_else(|| app.current_model.clone());
@@ -1179,14 +1184,14 @@ impl schedule::Runtime for LoopRuntime<'_> {
         *self.steer_tx = Some(tx_steer);
         *self.turn_handle = Some(tokio::spawn(async move {
             let result = match request {
-                TurnRequest::New(text) => {
+                TurnRequest::New(text, images) => {
                     run_turn(
                         resolver.as_ref(),
                         &registry,
                         &store,
                         &session_id,
                         &text,
-                        &[],
+                        &images,
                         Some(&system_prompt),
                         loop_config,
                         tx,
@@ -2774,8 +2779,24 @@ async fn run_app(
                             }
                         } else if !app.input.is_blank() {
                             app.input.clear();
+                            app.pending_images.clear();
+                        } else if !app.pending_images.is_empty() {
+                            app.pending_images.clear();
+                            app.set_notice("attached images discarded", NoticeLevel::Info);
                         }
                     }
+                    // Ctrl-V attaches a clipboard *image*; text arrives
+                    // as an ordinary terminal paste event regardless.
+                    (KeyCode::Char('v'), true) => match app.read_clipboard_image() {
+                        Ok(Some(image)) => app.attach_image(image),
+                        Ok(None) => app.set_notice(
+                            "no image on the clipboard (text pastes normally)",
+                            NoticeLevel::Info,
+                        ),
+                        Err(error) => {
+                            app.set_notice(format!("clipboard: {error:#}"), NoticeLevel::Error);
+                        }
+                    },
                     // Half-page scrolling lives on Alt so that Ctrl-U and
                     // Ctrl-D can keep one meaning each: kill to line
                     // start, and quit.
@@ -2836,7 +2857,8 @@ async fn run_app(
                             app.history.push(&text);
                             // The transcript line for a steer appears
                             // when the loop delivers it, not on submit.
-                            let decided = decide::submit(&state, app.busy, text);
+                            let decided =
+                                decide::submit(&state, app.busy, app.pending_images.len(), text);
                             apply_event_intents(app, decided, &mut intents, steer_tx.as_ref());
                         }
                         PromptAction::Edited => app.clear_transient_notice(),

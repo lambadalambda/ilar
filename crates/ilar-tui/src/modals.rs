@@ -491,6 +491,7 @@ static HELP_SECTIONS: &[HelpSection] = &[
             binding!("Ctrl-D", "quit (blank input, nothing open)"),
             binding!("Ctrl-Q", "pending manager: queue, goal, jobs, retry"),
             binding!("Ctrl-R", "resume the failed turn from current context"),
+            binding!("Ctrl-V", "attach a clipboard image (vision models)"),
             binding!("Up / Down", "recall prompt history (blank input)"),
             binding!("Ctrl-A / Ctrl-E", "start / end of line"),
             binding!("Ctrl-K / Ctrl-U", "kill to line end / start"),

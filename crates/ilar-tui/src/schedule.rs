@@ -401,7 +401,7 @@ mod tests {
             if let Some(request) = crate::apply_intent(app, intent, None) {
                 self.turn_running = true;
                 match request {
-                    crate::TurnRequest::New(text) => self.log.push(format!("start_turn:{text}")),
+                    crate::TurnRequest::New(text, _) => self.log.push(format!("start_turn:{text}")),
                     crate::TurnRequest::Resume => self.log.push("resume_turn".into()),
                 }
             }
@@ -897,6 +897,7 @@ mod tests {
         let carried = crate::decide::submit(
             &FakeRuntime::new().observe(&app),
             false,
+            0,
             "typed while idle".into(),
         );
         let mut runtime = FakeRuntime::new();

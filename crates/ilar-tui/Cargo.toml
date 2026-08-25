@@ -22,7 +22,8 @@ tokio-util = "0.7.19"
 chrono.workspace = true
 unicode-width = { workspace = true }
 unicode-segmentation = { workspace = true }
-arboard = { version = "3.6", default-features = false, features = ["wayland-data-control"] }
+arboard = { version = "3.6", default-features = false, features = ["wayland-data-control", "image-data"] }
+png = "0.18"
 serde_json.workspace = true
 
 [dev-dependencies]

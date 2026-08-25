@@ -197,6 +197,8 @@ pub(crate) struct App {
     /// Pointer position within the transcript, viewport-relative; the
     /// row under it gets the hover underline when it is clickable.
     hover: Option<crate::selection::SelectionPoint>,
+    /// Images attached with Ctrl-V, waiting to ride the next fresh turn.
+    pub(crate) pending_images: Vec<ilar::session::ImageContent>,
     transcript_cells: Vec<RenderedRow>,
     transcript_selection: Option<TranscriptSelection>,
     selecting_transcript: bool,
@@ -297,6 +299,7 @@ impl App {
             transcript_hit_targets: Vec::new(),
             transcript_pressed_target: None,
             hover: None,
+            pending_images: Vec::new(),
             transcript_cells: Vec::new(),
             transcript_selection: None,
             selecting_transcript: false,
@@ -1524,6 +1527,69 @@ impl App {
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
     }
 
+    /// Attach an image to the next fresh turn, or say why not: mid-turn
+    /// attachments would ride steering (text-only), and a model without
+    /// vision would silently ignore what the user thinks it saw.
+    pub(crate) fn attach_image(&mut self, image: ilar::session::ImageContent) {
+        /// Decoded payload cap; providers reject far larger, but a session
+        /// line this size is already unpleasant to carry around.
+        const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+        if self.busy {
+            self.set_notice(
+                "a turn is running — images send with a fresh message; try again when it ends",
+                NoticeLevel::Warning,
+            );
+            return;
+        }
+        if !ilar::model::supports_vision(&self.current_model) {
+            self.set_notice(
+                format!("{} cannot view images", self.current_model),
+                NoticeLevel::Warning,
+            );
+            return;
+        }
+        let bytes = image.byte_len();
+        if bytes > MAX_IMAGE_BYTES {
+            self.set_notice(
+                format!(
+                    "image too large ({} — the cap is {})",
+                    crate::text::format_bytes(bytes as u64),
+                    crate::text::format_bytes(MAX_IMAGE_BYTES as u64)
+                ),
+                NoticeLevel::Warning,
+            );
+            return;
+        }
+        self.pending_images.push(image);
+        self.set_notice(
+            format!(
+                "image attached ({}) — sends with your next message, Esc discards",
+                crate::text::format_bytes(bytes as u64)
+            ),
+            NoticeLevel::Info,
+        );
+    }
+
+    /// The clipboard's image, PNG-encoded; `Ok(None)` when it holds none.
+    pub(crate) fn read_clipboard_image(&mut self) -> Result<Option<ilar::session::ImageContent>> {
+        if self.clipboard.is_none() {
+            self.clipboard = Some(arboard::Clipboard::new().context("opening clipboard")?);
+        }
+        let image = match self
+            .clipboard
+            .as_mut()
+            .expect("clipboard initialized")
+            .get_image()
+        {
+            Ok(image) => image,
+            Err(arboard::Error::ContentNotAvailable) => return Ok(None),
+            Err(error) => return Err(error).context("reading clipboard image"),
+        };
+        let png = encode_png(image.width as u32, image.height as u32, &image.bytes)
+            .context("encoding clipboard image")?;
+        Ok(Some(ilar::session::ImageContent::png(&png)))
+    }
+
     pub(crate) fn copy_to_clipboard(&mut self, text: &str) -> Result<()> {
         if self.clipboard.is_none() {
             self.clipboard = Some(arboard::Clipboard::new().context("opening clipboard")?);
@@ -1989,10 +2055,24 @@ impl App {
     pub(crate) fn pending_strip_lines(&self, width: u16) -> Vec<Line<'static>> {
         /// Rows before the strip collapses into a "+N more" count.
         const SHOWN: usize = 4;
-        let entries: Vec<(&str, &String)> = self
-            .pending_steers
+        let attachments: Vec<String> = self
+            .pending_images
             .iter()
-            .map(|text| ("steering · next step", text))
+            .map(|image| {
+                format!(
+                    "image · {}",
+                    crate::text::format_bytes(image.byte_len() as u64)
+                )
+            })
+            .collect();
+        let entries: Vec<(&str, &String)> = attachments
+            .iter()
+            .map(|label| ("attached · sends with your next message", label))
+            .chain(
+                self.pending_steers
+                    .iter()
+                    .map(|text| ("steering · next step", text)),
+            )
             .chain(
                 self.queued_messages
                     .iter()
@@ -2740,6 +2820,18 @@ const STREAM_STALL_AFTER: std::time::Duration = std::time::Duration::from_secs(3
 /// forever over work that has already stopped. A shallow sweep is not
 /// enough: the child's own rows are nested inside it, and
 /// `child_running` masks the parent row's state while it is set.
+/// RGBA8 rows → PNG bytes, for clipboard images headed into a session.
+fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut encoder = png::Encoder::new(&mut out, width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header()?;
+    writer.write_image_data(rgba)?;
+    writer.finish()?;
+    Ok(out)
+}
+
 fn close_running_tools(lines: &mut [Line_]) {
     for line in lines {
         if let Line_::Tool {
@@ -4444,6 +4536,54 @@ mod tests {
         let steer_at = text.find("go left").unwrap();
         let queued_at = text.find("and then stop").unwrap();
         assert!(steer_at < queued_at, "queued shown before steering: {text}");
+    }
+
+    #[test]
+    fn attaching_an_image_gates_on_vision_and_busy_then_rides_the_next_turn() {
+        use crate::{Intent, apply_intent};
+
+        let mut app = App::new();
+        // A model without vision refuses, naming the model.
+        app.current_model = "zai/glm-4.7".into();
+        app.attach_image(ilar::session::ImageContent::png(b"fake png bytes"));
+        assert!(app.pending_images.is_empty());
+        assert!(
+            app.notice
+                .as_ref()
+                .is_some_and(|notice| notice.text.contains("cannot view images"))
+        );
+
+        // Mid-turn attachments would ride steering (text-only): refused.
+        app.current_model = "openai/gpt-5.6-sol".into();
+        app.busy = true;
+        app.attach_image(ilar::session::ImageContent::png(b"fake png bytes"));
+        assert!(app.pending_images.is_empty());
+
+        // Idle on a vision model: attached, listed, and drained into
+        // the turn request with a marker on the transcript row.
+        app.busy = false;
+        app.attach_image(ilar::session::ImageContent::png(b"fake png bytes"));
+        assert_eq!(app.pending_images.len(), 1);
+        let strip = app.pending_strip_lines(80);
+        let text = strip[0]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(text.contains("attached"), "{text}");
+
+        let sent = apply_intent(&mut app, Intent::StartTurn("look at this".into()), None);
+        assert!(matches!(
+            sent,
+            Some(crate::TurnRequest::New(text, images))
+                if text == "look at this" && images.len() == 1
+        ));
+        assert!(app.pending_images.is_empty());
+        assert!(
+            matches!(app.lines.last(), Some(Line_::User(text)) if text.contains("[image attached: png")),
+            "{:?}",
+            app.lines.last()
+        );
     }
 
     #[test]
@@ -6630,7 +6770,10 @@ mod tests {
 
         // Sending from the queue takes the head and becomes a turn.
         let sent = apply_intent(&mut app, Intent::SendQueued, None);
-        assert_eq!(sent, Some(crate::TurnRequest::New("first".into())));
+        assert_eq!(
+            sent,
+            Some(crate::TurnRequest::New("first".into(), Vec::new()))
+        );
         assert_eq!(app.queued_messages, vec!["second"]);
         assert!(app.busy, "a started turn marks the app busy");
         assert!(
@@ -6698,7 +6841,10 @@ mod tests {
         }
         assert_eq!(
             started,
-            Some(crate::TurnRequest::New("do the next thing".into()))
+            Some(crate::TurnRequest::New(
+                "do the next thing".into(),
+                Vec::new()
+            ))
         );
         assert!(app.queued_messages.is_empty());
     }
@@ -6723,7 +6869,7 @@ mod tests {
             app.goal
         );
         assert!(
-            !matches!(&sent, crate::TurnRequest::New(text) if text == "/goal ship the parser"),
+            !matches!(&sent, crate::TurnRequest::New(text, _) if text == "/goal ship the parser"),
             "sent verbatim"
         );
         assert!(
@@ -6736,7 +6882,10 @@ mod tests {
         // Same for a queued command.
         app.queued_messages = vec!["/greptile PR 41".into()];
         let sent = apply_intent(&mut app, Intent::SendQueued, None).expect("the command body");
-        assert_eq!(sent, crate::TurnRequest::New("Review PR 41".into()));
+        assert_eq!(
+            sent,
+            crate::TurnRequest::New("Review PR 41".into(), Vec::new())
+        );
     }
 
     /// A steer reaches the channel while it lives and falls back to the
@@ -6849,7 +6998,7 @@ mod tests {
             input_blank: true,
             ..LoopState::default()
         };
-        for intent in decide::submit(&running, true, "next thing".into()) {
+        for intent in decide::submit(&running, true, 0, "next thing".into()) {
             assert!(!matches!(intent, Intent::StartTurn(_)), "mid-turn submit");
             apply_intent(&mut app, intent, None);
         }
@@ -6864,7 +7013,10 @@ mod tests {
         for intent in after_turn(&idle, true, None, false, 25) {
             started = started.or(apply_intent(&mut app, intent, None));
         }
-        assert_eq!(started, Some(crate::TurnRequest::New("next thing".into())));
+        assert_eq!(
+            started,
+            Some(crate::TurnRequest::New("next thing".into(), Vec::new()))
+        );
         assert!(app.queued_messages.is_empty());
     }
 }

@@ -27,6 +27,19 @@ impl ImageContent {
     pub fn data_url(&self) -> String {
         format!("data:{};base64,{}", self.media_type, self.data)
     }
+
+    pub fn png(bytes: &[u8]) -> Self {
+        use base64::Engine as _;
+        Self {
+            media_type: "image/png".into(),
+            data: base64::engine::general_purpose::STANDARD.encode(bytes),
+        }
+    }
+
+    /// Decoded payload size, for caps and display.
+    pub fn byte_len(&self) -> usize {
+        self.data.len() * 3 / 4
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
