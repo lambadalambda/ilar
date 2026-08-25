@@ -1267,7 +1267,7 @@ pub(crate) fn turn_entries(events: &[ilar::session::SessionEvent]) -> Vec<TurnEn
         .iter()
         .enumerate()
         .filter_map(|(index, event)| match event {
-            SessionEvent::UserMessage { id, text, ts } => Some(TurnEntry {
+            SessionEvent::UserMessage { id, text, ts, .. } => Some(TurnEntry {
                 cut: index,
                 user_id: id.clone(),
                 excerpt: text.split_whitespace().collect::<Vec<_>>().join(" "),
@@ -2571,6 +2571,7 @@ mod tests {
         ilar::session::SessionEvent::UserMessage {
             id: id.into(),
             text: text.into(),
+            images: Vec::new(),
             ts: chrono::Utc::now(),
         }
     }

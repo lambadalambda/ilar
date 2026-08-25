@@ -258,6 +258,12 @@ fn anthropic_message(msg: &ChatMessage) -> anyhow::Result<Option<serde_json::Val
         .iter()
         .filter_map(|block| match block {
             ContentBlock::Text { text } => Some(serde_json::json!({"type": "text", "text": text})),
+            // GLM image parts are a follow-up; degrade to a named gap so
+            // a session with images survives a switch to a text model.
+            ContentBlock::Image { .. } => Some(serde_json::json!({
+                "type": "text",
+                "text": "[image omitted: this model cannot view images]",
+            })),
             ContentBlock::Thinking {
                 text,
                 signature: Some(signature),
@@ -324,6 +330,9 @@ fn openai_message(msg: &ChatMessage) -> Vec<serde_json::Value> {
     for block in &msg.content {
         match block {
             ContentBlock::Text { text } => content_text.push_str(text),
+            ContentBlock::Image { .. } => {
+                content_text.push_str("[image omitted: this model cannot view images]");
+            }
             ContentBlock::Thinking { .. }
             | ContentBlock::ReasoningSummary { .. }
             | ContentBlock::Reasoning { .. }

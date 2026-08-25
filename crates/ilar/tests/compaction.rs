@@ -55,6 +55,7 @@ fn seed_compactable_history(store: &SessionStore, session_id: &str) {
             .append(SessionEvent::UserMessage {
                 id: new_id(),
                 text: format!("old question {i} {}", "context ".repeat(20)),
+                images: Vec::new(),
                 ts: chrono::Utc::now(),
             })
             .unwrap();
@@ -156,6 +157,7 @@ async fn estimate_ignores_usage_before_latest_compaction_boundary() {
         .append(SessionEvent::UserMessage {
             id: new_id(),
             text: "old context".repeat(20),
+            images: Vec::new(),
             ts: chrono::Utc::now(),
         })
         .unwrap();
@@ -180,6 +182,7 @@ async fn estimate_ignores_usage_before_latest_compaction_boundary() {
         .append(SessionEvent::UserMessage {
             id: new_id(),
             text: "current question".into(),
+            images: Vec::new(),
             ts: chrono::Utc::now(),
         })
         .unwrap();
@@ -299,6 +302,7 @@ async fn oversize_transcript_triggers_compaction() {
                     text: format!(
                         "question number {i} about the frobnicator module and its config"
                     ),
+                    images: Vec::new(),
                     ts: chrono::Utc::now(),
                 })
                 .unwrap();
@@ -627,6 +631,7 @@ async fn compaction_falls_back_to_chars_estimate_without_usage() {
             .append(SessionEvent::UserMessage {
                 id: new_id(),
                 text: "x".repeat(4000),
+                images: Vec::new(),
                 ts: chrono::Utc::now(),
             })
             .unwrap();
@@ -665,6 +670,7 @@ async fn forced_compaction_runs_below_the_threshold_and_reports_its_summary() {
             .append(SessionEvent::UserMessage {
                 id: new_id(),
                 text: "earlier question".into(),
+                images: Vec::new(),
                 ts: chrono::Utc::now(),
             })
             .unwrap();
@@ -976,6 +982,7 @@ async fn what_the_summary_drops_stays_findable() {
             .append(SessionEvent::UserMessage {
                 id: new_id(),
                 text: request.into(),
+                images: Vec::new(),
                 ts: chrono::Utc::now(),
             })
             .unwrap();

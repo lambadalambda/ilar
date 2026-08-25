@@ -159,30 +159,44 @@ impl OpenAIProvider {
 /// multimodal ones.
 fn wire_input_items(msg: &ChatMessage) -> Vec<serde_json::Value> {
     let mut items = Vec::new();
-    // Group tool results with their role; text becomes message items.
-    let mut text = String::new();
-    let flush_text = |text: &mut String, items: &mut Vec<serde_json::Value>| {
-        if !text.is_empty() {
-            let (role, part) = match msg.role {
-                Role::User => ("user", "input_text"),
-                Role::Assistant => ("assistant", "output_text"),
-            };
+    // Text and images gather as parts of one message item; consecutive
+    // text merges into a single part so a text-only message keeps the
+    // exact wire shape it always had (cached prefixes must not move).
+    let (role, text_part) = match msg.role {
+        Role::User => ("user", "input_text"),
+        Role::Assistant => ("assistant", "output_text"),
+    };
+    let mut parts: Vec<serde_json::Value> = Vec::new();
+    let push_text = |parts: &mut Vec<serde_json::Value>, t: &str| match parts.last_mut() {
+        Some(last) if last["type"] == text_part => {
+            let merged = format!("{}{t}", last["text"].as_str().unwrap_or_default());
+            last["text"] = serde_json::json!(merged);
+        }
+        _ if t.is_empty() => {}
+        _ => parts.push(serde_json::json!({"type": text_part, "text": t})),
+    };
+    let flush_parts = |parts: &mut Vec<serde_json::Value>, items: &mut Vec<serde_json::Value>| {
+        if !parts.is_empty() {
             items.push(serde_json::json!({
                 "type": "message",
                 "role": role,
-                "content": [{"type": part, "text": std::mem::take(text)}],
+                "content": std::mem::take(parts),
             }));
         }
     };
     for block in &msg.content {
         match block {
-            ContentBlock::Text { text: t } => text.push_str(t),
+            ContentBlock::Text { text: t } => push_text(&mut parts, t),
+            ContentBlock::Image { image } => parts.push(serde_json::json!({
+                "type": "input_image",
+                "image_url": image.data_url(),
+            })),
             ContentBlock::Thinking { .. } => {} // reasoning items are server-managed
             ContentBlock::ReasoningSummary { .. } => {}
             ContentBlock::Diagnostic { .. } => {}
             ContentBlock::ProviderReplay { .. } => {}
             ContentBlock::Reasoning { item } => {
-                flush_text(&mut text, &mut items);
+                flush_parts(&mut parts, &mut items);
                 items.push(item.clone());
             }
             ContentBlock::ToolCall {
@@ -191,7 +205,7 @@ fn wire_input_items(msg: &ChatMessage) -> Vec<serde_json::Value> {
                 input,
                 item_id,
             } => {
-                flush_text(&mut text, &mut items);
+                flush_parts(&mut parts, &mut items);
                 let input = input
                     .is_object()
                     .then_some(input)
@@ -217,7 +231,7 @@ fn wire_input_items(msg: &ChatMessage) -> Vec<serde_json::Value> {
                 content,
                 is_error: _,
             } => {
-                flush_text(&mut text, &mut items);
+                flush_parts(&mut parts, &mut items);
                 items.push(serde_json::json!({
                     "type": "function_call_output",
                     "call_id": tool_use_id,
@@ -226,7 +240,7 @@ fn wire_input_items(msg: &ChatMessage) -> Vec<serde_json::Value> {
             }
         }
     }
-    flush_text(&mut text, &mut items);
+    flush_parts(&mut parts, &mut items);
     items
 }
 
@@ -992,6 +1006,34 @@ mod tests {
             }],
         });
         assert!(legacy[0].get("id").is_none(), "{:?}", legacy[0]);
+    }
+
+    /// Text and images travel as parts of ONE message item, text first
+    /// — two items would give the model two user turns for one message.
+    #[test]
+    fn a_user_image_rides_the_same_message_item_as_its_text() {
+        let items = wire_input_items(&ChatMessage {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Text {
+                    text: "what is this?".into(),
+                },
+                ContentBlock::Image {
+                    image: crate::session::ImageContent {
+                        media_type: "image/png".into(),
+                        data: "aGVsbG8=".into(),
+                    },
+                },
+            ],
+        });
+
+        assert_eq!(items.len(), 1, "{items:?}");
+        let content = items[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "input_text");
+        assert_eq!(content[0]["text"], "what is this?");
+        assert_eq!(content[1]["type"], "input_image");
+        assert_eq!(content[1]["image_url"], "data:image/png;base64,aGVsbG8=");
     }
 
     /// The call id pairs a call with its result; the item id names the

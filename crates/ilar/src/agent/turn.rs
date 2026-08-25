@@ -1034,6 +1034,7 @@ async fn run_turn_inner(
             session.append(SessionEvent::UserMessage {
                 id: new_id(),
                 text: user_input.to_string(),
+                images: Vec::new(),
                 ts: Utc::now(),
             })?;
         }
@@ -1171,6 +1172,7 @@ async fn run_turn_inner(
                     session.append(SessionEvent::UserMessage {
                         id: new_id(),
                         text: text.clone(),
+                        images: Vec::new(),
                         ts: Utc::now(),
                     })?;
                     events.publish(LoopEvent::Steered { text }, &cancel).await;

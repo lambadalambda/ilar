@@ -1037,6 +1037,7 @@ async fn history_searches_this_session_and_no_other() {
             .append(ilar::session::SessionEvent::UserMessage {
                 id: ilar::session::new_id(),
                 text: format!("{marker}: {text}"),
+                images: Vec::new(),
                 ts: chrono::Utc::now(),
             })
             .unwrap();

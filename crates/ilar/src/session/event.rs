@@ -49,6 +49,10 @@ pub enum SessionEvent {
     UserMessage {
         id: String,
         text: String,
+        /// Inline attachments pasted with the message; absent in
+        /// sessions from before images existed.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<crate::session::ImageContent>,
         ts: DateTime<Utc>,
     },
     /// Associates one child-session turn with the parent task call that invoked it.

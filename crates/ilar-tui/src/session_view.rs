@@ -182,7 +182,7 @@ fn restored_session_invocation_view(
             // Folded out of replay before the view ever sees one; kept
             // total so a raw event stream renders as nothing.
             ilar::session::SessionEvent::Rewind { .. } => {}
-            ilar::session::SessionEvent::UserMessage { text, .. } => {
+            ilar::session::SessionEvent::UserMessage { text, images, .. } => {
                 match task_notification_display(text) {
                     Some(text) => lines.push(Line_::Task {
                         id: format!("note:restored:{}", lines.len()),
@@ -195,7 +195,9 @@ fn restored_session_invocation_view(
                             text,
                             expanded: false,
                         }),
-                        None => lines.push(Line_::User(text.clone())),
+                        None => lines.push(Line_::User(crate::transcript::user_text_with_images(
+                            text, images,
+                        ))),
                     },
                 }
             }
@@ -216,6 +218,8 @@ fn restored_session_invocation_view(
                         in_tool_run = false;
                     }
                     match block {
+                        // Never appears in assistant content.
+                        ilar::session::ContentBlock::Image { .. } => {}
                         ilar::session::ContentBlock::Text { text } => match lines.last_mut() {
                             Some(Line_::Assistant(current)) => current.push_str(text),
                             _ => lines.push(Line_::Assistant(text.clone())),
@@ -412,6 +416,7 @@ mod tests {
             .append(ilar::session::SessionEvent::UserMessage {
                 id: new_id(),
                 text: "remember this".into(),
+                images: Vec::new(),
                 ts: chrono::Utc::now(),
             })
             .unwrap();
@@ -636,6 +641,7 @@ mod tests {
             .append(ilar::session::SessionEvent::UserMessage {
                 id: new_id(),
                 text: "obsolete history".into(),
+                images: Vec::new(),
                 ts: chrono::Utc::now(),
             })
             .unwrap();
@@ -651,6 +657,7 @@ mod tests {
             .append(ilar::session::SessionEvent::UserMessage {
                 id: new_id(),
                 text: "current history".into(),
+                images: Vec::new(),
                 ts: chrono::Utc::now(),
             })
             .unwrap();
@@ -689,6 +696,7 @@ mod tests {
             .append(ilar::session::SessionEvent::UserMessage {
                 id: new_id(),
                 text: "Inspect rendering".into(),
+                images: Vec::new(),
                 ts: chrono::Utc::now(),
             })
             .unwrap();
@@ -715,6 +723,7 @@ mod tests {
             .append(ilar::session::SessionEvent::UserMessage {
                 id: new_id(),
                 text: "Later request".into(),
+                images: Vec::new(),
                 ts: chrono::Utc::now(),
             })
             .unwrap();

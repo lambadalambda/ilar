@@ -75,6 +75,7 @@ async fn turn(store: &SessionStore, id: &str, root: &Path, text: &str, checkpoin
         .append(SessionEvent::UserMessage {
             id: new_id(),
             text: text.into(),
+            images: Vec::new(),
             ts,
         })
         .unwrap();

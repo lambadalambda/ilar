@@ -27,6 +27,7 @@ fn seed_conversation(store: &SessionStore, session_id: &str) {
         .append(SessionEvent::UserMessage {
             id: new_id(),
             text: "wire up the auth service on port 8080".into(),
+            images: Vec::new(),
             ts: chrono::Utc::now(),
         })
         .unwrap();

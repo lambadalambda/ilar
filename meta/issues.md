@@ -45,3 +45,4 @@
 ## Milestone 11 — Beyond the terminal
 
 - [ ] [A web frontend](issues/web-frontend.md)
+- [ ] [Image input: paste a screenshot, the model sees it](issues/image-input.md)

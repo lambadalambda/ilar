@@ -12,11 +12,32 @@ pub enum Role {
     Assistant,
 }
 
+/// An inline image: base64 payload plus its IANA media type. Lives
+/// inside the session JSONL — bounded at capture time, not here.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImageContent {
+    /// e.g. "image/png".
+    pub media_type: String,
+    /// Base64-encoded bytes.
+    pub data: String,
+}
+
+impl ImageContent {
+    /// The `data:` URL form providers take inline.
+    pub fn data_url(&self) -> String {
+        format!("data:{};base64,{}", self.media_type, self.data)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
     Text {
         text: String,
+    },
+    /// User-supplied image; only ever appears in user messages.
+    Image {
+        image: ImageContent,
     },
     /// Extended-thinking block. Anthropic-style APIs require passing these
     /// back on the next request when thinking interleaves with tool use.

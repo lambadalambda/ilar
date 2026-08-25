@@ -1481,6 +1481,7 @@ async fn subagent_turns_use_the_configured_compaction_threshold() {
         .append(SessionEvent::UserMessage {
             id: new_id(),
             text: "old question ".repeat(40),
+            images: Vec::new(),
             ts: chrono::Utc::now(),
         })
         .unwrap();

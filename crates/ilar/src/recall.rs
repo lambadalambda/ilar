@@ -91,6 +91,7 @@ pub fn entries(events: &[SessionEvent]) -> Vec<Entry> {
                 for block in content {
                     match block {
                         ContentBlock::Text { text } => push(Speaker::Assistant, text),
+                        ContentBlock::Image { .. } => {}
                         ContentBlock::Thinking { text, .. } => push(Speaker::Thinking, text),
                         ContentBlock::ToolCall { name, input, .. } => {
                             push(Speaker::ToolCall, &format!("{name} {input}"));
@@ -354,6 +355,7 @@ mod tests {
         SessionEvent::UserMessage {
             id: new_id(),
             text: text.into(),
+            images: Vec::new(),
             ts: chrono::Utc::now(),
         }
     }

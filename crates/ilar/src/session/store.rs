@@ -1884,14 +1884,15 @@ pub fn transcript_of(events: &[SessionEvent]) -> Vec<ChatMessage> {
             | SessionEvent::Checkpoint { .. }
             | SessionEvent::Topic { .. }
             | SessionEvent::Rewind { .. } => {}
-            SessionEvent::UserMessage { text, .. } => {
+            SessionEvent::UserMessage { text, images, .. } => {
                 if !pending_results.is_empty() {
                     push_user_blocks(&mut messages, std::mem::take(&mut pending_results));
                 }
-                push_user_blocks(
-                    &mut messages,
-                    vec![ContentBlock::Text { text: text.clone() }],
-                );
+                let mut blocks = vec![ContentBlock::Text { text: text.clone() }];
+                blocks.extend(images.iter().map(|image| ContentBlock::Image {
+                    image: image.clone(),
+                }));
+                push_user_blocks(&mut messages, blocks);
             }
             SessionEvent::AssistantMessage { content, .. } => {
                 if !pending_results.is_empty() {

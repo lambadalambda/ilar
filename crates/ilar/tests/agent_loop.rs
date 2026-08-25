@@ -2644,6 +2644,7 @@ async fn pending_question_resumes_without_a_new_user_message() {
             .append(SessionEvent::UserMessage {
                 id: new_id(),
                 text: "start".into(),
+                images: Vec::new(),
                 ts: chrono::Utc::now(),
             })
             .unwrap();
@@ -2821,6 +2822,7 @@ async fn a_new_turn_cannot_overwrite_a_pending_question() {
             .append(SessionEvent::UserMessage {
                 id: new_id(),
                 text: "start".into(),
+                images: Vec::new(),
                 ts: chrono::Utc::now(),
             })
             .unwrap();

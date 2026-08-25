@@ -267,6 +267,8 @@ fn estimate_tokens_from(
                 .iter()
                 .map(|block| match block {
                     crate::session::ContentBlock::Text { text } => text.chars().count(),
+                    // Base64 tokenizes roughly like text: count it.
+                    crate::session::ContentBlock::Image { image } => image.data.len(),
                     crate::session::ContentBlock::Thinking { text, .. } => text.chars().count(),
                     crate::session::ContentBlock::ReasoningSummary { .. } => 0,
                     crate::session::ContentBlock::Reasoning { item } => {

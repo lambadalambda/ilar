@@ -26,6 +26,7 @@ fn user(text: &str) -> SessionEvent {
     SessionEvent::UserMessage {
         id: new_id(),
         text: text.into(),
+        images: Vec::new(),
         ts: Utc::now(),
     }
 }

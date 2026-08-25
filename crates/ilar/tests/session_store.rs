@@ -34,6 +34,7 @@ fn sample_log(meta: &SessionMeta) -> Vec<SessionEvent> {
         SessionEvent::UserMessage {
             id: new_id(),
             text: "read the config file".into(),
+            images: Vec::new(),
             ts,
         },
         SessionEvent::AssistantMessage {
@@ -276,6 +277,7 @@ fn torn_final_record_is_ignored_by_readers_and_repaired_before_append() {
         .append(SessionEvent::UserMessage {
             id: new_id(),
             text: "after recovery".into(),
+            images: Vec::new(),
             ts: Utc::now(),
         })
         .unwrap();
@@ -299,6 +301,7 @@ fn valid_final_record_without_newline_is_uncommitted() {
     let event = SessionEvent::UserMessage {
         id: new_id(),
         text: "not committed".into(),
+        images: Vec::new(),
         ts: Utc::now(),
     };
     let mut file = std::fs::OpenOptions::new()
@@ -483,6 +486,57 @@ fn transcript_groups_tool_results_into_user_message() {
 }
 
 #[test]
+fn user_images_ride_the_transcript_and_old_logs_read_without_them() {
+    let (store, _dir) = temp_store();
+    let meta = sample_meta();
+    let mut session = store.create(meta.clone()).unwrap();
+    session
+        .append(SessionEvent::UserMessage {
+            id: new_id(),
+            text: "what's wrong in this screenshot?".into(),
+            images: vec![ilar::session::ImageContent {
+                media_type: "image/png".into(),
+                data: "aGVsbG8=".into(),
+            }],
+            ts: Utc::now(),
+        })
+        .unwrap();
+    drop(session);
+
+    let transcript = store.load(&meta.session_id).unwrap().transcript();
+    assert_eq!(transcript.len(), 1);
+    assert_eq!(transcript[0].role, Role::User);
+    assert!(matches!(
+        &transcript[0].content[0],
+        ContentBlock::Text { text } if text == "what's wrong in this screenshot?"
+    ));
+    assert!(matches!(
+        &transcript[0].content[1],
+        ContentBlock::Image { image }
+            if image.media_type == "image/png" && image.data == "aGVsbG8="
+    ));
+
+    // A pre-image log line deserializes with no images at all.
+    let old: SessionEvent = serde_json::from_str(
+        r#"{"type":"user_message","id":"u1","text":"hi","ts":"2026-01-01T00:00:00Z"}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        old,
+        SessionEvent::UserMessage { images, .. } if images.is_empty()
+    ));
+    // And an image-free message writes no `images` key, so old ilar
+    // versions can still read new logs.
+    let plain = SessionEvent::UserMessage {
+        id: "u2".into(),
+        text: "hi".into(),
+        images: Vec::new(),
+        ts: Utc::now(),
+    };
+    assert!(!serde_json::to_string(&plain).unwrap().contains("images"));
+}
+
+#[test]
 fn transcript_honors_compaction_boundary() {
     let (store, _dir) = temp_store();
     let meta = sample_meta();
@@ -492,6 +546,7 @@ fn transcript_honors_compaction_boundary() {
     events.push(SessionEvent::UserMessage {
         id: new_id(),
         text: "and now?".into(),
+        images: Vec::new(),
         ts: Utc::now(),
     });
     // Compact away everything up to (excluding) the final user message.
@@ -526,6 +581,7 @@ fn fallback_window_clamps_compaction_boundary_to_its_event() {
         .append(SessionEvent::UserMessage {
             id: new_id(),
             text: "old".into(),
+            images: Vec::new(),
             ts: Utc::now(),
         })
         .unwrap();
@@ -561,6 +617,7 @@ fn compacted_session_loads_only_the_active_replay_window() {
             .append(SessionEvent::UserMessage {
                 id: new_id(),
                 text: format!("old question {index}"),
+                images: Vec::new(),
                 ts: Utc::now(),
             })
             .unwrap();
@@ -582,6 +639,7 @@ fn compacted_session_loads_only_the_active_replay_window() {
         .append(SessionEvent::UserMessage {
             id: new_id(),
             text: "active question".into(),
+            images: Vec::new(),
             ts: Utc::now(),
         })
         .unwrap();
@@ -617,6 +675,7 @@ fn corrupt_replay_index_falls_back_to_identical_canonical_replay() {
         .append(SessionEvent::UserMessage {
             id: new_id(),
             text: "active".into(),
+            images: Vec::new(),
             ts: Utc::now(),
         })
         .unwrap();
@@ -660,6 +719,7 @@ fn writer_rebuilds_a_corrupt_replay_index_after_canonical_fallback() {
         .append(SessionEvent::UserMessage {
             id: new_id(),
             text: "active".into(),
+            images: Vec::new(),
             ts: Utc::now(),
         })
         .unwrap();
@@ -755,6 +815,7 @@ fn replay_index_preserves_folded_model_and_todo_state() {
         .append(SessionEvent::UserMessage {
             id: new_id(),
             text: "active".into(),
+            images: Vec::new(),
             ts: Utc::now(),
         })
         .unwrap();
@@ -785,6 +846,7 @@ fn compaction_after_indexed_load_writes_an_absolute_boundary() {
             .append(SessionEvent::UserMessage {
                 id: new_id(),
                 text: format!("old {index}"),
+                images: Vec::new(),
                 ts: Utc::now(),
             })
             .unwrap();
@@ -806,6 +868,7 @@ fn compaction_after_indexed_load_writes_an_absolute_boundary() {
         .append(SessionEvent::UserMessage {
             id: new_id(),
             text: "first active".into(),
+            images: Vec::new(),
             ts: Utc::now(),
         })
         .unwrap();
@@ -841,6 +904,7 @@ fn compaction_after_indexed_load_writes_an_absolute_boundary() {
         .append(SessionEvent::UserMessage {
             id: new_id(),
             text: "second active".into(),
+            images: Vec::new(),
             ts: Utc::now(),
         })
         .unwrap();
@@ -883,6 +947,7 @@ fn active_writer_rejects_atomic_replacement_of_canonical_log() {
         .append(SessionEvent::UserMessage {
             id: new_id(),
             text: "must not disappear".into(),
+            images: Vec::new(),
             ts: Utc::now(),
         })
         .expect_err("replaced canonical path must invalidate the writer");
@@ -904,6 +969,7 @@ fn invalid_history_is_never_hidden_by_checkpoint_creation() {
         .append(SessionEvent::UserMessage {
             id: "duplicate-event".into(),
             text: "first".into(),
+            images: Vec::new(),
             ts: Utc::now(),
         })
         .unwrap();
@@ -923,6 +989,7 @@ fn invalid_history_is_never_hidden_by_checkpoint_creation() {
         .append(SessionEvent::UserMessage {
             id: "duplicate-event".into(),
             text: "duplicate".into(),
+            images: Vec::new(),
             ts: Utc::now(),
         })
         .unwrap();
@@ -954,6 +1021,7 @@ fn corrupted_historical_id_page_falls_back_to_canonical_validation() {
         .append(SessionEvent::UserMessage {
             id: "historical-id".into(),
             text: "old".into(),
+            images: Vec::new(),
             ts: Utc::now(),
         })
         .unwrap();
@@ -972,6 +1040,7 @@ fn corrupted_historical_id_page_falls_back_to_canonical_validation() {
         .append(SessionEvent::UserMessage {
             id: new_id(),
             text: "active".into(),
+            images: Vec::new(),
             ts: Utc::now(),
         })
         .unwrap();
@@ -987,6 +1056,7 @@ fn corrupted_historical_id_page_falls_back_to_canonical_validation() {
         .append(SessionEvent::UserMessage {
             id: "historical-id".into(),
             text: "duplicate tail".into(),
+            images: Vec::new(),
             ts: Utc::now(),
         })
         .unwrap();
@@ -1019,6 +1089,7 @@ fn middle_corruption_with_torn_tail_is_rejected_without_mutating_log() {
     events.push(SessionEvent::UserMessage {
         id: new_id(),
         text: "continue".into(),
+        images: Vec::new(),
         ts: Utc::now(),
     });
     let kept_from = events.len();
@@ -1031,6 +1102,7 @@ fn middle_corruption_with_torn_tail_is_rejected_without_mutating_log() {
     events.push(SessionEvent::UserMessage {
         id: new_id(),
         text: "after compaction".into(),
+        images: Vec::new(),
         ts: Utc::now(),
     });
     for event in events.into_iter().skip(1) {
@@ -1223,6 +1295,7 @@ fn pending_question_is_restored_from_active_checkpoint_replay() {
         .append(SessionEvent::UserMessage {
             id: new_id(),
             text: "old".into(),
+            images: Vec::new(),
             ts: Utc::now(),
         })
         .unwrap();
@@ -1346,6 +1419,7 @@ fn duplicate_event_and_tool_call_ids_are_rejected() {
             .append(SessionEvent::UserMessage {
                 id: duplicate_id.clone(),
                 text: text.into(),
+                images: Vec::new(),
                 ts: Utc::now(),
             })
             .unwrap();
@@ -1443,6 +1517,7 @@ fn list_returns_root_sessions_most_recent_first_with_titles() {
     a.append(SessionEvent::UserMessage {
         id: new_id(),
         text: "  first   question\nacross lines  ".into(),
+        images: Vec::new(),
         ts: Utc::now(),
     })
     .unwrap();
@@ -1453,6 +1528,7 @@ fn list_returns_root_sessions_most_recent_first_with_titles() {
     b.append(SessionEvent::UserMessage {
         id: new_id(),
         text: "second".into(),
+        images: Vec::new(),
         ts: Utc::now(),
     })
     .unwrap();
@@ -1505,6 +1581,7 @@ fn list_titles_are_bounded_and_optional() {
     long.append(SessionEvent::UserMessage {
         id: new_id(),
         text: "x".repeat(500),
+        images: Vec::new(),
         ts: Utc::now(),
     })
     .unwrap();
@@ -1543,6 +1620,7 @@ fn delete_removes_session_files_and_refuses_active_sessions() {
         .append(SessionEvent::UserMessage {
             id: new_id(),
             text: "hello".into(),
+            images: Vec::new(),
             ts: Utc::now(),
         })
         .unwrap();
@@ -1586,6 +1664,7 @@ fn fork_copies_history_under_a_new_id() {
         .append(SessionEvent::UserMessage {
             id: new_id(),
             text: "diverge".into(),
+            images: Vec::new(),
             ts: Utc::now(),
         })
         .unwrap();
@@ -1615,6 +1694,7 @@ fn checkpoint_events_round_trip_and_render_nothing() {
         .append(SessionEvent::UserMessage {
             id: new_id(),
             text: "rewrite the parser".into(),
+            images: Vec::new(),
             ts,
         })
         .unwrap();
@@ -1673,6 +1753,7 @@ fn simple_turn(user_id: &str, text: &str, assistant_id: &str) -> Vec<SessionEven
         SessionEvent::UserMessage {
             id: user_id.into(),
             text: text.into(),
+            images: Vec::new(),
             ts,
         },
         SessionEvent::AssistantMessage {
@@ -2124,6 +2205,7 @@ fn children_of_lists_only_this_session_s_tasks_newest_first() {
             .append(SessionEvent::UserMessage {
                 id: new_id(),
                 text: format!("task {index} prompt"),
+                images: Vec::new(),
                 ts: Utc::now(),
             })
             .unwrap();
@@ -2178,6 +2260,7 @@ fn a_generated_topic_titles_the_session_and_the_listing() {
             text: "here is a stack trace, no idea what is going on\n\
                    thread 'main' panicked at src/main.rs:42"
                 .into(),
+            images: Vec::new(),
             ts: Utc::now(),
         })
         .unwrap();
@@ -2234,6 +2317,7 @@ async fn titling_records_a_topic_and_leaves_a_failure_alone() {
         .append(SessionEvent::UserMessage {
             id: new_id(),
             text: "the auth test fails every third run".into(),
+            images: Vec::new(),
             ts: Utc::now(),
         })
         .unwrap();
@@ -2295,6 +2379,7 @@ fn the_archive_outlives_the_context_window() {
         .append(SessionEvent::UserMessage {
             id: new_id(),
             text: "the AES table lives at offset 0x4f11b4".into(),
+            images: Vec::new(),
             ts: Utc::now(),
         })
         .unwrap();

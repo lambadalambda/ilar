@@ -1600,6 +1600,7 @@ async fn notification_waits_for_busy_parent_without_being_lost() {
         .append(ilar::session::SessionEvent::UserMessage {
             id: new_id(),
             text: "active parent work".into(),
+            images: Vec::new(),
             ts: chrono::Utc::now(),
         })
         .unwrap();

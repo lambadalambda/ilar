@@ -3170,6 +3170,7 @@ mod tests {
             .append(ilar::session::SessionEvent::UserMessage {
                 id: new_id(),
                 text: "hello".into(),
+                images: Vec::new(),
                 ts: chrono::Utc::now(),
             })
             .unwrap();
@@ -3177,6 +3178,7 @@ mod tests {
             .append(ilar::session::SessionEvent::UserMessage {
                 id: new_id(),
                 text: "<task-notification>\nTask \"Assess architecture and risks\" completed.\n<result>\nRepository review\n</result>\n</task-notification>".into(),
+                images: Vec::new(),
                 ts: chrono::Utc::now(),
             })
             .unwrap();
@@ -3184,6 +3186,7 @@ mod tests {
             .append(ilar::session::SessionEvent::UserMessage {
                 id: new_id(),
                 text: "<tool-notification>\nBackground job job-1 (\"Run checks\") completed.\n<result>\nchecks passed\n</result>\n</tool-notification>".into(),
+                images: Vec::new(),
                 ts: chrono::Utc::now(),
             })
             .unwrap();
