@@ -190,6 +190,10 @@ pub(crate) struct App {
     transcript_text_area: Rect,
     transcript_cache: TranscriptRenderCache,
     transcript_hit_targets: Vec<Option<TranscriptHitTarget>>,
+    /// Resolved at mouse-down: under a streaming turn the transcript
+    /// scrolls between press and release, so a release-time lookup
+    /// would hit whatever moved under the cursor.
+    transcript_pressed_target: Option<TranscriptHitTarget>,
     transcript_cells: Vec<RenderedRow>,
     transcript_selection: Option<TranscriptSelection>,
     selecting_transcript: bool,
@@ -288,6 +292,7 @@ impl App {
             transcript_text_area: Rect::default(),
             transcript_cache: TranscriptRenderCache::default(),
             transcript_hit_targets: Vec::new(),
+            transcript_pressed_target: None,
             transcript_cells: Vec::new(),
             transcript_selection: None,
             selecting_transcript: false,
@@ -1399,7 +1404,9 @@ impl App {
         self.content_rows = content_rows;
         self.viewport_rows = viewport_rows;
         let max_scroll = self.max_scroll();
-        if self.follow_tail {
+        // A held button pins the viewport: rows must not move under a
+        // click or a drag-selection while the stream grows the tail.
+        if self.follow_tail && !self.selecting_transcript {
             self.scroll_top = max_scroll;
         } else {
             self.scroll_top = self.scroll_top.min(max_scroll);
@@ -1410,6 +1417,7 @@ impl App {
         self.transcript_selection = None;
         self.selecting_transcript = false;
         self.transcript_dragged = false;
+        self.transcript_pressed_target = None;
     }
 
     pub(crate) fn begin_transcript_selection(&mut self, column: u16, row: u16) {
@@ -1417,6 +1425,11 @@ impl App {
         let Some(point) = selection_point(self.transcript_text_area, column, row, false) else {
             return;
         };
+        self.transcript_pressed_target = self
+            .transcript_hit_targets
+            .get(point.row)
+            .cloned()
+            .flatten();
         self.transcript_selection = Some(TranscriptSelection {
             anchor: point,
             focus: point,
@@ -1447,15 +1460,11 @@ impl App {
         }
         self.update_transcript_selection(column, row);
         self.selecting_transcript = false;
+        let pressed = self.transcript_pressed_target.take();
         let selection = self.transcript_selection?;
         if selection.anchor == selection.focus && !self.transcript_dragged {
-            let target = self
-                .transcript_hit_targets
-                .get(selection.focus.row)
-                .cloned()
-                .flatten();
             self.transcript_selection = None;
-            if let Some(target) = target {
+            if let Some(target) = pressed {
                 self.toggle_transcript_target(target);
             }
             return None;
@@ -5200,6 +5209,43 @@ mod tests {
 
         assert!(app.expanded_tool_groups.contains("group-1"));
         assert!(app.transcript_selection.is_none());
+    }
+
+    #[test]
+    fn a_click_toggles_the_row_that_was_pressed_even_if_the_stream_shifts_it() {
+        let mut app = App::new();
+        app.transcript_text_area = Rect::new(4, 2, 40, 1);
+        app.transcript_hit_targets = vec![Some(TranscriptHitTarget::ToolGroup("group-1".into()))];
+
+        app.begin_transcript_selection(5, 2);
+        // A newer frame rendered before the release: the pressed row
+        // scrolled away and this position no longer names a target.
+        app.transcript_hit_targets = vec![None];
+        assert_eq!(app.finish_transcript_selection(5, 2), None);
+
+        assert!(app.expanded_tool_groups.contains("group-1"));
+    }
+
+    #[test]
+    fn a_held_press_pins_the_viewport_against_the_tail() {
+        let mut app = App::new();
+        app.transcript_text_area = Rect::new(4, 2, 40, 5);
+        app.transcript_hit_targets = vec![None; 5];
+        app.follow_tail = true;
+        app.update_scroll_metrics(20, 5);
+        assert_eq!(app.scroll_top, 15);
+
+        app.begin_transcript_selection(5, 3);
+        // The stream keeps growing while the button is held: the rows
+        // under the cursor must not move.
+        app.update_scroll_metrics(30, 5);
+        assert_eq!(app.scroll_top, 15);
+
+        // Released: following resumes without having been turned off.
+        app.finish_transcript_selection(5, 3);
+        assert!(app.follow_tail);
+        app.update_scroll_metrics(30, 5);
+        assert_eq!(app.scroll_top, 25);
     }
 
     #[test]
