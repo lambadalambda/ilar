@@ -18,6 +18,7 @@ mod sidebar;
 mod text;
 mod theme;
 mod transcript;
+mod view;
 
 use std::sync::Arc;
 

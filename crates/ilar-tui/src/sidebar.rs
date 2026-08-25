@@ -1,4 +1,6 @@
-//! The right-hand sidebar: todos, and its narrow-terminal fallback.
+//! The right-hand sidebar: the todo, agent and service panels, and its
+//! narrow-terminal fallback. Rows and the geometry they land in;
+//! view.rs frames and draws them.
 
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -103,6 +105,78 @@ pub(crate) fn agent_panel_lines(agents: &[AgentRow], width: usize) -> Vec<Line<'
         ));
     }
     lines
+}
+
+/// The services panel's rows, plus where its exited-services
+/// disclosure landed among them — the one row that takes clicks.
+pub(crate) struct ServicePanel {
+    pub(crate) lines: Vec<Line<'static>>,
+    pub(crate) exited_toggle: Option<usize>,
+}
+
+/// What runs is what matters: every running service, no cap
+/// (`carve_panel` bounds by available space), and the dead collapsed to
+/// a count so a crash still registers.
+pub(crate) fn service_panel(
+    services: &[(String, bool, String)],
+    show_exited: bool,
+    width: usize,
+) -> ServicePanel {
+    let row = |marker: &'static str, marker_color, name: &str, detail: &str, text_color| {
+        Line::from(vec![
+            Span::styled(marker, Style::default().fg(marker_color)),
+            Span::styled(
+                truncate_display(
+                    &format!("{name} · {detail}"),
+                    width.saturating_sub(2),
+                    Truncation::Right,
+                ),
+                Style::default().fg(text_color),
+            ),
+        ])
+    };
+    let mut lines: Vec<Line<'static>> = services
+        .iter()
+        .filter(|(_, running, _)| *running)
+        .map(|(name, _, detail)| row("● ", theme::SUCCESS, name, detail, theme::PRIMARY))
+        .collect();
+    let exited: Vec<_> = services.iter().filter(|(_, running, _)| !running).collect();
+    let mut exited_toggle = None;
+    if !exited.is_empty() {
+        exited_toggle = Some(lines.len());
+        let marker = if show_exited { "▾ " } else { "▸ " };
+        lines.push(Line::from(vec![
+            Span::styled(marker, Style::default().fg(MUTED)),
+            Span::styled(
+                format!("{} exited", exited.len()),
+                Style::default().fg(MUTED),
+            ),
+        ]));
+        if show_exited {
+            for (name, _, detail) in &exited {
+                lines.push(row("○ ", MUTED, name, detail, MUTED));
+            }
+        }
+    }
+    ServicePanel {
+        lines,
+        exited_toggle,
+    }
+}
+
+/// Where the disclosure row landed on screen inside its carved panel —
+/// `None` when the panel had no room to draw it.
+pub(crate) fn exited_disclosure_hit(panel: Rect, index: usize) -> Option<Rect> {
+    let row = panel.y + 1 + index as u16;
+    (row < panel.bottom().saturating_sub(1))
+        .then(|| Rect::new(panel.x + 1, row, panel.width.saturating_sub(2), 1))
+}
+
+/// Mark a row as the clickable the pointer is over.
+pub(crate) fn underline_row(line: &mut Line<'static>) {
+    for span in &mut line.spans {
+        span.style = span.style.add_modifier(Modifier::UNDERLINED);
+    }
 }
 
 pub(crate) struct TodoRenderSnapshot {
