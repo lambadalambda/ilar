@@ -143,6 +143,25 @@ fn excerpt(text: &str, at: usize, needle_len: usize) -> (String, bool, bool) {
     )
 }
 
+/// Carry a byte offset in `text.to_lowercase()` back to a byte offset
+/// in `text` itself, in one walk and with nothing allocated.
+///
+/// The two strings only line up while every character lowercases to its
+/// own byte length; 'İ' lowercases to "i\u{307}" and everything after
+/// it has shifted. An offset landing inside such an expansion resolves
+/// to the character holding it, so the answer is always a real char
+/// boundary of `text` — the whole point, since the caller slices there.
+fn original_offset(text: &str, lowered_at: usize) -> usize {
+    let mut lowered = 0;
+    for (index, character) in text.char_indices() {
+        lowered += character.to_lowercase().map(char::len_utf8).sum::<usize>();
+        if lowered > lowered_at {
+            return index;
+        }
+    }
+    text.len()
+}
+
 /// Parse a speaker filter from a caller's word, e.g. the `history`
 /// tool's `speaker` argument. `None` means every speaker.
 pub fn parse_speaker(word: &str) -> Option<Speaker> {
@@ -194,23 +213,18 @@ pub fn search(
         if speaker.is_some_and(|wanted| wanted != entry.speaker) {
             continue;
         }
-        let Some(at) = entry.text.to_lowercase().find(&needle) else {
+        let lowered = entry.text.to_lowercase();
+        let Some(found) = lowered.find(&needle) else {
             continue;
         };
-        // The lowercase index is a byte index into a different string;
-        // only ASCII-safe when the prefix is ASCII, so re-find on the
-        // original where the case matches, and fall back to the start.
-        let at = entry
-            .text
-            .char_indices()
-            .map(|(index, _)| index)
-            .find(|index| {
-                entry.text[*index..]
-                    .to_lowercase()
-                    .starts_with(needle.as_str())
-            })
-            .unwrap_or(at.min(entry.text.len()));
-        let (excerpt, elided_before, elided_after) = excerpt(&entry.text, at, needle.len());
+        // Both ends are indices into the lowercased text, a different
+        // string: lowercasing can change a character's byte length
+        // ('İ' becomes "i\u{307}"). Carry them back to the original
+        // before anything slices it.
+        let at = original_offset(&entry.text, found);
+        let end = original_offset(&entry.text, found + needle.len());
+        let (excerpt, elided_before, elided_after) =
+            excerpt(&entry.text, at, end.saturating_sub(at));
         matches.push(Match {
             event: entry.event,
             speaker: entry.speaker,
@@ -459,6 +473,60 @@ mod tests {
         assert_eq!(context[2].text, "third");
         // Clamped at both ends of the log.
         assert_eq!(around(&entries, 0, 5, 100).len(), entries.len());
+    }
+
+    #[test]
+    fn a_dotted_capital_i_does_not_slice_a_character_in_half() {
+        // 'İ' lowercases to two chars ("i\u{307}"), so any byte index
+        // taken from the lowercased text lands mid-character in the
+        // original — the excerpt must never be cut there.
+        let events = vec![user("İstanbul was the last stop")];
+
+        let matches = search(&entries(&events), "i", None, MAX_MATCHES);
+
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].excerpt.contains("İstanbul"), "{matches:?}");
+
+        // A query starting inside that expansion — the combining dot
+        // the 'İ' lowercased into — has no case-matching position in
+        // the original at all, and used to fall back to the lowercased
+        // index against the original text.
+        let matches = search(&entries(&events), "\u{307}stanbul", None, MAX_MATCHES);
+
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].excerpt.contains("İstanbul"), "{matches:?}");
+    }
+
+    #[test]
+    fn a_lengthening_char_before_a_hit_still_excerpts_the_term() {
+        let events = vec![user("İzmir first, then the AES table")];
+
+        let matches = search(&entries(&events), "aes table", None, MAX_MATCHES);
+
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].excerpt.contains("AES table"), "{matches:?}");
+    }
+
+    #[test]
+    fn an_ascii_hit_is_windowed_from_the_match_itself() {
+        let left = "a".repeat(200);
+        let right = "b".repeat(200);
+        let events = vec![result(&format!("{left}TARGET{right}"))];
+
+        let matches = search(&entries(&events), "target", None, MAX_MATCHES);
+
+        assert_eq!(matches.len(), 1);
+        // Exactly EXCERPT_RADIUS characters either side of the hit:
+        // an offset off by one would shift the whole window.
+        assert_eq!(
+            matches[0].excerpt,
+            format!(
+                "{}TARGET{}",
+                "a".repeat(EXCERPT_RADIUS),
+                "b".repeat(EXCERPT_RADIUS)
+            )
+        );
+        assert!(matches[0].elided_before && matches[0].elided_after);
     }
 
     #[test]
