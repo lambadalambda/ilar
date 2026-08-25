@@ -328,6 +328,146 @@ async fn read_keeps_text_with_ansi_escapes_as_text() {
     assert!(!out.content.contains("binary"), "{}", out.content);
 }
 
+fn vision_ctx(dir: &std::path::Path) -> ToolContext {
+    let mut ctx = ctx(dir);
+    ctx.vision = true;
+    ctx
+}
+
+#[tokio::test]
+async fn read_returns_the_image_itself_in_a_vision_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let bytes = png_bytes(48, 32);
+    std::fs::write(dir.path().join("shot.png"), &bytes).unwrap();
+    let out = run(
+        &registry(),
+        "read",
+        serde_json::json!({"path": "shot.png"}),
+        &vision_ctx(dir.path()),
+    )
+    .await;
+    assert!(!out.is_error, "{}", out.content);
+    assert_eq!(out.images().len(), 1, "{:?}", out);
+    assert_eq!(out.images()[0].media_type, "image/png");
+    assert!(out.content.contains("PNG image, 48x32"), "{}", out.content);
+    assert!(
+        out.content.contains("the image itself follows"),
+        "{}",
+        out.content
+    );
+    assert!(
+        !out.content.contains("cannot be read as text"),
+        "{}",
+        out.content
+    );
+    assert!(!out.content.contains("do not retry"), "{}", out.content);
+    assert_eq!(out.content.lines().count(), 1, "{}", out.content);
+}
+
+#[tokio::test]
+async fn read_returns_the_image_regardless_of_offset_and_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shot.png"), png_bytes(4, 4)).unwrap();
+    let out = run(
+        &registry(),
+        "read",
+        serde_json::json!({"path": "shot.png", "offset": 2, "limit": 5}),
+        &vision_ctx(dir.path()),
+    )
+    .await;
+    assert!(!out.is_error, "{}", out.content);
+    assert_eq!(out.images().len(), 1, "{:?}", out);
+    assert!(
+        out.content.contains("the image itself follows"),
+        "{}",
+        out.content
+    );
+}
+
+#[tokio::test]
+async fn read_without_vision_describes_the_image_and_attaches_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shot.png"), png_bytes(48, 32)).unwrap();
+    let out = run(
+        &registry(),
+        "read",
+        serde_json::json!({"path": "shot.png"}),
+        &ctx(dir.path()),
+    )
+    .await;
+    assert!(out.images().is_empty(), "{:?}", out);
+    assert!(out.content.contains("PNG image, 48x32"), "{}", out.content);
+    assert!(
+        out.content
+            .contains("cannot be read as text, do not retry with offset/limit"),
+        "{}",
+        out.content
+    );
+    assert!(
+        !out.content.contains("the image itself follows"),
+        "{}",
+        out.content
+    );
+}
+
+#[tokio::test]
+async fn read_describes_an_oversized_image_without_decoding_it() {
+    let dir = tempfile::tempdir().unwrap();
+    // Size guard fires before the decode: zeros after the magic bytes are
+    // not a decodable PNG, and nothing tries.
+    let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+    bytes.resize(10 * 1024 * 1024 + 1, 0);
+    std::fs::write(dir.path().join("huge.png"), &bytes).unwrap();
+    let out = run(
+        &registry(),
+        "read",
+        serde_json::json!({"path": "huge.png"}),
+        &vision_ctx(dir.path()),
+    )
+    .await;
+    assert!(!out.is_error, "{}", out.content);
+    assert!(out.images().is_empty(), "{:?}", out);
+    assert!(out.content.contains("PNG image"), "{}", out.content);
+    assert!(
+        out.content
+            .contains(&format!("{} bytes", 10 * 1024 * 1024 + 1)),
+        "{}",
+        out.content
+    );
+    assert!(
+        out.content.contains("cannot be read as text"),
+        "{}",
+        out.content
+    );
+}
+
+#[tokio::test]
+async fn read_attaches_a_jpeg_without_re_encoding_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let bytes = b"\xFF\xD8\xFF\xE0\x00\x10JFIF\x00 not really a jpeg body".to_vec();
+    std::fs::write(dir.path().join("photo.jpg"), &bytes).unwrap();
+    let out = run(
+        &registry(),
+        "read",
+        serde_json::json!({"path": "photo.jpg"}),
+        &vision_ctx(dir.path()),
+    )
+    .await;
+    assert!(!out.is_error, "{}", out.content);
+    assert_eq!(out.images().len(), 1, "{:?}", out);
+    assert_eq!(
+        out.images()[0],
+        ilar::session::ImageContent::new("image/jpeg", &bytes),
+        "the file's own bytes must reach the model untouched"
+    );
+    assert!(out.content.contains("JPEG image"), "{}", out.content);
+    assert!(
+        out.content.contains("the image itself follows"),
+        "{}",
+        out.content
+    );
+}
+
 // ---- write ----
 
 #[tokio::test]

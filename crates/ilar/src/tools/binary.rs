@@ -15,15 +15,39 @@ const CONTROL_PERCENT: usize = 5;
 /// Below this, control characters are a stray escape, not a file format.
 const MIN_CONTROLS: usize = 4;
 
+/// Closing hint when the model gets none of the file's bytes.
+const NO_RETRY_HINT: &str = "cannot be read as text, do not retry with offset/limit";
+
+/// Closing hint when the result carries the image itself.
+const IMAGE_FOLLOWS_HINT: &str = "the image itself follows";
+
 /// `Some(one-line description)` when `head` — the first [`SNIFF_BYTES`] of
 /// a `total_bytes`-long file — is binary; `None` when it reads as text.
 pub fn describe(display_path: &str, head: &[u8], total_bytes: u64) -> Option<String> {
     let kind =
         image_kind(head).or_else(|| looks_binary(head).then(|| "binary data".to_string()))?;
-    Some(format!(
-        "(binary file: {display_path} — {kind}, {total_bytes} bytes; \
-         cannot be read as text, do not retry with offset/limit)"
+    Some(line(display_path, &kind, total_bytes, NO_RETRY_HINT))
+}
+
+/// The [`describe`] line for an image whose bytes the result actually
+/// carries, so the hint points at the attachment instead of telling the
+/// model not to retry. `None` when `head` is not an image at all — which
+/// is also how a caller tells an image apart from generic binary data.
+pub(crate) fn describe_attached_image(
+    display_path: &str,
+    head: &[u8],
+    total_bytes: u64,
+) -> Option<String> {
+    Some(line(
+        display_path,
+        &image_kind(head)?,
+        total_bytes,
+        IMAGE_FOLLOWS_HINT,
     ))
+}
+
+fn line(display_path: &str, kind: &str, total_bytes: u64, hint: &str) -> String {
+    format!("(binary file: {display_path} — {kind}, {total_bytes} bytes; {hint})")
 }
 
 /// Magic-byte image formats, with dimensions where they are a cheap read.
@@ -157,6 +181,19 @@ mod tests {
         let mut head = "字".repeat(8).into_bytes();
         head.truncate(head.len() - 1);
         assert!(!looks_binary(&head));
+    }
+
+    #[test]
+    fn only_images_get_the_attached_image_hint() {
+        let described = describe_attached_image("a.png", &png(48, 32), 289).unwrap();
+        assert_eq!(
+            described,
+            "(binary file: a.png — PNG image, 48x32, 289 bytes; the image itself follows)"
+        );
+        // Generic binary has no image to attach.
+        assert!(describe_attached_image("blob.bin", &[0_u8; 64], 64).is_none());
+        // …and text is not binary at all, on either entry point.
+        assert!(describe_attached_image("f.txt", b"plain text\n", 11).is_none());
     }
 
     #[test]

@@ -13,6 +13,13 @@ use super::{
 const MAX_LINES: usize = 2000;
 const MAX_OUTPUT_BYTES: usize = 256 * 1024;
 
+/// On-disk ceiling for an image the result may carry, checked before any
+/// decode: a malformed header must never talk the decoder into allocating
+/// a machine's worth of pixels. Matches the TUI's attachment backstop.
+/// Downscaling happens after this, and the decoded result still has to fit
+/// [`super::MAX_RESULT_IMAGE_BYTES`].
+const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
+
 pub struct ReadTool;
 
 #[derive(Deserialize)]
@@ -63,8 +70,9 @@ impl Tool for ReadTool {
             let path = ctx.cwd.join(&input.path);
             let start = input.offset.unwrap_or(1).max(1);
             let limit = input.limit.unwrap_or(MAX_LINES).min(MAX_LINES);
+            let vision = ctx.vision;
             match super::blocking_scan(move |cancelled| {
-                read_window(&path, &input.path, start, limit, &cancelled)
+                read_window(&path, &input.path, start, limit, vision, &cancelled)
             })
             .await
             {
@@ -80,6 +88,7 @@ fn read_window(
     display_path: &str,
     start: usize,
     limit: usize,
+    vision: bool,
     cancelled: &std::sync::atomic::AtomicBool,
 ) -> ToolOutput {
     let file = match std::fs::File::open(path) {
@@ -88,8 +97,8 @@ fn read_window(
     };
     let total_bytes = file.metadata().map(|meta| meta.len()).ok();
     let mut reader = std::io::BufReader::with_capacity(super::binary::SNIFF_BYTES, file);
-    match sniff_binary(&mut reader, display_path, total_bytes) {
-        Ok(Some(description)) => return ToolOutput::text(description),
+    match sniff_binary(&mut reader, path, display_path, total_bytes, vision) {
+        Ok(Some(output)) => return output,
         Ok(None) => {}
         Err(error) => return ToolOutput::error(format!("read {display_path}: {error}")),
     }
@@ -155,17 +164,49 @@ fn read_window(
     ToolOutput::text(out)
 }
 
-/// Peeks the buffered head without consuming it; `Some` description means
-/// the caller must not emit bytes. Fires regardless of offset/limit —
-/// windowing binary content is never useful.
+/// Peeks the buffered head without consuming it; `Some` output means the
+/// caller must not emit lines. Fires regardless of offset/limit —
+/// windowing binary content is never useful, and an image is an image
+/// whatever window was asked for.
+///
+/// In a vision session an image within [`MAX_IMAGE_BYTES`] comes back
+/// attached to its description. Everything that can go wrong on that path
+/// — a non-vision model, an oversized file, an unsupported or corrupt
+/// image, an unreadable second pass — falls back to the plain description
+/// rather than an error: the model asked to read a file, and a one-line
+/// answer is still an answer.
 fn sniff_binary<R: BufRead>(
     reader: &mut R,
+    path: &std::path::Path,
     display_path: &str,
     total_bytes: Option<u64>,
-) -> std::io::Result<Option<String>> {
+    vision: bool,
+) -> std::io::Result<Option<ToolOutput>> {
     let head = reader.fill_buf()?;
     let total_bytes = total_bytes.unwrap_or(head.len() as u64);
-    Ok(super::binary::describe(display_path, head, total_bytes))
+    let Some(description) = super::binary::describe(display_path, head, total_bytes) else {
+        return Ok(None);
+    };
+    if vision
+        && total_bytes <= MAX_IMAGE_BYTES
+        && let Some(attached) =
+            super::binary::describe_attached_image(display_path, head, total_bytes)
+        && let Some(image) = std::fs::read(path)
+            .ok()
+            .as_deref()
+            .and_then(crate::image::from_file_bytes)
+        && let Some(output) = attached_output(attached, image)
+    {
+        return Ok(Some(output));
+    }
+    Ok(Some(ToolOutput::text(description)))
+}
+
+/// `None` when the per-result cap dropped the image: the text must not
+/// promise an attachment the result no longer carries.
+fn attached_output(description: String, image: crate::session::ImageContent) -> Option<ToolOutput> {
+    let output = ToolOutput::text(description).with_images(vec![image]);
+    (!output.images().is_empty()).then_some(output)
 }
 
 fn truncate_utf8(value: &mut String, max_bytes: usize) {
