@@ -26,6 +26,10 @@ the agent definition's model or inherits the parent's model and reasoning. The
 read-only `models` tool lists available models with context windows, pricing,
 and reasoning variants so agents can choose informedly.
 
+To have something *looked at*: save the image, then spawn a task with
+`model` set to a vision model and point it at the file — the child's
+`read` returns the picture itself, not just a description.
+
 A task's session outlives the call. Every task result names it
 (`task_id: <uuid>`), and passing that id back as the task tool's `task_id`
 resumes that subagent with its context intact — a follow-up question costs a

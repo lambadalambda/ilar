@@ -372,19 +372,7 @@ pub(crate) fn transcript_entries(
 /// A user message's display text: the words, then one marker line per
 /// attached image (the payload itself never renders).
 pub(crate) fn user_text_with_images(text: &str, images: &[ilar::session::ImageContent]) -> String {
-    let mut display = text.to_string();
-    for image in images {
-        let kind = image
-            .media_type
-            .strip_prefix("image/")
-            .unwrap_or(&image.media_type);
-        let bytes = image.data.len() as u64 * 3 / 4;
-        display.push_str(&format!(
-            "\n[image attached: {kind} · {}]",
-            crate::text::format_bytes(bytes)
-        ));
-    }
-    display
+    format!("{text}{}", ilar::image::attachment_markers(images))
 }
 
 /// The hover affordance: underline what a click on this row would

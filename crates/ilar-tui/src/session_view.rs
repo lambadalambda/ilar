@@ -304,6 +304,7 @@ fn restored_session_invocation_view(
                 tool_use_id,
                 content,
                 is_error,
+                images,
                 child_session_id,
                 ..
             } => {
@@ -324,7 +325,14 @@ fn restored_session_invocation_view(
                     } else {
                         ToolState::Succeeded
                     };
-                    *result = Some(bounded_detail(content));
+                    // The same markers the live ToolFinished row appended,
+                    // from the same helper: a restored transcript must
+                    // show what the running one did.
+                    *result = Some(format!(
+                        "{}{}",
+                        bounded_detail(content),
+                        ilar::image::markers(images)
+                    ));
                     *stored_child_session = child_session_id.clone();
                 }
             }
@@ -815,6 +823,72 @@ mod tests {
                 .iter()
                 .any(|line| matches!(line, Line_::Assistant(text) if text == "Later answer"))
         }));
+    }
+
+    #[test]
+    fn restored_image_bearing_tool_results_show_the_same_markers_the_live_row_did() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(directory.path().join("sessions"));
+        let session_id = new_id();
+        let mut session = store
+            .create(SessionMeta {
+                session_id: session_id.clone(),
+                parent_id: None,
+                agent: "build".into(),
+                model: "zai/glm-4.6v".into(),
+                workspace: None,
+                cwd: None,
+            })
+            .unwrap();
+        session
+            .append(ilar::session::SessionEvent::AssistantMessage {
+                id: new_id(),
+                model: "zai/glm-4.6v".into(),
+                content: vec![ilar::session::ContentBlock::ToolCall {
+                    id: "read-image".into(),
+                    name: "read".into(),
+                    input: serde_json::json!({ "path": "shot.png" }),
+                    item_id: None,
+                }],
+                usage: Default::default(),
+                stop_reason: "tool_use".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        let image = ilar::session::ImageContent::png(&vec![0u8; 12_600]);
+        session
+            .append(ilar::session::SessionEvent::ToolResult {
+                id: new_id(),
+                tool_use_id: "read-image".into(),
+                content: "shot.png: image/png, 640x480 — the image itself follows".into(),
+                is_error: false,
+                images: vec![image.clone()],
+                child_session_id: None,
+                state: None,
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        drop(session);
+
+        let restored = restored_session_view(&store.load(&session_id).unwrap());
+        let Some(Line_::Tool { result, .. }) = restored
+            .lines
+            .iter()
+            .find(|line| matches!(line, Line_::Tool { .. }))
+        else {
+            panic!("expected a restored tool row: {:?}", restored.lines);
+        };
+        let result = result.as_deref().unwrap_or_default();
+        assert!(
+            result.starts_with("shot.png: image/png, 640x480 — the image itself follows"),
+            "the description still leads: {result:?}"
+        );
+        // Byte-identical to what the live ToolFinished row appended.
+        assert!(
+            result.ends_with(&ilar::image::markers(std::slice::from_ref(&image))),
+            "restored rows must carry the live markers: {result:?}"
+        );
+        assert!(result.contains("[image: png · 12.3 KiB]"), "{result:?}");
     }
 
     /// Click-target id of an expandable line, if it is one.

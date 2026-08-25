@@ -11,6 +11,43 @@ use anyhow::Result;
 /// Longest edge providers keep before tiling; larger is waste.
 pub const MAX_IMAGE_DIM: usize = 2048;
 
+/// One line per image, naming what the transcript will not show: the
+/// kind and the decoded size. This is the tool-result wording; user
+/// attachments use [`attachment_markers`]. Both formats sizes the same
+/// way, so live rows, restored rows and pasted images agree.
+pub fn markers(images: &[ImageContent]) -> String {
+    marker_lines(images, "image")
+}
+
+/// [`markers`] with the wording a user's own attachment carries.
+pub fn attachment_markers(images: &[ImageContent]) -> String {
+    marker_lines(images, "image attached")
+}
+
+fn marker_lines(images: &[ImageContent], label: &str) -> String {
+    images
+        .iter()
+        .map(|image| {
+            let kind = image
+                .media_type
+                .strip_prefix("image/")
+                .unwrap_or(&image.media_type);
+            format!("\n[{label}: {kind} · {}]", format_bytes(image.byte_len()))
+        })
+        .collect()
+}
+
+/// Byte counts as the transcript writes them everywhere else.
+fn format_bytes(bytes: usize) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
 /// Media type by magic numbers — the extension may lie.
 pub fn media_type(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
@@ -122,6 +159,37 @@ pub fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_markers_name_the_kind_and_the_decoded_size() {
+        // 12,600 decoded bytes: base64 is 16,800 chars, byte_len halves
+        // back to 12,600, which rounds to one decimal like everywhere else.
+        let png = ImageContent::png(&vec![0u8; 12_600]);
+        let jpeg = ImageContent::new("image/jpeg", &[0u8; 900]);
+
+        assert_eq!(markers(&[]), "");
+        assert_eq!(
+            markers(std::slice::from_ref(&png)),
+            "\n[image: png · 12.3 KiB]"
+        );
+        // One line per image, in order, whatever the kind.
+        assert_eq!(
+            markers(&[png.clone(), jpeg]),
+            "\n[image: png · 12.3 KiB]\n[image: jpeg · 900 B]"
+        );
+
+        // Same size formatting, the user-attachment wording.
+        assert_eq!(
+            attachment_markers(&[png]),
+            "\n[image attached: png · 12.3 KiB]"
+        );
+
+        // A media type without the usual prefix is shown as-is.
+        assert_eq!(
+            markers(&[ImageContent::new("weird", &[0u8; 3])]),
+            "\n[image: weird · 3 B]"
+        );
+    }
 
     #[test]
     fn image_bytes_are_sniffed_and_oversized_pngs_downscale_on_the_way_in() {

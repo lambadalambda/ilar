@@ -1821,7 +1821,13 @@ async fn run_turn_inner(
             let state = output.session_state().cloned();
             let content = std::mem::take(&mut output.content);
             let images = output.take_images();
-            let result = bounded_tool_detail(&content);
+            // The payload never renders; the live row names it, exactly as
+            // the restored transcript will from the stored event.
+            let result = format!(
+                "{}{}",
+                bounded_tool_detail(&content),
+                crate::image::markers(&images)
+            );
             session.append(SessionEvent::ToolResult {
                 id: new_id(),
                 tool_use_id: outcome.id.clone(),

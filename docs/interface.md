@@ -56,7 +56,7 @@ abort the goal or cancel background jobs (both confirmed with a second
 press). **Esc is strictly immediate-scope**: it aborts the running turn
 or clears the input, and never touches the queue or the goal.
 
-## Image input: Ctrl-V
+## Images
 
 Copy a screenshot, press **Ctrl-V**, and the image attaches to your
 next message — listed above the input until it sends, shown as a size
@@ -87,6 +87,16 @@ Because the image is stored once and replayed byte-identically, it
 becomes part of the provider's cached prefix like any other content —
 follow-up turns read it from the prompt cache instead of re-billing
 it.
+
+**The agent can open one itself.** `read` pointed at an image file in a
+vision session returns the image alongside its one-line description
+(kind, dimensions, size), downscaled through the same 2048 px pipeline
+as a paste; the transcript shows a `[image: png · 12.3 KiB]` marker
+where the payload would be, live and on restore alike. On a text-only
+model the description arrives alone, so nothing errors — it just does
+not see. This is what lets a *vision subagent* inspect a screenshot the
+parent produced: write the file, spawn a task on a vision model, tell
+it the path.
 
 ## Asides: `/btw`
 
