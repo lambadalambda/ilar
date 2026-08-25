@@ -224,3 +224,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [One truncation helper](issues/one-truncation-helper.md)
 - [x] [Split app.rs](issues/split-app-rs.md)
 - [x] [The render cache clones the world](issues/the-render-cache-clones-the-world.md)
+- [x] [Sweep cleanups](issues/sweep-cleanups.md)

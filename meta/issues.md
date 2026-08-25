@@ -50,8 +50,8 @@
 
 Refactors:
 
-- [ ] [Sweep cleanups](issues/sweep-cleanups.md)
 - [ ] [Skip the project instructions](issues/skip-the-project-instructions.md)
+- [ ] [Sweep deferred decisions](issues/sweep-deferred-decisions.md)
 
 Follow-ups:
 

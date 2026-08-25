@@ -109,3 +109,19 @@ verified, and safe to do opportunistically:
 ## Milestone
 
 12 — Health sweep
+
+## Outcome
+
+Worked in one batch (f757bba), 1,013 workspace tests green, clippy
+clean. Every in-scope item done or explicitly marked: dead code
+deleted (compact_if_needed, PaletteAction wrapper, auth expires_at,
+account_id recompute, with_env param, max_context_limit; tool_line
+became a documented #[cfg(test)] seam); all nine duplications
+collapsed; all twelve small bugs fixed with red-first tests; all
+post-wave hardening landed including the zai prefix-stability test
+and the single sniffer table (the issue's "separate IHDR readers"
+claim was wrong — there was only one). Two consequential UX calls
+recorded for review: the skill picker now lists built-ins (the
+honest inventory), and the questions modal adopted the shared
+chrome (double border, footer in border, 2-cell margin). The five
+deferred decision bullets moved to sweep-deferred-decisions.
