@@ -7,6 +7,7 @@ pub mod glob;
 pub mod grep;
 pub mod history;
 pub mod models;
+mod process;
 pub mod read;
 pub mod service;
 pub mod web;

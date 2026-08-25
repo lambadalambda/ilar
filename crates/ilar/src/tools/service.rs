@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::Deserialize;
 
+use super::process::{Captured, drain, kill_process_group, shell_command};
 use super::{Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, WorkspaceAccess};
 
 /// Combined stdout+stderr retained per service.
@@ -16,38 +17,13 @@ const DEFAULT_LOG_LINES: usize = 50;
 const MAX_LOG_LINES: usize = 500;
 const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 
-#[derive(Default)]
-struct ServiceOutput {
-    retained: Vec<u8>,
-    total: usize,
-}
-
-async fn drain<R: tokio::io::AsyncRead + Unpin>(mut reader: R, output: Arc<Mutex<ServiceOutput>>) {
-    use tokio::io::AsyncReadExt;
-    let mut buffer = [0u8; 8192];
-    loop {
-        match reader.read(&mut buffer).await {
-            Ok(0) | Err(_) => break,
-            Ok(read) => {
-                let mut state = output.lock().unwrap();
-                state.total = state.total.saturating_add(read);
-                state.retained.extend_from_slice(&buffer[..read]);
-                if state.retained.len() > MAX_SERVICE_OUTPUT {
-                    let excess = state.retained.len() - MAX_SERVICE_OUTPUT;
-                    state.retained.drain(..excess);
-                }
-            }
-        }
-    }
-}
-
 struct ServiceEntry {
     command: String,
     /// Consumed by `stop`; `None` once the child has been waited on.
     child: Option<tokio::process::Child>,
     /// The child's process group (equals its pid; it starts a new group).
     group: Option<u32>,
-    output: Arc<Mutex<ServiceOutput>>,
+    output: Arc<Mutex<Captured>>,
     started: std::time::Instant,
     exited: Option<String>,
 }
@@ -72,15 +48,8 @@ impl ServiceEntry {
     }
 
     fn kill_group(&mut self) {
-        #[cfg(unix)]
-        if let Some(pid) = self.group.take()
-            && let Ok(group) = i32::try_from(pid)
-        {
-            // SAFETY: checked positive pid of a child that started its own
-            // process group; issued only while this entry still owns it.
-            unsafe {
-                libc::killpg(group, libc::SIGKILL);
-            }
+        if let Some(pid) = self.group.take() {
+            kill_process_group(pid);
         }
         if let Some(child) = self.child.as_mut() {
             let _ = child.start_kill();
@@ -255,29 +224,20 @@ impl Tool for ServiceTool {
                             }
                         }
                     }
-                    let mut command_builder = tokio::process::Command::new("sh");
-                    command_builder
-                        .arg("-c")
-                        .arg(&command)
-                        .current_dir(&ctx.cwd)
-                        .stdin(std::process::Stdio::null())
-                        .stdout(std::process::Stdio::piped())
-                        .stderr(std::process::Stdio::piped())
-                        .kill_on_drop(true);
-                    #[cfg(unix)]
-                    command_builder.process_group(0);
-                    let mut child = match command_builder.spawn() {
+                    let mut child = match shell_command(&command, &ctx.cwd).spawn() {
                         Ok(child) => child,
                         Err(error) => {
                             return ToolOutput::error(format!("service {name}: {error}"));
                         }
                     };
-                    let output = Arc::new(Mutex::new(ServiceOutput::default()));
+                    // Both streams share one capture, so logs stay
+                    // interleaved in arrival order.
+                    let output = Arc::new(Mutex::new(Captured::default()));
                     if let Some(stdout) = child.stdout.take() {
-                        tokio::spawn(drain(stdout, output.clone()));
+                        tokio::spawn(drain(stdout, MAX_SERVICE_OUTPUT, output.clone()));
                     }
                     if let Some(stderr) = child.stderr.take() {
-                        tokio::spawn(drain(stderr, output.clone()));
+                        tokio::spawn(drain(stderr, MAX_SERVICE_OUTPUT, output.clone()));
                     }
                     let pid = child.id();
                     manager.services.lock().unwrap().insert(
@@ -350,6 +310,9 @@ impl Tool for ServiceTool {
                     }
                     if body.trim().is_empty() {
                         body = "(no output yet)".to_string();
+                    }
+                    if let Some(error) = &output.error {
+                        body.push_str(&format!("\n(log capture error: {error})"));
                     }
                     ToolOutput::text(format!("{}\n\n{body}", describe(&name, entry)))
                 }

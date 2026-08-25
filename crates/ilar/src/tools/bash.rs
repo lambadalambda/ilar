@@ -2,43 +2,16 @@
 
 use serde::Deserialize;
 
+use super::process::{Captured, ProcessGroup, drain, shell_command, tail};
 use super::{
     Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, WorkspaceAccess, parse_input,
 };
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MAX_OUTPUT: usize = 100 * 1024;
-
-#[derive(Clone, Default)]
-struct Captured {
-    retained: Vec<u8>,
-    total: usize,
-    error: Option<String>,
-}
-
-async fn drain<R: tokio::io::AsyncRead + Unpin>(
-    mut reader: R,
-    captured: std::sync::Arc<std::sync::Mutex<Captured>>,
-) {
-    use tokio::io::AsyncReadExt;
-
-    let mut buffer = [0u8; 8192];
-    loop {
-        match reader.read(&mut buffer).await {
-            Ok(0) => break,
-            Ok(read) => {
-                let mut state = captured.lock().unwrap();
-                state.total = state.total.saturating_add(read);
-                let keep = read.min(MAX_OUTPUT.saturating_sub(state.retained.len()));
-                state.retained.extend_from_slice(&buffer[..keep]);
-            }
-            Err(error) => {
-                captured.lock().unwrap().error = Some(error.to_string());
-                return;
-            }
-        }
-    }
-}
+/// Share of the rendered cap stderr can always claim, however loud
+/// stdout was: the diagnosis is usually there.
+const MIN_STDERR_SHARE: usize = MAX_OUTPUT / 2;
 
 struct DrainTask {
     handle: tokio::task::JoinHandle<()>,
@@ -48,7 +21,7 @@ struct DrainTask {
 impl DrainTask {
     fn spawn<R: tokio::io::AsyncRead + Unpin + Send + 'static>(reader: R) -> Self {
         let captured = std::sync::Arc::new(std::sync::Mutex::new(Captured::default()));
-        let handle = tokio::spawn(drain(reader, captured.clone()));
+        let handle = tokio::spawn(drain(reader, MAX_OUTPUT, captured.clone()));
         Self { handle, captured }
     }
 
@@ -67,53 +40,31 @@ impl Drop for DrainTask {
     }
 }
 
-struct ProcessGroup(Option<u32>);
-
-impl ProcessGroup {
-    fn terminate(&self) {
-        #[cfg(unix)]
-        if let Some(pid) = self.0 {
-            // The child starts a fresh process group whose id equals its pid.
-            if let Ok(group) = i32::try_from(pid) {
-                // SAFETY: `group` is a checked positive child pid and this
-                // guard is armed only while that child still owns its group.
-                unsafe {
-                    libc::killpg(group, libc::SIGKILL);
-                }
-            }
-        }
-    }
-
-    fn disarm(&mut self) {
-        self.0 = None;
-    }
-}
-
-impl Drop for ProcessGroup {
-    fn drop(&mut self) {
-        self.terminate();
-    }
+/// Split the rendered cap between the two streams: stderr keeps at least
+/// [`MIN_STDERR_SHARE`] when it needs it, stdout takes whatever is left.
+fn stream_budgets(stdout_len: usize, stderr_len: usize) -> (usize, usize) {
+    let stderr_keep = stderr_len.min(MIN_STDERR_SHARE.max(MAX_OUTPUT.saturating_sub(stdout_len)));
+    (stdout_len.min(MAX_OUTPUT - stderr_keep), stderr_keep)
 }
 
 fn render_output(out: Captured, err: Captured) -> String {
     let total = out.total.saturating_add(err.total);
-    let mut retained = out.retained;
-    retained.extend_from_slice(&err.retained);
-    let mut content = String::from_utf8_lossy(&retained).into_owned();
+    let (stdout_keep, stderr_keep) = stream_budgets(out.retained.len(), err.retained.len());
+    let stdout_tail = tail(&out.retained, stdout_keep);
+    let stderr_tail = tail(&err.retained, stderr_keep);
+    let rendered = stdout_tail.len() + stderr_tail.len();
+    let mut content = String::from_utf8_lossy(stdout_tail).into_owned();
+    content.push_str(&String::from_utf8_lossy(stderr_tail));
     if let Some(error) = out.error {
         content.push_str(&format!("\n(stdout read error: {error})"));
     }
     if let Some(error) = err.error {
         content.push_str(&format!("\n(stderr read error: {error})"));
     }
-    if total > MAX_OUTPUT || content.len() > MAX_OUTPUT {
-        let mut end = MAX_OUTPUT.min(content.len());
-        while !content.is_char_boundary(end) {
-            end -= 1;
-        }
-        content.truncate(end);
+    if total > rendered {
         content.push_str(&format!(
-            "\n…(output truncated at {end} rendered bytes from {total} raw bytes)"
+            "\n…(output truncated at {rendered} rendered bytes from {total} raw bytes; \
+             kept the tail of each stream)"
         ));
     }
     content
@@ -252,18 +203,7 @@ fn run_command(
     tail_reporter: Option<(String, crate::tools::OutputTailSink)>,
 ) -> ToolFuture {
     Box::pin(async move {
-        let mut command = tokio::process::Command::new("sh");
-        command
-            .arg("-c")
-            .arg(&command_text)
-            .current_dir(&cwd)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
-        #[cfg(unix)]
-        command.process_group(0);
-        let mut child = match command.spawn() {
+        let mut child = match shell_command(&command_text, &cwd).spawn() {
             Ok(c) => c,
             Err(e) => return ToolOutput::error(format!("bash: {e}")),
         };

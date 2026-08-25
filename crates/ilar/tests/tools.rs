@@ -459,6 +459,42 @@ async fn bash_drains_high_volume_stdout_and_stderr_together() {
 }
 
 #[tokio::test]
+async fn bash_keeps_stderr_and_the_stdout_tail_when_stdout_fills_the_cap() {
+    // The failure of a chatty build lives in the last stdout lines and in
+    // stderr; keeping the first 100KB of the concatenation loses both.
+    let dir = tempfile::tempdir().unwrap();
+    let out = run(
+        &registry(),
+        "bash",
+        serde_json::json!({
+            "command": "yes 0123456789 | head -c 300000; printf 'stdout-tail\\n'; \
+                        printf 'fatal: the real error\\n' >&2; exit 1",
+            "timeout_ms": 10000
+        }),
+        &ctx(dir.path()),
+    )
+    .await;
+    assert!(out.is_error, "{}", out.content);
+    assert!(
+        out.content.contains("fatal: the real error"),
+        "stderr was dropped: {}",
+        &out.content[out.content.len().saturating_sub(400)..]
+    );
+    assert!(
+        out.content.contains("stdout-tail"),
+        "stdout tail was dropped: {}",
+        &out.content[out.content.len().saturating_sub(400)..]
+    );
+    assert!(out.content.len() < 110_000, "output was not bounded");
+    // 300000 + "stdout-tail\n" (12) + "fatal: the real error\n" (22)
+    assert!(
+        out.content.contains("from 300034 raw bytes"),
+        "raw byte total misreported: {}",
+        &out.content[out.content.len().saturating_sub(400)..]
+    );
+}
+
+#[tokio::test]
 async fn bash_truncates_only_at_utf8_boundaries() {
     let dir = tempfile::tempdir().unwrap();
     let out = run(
