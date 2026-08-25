@@ -199,6 +199,13 @@ pub(crate) struct App {
     hover: Option<crate::selection::SelectionPoint>,
     /// Images attached with Ctrl-V, waiting to ride the next fresh turn.
     pub(crate) pending_images: Vec<ilar::session::ImageContent>,
+    /// The exited-services disclosure: open?, and where its toggle
+    /// line landed on screen last frame (None when not drawn).
+    services_show_exited: bool,
+    pub(crate) services_exited_hit: Option<Rect>,
+    /// Raw pointer position for chrome outside the transcript (the
+    /// sidebar toggle); the transcript keeps its own relative hover.
+    hover_screen: Option<(u16, u16)>,
     transcript_cells: Vec<RenderedRow>,
     transcript_selection: Option<TranscriptSelection>,
     selecting_transcript: bool,
@@ -300,6 +307,9 @@ impl App {
             transcript_pressed_target: None,
             hover: None,
             pending_images: Vec::new(),
+            services_show_exited: false,
+            services_exited_hit: None,
+            hover_screen: None,
             transcript_cells: Vec::new(),
             transcript_selection: None,
             selecting_transcript: false,
@@ -1429,6 +1439,19 @@ impl App {
 
     pub(crate) fn update_hover(&mut self, column: u16, row: u16) {
         self.hover = selection_point(self.transcript_text_area, column, row, false);
+        self.hover_screen = Some((column, row));
+    }
+
+    /// A click on the exited-services disclosure; false when it missed
+    /// (the transcript gets the click instead).
+    pub(crate) fn click_exited_services(&mut self, column: u16, row: u16) -> bool {
+        let hit = self
+            .services_exited_hit
+            .is_some_and(|rect| rect.contains(ratatui::layout::Position::new(column, row)));
+        if hit {
+            self.services_show_exited = !self.services_show_exited;
+        }
+        hit
     }
 
     pub(crate) fn begin_transcript_selection(&mut self, column: u16, row: u16) {
@@ -2139,6 +2162,9 @@ impl App {
     }
 
     pub(crate) fn render(&mut self, frame: &mut Frame) {
+        // Refreshed below only if the services panel actually draws;
+        // a stale rect would take phantom clicks.
+        self.services_exited_hit = None;
         let input_width = frame.area().width.saturating_sub(2);
         let desired_input_height = self
             .input
@@ -2434,18 +2460,66 @@ impl App {
                         ])
                     })
                     .collect();
-                let exited = self
+                let exited: Vec<_> = self
                     .services_view
                     .iter()
                     .filter(|(_, running, _)| !running)
-                    .count();
-                if exited > 0 {
+                    .collect();
+                let mut exited_toggle_index = None;
+                if !exited.is_empty() {
+                    exited_toggle_index = Some(lines.len());
+                    let marker = if self.services_show_exited {
+                        "▾ "
+                    } else {
+                        "▸ "
+                    };
                     lines.push(Line::from(vec![
-                        Span::styled("○ ", Style::default().fg(MUTED)),
-                        Span::styled(format!("{exited} exited"), Style::default().fg(MUTED)),
+                        Span::styled(marker, Style::default().fg(MUTED)),
+                        Span::styled(
+                            format!("{} exited", exited.len()),
+                            Style::default().fg(MUTED),
+                        ),
                     ]));
+                    if self.services_show_exited {
+                        for (name, _, detail) in &exited {
+                            lines.push(Line::from(vec![
+                                Span::styled("○ ", Style::default().fg(MUTED)),
+                                Span::styled(
+                                    truncate_display(
+                                        &format!("{name} · {detail}"),
+                                        text_width.saturating_sub(2),
+                                        Truncation::Right,
+                                    ),
+                                    Style::default().fg(MUTED),
+                                ),
+                            ]));
+                        }
+                    }
                 }
                 if let Some(service_area) = carve_panel(&mut todo_area, lines.len()) {
+                    // The disclosure line's screen row, for the mouse —
+                    // and the hover underline, like every clickable.
+                    if let Some(index) = exited_toggle_index {
+                        let row = service_area.y + 1 + index as u16;
+                        if row < service_area.bottom().saturating_sub(1) {
+                            let rect = Rect::new(
+                                service_area.x + 1,
+                                row,
+                                service_area.width.saturating_sub(2),
+                                1,
+                            );
+                            self.services_exited_hit = Some(rect);
+                            if self.active_modal().is_none()
+                                && self.hover_screen.is_some_and(|(column, hover_row)| {
+                                    rect.contains(ratatui::layout::Position::new(column, hover_row))
+                                })
+                            {
+                                for span in &mut lines[index].spans {
+                                    span.style = span.style.add_modifier(Modifier::UNDERLINED);
+                                }
+                            }
+                        }
+                    }
                     let service_block = Block::default()
                         .borders(Borders::ALL)
                         .border_type(BorderType::Rounded)
@@ -3943,6 +4017,56 @@ mod tests {
         assert!(!screen.contains("compile"), "{screen}");
         assert!(screen.contains("5 exited"), "{screen}");
         assert!(screen.contains("todos"), "{screen}");
+    }
+
+    #[test]
+    fn clicking_the_exited_count_reveals_and_folds_the_dead_services() {
+        let mut app = App::new();
+        app.services_view = vec![
+            ("web".into(), true, "up 3m2s".into()),
+            ("build".into(), false, "exit 1".into()),
+            ("lint".into(), false, "exit 2".into()),
+        ];
+        app.services_running = 1;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
+        let screen = |terminal: &ratatui::Terminal<ratatui::backend::TestBackend>| {
+            (0..30)
+                .map(|row| {
+                    (0..140)
+                        .map(|column| terminal.backend().buffer()[(column, row)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert!(
+            screen(&terminal).contains("▸ 2 exited"),
+            "{}",
+            screen(&terminal)
+        );
+        assert!(!screen(&terminal).contains("build"));
+        let hit = app.services_exited_hit.expect("toggle rect recorded");
+
+        // Click reveals the dead with their details…
+        assert!(app.click_exited_services(hit.x, hit.y));
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert!(screen(&terminal).contains("▾ 2 exited"));
+        assert!(screen(&terminal).contains("build · exit 1"));
+        assert!(screen(&terminal).contains("lint · exit 2"));
+
+        // …a second click folds them away.
+        assert!(app.click_exited_services(hit.x, hit.y));
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert!(!screen(&terminal).contains("build"));
+
+        // A miss is not consumed, and no panel means no rect.
+        assert!(!app.click_exited_services(0, 0));
+        app.services_view.clear();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert!(app.services_exited_hit.is_none());
     }
 
     #[test]

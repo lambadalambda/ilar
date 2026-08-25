@@ -142,7 +142,7 @@ the loop; it resumes after your next completed turn.
 On wide terminals the right column tracks session state: the todo list
 the model maintains as it plans (**Ctrl-T** opens the full overlay),
 running services — every one that runs, with exited ones collapsed
-into a count — and, while subagents are in flight, an `agents` panel
+into a count that clicks open to show who died how — and, while subagents are in flight, an `agents` panel
 with each task's description, agent, a `bg` marker for detached work,
 and a live elapsed time.
 

@@ -188,3 +188,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Multi-file drops attach every image](issues/multi-file-drops-attach-every-image.md)
 - [x] ["… more" rows are clickable](issues/more-rows-are-clickable.md)
 - [x] [The services panel shows what runs](issues/services-panel-shows-what-runs.md)
+- [x] [Exited services reveal on click](issues/exited-services-reveal-on-click.md)
