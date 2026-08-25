@@ -1746,6 +1746,10 @@ async fn run_app(
     // Decisions accumulate here and are performed in one place below,
     // rather than each arm doing its own effects inline.
     let mut intents: Vec<Intent> = Vec::new();
+    // The stranded-question check costs a full session parse, so it
+    // runs only when it can change anything: at startup and after a
+    // turn completes — never on the idle path between keystrokes.
+    let mut recheck_pending_question = true;
 
     // Name the window like the transcript header: the topic when the
     // session has one, updated again if titling lands mid-run.
@@ -1756,6 +1760,7 @@ async fn run_app(
         // Reopen it instead of stranding the session behind a rejected new turn.
         if turn_handle.is_none()
             && app.question_modal.is_none()
+            && std::mem::take(&mut recheck_pending_question)
             && let Some(pending) = store.load(session_id)?.pending_question()
         {
             pending_question_id = Some(pending.tool_call_id.clone());
@@ -1895,6 +1900,7 @@ async fn run_app(
                 Ok(TurnCompletion::Compaction(result)) => schedule::Completion::Compaction(result),
                 Err(error) => schedule::Completion::Crashed(error.to_string()),
             });
+            recheck_pending_question = true;
             // Name the session once it has something to be named after.
             // Detached and unawaited: a title is never worth delaying a
             // prompt for, and a failure leaves the session as it was.
