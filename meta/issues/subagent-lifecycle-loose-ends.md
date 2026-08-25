@@ -30,6 +30,22 @@ Four related teardown gaps in subagent.rs / turn.rs:
 - `WouldBlock` gets a cap and falls back to requeueing.
 - The error path publishes the terminal event; the dead publishes go.
 
+## Outcome
+
+All four gaps closed: background cancel/stall now awaits the turn
+under a 5s `BACKGROUND_ABORT_GRACE` (and `shutdown` joins children
+concurrently, bounding quit to one grace); the rollback uses
+`store.delete` via `rollback_created_session`; `WouldBlock` caps at
+~3s then requeues like the other transient paths; and
+`persist_failed_step` publishes the terminal `TurnDone { Aborted }`
+for all three bail sites, with the dead abort-path `ToolFinished`
+publishes removed. Callers' synthesized-TurnDone fallbacks kept:
+`run_turn` can still error before the event channel exists.
+Known residuals (deliberate): a lease held >3s now surfaces as a
+paused notification instead of waiting silently; a turn finishing
+inside the grace window still reports cancelled; an append failure
+inside `persist_failed_step` can still skip the terminal event.
+
 ## Acceptance Criteria
 
 - Tests: background cancel persists partial content and leaves no

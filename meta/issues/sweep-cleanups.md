@@ -35,7 +35,12 @@ verified, and safe to do opportunistically:
   (`start_tool_call` covers every announced id); abort/error paths
   publish no `StepComplete`, so live TUI totals and reloaded totals
   diverge by the recovered usage.
-- **Small bugs**: the mouse wheel is inert in the pending manager,
+- **Small bugs**: the questions modal's free-text draft has the
+  same edge-arrow dead keys fixed in 3c28c6c
+  (questions.rs:88-91 maps `Unhandled` to `Stay`); the F1 help
+  "Up / Down scroll line (while input has text)" (modals.rs:519)
+  now undersells multiline behavior — reword; the mouse wheel is
+  inert in the pending manager,
   which scrolls since 0d9737d — wire it to `move_selection` and
   drop the stale "handful of rows" comment (app.rs:527-531);
   uncataloged zai models are asymmetric after

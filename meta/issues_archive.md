@@ -204,3 +204,7 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Recall relocation is quadratic and can panic](issues/recall-relocation-is-quadratic-and-can-panic.md)
 - [x] [Asides can catch a half-answered step](issues/asides-can-catch-a-half-answered-step.md)
 - [x] [Compaction tells the future to stop](issues/compaction-tells-the-future-to-stop.md)
+- [x] [Multiline arrows die at the edges](issues/multiline-arrows-die-at-the-edges.md)
+- [x] [Pastes into pickers vanish](issues/pastes-into-pickers-vanish.md)
+- [x] [Deleting a session leaks its index](issues/deleting-a-session-leaks-its-index.md)
+- [x] [Subagent lifecycle loose ends](issues/subagent-lifecycle-loose-ends.md)

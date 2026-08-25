@@ -23,3 +23,15 @@ file in the session root forever.
 ## Milestone
 
 12 — Health sweep
+
+## Outcome
+
+`delete` now scans the store root for `{id}.replay.*.ids` (full
+literal prefix, ok-if-absent) and unlinks them under the writer
+lease — covering current and crash-stranded generations.
+`publish_checkpoint` was verified to already clean the previous
+generation on republish, so the scan closes the only remaining
+path. Pinned by
+`delete_removes_replay_id_indexes_of_every_generation`, which
+plants a stranded generation and asserts nothing bearing the id
+survives while a neighbour session still loads. (7ee03cf)

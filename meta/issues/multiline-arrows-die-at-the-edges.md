@@ -24,6 +24,19 @@ recall unreachable there.
   admit edge-of-draft arrows (e.g. ask the input whether a vertical
   move can succeed).
 
+## Outcome
+
+Two halves: 58d9e78 honors `move_vertical`'s return so edge arrows
+are `Unhandled` rather than phantom edits; 3c28c6c adds
+`InputBuffer::can_move_vertical` (factored from the same
+edge-detection as `move_vertical`, so they cannot disagree) and
+relaxes `handle_prompt_navigation_key`'s scroll guards from
+`!is_multiline()` to "no row to move to" — edge arrows in a
+multiline draft now scroll the transcript, mid-draft arrows still
+move the cursor, blank-prompt history recall unchanged. The same
+dead-key pattern found in the questions modal is recorded in
+sweep-cleanups.
+
 ## Acceptance Criteria
 
 - A test: Up on the first line of a multiline draft is `Unhandled`;

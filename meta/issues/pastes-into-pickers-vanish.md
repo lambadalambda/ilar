@@ -22,3 +22,14 @@ accept typed filter characters. Pasting a search term into
 ## Milestone
 
 12 — Health sweep
+
+## Outcome
+
+`PasteTarget::ModalQuery` routes pastes into the query of the six
+filterable pickers and the session search (which restarts its
+scan); the discard arm is spelled exhaustively so a future modal
+must declare its paste fate at compile time. A shared
+`insert_query` drops control characters, caps queries at 256 chars
+(a runaway clipboard would stall the per-render fuzzy scorer), and
+treats no-growth pastes as inert; the transcript search
+(`PasteSearch`) shares the same policy. (60de4ac, 5d7e70a)

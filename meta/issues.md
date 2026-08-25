@@ -48,13 +48,6 @@
 
 ## Milestone 12 — Health sweep
 
-Bugs, by severity:
-
-- [ ] [Multiline arrows die at the edges](issues/multiline-arrows-die-at-the-edges.md)
-- [ ] [Pastes into pickers vanish](issues/pastes-into-pickers-vanish.md)
-- [ ] [Deleting a session leaks its index](issues/deleting-a-session-leaks-its-index.md)
-- [ ] [Subagent lifecycle loose ends](issues/subagent-lifecycle-loose-ends.md)
-
 Refactors:
 
 - [ ] [Nine pickers, one skeleton](issues/nine-pickers-one-skeleton.md)
