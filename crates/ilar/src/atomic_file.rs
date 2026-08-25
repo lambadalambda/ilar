@@ -89,9 +89,10 @@ fn replace_unix(path: &Path, content: &[u8], mode: Mode, hooks: &dyn Hooks) -> s
     let destination = metadata_at(directory.as_raw_fd(), destination_name)?;
     refuse_symlink(path, destination.as_ref())?;
     let final_mode = match mode {
-        Mode::Preserve => destination
-            .as_ref()
-            .map(|metadata| metadata.st_mode as u32 & 0o7777),
+        Mode::Preserve => Some(destination.as_ref().map_or_else(
+            || 0o666 & !process_umask(),
+            |metadata| metadata.st_mode as u32 & 0o7777,
+        )),
         Mode::Force(mode) => Some(mode),
     };
     let (temp_name, mut temp) = create_temp_at(directory.as_raw_fd(), destination_name)?;
@@ -153,6 +154,21 @@ fn replace_unix(path: &Path, content: &[u8], mode: Mode, hooks: &dyn Hooks) -> s
             ),
         )),
     }
+}
+
+/// Creation permissions for a destination that does not exist yet.
+///
+/// `libc::umask` only reports the mask by setting it, so the read is done once
+/// and cached: the window where the process mask is temporarily `0` exists on
+/// first use only.
+#[cfg(unix)]
+fn process_umask() -> u32 {
+    static UMASK: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *UMASK.get_or_init(|| {
+        let mask = unsafe { libc::umask(0) };
+        unsafe { libc::umask(mask) };
+        u32::from(mask)
+    })
 }
 
 #[cfg(unix)]
@@ -385,6 +401,23 @@ mod tests {
         assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o777, 0o640);
         replace(&path, b"secret", Mode::Force(0o600)).unwrap();
         assert_eq!(std::fs::metadata(path).unwrap().mode() & 0o777, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_file_honors_umask_while_overwrite_keeps_mode() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = tempfile::tempdir().unwrap();
+        let fresh = dir.path().join("fresh");
+        replace(&fresh, b"created", Mode::Preserve).unwrap();
+        assert_eq!(
+            std::fs::metadata(&fresh).unwrap().mode() & 0o7777,
+            0o666 & !process_umask()
+        );
+
+        std::fs::set_permissions(&fresh, std::fs::Permissions::from_mode(0o604)).unwrap();
+        replace(&fresh, b"overwritten", Mode::Preserve).unwrap();
+        assert_eq!(std::fs::metadata(&fresh).unwrap().mode() & 0o7777, 0o604);
     }
 
     #[cfg(unix)]
