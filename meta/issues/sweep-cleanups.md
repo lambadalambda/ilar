@@ -51,6 +51,9 @@ verified, and safe to do opportunistically:
   were the only coverage) — add one against the wire body;
   `ContentBlock::Thinking.signature` is now always `None` — keep
   (future native-Anthropic) or drop, decide once.
+- **Post-cache**: `App::lines` is `pub(crate)` while the dirty-mark
+  invariant is conventional — a private field with a marking
+  `lines_mut()` would enforce it.
 - **Post-split**: `service_panel` labels skip `safe_text` unlike
   `agent_panel_lines` — service names from the process registry
   could carry control chars; sanitize.

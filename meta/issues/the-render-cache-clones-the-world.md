@@ -34,3 +34,20 @@ newest-first.
 ## Milestone
 
 12 — Health sweep
+
+## Outcome
+
+The cache now borrows the transcript (`TranscriptEntry<'a>` — the
+clone is forbidden by the type system) and re-renders only from the
+first dirty line, tracked by chained revision marks whose failure
+mode is a full rebuild, never a wrong frame (`mark_dirty_from`
+requires contiguous revisions; unmarked bumps degrade safely).
+Measured: 811µs of clone+compare per streaming delta became 13.9µs
+(~28x with search open, whose per-entry match offsets now cache).
+The child event path collapsed onto thirteen shared helpers that
+return the lowest changed index — fixing the unbounded child
+reasoning growth (64KB cap, red-tested) and unifying tool lookup
+newest-first. A frame-for-frame differential net (36-step script x
+5 configurations vs a cold cache) plus mutation testing pin it.
+Adjacent pre-existing search_refresh staleness fixed alongside.
+`App::lines` encapsulation recorded in sweep-cleanups.
