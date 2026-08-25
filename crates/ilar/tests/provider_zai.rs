@@ -1,7 +1,7 @@
 use futures::StreamExt;
 use ilar::provider::zai::ZaiProvider;
 use ilar::provider::{Provider, ProviderEvent, Request, StopReason, ToolDefinition};
-use ilar::session::{ChatMessage, ContentBlock, InputTokenAccounting, Role, Usage};
+use ilar::session::{ChatMessage, ContentBlock, ImageContent, InputTokenAccounting, Role, Usage};
 
 fn request() -> Request {
     Request {
@@ -591,6 +591,91 @@ fn serializes_system_and_tool_results_in_protocol_order() {
             "tool_stream",
             "tools"
         ]
+    );
+}
+
+/// One tool result carrying one image, sent to `model`.
+fn tool_result_with_image(model: &str) -> serde_json::Value {
+    let provider = ZaiProvider::new("k".into(), None);
+    let mut req = Request {
+        messages: vec![ChatMessage {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_1".into(),
+                content: "screenshot.png (64x64)".into(),
+                is_error: false,
+                images: vec![ImageContent {
+                    media_type: "image/png".into(),
+                    data: "aGVsbG8=".into(),
+                }],
+            }],
+        }],
+        ..request()
+    };
+    req.model = model.into();
+    provider.wire_body_for_test(&req)["messages"][0].clone()
+}
+
+/// A vision model gets the real image as a part of the tool message the
+/// result text rides in — the same shape a user image uses.
+#[test]
+fn a_vision_tool_result_carries_text_and_image_url_parts() {
+    assert_eq!(
+        tool_result_with_image("zai/glm-4.6v"),
+        serde_json::json!({
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": [
+                {"type": "text", "text": "screenshot.png (64x64)"},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,aGVsbG8="},
+                },
+            ],
+        })
+    );
+}
+
+/// Gating is per request, so a mid-session switch to a text-only model
+/// degrades to the same named gap a user image gets there.
+#[test]
+fn a_non_vision_model_sees_a_named_gap_in_a_tool_result() {
+    assert_eq!(
+        tool_result_with_image("zai/glm-4.7"),
+        serde_json::json!({
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": "screenshot.png (64x64)\n[image omitted: this model cannot view images]",
+        })
+    );
+}
+
+/// Text-only results keep the plain string they always had, on a vision
+/// model too: cached prefixes must not move.
+#[test]
+fn a_text_only_tool_result_content_stays_a_plain_string() {
+    let provider = ZaiProvider::new("k".into(), None);
+    let mut req = Request {
+        messages: vec![ChatMessage {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_1".into(),
+                content: "1: model".into(),
+                is_error: false,
+                images: Vec::new(),
+            }],
+        }],
+        ..request()
+    };
+    req.model = "zai/glm-4.6v".into();
+
+    assert_eq!(
+        provider.wire_body_for_test(&req)["messages"][0],
+        serde_json::json!({
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": "1: model",
+        })
     );
 }
 

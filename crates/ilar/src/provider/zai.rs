@@ -95,6 +95,45 @@ impl ZaiProvider {
     }
 }
 
+/// What a model that cannot see is told stood where an image was.
+const IMAGE_GAP: &str = "[image omitted: this model cannot view images]";
+
+/// The named gap, on its own line when text precedes it.
+fn push_image_gap(text: &mut String) {
+    if !text.is_empty() {
+        text.push('\n');
+    }
+    text.push_str(IMAGE_GAP);
+}
+
+/// One image as the chat-completions part.
+fn image_part(image: &crate::session::ImageContent) -> serde_json::Value {
+    serde_json::json!({
+        "type": "image_url",
+        "image_url": {"url": image.data_url()},
+    })
+}
+
+/// Text plus images as chat-completions `content`. Text-only content
+/// stays the plain string it always was, so cached prefixes do not move;
+/// images make it a parts array, text part first.
+fn content_value(text: &str, image_parts: Vec<serde_json::Value>) -> serde_json::Value {
+    if image_parts.is_empty() {
+        if text.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::json!(text)
+        }
+    } else {
+        let mut parts = Vec::new();
+        if !text.is_empty() {
+            parts.push(serde_json::json!({"type": "text", "text": text}));
+        }
+        parts.extend(image_parts);
+        serde_json::json!(parts)
+    }
+}
+
 /// Neutral -> OpenAI chat-completions wire. Tool results expand into
 /// separate `role: "tool"` messages (the wire format requires it).
 fn openai_message(msg: &ChatMessage, vision: bool) -> Vec<serde_json::Value> {
@@ -111,13 +150,8 @@ fn openai_message(msg: &ChatMessage, vision: bool) -> Vec<serde_json::Value> {
             ContentBlock::Text { text } => content_text.push_str(text),
             // Vision models get the real part; the placeholder keeps a
             // session with images usable on a text-only model.
-            ContentBlock::Image { image } if vision => image_parts.push(serde_json::json!({
-                "type": "image_url",
-                "image_url": {"url": image.data_url()},
-            })),
-            ContentBlock::Image { .. } => {
-                content_text.push_str("[image omitted: this model cannot view images]");
-            }
+            ContentBlock::Image { image } if vision => image_parts.push(image_part(image)),
+            ContentBlock::Image { .. } => push_image_gap(&mut content_text),
             ContentBlock::Thinking { .. }
             | ContentBlock::ReasoningSummary { .. }
             | ContentBlock::Reasoning { .. }
@@ -139,32 +173,35 @@ fn openai_message(msg: &ChatMessage, vision: bool) -> Vec<serde_json::Value> {
             ContentBlock::ToolResult {
                 tool_use_id,
                 content,
+                images,
                 ..
-            } => tool_results.push(serde_json::json!({
-                "role": "tool",
-                "tool_call_id": tool_use_id,
-                "content": content,
-            })),
+            } => {
+                // Same gating as a user image, read per request, so a
+                // mid-session switch to a text-only model degrades to the
+                // named gap instead of erroring.
+                let mut result_text = content.clone();
+                let result_parts = if vision {
+                    images.iter().map(image_part).collect()
+                } else {
+                    for _ in images {
+                        push_image_gap(&mut result_text);
+                    }
+                    Vec::new()
+                };
+                tool_results.push(serde_json::json!({
+                    "role": "tool",
+                    "tool_call_id": tool_use_id,
+                    // A result is a string even when it is empty; only
+                    // images turn it into parts.
+                    "content": if result_parts.is_empty() {
+                        serde_json::json!(result_text)
+                    } else {
+                        content_value(&result_text, result_parts)
+                    },
+                }));
+            }
         }
     }
-    // A message with images carries parts; text-only stays the plain
-    // string it always was, so cached prefixes do not move.
-    let content_value = |content_text: &str, image_parts: Vec<serde_json::Value>| {
-        if image_parts.is_empty() {
-            if content_text.is_empty() {
-                serde_json::Value::Null
-            } else {
-                serde_json::json!(content_text)
-            }
-        } else {
-            let mut parts = Vec::new();
-            if !content_text.is_empty() {
-                parts.push(serde_json::json!({"type": "text", "text": content_text}));
-            }
-            parts.extend(image_parts);
-            serde_json::json!(parts)
-        }
-    };
     if !tool_results.is_empty() {
         let mut messages = Vec::new();
         if !tool_calls.is_empty() {

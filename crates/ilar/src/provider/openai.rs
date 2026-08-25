@@ -152,8 +152,8 @@ impl OpenAIProvider {
 /// a replayed conversation is only cacheable if the server can rebuild the
 /// same item graph: typed `message` items rather than bare role/content
 /// pairs, and function calls carrying the item id a preceding reasoning
-/// item refers to. `function_call_output.output` stays a plain string —
-/// that is the canonical form for text results, arrays being for
+/// item refers to. A text-only `function_call_output.output` stays a plain
+/// string — that is the canonical form for text results, arrays being for
 /// multimodal ones.
 fn wire_input_items(msg: &ChatMessage) -> Vec<serde_json::Value> {
     let mut items = Vec::new();
@@ -226,13 +226,30 @@ fn wire_input_items(msg: &ChatMessage) -> Vec<serde_json::Value> {
             ContentBlock::ToolResult {
                 tool_use_id,
                 content,
+                images,
                 ..
             } => {
                 flush_parts(&mut parts, &mut items);
+                // Text first, then the images, as parts of the one output
+                // the call is waiting for. Every OpenAI model on the
+                // catalog sees, so nothing is gated away here.
+                let output = if images.is_empty() {
+                    serde_json::json!(content)
+                } else {
+                    let mut output =
+                        vec![serde_json::json!({"type": "input_text", "text": content})];
+                    output.extend(images.iter().map(|image| {
+                        serde_json::json!({
+                            "type": "input_image",
+                            "image_url": image.data_url(),
+                        })
+                    }));
+                    serde_json::json!(output)
+                };
                 items.push(serde_json::json!({
                     "type": "function_call_output",
                     "call_id": tool_use_id,
-                    "output": content,
+                    "output": output,
                 }));
             }
         }

@@ -748,6 +748,78 @@ async fn neutral_request_serializes_to_wire_format() {
     );
 }
 
+/// Result text and its images travel as parts of ONE
+/// `function_call_output`, text first — a second item would be a result
+/// for a call that never happened.
+#[tokio::test]
+async fn a_tool_result_image_rides_the_same_function_call_output_as_its_text() {
+    let (base, server) = http_server(fixture("openai_text.sse"));
+    let mut request = request_with_tool();
+    request.messages = vec![ilar::session::ChatMessage {
+        role: Role::User,
+        content: vec![ContentBlock::ToolResult {
+            tool_use_id: "call_1".into(),
+            content: "screenshot.png (64x64)".into(),
+            is_error: false,
+            images: vec![ilar::session::ImageContent {
+                media_type: "image/png".into(),
+                data: "aGVsbG8=".into(),
+            }],
+        }],
+    }];
+    let stream = provider(base).stream(request).unwrap();
+    let wire = server.await.unwrap();
+    drop(stream);
+
+    let body_start = wire.find("\r\n\r\n").unwrap() + 4;
+    let body: serde_json::Value = serde_json::from_str(wire[body_start..].trim()).unwrap();
+    let input = body["input"].as_array().unwrap();
+    assert_eq!(input.len(), 1, "{input:?}");
+    assert_eq!(
+        input[0],
+        serde_json::json!({
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": [
+                {"type": "input_text", "text": "screenshot.png (64x64)"},
+                {"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8="},
+            ],
+        })
+    );
+}
+
+/// The plain string is the canonical form for a text result, and a cached
+/// prefix full of them must not move: an image-capable builder still has
+/// to emit exactly what it always did when there are no images.
+#[tokio::test]
+async fn a_text_only_tool_result_output_stays_a_plain_string() {
+    let (base, server) = http_server(fixture("openai_text.sse"));
+    let mut request = request_with_tool();
+    request.messages = vec![ilar::session::ChatMessage {
+        role: Role::User,
+        content: vec![ContentBlock::ToolResult {
+            tool_use_id: "call_1".into(),
+            content: "1: model".into(),
+            is_error: false,
+            images: Vec::new(),
+        }],
+    }];
+    let stream = provider(base).stream(request).unwrap();
+    let wire = server.await.unwrap();
+    drop(stream);
+
+    let body_start = wire.find("\r\n\r\n").unwrap() + 4;
+    let body: serde_json::Value = serde_json::from_str(wire[body_start..].trim()).unwrap();
+    assert_eq!(
+        body["input"][0],
+        serde_json::json!({
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": "1: model",
+        })
+    );
+}
+
 #[tokio::test]
 async fn stateless_tool_continuation_replays_opaque_reasoning_in_order() {
     let first_sse = concat!(
