@@ -1906,6 +1906,44 @@ fn simple_turn(user_id: &str, text: &str, assistant_id: &str) -> Vec<SessionEven
     ]
 }
 
+/// Rewind through the production entry point, which pins the target
+/// user message by event id. `cwd` is only touched for turns carrying a
+/// tree checkpoint; the sessions here have none, so the session
+/// directory stands in. Tree restoration itself is covered by
+/// tests/rewind.rs against a real repository.
+fn rewind_at(
+    store: &SessionStore,
+    cwd: &std::path::Path,
+    id: &str,
+    cut: usize,
+) -> anyhow::Result<ilar::rewind::RewindReport> {
+    // A cut that is not a user message has no id to pin; the empty
+    // string stands in because `rewind_session` validates the cut before
+    // it compares ids, so the rejection is the cut's, not the id's.
+    let target = store
+        .load(id)
+        .ok()
+        .and_then(|reader| match reader.events().get(cut) {
+            Some(SessionEvent::UserMessage { id, .. }) => Some(id.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(ilar::rewind::rewind_session(store, id, cut, &target, cwd))
+}
+
+/// The `io::ErrorKind` a rejected rewind carries, once unwrapped from
+/// the `anyhow` error the production path returns.
+fn rewind_error_kind(error: &anyhow::Error) -> std::io::ErrorKind {
+    error
+        .downcast_ref::<std::io::Error>()
+        .unwrap_or_else(|| panic!("expected an io error, got: {error}"))
+        .kind()
+}
+
 fn two_turn_session(store: &SessionStore) -> String {
     let meta = sample_meta();
     let id = meta.session_id.clone();
@@ -1921,14 +1959,13 @@ fn two_turn_session(store: &SessionStore) -> String {
 
 #[test]
 fn rewind_folds_replay_to_the_cut_and_keeps_the_audit_log() {
-    let (store, _dir) = temp_store();
+    let (store, dir) = temp_store();
     let id = two_turn_session(&store);
 
     // Cut at "second" (canonical index 3): that message becomes unsent.
-    let outcome = store
-        .rewind(&id, 3, Some("commit-a".into()), Some("commit-b".into()))
-        .unwrap();
-    assert_eq!(outcome.unsent, "second");
+    let report = rewind_at(&store, dir.path(), &id, 3).unwrap();
+    assert_eq!(report.unsent, "second");
+    assert!(!report.tree_restored);
 
     let reader = store.load(&id).unwrap();
     assert_eq!(reader.events().len(), 3);
@@ -1945,8 +1982,8 @@ fn rewind_folds_replay_to_the_cut_and_keeps_the_audit_log() {
         audit.last(),
         Some(SessionEvent::Rewind {
             to: 3,
-            tree_restored: Some(_),
-            tree_saved: Some(_),
+            tree_restored: None,
+            tree_saved: None,
             ..
         })
     ));
@@ -1959,9 +1996,9 @@ fn rewind_folds_replay_to_the_cut_and_keeps_the_audit_log() {
 
 #[test]
 fn a_second_rewind_folds_past_the_first() {
-    let (store, _dir) = temp_store();
+    let (store, dir) = temp_store();
     let id = two_turn_session(&store);
-    store.rewind(&id, 3, None, None).unwrap();
+    rewind_at(&store, dir.path(), &id, 3).unwrap();
 
     let mut session = store.acquire_writer(&id).unwrap().load().unwrap();
     for event in simple_turn("user-3", "third", "assistant-3") {
@@ -1969,8 +2006,8 @@ fn a_second_rewind_folds_past_the_first() {
     }
     drop(session);
 
-    let outcome = store.rewind(&id, 1, None, None).unwrap();
-    assert_eq!(outcome.unsent, "first");
+    let report = rewind_at(&store, dir.path(), &id, 1).unwrap();
+    assert_eq!(report.unsent, "first");
     let reader = store.load(&id).unwrap();
     assert_eq!(reader.events().len(), 1);
     assert!(matches!(reader.events()[0], SessionEvent::Meta { .. }));
@@ -1980,9 +2017,9 @@ fn a_second_rewind_folds_past_the_first() {
 
 #[test]
 fn rewound_sessions_accept_new_turns() {
-    let (store, _dir) = temp_store();
+    let (store, dir) = temp_store();
     let id = two_turn_session(&store);
-    store.rewind(&id, 3, None, None).unwrap();
+    rewind_at(&store, dir.path(), &id, 3).unwrap();
 
     let mut session = store.acquire_writer(&id).unwrap().load().unwrap();
     for event in simple_turn("user-2b", "second try", "assistant-2b") {
@@ -2000,13 +2037,13 @@ fn rewound_sessions_accept_new_turns() {
 
 #[test]
 fn rewind_rejects_invalid_cuts() {
-    let (store, _dir) = temp_store();
+    let (store, dir) = temp_store();
     let id = two_turn_session(&store);
 
     for cut in [0, 2, 4, 5, 99] {
-        let error = store.rewind(&id, cut, None, None).unwrap_err();
+        let error = rewind_at(&store, dir.path(), &id, cut).unwrap_err();
         assert_eq!(
-            error.kind(),
+            rewind_error_kind(&error),
             std::io::ErrorKind::InvalidInput,
             "cut {cut} must be rejected"
         );
@@ -2017,7 +2054,7 @@ fn rewind_rejects_invalid_cuts() {
 
 #[test]
 fn rewind_refuses_a_session_with_a_pending_question() {
-    let (store, _dir) = temp_store();
+    let (store, dir) = temp_store();
     let meta = sample_meta();
     let id = meta.session_id.clone();
     let mut session = store.create(meta).unwrap();
@@ -2050,13 +2087,13 @@ fn rewind_refuses_a_session_with_a_pending_question() {
         .unwrap();
     drop(session);
 
-    let error = store.rewind(&id, 1, None, None).unwrap_err();
-    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    let error = rewind_at(&store, dir.path(), &id, 1).unwrap_err();
+    assert_eq!(rewind_error_kind(&error), std::io::ErrorKind::InvalidInput);
 }
 
 #[test]
 fn rewind_across_compaction_keeps_or_drops_the_summary_with_the_cut() {
-    let (store, _dir) = temp_store();
+    let (store, dir) = temp_store();
     let meta = sample_meta();
     let id = meta.session_id.clone();
     let mut session = store.create(meta).unwrap();
@@ -2091,8 +2128,8 @@ fn rewind_across_compaction_keeps_or_drops_the_summary_with_the_cut() {
         .unwrap();
 
     // Cut at "third": the compaction survives, so the summary stays.
-    let outcome = store.rewind(&id, third_local, None, None).unwrap();
-    assert_eq!(outcome.unsent, "third");
+    let report = rewind_at(&store, dir.path(), &id, third_local).unwrap();
+    assert_eq!(report.unsent, "third");
     let reader = store.load(&id).unwrap();
     assert_eq!(reader.events().len(), window_len - 2);
     let transcript = reader.transcript();
@@ -2149,7 +2186,7 @@ fn a_stale_replay_index_surviving_a_rewind_is_rejected() {
             |event| matches!(event, SessionEvent::UserMessage { text, .. } if text == "second"),
         )
         .unwrap();
-    store.rewind(&id, second_local, None, None).unwrap();
+    rewind_at(&store, dir.path(), &id, second_local).unwrap();
     for (path, bytes) in &stashed {
         std::fs::write(path, bytes).unwrap();
     }
@@ -2273,9 +2310,9 @@ fn raw_rewind_markers_are_rejected_by_append() {
 
 #[test]
 fn indexed_and_canonical_replay_agree_after_a_rewind() {
-    let (store, _dir) = temp_store();
+    let (store, dir) = temp_store();
     let id = two_turn_session(&store);
-    store.rewind(&id, 3, None, None).unwrap();
+    rewind_at(&store, dir.path(), &id, 3).unwrap();
 
     // New life after the rewind, ending in a compaction so the indexed
     // fast path publishes a checkpoint.

@@ -1,16 +1,19 @@
 //! Append-only JSONL session store.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, Write};
 use std::path::PathBuf;
 
 use fs2::FileExt;
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use super::event::{SessionEvent, SessionMeta, new_id, unknown_event_type};
 use super::model::{ChatMessage, ContentBlock, Role};
+use super::replay_index::{
+    FileStamp, REPLAY_INDEX_VERSION, ReplayCheckpoint, ReplayIdIndex, checkpoint_checksum,
+    committed_line_count, file_stamp, id_record, id_records, invalid_data, read_all_id_records,
+    replay_ids_path, write_checkpoint, write_id_records,
+};
 use crate::question::{QUESTION_TOOL_NAME, QuestionRequest, validate_request};
 
 /// Owns the session directory; creates/loads sessions.
@@ -58,6 +61,10 @@ pub struct Session {
     _writer: SessionWriter,
     event_base: usize,
     canonical_event_count: usize,
+    /// Committed lines in the log file. Unlike `canonical_event_count`
+    /// this counts what a rewind abandoned, so tail-parse diagnostics
+    /// can name a line the reader will actually find.
+    physical_line_count: usize,
     effective_model: String,
     effective_variant: Option<String>,
     todo_list: Option<crate::todo::TodoList>,
@@ -76,52 +83,12 @@ pub struct SessionWriter {
     replay_index_path: PathBuf,
 }
 
-const REPLAY_INDEX_VERSION: u32 = 2;
-const REPLAY_IDS_MAGIC: &[u8; 8] = b"ILARIDS1";
-const REPLAY_IDS_HEADER_LEN: u64 = 32;
-const REPLAY_ID_RECORD_LEN: u64 = 33;
-const REPLAY_ID_PAGE_RECORDS: usize = 256;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct FileStamp {
-    len: u64,
-    modified_nanos: u64,
-    #[serde(default)]
-    device: u64,
-    #[serde(default)]
-    inode: u64,
-    #[serde(default)]
-    changed_seconds: i64,
-    #[serde(default)]
-    changed_nanos: i64,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct ReplayCheckpoint {
-    version: u32,
-    generation: String,
-    session_id: String,
-    replay_offset: u64,
-    canonical_event_count: usize,
-    physical_line_count: usize,
-    active_start: usize,
-    events: Vec<SessionEvent>,
-    effective_model: String,
-    #[serde(default)]
-    effective_variant: Option<String>,
-    todo_list: Option<crate::todo::TodoList>,
-    #[serde(default)]
-    topic: Option<String>,
-    id_root: String,
-    observed: FileStamp,
-    checksum: String,
-}
-
 struct ReplayData {
     events: Vec<SessionEvent>,
     unanswered_calls: Vec<String>,
     event_base: usize,
     canonical_event_count: usize,
+    physical_line_count: usize,
     effective_model: String,
     effective_variant: Option<String>,
     todo_list: Option<crate::todo::TodoList>,
@@ -286,6 +253,7 @@ impl SessionStore {
             _writer: writer,
             event_base: 0,
             canonical_event_count: 0,
+            physical_line_count: 0,
             effective_model: meta.model.clone(),
             effective_variant: None,
             todo_list: None,
@@ -512,23 +480,6 @@ impl SessionStore {
         Ok(new_id)
     }
 
-    /// Rewind a session in place: the `UserMessage` at local event
-    /// index `cut` becomes unsent, and everything from it on is folded
-    /// out of replay by an appended `Rewind` marker. The audit log
-    /// keeps the abandoned tail. `tree_restored` and `tree_saved`
-    /// record what happened to the working tree; the git work itself is
-    /// the caller's.
-    pub fn rewind(
-        &self,
-        id: &str,
-        cut: usize,
-        tree_restored: Option<String>,
-        tree_saved: Option<String>,
-    ) -> std::io::Result<RewindOutcome> {
-        let session = self.acquire_writer(id)?.load()?;
-        session.rewind_to(cut, tree_restored, tree_saved)
-    }
-
     /// Read a session snapshot. Only newline-committed records are parsed;
     /// committed corruption is rejected and an in-progress tail is ignored.
     pub fn load(&self, id: &str) -> std::io::Result<SessionReader> {
@@ -586,6 +537,7 @@ impl SessionWriter {
             _writer: self,
             event_base: replay.event_base,
             canonical_event_count: replay.canonical_event_count,
+            physical_line_count: replay.physical_line_count,
             effective_model: replay.effective_model,
             effective_variant: replay.effective_variant,
             todo_list: replay.todo_list,
@@ -635,18 +587,19 @@ fn read_replay(
     if let Ok(replay) = read_indexed_replay(file, path, replay_index_path, id) {
         return Ok(replay);
     }
-    let (full_events, unanswered_calls, observed_stamp) = read_events(file, path, id, repair_tail)?;
-    let canonical_event_count = full_events.len();
-    let (effective_model, effective_variant, todo_list, topic) = replay_state(&full_events);
+    let canonical = read_events(file, path, id, repair_tail)?;
+    let canonical_event_count = canonical.events.len();
+    let (effective_model, effective_variant, todo_list, topic) = replay_state(&canonical.events);
     let (events, event_base) = if repair_tail {
-        (full_events, 0)
+        (canonical.events, 0)
     } else {
-        active_replay_window(&full_events)
+        active_replay_window(&canonical.events)
     };
     Ok(ReplayData {
         canonical_event_count,
+        physical_line_count: canonical.physical_line_count,
         events,
-        unanswered_calls,
+        unanswered_calls: canonical.unanswered_calls,
         event_base,
         effective_model,
         effective_variant,
@@ -654,7 +607,7 @@ fn read_replay(
         topic,
         checkpoint: None,
         checkpoint_tail_start: 0,
-        observed_stamp,
+        observed_stamp: canonical.observed_stamp,
     })
 }
 
@@ -748,6 +701,10 @@ fn read_indexed_replay(
             .canonical_event_count
             .checked_add(tail_events.len())
             .ok_or_else(|| invalid_data("canonical event count overflow"))?,
+        physical_line_count: checkpoint
+            .physical_line_count
+            .checked_add(committed_line_count(&tail))
+            .ok_or_else(|| invalid_data("physical line count overflow"))?,
         effective_model,
         effective_variant,
         todo_list,
@@ -794,12 +751,21 @@ fn parse_event_bytes(
     Ok(events)
 }
 
+/// One full canonical replay: the folded events plus the raw shape of
+/// the file they came from.
+struct CanonicalReplay {
+    events: Vec<SessionEvent>,
+    unanswered_calls: Vec<String>,
+    physical_line_count: usize,
+    observed_stamp: FileStamp,
+}
+
 fn read_events(
     file: &mut File,
     path: &std::path::Path,
     id: &str,
     repair_tail: bool,
-) -> std::io::Result<(Vec<SessionEvent>, Vec<String>, FileStamp)> {
+) -> std::io::Result<CanonicalReplay> {
     let expected = file_stamp(&file.metadata()?)?;
     if file_stamp(&std::fs::metadata(path)?)? != expected {
         return invalid_replay(id, "session path changed before canonical replay");
@@ -820,7 +786,12 @@ fn read_events(
         .iter()
         .rposition(|byte| *byte == b'\n')
         .map_or(0, |position| position + 1);
-    let events = fold_rewinds(parse_event_bytes(&bytes[..complete_len], id, 0)?);
+    let committed = &bytes[..complete_len];
+    // Every committed line, counted before rewinds fold any of them away:
+    // this is what a later tail-parse diagnostic offsets its line numbers
+    // by, and the reader counts lines in the file, not surviving events.
+    let physical_line_count = committed_line_count(committed);
+    let events = fold_rewinds(parse_event_bytes(committed, id, 0)?);
     if events.is_empty() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -845,39 +816,12 @@ fn read_events(
     {
         return invalid_replay(id, "session path changed during canonical replay");
     }
-    Ok((events, unanswered_calls, final_stamp))
-}
-
-fn file_stamp(metadata: &std::fs::Metadata) -> std::io::Result<FileStamp> {
-    let modified_nanos = metadata
-        .modified()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos()
-        .min(u64::MAX as u128) as u64;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        Ok(FileStamp {
-            len: metadata.len(),
-            modified_nanos,
-            device: metadata.dev(),
-            inode: metadata.ino(),
-            changed_seconds: metadata.ctime(),
-            changed_nanos: metadata.ctime_nsec(),
-        })
-    }
-    #[cfg(not(unix))]
-    {
-        Ok(FileStamp {
-            len: metadata.len(),
-            modified_nanos,
-            device: 0,
-            inode: 0,
-            changed_seconds: 0,
-            changed_nanos: 0,
-        })
-    }
+    Ok(CanonicalReplay {
+        events,
+        unanswered_calls,
+        physical_line_count,
+        observed_stamp: final_stamp,
+    })
 }
 
 fn replay_state(
@@ -973,325 +917,6 @@ fn apply_replay_state(
             _ => {}
         }
     }
-}
-
-fn id_records(events: &[SessionEvent]) -> Vec<[u8; REPLAY_ID_RECORD_LEN as usize]> {
-    let mut records = Vec::new();
-    for event in events {
-        let event_id = match event {
-            SessionEvent::Meta { .. } => None,
-            SessionEvent::UserMessage { id, .. }
-            | SessionEvent::SubagentInvocation { id, .. }
-            | SessionEvent::AssistantMessage { id, .. }
-            | SessionEvent::ToolResult { id, .. }
-            | SessionEvent::Checkpoint { id, .. }
-            | SessionEvent::ModelChange { id, .. }
-            | SessionEvent::Compaction { id, .. }
-            | SessionEvent::Topic { id, .. }
-            | SessionEvent::Rewind { id, .. } => Some(id.as_str()),
-        };
-        if let Some(id) = event_id {
-            records.push(id_record(0, id));
-        }
-        if let SessionEvent::AssistantMessage { content, .. } = event {
-            records.extend(content.iter().filter_map(|block| match block {
-                ContentBlock::ToolCall { id, .. } => Some(id_record(1, id)),
-                _ => None,
-            }));
-        }
-    }
-    records
-}
-
-fn id_record(namespace: u8, id: &str) -> [u8; REPLAY_ID_RECORD_LEN as usize] {
-    let mut record = [0; REPLAY_ID_RECORD_LEN as usize];
-    record[0] = namespace;
-    record[1..].copy_from_slice(&Sha256::digest(id.as_bytes()));
-    record
-}
-
-struct ReplayIdIndex {
-    file: File,
-    count: usize,
-    level_counts: Vec<usize>,
-    level_offsets: Vec<u64>,
-    root: [u8; 32],
-    verified_pages: HashMap<usize, Vec<[u8; REPLAY_ID_RECORD_LEN as usize]>>,
-}
-
-impl ReplayIdIndex {
-    fn open(path: &std::path::Path, generation: &str, root: &str) -> std::io::Result<Self> {
-        let generation = uuid::Uuid::parse_str(generation)
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-        let mut file = File::open(path)?;
-        let mut header = [0u8; REPLAY_IDS_HEADER_LEN as usize];
-        file.read_exact(&mut header)?;
-        if &header[..8] != REPLAY_IDS_MAGIC || header[8..24] != *generation.as_bytes() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "replay id index generation mismatch",
-            ));
-        }
-        let count = usize::try_from(u64::from_le_bytes(header[24..32].try_into().unwrap()))
-            .map_err(|_| invalid_data("replay id count does not fit this platform"))?;
-        let level_counts = merkle_level_counts(count);
-        let records_len = (count as u64)
-            .checked_mul(REPLAY_ID_RECORD_LEN)
-            .ok_or_else(|| invalid_data("replay id length overflow"))?;
-        let mut offset = REPLAY_IDS_HEADER_LEN
-            .checked_add(records_len)
-            .ok_or_else(|| invalid_data("replay id length overflow"))?;
-        let mut level_offsets = Vec::with_capacity(level_counts.len());
-        for level_count in &level_counts {
-            level_offsets.push(offset);
-            offset = offset
-                .checked_add(
-                    (*level_count as u64)
-                        .checked_mul(32)
-                        .ok_or_else(|| invalid_data("replay id tree length overflow"))?,
-                )
-                .ok_or_else(|| invalid_data("replay id tree length overflow"))?;
-        }
-        if file.metadata()?.len() != offset {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "invalid replay id index length",
-            ));
-        }
-        Ok(Self {
-            file,
-            count,
-            level_counts,
-            level_offsets,
-            root: parse_digest(root)?,
-            verified_pages: HashMap::new(),
-        })
-    }
-
-    fn contains(&mut self, target: &[u8; REPLAY_ID_RECORD_LEN as usize]) -> std::io::Result<bool> {
-        let mut low = 0;
-        let mut high = self.count;
-        while low < high {
-            let middle = low + (high - low) / 2;
-            match self.record_at(middle)?.cmp(target) {
-                std::cmp::Ordering::Less => low = middle + 1,
-                std::cmp::Ordering::Greater => high = middle,
-                std::cmp::Ordering::Equal => return Ok(true),
-            }
-        }
-        Ok(false)
-    }
-
-    fn record_at(&mut self, index: usize) -> std::io::Result<[u8; REPLAY_ID_RECORD_LEN as usize]> {
-        let page = index / REPLAY_ID_PAGE_RECORDS;
-        let within = index % REPLAY_ID_PAGE_RECORDS;
-        Ok(self.read_page(page)?[within])
-    }
-
-    fn read_page(
-        &mut self,
-        page: usize,
-    ) -> std::io::Result<Vec<[u8; REPLAY_ID_RECORD_LEN as usize]>> {
-        if let Some(records) = self.verified_pages.get(&page) {
-            return Ok(records.clone());
-        }
-        let first_record = page.saturating_mul(REPLAY_ID_PAGE_RECORDS);
-        let count = (self.count - first_record).min(REPLAY_ID_PAGE_RECORDS);
-        let mut bytes = vec![0; count * REPLAY_ID_RECORD_LEN as usize];
-        self.file.seek(std::io::SeekFrom::Start(
-            REPLAY_IDS_HEADER_LEN + first_record as u64 * REPLAY_ID_RECORD_LEN,
-        ))?;
-        self.file.read_exact(&mut bytes)?;
-        let mut hash = digest(&bytes);
-        let mut node = page;
-        for level in 0..self.level_counts.len().saturating_sub(1) {
-            let sibling = if node.is_multiple_of(2) {
-                node + 1
-            } else {
-                node - 1
-            };
-            let sibling_hash = if sibling < self.level_counts[level] {
-                self.read_tree_hash(level, sibling)?
-            } else {
-                hash
-            };
-            hash = if node.is_multiple_of(2) {
-                digest_pair(&hash, &sibling_hash)
-            } else {
-                digest_pair(&sibling_hash, &hash)
-            };
-            node /= 2;
-        }
-        if hash != self.root {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "replay id Merkle proof mismatch",
-            ));
-        }
-        let records = bytes
-            .chunks_exact(REPLAY_ID_RECORD_LEN as usize)
-            .map(|bytes| bytes.try_into().map_err(std::io::Error::other))
-            .collect::<std::io::Result<Vec<_>>>()?;
-        self.verified_pages.insert(page, records.clone());
-        Ok(records)
-    }
-
-    fn read_tree_hash(&mut self, level: usize, node: usize) -> std::io::Result<[u8; 32]> {
-        let offset = self.level_offsets[level]
-            .checked_add(
-                (node as u64)
-                    .checked_mul(32)
-                    .ok_or_else(|| invalid_data("replay id tree offset overflow"))?,
-            )
-            .ok_or_else(|| invalid_data("replay id tree offset overflow"))?;
-        self.file.seek(std::io::SeekFrom::Start(offset))?;
-        let mut hash = [0; 32];
-        self.file.read_exact(&mut hash)?;
-        Ok(hash)
-    }
-}
-
-fn read_all_id_records(
-    path: &std::path::Path,
-    generation: &str,
-    root: &str,
-) -> std::io::Result<Vec<[u8; REPLAY_ID_RECORD_LEN as usize]>> {
-    let mut index = ReplayIdIndex::open(path, generation, root)?;
-    let mut records = Vec::with_capacity(index.count);
-    for page in 0..index.level_counts.first().copied().unwrap_or(0) {
-        records.extend(index.read_page(page)?);
-    }
-    Ok(records)
-}
-
-fn write_id_records(
-    path: &std::path::Path,
-    generation: &str,
-    records: &[[u8; REPLAY_ID_RECORD_LEN as usize]],
-) -> std::io::Result<String> {
-    let generation = uuid::Uuid::parse_str(generation)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-    let mut bytes = Vec::with_capacity(
-        REPLAY_IDS_HEADER_LEN as usize + records.len() * REPLAY_ID_RECORD_LEN as usize,
-    );
-    bytes.extend_from_slice(REPLAY_IDS_MAGIC);
-    bytes.extend_from_slice(generation.as_bytes());
-    bytes.extend_from_slice(&(records.len() as u64).to_le_bytes());
-    for record in records {
-        bytes.extend_from_slice(record);
-    }
-    let mut levels = vec![
-        records
-            .chunks(REPLAY_ID_PAGE_RECORDS)
-            .map(|page| {
-                digest(
-                    &page
-                        .iter()
-                        .flat_map(|record| record.iter().copied())
-                        .collect::<Vec<_>>(),
-                )
-            })
-            .collect::<Vec<_>>(),
-    ];
-    while levels.last().is_some_and(|level| level.len() > 1) {
-        let previous = levels.last().unwrap();
-        levels.push(
-            previous
-                .chunks(2)
-                .map(|pair| digest_pair(&pair[0], pair.get(1).unwrap_or(&pair[0])))
-                .collect(),
-        );
-    }
-    for level in &levels {
-        for hash in level {
-            bytes.extend_from_slice(hash);
-        }
-    }
-    let root = levels
-        .last()
-        .and_then(|level| level.first())
-        .copied()
-        .unwrap_or_else(|| digest(&[]));
-    crate::atomic_file::replace(path, &bytes, crate::atomic_file::Mode::Force(0o600))?;
-    Ok(digest_to_hex(&root))
-}
-
-fn replay_ids_path(replay_index_path: &std::path::Path, id: &str, generation: &str) -> PathBuf {
-    replay_index_path.with_file_name(format!("{id}.replay.{generation}.ids"))
-}
-
-fn merkle_level_counts(record_count: usize) -> Vec<usize> {
-    let mut count = record_count.div_ceil(REPLAY_ID_PAGE_RECORDS);
-    let mut levels = Vec::new();
-    while count > 0 {
-        levels.push(count);
-        if count == 1 {
-            break;
-        }
-        count = count.div_ceil(2);
-    }
-    levels
-}
-
-fn digest(bytes: &[u8]) -> [u8; 32] {
-    Sha256::digest(bytes).into()
-}
-
-fn digest_pair(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
-    let mut bytes = [0; 64];
-    bytes[..32].copy_from_slice(left);
-    bytes[32..].copy_from_slice(right);
-    digest(&bytes)
-}
-
-fn digest_to_hex(digest: &[u8; 32]) -> String {
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-fn digest_hex(bytes: &[u8]) -> String {
-    digest_to_hex(&digest(bytes))
-}
-
-fn parse_digest(value: &str) -> std::io::Result<[u8; 32]> {
-    if value.len() != 64 {
-        return Err(invalid_data("invalid replay digest length"));
-    }
-    let mut digest = [0; 32];
-    for (index, byte) in digest.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
-            .map_err(|_| invalid_data("invalid replay digest"))?;
-    }
-    Ok(digest)
-}
-
-fn invalid_data(message: &'static str) -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::InvalidData, message)
-}
-
-fn checkpoint_checksum(checkpoint: &ReplayCheckpoint) -> std::io::Result<String> {
-    let payload = serde_json::to_vec(&(
-        checkpoint.version,
-        &checkpoint.generation,
-        &checkpoint.session_id,
-        checkpoint.replay_offset,
-        checkpoint.canonical_event_count,
-        checkpoint.physical_line_count,
-        checkpoint.active_start,
-        &checkpoint.events,
-        &checkpoint.effective_model,
-        &checkpoint.effective_variant,
-        &checkpoint.todo_list,
-        &checkpoint.topic,
-        &checkpoint.id_root,
-        &checkpoint.observed,
-    ))
-    .map_err(std::io::Error::other)?;
-    Ok(digest_hex(&payload))
-}
-
-fn write_checkpoint(path: &std::path::Path, checkpoint: &ReplayCheckpoint) -> std::io::Result<()> {
-    let bytes = serde_json::to_vec(checkpoint).map_err(std::io::Error::other)?;
-    crate::atomic_file::replace(path, &bytes, crate::atomic_file::Mode::Force(0o600))
 }
 
 fn validate_replay(events: &[SessionEvent], id: &str) -> std::io::Result<Vec<String>> {
@@ -1505,7 +1130,7 @@ impl Session {
         if matches!(event, SessionEvent::Rewind { .. }) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "rewind markers are appended through SessionStore::rewind",
+                "rewind markers are appended through Session::rewind_to",
             ));
         }
         self.append_event(event)
@@ -1516,6 +1141,10 @@ impl Session {
             .canonical_event_count
             .checked_add(1)
             .ok_or_else(|| invalid_data("canonical event count overflow"))?;
+        let next_physical_line_count = self
+            .physical_line_count
+            .checked_add(1)
+            .ok_or_else(|| invalid_data("physical line count overflow"))?;
         if file_stamp(&self.file.metadata()?)? != self.observed_stamp
             || file_stamp(&std::fs::metadata(&self._writer.session_path)?)? != self.observed_stamp
         {
@@ -1576,6 +1205,7 @@ impl Session {
         }
         self.events.push(event);
         self.canonical_event_count = next_canonical_event_count;
+        self.physical_line_count = next_physical_line_count;
         if let Some(cut) = local_compaction_cut {
             let _ = self.publish_checkpoint(cut);
         } else {
@@ -1751,7 +1381,7 @@ impl Session {
             session_id: self.session_id().to_string(),
             replay_offset: self.file.metadata()?.len(),
             canonical_event_count: self.canonical_event_count,
-            physical_line_count: self.canonical_event_count,
+            physical_line_count: self.physical_line_count,
             active_start,
             events,
             effective_model: self.effective_model.clone(),
@@ -1972,4 +1602,94 @@ fn compaction_cut(events: &[SessionEvent]) -> usize {
         })
         .max()
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn user_message(text: &str) -> SessionEvent {
+        SessionEvent::UserMessage {
+            id: new_id(),
+            text: text.into(),
+            images: Vec::new(),
+            ts: chrono::Utc::now(),
+        }
+    }
+
+    fn assistant_message(text: &str) -> SessionEvent {
+        SessionEvent::AssistantMessage {
+            id: new_id(),
+            model: "test/model".into(),
+            content: vec![ContentBlock::Text { text: text.into() }],
+            usage: super::super::model::Usage::default(),
+            stop_reason: "end_turn".into(),
+            ts: chrono::Utc::now(),
+        }
+    }
+
+    /// Tail-parse diagnostics name a line in the file, so the offset the
+    /// checkpoint carries has to be a physical line count. A rewind makes
+    /// the folded event count smaller than the file — the two numbers must
+    /// not be confused.
+    #[test]
+    fn tail_diagnostics_report_the_physical_line_after_a_rewind() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf());
+        let id = new_id();
+        let mut session = store
+            .create(SessionMeta {
+                session_id: id.clone(),
+                parent_id: None,
+                agent: "build".into(),
+                model: "test/model".into(),
+                workspace: None,
+            })
+            .unwrap();
+        // Lines 2..5: two turns, the second of which the rewind abandons.
+        session.append(user_message("first")).unwrap();
+        session.append(assistant_message("did first")).unwrap();
+        session.append(user_message("second")).unwrap();
+        session.append(assistant_message("did second")).unwrap();
+        // Line 6: the rewind marker. Replay now folds back to 3 events
+        // while the file holds 6 lines.
+        session.rewind_to(3, None, None).unwrap();
+
+        // Lines 7..9: a fresh turn plus a compaction, which publishes a
+        // checkpoint whose tail offset is what we are pinning.
+        let mut session = store.acquire_writer(&id).unwrap().load().unwrap();
+        session.append(user_message("third")).unwrap();
+        session.append(assistant_message("did third")).unwrap();
+        session
+            .append(SessionEvent::Compaction {
+                id: new_id(),
+                summary: "the story so far".into(),
+                kept_from: 3,
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        drop(session);
+
+        // Line 10: corrupt. Re-seal the checkpoint over the new file so
+        // the indexed path is the one that reports it.
+        let session_path = store.session_path(&id).unwrap();
+        let index_path = store.replay_index_path(&id).unwrap();
+        let mut file = OpenOptions::new().append(true).open(&session_path).unwrap();
+        file.write_all(b"{\"broken\"\n").unwrap();
+        file.sync_data().unwrap();
+        let mut checkpoint: ReplayCheckpoint =
+            serde_json::from_slice(&std::fs::read(&index_path).unwrap()).unwrap();
+        checkpoint.observed = file_stamp(&std::fs::metadata(&session_path).unwrap()).unwrap();
+        checkpoint.checksum = checkpoint_checksum(&checkpoint).unwrap();
+        write_checkpoint(&index_path, &checkpoint).unwrap();
+
+        let mut file = File::open(&session_path).unwrap();
+        let Err(error) = read_indexed_replay(&mut file, &session_path, &index_path, &id) else {
+            panic!("expected the corrupt tail to be rejected");
+        };
+        assert!(
+            error.to_string().contains("malformed line 10"),
+            "expected the real file line, got: {error}"
+        );
+    }
 }

@@ -2,6 +2,7 @@
 
 mod event;
 mod model;
+mod replay_index;
 mod store;
 
 pub use event::{SessionEvent, SessionMeta, SessionState, new_id};
