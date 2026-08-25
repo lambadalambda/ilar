@@ -421,9 +421,33 @@ impl SessionStore {
         // after release would race a new holder of the same path.
         let _writer = self.acquire_writer_id(parsed.clone())?;
         let _ = std::fs::remove_file(self.replay_index_path_for(&parsed));
+        for path in self.replay_ids_paths_for(&parsed) {
+            let _ = std::fs::remove_file(path);
+        }
         std::fs::remove_file(self.session_path_for(&parsed))?;
         let _ = std::fs::remove_file(lock_path);
         Ok(())
+    }
+
+    /// Every id-index file the session owns. `publish_checkpoint` names
+    /// them by generation and a crash before the superseded one is
+    /// unlinked strands it, so scan the root instead of trusting the
+    /// checkpoint to name the only live generation. Ids are UUIDs, so
+    /// the full `{id}.replay.` prefix cannot reach another session's
+    /// files. An unreadable root yields nothing — absence is fine here.
+    fn replay_ids_paths_for(&self, id: &SessionId) -> Vec<PathBuf> {
+        let prefix = format!("{id}.replay.");
+        let Ok(entries) = std::fs::read_dir(&self.root) else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .filter(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                name.starts_with(&prefix) && name.ends_with(".ids")
+            })
+            .map(|entry| entry.path())
+            .collect()
     }
 
     /// Fork a session: copy its validated history under a fresh id (the

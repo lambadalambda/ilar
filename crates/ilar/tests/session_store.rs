@@ -1696,6 +1696,62 @@ fn delete_removes_session_files_and_refuses_active_sessions() {
 }
 
 #[test]
+fn delete_removes_replay_id_indexes_of_every_generation() {
+    let (store, dir) = temp_store();
+    let meta = sample_meta();
+    let mut session = store.create(meta.clone()).unwrap();
+    for event in sample_log(&meta).into_iter().skip(1) {
+        session.append(event).unwrap();
+    }
+    let kept_from = session.events().len();
+    session
+        .append(SessionEvent::UserMessage {
+            id: new_id(),
+            text: "active".into(),
+            images: Vec::new(),
+            ts: Utc::now(),
+        })
+        .unwrap();
+    session
+        .append(SessionEvent::Compaction {
+            id: new_id(),
+            summary: "old conversation".into(),
+            kept_from,
+            ts: Utc::now(),
+        })
+        .unwrap();
+    drop(session);
+    // A crash between publishing a checkpoint and unlinking the one it
+    // replaced strands an older generation; delete must take those too.
+    let stale = dir
+        .path()
+        .join(format!("{}.replay.{}.ids", meta.session_id, new_id()));
+    std::fs::write(&stale, b"stale").unwrap();
+    let indexes: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(&meta.session_id) && name.ends_with(".ids"))
+        .collect();
+    assert_eq!(indexes.len(), 2, "{indexes:?}");
+
+    // A neighbouring session is untouched by the scan.
+    let neighbour = sample_meta();
+    drop(store.create(neighbour.clone()).unwrap());
+
+    store.delete(&meta.session_id).unwrap();
+
+    let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains(&meta.session_id))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+    assert!(store.load(&neighbour.session_id).is_ok());
+}
+
+#[test]
 fn fork_copies_history_under_a_new_id() {
     let (store, _dir) = temp_store();
     let meta = sample_meta();
