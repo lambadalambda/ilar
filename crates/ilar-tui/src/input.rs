@@ -386,6 +386,16 @@ pub(crate) enum PromptAction {
     Unhandled,
 }
 
+/// A cursor move that had nowhere to go is not an edit: the key falls
+/// through to the dispatcher rather than dying in the prompt.
+fn moved(moved: bool) -> PromptAction {
+    if moved {
+        PromptAction::Edited
+    } else {
+        PromptAction::Unhandled
+    }
+}
+
 pub(crate) fn handle_prompt_key(input: &mut InputBuffer, key: KeyEvent) -> PromptAction {
     let control = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
@@ -443,14 +453,10 @@ pub(crate) fn handle_prompt_key(input: &mut InputBuffer, key: KeyEvent) -> Promp
             input.move_end();
             PromptAction::Edited
         }
-        KeyCode::Up if input.is_multiline() => {
-            input.move_vertical(-1);
-            PromptAction::Edited
-        }
-        KeyCode::Down if input.is_multiline() => {
-            input.move_vertical(1);
-            PromptAction::Edited
-        }
+        // On the first and last line there is no row to move to, so the
+        // arrow is released instead of being swallowed as a phantom edit.
+        KeyCode::Up if input.is_multiline() => moved(input.move_vertical(-1)),
+        KeyCode::Down if input.is_multiline() => moved(input.move_vertical(1)),
         KeyCode::Backspace if !control => {
             input.backspace();
             PromptAction::Edited
@@ -824,5 +830,34 @@ mod tests {
         );
         input.insert("X");
         assert_eq!(input.text(), "one\nXtwo\nthree");
+    }
+
+    /// The edges of a multiline draft are not dead keys: `move_vertical`
+    /// declines on the first and last line, and the arrow has to be
+    /// released there rather than reported as a phantom edit.
+    #[test]
+    fn multiline_arrows_release_the_key_at_the_first_and_last_line() {
+        let arrow = |input: &mut InputBuffer, code: KeyCode| {
+            handle_prompt_key(input, KeyEvent::new(code, KeyModifiers::NONE))
+        };
+
+        let mut input = InputBuffer::from("one\ntwo\nthree");
+        input.cursor = 1;
+        assert_eq!(arrow(&mut input, KeyCode::Up), PromptAction::Unhandled);
+        assert_eq!(input.cursor(), 1, "the first line has nowhere to go up");
+        assert_eq!(arrow(&mut input, KeyCode::Down), PromptAction::Edited);
+        assert_eq!(input.cursor(), 5);
+
+        let mut input = InputBuffer::from("one\ntwo\nthree");
+        assert_eq!(arrow(&mut input, KeyCode::Down), PromptAction::Unhandled);
+        assert_eq!(input.cursor(), 13, "the last line has nowhere to go down");
+        assert_eq!(arrow(&mut input, KeyCode::Up), PromptAction::Edited);
+        assert_eq!(input.cursor(), 7);
+
+        // A blank single-line prompt is not the multiline case at all, so
+        // the arrow stays free for the dispatcher's history recall.
+        let mut blank = InputBuffer::default();
+        assert_eq!(arrow(&mut blank, KeyCode::Up), PromptAction::Unhandled);
+        assert_eq!(arrow(&mut blank, KeyCode::Down), PromptAction::Unhandled);
     }
 }
