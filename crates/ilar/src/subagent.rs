@@ -20,6 +20,19 @@ use serde::Deserialize;
 
 const NOTIFICATION_CAPACITY: usize = 64;
 const ACTIVITY_CAPACITY: usize = 256;
+/// How long a cancelled or stalled background child may take to finish
+/// its graceful abort. That path only appends a partial step to the
+/// session log and publishes the terminal event, so seconds are already
+/// generous — the bound exists so a provider or tool that ignores
+/// cancellation cannot wedge `shutdown`, which waits for these tasks.
+const BACKGROUND_ABORT_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+/// Poll interval and cap for a notification whose parent session is
+/// locked by another turn. A lease that outlives ~3s is held by a turn
+/// that is going to keep it, so the notification goes back to the queue
+/// instead of spinning at 40 attempts a second until the heat death of
+/// the universe.
+const NOTIFICATION_LOCK_RETRY: std::time::Duration = std::time::Duration::from_millis(25);
+const NOTIFICATION_LOCK_ATTEMPTS: usize = 120;
 
 /// A completed background task's notification — the synthetic user
 /// message that re-invokes the parent loop.
@@ -243,9 +256,10 @@ impl SubagentSpawner {
                 .map(|task| task.handle)
                 .collect::<Vec<_>>()
         };
-        for task in tasks {
-            let _ = task.await;
-        }
+        // Every task was cancelled at once, and each may spend up to
+        // BACKGROUND_ABORT_GRACE finishing its abort: wait for them
+        // together so quitting costs one grace, not one per child.
+        let _ = futures::future::join_all(tasks).await;
     }
 
     /// Number of live detached background tasks.
@@ -563,9 +577,7 @@ impl SubagentSpawner {
                                 })
                         {
                             drop(session);
-                            if let Ok(path) = self.store.session_path(&id) {
-                                let _ = std::fs::remove_file(path);
-                            }
+                            rollback_created_session(&self.store, &id);
                             return ToolOutput::error(format!(
                                 "persisting inherited subagent reasoning variant: {error}"
                             ));
@@ -802,7 +814,7 @@ impl SubagentSpawner {
                         }
                     }
                 };
-                let turn = run_turn(
+                let mut turn = Box::pin(run_turn(
                     spawner.resolver.as_ref(),
                     &registry,
                     &spawner.store,
@@ -816,22 +828,28 @@ impl SubagentSpawner {
                     child_ctx,
                     // Subagents have no interactive user to steer them.
                     None,
-                );
-                let (outcome, was_cancelled) = tokio::select! {
-                    outcome = turn => (Some(outcome), false),
-                    () = stall_watch => {
-                        cancel.cancel();
-                        (None, false)
-                    }
-                    () = task_cancel.cancelled() => {
-                        cancel.cancel();
-                        (None, true)
-                    }
-                    () = root_cancel.cancelled() => {
-                        cancel.cancel();
-                        (None, true)
+                ));
+                // Whichever way this ends, the child stops the same way a
+                // foreground one does: the token is cancelled and the turn
+                // is awaited, never dropped mid-flight.
+                let stopped = async {
+                    tokio::select! {
+                        () = stall_watch => false,
+                        () = task_cancel.cancelled() => true,
+                        () = root_cancel.cancelled() => true,
                     }
                 };
+                let (outcome, was_cancelled) = tokio::select! {
+                    outcome = &mut turn => (Some(outcome), false),
+                    was_cancelled = stopped => {
+                        cancel.cancel();
+                        let _ = tokio::time::timeout(BACKGROUND_ABORT_GRACE, &mut turn).await;
+                        (None, was_cancelled)
+                    }
+                };
+                // The event channel closes with the turn; the watcher ends
+                // with it.
+                drop(turn);
                 let _ = watcher.await;
                 let activity_outcome = match &outcome {
                     Some(Ok(outcome)) => *outcome,
@@ -1250,6 +1268,7 @@ task's scope yourself; continue only clearly disjoint work."
                 anyhow::anyhow!("workspace changed while waiting for its lease"),
             );
         }
+        let mut lock_attempts = 0;
         let outcome = loop {
             if cancel.is_cancelled() {
                 return Ok(RouteOutcome::Requeue(notification));
@@ -1288,9 +1307,17 @@ task's scope yourself; continue only clearly disjoint work."
                         .downcast_ref::<std::io::Error>()
                         .is_some_and(|error| error.kind() == std::io::ErrorKind::WouldBlock) =>
                 {
+                    // The lease belongs to another turn and nothing was
+                    // appended: wait for it briefly, then hand the
+                    // notification back like every other transient
+                    // failure here rather than spinning on the lock.
+                    lock_attempts += 1;
+                    if lock_attempts >= NOTIFICATION_LOCK_ATTEMPTS {
+                        return Ok(RouteOutcome::Requeue(notification));
+                    }
                     tokio::select! {
                         () = cancel.cancelled() => return Ok(RouteOutcome::Requeue(notification)),
-                        () = tokio::time::sleep(std::time::Duration::from_millis(25)) => {}
+                        () = tokio::time::sleep(NOTIFICATION_LOCK_RETRY) => {}
                     }
                 }
                 result => break result,
@@ -1503,6 +1530,15 @@ async fn revalidate_after_lease(
             crate::tools::WorkspaceLocation::revalidate(parent, location).await
         }
     }
+}
+
+/// Undo a session that was created moments ago but could not be
+/// initialized. The id is about to be forgotten, so nothing of it may
+/// stay on disk — its log, its lock and its replay index all go, which
+/// is exactly what `delete` does under the lease it takes itself. The
+/// caller must have dropped the session first.
+fn rollback_created_session(store: &SessionStore, id: &str) {
+    let _ = store.delete(id);
 }
 
 fn publish_reserved_notification(
@@ -1896,6 +1932,33 @@ mod tests {
         publish_reserved_notification(&mut permit, notification("first"));
         assert_eq!(receiver.recv().await.unwrap().description, "first");
         assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn rolling_back_a_created_session_leaves_no_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf());
+        let id = new_id();
+        drop(
+            store
+                .create(SessionMeta {
+                    session_id: id.clone(),
+                    parent_id: Some("parent".into()),
+                    agent: "explore".into(),
+                    model: "zai/glm-4.7".into(),
+                    workspace: None,
+                })
+                .unwrap(),
+        );
+
+        rollback_created_session(&store, &id);
+
+        let leftovers: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(leftovers.is_empty(), "rollback left {leftovers:?}");
     }
 
     #[test]

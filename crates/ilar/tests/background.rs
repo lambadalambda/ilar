@@ -81,6 +81,27 @@ impl Provider for NotifyingPending {
     }
 }
 
+/// Streams one delta and then hangs, announcing itself once the delta is
+/// on its way — a child with partial work worth persisting.
+#[derive(Clone)]
+struct NotifyingPartialText {
+    started: Arc<tokio::sync::Notify>,
+}
+
+impl Provider for NotifyingPartialText {
+    fn stream(&self, _req: Request) -> anyhow::Result<EventStream> {
+        let started = self.started.clone();
+        Ok(Box::pin(
+            stream::once(async { ProviderEvent::TextDelta("partial answer".into()) }).chain(
+                stream::once(async move {
+                    started.notify_one();
+                    std::future::pending::<ProviderEvent>().await
+                }),
+            ),
+        ))
+    }
+}
+
 #[derive(Clone)]
 struct NotifyingDelayedText {
     started: Arc<tokio::sync::Notify>,
@@ -181,23 +202,46 @@ fn spawner_for_workspace(
     cwd: std::path::PathBuf,
 ) -> Arc<SubagentSpawner> {
     Arc::new(
-        SubagentSpawner::new(
-            Arc::new(FixedProviderResolver::new(provider)),
-            store.clone(),
-            vec![AgentDefinition {
-                name: "explore".into(),
-                description: "explores".into(),
-                model: None,
-                prompt: "".into(),
-                workspace_mode,
-                tools: None,
-            }],
-            cwd,
-            0,
-            10,
-            3,
+        unwatched_spawner(provider, store, workspace_mode, cwd)
+            .with_stall_timeout(Duration::from_millis(400)),
+    )
+}
+
+/// A spawner whose stall watchdog cannot fire during the test — for
+/// cancellation tests, where a 400ms watchdog would race the assertion.
+fn patient_spawner(provider: Arc<dyn Provider>, store: &SessionStore) -> Arc<SubagentSpawner> {
+    Arc::new(
+        unwatched_spawner(
+            provider,
+            store,
+            AgentWorkspaceMode::Mutable,
+            std::env::temp_dir(),
         )
-        .with_stall_timeout(Duration::from_millis(400)),
+        .with_stall_timeout(Duration::from_secs(60)),
+    )
+}
+
+fn unwatched_spawner(
+    provider: Arc<dyn Provider>,
+    store: &SessionStore,
+    workspace_mode: AgentWorkspaceMode,
+    cwd: std::path::PathBuf,
+) -> SubagentSpawner {
+    SubagentSpawner::new(
+        Arc::new(FixedProviderResolver::new(provider)),
+        store.clone(),
+        vec![AgentDefinition {
+            name: "explore".into(),
+            description: "explores".into(),
+            model: None,
+            prompt: "".into(),
+            workspace_mode,
+            tools: None,
+        }],
+        cwd,
+        0,
+        10,
+        3,
     )
 }
 
@@ -911,6 +955,77 @@ async fn background_task_returns_immediately_and_notifies_once() {
 }
 
 #[tokio::test]
+async fn cancelled_background_task_persists_its_partial_answer() {
+    let (store, session_id) = temp_store();
+    let started = Arc::new(tokio::sync::Notify::new());
+    // The watchdog must not steal the cancellation this test is about.
+    let spawner = patient_spawner(
+        Arc::new(NotifyingPartialText {
+            started: started.clone(),
+        }),
+        &store,
+    );
+    let mut notifications = spawner.subscribe();
+    let registry = ToolRegistry::builtin()
+        .with_subagents(spawner.clone())
+        .unwrap();
+    let ctx = background_tool_context(session_id, spawner.clone(), std::env::temp_dir().as_ref());
+
+    let out = registry
+        .get("task")
+        .unwrap()
+        .run(
+            serde_json::json!({
+                "description": "cancelled bg",
+                "prompt": "work",
+                "subagent_type": "explore",
+                "background": true,
+            }),
+            ctx,
+        )
+        .await;
+    assert!(!out.is_error, "{}", out.content);
+    let child_id = out
+        .child_session_id()
+        .expect("background task names its session")
+        .to_string();
+    started.notified().await;
+    spawner.abort_all();
+
+    let notification = tokio::time::timeout(Duration::from_secs(5), notifications.recv())
+        .await
+        .expect("cancellation notification")
+        .expect("present");
+    assert!(notification.is_error, "{}", notification.text);
+    assert!(
+        notification.text.contains("was cancelled"),
+        "{}",
+        notification.text
+    );
+    // The turn ran its graceful abort instead of being dropped: what the
+    // child already streamed is in its transcript.
+    let child = store.load(&child_id).unwrap();
+    let partial = child
+        .events()
+        .iter()
+        .find_map(|event| match event {
+            SessionEvent::AssistantMessage {
+                content,
+                stop_reason,
+                ..
+            } if stop_reason == "aborted" => Some(content.clone()),
+            _ => None,
+        })
+        .expect("aborted assistant message");
+    assert!(
+        partial
+            .iter()
+            .any(|block| matches!(block, ContentBlock::Text { text } if text == "partial answer")),
+        "{partial:?}"
+    );
+}
+
+#[tokio::test]
 async fn stall_watchdog_fires_on_silent_child() {
     let (store, session_id) = temp_store();
     let spawner = spawner(Arc::new(Silent), &store);
@@ -1137,6 +1252,63 @@ async fn routed_abort_after_append_is_terminal_instead_of_requeued() {
         })
         .count();
     assert_eq!(notification_messages, 1);
+}
+
+#[tokio::test]
+async fn routed_notification_requeues_when_the_parent_stays_locked() {
+    let (store, session_id) = temp_store();
+    let spawner = Arc::new(SubagentSpawner::new(
+        Arc::new(FixedProviderResolver::new(Arc::new(MockProvider::new(
+            vec![],
+        )))),
+        store.clone(),
+        vec![AgentDefinition {
+            name: "build".into(),
+            description: "builds".into(),
+            model: None,
+            prompt: String::new(),
+            workspace_mode: AgentWorkspaceMode::Mutable,
+            tools: None,
+        }],
+        std::env::temp_dir(),
+        0,
+        10,
+        3,
+    ));
+    // Another turn owns the writer lease for the whole call: the route
+    // must give up and hand the notification back instead of spinning.
+    let _writer = store.acquire_writer(&session_id).unwrap();
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(30),
+        spawner.route_notification(
+            ilar::subagent::Notification {
+                parent_session_id: session_id.clone(),
+                description: "locked parent".into(),
+                text: "nested finished".into(),
+                is_error: false,
+            },
+            tokio_util::sync::CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("locked route must not spin forever")
+    .unwrap();
+
+    assert!(
+        matches!(outcome, ilar::subagent::RouteOutcome::Requeue(_)),
+        "a locked parent must requeue its notification"
+    );
+    // Requeueing is only safe because the lock stopped the turn before
+    // it appended anything: a replay must not duplicate the message.
+    let appended = store
+        .load(&session_id)
+        .unwrap()
+        .events()
+        .iter()
+        .filter(|event| matches!(event, SessionEvent::UserMessage { .. }))
+        .count();
+    assert_eq!(appended, 0, "a requeued notification was already appended");
 }
 
 #[tokio::test]

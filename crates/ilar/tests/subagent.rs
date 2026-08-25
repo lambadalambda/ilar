@@ -1322,6 +1322,50 @@ async fn foreground_subagent_abort_is_error() {
 }
 
 #[tokio::test]
+async fn provider_error_publishes_the_terminal_turn_done() {
+    let (store, session_id) = temp_store();
+    let provider = MockProvider::new(vec![vec![
+        ProviderEvent::TextDelta("half an answer".into()),
+        ProviderEvent::Error("api down".into()),
+    ]]);
+    let (tx, mut rx) = loop_event_channel(LOOP_EVENT_CAPACITY);
+
+    let error = run_turn(
+        &provider,
+        &ToolRegistry::builtin(),
+        &store,
+        &session_id,
+        "go",
+        &[],
+        None,
+        LoopConfig::default(),
+        tx,
+        tokio_util::sync::CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("api down"), "{error:#}");
+
+    // Event-only consumers must not have to infer the end of a failed
+    // turn from a closed channel.
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+    assert!(
+        matches!(
+            events.last(),
+            Some(LoopEvent::TurnDone {
+                outcome: TurnOutcome::Aborted
+            })
+        ),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
 async fn tool_only_child_does_not_return_its_prompt() {
     let (store, parent_id) = temp_store();
     let provider = MockProvider::new(vec![

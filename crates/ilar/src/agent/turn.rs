@@ -403,11 +403,13 @@ fn merge_segment_usage(total: Usage, segment: Usage) -> Usage {
 /// does: whatever the user already watched stream (the paused prefix plus
 /// this response's blocks) with the failure recorded as a diagnostic, then
 /// a synthetic error result for every announced tool call — an unanswered
-/// tool_use poisons the transcript.
+/// tool_use poisons the transcript. Ends with the reserved terminal
+/// event, so a consumer watching only the channel sees the turn end
+/// rather than a bare close; the caller then returns the error.
 #[allow(clippy::too_many_arguments)]
 async fn persist_failed_step(
     session: &mut crate::session::Session,
-    events: &LoopEventSender,
+    events: &mut LoopEventSender,
     cancel: &CancellationToken,
     model: &str,
     prefix: &[ContentBlock],
@@ -471,6 +473,12 @@ async fn persist_failed_step(
                 .await;
         }
     }
+    // A failed turn ends like an aborted one for anybody watching the
+    // channel — the same outcome every caller synthesizes from the
+    // error it is about to get back.
+    events.publish_terminal(LoopEvent::TurnDone {
+        outcome: TurnOutcome::Aborted,
+    });
     Ok(())
 }
 
@@ -1576,7 +1584,7 @@ async fn run_turn_inner(
             // (see meta/issues: provider decode errors were lost before).
             persist_failed_step(
                 &mut session,
-                &events,
+                &mut events,
                 &cancel,
                 &model,
                 &paused_content,
@@ -1605,8 +1613,10 @@ async fn run_turn_inner(
             }
             // ...and answer every announced tool call with a synthetic
             // error result: an unanswered tool_use poisons the transcript
-            // (providers 400 on tool_use without tool_result).
-            for (id, name, _, _) in acc.tool_calls() {
+            // (providers 400 on tool_use without tool_result). Nothing is
+            // published for them: `publish` abandons a cancelled turn's
+            // events, and only the terminal event has reserved capacity.
+            for (id, _, _, _) in acc.tool_calls() {
                 session.append(SessionEvent::ToolResult {
                     id: new_id(),
                     tool_use_id: id.clone(),
@@ -1616,18 +1626,6 @@ async fn run_turn_inner(
                     state: None,
                     ts: Utc::now(),
                 })?;
-                events
-                    .publish(
-                        LoopEvent::ToolFinished {
-                            id: id.clone(),
-                            name: name.clone(),
-                            is_error: true,
-                            result: "aborted before execution".into(),
-                            child_session_id: None,
-                        },
-                        &cancel,
-                    )
-                    .await;
             }
             events.publish_terminal(LoopEvent::TurnDone {
                 outcome: TurnOutcome::Aborted,
@@ -1658,7 +1656,7 @@ async fn run_turn_inner(
             if let Some(message) = failure {
                 persist_failed_step(
                     &mut session,
-                    &events,
+                    &mut events,
                     &cancel,
                     &model,
                     &paused_content,
@@ -1697,7 +1695,7 @@ async fn run_turn_inner(
             if let Some(message) = failure {
                 persist_failed_step(
                     &mut session,
-                    &events,
+                    &mut events,
                     &cancel,
                     &model,
                     &paused_content,
@@ -1758,6 +1756,8 @@ async fn run_turn_inner(
             )
             .await;
         if cancel.is_cancelled() {
+            // Same synthetic answers as the abort above, for the same
+            // reason: this step's calls are never going to run.
             for (id, _, _, _) in acc.tool_calls() {
                 session.append(SessionEvent::ToolResult {
                     id: new_id(),
