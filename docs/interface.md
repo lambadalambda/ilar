@@ -141,9 +141,10 @@ the loop; it resumes after your next completed turn.
 
 On wide terminals the right column tracks session state: the todo list
 the model maintains as it plans (**Ctrl-T** opens the full overlay),
-running services, and — while subagents are in flight — an `agents`
-panel with each task's description, agent, a `bg` marker for detached
-work, and a live elapsed time.
+running services — every one that runs, with exited ones collapsed
+into a count — and, while subagents are in flight, an `agents` panel
+with each task's description, agent, a `bg` marker for detached work,
+and a live elapsed time.
 
 ## Transcript
 
@@ -151,8 +152,10 @@ The transcript renders markdown with syntax-highlighted code fences and
 diffs for edits. **Ctrl-F** searches it, **Ctrl-O** opens any link it
 contains, mouse drag selects and copies, and the palette's "Export
 transcript" writes the session as a Markdown file. Tool rows expand on
-click (or Enter targeting) to show arguments, diffs and output; grouped
-tool calls align their columns to the widest sibling. Anything
+click (or Enter targeting) to show arguments, diffs and output — and a
+truncated block's "… more" row is itself clickable, advancing the
+expansion right where the eye stopped; grouped tool calls align their
+columns to the widest sibling. Anything
 clickable underlines itself when the pointer hovers over it, and
 clicks resolve against the row that was under the pointer when the
 button went down — a streaming turn cannot pull the target out from

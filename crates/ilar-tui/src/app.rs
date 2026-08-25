@@ -2413,35 +2413,37 @@ impl App {
                     .width
                     .saturating_sub(2 + CONTENT_HORIZONTAL_PADDING * 2)
                     .max(1) as usize;
-                let shown = self.services_view.len().min(4);
+                // What runs is what matters: every running service, no
+                // cap (`carve_panel` bounds by available space), and the
+                // dead collapsed to a count so a crash still registers.
                 let mut lines: Vec<Line<'static>> = self
                     .services_view
                     .iter()
-                    .take(shown)
-                    .map(|(name, running, detail)| {
-                        let (marker, color) = if *running {
-                            ("● ", theme::SUCCESS)
-                        } else {
-                            ("○ ", MUTED)
-                        };
+                    .filter(|(_, running, _)| *running)
+                    .map(|(name, _, detail)| {
                         Line::from(vec![
-                            Span::styled(marker, Style::default().fg(color)),
+                            Span::styled("● ", Style::default().fg(theme::SUCCESS)),
                             Span::styled(
                                 truncate_display(
                                     &format!("{name} · {detail}"),
                                     text_width.saturating_sub(2),
                                     Truncation::Right,
                                 ),
-                                Style::default().fg(if *running { theme::PRIMARY } else { MUTED }),
+                                Style::default().fg(theme::PRIMARY),
                             ),
                         ])
                     })
                     .collect();
-                if self.services_view.len() > shown {
-                    lines.push(Line::styled(
-                        format!("  +{} more", self.services_view.len() - shown),
-                        Style::default().fg(MUTED),
-                    ));
+                let exited = self
+                    .services_view
+                    .iter()
+                    .filter(|(_, running, _)| !running)
+                    .count();
+                if exited > 0 {
+                    lines.push(Line::from(vec![
+                        Span::styled("○ ", Style::default().fg(MUTED)),
+                        Span::styled(format!("{exited} exited"), Style::default().fg(MUTED)),
+                    ]));
                 }
                 if let Some(service_area) = carve_panel(&mut todo_area, lines.len()) {
                     let service_block = Block::default()
@@ -3912,11 +3914,17 @@ mod tests {
     }
 
     #[test]
-    fn services_show_in_the_sidebar() {
+    fn services_show_what_runs_and_summarize_the_dead() {
         let mut app = App::new();
+        // One running buried under five exited: the old capped list hid
+        // the only row that mattered.
         app.services_view = vec![
+            ("build".into(), false, "exit 1".into()),
+            ("compile".into(), false, "exit 1".into()),
+            ("compile2".into(), false, "exit 1".into()),
+            ("compile3".into(), false, "exit 1".into()),
+            ("lint".into(), false, "exit 1".into()),
             ("web".into(), true, "up 3m2s".into()),
-            ("worker".into(), false, "exit 1".into()),
         ];
         app.services_running = 1;
         let mut terminal =
@@ -3932,7 +3940,8 @@ mod tests {
             .join("\n");
         assert!(screen.contains("services (1)"), "{screen}");
         assert!(screen.contains("web · up 3m2s"), "{screen}");
-        assert!(screen.contains("worker · exit 1"), "{screen}");
+        assert!(!screen.contains("compile"), "{screen}");
+        assert!(screen.contains("5 exited"), "{screen}");
         assert!(screen.contains("todos"), "{screen}");
     }
 
