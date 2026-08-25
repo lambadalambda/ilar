@@ -210,6 +210,7 @@ pub(crate) async fn exec_turn(
         store,
         session_id,
         prompt,
+        &[],
         system_prompt,
         loop_config,
         events,

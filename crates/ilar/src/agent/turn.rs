@@ -891,6 +891,7 @@ pub async fn run_turn(
     store: &SessionStore,
     session_id: &str,
     user_input: &str,
+    images: &[crate::session::ImageContent],
     system_prompt: Option<&str>,
     config: LoopConfig,
     events: LoopEventSender,
@@ -903,7 +904,7 @@ pub async fn run_turn(
         registry,
         store,
         session_id,
-        TurnStart::User(user_input),
+        TurnStart::User(user_input, images),
         system_prompt,
         config,
         events,
@@ -978,7 +979,7 @@ pub async fn resume_pending_question(
 }
 
 enum TurnStart<'a> {
-    User(&'a str),
+    User(&'a str, &'a [crate::session::ImageContent]),
     Continue,
     Resume(crate::question::QuestionResponse),
 }
@@ -1003,7 +1004,7 @@ async fn run_turn_inner(
     let request_options = crate::model::variant_options(&model, variant.as_deref())?;
     let provider = resolver.resolve_provider(&model)?;
     match start {
-        TurnStart::User(user_input) => {
+        TurnStart::User(user_input, images) => {
             if session.pending_question().is_some() {
                 anyhow::bail!(
                     "session has a pending question; use resume_pending_question before starting a new turn"
@@ -1034,7 +1035,7 @@ async fn run_turn_inner(
             session.append(SessionEvent::UserMessage {
                 id: new_id(),
                 text: user_input.to_string(),
-                images: Vec::new(),
+                images: images.to_vec(),
                 ts: Utc::now(),
             })?;
         }
