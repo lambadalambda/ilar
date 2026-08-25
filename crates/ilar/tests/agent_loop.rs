@@ -9,7 +9,9 @@ use ilar::agent::{
 };
 use ilar::provider::zai::{Flavor, ZaiProvider};
 use ilar::provider::{EventStream, MockProvider, Provider, ProviderEvent, Request, StopReason};
-use ilar::session::{ContentBlock, SessionEvent, SessionMeta, SessionStore, new_id};
+use ilar::session::{
+    ContentBlock, InputTokenAccounting, SessionEvent, SessionMeta, SessionStore, Usage, new_id,
+};
 use ilar::todo::Status as TodoStatus;
 use ilar::tools::{
     Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, ToolRegistry, WorkspaceAccess,
@@ -652,6 +654,424 @@ async fn paused_turn_retry_cap_is_finite() {
 
     assert!(error.to_string().contains("pause retry limit"), "{error:#}");
     assert_eq!(provider.requests().len(), 3);
+}
+
+/// The provider-side content a paused response hands back for replay.
+fn paused_replay(id: &str) -> serde_json::Value {
+    serde_json::json!([{
+        "type": "server_tool_use",
+        "id": id,
+        "name": "web_search",
+        "input": {"query": "news"}
+    }])
+}
+
+/// Every persisted assistant message, as (blocks, usage, stop reason).
+fn assistant_messages(
+    store: &SessionStore,
+    session_id: &str,
+) -> Vec<(Vec<ContentBlock>, Usage, String)> {
+    store
+        .load(session_id)
+        .unwrap()
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::AssistantMessage {
+                content,
+                usage,
+                stop_reason,
+                ..
+            } => Some((content.clone(), *usage, stop_reason.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn paused_segments_sum_into_the_persisted_step_usage() {
+    let (store, session_id) = temp_session("build");
+    let provider = MockProvider::new(vec![
+        vec![
+            ProviderEvent::TextDelta("before pause".into()),
+            ProviderEvent::ResponseContent {
+                provider: "zai-anthropic".into(),
+                content: paused_replay("srv_1"),
+            },
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::Paused,
+                usage: Usage {
+                    input_tokens: 100,
+                    output_tokens: 20,
+                    input_token_accounting: Some(InputTokenAccounting::ExcludesCached),
+                    ..Default::default()
+                },
+            },
+        ],
+        vec![
+            ProviderEvent::TextDelta("after pause".into()),
+            ProviderEvent::ResponseContent {
+                provider: "zai-anthropic".into(),
+                content: serde_json::json!([{"type": "text", "text": "after pause"}]),
+            },
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+                usage: Usage {
+                    input_tokens: 40,
+                    output_tokens: 30,
+                    cache_read_input_tokens: 100,
+                    input_token_accounting: Some(InputTokenAccounting::ExcludesCached),
+                    ..Default::default()
+                },
+            },
+        ],
+    ]);
+    let (tx, mut rx) = events_channel();
+
+    let outcome = run_turn(
+        &provider,
+        &ToolRegistry::read_only(),
+        &store,
+        &session_id,
+        "go",
+        &[],
+        None,
+        LoopConfig::default(),
+        tx,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, TurnOutcome::Completed);
+    let messages = assistant_messages(&store, &session_id);
+    let [(_, usage, _)] = &messages[..] else {
+        panic!("expected one assistant message, got {messages:?}");
+    };
+    // Output is genuinely incremental across segments; the prompt is
+    // re-sent every continuation, so its largest report wins instead of
+    // being summed (which would double the context gauge).
+    assert_eq!(usage.output_tokens, 50);
+    assert_eq!(usage.input_tokens, 40);
+    assert_eq!(usage.cache_read_input_tokens, 100);
+    assert_eq!(usage.context_tokens(), 190);
+
+    let mut steps = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let LoopEvent::StepComplete { usage, .. } = event {
+            steps.push(usage);
+        }
+    }
+    assert_eq!(steps, vec![*usage], "the UI counters see the same sum");
+}
+
+#[tokio::test]
+async fn pause_retry_budget_resets_after_a_continuation_chain_completes() {
+    let (store, session_id) = temp_session("build");
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let registry = registry_with(EchoTool {
+        calls: calls.clone(),
+    });
+    let provider = MockProvider::new(vec![
+        vec![
+            ProviderEvent::TextDelta("chain one".into()),
+            ProviderEvent::ResponseContent {
+                provider: "zai-anthropic".into(),
+                content: paused_replay("srv_1"),
+            },
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::Paused,
+                usage: Default::default(),
+            },
+        ],
+        vec![
+            ProviderEvent::ToolCallStarted {
+                id: "client_1".into(),
+                name: "echo".into(),
+                item_id: None,
+            },
+            tool_call_event("client_1", "result"),
+            ProviderEvent::ResponseContent {
+                provider: "zai-anthropic".into(),
+                content: serde_json::json!([
+                    {"type": "web_search_tool_result", "tool_use_id": "srv_1", "content": []},
+                    {"type": "tool_use", "id": "client_1", "name": "echo", "input": {"msg": "result"}}
+                ]),
+            },
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+                usage: Default::default(),
+            },
+        ],
+        vec![
+            ProviderEvent::TextDelta("chain two".into()),
+            ProviderEvent::ResponseContent {
+                provider: "zai-anthropic".into(),
+                content: paused_replay("srv_2"),
+            },
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::Paused,
+                usage: Default::default(),
+            },
+        ],
+        vec![
+            ProviderEvent::TextDelta("done".into()),
+            ProviderEvent::ResponseContent {
+                provider: "zai-anthropic".into(),
+                content: serde_json::json!([{"type": "text", "text": "done"}]),
+            },
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+                usage: Default::default(),
+            },
+        ],
+    ]);
+    let (tx, _rx) = events_channel();
+
+    // One retry per continuation chain: two chains, one pause each, must
+    // both survive — the budget is per chain, not per turn.
+    let outcome = run_turn(
+        &provider,
+        &registry,
+        &store,
+        &session_id,
+        "go",
+        &[],
+        None,
+        LoopConfig {
+            max_pause_retries: 1,
+            ..LoopConfig::default()
+        },
+        tx,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, TurnOutcome::Completed);
+    assert_eq!(provider.requests().len(), 4);
+    assert_eq!(calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn pause_retry_limit_persists_the_streamed_prefix() {
+    let (store, session_id) = temp_session("build");
+    let provider = MockProvider::new(vec![
+        vec![
+            ProviderEvent::TextDelta("first segment".into()),
+            ProviderEvent::ResponseContent {
+                provider: "zai-anthropic".into(),
+                content: paused_replay("srv_1"),
+            },
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::Paused,
+                usage: Usage {
+                    input_tokens: 100,
+                    output_tokens: 20,
+                    ..Default::default()
+                },
+            },
+        ],
+        vec![
+            ProviderEvent::TextDelta("second segment".into()),
+            ProviderEvent::ResponseContent {
+                provider: "zai-anthropic".into(),
+                content: paused_replay("srv_2"),
+            },
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::Paused,
+                usage: Usage {
+                    input_tokens: 120,
+                    output_tokens: 30,
+                    ..Default::default()
+                },
+            },
+        ],
+    ]);
+    let (tx, _rx) = events_channel();
+
+    let error = run_turn(
+        &provider,
+        &ToolRegistry::read_only(),
+        &store,
+        &session_id,
+        "go",
+        &[],
+        None,
+        LoopConfig {
+            max_pause_retries: 1,
+            ..LoopConfig::default()
+        },
+        tx,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+        None,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("pause retry limit"), "{error:#}");
+    let messages = assistant_messages(&store, &session_id);
+    let [(blocks, usage, stop_reason)] = &messages[..] else {
+        panic!("expected one assistant message, got {messages:?}");
+    };
+    assert_eq!(stop_reason, "error");
+    let rendered = format!("{blocks:?}");
+    assert!(rendered.contains("first segment"), "{rendered}");
+    assert!(rendered.contains("second segment"), "{rendered}");
+    assert!(
+        blocks.iter().any(|block| matches!(
+            block,
+            ContentBlock::Diagnostic { text } if text.contains("pause retry limit")
+        )),
+        "{blocks:?}"
+    );
+    assert_eq!(usage.output_tokens, 50);
+    assert_eq!(usage.input_tokens, 120);
+}
+
+#[tokio::test]
+async fn continuation_provider_change_persists_the_streamed_prefix() {
+    let (store, session_id) = temp_session("build");
+    let provider = MockProvider::new(vec![
+        vec![
+            ProviderEvent::TextDelta("first segment".into()),
+            ProviderEvent::ResponseContent {
+                provider: "zai-anthropic".into(),
+                content: paused_replay("srv_1"),
+            },
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::Paused,
+                usage: Default::default(),
+            },
+        ],
+        vec![
+            ProviderEvent::TextDelta("second segment".into()),
+            ProviderEvent::ResponseContent {
+                provider: "openai-responses".into(),
+                content: serde_json::json!([{"type": "text", "text": "second segment"}]),
+            },
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+                usage: Default::default(),
+            },
+        ],
+    ]);
+    let (tx, _rx) = events_channel();
+
+    let error = run_turn(
+        &provider,
+        &ToolRegistry::read_only(),
+        &store,
+        &session_id,
+        "go",
+        &[],
+        None,
+        LoopConfig::default(),
+        tx,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+        None,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("changed provider"), "{error:#}");
+    let messages = assistant_messages(&store, &session_id);
+    let [(blocks, _, stop_reason)] = &messages[..] else {
+        panic!("expected one assistant message, got {messages:?}");
+    };
+    assert_eq!(stop_reason, "error");
+    let rendered = format!("{blocks:?}");
+    assert!(rendered.contains("first segment"), "{rendered}");
+    assert!(rendered.contains("second segment"), "{rendered}");
+    // Half a continuation chain must never be replayed to a provider.
+    assert!(
+        !blocks
+            .iter()
+            .any(|block| matches!(block, ContentBlock::ProviderReplay { .. })),
+        "{blocks:?}"
+    );
+}
+
+/// Cancels the turn as the loop drops the stream: the exact window where
+/// a pause is pending and the loop's cancel check has to persist it.
+struct PauseThenCancelProvider {
+    cancel: CancellationToken,
+}
+
+struct CancelOnDrop(CancellationToken);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+impl Provider for PauseThenCancelProvider {
+    fn stream(&self, _req: Request) -> anyhow::Result<EventStream> {
+        let guard = CancelOnDrop(self.cancel.clone());
+        let events = vec![
+            ProviderEvent::TextDelta("before pause".into()),
+            ProviderEvent::ResponseContent {
+                provider: "zai-anthropic".into(),
+                content: paused_replay("srv_1"),
+            },
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::Paused,
+                usage: Usage {
+                    input_tokens: 100,
+                    output_tokens: 20,
+                    ..Default::default()
+                },
+            },
+        ];
+        Ok(Box::pin(futures::stream::iter(events).map(move |event| {
+            let _guard = &guard;
+            event
+        })))
+    }
+}
+
+#[tokio::test]
+async fn cancelling_after_a_pause_persists_the_accumulated_usage() {
+    let (store, session_id) = temp_session("build");
+    let cancel = CancellationToken::new();
+    let provider = PauseThenCancelProvider {
+        cancel: cancel.clone(),
+    };
+    let (tx, _rx) = events_channel();
+
+    let outcome = run_turn(
+        &provider,
+        &ToolRegistry::read_only(),
+        &store,
+        &session_id,
+        "go",
+        &[],
+        None,
+        LoopConfig::default(),
+        tx,
+        cancel,
+        ToolContext::root(std::env::temp_dir()),
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, TurnOutcome::Aborted);
+    let messages = assistant_messages(&store, &session_id);
+    let [(blocks, usage, stop_reason)] = &messages[..] else {
+        panic!("expected one assistant message, got {messages:?}");
+    };
+    assert_eq!(stop_reason, "aborted");
+    assert!(format!("{blocks:?}").contains("before pause"), "{blocks:?}");
+    assert_eq!(usage.output_tokens, 20);
+    assert_eq!(usage.input_tokens, 100);
 }
 
 #[tokio::test]

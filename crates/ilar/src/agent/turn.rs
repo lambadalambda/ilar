@@ -359,6 +359,121 @@ impl StepAccumulator {
     }
 }
 
+/// Fold one provider response of a paused chain into the step's running
+/// usage.
+///
+/// A continuation is a fresh request carrying the whole prompt plus
+/// everything already streamed, so its prompt-side counts re-report the
+/// previous segment's rather than adding to them — summing them would
+/// bill the same context several times and blow up the context gauge
+/// that drives compaction. Output tokens are the one genuinely
+/// incremental figure, so they sum; the prompt side keeps whichever
+/// segment reported the largest one, whole, so its input/cache split
+/// stays internally consistent (and a segment the provider never priced
+/// changes nothing). The accounting mode is a per-provider constant, so
+/// the latest report of it stands.
+///
+/// One `Usage` cannot be exact for both a gauge and a bill, and this
+/// leans on the gauge: `context_tokens()` runs a little high, because the
+/// winning prompt already contains the earlier segments' output that the
+/// sum adds back, and the cost side under-reports, because each
+/// continuation is separately billed for a prompt this deliberately does
+/// not sum. Both errors are bounded by `max_pause_retries`, and erring
+/// high on context only compacts early.
+fn merge_segment_usage(total: Usage, segment: Usage) -> Usage {
+    let prompt = |usage: &Usage| {
+        usage
+            .input_tokens
+            .saturating_add(usage.cache_read_input_tokens)
+            .saturating_add(usage.cache_creation_input_tokens)
+    };
+    let mut merged = if prompt(&segment) >= prompt(&total) {
+        segment
+    } else {
+        total
+    };
+    merged.output_tokens = total.output_tokens.saturating_add(segment.output_tokens);
+    merged.input_token_accounting = segment
+        .input_token_accounting
+        .or(total.input_token_accounting);
+    merged
+}
+
+/// Persist a step that ended in failure the way the provider-error path
+/// does: whatever the user already watched stream (the paused prefix plus
+/// this response's blocks) with the failure recorded as a diagnostic, then
+/// a synthetic error result for every announced tool call — an unanswered
+/// tool_use poisons the transcript.
+#[allow(clippy::too_many_arguments)]
+async fn persist_failed_step(
+    session: &mut crate::session::Session,
+    events: &LoopEventSender,
+    cancel: &CancellationToken,
+    model: &str,
+    prefix: &[ContentBlock],
+    acc: &StepAccumulator,
+    usage: Usage,
+    message: &str,
+) -> Result<()> {
+    let mut blocks = prefix.to_vec();
+    blocks.extend(acc.content_blocks());
+    blocks.push(ContentBlock::Diagnostic {
+        text: format!("turn error: {message}"),
+    });
+    session.append(SessionEvent::AssistantMessage {
+        id: new_id(),
+        model: model.to_string(),
+        content: blocks,
+        usage,
+        stop_reason: "error".into(),
+        ts: Utc::now(),
+    })?;
+    let result = format!("provider error before execution: {message}");
+    let calls = acc.tool_calls();
+    let completed_ids: std::collections::HashSet<&str> =
+        calls.iter().map(|(id, _, _, _)| id.as_str()).collect();
+    for (id, name, _, _) in &calls {
+        session.append(SessionEvent::ToolResult {
+            id: new_id(),
+            tool_use_id: (*id).clone(),
+            content: result.clone(),
+            is_error: true,
+            child_session_id: None,
+            state: None,
+            ts: Utc::now(),
+        })?;
+        events
+            .publish(
+                LoopEvent::ToolFinished {
+                    id: (*id).clone(),
+                    name: (*name).clone(),
+                    is_error: true,
+                    result: bounded_tool_detail(&result),
+                    child_session_id: None,
+                },
+                cancel,
+            )
+            .await;
+    }
+    for (id, name) in &acc.announced_calls {
+        if !completed_ids.contains(id.as_str()) {
+            events
+                .publish(
+                    LoopEvent::ToolFinished {
+                        id: id.clone(),
+                        name: name.clone(),
+                        is_error: true,
+                        result: bounded_tool_detail(&result),
+                        child_session_id: None,
+                    },
+                    cancel,
+                )
+                .await;
+        }
+    }
+    Ok(())
+}
+
 const MAX_TOOL_ARGUMENT_SUMMARY_CHARS: usize = 512;
 const MAX_STREAMED_PATH_BYTES: usize = 4 * 1024;
 const MAX_STREAMED_JSON_DEPTH: usize = 64;
@@ -1124,6 +1239,7 @@ async fn run_turn_inner(
     let mut continuations = Vec::new();
     let mut continuation_provider: Option<String> = None;
     let mut paused_content = Vec::new();
+    let mut paused_usage = Usage::default();
     // Provider-generated call ids are globally unique in a session. Keeping
     // the completed ids reserved prevents a resumed model response from
     // replaying an already-applied side effect (and keeps JSONL valid).
@@ -1150,7 +1266,7 @@ async fn run_turn_inner(
                     id: new_id(),
                     model: model.clone(),
                     content: std::mem::take(&mut paused_content),
-                    usage: Usage::default(),
+                    usage: paused_usage,
                     stop_reason: "aborted".into(),
                     ts: Utc::now(),
                 })?;
@@ -1451,70 +1567,24 @@ async fn run_turn_inner(
             break (acc, aborted, errored);
         };
 
+        let step_usage = merge_segment_usage(paused_usage, acc.usage);
+
         if let Some(message) = errored {
             // Persist the partial step so the UI's already-shown deltas
             // don't evaporate from the transcript — and record the error
             // itself so failures stay diagnosable from the session log
             // (see meta/issues: provider decode errors were lost before).
-            let mut blocks = paused_content.clone();
-            blocks.extend(acc.content_blocks());
-            blocks.push(crate::session::ContentBlock::Diagnostic {
-                text: format!("turn error: {message}"),
-            });
-            session.append(SessionEvent::AssistantMessage {
-                id: new_id(),
-                model: model.clone(),
-                content: blocks,
-                usage: acc.usage,
-                stop_reason: "error".into(),
-                ts: Utc::now(),
-            })?;
-            let calls = acc.tool_calls();
-            let completed_ids: std::collections::HashSet<&str> =
-                calls.iter().map(|(id, _, _, _)| id.as_str()).collect();
-            for (id, name, _, _) in calls {
-                session.append(SessionEvent::ToolResult {
-                    id: new_id(),
-                    tool_use_id: id.clone(),
-                    content: format!("provider error before execution: {message}"),
-                    is_error: true,
-                    child_session_id: None,
-                    state: None,
-                    ts: Utc::now(),
-                })?;
-                events
-                    .publish(
-                        LoopEvent::ToolFinished {
-                            id: id.clone(),
-                            name: name.clone(),
-                            is_error: true,
-                            result: bounded_tool_detail(&format!(
-                                "provider error before execution: {message}"
-                            )),
-                            child_session_id: None,
-                        },
-                        &cancel,
-                    )
-                    .await;
-            }
-            for (id, name) in &acc.announced_calls {
-                if !completed_ids.contains(id.as_str()) {
-                    events
-                        .publish(
-                            LoopEvent::ToolFinished {
-                                id: id.clone(),
-                                name: name.clone(),
-                                is_error: true,
-                                result: bounded_tool_detail(&format!(
-                                    "provider error before execution: {message}"
-                                )),
-                                child_session_id: None,
-                            },
-                            &cancel,
-                        )
-                        .await;
-                }
-            }
+            persist_failed_step(
+                &mut session,
+                &events,
+                &cancel,
+                &model,
+                &paused_content,
+                &acc,
+                step_usage,
+                &message,
+            )
+            .await?;
             anyhow::bail!(message);
         }
 
@@ -1528,7 +1598,7 @@ async fn run_turn_inner(
                     id: new_id(),
                     model: model.clone(),
                     content: blocks,
-                    usage: acc.usage,
+                    usage: step_usage,
                     stop_reason: "aborted".into(),
                     ts: Utc::now(),
                 })?;
@@ -1566,26 +1636,47 @@ async fn run_turn_inner(
         }
 
         if acc.stop_reason == Some(StopReason::Paused) {
-            if pause_retries >= config.max_pause_retries {
-                anyhow::bail!(
+            let (provider, _) = acc
+                .response_content
+                .as_ref()
+                .expect("validated paused continuation");
+            let failure = if pause_retries >= config.max_pause_retries {
+                Some(format!(
                     "provider pause retry limit reached ({})",
                     config.max_pause_retries
-                );
+                ))
+            } else if continuation_provider
+                .as_ref()
+                .is_some_and(|existing| existing != provider)
+            {
+                Some("paused continuation changed provider".to_string())
+            } else {
+                None
+            };
+            // An unresumable chain still streamed text the user watched:
+            // keep it, the same way a provider error does.
+            if let Some(message) = failure {
+                persist_failed_step(
+                    &mut session,
+                    &events,
+                    &cancel,
+                    &model,
+                    &paused_content,
+                    &acc,
+                    step_usage,
+                    &message,
+                )
+                .await?;
+                anyhow::bail!(message);
             }
             pause_retries += 1;
-            let (provider, content) = acc
-                .response_content
-                .take()
-                .expect("validated paused continuation");
-            if continuation_provider
-                .as_ref()
-                .is_some_and(|existing| existing != &provider)
-            {
-                anyhow::bail!("paused continuation changed provider");
-            }
+            let (provider, content) = acc.response_content.take().expect("checked just above");
             continuation_provider.get_or_insert(provider);
             continuations.push(content);
             paused_content.extend(acc.content_blocks());
+            // A paused segment publishes no step of its own, so its
+            // tokens ride along to whichever response settles the chain.
+            paused_usage = step_usage;
             continue;
         }
         iterations += 1;
@@ -1594,10 +1685,30 @@ async fn run_turn_inner(
         let mut blocks = paused_content.clone();
         blocks.extend(acc.content_blocks());
         if !continuations.is_empty() {
-            if let Some((provider, current)) = acc.response_content.take() {
-                if continuation_provider.as_ref() != Some(&provider) {
-                    anyhow::bail!("continued response changed provider");
+            let failure = match acc.response_content.as_ref() {
+                Some((provider, _)) if continuation_provider.as_ref() != Some(provider) => {
+                    Some("continued response changed provider")
                 }
+                None if acc.stop_reason != Some(StopReason::MaxTokens) => {
+                    Some("continued response omitted replay content")
+                }
+                _ => None,
+            };
+            if let Some(message) = failure {
+                persist_failed_step(
+                    &mut session,
+                    &events,
+                    &cancel,
+                    &model,
+                    &paused_content,
+                    &acc,
+                    step_usage,
+                    message,
+                )
+                .await?;
+                anyhow::bail!(message);
+            }
+            if let Some((provider, current)) = acc.response_content.take() {
                 let mut content = Vec::new();
                 for response in continuations.iter().chain(std::iter::once(&current)) {
                     content.extend(
@@ -1612,8 +1723,6 @@ async fn run_turn_inner(
                     provider,
                     content: serde_json::Value::Array(content),
                 });
-            } else if acc.stop_reason != Some(StopReason::MaxTokens) {
-                anyhow::bail!("continued response omitted replay content");
             }
         }
         let had_tool_calls = !acc.tool_indices.is_empty();
@@ -1634,7 +1743,7 @@ async fn run_turn_inner(
                 id: new_id(),
                 model: model.clone(),
                 content: blocks,
-                usage: acc.usage,
+                usage: step_usage,
                 stop_reason: stop_reason.clone(),
                 ts: Utc::now(),
             })?;
@@ -1643,7 +1752,7 @@ async fn run_turn_inner(
             .publish(
                 LoopEvent::StepComplete {
                     stop_reason: stop_reason.clone(),
-                    usage: acc.usage,
+                    usage: step_usage,
                 },
                 &cancel,
             )
@@ -1665,9 +1774,14 @@ async fn run_turn_inner(
             });
             return Ok(TurnOutcome::Aborted);
         }
+        // The chain settled: its replay state, its accumulated tokens and
+        // its retry budget all belong to that chain alone, so a later
+        // pause in the same turn starts from a clean slate.
         continuations.clear();
         continuation_provider = None;
         paused_content.clear();
+        paused_usage = Usage::default();
+        pause_retries = 0;
 
         if !had_tool_calls {
             // The model is done, but the user may have said something
@@ -2114,6 +2228,42 @@ mod tests {
                 .unwrap_err()
                 .contains("contradicts")
         );
+    }
+
+    #[test]
+    fn pause_segments_sum_output_and_keep_the_largest_prompt() {
+        let first = Usage {
+            input_tokens: 100,
+            output_tokens: 20,
+            input_token_accounting: Some(crate::session::InputTokenAccounting::ExcludesCached),
+            ..Usage::default()
+        };
+        // A continuation re-sends the prompt, mostly from cache: its
+        // prompt side is the same tokens re-reported, not new ones.
+        let second = Usage {
+            input_tokens: 40,
+            output_tokens: 30,
+            cache_read_input_tokens: 100,
+            input_token_accounting: Some(crate::session::InputTokenAccounting::ExcludesCached),
+            ..Usage::default()
+        };
+
+        let merged = merge_segment_usage(first, second);
+        assert_eq!(merged.output_tokens, 50);
+        assert_eq!(merged.input_tokens, 40);
+        assert_eq!(merged.cache_read_input_tokens, 100);
+        // 190, not the 170 actually in the window: the second prompt
+        // already contains the first segment's 20 output tokens. Erring
+        // high only compacts early — see the merge's doc comment.
+        assert_eq!(merged.context_tokens(), 190);
+
+        // A segment the provider never priced keeps the prompt side it
+        // already had, and an empty accumulator is the identity.
+        let silent = merge_segment_usage(merged, Usage::default());
+        assert_eq!(silent.input_tokens, 40);
+        assert_eq!(silent.cache_read_input_tokens, 100);
+        assert_eq!(silent.output_tokens, 50);
+        assert_eq!(merge_segment_usage(Usage::default(), first), first);
     }
 
     #[test]
