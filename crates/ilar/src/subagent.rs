@@ -646,8 +646,11 @@ impl SubagentSpawner {
 
         // The child delegates one level deeper, sharing this spawner's
         // slot counter, session claims and notification channel.
-        let child_spawner =
-            self.derived(child_location.clone(), child_workspace.clone(), self.depth + 1);
+        let child_spawner = self.derived(
+            child_location.clone(),
+            child_workspace.clone(),
+            self.depth + 1,
+        );
         let registry = match child_spawner.agent_registry(agent) {
             Ok(registry) => registry,
             Err(error) => {
@@ -830,9 +833,8 @@ impl SubagentSpawner {
                 };
                 activity.turn_done(outcome.activity());
 
-                let failed = |body: String| {
-                    task_notification(&parent_session_id, &description, &body, true)
-                };
+                let failed =
+                    |body: String| task_notification(&parent_session_id, &description, &body, true);
                 let notification = match &outcome {
                     TaskOutcome::Completed => {
                         let text = final_assistant_text(&spawner.store, &session_id)

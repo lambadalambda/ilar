@@ -137,7 +137,10 @@ impl MapperCore {
         name: impl Into<String>,
     ) {
         let key = key.into();
-        debug_assert!(!self.has_key(&key), "duplicate tool-call ledger key {key:?}");
+        debug_assert!(
+            !self.has_key(&key),
+            "duplicate tool-call ledger key {key:?}"
+        );
         self.calls.push(ToolCall {
             key,
             order,
