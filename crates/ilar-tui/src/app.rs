@@ -461,11 +461,15 @@ impl App {
                 }
                 true
             }
-            KeyCode::Up if !self.input.is_multiline() => {
+            // A draft whose cursor still has a row to reach keeps its
+            // arrows; at the edges — and in a single-line prompt, which
+            // never has one — the transcript takes them rather than
+            // letting the key die in the prompt.
+            KeyCode::Up if !self.input.can_move_vertical(-1) => {
                 self.scroll_up(1);
                 true
             }
-            KeyCode::Down if !self.input.is_multiline() => {
+            KeyCode::Down if !self.input.can_move_vertical(1) => {
                 self.scroll_down(1);
                 true
             }
@@ -3296,7 +3300,7 @@ mod tests {
         assert!(rate.abs() < 1.0, "{rate}");
     }
     use crate::drain_wheel_batch;
-    use crate::input::slash_candidates;
+    use crate::input::{PromptAction, handle_prompt_key, slash_candidates};
     use crate::modals::{CommandPaletteAction, PALETTE_COMMANDS, is_command_palette_shortcut};
     use crate::selection::SelectionPoint;
     use crate::session_view::restored_session_view;
@@ -3842,6 +3846,62 @@ mod tests {
             app.handle_prompt_navigation_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE,))
         );
         assert!(app.input.is_blank());
+    }
+
+    /// The F1 help promises Up / Down scroll the transcript, and the
+    /// dispatcher runs navigation before the prompt editor. At the top
+    /// and bottom of a multiline draft the cursor has no row to reach,
+    /// so the arrow belongs to the transcript — everywhere else it has
+    /// to fall through and move the cursor instead.
+    #[test]
+    fn multiline_edge_arrows_scroll_while_mid_draft_arrows_reach_the_prompt() {
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let mut app = App::new();
+        app.content_rows = 100;
+        app.viewport_rows = 20;
+        app.scroll_top = 50;
+        app.input = InputBuffer::from("one\ntwo\nthree");
+
+        // Mid-draft: navigation declines and the prompt editor moves the
+        // cursor, one line per press, without the transcript budging.
+        for expected in [7, 3] {
+            assert!(!app.handle_prompt_navigation_key(key(KeyCode::Up)));
+            assert_eq!(
+                handle_prompt_key(&mut app.input, key(KeyCode::Up)),
+                PromptAction::Edited
+            );
+            assert_eq!(app.input.cursor(), expected);
+        }
+        assert_eq!(app.scroll_top, 50, "a cursor move must not scroll");
+
+        // On the first line the arrow scrolls and leaves the draft alone.
+        assert!(app.handle_prompt_navigation_key(key(KeyCode::Up)));
+        assert_eq!(app.scroll_top, 49);
+        assert_eq!(app.input.text(), "one\ntwo\nthree");
+        assert_eq!(app.input.cursor(), 3);
+
+        // The bottom edge is the same story downwards.
+        for expected in [7, 11] {
+            assert!(!app.handle_prompt_navigation_key(key(KeyCode::Down)));
+            assert_eq!(
+                handle_prompt_key(&mut app.input, key(KeyCode::Down)),
+                PromptAction::Edited
+            );
+            assert_eq!(app.input.cursor(), expected);
+        }
+        assert_eq!(app.scroll_top, 49);
+        assert!(app.handle_prompt_navigation_key(key(KeyCode::Down)));
+        assert_eq!(app.scroll_top, 50);
+
+        // A blank prompt still recalls history rather than scrolling.
+        let mut app = App::new();
+        app.content_rows = 100;
+        app.viewport_rows = 20;
+        app.scroll_top = 50;
+        app.history.push("previous prompt");
+        assert!(app.handle_prompt_navigation_key(key(KeyCode::Up)));
+        assert_eq!(app.input.text(), "previous prompt");
+        assert_eq!(app.scroll_top, 50, "recall must not scroll");
     }
 
     #[test]

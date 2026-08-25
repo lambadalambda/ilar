@@ -90,49 +90,59 @@ impl InputBuffer {
         }
     }
 
-    fn move_home(&mut self) {
-        self.cursor = self.text[..self.cursor]
+    /// Byte bounds of the logical line the cursor sits on.
+    fn line_bounds(&self) -> (usize, usize) {
+        let start = self.text[..self.cursor]
             .rfind('\n')
             .map(|index| index + 1)
             .unwrap_or(0);
+        let end = self.text[self.cursor..]
+            .find('\n')
+            .map(|offset| self.cursor + offset)
+            .unwrap_or(self.text.len());
+        (start, end)
+    }
+
+    fn move_home(&mut self) {
+        self.cursor = self.line_bounds().0;
     }
 
     fn move_end(&mut self) {
-        self.cursor = self.text[self.cursor..]
-            .find('\n')
-            .map(|offset| self.cursor + offset)
-            .unwrap_or(self.text.len());
+        self.cursor = self.line_bounds().1;
     }
 
-    fn move_vertical(&mut self, direction: isize) -> bool {
-        let line_start = self.text[..self.cursor]
-            .rfind('\n')
-            .map(|index| index + 1)
-            .unwrap_or(0);
-        let line_end = self.text[self.cursor..]
-            .find('\n')
-            .map(|offset| self.cursor + offset)
-            .unwrap_or(self.text.len());
-        let (target_start, target_end) = if direction < 0 {
-            if line_start == 0 {
-                return false;
-            }
-            let end = line_start - 1;
+    /// Byte bounds of the line a vertical move off `bounds` would land
+    /// on, or `None` on the first line going up and the last going down.
+    fn target_line(&self, bounds: (usize, usize), direction: isize) -> Option<(usize, usize)> {
+        let (line_start, line_end) = bounds;
+        if direction < 0 {
+            let end = line_start.checked_sub(1)?;
             let start = self.text[..end]
                 .rfind('\n')
                 .map(|index| index + 1)
                 .unwrap_or(0);
-            (start, end)
+            Some((start, end))
         } else {
-            if line_end == self.text.len() {
-                return false;
-            }
-            let start = line_end + 1;
+            let start = (line_end != self.text.len()).then_some(line_end + 1)?;
             let end = self.text[start..]
                 .find('\n')
                 .map(|offset| start + offset)
                 .unwrap_or(self.text.len());
-            (start, end)
+            Some((start, end))
+        }
+    }
+
+    /// Whether `move_vertical` has a row to land on. The dispatcher asks
+    /// before the key is routed, so both read the same answer.
+    pub(crate) fn can_move_vertical(&self, direction: isize) -> bool {
+        self.target_line(self.line_bounds(), direction).is_some()
+    }
+
+    fn move_vertical(&mut self, direction: isize) -> bool {
+        let (line_start, line_end) = self.line_bounds();
+        let Some((target_start, target_end)) = self.target_line((line_start, line_end), direction)
+        else {
+            return false;
         };
         let desired_column = UnicodeWidthStr::width(&self.text[line_start..self.cursor]);
         let mut column = 0usize;
@@ -455,6 +465,9 @@ pub(crate) fn handle_prompt_key(input: &mut InputBuffer, key: KeyEvent) -> Promp
         }
         // On the first and last line there is no row to move to, so the
         // arrow is released instead of being swallowed as a phantom edit.
+        // In the main prompt the dispatcher claims those edges before
+        // this sees them (`App::handle_prompt_navigation_key` asks
+        // `can_move_vertical` and scrolls the transcript instead).
         KeyCode::Up if input.is_multiline() => moved(input.move_vertical(-1)),
         KeyCode::Down if input.is_multiline() => moved(input.move_vertical(1)),
         KeyCode::Backspace if !control => {
@@ -859,5 +872,45 @@ mod tests {
         let mut blank = InputBuffer::default();
         assert_eq!(arrow(&mut blank, KeyCode::Up), PromptAction::Unhandled);
         assert_eq!(arrow(&mut blank, KeyCode::Down), PromptAction::Unhandled);
+    }
+
+    /// The dispatcher asks whether an arrow has a row to land on before
+    /// it decides to scroll the transcript instead, so the answer has to
+    /// be the one `move_vertical` itself would give.
+    #[test]
+    fn a_vertical_move_is_predicted_without_moving_the_cursor() {
+        let mut input = InputBuffer::from("one\ntwo\nthree");
+        input.cursor = 1;
+        assert!(!input.can_move_vertical(-1), "the first line has no row up");
+        assert!(input.can_move_vertical(1));
+        assert_eq!(input.cursor(), 1, "asking must not move the cursor");
+
+        input.cursor = 5;
+        assert!(input.can_move_vertical(-1));
+        assert!(input.can_move_vertical(1));
+
+        input.cursor = input.text().len();
+        assert!(input.can_move_vertical(-1));
+        assert!(!input.can_move_vertical(1), "the last line has no row down");
+
+        // A single-line prompt has no row in either direction.
+        let single = InputBuffer::from("one");
+        assert!(!single.can_move_vertical(-1));
+        assert!(!single.can_move_vertical(1));
+
+        // The prediction and the move cannot disagree anywhere.
+        let text = "one\ntwo\nthree";
+        for cursor in 0..=text.len() {
+            for direction in [-1isize, 1] {
+                let mut probe = InputBuffer::from(text);
+                probe.cursor = cursor;
+                let predicted = probe.can_move_vertical(direction);
+                assert_eq!(
+                    predicted,
+                    probe.move_vertical(direction),
+                    "cursor {cursor}, direction {direction}"
+                );
+            }
+        }
     }
 }
