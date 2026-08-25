@@ -22,3 +22,13 @@ keyboard and blocks notification routing until the user hits Esc.
 ## Milestone
 
 12 — Health sweep
+
+## Outcome
+
+The dismissal rule moved into the decision layer as
+`decide::retry_dismisses_manager` (true iff the intents contain
+`ResumeTurn`); the main.rs arm now uses it instead of the dead
+`StartTurn` check. Pinned by
+`retry_dismisses_the_manager_only_when_it_resumes`: blank input
+closes the modal and resumes, a draft keeps it open with the
+warning.

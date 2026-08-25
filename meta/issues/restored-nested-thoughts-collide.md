@@ -27,3 +27,15 @@ silently does nothing.
 ## Milestone
 
 12 — Health sweep
+
+## Outcome
+
+Restored lines get ids from `restored_line_id(nested, ...)`, which
+returns an empty id for any nested invocation
+(`parent_tool_call_id.is_some()`) — matching the live path's
+invariant that nested thoughts/notes are previews, not click
+targets; recursion covers deeper levels for free. Top-level ids are
+unchanged and unique. Pinned by
+`restored_nested_thoughts_are_not_click_targets`, which also renders
+the rows and asserts every emitted `Thought` hit target is
+top-level.

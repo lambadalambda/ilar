@@ -50,11 +50,6 @@
 
 Bugs, by severity:
 
-- [ ] [zai usage loses the cache fields](issues/zai-usage-loses-the-cache-fields.md)
-- [ ] [HTTP 529 should retry](issues/http-529-should-retry.md)
-- [ ] [Retry-now strands the pending manager](issues/retry-now-strands-the-pending-manager.md)
-- [ ] [Turn errors leave spinners behind](issues/turn-errors-leave-spinners-behind.md)
-- [ ] [Restored nested thoughts collide](issues/restored-nested-thoughts-collide.md)
 - [ ] [Bash output drops stderr and the tail](issues/bash-output-drops-stderr-and-the-tail.md)
 - [ ] [Server pauses lose usage and content](issues/server-pauses-lose-usage-and-content.md)
 - [ ] [Anthropic flavor caps output at 16k](issues/anthropic-flavor-caps-output-at-16k.md)

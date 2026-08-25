@@ -28,3 +28,15 @@ spinners and incomplete streaming thoughts persist on an idle app.
 ## Milestone
 
 12 — Health sweep
+
+## Outcome
+
+Both paths now share `App::close_open_rows` (prune incomplete
+thoughts + the recursive `close_running_tools`): `finish_turn`'s
+error arm calls it instead of its partial flat copy, and
+`Completion::Crashed` calls it too — a crash delivers no `TurnDone`
+and no error event, so this is its only cleanup point. The stray
+doc comment that had drifted onto `MAX_IMAGE_DIM` is back on
+`close_running_tools`. Pinned by
+`a_turn_error_stops_the_subagent_spinner` and
+`a_crash_closes_what_the_turn_left_open`.

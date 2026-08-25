@@ -190,3 +190,8 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [The services panel shows what runs](issues/services-panel-shows-what-runs.md)
 - [x] [Exited services reveal on click](issues/exited-services-reveal-on-click.md)
 - [x] [Codebase health sweep](issues/codebase-health-sweep.md)
+- [x] [zai usage loses the cache fields](issues/zai-usage-loses-the-cache-fields.md)
+- [x] [HTTP 529 should retry](issues/http-529-should-retry.md)
+- [x] [Retry-now strands the pending manager](issues/retry-now-strands-the-pending-manager.md)
+- [x] [Turn errors leave spinners behind](issues/turn-errors-leave-spinners-behind.md)
+- [x] [Restored nested thoughts collide](issues/restored-nested-thoughts-collide.md)

@@ -21,3 +21,11 @@ instead of retrying.
 ## Milestone
 
 12 — Health sweep
+
+## Outcome
+
+`retryable_status` now also matches 529 numerically (`StatusCode`
+has no named constant). Pinned by
+`overloaded_responses_are_retryable_stream_errors`, which drives a
+real 529 response through `stream()` and asserts a single
+`RetryableError`.

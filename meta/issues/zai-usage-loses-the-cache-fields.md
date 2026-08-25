@@ -27,3 +27,13 @@ context meter and compaction trigger run far behind reality.
 ## Milestone
 
 12 — Health sweep
+
+## Outcome
+
+`message_start` now routes its whole usage object through
+`merge_usage`, capturing cache_read/cache_creation fields and marking
+`ExcludesCached` even when no later usage arrives; `message_delta`
+still wins for output tokens since `merge_usage` only overwrites
+non-zero fields. Pinned by
+`anthropic_message_start_usage_keeps_cache_fields`
+(`context_tokens() == 1_850` from a 300+1500+50 start event).
