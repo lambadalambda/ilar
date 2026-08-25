@@ -29,3 +29,17 @@ semantics).
 ## Milestone
 
 12 — Health sweep
+
+## Outcome
+
+The render pass (`render`, `status_line`, `pending_strip_lines`,
+activity/liveness helpers) moved to a new view.rs as `impl App`
+blocks; the services panel (rows, exited disclosure, hover
+underline) finished the sidebar.rs seam as pure functions with the
+App-state decisions staying in `render`. app.rs 7452→~6300 lines.
+Every moved function machine-diffed byte-identical against HEAD;
+25 fields widened to `pub(crate)` were audited as all
+view-referenced. `windowed_rate` went back to app.rs post-review
+(stream accounting, its only caller). The image-pipeline part of
+this issue had already landed via ilar::image (S1). The services
+`safe_text` gap is recorded in sweep-cleanups.

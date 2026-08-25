@@ -51,6 +51,9 @@ verified, and safe to do opportunistically:
   were the only coverage) — add one against the wire body;
   `ContentBlock::Thinking.signature` is now always `None` — keep
   (future native-Anthropic) or drop, decide once.
+- **Post-split**: `service_panel` labels skip `safe_text` unlike
+  `agent_panel_lines` — service names from the process registry
+  could carry control chars; sanitize.
 - **Post-S6**: the live tool row bounds text with
   `ilar::agent::bounded_tool_detail`, the restore path with
   `ilar-tui::text::bounded_detail` — markers now match but the
