@@ -21,6 +21,7 @@ fn meta(model: &str) -> SessionMeta {
         agent: "build".into(),
         model: model.into(),
         workspace: None,
+        cwd: None,
     }
 }
 

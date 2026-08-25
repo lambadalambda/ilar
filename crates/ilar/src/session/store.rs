@@ -126,11 +126,11 @@ pub struct SessionSummary {
     /// sessions without one yet.
     pub title: Option<String>,
     pub modified: std::time::SystemTime,
-    /// Where the session was started, when it recorded it. Resume
-    /// surfaces lead with the directory they are running in; sessions
-    /// from before this was written down have `None` and sort with the
-    /// rest.
-    pub workspace: Option<crate::tools::WorkspaceLocation>,
+    /// The directory the session was launched from, when it recorded
+    /// one. Resume surfaces lead with the directory they are running
+    /// in; sessions from before this was written down have `None` and
+    /// group with the rest.
+    pub cwd: Option<std::path::PathBuf>,
 }
 
 /// A session file's head: enough to summarize it without reading the
@@ -342,7 +342,7 @@ impl SessionStore {
             id: head.id,
             title: head.title,
             modified: head.modified,
-            workspace: head.meta.workspace,
+            cwd: head.meta.cwd,
         })
     }
 
@@ -1653,6 +1653,7 @@ mod tests {
                 agent: "build".into(),
                 model: "test/model".into(),
                 workspace: None,
+                cwd: None,
             })
             .unwrap();
         // Lines 2..5: two turns, the second of which the rewind abandons.

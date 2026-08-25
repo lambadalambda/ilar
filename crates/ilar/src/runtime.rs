@@ -148,6 +148,17 @@ pub fn restored_todos(resumed: Option<&SessionReader>) -> TodoList {
         .unwrap_or_default()
 }
 
+/// The directory a new session records as the one it was launched
+/// from. Canonicalized because that is what it will be compared
+/// against: `WorkspaceLocation` canonicalizes the cwd it carries, so a
+/// session started through a symlink must resolve to the same path or
+/// it would never look like "here". A directory that cannot be
+/// resolved records nothing — a path nothing can be compared against
+/// is worse than no path at all.
+fn launch_cwd(cwd: &std::path::Path) -> Option<PathBuf> {
+    std::fs::canonicalize(cwd).ok()
+}
+
 /// Create a root session, recording a non-default reasoning variant
 /// before anything can read it. A session that cannot record its
 /// variant is removed rather than left behind mislabelled.
@@ -329,7 +340,11 @@ impl RuntimePlan {
                         parent_id: None,
                         agent: self.agent.name.clone(),
                         model: self.model.clone(),
+                        // Not `workspace`: that one means "this session
+                        // is a workspace-bound child" and would make the
+                        // session unresumable on its own.
                         workspace: None,
+                        cwd: launch_cwd(&self.cwd),
                     },
                     self.reasoning.as_deref(),
                 )?;
@@ -405,6 +420,26 @@ impl RuntimePlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The recorded launch directory is compared against a running
+    /// ilar's workspace cwd by exact equality, and that one is
+    /// canonical — so this one has to be too, or a session started
+    /// through a symlinked path would never look like "here". An
+    /// unresolvable directory records nothing rather than a path that
+    /// cannot be compared.
+    #[test]
+    fn the_launch_directory_is_recorded_canonically() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = std::fs::canonicalize(dir.path()).unwrap();
+        let nested = real.join("workspace");
+        std::fs::create_dir(&nested).unwrap();
+        let link = real.join("link");
+        std::os::unix::fs::symlink(&nested, &link).unwrap();
+
+        assert_eq!(launch_cwd(&nested), Some(nested.clone()));
+        assert_eq!(launch_cwd(&link), Some(nested));
+        assert_eq!(launch_cwd(&real.join("gone")), None);
+    }
 
     #[test]
     fn selection_respects_cli_over_history_over_agent_over_config() {

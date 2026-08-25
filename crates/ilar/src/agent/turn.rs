@@ -1185,6 +1185,10 @@ async fn run_turn_inner(
     }
 
     tool_ctx.session_id = session_id.to_string();
+    // The model bound above is the one every result of this turn is
+    // written for — including a subagent's, whose session (not its
+    // parent's) is the one loaded here.
+    tool_ctx.vision = crate::model::supports_vision(&model);
     tool_ctx.output_tail = Some(events.output_tail_sink());
 
     let mut iterations = 0;
@@ -1816,13 +1820,14 @@ async fn run_turn_inner(
             let child_session_id = output.child_session_id().map(str::to_string);
             let state = output.session_state().cloned();
             let content = std::mem::take(&mut output.content);
+            let images = output.take_images();
             let result = bounded_tool_detail(&content);
             session.append(SessionEvent::ToolResult {
                 id: new_id(),
                 tool_use_id: outcome.id.clone(),
                 content,
                 is_error,
-                images: Vec::new(),
+                images,
                 child_session_id,
                 state,
                 ts: Utc::now(),

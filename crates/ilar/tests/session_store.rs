@@ -21,6 +21,7 @@ fn sample_meta() -> SessionMeta {
         agent: "build".into(),
         model: "zai/glm-4.7".into(),
         workspace: None,
+        cwd: None,
     }
 }
 
@@ -1627,6 +1628,7 @@ fn child_session_references_parent() {
         agent: "explore".into(),
         model: "zai/glm-4.7-air".into(),
         workspace: None,
+        cwd: None,
     };
     store.create(child_meta.clone()).unwrap();
 
@@ -1638,7 +1640,7 @@ fn child_session_references_parent() {
 }
 
 #[test]
-fn older_metadata_without_workspace_still_deserializes() {
+fn older_metadata_without_workspace_or_cwd_still_deserializes() {
     let (store, _dir) = temp_store();
     let id = new_id();
     let path = store.session_path(&id).unwrap();
@@ -1653,6 +1655,9 @@ fn older_metadata_without_workspace_still_deserializes() {
     let session = store.load(&id).unwrap();
 
     assert_eq!(session.meta().unwrap().workspace, None);
+    // Sessions from before the launch directory was written down have
+    // no opinion about where they came from.
+    assert_eq!(session.meta().unwrap().cwd, None);
 }
 
 // ---- session listing ----
@@ -1721,31 +1726,42 @@ fn list_returns_root_sessions_most_recent_first_with_titles() {
     );
 }
 
-/// The listing is what the resume surfaces sort by directory, so the
-/// workspace the meta already carries has to survive the summary.
+/// The listing is what the resume surfaces group by directory, so the
+/// launch directory the meta records has to survive into the summary —
+/// through the log line it was written to, and back.
 #[test]
-fn list_summaries_carry_the_recorded_workspace() {
+fn list_summaries_carry_the_launch_directory() {
     let (store, _dir) = temp_store();
-    let workspace_dir = tempfile::tempdir().unwrap();
-    let workspace = ilar::tools::WorkspaceLocation::shared(workspace_dir.path().to_path_buf());
+    let launched_in = tempfile::tempdir().unwrap();
+    let cwd = launched_in.path().to_path_buf();
     let mut recorded = sample_meta();
-    recorded.workspace = Some(workspace.clone());
+    recorded.cwd = Some(cwd.clone());
     drop(store.create(recorded.clone()).unwrap());
     // Older logs recorded none; they stay `None` rather than guessing.
     let bare = sample_meta();
     drop(store.create(bare.clone()).unwrap());
 
     let sessions = store.list();
-    let workspace_of = |id: &str| {
+    let cwd_of = |id: &str| {
         sessions
             .iter()
             .find(|session| session.id == id)
             .unwrap_or_else(|| panic!("{id} missing from the listing"))
-            .workspace
+            .cwd
             .clone()
     };
-    assert_eq!(workspace_of(&recorded.session_id), Some(workspace));
-    assert_eq!(workspace_of(&bare.session_id), None);
+    assert_eq!(cwd_of(&recorded.session_id), Some(cwd.clone()));
+    assert_eq!(cwd_of(&bare.session_id), None);
+    assert_eq!(
+        store
+            .load(&recorded.session_id)
+            .unwrap()
+            .meta()
+            .unwrap()
+            .cwd,
+        Some(cwd),
+        "the meta itself must round-trip, not just the summary"
+    );
 }
 
 #[test]
@@ -2467,6 +2483,7 @@ fn children_of_lists_only_this_session_s_tasks_newest_first() {
             agent: (*agent).into(),
             model: "zai/glm-4.7".into(),
             workspace: None,
+            cwd: None,
         };
         let mut session = store.create(child.clone()).unwrap();
         session
@@ -2488,6 +2505,7 @@ fn children_of_lists_only_this_session_s_tasks_newest_first() {
         agent: "explore".into(),
         model: "zai/glm-4.7".into(),
         workspace: None,
+        cwd: None,
     };
     drop(store.create(stranger.clone()).unwrap());
 

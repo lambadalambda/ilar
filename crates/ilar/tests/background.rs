@@ -22,6 +22,7 @@ fn temp_store() -> (SessionStore, String) {
             agent: "build".into(),
             model: "zai/glm-4.7".into(),
             workspace: None,
+            cwd: None,
         })
         .unwrap();
     (store, id)
@@ -1056,6 +1057,7 @@ async fn stall_watchdog_fires_on_silent_child() {
                 workspace_ancestry: Vec::new(),
                 cancel: tokio_util::sync::CancellationToken::new(),
                 output_tail: None,
+                vision: false,
             },
         )
         .await;
@@ -1093,6 +1095,7 @@ async fn nested_notification_runs_declared_parent_and_propagates_once() {
                 agent: "explore".into(),
                 model: "zai/glm-4.7".into(),
                 workspace: None,
+                cwd: None,
             })
             .unwrap(),
     );
@@ -1143,6 +1146,7 @@ async fn routed_notification_waits_for_an_active_parent_without_requeueing() {
                 agent: "explore".into(),
                 model: "zai/glm-4.7".into(),
                 workspace: Some(location),
+                cwd: None,
             })
             .unwrap(),
     );
@@ -1330,6 +1334,7 @@ async fn isolated_notification_uses_persisted_cwd_and_independent_lock() {
                 agent: "explore".into(),
                 model: "zai/glm-4.7".into(),
                 workspace: Some(location),
+                cwd: None,
             })
             .unwrap(),
     );
@@ -1407,6 +1412,7 @@ async fn nested_notification_resolves_each_workspace_against_its_parent() {
                 agent: "explore".into(),
                 model: "zai/glm-4.7".into(),
                 workspace: Some(isolated),
+                cwd: None,
             })
             .unwrap(),
     );
@@ -1419,6 +1425,7 @@ async fn nested_notification_resolves_each_workspace_against_its_parent() {
                 agent: "explore".into(),
                 model: "zai/glm-4.7".into(),
                 workspace: Some(back_to_root),
+                cwd: None,
             })
             .unwrap(),
     );
@@ -1467,6 +1474,7 @@ async fn notification_with_cyclic_ancestry_is_preserved_without_propagating() {
                 agent: "explore".into(),
                 model: "zai/glm-4.7".into(),
                 workspace: None,
+                cwd: None,
             })
             .unwrap(),
     );
@@ -1478,6 +1486,7 @@ async fn notification_with_cyclic_ancestry_is_preserved_without_propagating() {
                 agent: "explore".into(),
                 model: "zai/glm-4.7".into(),
                 workspace: None,
+                cwd: None,
             })
             .unwrap(),
     );
@@ -1558,6 +1567,7 @@ async fn isolated_notification_revalidates_after_waiting_for_lease() {
                 agent: "explore".into(),
                 model: "zai/glm-4.7".into(),
                 workspace: Some(location.clone()),
+                cwd: None,
             })
             .unwrap(),
     );
@@ -1623,6 +1633,7 @@ async fn routed_read_only_agent_keeps_mutating_tools_unavailable() {
                 agent: "explore".into(),
                 model: "zai/glm-4.7".into(),
                 workspace: None,
+                cwd: None,
             })
             .unwrap(),
     );
@@ -1688,6 +1699,7 @@ async fn routed_mutable_agent_waits_for_workspace_and_requeues_if_cancelled() {
                 agent: "explore".into(),
                 model: "zai/glm-4.7".into(),
                 workspace: None,
+                cwd: None,
             })
             .unwrap(),
     );
@@ -1741,6 +1753,7 @@ async fn notification_waits_for_busy_parent_without_being_lost() {
                 agent: "explore".into(),
                 model: "zai/glm-4.7".into(),
                 workspace: None,
+                cwd: None,
             })
             .unwrap(),
     );
@@ -1820,6 +1833,7 @@ async fn cancelled_undelivered_notification_is_returned_for_requeue() {
                 agent: "explore".into(),
                 model: "zai/glm-4.7".into(),
                 workspace: None,
+                cwd: None,
             })
             .unwrap(),
     );
@@ -1866,6 +1880,7 @@ async fn nested_parent_failure_propagates_one_error() {
                 agent: "explore".into(),
                 model: "zai/glm-4.7".into(),
                 workspace: None,
+                cwd: None,
             })
             .unwrap(),
     );
@@ -1902,6 +1917,7 @@ async fn nested_no_text_completion_does_not_reuse_stale_answer() {
             agent: "explore".into(),
             model: "zai/glm-4.7".into(),
             workspace: None,
+            cwd: None,
         })
         .unwrap();
     child

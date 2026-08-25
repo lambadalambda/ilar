@@ -349,6 +349,10 @@ pub struct ToolContext {
     pub cancel: tokio_util::sync::CancellationToken,
     /// Live-output reporter for long-running tools, when a UI is listening.
     pub output_tail: Option<OutputTailSink>,
+    /// Whether the model about to receive this call's result can see
+    /// images. Set per turn from the session's own model, so a tool
+    /// producing an image never hands one to a model that would drop it.
+    pub vision: bool,
 }
 
 impl ToolContext {
@@ -367,6 +371,7 @@ impl ToolContext {
             workspace_ancestry: Vec::new(),
             cancel: tokio_util::sync::CancellationToken::new(),
             output_tail: None,
+            vision: false,
         }
     }
 
@@ -405,13 +410,24 @@ impl ToolContext {
     }
 }
 
+/// Decoded image bytes one tool result may carry. Enforced here rather
+/// than in any one tool, so every image-producing tool inherits it: a
+/// single result big enough to blow the request budget is a bug the
+/// model cannot see coming.
+pub const MAX_RESULT_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+
 #[derive(Clone)]
 pub struct ToolOutput {
     pub content: String,
     pub is_error: bool,
+    /// Images the result carries, already within [`MAX_RESULT_IMAGE_BYTES`]:
+    /// private so the cap cannot be bypassed by assignment.
+    images: Vec<crate::session::ImageContent>,
     child_session_id: Option<String>,
     state: Option<crate::session::SessionState>,
-    pending_state_commit: Option<PendingStateCommit>,
+    /// Boxed: one tool in the tree ever sets it, and `ToolOutput` is an
+    /// `Err` variant all over the tools — the cold field pays for itself.
+    pending_state_commit: Option<Box<PendingStateCommit>>,
 }
 
 #[derive(Clone)]
@@ -426,6 +442,16 @@ impl std::fmt::Debug for ToolOutput {
             .debug_struct("ToolOutput")
             .field("content", &self.content)
             .field("is_error", &self.is_error)
+            // Sizes, not payloads: a base64 screenshot in a panic
+            // message helps nobody.
+            .field(
+                "images",
+                &self
+                    .images
+                    .iter()
+                    .map(crate::session::ImageContent::byte_len)
+                    .collect::<Vec<_>>(),
+            )
             .field("child_session_id", &self.child_session_id)
             .field("state", &self.state)
             .finish()
@@ -436,6 +462,7 @@ impl PartialEq for ToolOutput {
     fn eq(&self, other: &Self) -> bool {
         self.content == other.content
             && self.is_error == other.is_error
+            && self.images == other.images
             && self.child_session_id == other.child_session_id
             && self.state == other.state
     }
@@ -446,6 +473,7 @@ impl ToolOutput {
         Self {
             content: content.into(),
             is_error: false,
+            images: Vec::new(),
             child_session_id: None,
             state: None,
             pending_state_commit: None,
@@ -456,10 +484,54 @@ impl ToolOutput {
         Self {
             content: content.into(),
             is_error: true,
+            images: Vec::new(),
             child_session_id: None,
             state: None,
             pending_state_commit: None,
         }
+    }
+
+    pub fn images(&self) -> &[crate::session::ImageContent] {
+        &self.images
+    }
+
+    pub(crate) fn take_images(&mut self) -> Vec<crate::session::ImageContent> {
+        std::mem::take(&mut self.images)
+    }
+
+    /// Attach images, keeping the result within [`MAX_RESULT_IMAGE_BYTES`].
+    /// Images are taken in order until one does not fit; that one and
+    /// everything after it are dropped whole — half an image is worth
+    /// nothing to a vision model — and a single note naming them is
+    /// appended to the text, because the model's only account of what it
+    /// is not being shown is the text it gets back.
+    pub fn with_images(mut self, images: Vec<crate::session::ImageContent>) -> Self {
+        let mut budget = MAX_RESULT_IMAGE_BYTES;
+        let mut kept = Vec::with_capacity(images.len());
+        let mut dropped = Vec::new();
+        for (index, image) in images.into_iter().enumerate() {
+            match budget.checked_sub(image.byte_len()) {
+                Some(remaining) if dropped.is_empty() => {
+                    budget = remaining;
+                    kept.push(image);
+                }
+                _ => dropped.push(format!(
+                    "image {} ({}, {} KiB)",
+                    index + 1,
+                    image.media_type,
+                    image.byte_len() / 1024
+                )),
+            }
+        }
+        if !dropped.is_empty() {
+            self.content.push_str(&format!(
+                "\n[dropped {}: a tool result carries at most {} MiB of images]",
+                dropped.join(", "),
+                MAX_RESULT_IMAGE_BYTES / (1024 * 1024)
+            ));
+        }
+        self.images = kept;
+        self
     }
 
     pub fn session_state(&self) -> Option<&crate::session::SessionState> {
@@ -488,7 +560,7 @@ impl ToolOutput {
         list: crate::todo::TodoList,
     ) -> Self {
         self.state = Some(crate::session::SessionState::TodoList { list: list.clone() });
-        self.pending_state_commit = Some(PendingStateCommit { target, list });
+        self.pending_state_commit = Some(Box::new(PendingStateCommit { target, list }));
         self
     }
 
@@ -860,7 +932,55 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{ChildTool, ToolRegistry, child_tool_names, child_tool_names_from};
+    use super::{
+        ChildTool, MAX_RESULT_IMAGE_BYTES, ToolOutput, ToolRegistry, child_tool_names,
+        child_tool_names_from,
+    };
+    use crate::session::ImageContent;
+
+    fn image(bytes: usize) -> ImageContent {
+        ImageContent::new("image/png", &vec![0u8; bytes])
+    }
+
+    #[test]
+    fn images_under_the_cap_ride_through_untouched() {
+        let images = vec![image(1024), image(2048)];
+        let output = ToolOutput::text("looked at it").with_images(images.clone());
+
+        assert_eq!(output.content, "looked at it");
+        assert_eq!(output.images(), images);
+    }
+
+    /// A truncated image is not an image, so the cap drops whole ones —
+    /// and the model is told, in the only channel it can read.
+    #[test]
+    fn images_over_the_cap_are_dropped_whole_and_named_in_the_text() {
+        let big = image(4 * 1024 * 1024);
+        let output = ToolOutput::text("looked at it").with_images(vec![
+            big.clone(),
+            big.clone(),
+            image(1024),
+        ]);
+
+        assert_eq!(output.images(), [big]);
+        let note = output
+            .content
+            .strip_prefix("looked at it\n")
+            .unwrap_or_else(|| panic!("no note appended: {:?}", output.content));
+        assert!(!note.contains('\n'), "{note:?}");
+        assert!(note.contains("image 2"), "{note:?}");
+        assert!(note.contains("image 3"), "{note:?}");
+        assert!(note.contains("image/png"), "{note:?}");
+        assert!(
+            note.contains(&format!("{} MiB", MAX_RESULT_IMAGE_BYTES / (1024 * 1024))),
+            "{note:?}"
+        );
+    }
+
+    #[test]
+    fn a_root_tool_context_has_no_vision_until_a_turn_says_otherwise() {
+        assert!(!super::ToolContext::root(std::env::temp_dir()).vision);
+    }
 
     #[test]
     fn one_table_entry_is_all_a_new_child_tool_needs() {

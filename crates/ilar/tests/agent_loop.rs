@@ -16,6 +16,10 @@ use ilar::tools::{
 use tokio_util::sync::CancellationToken;
 
 fn temp_session(agent: &str) -> (SessionStore, String) {
+    temp_session_on(agent, "zai/glm-4.7")
+}
+
+fn temp_session_on(agent: &str, model: &str) -> (SessionStore, String) {
     let dir = std::env::temp_dir().join(format!("ilar-agent-test-{}", new_id()));
     let store = SessionStore::new(dir);
     let id = new_id();
@@ -24,8 +28,9 @@ fn temp_session(agent: &str) -> (SessionStore, String) {
             session_id: id.clone(),
             parent_id: None,
             agent: agent.into(),
-            model: "zai/glm-4.7".into(),
+            model: model.into(),
             workspace: None,
+            cwd: None,
         })
         .unwrap();
     (store, id)
@@ -64,6 +69,138 @@ impl Tool for EchoTool {
             ToolOutput::text(format!("echo: {}", input["msg"].as_str().unwrap_or("?")))
         })
     }
+}
+
+/// A tool that hands back an image and records the vision flag the turn
+/// gave it — the two halves of "a tool result can carry an image".
+#[derive(Clone)]
+struct SnapshotTool {
+    image: ilar::session::ImageContent,
+    saw_vision: Arc<Mutex<Option<bool>>>,
+}
+
+impl Tool for SnapshotTool {
+    fn name(&self) -> &'static str {
+        "snapshot"
+    }
+    fn description(&self) -> &'static str {
+        "returns a picture"
+    }
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::Concurrent
+    }
+    fn workspace_access(&self) -> WorkspaceAccess {
+        WorkspaceAccess::None
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    fn run(&self, _input: serde_json::Value, ctx: ToolContext) -> ToolFuture {
+        let image = self.image.clone();
+        let saw_vision = self.saw_vision.clone();
+        Box::pin(async move {
+            *saw_vision.lock().unwrap() = Some(ctx.vision);
+            ToolOutput::text("a picture").with_images(vec![image])
+        })
+    }
+}
+
+fn snapshot_turn(id: &str) -> Vec<Vec<ProviderEvent>> {
+    vec![
+        vec![
+            ProviderEvent::ToolCallStarted {
+                id: id.into(),
+                name: "snapshot".into(),
+                item_id: None,
+            },
+            ProviderEvent::ToolCallCompleted {
+                id: id.into(),
+                name: "snapshot".into(),
+                input: serde_json::json!({}),
+            },
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+                usage: Default::default(),
+            },
+        ],
+        vec![
+            ProviderEvent::TextDelta("seen".into()),
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+                usage: Default::default(),
+            },
+        ],
+    ]
+}
+
+async fn run_snapshot_turn(model: &str) -> (Vec<SessionEvent>, Option<bool>) {
+    let (store, session_id) = temp_session_on("build", model);
+    let tool = SnapshotTool {
+        image: ilar::session::ImageContent::png(b"\x89PNG\r\n\x1a\npretend"),
+        saw_vision: Arc::new(Mutex::new(None)),
+    };
+    let registry = ToolRegistry::builtin()
+        .with_tool(Arc::new(tool.clone()))
+        .unwrap();
+
+    run_turn(
+        &MockProvider::new(snapshot_turn("snap-1")),
+        &registry,
+        &store,
+        &session_id,
+        "look at this",
+        &[],
+        None,
+        LoopConfig::default(),
+        events_channel().0,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let events = store.load(&session_id).unwrap().events().to_vec();
+    let saw_vision = *tool.saw_vision.lock().unwrap();
+    (events, saw_vision)
+}
+
+/// The images a tool returns reach the session log intact — otherwise
+/// nothing downstream (wire, replay, compaction) has anything to carry.
+#[tokio::test]
+async fn a_tool_result_persists_the_images_its_tool_returned() {
+    let (events, _) = run_snapshot_turn("zai/glm-4.6v").await;
+
+    let (content, images) = events
+        .iter()
+        .find_map(|event| match event {
+            SessionEvent::ToolResult {
+                tool_use_id,
+                content,
+                images,
+                ..
+            } if tool_use_id == "snap-1" => Some((content.clone(), images.clone())),
+            _ => None,
+        })
+        .expect("tool result for snap-1");
+    assert_eq!(content, "a picture");
+    assert_eq!(
+        images,
+        [ilar::session::ImageContent::png(
+            b"\x89PNG\r\n\x1a\npretend"
+        )]
+    );
+}
+
+/// A tool asks the context, not the parent, whether anybody can see what
+/// it is about to return; the turn answers from the session's own model.
+#[tokio::test]
+async fn a_tool_sees_the_vision_of_the_model_the_session_runs_on() {
+    let (_, vision_model) = run_snapshot_turn("zai/glm-4.6v").await;
+    let (_, text_model) = run_snapshot_turn("zai/glm-4.7").await;
+
+    assert_eq!(vision_model, Some(true));
+    assert_eq!(text_model, Some(false));
 }
 
 fn registry_with(tool: EchoTool) -> ToolRegistry {

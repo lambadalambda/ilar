@@ -9,10 +9,16 @@ that one property.
 
 `ilar --continue` resumes the latest session from the CLI. Inside the
 TUI, `/sessions` opens a two-pane search that is both the picker
-(empty query lists sessions newest-first by topic, age and last words)
-and a full-content grep (type to match against every session's
-complete history, including material compaction has summarized away).
+(empty query lists the sessions started in the directory you are in
+first, then everything else, newest-first within each — by topic, last
+words and when it was last used) and a full-content grep (type to
+match against every session's complete history, including material
+compaction has summarized away).
 See [the interface guide](interface.md#switching-sessions-sessions).
+
+A session records the directory it was launched from, which is what
+that grouping reads; sessions from before it was recorded simply group
+with the ones from elsewhere.
 
 Sessions name themselves: after the first completed turn a short topic
 is generated and shown in the title bar, the listing, and the terminal

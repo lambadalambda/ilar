@@ -1245,6 +1245,7 @@ async fn history_searches_this_session_and_no_other() {
                 agent: "build".into(),
                 model: "zai/glm-4.7".into(),
                 workspace: None,
+                cwd: None,
             })
             .unwrap();
         session

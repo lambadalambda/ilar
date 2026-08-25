@@ -422,6 +422,7 @@ mod tests {
                 agent: "build".into(),
                 model: "zai/glm-4.7".into(),
                 workspace: None,
+                cwd: None,
             })
             .unwrap();
         session
@@ -559,6 +560,7 @@ mod tests {
                 agent: "build".into(),
                 model: "zai/glm-4.7".into(),
                 workspace: None,
+                cwd: None,
             })
             .unwrap();
         session
@@ -608,6 +610,7 @@ mod tests {
                 agent: "build".into(),
                 model: "zai/glm-4.7".into(),
                 workspace: None,
+                cwd: None,
             })
             .unwrap();
         session
@@ -649,6 +652,7 @@ mod tests {
                 agent: "build".into(),
                 model: "zai/glm-4.7".into(),
                 workspace: None,
+                cwd: None,
             })
             .unwrap();
         session
@@ -697,6 +701,7 @@ mod tests {
                 agent: "explore".into(),
                 model: "zai/glm-4.7".into(),
                 workspace: None,
+                cwd: None,
             })
             .unwrap();
         child
@@ -762,6 +767,7 @@ mod tests {
                 agent: "build".into(),
                 model: "zai/glm-4.7".into(),
                 workspace: None,
+                cwd: None,
             })
             .unwrap();
         parent
@@ -834,6 +840,7 @@ mod tests {
                 agent: "explore".into(),
                 model: "zai/glm-4.7".into(),
                 workspace: None,
+                cwd: None,
             })
             .unwrap();
         child
@@ -887,6 +894,7 @@ mod tests {
                 agent: "build".into(),
                 model: "zai/glm-4.7".into(),
                 workspace: None,
+                cwd: None,
             })
             .unwrap();
         parent

@@ -1253,16 +1253,9 @@ impl SessionPicker {
         }
     }
 
-    fn workspace_of(session: &ilar::session::SessionSummary) -> Option<&std::path::Path> {
-        session
-            .workspace
-            .as_ref()
-            .map(ilar::tools::WorkspaceLocation::cwd)
-    }
-
     fn origin(&self, session: &ilar::session::SessionSummary) -> RowOrigin {
         row_origin(
-            Self::workspace_of(session),
+            session.cwd.as_deref(),
             self.cwd.as_deref(),
             self.home.as_deref(),
         )
@@ -1278,7 +1271,7 @@ impl SessionPicker {
         });
         if self.query.trim().is_empty() {
             here_first(matched, |session| {
-                workspace_is_here(Self::workspace_of(session), self.cwd.as_deref())
+                launched_here(session.cwd.as_deref(), self.cwd.as_deref())
             })
         } else {
             matched
@@ -1973,32 +1966,33 @@ impl RowOrigin {
     }
 }
 
-/// Whether a session belongs to the directory ilar runs in. The
-/// comparison is exact: both paths are canonical (the recorded
-/// workspace was canonicalized when it was written, and so was the cwd
-/// the caller passes), so a subdirectory of this checkout is another
-/// directory, not this one. A session that recorded no workspace is
-/// never here — the ordering says so, without a path to show for it.
-pub(crate) fn workspace_is_here(
-    workspace: Option<&std::path::Path>,
+/// Whether a session was launched from the directory ilar runs in.
+/// The comparison is exact: both paths are canonical (the session
+/// canonicalized its launch directory when it recorded it, and so did
+/// the workspace whose cwd the caller passes), so a subdirectory of
+/// this checkout is another directory, not this one. A session that
+/// recorded no directory is never here — the ordering says so, without
+/// a path to show for it.
+pub(crate) fn launched_here(
+    launched_in: Option<&std::path::Path>,
     cwd: Option<&std::path::Path>,
 ) -> bool {
-    matches!((workspace, cwd), (Some(workspace), Some(cwd)) if workspace == cwd)
+    matches!((launched_in, cwd), (Some(launched_in), Some(cwd)) if launched_in == cwd)
 }
 
-/// Classify one row's workspace against the directory ilar runs in,
-/// abbreviating the directory it will be marked with when it is not
-/// this one. Sorting asks [`workspace_is_here`] instead: it needs the
+/// Classify one row's launch directory against the directory ilar runs
+/// in, abbreviating the directory it will be marked with when it is not
+/// this one. Sorting asks [`launched_here`] instead: it needs the
 /// verdict, not the label.
 pub(crate) fn row_origin(
-    workspace: Option<&std::path::Path>,
+    launched_in: Option<&std::path::Path>,
     cwd: Option<&std::path::Path>,
     home: Option<&std::path::Path>,
 ) -> RowOrigin {
-    if workspace_is_here(workspace, cwd) {
+    if launched_here(launched_in, cwd) {
         RowOrigin::Here
     } else {
-        RowOrigin::Elsewhere(workspace.map(|workspace| abbreviated_path(workspace, home)))
+        RowOrigin::Elsewhere(launched_in.map(|launched_in| abbreviated_path(launched_in, home)))
     }
 }
 
@@ -3114,13 +3108,13 @@ mod tests {
         id: &str,
         title: Option<&str>,
         modified: std::time::SystemTime,
-        workspace: Option<ilar::tools::WorkspaceLocation>,
+        cwd: Option<std::path::PathBuf>,
     ) -> ilar::session::SessionSummary {
         ilar::session::SessionSummary {
             id: id.into(),
             title: title.map(str::to_string),
             modified,
-            workspace,
+            cwd,
         }
     }
 
@@ -3132,6 +3126,7 @@ mod tests {
                 agent: "build".into(),
                 model: "zai/glm-4.7".into(),
                 workspace: None,
+                cwd: None,
             },
             ts: chrono::Utc::now(),
         }
@@ -3863,16 +3858,19 @@ mod tests {
     /// directory's older one, stamped with when it was last used.
     #[test]
     fn the_session_picker_leads_with_this_directorys_last_session() {
-        let here_dir = tempfile::tempdir().unwrap();
-        let there_dir = tempfile::tempdir().unwrap();
-        let here = ilar::tools::WorkspaceLocation::shared(here_dir.path().to_path_buf());
-        let there = ilar::tools::WorkspaceLocation::shared(there_dir.path().to_path_buf());
+        let here = std::path::PathBuf::from("/work/ilar");
+        let there = std::path::PathBuf::from("/work/other");
         let now = std::time::SystemTime::now();
         let ago = |seconds: u64| now - std::time::Duration::from_secs(seconds);
         let mut picker = SessionPicker::new(
             vec![
-                summary("newer", Some("other project work"), ago(600), Some(there)),
-                summary("legacy", Some("no workspace recorded"), ago(900), None),
+                summary(
+                    "newer",
+                    Some("other project work"),
+                    ago(600),
+                    Some(there.clone()),
+                ),
+                summary("legacy", Some("no directory recorded"), ago(900), None),
                 summary(
                     "older",
                     Some("work in this repo"),
@@ -3880,7 +3878,7 @@ mod tests {
                     Some(here.clone()),
                 ),
             ],
-            Some(here.cwd().to_path_buf()),
+            Some(here),
         );
 
         let (screen, _) = draw_modal(80, 20, |frame| render_session_picker(frame, &picker));
@@ -3892,7 +3890,7 @@ mod tests {
         };
         let leading = line_of("work in this repo");
         assert!(leading < line_of("other project work"), "{screen}");
-        assert!(leading < line_of("no workspace recorded"), "{screen}");
+        assert!(leading < line_of("no directory recorded"), "{screen}");
         let row = screen.lines().nth(leading).unwrap();
         assert!(row.contains("> work in this repo"), "{row}");
         assert!(row.contains("2h ago"), "{row}");
@@ -3900,11 +3898,20 @@ mod tests {
             !row.contains('·'),
             "the directory ilar runs in needs no suffix: {row}"
         );
-        // Rows from elsewhere say where they are from.
+        // Rows from elsewhere name the directory they came from; one
+        // that recorded none has nothing to name.
         assert!(
             screen
                 .lines()
                 .nth(line_of("other project work"))
+                .unwrap()
+                .contains("· /work/other"),
+            "{screen}"
+        );
+        assert!(
+            !screen
+                .lines()
+                .nth(line_of("no directory recorded"))
                 .unwrap()
                 .contains('·'),
             "{screen}"

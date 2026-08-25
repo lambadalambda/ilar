@@ -1850,19 +1850,12 @@ fn start_session_scan(
         let now = std::time::SystemTime::now();
         let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
         // The scan reads sessions one at a time and the listing carries
-        // the workspace, so the directory each row belongs to is looked
-        // up once here rather than re-read per hit.
-        let workspaces: std::collections::HashMap<String, Option<std::path::PathBuf>> = store
+        // each session's launch directory, so it is looked up once here
+        // rather than re-read per hit.
+        let launched_in: std::collections::HashMap<String, Option<std::path::PathBuf>> = store
             .list()
             .into_iter()
-            .map(|session| {
-                (
-                    session.id,
-                    session
-                        .workspace
-                        .map(|workspace| workspace.cwd().to_path_buf()),
-                )
-            })
+            .map(|session| (session.id, session.cwd))
             .collect();
         let mut sent = 0usize;
         let mut emit = |entries: &[ilar::recall::Entry], hits: ilar::recall::SessionHits| {
@@ -1875,9 +1868,9 @@ fn start_session_scan(
                 .unwrap_or_else(|| hits.session_id.clone());
             let age = crate::modals::last_used(hits.modified, now);
             let origin = crate::modals::row_origin(
-                workspaces
+                launched_in
                     .get(&hits.session_id)
-                    .and_then(|workspace| workspace.as_deref()),
+                    .and_then(|launched_in| launched_in.as_deref()),
                 Some(&cwd),
                 home.as_deref(),
             );
@@ -3201,7 +3194,7 @@ mod tests {
                 id: "aaa".into(),
                 title: Some("fix websearch fallback".into()),
                 modified: std::time::SystemTime::now(),
-                workspace: None,
+                cwd: None,
             }],
             None,
         ));
@@ -3374,6 +3367,7 @@ mod tests {
                     agent: "build".into(),
                     model: "zai/glm-4.7".into(),
                     workspace: None,
+                    cwd: None,
                 })
                 .unwrap(),
         );
@@ -3400,6 +3394,7 @@ mod tests {
             agent: "explore".into(),
             model: "zai/glm-4.7".into(),
             workspace: Some(ilar::tools::WorkspaceLocation::shared(std::env::temp_dir())),
+            cwd: None,
         };
 
         let error = ensure_direct_resume_allowed(Some(&meta)).unwrap_err();
@@ -3422,6 +3417,7 @@ mod tests {
                 agent: "build".into(),
                 model: "openai/gpt-5.2".into(),
                 workspace: None,
+                cwd: None,
             },
             Some("high"),
         )
@@ -3441,6 +3437,7 @@ mod tests {
                 agent: "build".into(),
                 model: "zai/glm-4.7".into(),
                 workspace: None,
+                cwd: None,
             },
             Some("high"),
         )
@@ -3469,6 +3466,7 @@ mod tests {
                     agent: "build".into(),
                     model: "zai/glm-4.7".into(),
                     workspace: None,
+                    cwd: None,
                 })
                 .unwrap(),
         );
@@ -3643,6 +3641,7 @@ mod tests {
                 agent: "build".into(),
                 model: "zai/glm-4.7".into(),
                 workspace: None,
+                cwd: None,
             })
             .unwrap();
         session
@@ -3774,6 +3773,7 @@ mod tests {
                     agent: "build".into(),
                     model: "zai/glm-4.7".into(),
                     workspace: None,
+                    cwd: None,
                 })
                 .unwrap(),
         );

@@ -17,6 +17,7 @@ fn temp_session(model: &str) -> (SessionStore, String) {
             agent: "build".into(),
             model: model.into(),
             workspace: None,
+            cwd: None,
         })
         .unwrap();
     (store, id)

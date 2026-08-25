@@ -27,6 +27,7 @@ fn temp_store() -> (SessionStore, String) {
             agent: "build".into(),
             model: "zai/glm-4.7".into(),
             workspace: None,
+            cwd: None,
         })
         .unwrap();
     (store, id)
@@ -726,6 +727,7 @@ async fn nested_tasks_do_not_wait_on_busy_sibling_workspaces() {
                 agent: "build".into(),
                 model: "zai/glm-4.7".into(),
                 workspace: None,
+                cwd: None,
             })
             .unwrap(),
     );
@@ -1423,6 +1425,7 @@ async fn resumed_subagent_rejects_an_already_active_session() {
                 agent: "explore".into(),
                 model: "zai/glm-4.7".into(),
                 workspace: None,
+                cwd: None,
             })
             .unwrap(),
     );
@@ -1483,6 +1486,7 @@ async fn resumed_subagent_rejects_persisted_agent_mismatch() {
                 agent: "other".into(),
                 model: "zai/glm-4.7".into(),
                 workspace: None,
+                cwd: None,
             })
             .unwrap(),
     );
@@ -1522,6 +1526,7 @@ async fn subagent_turns_use_the_configured_compaction_threshold() {
             agent: "explore".into(),
             model: "zai/glm-4.7".into(),
             workspace: None,
+            cwd: None,
         })
         .unwrap();
     child_session
@@ -1628,6 +1633,7 @@ async fn isolated_resume_requires_an_explicit_workspace() {
                 agent: "explore".into(),
                 model: "zai/glm-4.7".into(),
                 workspace: Some(persisted),
+                cwd: None,
             })
             .unwrap(),
     );
@@ -1684,6 +1690,7 @@ async fn nested_resume_may_inherit_its_parents_validated_worktree() {
                 agent: "explore".into(),
                 model: "zai/glm-4.7".into(),
                 workspace: Some(location.clone()),
+                cwd: None,
             })
             .unwrap(),
     );
@@ -1696,6 +1703,7 @@ async fn nested_resume_may_inherit_its_parents_validated_worktree() {
                 agent: "explore".into(),
                 model: "zai/glm-4.7".into(),
                 workspace: Some(location.clone()),
+                cwd: None,
             })
             .unwrap(),
     );
@@ -1743,6 +1751,7 @@ async fn resumed_subagent_rejects_a_different_parent_session() {
                 agent: "build".into(),
                 model: "zai/glm-4.7".into(),
                 workspace: None,
+                cwd: None,
             })
             .unwrap(),
     );
@@ -1755,6 +1764,7 @@ async fn resumed_subagent_rejects_a_different_parent_session() {
                 agent: "explore".into(),
                 model: "zai/glm-4.7".into(),
                 workspace: None,
+                cwd: None,
             })
             .unwrap(),
     );
@@ -1810,6 +1820,7 @@ async fn isolated_resume_rejects_a_different_cwd_in_the_same_worktree() {
                 agent: "explore".into(),
                 model: "zai/glm-4.7".into(),
                 workspace: Some(persisted),
+                cwd: None,
             })
             .unwrap(),
     );
@@ -1881,6 +1892,7 @@ async fn isolated_resume_rejects_tampered_persisted_workspace_metadata() {
                 agent: "explore".into(),
                 model: "zai/glm-4.7".into(),
                 workspace: Some(tampered),
+                cwd: None,
             })
             .unwrap(),
     );
@@ -1932,6 +1944,7 @@ async fn legacy_resume_cannot_adopt_an_isolated_workspace() {
                 agent: "explore".into(),
                 model: "zai/glm-4.7".into(),
                 workspace: None,
+                cwd: None,
             })
             .unwrap(),
     );
@@ -2143,6 +2156,7 @@ async fn resumed_subagent_uses_its_persisted_model() {
             agent: "explore".into(),
             model: "zai/original".into(),
             workspace: None,
+            cwd: None,
         })
         .unwrap();
     child

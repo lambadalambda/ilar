@@ -21,6 +21,13 @@ pub struct SessionMeta {
     /// the runtime workspace when this is absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<crate::tools::WorkspaceLocation>,
+    /// The directory the session was launched from, canonicalized.
+    /// Purely informational — unlike `workspace` it routes nothing and
+    /// binds nothing; the resume surfaces read it to lead with the
+    /// sessions belonging to the directory you are in. Absent in logs
+    /// written before it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -601,6 +601,9 @@ impl SubagentSpawner {
                     agent: input.subagent_type.clone(),
                     model,
                     workspace: Some(child_location.clone()),
+                    // Children are never listed, so there is no listing
+                    // for a launch directory to group.
+                    cwd: None,
                 });
                 match created {
                     Ok(mut session) => {
@@ -676,6 +679,10 @@ impl SubagentSpawner {
             workspace_ancestry,
             cancel: ctx.cancel.clone(),
             output_tail: None,
+            // Not inherited from the parent: the child's turn sets this
+            // from the child session's own model, which is the one that
+            // will be looking at whatever its tools return.
+            vision: false,
         };
 
         if input.background == Some(true) {
@@ -1172,6 +1179,9 @@ task's scope yourself; continue only clearly disjoint work."
                     workspace_ancestry: vec![workspace_location.id().clone()],
                     cancel: cancel.clone(),
                     output_tail: None,
+                    // Set by the turn below from the notified session's
+                    // own model.
+                    vision: false,
                 },
                 // Subagents have no interactive user to steer them.
                 None,
@@ -2071,6 +2081,7 @@ mod tests {
                     agent: "explore".into(),
                     model: "zai/glm-4.7".into(),
                     workspace: None,
+                    cwd: None,
                 })
                 .unwrap(),
         );
@@ -2093,6 +2104,7 @@ mod tests {
             agent: "build".into(),
             model: "zai/glm-4.7".into(),
             workspace: None,
+            cwd: None,
         };
 
         let outcome = context_route_failure(
