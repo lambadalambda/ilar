@@ -1900,7 +1900,14 @@ pub fn transcript_of(events: &[SessionEvent]) -> Vec<ChatMessage> {
         messages.push(ChatMessage {
             role: Role::User,
             content: vec![ContentBlock::Text {
-                text: format!("<compaction-summary>\n{summary}\n</compaction-summary>"),
+                // The trailing line outranks any stop-flavored wording the
+                // summarizer may have carried over: the checkpoint replaced
+                // the conversation, never the goal.
+                text: format!(
+                    "<compaction-summary>\n{summary}\n</compaction-summary>\n\
+                    Continue the task from this state — the checkpoint replaced the \
+                    earlier conversation, not the goal."
+                ),
             }],
         });
     }

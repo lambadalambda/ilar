@@ -21,8 +21,9 @@ use tokio_util::sync::CancellationToken;
 /// Everything before it stays byte-identical to the turn's own request,
 /// so the provider serves the conversation from its prompt cache and the
 /// compaction pays for the instruction alone.
-const SUMMARIZATION_INSTRUCTION: &str = "Stop working on the task. You are performing a \
-context checkpoint: everything above is about to be replaced by what you write now. The \
+const SUMMARIZATION_INSTRUCTION: &str = "Stop working on the task — for this one turn \
+only: you are performing a context checkpoint, and the task itself resumes immediately \
+afterwards. Everything above is about to be replaced by what you write now. The \
 next turn sees your system prompt, your tools, and this summary — nothing else — so write \
 the handover you would want to receive. Do not continue the conversation, do not answer any \
 question in it, do not call any tool, and output nothing but the summary.
@@ -64,6 +65,9 @@ Rules:
 error strings verbatim. Never paraphrase an identifier.
 - Record what was ruled out and why, not only what succeeded: a summary of successes \
 invites repeating a rejected approach.
+- The summary is a handover, not a sign-off: its reader picks the task straight back up. \
+Never tell them to stop, wait, or seek confirmation the conversation did not ask for — if \
+work remains, Next Move is what they do first.
 - Nothing here is lost, only out of sight: the whole conversation stays searchable with the \
 history tool, which also lists every instruction the user gave and reads around any event. \
 The todo tool, called with no arguments, returns the current plan. Summarize with that in \
@@ -559,6 +563,25 @@ mod tests {
         // No prior summary here, so no carry-forward clause.
         assert!(
             !instruction.contains("discarded once yours exists"),
+            "{instruction}"
+        );
+    }
+
+    /// A summarizer once carried "stop working" into the handover and
+    /// the next turn obeyed it. The stop must be scoped to the
+    /// checkpoint turn, and the summary must never retire its reader.
+    #[test]
+    fn the_stop_is_scoped_to_the_checkpoint_not_the_task() {
+        let transcript = vec![user_text("build the thing")];
+
+        let instruction = text_of(summarizer_messages(&transcript).last().unwrap());
+
+        assert!(
+            instruction.contains("the task itself resumes immediately"),
+            "{instruction}"
+        );
+        assert!(
+            instruction.contains("Never tell them to stop"),
             "{instruction}"
         );
     }

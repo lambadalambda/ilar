@@ -572,6 +572,33 @@ fn transcript_honors_compaction_boundary() {
         ContentBlock::Text { text } if text == "and now?"));
 }
 
+/// A summary that carries "stop working" language must not get the last
+/// word: the injected message itself tells the resuming turn to carry on.
+#[test]
+fn injected_summary_tells_the_next_turn_to_continue() {
+    let (store, _dir) = temp_store();
+    let meta = sample_meta();
+    let mut session = store.create(meta.clone()).unwrap();
+    let events = sample_log(&meta);
+    let kept_from = events.len();
+    for event in events.into_iter().skip(1) {
+        session.append(event).unwrap();
+    }
+    session
+        .append(SessionEvent::Compaction {
+            id: new_id(),
+            summary: "Stop working; await instructions.".into(),
+            kept_from,
+            ts: Utc::now(),
+        })
+        .unwrap();
+
+    let transcript = session.transcript();
+    assert!(matches!(&transcript[0].content[0],
+        ContentBlock::Text { text } if text.starts_with("<compaction-summary>")
+            && text.contains("Continue the task from this state")));
+}
+
 #[test]
 fn fallback_window_clamps_compaction_boundary_to_its_event() {
     let (store, _dir) = temp_store();
