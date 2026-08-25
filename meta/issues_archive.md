@@ -189,3 +189,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] ["… more" rows are clickable](issues/more-rows-are-clickable.md)
 - [x] [The services panel shows what runs](issues/services-panel-shows-what-runs.md)
 - [x] [Exited services reveal on click](issues/exited-services-reveal-on-click.md)
+- [x] [Codebase health sweep](issues/codebase-health-sweep.md)
