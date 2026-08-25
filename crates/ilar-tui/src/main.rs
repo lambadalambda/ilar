@@ -1835,6 +1835,9 @@ fn start_session_scan(
     store: ilar::session::SessionStore,
     query: String,
     current_session: String,
+    // The directory rows are grouped against — the workspace's own
+    // canonical cwd, the same value a session records in its meta.
+    cwd: std::path::PathBuf,
 ) -> (
     std::sync::mpsc::Receiver<Vec<SearchRow>>,
     std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -1845,6 +1848,22 @@ fn start_session_scan(
     let flag = cancel.clone();
     tokio::task::spawn_blocking(move || {
         let now = std::time::SystemTime::now();
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        // The scan reads sessions one at a time and the listing carries
+        // the workspace, so the directory each row belongs to is looked
+        // up once here rather than re-read per hit.
+        let workspaces: std::collections::HashMap<String, Option<std::path::PathBuf>> = store
+            .list()
+            .into_iter()
+            .map(|session| {
+                (
+                    session.id,
+                    session
+                        .workspace
+                        .map(|workspace| workspace.cwd().to_path_buf()),
+                )
+            })
+            .collect();
         let mut sent = 0usize;
         let mut emit = |entries: &[ilar::recall::Entry], hits: ilar::recall::SessionHits| {
             if flag.load(Ordering::Relaxed) {
@@ -1854,7 +1873,14 @@ fn start_session_scan(
                 .title
                 .clone()
                 .unwrap_or_else(|| hits.session_id.clone());
-            let age = crate::modals::session_age(hits.modified, now);
+            let age = crate::modals::last_used(hits.modified, now);
+            let origin = crate::modals::row_origin(
+                workspaces
+                    .get(&hits.session_id)
+                    .and_then(|workspace| workspace.as_deref()),
+                Some(&cwd),
+                home.as_deref(),
+            );
             let rows: Vec<SearchRow> = hits
                 .hits
                 .iter()
@@ -1864,6 +1890,7 @@ fn start_session_scan(
                     event: hit.event,
                     excerpt: hit.excerpt.clone(),
                     age: age.clone(),
+                    origin: origin.clone(),
                     context: ilar::recall::around(
                         entries,
                         hit.event,
@@ -2028,8 +2055,12 @@ async fn run_app(
             && search.scanning
             && search_rx.is_none()
         {
-            let (rx, flag) =
-                start_session_scan(store.clone(), search.query.clone(), app.session_id.clone());
+            let (rx, flag) = start_session_scan(
+                store.clone(),
+                search.query.clone(),
+                app.session_id.clone(),
+                tool_ctx.location.cwd().to_path_buf(),
+            );
             search_rx = Some((search.generation, rx));
             search_cancel = Some(flag);
         }
@@ -2571,7 +2602,10 @@ async fn run_app(
                                         .into_iter()
                                         .filter(|session| session.id != app.session_id)
                                         .collect();
-                                    app.session_picker = Some(SessionPicker::new(sessions));
+                                    app.session_picker = Some(SessionPicker::new(
+                                        sessions,
+                                        Some(tool_ctx.location.cwd().to_path_buf()),
+                                    ));
                                 }
                                 SessionSearchAction::Resume(new_session) => {
                                     let blocked = switch_blocked(
@@ -3162,11 +3196,15 @@ mod tests {
         };
 
         let mut app = App::new();
-        app.session_picker = Some(SessionPicker::new(vec![ilar::session::SessionSummary {
-            id: "aaa".into(),
-            title: Some("fix websearch fallback".into()),
-            modified: std::time::SystemTime::now(),
-        }]));
+        app.session_picker = Some(SessionPicker::new(
+            vec![ilar::session::SessionSummary {
+                id: "aaa".into(),
+                title: Some("fix websearch fallback".into()),
+                modified: std::time::SystemTime::now(),
+                workspace: None,
+            }],
+            None,
+        ));
         paste(&mut app, "websearch");
         let picker = app.session_picker.as_mut().expect("picker open");
         assert_eq!(

@@ -1721,6 +1721,33 @@ fn list_returns_root_sessions_most_recent_first_with_titles() {
     );
 }
 
+/// The listing is what the resume surfaces sort by directory, so the
+/// workspace the meta already carries has to survive the summary.
+#[test]
+fn list_summaries_carry_the_recorded_workspace() {
+    let (store, _dir) = temp_store();
+    let workspace_dir = tempfile::tempdir().unwrap();
+    let workspace = ilar::tools::WorkspaceLocation::shared(workspace_dir.path().to_path_buf());
+    let mut recorded = sample_meta();
+    recorded.workspace = Some(workspace.clone());
+    drop(store.create(recorded.clone()).unwrap());
+    // Older logs recorded none; they stay `None` rather than guessing.
+    let bare = sample_meta();
+    drop(store.create(bare.clone()).unwrap());
+
+    let sessions = store.list();
+    let workspace_of = |id: &str| {
+        sessions
+            .iter()
+            .find(|session| session.id == id)
+            .unwrap_or_else(|| panic!("{id} missing from the listing"))
+            .workspace
+            .clone()
+    };
+    assert_eq!(workspace_of(&recorded.session_id), Some(workspace));
+    assert_eq!(workspace_of(&bare.session_id), None);
+}
+
 #[test]
 fn list_titles_are_bounded_and_optional() {
     let (store, _dir) = temp_store();

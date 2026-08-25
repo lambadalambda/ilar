@@ -15,7 +15,8 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::text::{
-    Truncation, format_tokens_compact, fuzzy_score, text_field_view, truncate_display,
+    Truncation, abbreviated_path, format_tokens_compact, fuzzy_score, text_field_view,
+    truncate_display,
 };
 use crate::theme;
 use crate::theme::{ERROR, MUTED};
@@ -1226,6 +1227,11 @@ pub(crate) enum SessionPickerAction {
 
 pub(crate) struct SessionPicker {
     pub(crate) sessions: Vec<ilar::session::SessionSummary>,
+    /// The directory ilar is running in, canonicalized by the caller.
+    /// Sessions started here lead the unfiltered list, so the row the
+    /// picker opens on is where the user left off *here*.
+    cwd: Option<std::path::PathBuf>,
+    home: Option<std::path::PathBuf>,
     query: String,
     pub(crate) nav: ListNav,
     /// Session id armed for deletion; the next Ctrl-D confirms.
@@ -1233,21 +1239,50 @@ pub(crate) struct SessionPicker {
 }
 
 impl SessionPicker {
-    pub(crate) fn new(sessions: Vec<ilar::session::SessionSummary>) -> Self {
+    pub(crate) fn new(
+        sessions: Vec<ilar::session::SessionSummary>,
+        cwd: Option<std::path::PathBuf>,
+    ) -> Self {
         Self {
             sessions,
+            cwd,
+            home: std::env::var_os("HOME").map(std::path::PathBuf::from),
             query: String::new(),
             nav: ListNav::default(),
             pending_delete: None,
         }
     }
 
+    fn workspace_of(session: &ilar::session::SessionSummary) -> Option<&std::path::Path> {
+        session
+            .workspace
+            .as_ref()
+            .map(ilar::tools::WorkspaceLocation::cwd)
+    }
+
+    fn origin(&self, session: &ilar::session::SessionSummary) -> RowOrigin {
+        row_origin(
+            Self::workspace_of(session),
+            self.cwd.as_deref(),
+            self.home.as_deref(),
+        )
+    }
+
     /// Sessions matching the query, best fuzzy score first (stable, so
-    /// equal scores keep recency order).
+    /// equal scores keep recency order). With no query the listing is a
+    /// resume list rather than a search result, so this directory's
+    /// sessions lead it — recency within each group.
     fn filtered(&self) -> Vec<&ilar::session::SessionSummary> {
-        fuzzy_filter(&self.query, self.sessions.iter(), |session| {
+        let matched = fuzzy_filter(&self.query, self.sessions.iter(), |session| {
             format!("{} {}", session.title.as_deref().unwrap_or(""), session.id)
-        })
+        });
+        if self.query.trim().is_empty() {
+            here_first(matched, |session| {
+                workspace_is_here(Self::workspace_of(session), self.cwd.as_deref())
+            })
+        } else {
+            matched
+        }
     }
 
     fn selected_id(&self) -> Option<String> {
@@ -1335,8 +1370,11 @@ pub(crate) struct SearchRow {
     /// Event index of the hit inside its session, shown as an anchor.
     pub(crate) event: usize,
     pub(crate) excerpt: String,
-    /// How long since the session was last written, picker-style.
+    /// When the session was last used, stamped by [`last_used`].
     pub(crate) age: String,
+    /// Whether the session belongs to the directory ilar runs in, and
+    /// which directory it belongs to otherwise.
+    pub(crate) origin: RowOrigin,
     /// (speaker label, text, is-the-hit) around the match, in order.
     pub(crate) context: Vec<(String, String, bool)>,
 }
@@ -1369,6 +1407,11 @@ pub(crate) struct SessionSearch {
     /// are dropped instead of mixing into the new list.
     pub(crate) generation: u64,
     pub(crate) scanning: bool,
+    /// Whether the user has taken the cursor somewhere of their own.
+    /// Until they do, the still-streaming listing may re-order under it
+    /// — the top row is the answer, whichever session that turns out to
+    /// be. Afterwards the cursor follows the row it is on.
+    steered: bool,
 }
 
 impl SessionSearch {
@@ -1381,6 +1424,7 @@ impl SessionSearch {
             // An empty query lists recent sessions, so a scan starts
             // the moment the modal opens.
             scanning: true,
+            steered: false,
         }
     }
 
@@ -1398,12 +1442,40 @@ impl SessionSearch {
 
     /// Accept a batch from the scanner, unless it answers a query the
     /// user has already typed past.
+    ///
+    /// With no query the rows are a resume listing, not search results,
+    /// so this directory's sessions are kept at the top as they arrive
+    /// — the scan streams in recency order, and the partition is stable,
+    /// so each group stays in it. A typed query is ordered by the scan's
+    /// match quality and left exactly as delivered.
+    ///
+    /// Hoisting a late arrival past a cursor the user placed would leave
+    /// the highlight on a different session than the one it was on, so
+    /// once they have steered, the selection follows its row.
     pub(crate) fn push_rows(&mut self, generation: u64, rows: Vec<SearchRow>) {
         if generation != self.generation {
             return;
         }
+        let anchor = self
+            .steered
+            .then(|| {
+                self.selected()
+                    .map(|row| (row.session_id.clone(), row.event))
+            })
+            .flatten();
         let room = MAX_SEARCH_ROWS.saturating_sub(self.rows.len());
         self.rows.extend(rows.into_iter().take(room));
+        if self.query.trim().is_empty() {
+            self.rows = here_first(std::mem::take(&mut self.rows), |row| row.origin.here());
+        }
+        if let Some((session_id, event)) = anchor
+            && let Some(index) = self
+                .rows
+                .iter()
+                .position(|row| row.session_id == session_id && row.event == event)
+        {
+            self.nav.selected = index;
+        }
     }
 
     /// The scan for `generation` has no more rows to deliver.
@@ -1458,12 +1530,19 @@ impl Picker for SessionSearch {
         Some(&mut self.query)
     }
 
+    /// A cursor the user placed is theirs to keep: streamed rows stop
+    /// re-ordering under it.
+    fn on_move(&mut self) {
+        self.steered = true;
+    }
+
     /// Editing the query does not re-filter a list here, it retires
     /// one: the rows on screen answer the old query, and the scan
     /// still delivering them is stamped stale.
     fn on_edit(&mut self) -> Self::Action {
         self.nav.reset();
         self.rows.clear();
+        self.steered = false;
         self.generation += 1;
         // Empty query included: that rescans as the recent-sessions
         // listing.
@@ -1837,6 +1916,118 @@ pub(crate) fn session_age(modified: std::time::SystemTime, now: std::time::Syste
     }
 }
 
+/// When a session was last used, as the resume surfaces stamp it.
+/// Inside a day the distance is what matters ("35m ago"); past that it
+/// stops meaning anything and the date is what identifies the session,
+/// with the year only when it is not this one. `now` is a parameter so
+/// the buckets are the same wherever this is called from — and testable
+/// without a clock.
+pub(crate) fn last_used(modified: std::time::SystemTime, now: std::time::SystemTime) -> String {
+    use chrono::Datelike;
+    let seconds = now.duration_since(modified).unwrap_or_default().as_secs();
+    match seconds {
+        0..=59 => "just now".into(),
+        60..=3_599 => format!("{}m ago", seconds / 60),
+        3_600..=86_399 => format!("{}h ago", seconds / 3_600),
+        _ => {
+            let when = chrono::DateTime::<chrono::Local>::from(modified);
+            if when.year() == chrono::DateTime::<chrono::Local>::from(now).year() {
+                when.format("%b %-d").to_string().to_lowercase()
+            } else {
+                when.format("%Y-%m-%d").to_string()
+            }
+        }
+    }
+}
+
+/// Where a listed session was last used, relative to where ilar is
+/// running now. Only rows that are `Here` lead the unfiltered listing;
+/// everything else is marked with its directory, when it recorded one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RowOrigin {
+    /// The directory ilar is running in — the row needs no marker,
+    /// because it is where the user already is.
+    Here,
+    /// Another directory, abbreviated for display; `None` for sessions
+    /// written before the workspace was recorded.
+    Elsewhere(Option<String>),
+}
+
+impl Default for RowOrigin {
+    /// Knowing nothing is knowing it is not this directory.
+    fn default() -> Self {
+        Self::Elsewhere(None)
+    }
+}
+
+impl RowOrigin {
+    fn here(&self) -> bool {
+        matches!(self, Self::Here)
+    }
+
+    fn directory(&self) -> Option<&str> {
+        match self {
+            Self::Here => None,
+            Self::Elsewhere(directory) => directory.as_deref(),
+        }
+    }
+}
+
+/// Whether a session belongs to the directory ilar runs in. The
+/// comparison is exact: both paths are canonical (the recorded
+/// workspace was canonicalized when it was written, and so was the cwd
+/// the caller passes), so a subdirectory of this checkout is another
+/// directory, not this one. A session that recorded no workspace is
+/// never here — the ordering says so, without a path to show for it.
+pub(crate) fn workspace_is_here(
+    workspace: Option<&std::path::Path>,
+    cwd: Option<&std::path::Path>,
+) -> bool {
+    matches!((workspace, cwd), (Some(workspace), Some(cwd)) if workspace == cwd)
+}
+
+/// Classify one row's workspace against the directory ilar runs in,
+/// abbreviating the directory it will be marked with when it is not
+/// this one. Sorting asks [`workspace_is_here`] instead: it needs the
+/// verdict, not the label.
+pub(crate) fn row_origin(
+    workspace: Option<&std::path::Path>,
+    cwd: Option<&std::path::Path>,
+    home: Option<&std::path::Path>,
+) -> RowOrigin {
+    if workspace_is_here(workspace, cwd) {
+        RowOrigin::Here
+    } else {
+        RowOrigin::Elsewhere(workspace.map(|workspace| abbreviated_path(workspace, home)))
+    }
+}
+
+/// "This directory first", stably: the rows from here keep their
+/// order — recency, as the listing delivered it — and the rest follow
+/// in theirs.
+fn here_first<T>(rows: Vec<T>, here: impl Fn(&T) -> bool) -> Vec<T> {
+    let (mine, others): (Vec<T>, Vec<T>) = rows.into_iter().partition(here);
+    mine.into_iter().chain(others).collect()
+}
+
+/// The right-hand column of a resume row: when the session was last
+/// used, behind its directory when that is not the one ilar runs in.
+/// The directory gets at most a third of the row and is truncated in
+/// the middle, which keeps the leaf — the part that names the project.
+/// Under that it is dropped rather than shrunk further: the column
+/// dates the row first and places it second, and a row too narrow for
+/// both keeps the date.
+fn resume_column(origin: &RowOrigin, stamp: &str, width: usize) -> String {
+    let budget = (width / 3).min(28);
+    match origin.directory().filter(|_| budget >= 8) {
+        Some(directory) => format!(
+            "· {} {stamp}",
+            truncate_display(directory, budget, Truncation::Middle)
+        ),
+        None => stamp.to_string(),
+    }
+}
+
 pub(crate) fn render_session_picker(frame: &mut Frame, picker: &SessionPicker) -> ModalHit {
     let area = centered_rect(frame.area(), 72, 16);
     let footer = if area.width < 44 {
@@ -1875,7 +2066,11 @@ pub(crate) fn render_session_picker(frame: &mut Frame, picker: &SessionPicker) -
             let age = if armed {
                 "^D deletes".to_string()
             } else {
-                session_age(session.modified, now)
+                resume_column(
+                    &picker.origin(session),
+                    &last_used(session.modified, now),
+                    width,
+                )
             };
             let title = session.title.as_deref().unwrap_or("(no messages yet)");
             let label_width = width
@@ -2065,11 +2260,13 @@ pub(crate) fn render_session_search(frame: &mut Frame, search: &SessionSearch) -
         let row = &search.rows[index];
         let marker = if index == selected { "> " } else { "  " };
         // The title gets a bounded column so the excerpt always shows;
-        // the age keeps the right edge.
+        // the stamp — behind the directory, for rows from elsewhere —
+        // keeps the right edge.
         let title_width = (width / 3).clamp(8, 28);
         let title = truncate_display(&row.title, title_width, Truncation::Right);
         let lead = format!("{marker}{title}: ");
-        let age_width = UnicodeWidthStr::width(row.age.as_str());
+        let age = resume_column(&row.origin, &row.age, width);
+        let age_width = UnicodeWidthStr::width(age.as_str());
         let excerpt_budget = width
             .saturating_sub(UnicodeWidthStr::width(lead.as_str()))
             .saturating_sub(age_width + 1);
@@ -2078,7 +2275,7 @@ pub(crate) fn render_session_search(frame: &mut Frame, search: &SessionSearch) -
         let line = if index == selected {
             // The bar owns the row; per-span colours would fight it.
             Line::styled(
-                format!("{lead}{excerpt}{}{}", " ".repeat(pad), row.age),
+                format!("{lead}{excerpt}{}{age}", " ".repeat(pad)),
                 theme::selected(),
             )
         } else {
@@ -2093,7 +2290,7 @@ pub(crate) fn render_session_search(frame: &mut Frame, search: &SessionSearch) -
                 theme::title(theme::MARKUP),
             ));
             spans.push(Span::raw(" ".repeat(pad)));
-            spans.push(Span::styled(row.age.clone(), Style::default().fg(MUTED)));
+            spans.push(Span::styled(age, Style::default().fg(MUTED)));
             Line::from(spans)
         };
         body.push(line, Some(index));
@@ -2912,6 +3109,21 @@ mod tests {
         }
     }
 
+    /// One listing entry, the shape both resume surfaces are fed.
+    fn summary(
+        id: &str,
+        title: Option<&str>,
+        modified: std::time::SystemTime,
+        workspace: Option<ilar::tools::WorkspaceLocation>,
+    ) -> ilar::session::SessionSummary {
+        ilar::session::SessionSummary {
+            id: id.into(),
+            title: title.map(str::to_string),
+            modified,
+            workspace,
+        }
+    }
+
     fn meta_event() -> ilar::session::SessionEvent {
         ilar::session::SessionEvent::Meta {
             meta: ilar::session::SessionMeta {
@@ -3124,11 +3336,10 @@ mod tests {
     #[test]
     fn pasting_appends_to_the_query_of_every_filterable_picker() {
         let now = std::time::SystemTime::now();
-        let mut session = SessionPicker::new(vec![ilar::session::SessionSummary {
-            id: "aaa".into(),
-            title: Some("fix websearch fallback".into()),
-            modified: now,
-        }]);
+        let mut session = SessionPicker::new(
+            vec![summary("aaa", Some("fix websearch fallback"), now, None)],
+            None,
+        );
         // Armed for deletion, then filtered: disarmed, like a keystroke.
         session.handle_key(KeyCode::Char('d'), true);
         session.insert_query("web");
@@ -3260,7 +3471,7 @@ mod tests {
     /// to strand the base character.
     #[test]
     fn query_backspace_removes_whole_graphemes_in_every_picker() {
-        let mut session = SessionPicker::new(Vec::new());
+        let mut session = SessionPicker::new(Vec::new(), None);
         session.handle_key(KeyCode::Char('e'), false);
         session.handle_key(KeyCode::Char('\u{301}'), false);
         assert_eq!(session.query, "e\u{301}");
@@ -3476,18 +3687,15 @@ mod tests {
     fn session_picker_navigates_and_chooses() {
         let now = std::time::SystemTime::now();
         let sessions = vec![
-            ilar::session::SessionSummary {
-                id: "recent".into(),
-                title: Some("latest work".into()),
-                modified: now,
-            },
-            ilar::session::SessionSummary {
-                id: "older".into(),
-                title: None,
-                modified: now - std::time::Duration::from_secs(3_600),
-            },
+            summary("recent", Some("latest work"), now, None),
+            summary(
+                "older",
+                None,
+                now - std::time::Duration::from_secs(3_600),
+                None,
+            ),
         ];
-        let mut picker = SessionPicker::new(sessions);
+        let mut picker = SessionPicker::new(sessions, None);
         assert_eq!(
             picker.handle_key(KeyCode::Down, false),
             SessionPickerAction::Stay
@@ -3506,7 +3714,7 @@ mod tests {
             SessionPickerAction::Dismiss
         );
 
-        let mut empty = SessionPicker::new(Vec::new());
+        let mut empty = SessionPicker::new(Vec::new(), None);
         assert_eq!(
             empty.handle_key(KeyCode::Enter, false),
             SessionPickerAction::Stay,
@@ -3517,16 +3725,15 @@ mod tests {
     #[test]
     fn session_picker_fuzzy_filters_and_arms_deletion() {
         let now = std::time::SystemTime::now();
-        let session = |id: &str, title: &str| ilar::session::SessionSummary {
-            id: id.into(),
-            title: Some(title.into()),
-            modified: now,
-        };
-        let mut picker = SessionPicker::new(vec![
-            session("aaa", "fix websearch fallback"),
-            session("bbb", "voxel pagoda benchmark"),
-            session("ccc", "readline editing chords"),
-        ]);
+        let session = |id: &str, title: &str| summary(id, Some(title), now, None);
+        let mut picker = SessionPicker::new(
+            vec![
+                session("aaa", "fix websearch fallback"),
+                session("bbb", "voxel pagoda benchmark"),
+                session("ccc", "readline editing chords"),
+            ],
+            None,
+        );
         // fzf-style: subsequence, not substring.
         for character in "vxl".chars() {
             picker.handle_key(KeyCode::Char(character), false);
@@ -3580,6 +3787,141 @@ mod tests {
         assert_eq!(
             session_age(now + std::time::Duration::from_secs(60), now),
             "now"
+        );
+    }
+
+    /// The stamp both resume surfaces put on every row. The reference
+    /// time is an argument, so the buckets read the same on every
+    /// machine and at every hour of the day.
+    #[test]
+    fn last_used_is_relative_within_a_day_and_a_date_beyond() {
+        use chrono::TimeZone;
+        let local = |year, month, day, hour| {
+            std::time::SystemTime::from(
+                chrono::Local
+                    .with_ymd_and_hms(year, month, day, hour, 0, 0)
+                    .single()
+                    .expect("an unambiguous local time"),
+            )
+        };
+        let now = local(2026, 8, 19, 12);
+        let ago = |seconds: u64| now - std::time::Duration::from_secs(seconds);
+        assert_eq!(last_used(ago(20), now), "just now");
+        assert_eq!(last_used(ago(35 * 60), now), "35m ago");
+        assert_eq!(last_used(ago(2 * 3_600), now), "2h ago");
+        assert_eq!(last_used(ago(23 * 3_600), now), "23h ago");
+        // Past a day the relative form stops meaning anything: a date,
+        // with the year only when it is not this one.
+        assert_eq!(last_used(local(2026, 8, 12, 9), now), "aug 12");
+        assert_eq!(last_used(local(2024, 11, 3, 9), now), "2024-11-03");
+        // Clock skew (a session written "in the future") must not panic.
+        assert_eq!(
+            last_used(now + std::time::Duration::from_secs(60), now),
+            "just now"
+        );
+    }
+
+    /// Where a session was last used, relative to where ilar runs now:
+    /// only the same directory is "here", $HOME collapses to `~`, and a
+    /// session that recorded no workspace is elsewhere with nothing to
+    /// show for it.
+    #[test]
+    fn row_origin_marks_every_directory_but_this_one() {
+        let path = std::path::Path::new;
+        let home = path("/home/dev");
+        let here = path("/home/dev/repos/ilar");
+        assert_eq!(
+            row_origin(Some(here), Some(here), Some(home)),
+            RowOrigin::Here
+        );
+        assert_eq!(
+            row_origin(Some(path("/home/dev/repos/foo")), Some(here), Some(home)),
+            RowOrigin::Elsewhere(Some("~/repos/foo".into()))
+        );
+        // A subdirectory of this one is another directory, not this one.
+        assert_eq!(
+            row_origin(
+                Some(path("/home/dev/repos/ilar/crates")),
+                Some(here),
+                Some(home)
+            ),
+            RowOrigin::Elsewhere(Some("~/repos/ilar/crates".into()))
+        );
+        assert_eq!(
+            row_origin(Some(path("/srv/build")), Some(here), None),
+            RowOrigin::Elsewhere(Some("/srv/build".into()))
+        );
+        // Older logs recorded nothing; they group with "elsewhere".
+        assert_eq!(
+            row_origin(None, Some(here), Some(home)),
+            RowOrigin::Elsewhere(None)
+        );
+    }
+
+    /// The acceptance case: the newest session belongs to another
+    /// directory, so the top row — and the initial selection — is this
+    /// directory's older one, stamped with when it was last used.
+    #[test]
+    fn the_session_picker_leads_with_this_directorys_last_session() {
+        let here_dir = tempfile::tempdir().unwrap();
+        let there_dir = tempfile::tempdir().unwrap();
+        let here = ilar::tools::WorkspaceLocation::shared(here_dir.path().to_path_buf());
+        let there = ilar::tools::WorkspaceLocation::shared(there_dir.path().to_path_buf());
+        let now = std::time::SystemTime::now();
+        let ago = |seconds: u64| now - std::time::Duration::from_secs(seconds);
+        let mut picker = SessionPicker::new(
+            vec![
+                summary("newer", Some("other project work"), ago(600), Some(there)),
+                summary("legacy", Some("no workspace recorded"), ago(900), None),
+                summary(
+                    "older",
+                    Some("work in this repo"),
+                    ago(7_200),
+                    Some(here.clone()),
+                ),
+            ],
+            Some(here.cwd().to_path_buf()),
+        );
+
+        let (screen, _) = draw_modal(80, 20, |frame| render_session_picker(frame, &picker));
+        let line_of = |needle: &str| {
+            screen
+                .lines()
+                .position(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("{needle} is missing from:\n{screen}"))
+        };
+        let leading = line_of("work in this repo");
+        assert!(leading < line_of("other project work"), "{screen}");
+        assert!(leading < line_of("no workspace recorded"), "{screen}");
+        let row = screen.lines().nth(leading).unwrap();
+        assert!(row.contains("> work in this repo"), "{row}");
+        assert!(row.contains("2h ago"), "{row}");
+        assert!(
+            !row.contains('·'),
+            "the directory ilar runs in needs no suffix: {row}"
+        );
+        // Rows from elsewhere say where they are from.
+        assert!(
+            screen
+                .lines()
+                .nth(line_of("other project work"))
+                .unwrap()
+                .contains('·'),
+            "{screen}"
+        );
+        // Enter resumes the row the picker opened on.
+        assert_eq!(
+            picker.handle_key(KeyCode::Enter, false),
+            SessionPickerAction::Resume("older".into())
+        );
+
+        // A typed query is ordered by match quality, as it always was.
+        for character in "project".chars() {
+            picker.handle_key(KeyCode::Char(character), false);
+        }
+        assert_eq!(
+            picker.handle_key(KeyCode::Enter, false),
+            SessionPickerAction::Resume("newer".into())
         );
     }
 
@@ -3873,15 +4215,14 @@ mod tests {
     #[test]
     fn session_picker_renders_armed_deletion_and_click_map() {
         let now = std::time::SystemTime::now();
-        let session = |id: &str, title: &str| ilar::session::SessionSummary {
-            id: id.into(),
-            title: Some(title.into()),
-            modified: now,
-        };
-        let mut picker = SessionPicker::new(vec![
-            session("aaa", "fix websearch fallback"),
-            session("bbb", "voxel pagoda benchmark"),
-        ]);
+        let session = |id: &str, title: &str| summary(id, Some(title), now, None);
+        let mut picker = SessionPicker::new(
+            vec![
+                session("aaa", "fix websearch fallback"),
+                session("bbb", "voxel pagoda benchmark"),
+            ],
+            None,
+        );
 
         let (screen, hit) = draw_modal(80, 20, |frame| render_session_picker(frame, &picker));
         assert!(screen.contains("sessions"), "{screen}");
@@ -3912,11 +4253,108 @@ mod tests {
             event: 7,
             excerpt: excerpt.into(),
             age: "3d".into(),
+            origin: RowOrigin::default(),
             context: vec![
                 ("user".into(), "before the hit".into(), false),
                 ("assistant".into(), context_line.into(), true),
             ],
         }
+    }
+
+    /// The same directory-first rule in the two-pane search: with no
+    /// query the listing is a resume list, so this directory leads it —
+    /// and typing hands the ordering back to the scan's match quality.
+    #[test]
+    fn the_session_search_listing_leads_with_this_directory() {
+        let elsewhere = SearchRow {
+            age: "10m ago".into(),
+            origin: RowOrigin::Elsewhere(Some("~/repos/other".into())),
+            ..search_row("newer", "other project", "last thing said", "ctx")
+        };
+        let here = SearchRow {
+            age: "2h ago".into(),
+            origin: RowOrigin::Here,
+            ..search_row("older", "this repo", "where we left off", "ctx")
+        };
+
+        let mut listing = SessionSearch::new();
+        listing.push_rows(0, vec![elsewhere.clone(), here.clone()]);
+        assert_eq!(
+            listing.selected().map(|row| row.session_id.as_str()),
+            Some("older"),
+            "the listing opened on another directory's session"
+        );
+        let (screen, _) = draw_modal(120, 24, |frame| render_session_search(frame, &listing));
+        let line_of = |needle: &str| {
+            screen
+                .lines()
+                .position(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("{needle} is missing from:\n{screen}"))
+        };
+        assert!(line_of("this repo") < line_of("other project"), "{screen}");
+        assert!(screen.contains("2h ago"), "{screen}");
+        assert!(screen.contains("~/repos/other"), "{screen}");
+
+        // A typed query keeps the order the scan delivered.
+        let mut typed = SessionSearch::new();
+        typed.query = "needle".into();
+        typed.push_rows(0, vec![elsewhere, here]);
+        assert_eq!(
+            typed.selected().map(|row| row.session_id.as_str()),
+            Some("newer")
+        );
+    }
+
+    /// The listing streams in while the user is already moving through
+    /// it. Rows hoisted by a later batch must not slide the highlight
+    /// onto a session the user never selected.
+    #[test]
+    fn a_batch_arriving_mid_scan_keeps_the_cursor_on_its_row() {
+        let elsewhere = |id: &str| SearchRow {
+            origin: RowOrigin::Elsewhere(Some("~/repos/other".into())),
+            ..search_row(id, "other project", "last thing said", "ctx")
+        };
+        let mut search = SessionSearch::new();
+        search.push_rows(0, vec![elsewhere("first"), elsewhere("second")]);
+        search.move_selection(1);
+        assert_eq!(
+            search.selected().map(|row| row.session_id.as_str()),
+            Some("second")
+        );
+
+        // A session from this directory arrives and leads the list; the
+        // cursor stays on the row it was put on.
+        search.push_rows(
+            0,
+            vec![SearchRow {
+                origin: RowOrigin::Here,
+                ..search_row("here", "this repo", "where we left off", "ctx")
+            }],
+        );
+        assert_eq!(
+            search.rows.first().map(|row| row.session_id.as_str()),
+            Some("here")
+        );
+        assert_eq!(
+            search.selected().map(|row| row.session_id.as_str()),
+            Some("second")
+        );
+
+        // Untouched, the cursor is not a choice: it keeps the top row,
+        // whichever session the scan turns out to lead with.
+        let mut opening = SessionSearch::new();
+        opening.push_rows(0, vec![elsewhere("first")]);
+        opening.push_rows(
+            0,
+            vec![SearchRow {
+                origin: RowOrigin::Here,
+                ..search_row("here", "this repo", "where we left off", "ctx")
+            }],
+        );
+        assert_eq!(
+            opening.selected().map(|row| row.session_id.as_str()),
+            Some("here")
+        );
     }
 
     #[test]

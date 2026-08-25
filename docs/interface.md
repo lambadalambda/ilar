@@ -105,16 +105,20 @@ cache, and a newer `/btw` replaces a still-running one.
 `/sessions` (or the palette's "Switch session", or just Ctrl-P → Enter)
 opens a two-pane grep over every session you have:
 
-- **Empty query**: your sessions newest-first — topic, age, and the
-  last words said — with the tail of the conversation previewed on the
-  right. A session picker, in other words.
+- **Empty query**: your sessions with the ones from the directory
+  you are in first, newest-first within each group — topic, last words
+  said, and when it was last used ("2h ago" inside a day, "aug 12"
+  beyond), with the tail of the conversation previewed on the right.
+  So the row you open on is where you left off *here*; sessions from
+  elsewhere follow, marked with their directory (`· ~/repos/foo`).
 - **Type anything**: rows become content matches from *every* session's
   full history, compacted-away material included; the preview shows
   each match in its surrounding conversation. Find a session by an
   error string you half-remember from its middle.
 - **Enter** resumes the selected session at its tail. **`^G`** switches
-  to the classic list picker, which is where title filtering, delete
-  (`^D` twice) and fork (`^Y`) live.
+  to the classic list picker, which orders and stamps its rows the same
+  way, and is where title filtering, delete (`^D` twice) and fork
+  (`^Y`) live.
 
 ## Session topics and the window title
 
