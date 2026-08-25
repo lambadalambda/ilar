@@ -13,7 +13,6 @@ use ratatui::style::Color;
 use ilar::agent::{LoopEvent, TurnOutcome};
 use ilar::session::SessionStore;
 
-use crate::diff;
 use crate::input::{InputBuffer, slash_candidates};
 use crate::modals::{
     AsideModal, CommandPalette, LinkPicker, Modal, ModelPicker, PaletteAction, PaletteCommand,
@@ -29,10 +28,13 @@ use crate::session_view::{
     tool_notification_display,
 };
 use crate::sidebar::AgentRow;
-use crate::text::{bounded_detail, cache_share, format_cost, safe_text};
+use crate::text::{cache_share, format_cost, safe_text};
 use crate::transcript::{
-    Line_, ToolKind, ToolProgress, ToolState, TranscriptHitTarget, TranscriptRenderCache,
-    append_thought_tail, apply_subagent_activity, toggle_tool_expansion, transcript_markdown,
+    Line_, ToolState, TranscriptHitTarget, TranscriptRenderCache, append_text_delta,
+    append_thought_delta, apply_subagent_activity, complete_open_thought, complete_tool_execution,
+    complete_tool_input, configure_subagent_row, finish_tool_row, note_tool_input_progress,
+    prune_incomplete_thoughts, push_tool_row, set_tool_arguments, set_tool_tail,
+    start_tool_execution, toggle_tool_expansion, transcript_markdown,
 };
 use crate::{Activity, MAX_GOAL_ROUNDS, NoticeLevel, history, theme};
 
@@ -618,32 +620,31 @@ impl App {
         store: &SessionStore,
     ) {
         let restored = restored_session_view_with_store(session, store);
+        let from = self.lines.len();
         self.lines.extend(restored.lines);
         self.latest_usage = restored.latest_usage;
         self.session_usage = restored.total_usage;
         self.session_cost = restored.total_cost;
+        self.touch_transcript(Some(from));
+    }
+
+    /// Record a transcript change: bump the revision, and tell the
+    /// render cache the lowest line index whose rows may have moved so
+    /// it can leave the rest alone. `None` means no line changed.
+    fn touch_transcript(&mut self, from: Option<usize>) {
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
+        self.transcript_cache
+            .mark_dirty_from(from.unwrap_or(usize::MAX), self.transcript_revision);
+    }
+
+    /// The same, for edits whose extent we do not track — the whole
+    /// transcript re-renders.
+    fn touch_whole_transcript(&mut self) {
+        self.touch_transcript(Some(0));
     }
 
     fn allocate_thought_id(&mut self) -> String {
-        self.next_thought = self.next_thought.wrapping_add(1);
-        format!("thought:{}", self.next_thought)
-    }
-
-    /// Mark any open thought complete (its phase ended: content or tools
-    /// started arriving).
-    fn close_open_thought(&mut self) {
-        if let Some(Line_::Thought { complete, .. }) = self.lines.iter_mut().rev().find(|line| {
-            matches!(
-                line,
-                Line_::Thought {
-                    complete: false,
-                    ..
-                }
-            )
-        }) {
-            *complete = true;
-        }
+        next_thought_id(&mut self.next_thought)
     }
 
     fn note_stream_data(&mut self, bytes: usize) {
@@ -671,11 +672,11 @@ impl App {
 
     pub(crate) fn push_transcript_line(&mut self, line: Line_) {
         self.lines.push(line);
-        self.transcript_revision = self.transcript_revision.wrapping_add(1);
+        self.touch_transcript(Some(self.lines.len() - 1));
     }
 
     pub(crate) fn push_notification(&mut self, description: &str, text: &str) {
-        self.transcript_revision = self.transcript_revision.wrapping_add(1);
+        let from = self.lines.len();
         if let Some(text) = task_notification_display(text) {
             let id = self.allocate_thought_id();
             self.lines.push(Line_::Task {
@@ -695,6 +696,7 @@ impl App {
                 .push(Line_::System(format!("task notification: {description}")));
             self.lines.push(Line_::User(text.to_string()));
         }
+        self.touch_transcript(Some(from));
     }
 
     /// A `/btw` came back. `Ok(None)` is an abandoned aside — cancelled
@@ -729,7 +731,17 @@ impl App {
         {
             self.notice = None;
         }
-        self.transcript_revision = self.transcript_revision.wrapping_add(1);
+        let touched = self.apply_loop_event(event);
+        self.touch_transcript(touched);
+    }
+
+    /// Fold a loop event into the transcript and the session status it
+    /// implies. The model edits themselves live in `transcript`, shared
+    /// with the nested timeline under an agent row; what is left here is
+    /// this session's own business — status text, notices, stream
+    /// accounting. Returns the lowest line index whose rendering
+    /// changed, so the render cache can leave everything above it alone.
+    fn apply_loop_event(&mut self, event: &LoopEvent) -> Option<usize> {
         match event {
             // Shown when the loop delivers it, not when it was typed —
             // the transcript reflects what the model actually saw.
@@ -737,8 +749,9 @@ impl App {
                 if let Some(index) = self.pending_steers.iter().position(|held| held == text) {
                     self.pending_steers.remove(index);
                 }
-                self.push_transcript_line(Line_::User(text.clone()));
+                self.lines.push(Line_::User(text.clone()));
                 self.follow_tail = true;
+                Some(self.lines.len() - 1)
             }
             LoopEvent::TurnStarted => {
                 self.turn_committed = true;
@@ -753,226 +766,73 @@ impl App {
                 // instead of a bare spinner.
                 self.stream_last_data = Some(std::time::Instant::now());
                 self.set_activity(Activity::Thinking);
+                None
             }
             LoopEvent::TextDelta(t) => {
                 self.note_stream_data(t.len());
-                self.close_open_thought();
+                let closed = complete_open_thought(&mut self.lines);
                 self.status = "responding".into();
                 self.set_activity(Activity::Responding);
-                match self.lines.last_mut() {
-                    Some(Line_::Assistant(text)) => text.push_str(t),
-                    _ => self.lines.push(Line_::Assistant(t.clone())),
-                }
+                let appended = append_text_delta(&mut self.lines, t);
+                Some(closed.unwrap_or(appended))
             }
             LoopEvent::ThinkingDelta(delta) => {
                 self.note_stream_data(delta.len());
                 // Raw thinking accumulates into an expandable Thought line
                 // (bounded to a tail) so the user can watch it live.
-                match self.lines.last_mut() {
-                    Some(Line_::Thought {
-                        text,
-                        complete: false,
-                        ..
-                    }) => append_thought_tail(text, delta),
-                    _ => {
-                        let id = self.allocate_thought_id();
-                        self.lines.push(Line_::Thought {
-                            id,
-                            text: delta.clone(),
-                            complete: false,
-                            expanded: false,
-                        });
-                    }
-                }
+                let next = &mut self.next_thought;
+                let index = append_thought_delta(&mut self.lines, delta, || next_thought_id(next));
                 self.status = "thinking".into();
                 self.set_activity(Activity::Thinking);
+                Some(index)
             }
             LoopEvent::ReasoningSummaryDelta(summary) => {
                 self.note_stream_data(summary.len());
                 self.status = "thinking".into();
                 self.set_activity(Activity::Thinking);
-                match self.lines.last_mut() {
-                    Some(Line_::Thought {
-                        text,
-                        complete: false,
-                        ..
-                    }) => append_thought_tail(text, summary),
-                    _ => {
-                        let id = self.allocate_thought_id();
-                        self.lines.push(Line_::Thought {
-                            id,
-                            text: summary.clone(),
-                            complete: false,
-                            expanded: false,
-                        });
-                    }
-                }
+                let next = &mut self.next_thought;
+                Some(append_thought_delta(&mut self.lines, summary, || {
+                    next_thought_id(next)
+                }))
             }
-            LoopEvent::ReasoningSummaryCompleted => {
-                if let Some(complete) = self.lines.iter_mut().rev().find_map(|line| match line {
-                    Line_::Thought { complete, .. } if !*complete => Some(complete),
-                    _ => None,
-                }) {
-                    *complete = true;
-                }
-            }
+            LoopEvent::ReasoningSummaryCompleted => complete_open_thought(&mut self.lines),
             LoopEvent::ToolStarted { id, name } => {
-                self.close_open_thought();
-                self.lines.push(Line_::Tool {
-                    id: id.clone(),
-                    group_id: format!("live:{}", self.next_tool_group),
-                    name: name.clone(),
-                    kind: ToolKind::Tool,
-                    arguments: String::new(),
-                    argument_detail: String::new(),
-                    diff: Vec::new(),
-                    tail: String::new(),
-                    result: None,
-                    state: ToolState::Running,
-                    progress: ToolProgress::None,
-                    expanded: false,
-                    full: false,
-                    child_lines: Vec::new(),
-                    child_group: 0,
-                    child_running: false,
-                    child_session_id: None,
-                });
+                let closed = complete_open_thought(&mut self.lines);
+                let group = format!("live:{}", self.next_tool_group);
+                let started = push_tool_row(&mut self.lines, id, group, name);
                 self.status = format!("running {name}");
                 self.set_activity(Activity::Tools);
+                Some(closed.unwrap_or(started))
             }
             LoopEvent::ToolArguments {
                 id,
                 arguments: summary,
-            } => {
-                if let Some(arguments) = self.lines.iter_mut().rev().find_map(|line| match line {
-                    Line_::Tool {
-                        id: line_id,
-                        arguments,
-                        ..
-                    } if line_id == id => Some(arguments),
-                    _ => None,
-                }) {
-                    *arguments = summary.clone();
-                }
-            }
+            } => set_tool_arguments(&mut self.lines, id, summary),
             LoopEvent::ToolInputProgress {
                 id,
                 received_bytes,
                 last_data,
             } => {
                 self.stream_last_data = Some(*last_data);
-                if let Some(progress) = self.lines.iter_mut().rev().find_map(|line| match line {
-                    Line_::Tool {
-                        id: line_id,
-                        state: ToolState::Running,
-                        progress,
-                        ..
-                    } if line_id == id => Some(progress),
-                    _ => None,
-                }) && !matches!(
-                    progress,
-                    ToolProgress::Queued | ToolProgress::Executing { .. }
-                ) {
-                    *progress = ToolProgress::Receiving {
-                        received_bytes: *received_bytes,
-                        last_data: *last_data,
-                    };
-                }
+                note_tool_input_progress(&mut self.lines, id, *received_bytes, *last_data)
             }
             LoopEvent::ToolInputComplete { id, arguments } => {
-                if let Some((name, progress, detail, diff)) =
-                    self.lines.iter_mut().rev().find_map(|line| match line {
-                        Line_::Tool {
-                            id: line_id,
-                            name,
-                            state: ToolState::Running,
-                            progress,
-                            argument_detail,
-                            diff,
-                            ..
-                        } if line_id == id => Some((name, progress, argument_detail, diff)),
-                        _ => None,
-                    })
-                {
-                    *progress = ToolProgress::Queued;
-                    *detail = bounded_detail(arguments);
-                    *diff = diff::tool_diff(name, arguments);
-                }
+                complete_tool_input(&mut self.lines, id, arguments)
             }
             LoopEvent::SubagentConfigured {
                 id,
                 description,
                 agent,
                 model,
-            } => {
-                if let Some((kind, arguments)) =
-                    self.lines.iter_mut().rev().find_map(|line| match line {
-                        Line_::Tool {
-                            id: line_id,
-                            kind,
-                            arguments,
-                            ..
-                        } if line_id == id => Some((kind, arguments)),
-                        _ => None,
-                    })
-                {
-                    *kind = ToolKind::Agent {
-                        name: agent.clone(),
-                        model: model.clone(),
-                    };
-                    *arguments = description.clone();
-                }
-            }
+            } => configure_subagent_row(&mut self.lines, id, agent, model, description),
             LoopEvent::ToolExecutionStarted {
                 id,
                 received_bytes,
                 started,
-            } => {
-                if let Some(progress) = self.lines.iter_mut().rev().find_map(|line| match line {
-                    Line_::Tool {
-                        id: line_id,
-                        state: ToolState::Running,
-                        progress,
-                        ..
-                    } if line_id == id => Some(progress),
-                    _ => None,
-                }) {
-                    *progress = ToolProgress::Executing {
-                        received_bytes: *received_bytes,
-                        started: *started,
-                    };
-                }
-            }
-            LoopEvent::ToolOutputTail { id, tail } => {
-                if let Some(current) = self.lines.iter_mut().rev().find_map(|line| match line {
-                    Line_::Tool {
-                        id: line_id,
-                        state: ToolState::Running,
-                        tail,
-                        ..
-                    } if line_id == id => Some(tail),
-                    _ => None,
-                }) {
-                    *current = tail.clone();
-                }
-            }
+            } => start_tool_execution(&mut self.lines, id, *received_bytes, *started),
+            LoopEvent::ToolOutputTail { id, tail } => set_tool_tail(&mut self.lines, id, tail),
             LoopEvent::ToolExecutionCompleted { id } => {
-                if let Some((state, progress)) =
-                    self.lines.iter_mut().rev().find_map(|line| match line {
-                        Line_::Tool {
-                            id: line_id,
-                            state,
-                            progress,
-                            ..
-                        } if line_id == id && *state == ToolState::Running => {
-                            Some((state, progress))
-                        }
-                        _ => None,
-                    })
-                {
-                    *state = ToolState::Complete;
-                    *progress = ToolProgress::None;
-                }
+                complete_tool_execution(&mut self.lines, id)
             }
             LoopEvent::ToolFinished {
                 id,
@@ -981,59 +841,16 @@ impl App {
                 result,
                 child_session_id,
             } => {
-                let mut matched = false;
-                if let Some((state, progress, stored_result, stored_child_session)) =
-                    self.lines.iter_mut().rev().find_map(|line| match line {
-                        Line_::Tool {
-                            id: line_id,
-                            state,
-                            progress,
-                            result,
-                            child_session_id,
-                            ..
-                        } if line_id == id
-                            && matches!(*state, ToolState::Running | ToolState::Complete) =>
-                        {
-                            Some((state, progress, result, child_session_id))
-                        }
-                        _ => None,
-                    })
-                {
-                    *state = if *is_error {
-                        ToolState::Failed
-                    } else {
-                        ToolState::Succeeded
-                    };
-                    *progress = ToolProgress::None;
-                    *stored_result = Some(bounded_detail(result));
-                    *stored_child_session = child_session_id.clone();
-                    matched = true;
-                }
-                if !matched {
-                    self.lines.push(Line_::Tool {
-                        id: id.clone(),
-                        group_id: format!("live:{}", self.next_tool_group),
-                        name: name.clone(),
-                        kind: ToolKind::Tool,
-                        arguments: String::new(),
-                        argument_detail: String::new(),
-                        diff: Vec::new(),
-                        tail: String::new(),
-                        result: Some(bounded_detail(result)),
-                        state: if *is_error {
-                            ToolState::Failed
-                        } else {
-                            ToolState::Succeeded
-                        },
-                        progress: ToolProgress::None,
-                        expanded: false,
-                        full: false,
-                        child_lines: Vec::new(),
-                        child_group: 0,
-                        child_running: false,
-                        child_session_id: child_session_id.clone(),
-                    });
-                }
+                let finished =
+                    finish_tool_row(&mut self.lines, id, *is_error, result, child_session_id);
+                let touched = finished.unwrap_or_else(|| {
+                    // A result for a call whose row never arrived still
+                    // has to land somewhere.
+                    let group = format!("live:{}", self.next_tool_group);
+                    let index = push_tool_row(&mut self.lines, id, group, name);
+                    finish_tool_row(&mut self.lines, id, *is_error, result, child_session_id);
+                    index
+                });
                 let running = self
                     .lines
                     .iter()
@@ -1055,6 +872,7 @@ impl App {
                 if running == 0 {
                     self.set_activity(Activity::Thinking);
                 }
+                Some(touched)
             }
             LoopEvent::ProviderRetry {
                 attempt,
@@ -1068,6 +886,7 @@ impl App {
                     format!("provider retry: {error} — in {delay:?}"),
                     NoticeLevel::Warning,
                 );
+                None
             }
             LoopEvent::StepComplete { stop_reason, usage } => {
                 self.stream_step_base = self.stream_received;
@@ -1093,6 +912,7 @@ impl App {
                     usage.output_tokens,
                     Self::cache_hit_display(usage)
                 );
+                None
             }
             LoopEvent::Compacted {
                 context_tokens,
@@ -1102,13 +922,15 @@ impl App {
                 self.context_estimated = true;
                 self.lines
                     .push(Line_::System(format!("transcript compacted\n{summary}")));
+                Some(self.lines.len() - 1)
             }
             LoopEvent::TurnDone { outcome } => {
-                if *outcome == TurnOutcome::Aborted {
+                let touched = if *outcome == TurnOutcome::Aborted {
                     self.close_open_rows();
+                    Some(0)
                 } else {
-                    self.prune_incomplete_thoughts();
-                }
+                    prune_incomplete_thoughts(&mut self.lines)
+                };
                 self.status = match outcome {
                     TurnOutcome::Completed => "ready".into(),
                     TurnOutcome::Aborted => "aborted".into(),
@@ -1126,13 +948,14 @@ impl App {
                     TurnOutcome::Aborted => Activity::Aborted,
                     TurnOutcome::MaxIterations => Activity::Stopped,
                 });
+                touched
             }
         }
     }
 
     pub(crate) fn push_subagent_activity(&mut self, activity: &ilar::subagent::SubagentActivity) {
-        self.transcript_revision = self.transcript_revision.wrapping_add(1);
-        if !apply_subagent_activity(&mut self.lines, &self.session_id, activity)
+        let touched = apply_subagent_activity(&mut self.lines, &self.session_id, activity);
+        if touched.is_none()
             // A UI-spawned subtask has no parent tool call, so its
             // activity can never attach to a Tool row; buffering it
             // would fill the retry queue with entries that stay
@@ -1142,6 +965,7 @@ impl App {
         {
             self.pending_subagent_activity.push_back(activity.clone());
         }
+        self.touch_transcript(touched);
         self.retry_subagent_activity();
     }
 
@@ -1151,41 +975,34 @@ impl App {
             let Some(activity) = self.pending_subagent_activity.pop_front() else {
                 break;
             };
-            if !apply_subagent_activity(&mut self.lines, &self.session_id, &activity) {
-                self.pending_subagent_activity.push_back(activity);
+            match apply_subagent_activity(&mut self.lines, &self.session_id, &activity) {
+                Some(index) => self.touch_transcript(Some(index)),
+                None => self.pending_subagent_activity.push_back(activity),
             }
         }
-    }
-
-    /// Streaming thoughts that will never finish: whatever arrived is
-    /// a fragment of a sentence, and keeping it would read as content.
-    fn prune_incomplete_thoughts(&mut self) {
-        self.lines.retain(|line| {
-            !matches!(
-                line,
-                Line_::Thought {
-                    complete: false,
-                    ..
-                }
-            )
-        });
     }
 
     /// Everything a turn that ended badly left mid-flight. Whatever
     /// would have closed these rows is gone with the turn, so an idle
     /// app would otherwise spin over work that has already stopped.
     pub(crate) fn close_open_rows(&mut self) {
-        self.prune_incomplete_thoughts();
+        prune_incomplete_thoughts(&mut self.lines);
         close_running_tools(&mut self.lines);
+        self.touch_whole_transcript();
     }
 
     pub(crate) fn finish_turn(&mut self, result: anyhow::Result<TurnOutcome>) {
-        self.transcript_revision = self.transcript_revision.wrapping_add(1);
         self.retry_subagent_activity();
+        // A turn that ended cleanly leaves the transcript exactly as the
+        // last event did — the point where it is longest is the worst
+        // possible moment to throw the rendered rows away.
+        let mut touched = None;
         if let Err(error) = result {
+            // Closes the open rows and marks the whole transcript.
             self.close_open_rows();
             let mut message = format!("error: {error:#}");
             self.lines.push(Line_::System(message.clone()));
+            touched = Some(self.lines.len() - 1);
             if self.turn_committed {
                 self.retry_available = true;
                 message.push_str(" — Ctrl-R to resume");
@@ -1194,6 +1011,7 @@ impl App {
             self.status = "error".into();
             self.set_activity(Activity::Error);
         }
+        self.touch_transcript(touched);
         self.busy = false;
         self.turn_committed = false;
     }
@@ -1341,9 +1159,12 @@ impl App {
     }
 
     /// Recompute matches against the cached rows and jump to the first.
+    /// The rows may lag the model (the cache renders at draw time), so
+    /// the computed revision stays unset: the next frame recomputes
+    /// against rows the same frame just rebuilt.
     pub(crate) fn search_refresh(&mut self) {
         self.search_matches = self.transcript_cache.matching_rows(&self.search_query);
-        self.search_computed_revision = Some(self.transcript_revision);
+        self.search_computed_revision = None;
         self.search_current = 0;
         if !self.search_matches.is_empty() {
             self.search_scroll_to_current();
@@ -1554,8 +1375,9 @@ impl App {
                 }
             }
         }
-        self.transcript_cache.entries.clear();
-        self.transcript_revision = self.transcript_revision.wrapping_add(1);
+        // An expansion toggle can move every row below it, and the
+        // expansion state lives in the entries the cache holds.
+        self.touch_whole_transcript();
     }
 
     /// Attach an image to the next fresh turn, or say why not: mid-turn
@@ -1944,6 +1766,12 @@ fn split_shell_words(text: &str) -> Option<Vec<String>> {
 /// the agent row would spin forever. A shallow sweep is not enough:
 /// the child's own rows are nested inside it, and `child_running`
 /// masks the parent row's state while it is set.
+/// Click-target ids for expandable thought rows.
+fn next_thought_id(counter: &mut u64) -> String {
+    *counter = counter.wrapping_add(1);
+    format!("thought:{counter}")
+}
+
 fn close_running_tools(lines: &mut [Line_]) {
     for line in lines {
         if let Line_::Tool {
@@ -2059,7 +1887,9 @@ mod tests {
     use crate::selection::SelectionPoint;
     use crate::session_view::restored_session_view;
     use crate::text::tests::rendered_text;
-    use crate::transcript::{reasoning_summary_title, tool_line, transcript_entry_lines};
+    use crate::transcript::{
+        ToolKind, ToolProgress, reasoning_summary_title, tool_line, transcript_entry_lines,
+    };
     use crossterm::event::{Event, KeyEvent, KeyModifiers, MouseEventKind};
     use ilar::session::{SessionMeta, new_id};
 
@@ -5543,6 +5373,309 @@ mod tests {
         );
 
         assert_eq!(app.transcript_cache.rebuilds, 4);
+    }
+
+    /// One appended token must cost one entry, whatever is behind it.
+    /// The cache used to clone and deep-compare the whole model per
+    /// delta; now the mutation says where it happened and everything
+    /// above that line keeps its rows.
+    #[test]
+    fn a_streaming_delta_touches_one_entry_of_a_thousand() {
+        let mut app = App::new();
+        app.lines = (0..1_000)
+            .map(|index| Line_::System(format!("row {index}")))
+            .collect();
+        app.lines.push(Line_::Assistant("stream".into()));
+        let now = std::time::Instant::now();
+        let render = |app: &mut App| {
+            app.transcript_cache.update(
+                &app.lines,
+                &app.expanded_tool_groups,
+                app.transcript_revision,
+                40,
+                now,
+                app.activity_started,
+            );
+        };
+        render(&mut app);
+        let rendered = app.transcript_cache.rebuilds;
+        assert_eq!(rendered, 1_001, "a cold cache renders everything once");
+        app.search_query = "row".into();
+        assert_eq!(app.transcript_cache.matching_rows("row").len(), 1_000);
+        let searched = app.transcript_cache.searched_rows;
+
+        app.push_loop_event(&LoopEvent::TextDelta("ing".into()));
+        render(&mut app);
+        let matches = app.transcript_cache.matching_rows("row");
+
+        assert_eq!(
+            app.transcript_cache.rebuilds,
+            rendered + 1,
+            "only the entry the delta landed in re-renders"
+        );
+        assert!(
+            app.transcript_cache.searched_rows - searched < 8,
+            "search rescans only the rebuilt rows, not {} of them",
+            app.transcript_cache.searched_rows - searched
+        );
+        assert_eq!(matches.len(), 1_000, "kept matches stay whole");
+        assert!(
+            app.transcript_cache
+                .visible_rows(0, usize::MAX, &[])
+                .iter()
+                .any(|row| rendered_text(&row.line).contains("streaming")),
+            "the delta itself is on screen"
+        );
+    }
+
+    /// The narrowed rebuild has to be indistinguishable from a cold
+    /// one. Drive a stream that pushes, edits, regroups, splits and
+    /// prunes, and compare frames against a cache that has seen
+    /// nothing — the only honest check on where the marks point.
+    ///
+    /// Run it several ways: checking every frame proves each mark
+    /// alone, checking every third proves they chain across mutations
+    /// the cache never rendered, and a run whose width flips mid-stream
+    /// proves the reset path. The narrow width matters too — hierarchy
+    /// and grouping change shape below 64 columns.
+    #[test]
+    fn narrowed_rebuilds_match_a_cold_cache_frame_for_frame() {
+        for (every, widths) in [
+            (1usize, [80u16, 80]),
+            (3, [80, 80]),
+            (1, [40, 40]),
+            (2, [120, 120]),
+            (1, [80, 40]),
+        ] {
+            replay_transcript_against_a_cold_cache(every, widths);
+        }
+    }
+
+    /// Replays the script, rendering every `every` events at
+    /// `widths[0]`, then `widths[1]` once past halfway.
+    fn replay_transcript_against_a_cold_cache(every: usize, widths: [u16; 2]) {
+        fn snapshot(cache: &TranscriptRenderCache) -> Vec<(String, Option<TranscriptHitTarget>)> {
+            cache
+                .visible_rows(0, usize::MAX, &[])
+                .into_iter()
+                .map(|row| (rendered_text(&row.line), row.target))
+                .collect()
+        }
+
+        let now = std::time::Instant::now();
+        let tool = |id: &str| LoopEvent::ToolStarted {
+            id: id.into(),
+            name: "read".into(),
+        };
+        let done = |id: &str| LoopEvent::ToolFinished {
+            id: id.into(),
+            name: "read".into(),
+            is_error: false,
+            result: "ok".into(),
+            child_session_id: None,
+        };
+        let child = |event: LoopEvent| ilar::subagent::SubagentActivity {
+            parent_session_id: String::new(),
+            parent_call_id: "task-1".into(),
+            child_session_id: "child-session".into(),
+            event,
+        };
+
+        enum Step {
+            Loop(LoopEvent),
+            Child(LoopEvent),
+            Toggle(TranscriptHitTarget),
+            Notify,
+            CloseRows,
+        }
+        let script = vec![
+            Step::Loop(LoopEvent::TurnStarted),
+            Step::Loop(LoopEvent::ReasoningSummaryDelta(
+                "**Planning** the read".into(),
+            )),
+            Step::Loop(LoopEvent::ReasoningSummaryDelta(" carefully".into())),
+            Step::Loop(LoopEvent::ReasoningSummaryCompleted),
+            Step::Loop(tool("read-1")),
+            Step::Loop(LoopEvent::ToolArguments {
+                id: "read-1".into(),
+                arguments: "src/main.rs".into(),
+            }),
+            Step::Loop(tool("read-2")),
+            Step::Loop(tool("task-1")),
+            // Configuring a subagent splits the run of plain calls.
+            Step::Loop(LoopEvent::SubagentConfigured {
+                id: "task-1".into(),
+                description: "survey the tree".into(),
+                agent: "explore".into(),
+                model: None,
+            }),
+            Step::Loop(tool("read-3")),
+            Step::Loop(LoopEvent::ToolInputComplete {
+                id: "read-3".into(),
+                arguments: "{\"path\":\"README.md\"}".into(),
+            }),
+            Step::Loop(done("read-1")),
+            Step::Loop(done("read-2")),
+            Step::Loop(LoopEvent::StepComplete {
+                stop_reason: "tool_use".into(),
+                usage: Default::default(),
+            }),
+            // In-place growth, repeatedly: the row is edited rather than
+            // pushed, so nothing but the mark can reveal it.
+            Step::Loop(LoopEvent::TextDelta("Here".into())),
+            Step::Loop(LoopEvent::TextDelta(" is".into())),
+            Step::Loop(LoopEvent::TextDelta(" the".into())),
+            Step::Loop(LoopEvent::TextDelta(" answer".into())),
+            Step::Loop(LoopEvent::TextDelta(" at last".into())),
+            Step::Loop(tool("read-4")),
+            Step::Loop(done("read-3")),
+            Step::Loop(done("read-4")),
+            Step::Child(LoopEvent::ReasoningSummaryDelta("child reasoning".into())),
+            Step::Child(tool("child-read")),
+            Step::Child(LoopEvent::TextDelta("child reply".into())),
+            Step::Toggle(TranscriptHitTarget::Tool("task-1".into())),
+            Step::Child(LoopEvent::TextDelta(" continues".into())),
+            Step::Child(LoopEvent::TurnDone {
+                outcome: TurnOutcome::Completed,
+            }),
+            Step::Notify,
+            // Left open on purpose: the turn below prunes it out of the
+            // middle of the transcript, shifting everything after it.
+            Step::Loop(LoopEvent::ThinkingDelta("second thoughts".into())),
+            Step::Loop(LoopEvent::Compacted {
+                context_tokens: 10,
+                summary: "compacted".into(),
+            }),
+            Step::Loop(LoopEvent::Steered {
+                text: "also check the tests".into(),
+            }),
+            Step::Loop(LoopEvent::TurnDone {
+                outcome: TurnOutcome::Completed,
+            }),
+            Step::Toggle(TranscriptHitTarget::ToolGroup("live:0:read-1".into())),
+            Step::Loop(tool("read-5")),
+            Step::CloseRows,
+        ];
+
+        let halfway = script.len() / 2;
+        let mut app = App::new();
+        app.lines.clear();
+        for (step, action) in script.into_iter().enumerate() {
+            match action {
+                Step::Loop(event) => app.push_loop_event(&event),
+                Step::Child(event) => app.push_subagent_activity(&child(event)),
+                Step::Toggle(target) => app.toggle_transcript_target(target),
+                Step::Notify => app.push_notification("a job", "job finished\nwith detail"),
+                Step::CloseRows => app.close_open_rows(),
+            }
+            if !(step + 1).is_multiple_of(every) {
+                continue;
+            }
+            let width = widths[usize::from(step >= halfway)];
+            app.transcript_cache.update(
+                &app.lines,
+                &app.expanded_tool_groups,
+                app.transcript_revision,
+                width,
+                now,
+                app.activity_started,
+            );
+            let mut cold = TranscriptRenderCache::default();
+            cold.update(
+                &app.lines,
+                &app.expanded_tool_groups,
+                app.transcript_revision,
+                width,
+                now,
+                app.activity_started,
+            );
+            let at = format!("step {step} every {every} width {width}");
+            assert_eq!(snapshot(&app.transcript_cache), snapshot(&cold), "{at}");
+            assert_eq!(
+                app.transcript_cache.matching_rows("read"),
+                cold.matching_rows("read"),
+                "{at}"
+            );
+        }
+    }
+
+    /// A run of tool calls is one entry, so a call arriving at its edge
+    /// joins the run rather than starting a second group beside it —
+    /// even though the mark names only the new line.
+    #[test]
+    fn a_tool_call_appended_next_to_a_group_joins_it() {
+        let mut app = App::new();
+        app.lines.clear();
+        let now = std::time::Instant::now();
+        for id in ["read-1", "read-2", "read-3"] {
+            app.push_loop_event(&LoopEvent::ToolStarted {
+                id: id.into(),
+                name: "read".into(),
+            });
+            app.transcript_cache.update(
+                &app.lines,
+                &app.expanded_tool_groups,
+                app.transcript_revision,
+                80,
+                now,
+                app.activity_started,
+            );
+        }
+
+        let rendered = app
+            .transcript_cache
+            .visible_rows(0, usize::MAX, &[])
+            .iter()
+            .map(|row| rendered_text(&row.line))
+            .collect::<Vec<_>>();
+        let headers = rendered
+            .iter()
+            .filter(|row| row.contains("tools "))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            headers.len(),
+            1,
+            "one group, not one per call: {rendered:?}"
+        );
+        assert!(headers[0].contains("3 calls"), "{headers:?}");
+    }
+
+    /// Narrowing is an optimisation, never a contract: an edit the
+    /// cache was not told about still re-renders, because an unmarked
+    /// revision bump breaks the chain the marks ride on.
+    #[test]
+    fn an_unmarked_transcript_edit_still_rerenders() {
+        let mut app = App::new();
+        app.lines = (0..100)
+            .map(|index| Line_::System(format!("row {index}")))
+            .collect();
+        let now = std::time::Instant::now();
+        app.transcript_cache.update(
+            &app.lines,
+            &app.expanded_tool_groups,
+            app.transcript_revision,
+            40,
+            now,
+            app.activity_started,
+        );
+
+        app.lines[0] = Line_::System("edited behind the cache".into());
+        app.transcript_revision = app.transcript_revision.wrapping_add(1);
+        app.transcript_cache.update(
+            &app.lines,
+            &app.expanded_tool_groups,
+            app.transcript_revision,
+            40,
+            now,
+            app.activity_started,
+        );
+
+        let rows = app.transcript_cache.visible_rows(0, 2, &[]);
+        assert!(
+            rendered_text(&rows[0].line).contains("edited behind the cache"),
+            "{:?}",
+            rendered_text(&rows[0].line)
+        );
     }
 
     #[test]

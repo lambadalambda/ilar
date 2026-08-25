@@ -101,32 +101,85 @@ pub(crate) enum ToolProgress {
 /// content, so following the tail actually shows them.
 const TAIL_PADDING_ROWS: usize = 1;
 
+/// Rendered rows, kept across frames so a streaming delta re-renders
+/// only what it touched.
+///
+/// Change detection is by *mark*, not by comparison: the model is far
+/// too large to clone and diff per token, so whoever mutates it says
+/// which line index it started at (`mark_dirty_from`). Marks are only
+/// trusted while they account for every revision bump since the last
+/// update — an unmarked bump breaks the chain and the next update
+/// rebuilds everything. A missed mark therefore costs work, never
+/// correctness.
 #[derive(Default)]
 pub(crate) struct TranscriptRenderCache {
     width: Option<u16>,
+    /// Revision of the last mark or update; marks must chain from it.
     revision: Option<u64>,
-    pub(crate) entries: Vec<CachedTranscriptEntry>,
+    /// Lowest line index whose rows may be stale as of `revision`.
+    /// `usize::MAX` means nothing has changed since the last update.
+    dirty_from: usize,
+    /// The query `entries[..].matches` were scanned for.
+    query: Option<String>,
+    entries: Vec<CachedTranscriptEntry>,
     #[cfg(test)]
     pub(crate) rebuilds: usize,
+    /// Rows `matching_rows` has lowercased and scanned, ever.
+    #[cfg(test)]
+    pub(crate) searched_rows: usize,
 }
 
-pub(crate) struct CachedTranscriptEntry {
-    source: TranscriptEntry,
+struct CachedTranscriptEntry {
+    /// The `lines` range this entry renders, so a mark can name the
+    /// entries it invalidates.
+    range: std::ops::Range<usize>,
+    /// Group identity for a run of tool calls; `None` for a lone line.
+    group: Option<CachedGroup>,
+    /// Spinners and elapsed times move without the model changing.
+    animated: bool,
     rows: Vec<TranscriptRow>,
+    /// Row offsets within `rows` matching the cache's query; `None`
+    /// until scanned, which is what keeps search off untouched rows.
+    matches: Option<Vec<usize>>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum TranscriptEntry {
-    Item(Box<Line_>),
+struct CachedGroup {
+    id: String,
+    expanded: bool,
+    child: bool,
+}
+
+impl CachedTranscriptEntry {
+    /// Borrow the entry back out of the model — enough to re-render an
+    /// animated row without rescanning the transcript for its bounds.
+    fn borrow<'a>(&self, lines: &'a [Line_]) -> TranscriptEntry<'a> {
+        match &self.group {
+            None => TranscriptEntry::Item(&lines[self.range.start]),
+            Some(group) => TranscriptEntry::ToolGroup {
+                id: group.id.clone(),
+                calls: &lines[self.range.clone()],
+                expanded: group.expanded,
+                child: group.child,
+            },
+        }
+    }
+}
+
+/// One unit of the transcript as rendered: a line, or a run of adjacent
+/// tool calls shown as one collapsible group. Borrowed from the model —
+/// building these must stay cheap enough to do per streaming delta.
+#[derive(Debug)]
+pub(crate) enum TranscriptEntry<'a> {
+    Item(&'a Line_),
     ToolGroup {
         id: String,
-        calls: Vec<Line_>,
+        calls: &'a [Line_],
         expanded: bool,
         child: bool,
     },
 }
 
-impl TranscriptEntry {
+impl TranscriptEntry<'_> {
     pub(crate) fn is_child(&self) -> bool {
         matches!(self, Self::ToolGroup { child: true, .. })
     }
@@ -146,6 +199,29 @@ pub(crate) struct TranscriptRow {
 }
 
 impl TranscriptRenderCache {
+    /// Drop everything: rows rendered at one width say nothing about
+    /// another. Line edits do not need this — they mark instead.
+    fn invalidate(&mut self) {
+        self.revision = None;
+        self.dirty_from = 0;
+        self.entries.clear();
+        self.query = None;
+    }
+
+    /// Record that `from` is the lowest line index whose rows may have
+    /// changed at `revision` (the value the revision counter now holds).
+    /// Marks narrow the next rebuild; they never widen what is
+    /// considered clean, and a bump that arrives unmarked resets to a
+    /// full rebuild.
+    pub(crate) fn mark_dirty_from(&mut self, from: usize, revision: u64) {
+        self.dirty_from = if self.revision == Some(revision.wrapping_sub(1)) {
+            self.dirty_from.min(from)
+        } else {
+            0
+        };
+        self.revision = Some(revision);
+    }
+
     pub(crate) fn update(
         &mut self,
         lines: &[Line_],
@@ -157,73 +233,93 @@ impl TranscriptRenderCache {
     ) {
         if self.width != Some(width) {
             self.width = Some(width);
-            self.revision = None;
-            self.entries.clear();
+            self.invalidate();
         }
-        if self.revision == Some(revision) {
-            for (index, cached) in self.entries.iter_mut().enumerate() {
-                if transcript_entry_animated(&cached.source) {
-                    let mut rows = transcript_entry_rows(
-                        &cached.source,
-                        expanded_groups,
-                        width,
-                        now,
-                        activity_started,
-                        false,
-                    );
-                    if index > 0 && !cached.source.is_child() {
-                        rows.insert(
-                            0,
-                            TranscriptRow {
-                                line: Line::default(),
-                                target: None,
-                            },
-                        );
-                    }
-                    cached.rows = rows;
-                }
+        let dirty_from = if self.revision == Some(revision) {
+            self.dirty_from
+        } else {
+            0
+        };
+        // Grouping restarts at the entry that owns the first dirty line,
+        // so a run of tool calls that grew regroups as a whole.
+        let mut resume = self
+            .entries
+            .iter()
+            .position(|entry| entry.range.end > dirty_from)
+            .unwrap_or(self.entries.len());
+        // A run of adjacent tool calls is one entry, so a call arriving
+        // at a group's edge joins the run rather than starting a second
+        // group beside it. A plain tool sitting where a group ends is
+        // proof the grouping is stale — the group swallows anything it
+        // can, so it could not have been there last time. One step back
+        // is enough: two tool groups are never adjacent.
+        if resume > 0
+            && self.entries[resume - 1].group.is_some()
+            && matches!(
+                lines.get(self.entries[resume - 1].range.end),
+                Some(Line_::Tool {
+                    kind: ToolKind::Tool,
+                    ..
+                })
+            )
+        {
+            resume -= 1;
+        }
+        let mut line = self
+            .entries
+            .get(resume)
+            .map(|entry| entry.range.start)
+            .unwrap_or_else(|| self.entries.last().map_or(0, |entry| entry.range.end))
+            .min(lines.len());
+        self.entries.truncate(resume);
+        while line < lines.len() {
+            let (entry, next) = transcript_entry_at(lines, expanded_groups, line);
+            let index = self.entries.len();
+            let rows =
+                spaced_entry_rows(&entry, index, expanded_groups, width, now, activity_started);
+            self.entries.push(CachedTranscriptEntry {
+                range: line..next,
+                group: match &entry {
+                    TranscriptEntry::Item(_) => None,
+                    TranscriptEntry::ToolGroup {
+                        id,
+                        expanded,
+                        child,
+                        ..
+                    } => Some(CachedGroup {
+                        id: id.clone(),
+                        expanded: *expanded,
+                        child: *child,
+                    }),
+                },
+                animated: transcript_entry_animated(&entry),
+                rows,
+                matches: None,
+            });
+            #[cfg(test)]
+            {
+                self.rebuilds += 1;
             }
-            return;
+            line = next;
         }
-        let sources = transcript_entries(lines, expanded_groups);
-        self.entries.truncate(sources.len());
-        for (index, source) in sources.iter().enumerate() {
-            let animated = transcript_entry_animated(source);
-            let changed = self
-                .entries
-                .get(index)
-                .is_none_or(|cached| cached.source != *source);
-            if !changed && !animated {
+        // Rows kept from before the first dirty line still animate.
+        for index in 0..resume {
+            if !self.entries[index].animated {
                 continue;
             }
-            let mut rows =
-                transcript_entry_rows(source, expanded_groups, width, now, activity_started, false);
-            if index > 0 && !source.is_child() {
-                rows.insert(
-                    0,
-                    TranscriptRow {
-                        line: Line::default(),
-                        target: None,
-                    },
-                );
-            }
-            if let Some(cached) = self.entries.get_mut(index) {
-                if changed {
-                    cached.source = source.clone();
-                }
-                cached.rows = rows;
-            } else {
-                self.entries.push(CachedTranscriptEntry {
-                    source: source.clone(),
-                    rows,
-                });
-            }
+            let entry = self.entries[index].borrow(lines);
+            let rows =
+                spaced_entry_rows(&entry, index, expanded_groups, width, now, activity_started);
+            let cached = &mut self.entries[index];
+            cached.rows = rows;
+            cached.matches = None;
             #[cfg(test)]
             {
                 self.rebuilds += 1;
             }
         }
         self.revision = Some(revision);
+        self.dirty_from = usize::MAX;
     }
 
     pub(crate) fn row_count(&self) -> usize {
@@ -235,27 +331,32 @@ impl TranscriptRenderCache {
     }
 
     /// Absolute indices of rows whose text contains `query`
-    /// (case-insensitive), in row order.
-    pub(crate) fn matching_rows(&self, query: &str) -> Vec<usize> {
+    /// (case-insensitive), in row order. Per-entry results are kept, so
+    /// a streaming delta only rescans the entry it re-rendered.
+    pub(crate) fn matching_rows(&mut self, query: &str) -> Vec<usize> {
         if query.trim().is_empty() {
+            self.query = None;
             return Vec::new();
+        }
+        if self.query.as_deref() != Some(query) {
+            self.query = Some(query.to_string());
+            for entry in &mut self.entries {
+                entry.matches = None;
+            }
         }
         let needle = query.to_lowercase();
         let mut matches = Vec::new();
-        let mut index = 0usize;
-        for entry in &self.entries {
-            for row in &entry.rows {
-                let text: String = row
-                    .line
-                    .spans
-                    .iter()
-                    .map(|span| span.content.as_ref())
-                    .collect();
-                if text.to_lowercase().contains(&needle) {
-                    matches.push(index);
+        let mut base = 0usize;
+        for entry in &mut self.entries {
+            if entry.matches.is_none() {
+                #[cfg(test)]
+                {
+                    self.searched_rows += entry.rows.len();
                 }
-                index += 1;
+                entry.matches = Some(matching_row_offsets(&entry.rows, &needle));
             }
+            matches.extend(entry.matches.iter().flatten().map(|offset| base + *offset));
+            base += entry.rows.len();
         }
         matches
     }
@@ -328,43 +429,98 @@ pub(crate) fn reasoning_summary_title(summary: &str) -> String {
     }
 }
 
-pub(crate) fn transcript_entries(
-    lines: &[Line_],
+/// Row offsets whose text contains an already-lowercased `needle`.
+fn matching_row_offsets(rows: &[TranscriptRow], needle: &str) -> Vec<usize> {
+    rows.iter()
+        .enumerate()
+        .filter(|(_, row)| {
+            let text: String = row
+                .line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect();
+            text.to_lowercase().contains(needle)
+        })
+        .map(|(offset, _)| offset)
+        .collect()
+}
+
+/// An entry's rows plus the blank row that spaces it from the entry
+/// above.
+fn spaced_entry_rows(
+    entry: &TranscriptEntry,
+    index: usize,
     expanded_groups: &std::collections::HashSet<String>,
-) -> Vec<TranscriptEntry> {
+    width: u16,
+    now: std::time::Instant,
+    activity_started: std::time::Instant,
+) -> Vec<TranscriptRow> {
+    let mut rows =
+        transcript_entry_rows(entry, expanded_groups, width, now, activity_started, false);
+    if index > 0 && !entry.is_child() {
+        rows.insert(
+            0,
+            TranscriptRow {
+                line: Line::default(),
+                target: None,
+            },
+        );
+    }
+    rows
+}
+
+/// The entry beginning at `start`, and the index after it. Adjacent
+/// plain tool calls collapse into one group; everything else is one
+/// line, one entry.
+fn transcript_entry_at<'a>(
+    lines: &'a [Line_],
+    expanded_groups: &std::collections::HashSet<String>,
+    start: usize,
+) -> (TranscriptEntry<'a>, usize) {
+    let Line_::Tool {
+        id: first_call_id,
+        group_id,
+        kind: ToolKind::Tool,
+        ..
+    } = &lines[start]
+    else {
+        return (TranscriptEntry::Item(&lines[start]), start + 1);
+    };
+    let mut end = start;
+    while end < lines.len()
+        && matches!(
+            &lines[end],
+            Line_::Tool {
+                kind: ToolKind::Tool,
+                ..
+            }
+        )
+    {
+        end += 1;
+    }
+    let id = format!("{group_id}:{first_call_id}");
+    (
+        TranscriptEntry::ToolGroup {
+            expanded: expanded_groups.contains(&id),
+            id,
+            calls: &lines[start..end],
+            child: start > 0 && matches!(lines[start - 1], Line_::Thought { .. }),
+        },
+        end,
+    )
+}
+
+pub(crate) fn transcript_entries<'a>(
+    lines: &'a [Line_],
+    expanded_groups: &std::collections::HashSet<String>,
+) -> Vec<TranscriptEntry<'a>> {
     let mut entries = Vec::new();
     let mut index = 0;
     while index < lines.len() {
-        let Line_::Tool {
-            id: first_call_id,
-            group_id,
-            kind: ToolKind::Tool,
-            ..
-        } = &lines[index]
-        else {
-            entries.push(TranscriptEntry::Item(Box::new(lines[index].clone())));
-            index += 1;
-            continue;
-        };
-        let start = index;
-        while index < lines.len()
-            && matches!(
-                &lines[index],
-                Line_::Tool {
-                    kind: ToolKind::Tool,
-                    ..
-                }
-            )
-        {
-            index += 1;
-        }
-        let group_id = format!("{group_id}:{first_call_id}");
-        entries.push(TranscriptEntry::ToolGroup {
-            id: group_id.clone(),
-            calls: lines[start..index].to_vec(),
-            expanded: expanded_groups.contains(&group_id),
-            child: start > 0 && matches!(lines[start - 1], Line_::Thought { .. }),
-        });
+        let (entry, next) = transcript_entry_at(lines, expanded_groups, index);
+        entries.push(entry);
+        index = next;
     }
     entries
 }
@@ -421,21 +577,7 @@ pub(crate) fn toggle_tool_expansion(lines: &mut [Line_], id: &str) -> bool {
     false
 }
 
-fn contains_child_session(lines: &[Line_], session_id: &str) -> bool {
-    lines.iter().any(|line| match line {
-        Line_::Tool {
-            child_session_id,
-            child_lines,
-            ..
-        } => {
-            child_session_id.as_deref() == Some(session_id)
-                || contains_child_session(child_lines, session_id)
-        }
-        _ => false,
-    })
-}
-
-pub(crate) fn session_lines_for_call_mut<'a>(
+fn session_lines_for_call_mut<'a>(
     lines: &'a mut [Line_],
     session_id: &str,
     call_id: &str,
@@ -462,40 +604,101 @@ pub(crate) fn session_lines_for_call_mut<'a>(
     None
 }
 
-pub(crate) fn direct_tool_mut<'a>(lines: &'a mut [Line_], id: &str) -> Option<&'a mut Line_> {
+/// The newest row carrying this call id. Ids repeat across a long
+/// transcript; an event is about the row that is still live, so every
+/// lookup here runs newest-first.
+fn newest_tool_index(lines: &[Line_], id: &str) -> Option<usize> {
     lines
-        .iter_mut()
-        .find(|line| matches!(line, Line_::Tool { id: line_id, .. } if line_id == id))
+        .iter()
+        .rposition(|line| matches!(line, Line_::Tool { id: line_id, .. } if line_id == id))
 }
 
-pub(crate) fn apply_subagent_activity(
-    lines: &mut Vec<Line_>,
+fn newest_tool_index_where(
+    lines: &[Line_],
+    id: &str,
+    live: impl Fn(ToolState) -> bool,
+) -> Option<usize> {
+    lines.iter().rposition(
+        |line| matches!(line, Line_::Tool { id: line_id, state, .. } if line_id == id && live(*state)),
+    )
+}
+
+fn newest_running_tool_index(lines: &[Line_], id: &str) -> Option<usize> {
+    newest_tool_index_where(lines, id, |state| state == ToolState::Running)
+}
+
+/// The top-level index whose subtree owns this activity's parent call.
+fn subagent_owner_index(
+    lines: &[Line_],
     root_session_id: &str,
     activity: &ilar::subagent::SubagentActivity,
-) -> bool {
-    let owner = if activity.parent_session_id == root_session_id || root_session_id.is_empty() {
-        lines
-    } else if contains_child_session(lines, &activity.parent_session_id) {
-        let Some(owner) = session_lines_for_call_mut(
-            lines,
+) -> Option<usize> {
+    if activity.parent_session_id == root_session_id || root_session_id.is_empty() {
+        return newest_tool_index(lines, &activity.parent_call_id);
+    }
+    (0..lines.len()).find(|index| {
+        session_lines_for_call(
+            std::slice::from_ref(&lines[*index]),
             &activity.parent_session_id,
             &activity.parent_call_id,
-        ) else {
-            return false;
-        };
-        owner
+        )
+    })
+}
+
+/// Whether any tool in this subtree hosts `session_id` and holds the
+/// row for `call_id` — the read-only mirror of
+/// `session_lines_for_call_mut`.
+fn session_lines_for_call(lines: &[Line_], session_id: &str, call_id: &str) -> bool {
+    lines.iter().any(|line| match line {
+        Line_::Tool {
+            child_session_id,
+            child_lines,
+            ..
+        } => {
+            (child_session_id.as_deref() == Some(session_id)
+                && child_lines
+                    .iter()
+                    .any(|line| matches!(line, Line_::Tool { id, .. } if id == call_id)))
+                || session_lines_for_call(child_lines, session_id, call_id)
+        }
+        _ => false,
+    })
+}
+
+/// Fold a subagent's event into the child timeline under its parent
+/// tool row. Returns the top-level line index that changed, or `None`
+/// when the parent row has not arrived yet (the caller buffers).
+pub(crate) fn apply_subagent_activity(
+    lines: &mut [Line_],
+    root_session_id: &str,
+    activity: &ilar::subagent::SubagentActivity,
+) -> Option<usize> {
+    let index = subagent_owner_index(lines, root_session_id, activity)?;
+    let direct = activity.parent_session_id == root_session_id || root_session_id.is_empty();
+    let subtree = std::slice::from_mut(&mut lines[index]);
+    // The list the parent call lives in: the top level itself when the
+    // activity belongs to this session, otherwise the child timeline of
+    // whichever nested agent hosts it.
+    let owner = if direct {
+        subtree
     } else {
-        return false;
+        session_lines_for_call_mut(
+            subtree,
+            &activity.parent_session_id,
+            &activity.parent_call_id,
+        )?
+        .as_mut_slice()
     };
-    let Some(Line_::Tool {
+    let call_index = newest_tool_index(owner, &activity.parent_call_id)?;
+    let Line_::Tool {
         child_lines,
         child_group,
         child_running,
         child_session_id,
         ..
-    }) = direct_tool_mut(owner, &activity.parent_call_id)
+    } = &mut owner[call_index]
     else {
-        return false;
+        return None;
     };
     *child_session_id = Some(activity.child_session_id.clone());
     *child_running = !matches!(activity.event, LoopEvent::TurnDone { .. });
@@ -505,115 +708,330 @@ pub(crate) fn apply_subagent_activity(
         &activity.parent_call_id,
         &activity.event,
     );
-    true
+    Some(index)
+}
+
+// ---------------------------------------------------------------------
+// Loop events applied to a transcript model. Both the session
+// transcript (app.rs) and the nested timeline under an agent row match
+// the same `LoopEvent`, so the edits themselves live here once — only
+// the surrounding side effects (status text, notices, stream
+// accounting) belong to the session. Each helper returns the lowest
+// line index whose rendering changed, which is what the render cache
+// needs to narrow its rebuild.
+// ---------------------------------------------------------------------
+
+/// Grow the last assistant reply, or start one.
+pub(crate) fn append_text_delta(lines: &mut Vec<Line_>, text: &str) -> usize {
+    match lines.last_mut() {
+        Some(Line_::Assistant(current)) => current.push_str(text),
+        _ => lines.push(Line_::Assistant(text.to_string())),
+    }
+    lines.len() - 1
+}
+
+/// Grow the open thought by `delta` — bounded to a tail, so a model
+/// that reasons for an hour does not carry an hour of text — or open
+/// one with `id` (empty for nested previews, which are not expandable).
+pub(crate) fn append_thought_delta(
+    lines: &mut Vec<Line_>,
+    delta: &str,
+    id: impl FnOnce() -> String,
+) -> usize {
+    match lines.last_mut() {
+        Some(Line_::Thought {
+            text,
+            complete: false,
+            ..
+        }) => append_thought_tail(text, delta),
+        _ => {
+            let mut text = String::new();
+            append_thought_tail(&mut text, delta);
+            lines.push(Line_::Thought {
+                id: id(),
+                text,
+                complete: false,
+                expanded: false,
+            });
+        }
+    }
+    lines.len() - 1
+}
+
+/// Note that reasoning is under way without keeping the text: nested
+/// previews show that a child is thinking, not what about.
+fn open_placeholder_thought(lines: &mut Vec<Line_>, title: &str) -> usize {
+    if !matches!(
+        lines.last(),
+        Some(Line_::Thought {
+            complete: false,
+            ..
+        })
+    ) {
+        lines.push(Line_::Thought {
+            id: String::new(),
+            text: title.into(),
+            complete: false,
+            expanded: false,
+        });
+    }
+    lines.len() - 1
+}
+
+/// Close the newest open thought: its phase ended.
+pub(crate) fn complete_open_thought(lines: &mut [Line_]) -> Option<usize> {
+    let index = lines.iter().rposition(|line| {
+        matches!(
+            line,
+            Line_::Thought {
+                complete: false,
+                ..
+            }
+        )
+    })?;
+    if let Line_::Thought { complete, .. } = &mut lines[index] {
+        *complete = true;
+    }
+    Some(index)
+}
+
+/// A fresh running tool row.
+fn new_tool_row(id: &str, group_id: String, name: &str) -> Line_ {
+    Line_::Tool {
+        id: id.to_string(),
+        group_id,
+        name: name.to_string(),
+        kind: ToolKind::Tool,
+        arguments: String::new(),
+        argument_detail: String::new(),
+        diff: Vec::new(),
+        tail: String::new(),
+        result: None,
+        state: ToolState::Running,
+        progress: ToolProgress::None,
+        expanded: false,
+        full: false,
+        child_lines: Vec::new(),
+        child_group: 0,
+        child_running: false,
+        child_session_id: None,
+    }
+}
+
+pub(crate) fn push_tool_row(
+    lines: &mut Vec<Line_>,
+    id: &str,
+    group_id: String,
+    name: &str,
+) -> usize {
+    lines.push(new_tool_row(id, group_id, name));
+    lines.len() - 1
+}
+
+pub(crate) fn set_tool_arguments(lines: &mut [Line_], id: &str, arguments: &str) -> Option<usize> {
+    let index = newest_tool_index(lines, id)?;
+    let Line_::Tool {
+        arguments: current, ..
+    } = &mut lines[index]
+    else {
+        return None;
+    };
+    *current = arguments.to_string();
+    Some(index)
+}
+
+pub(crate) fn note_tool_input_progress(
+    lines: &mut [Line_],
+    id: &str,
+    received_bytes: u64,
+    last_data: std::time::Instant,
+) -> Option<usize> {
+    let index = newest_running_tool_index(lines, id)?;
+    let Line_::Tool { progress, .. } = &mut lines[index] else {
+        return None;
+    };
+    // Bytes still arriving is the least of what a row can say: once it
+    // is queued or executing, that is the news.
+    if matches!(
+        progress,
+        ToolProgress::Queued | ToolProgress::Executing { .. }
+    ) {
+        return None;
+    }
+    *progress = ToolProgress::Receiving {
+        received_bytes,
+        last_data,
+    };
+    Some(index)
+}
+
+pub(crate) fn complete_tool_input(lines: &mut [Line_], id: &str, arguments: &str) -> Option<usize> {
+    let index = newest_running_tool_index(lines, id)?;
+    let Line_::Tool {
+        name,
+        progress,
+        argument_detail,
+        diff,
+        ..
+    } = &mut lines[index]
+    else {
+        return None;
+    };
+    *progress = ToolProgress::Queued;
+    *argument_detail = bounded_detail(arguments);
+    *diff = diff::tool_diff(name, arguments);
+    Some(index)
+}
+
+pub(crate) fn configure_subagent_row(
+    lines: &mut [Line_],
+    id: &str,
+    agent: &str,
+    model: &Option<String>,
+    description: &str,
+) -> Option<usize> {
+    let index = newest_tool_index(lines, id)?;
+    let Line_::Tool {
+        kind, arguments, ..
+    } = &mut lines[index]
+    else {
+        return None;
+    };
+    *kind = ToolKind::Agent {
+        name: agent.to_string(),
+        model: model.clone(),
+    };
+    *arguments = description.to_string();
+    Some(index)
+}
+
+pub(crate) fn start_tool_execution(
+    lines: &mut [Line_],
+    id: &str,
+    received_bytes: u64,
+    started: std::time::Instant,
+) -> Option<usize> {
+    let index = newest_running_tool_index(lines, id)?;
+    let Line_::Tool { progress, .. } = &mut lines[index] else {
+        return None;
+    };
+    *progress = ToolProgress::Executing {
+        received_bytes,
+        started,
+    };
+    Some(index)
+}
+
+pub(crate) fn complete_tool_execution(lines: &mut [Line_], id: &str) -> Option<usize> {
+    let index = newest_running_tool_index(lines, id)?;
+    let Line_::Tool {
+        state, progress, ..
+    } = &mut lines[index]
+    else {
+        return None;
+    };
+    *state = ToolState::Complete;
+    *progress = ToolProgress::None;
+    Some(index)
+}
+
+pub(crate) fn set_tool_tail(lines: &mut [Line_], id: &str, tail: &str) -> Option<usize> {
+    let index = newest_running_tool_index(lines, id)?;
+    let Line_::Tool { tail: current, .. } = &mut lines[index] else {
+        return None;
+    };
+    *current = tail.to_string();
+    Some(index)
+}
+
+/// Settle the newest still-open row for this call. `None` means the
+/// result belongs to no row we have.
+pub(crate) fn finish_tool_row(
+    lines: &mut [Line_],
+    id: &str,
+    is_error: bool,
+    result: &str,
+    child_session_id: &Option<String>,
+) -> Option<usize> {
+    let index = newest_tool_index_where(lines, id, |state| {
+        matches!(state, ToolState::Running | ToolState::Complete)
+    })?;
+    let Line_::Tool {
+        state,
+        progress,
+        result: current,
+        child_session_id: current_child,
+        ..
+    } = &mut lines[index]
+    else {
+        return None;
+    };
+    *state = if is_error {
+        ToolState::Failed
+    } else {
+        ToolState::Succeeded
+    };
+    *progress = ToolProgress::None;
+    *current = Some(bounded_detail(result));
+    *current_child = child_session_id.clone();
+    Some(index)
+}
+
+/// Streaming thoughts that will never finish: whatever arrived is a
+/// fragment of a sentence, and keeping it would read as content.
+pub(crate) fn prune_incomplete_thoughts(lines: &mut Vec<Line_>) -> Option<usize> {
+    let first = lines.iter().position(|line| {
+        matches!(
+            line,
+            Line_::Thought {
+                complete: false,
+                ..
+            }
+        )
+    })?;
+    lines.retain(|line| {
+        !matches!(
+            line,
+            Line_::Thought {
+                complete: false,
+                ..
+            }
+        )
+    });
+    Some(first)
 }
 
 fn apply_child_loop_event(lines: &mut Vec<Line_>, group: &mut u64, scope: &str, event: &LoopEvent) {
     match event {
         // Subagents have no interactive user, so they are never steered.
         LoopEvent::Steered { .. } => {}
-        LoopEvent::TextDelta(text) => match lines.last_mut() {
-            Some(Line_::Assistant(current)) => current.push_str(text),
-            _ => lines.push(Line_::Assistant(text.clone())),
-        },
+        LoopEvent::TextDelta(text) => {
+            append_text_delta(lines, text);
+        }
         LoopEvent::ThinkingDelta(_) => {
-            if !matches!(
-                lines.last(),
-                Some(Line_::Thought {
-                    complete: false,
-                    ..
-                })
-            ) {
-                lines.push(Line_::Thought {
-                    id: String::new(),
-                    text: "reasoning".into(),
-                    complete: false,
-                    expanded: false,
-                });
-            }
+            open_placeholder_thought(lines, "reasoning");
         }
-        LoopEvent::ReasoningSummaryDelta(summary) => match lines.last_mut() {
-            Some(Line_::Thought {
-                text,
-                complete: false,
-                ..
-            }) => text.push_str(summary),
-            _ => lines.push(Line_::Thought {
-                id: String::new(),
-                text: summary.clone(),
-                complete: false,
-                expanded: false,
-            }),
-        },
+        LoopEvent::ReasoningSummaryDelta(summary) => {
+            append_thought_delta(lines, summary, String::new);
+        }
         LoopEvent::ReasoningSummaryCompleted => {
-            if let Some(complete) = lines.iter_mut().rev().find_map(|line| match line {
-                Line_::Thought { complete, .. } if !*complete => Some(complete),
-                _ => None,
-            }) {
-                *complete = true;
-            }
+            complete_open_thought(lines);
         }
-        LoopEvent::ToolStarted { id, name } => lines.push(Line_::Tool {
-            id: id.clone(),
-            group_id: format!("{scope}:{group}"),
-            name: name.clone(),
-            kind: ToolKind::Tool,
-            arguments: String::new(),
-            argument_detail: String::new(),
-            diff: Vec::new(),
-            tail: String::new(),
-            result: None,
-            state: ToolState::Running,
-            progress: ToolProgress::None,
-            expanded: false,
-            full: false,
-            child_lines: Vec::new(),
-            child_group: 0,
-            child_running: false,
-            child_session_id: None,
-        }),
+        LoopEvent::ToolStarted { id, name } => {
+            push_tool_row(lines, id, format!("{scope}:{group}"), name);
+        }
         LoopEvent::ToolArguments { id, arguments } => {
-            if let Some(Line_::Tool {
-                arguments: current, ..
-            }) = direct_tool_mut(lines, id)
-            {
-                *current = arguments.clone();
-            }
+            set_tool_arguments(lines, id, arguments);
         }
         LoopEvent::ToolInputProgress {
             id,
             received_bytes,
             last_data,
         } => {
-            if let Some(Line_::Tool {
-                state: ToolState::Running,
-                progress,
-                ..
-            }) = direct_tool_mut(lines, id)
-                && !matches!(
-                    progress,
-                    ToolProgress::Queued | ToolProgress::Executing { .. }
-                )
-            {
-                *progress = ToolProgress::Receiving {
-                    received_bytes: *received_bytes,
-                    last_data: *last_data,
-                };
-            }
+            note_tool_input_progress(lines, id, *received_bytes, *last_data);
         }
         LoopEvent::ToolInputComplete { id, arguments } => {
-            if let Some(Line_::Tool {
-                name,
-                progress,
-                argument_detail,
-                diff,
-                ..
-            }) = direct_tool_mut(lines, id)
-            {
-                *progress = ToolProgress::Queued;
-                *argument_detail = bounded_detail(arguments);
-                *diff = diff::tool_diff(name, arguments);
-            }
+            complete_tool_input(lines, id, arguments);
         }
         LoopEvent::SubagentConfigured {
             id,
@@ -621,47 +1039,20 @@ fn apply_child_loop_event(lines: &mut Vec<Line_>, group: &mut u64, scope: &str, 
             agent,
             model,
         } => {
-            if let Some(Line_::Tool {
-                kind, arguments, ..
-            }) = direct_tool_mut(lines, id)
-            {
-                *kind = ToolKind::Agent {
-                    name: agent.clone(),
-                    model: model.clone(),
-                };
-                *arguments = description.clone();
-            }
+            configure_subagent_row(lines, id, agent, model, description);
         }
         LoopEvent::ToolExecutionStarted {
             id,
             received_bytes,
             started,
         } => {
-            if let Some(Line_::Tool { progress, .. }) = direct_tool_mut(lines, id) {
-                *progress = ToolProgress::Executing {
-                    received_bytes: *received_bytes,
-                    started: *started,
-                };
-            }
+            start_tool_execution(lines, id, *received_bytes, *started);
         }
         LoopEvent::ToolExecutionCompleted { id } => {
-            if let Some(Line_::Tool {
-                state, progress, ..
-            }) = direct_tool_mut(lines, id)
-            {
-                *state = ToolState::Complete;
-                *progress = ToolProgress::None;
-            }
+            complete_tool_execution(lines, id);
         }
         LoopEvent::ToolOutputTail { id, tail } => {
-            if let Some(Line_::Tool {
-                state: ToolState::Running,
-                tail: current,
-                ..
-            }) = direct_tool_mut(lines, id)
-            {
-                *current = tail.clone();
-            }
+            set_tool_tail(lines, id, tail);
         }
         LoopEvent::ToolFinished {
             id,
@@ -670,35 +1061,11 @@ fn apply_child_loop_event(lines: &mut Vec<Line_>, group: &mut u64, scope: &str, 
             child_session_id,
             ..
         } => {
-            if let Some(Line_::Tool {
-                state,
-                progress,
-                result: current,
-                child_session_id: current_child,
-                ..
-            }) = direct_tool_mut(lines, id)
-            {
-                *state = if *is_error {
-                    ToolState::Failed
-                } else {
-                    ToolState::Succeeded
-                };
-                *progress = ToolProgress::None;
-                *current = Some(bounded_detail(result));
-                *current_child = child_session_id.clone();
-            }
+            finish_tool_row(lines, id, *is_error, result, child_session_id);
         }
         LoopEvent::StepComplete { .. } => *group = group.saturating_add(1),
         LoopEvent::TurnDone { outcome } => {
-            lines.retain(|line| {
-                !matches!(
-                    line,
-                    Line_::Thought {
-                        complete: false,
-                        ..
-                    }
-                )
-            });
+            prune_incomplete_thoughts(lines);
             if *outcome != TurnOutcome::Completed {
                 mark_running_tools_failed(lines);
             }
@@ -750,7 +1117,7 @@ pub(crate) fn transcript_entry_rows(
     nested: bool,
 ) -> Vec<TranscriptRow> {
     match entry {
-        TranscriptEntry::Item(item) => match item.as_ref() {
+        TranscriptEntry::Item(item) => match *item {
             tool @ Line_::Tool { .. } => tool_entry_rows(
                 tool,
                 expanded_groups,
@@ -1479,7 +1846,7 @@ pub(crate) fn transcript_markdown(session_id: &str, lines: &[Line_]) -> String {
 /// model is doing without letting 100KB+ reasoning bloat the transcript.
 const MAX_THOUGHT_CHARS: usize = 64 * 1024;
 
-pub(crate) fn append_thought_tail(text: &mut String, delta: &str) {
+fn append_thought_tail(text: &mut String, delta: &str) {
     text.push_str(delta);
     if text.len() > MAX_THOUGHT_CHARS {
         *text = format!("…{}", ilar::text::tail_str(text, MAX_THOUGHT_CHARS));
@@ -1933,12 +2300,13 @@ mod tests {
     /// them — the exact cost of alignment, not a fixed column.
     #[test]
     fn grouped_tool_rows_align_to_their_widest_sibling() {
+        let calls = [
+            finished_tool("t1", "bash", "cargo test"),
+            finished_tool("t2", "webfetch", "https://x"),
+        ];
         let group = TranscriptEntry::ToolGroup {
             id: "g".into(),
-            calls: vec![
-                finished_tool("t1", "bash", "cargo test"),
-                finished_tool("t2", "webfetch", "https://x"),
-            ],
+            calls: &calls,
             expanded: true,
             child: false,
         };
@@ -2157,6 +2525,67 @@ mod tests {
         append_thought_tail(&mut unicode, &"é".repeat(MAX_THOUGHT_CHARS));
         assert!(unicode.starts_with('…'));
         assert!(unicode.ends_with('é'));
+    }
+
+    /// A subagent's reasoning is the same unbounded stream the parent's
+    /// is: without the cap a long-running child grows its Thought row
+    /// without limit.
+    #[test]
+    fn child_reasoning_summaries_are_bounded_like_the_parents() {
+        let mut lines = Vec::new();
+        let mut group = 0u64;
+        for _ in 0..4 {
+            apply_child_loop_event(
+                &mut lines,
+                &mut group,
+                "call-1",
+                &LoopEvent::ReasoningSummaryDelta("x".repeat(MAX_THOUGHT_CHARS / 2)),
+            );
+        }
+
+        let Some(Line_::Thought { text, .. }) = lines.last() else {
+            panic!("a child thought row: {lines:?}");
+        };
+        assert!(
+            text.len() <= MAX_THOUGHT_CHARS + '…'.len_utf8(),
+            "child thought grew to {} bytes",
+            text.len()
+        );
+    }
+
+    /// Call ids repeat across a long child transcript; an event is about
+    /// the row that is live, not the first one that ever wore the id.
+    #[test]
+    fn child_tool_events_land_on_the_newest_row_with_that_id() {
+        let mut lines = vec![finished_tool("call-1", "read", "stale")];
+        let mut group = 0u64;
+        apply_child_loop_event(
+            &mut lines,
+            &mut group,
+            "scope",
+            &LoopEvent::ToolStarted {
+                id: "call-1".into(),
+                name: "read".into(),
+            },
+        );
+        apply_child_loop_event(
+            &mut lines,
+            &mut group,
+            "scope",
+            &LoopEvent::ToolArguments {
+                id: "call-1".into(),
+                arguments: "live".into(),
+            },
+        );
+
+        let arguments = lines
+            .iter()
+            .map(|line| match line {
+                Line_::Tool { arguments, .. } => arguments.as_str(),
+                _ => "",
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(arguments, ["stale", "live"], "{lines:?}");
     }
 
     #[test]
