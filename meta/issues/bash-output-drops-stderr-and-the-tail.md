@@ -30,3 +30,14 @@ incantation.
 ## Milestone
 
 12 — Health sweep
+
+## Outcome
+
+A shared `tools/process.rs` now owns `Captured` (tail-biased
+retention), `drain`, the `sh -c`/process-group spawn shape, and the
+one `killpg` site; bash and service both use it. `render_output`
+budgets the rendered cap per stream — stderr always keeps up to half
+when it needs it, both streams tail-sliced on UTF-8 boundaries — and
+reports actual raw totals. Pinned by
+`bash_keeps_stderr_and_the_stdout_tail_when_stdout_fills_the_cap`
+plus process.rs unit tests. (ce41a84)

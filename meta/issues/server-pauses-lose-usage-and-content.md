@@ -37,3 +37,15 @@ of `run_turn_inner` (turn.rs):
 ## Milestone
 
 12 — Health sweep
+
+## Outcome
+
+A `paused_usage` accumulator folds each pause segment via
+`merge_segment_usage` (output summed; prompt side taken whole from
+the largest segment, since continuations re-send the full prompt —
+summing would spuriously trip compaction); the persisted message,
+`StepComplete`, error, abort, and cancel paths all use the merged
+value. The retry budget resets when a chain settles (per-chain, not
+per-turn). All four pause-path bails persist the streamed prefix
+through the extracted `persist_failed_step`. Five agent_loop tests
+pin it. Residual edge cases recorded in sweep-cleanups. (22189d6)

@@ -25,3 +25,13 @@ new event kinds.
 ## Milestone
 
 12 — Health sweep
+
+## Outcome
+
+`parse_event_bytes` re-probes failed lines with
+`unknown_event_type`, which asks serde's own variant table (no
+hand-list to drift): a well-formed object with an unrecognized
+`type` now reads `unknown event type "…"; written by a newer
+ilar?`, everything else keeps the malformed diagnosis. Still
+fail-closed. Pinned by three tests covering future types, broken
+known types, and JSON garbage. (fbdda73)

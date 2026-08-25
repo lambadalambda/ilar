@@ -15,7 +15,14 @@ recall unreachable there.
 ## Requirements
 
 - Honor `move_vertical`'s return: `false` falls through as
-  `Unhandled`.
+  `Unhandled`. (Done in 58d9e78.)
+- Discovered while fixing: `Unhandled` does not actually reach
+  transcript scrolling — `App::handle_prompt_navigation_key` runs
+  *before* `handle_prompt_key` and guards its scroll arms with
+  `!is_multiline()`, and main.rs's `Unhandled` arm is a no-op. For
+  the F1 help promise ("Up / Down scroll"), the app.rs guard must
+  admit edge-of-draft arrows (e.g. ask the input whether a vertical
+  move can succeed).
 
 ## Acceptance Criteria
 

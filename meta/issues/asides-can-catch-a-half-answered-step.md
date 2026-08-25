@@ -25,3 +25,14 @@ blocks — providers reject it with a 400.
 ## Milestone
 
 12 — Health sweep
+
+## Outcome
+
+`settled()` now loops on an `unsettled_tail` predicate that also
+recognizes a trailing user message whose tool-result ids don't
+cover the preceding assistant's call ids (matched by id, not
+count) — popping the partial results, then the unanswered step,
+until the tail settles. Fully-answered steps still ride along.
+Pinned by three in-file tests. Known trade-off: a queued user text
+merged into the same message as partial results is dropped from the
+aside snapshot only (the log is untouched).

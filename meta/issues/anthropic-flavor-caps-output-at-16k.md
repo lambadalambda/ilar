@@ -26,3 +26,15 @@ list, so a user override silently desynchronizes the two.
 ## Milestone
 
 12 — Health sweep
+
+## Outcome
+
+`zai::max_output_tokens(model)` is the single source: the catalog's
+`output_limit` (131k for the V/flagship models), 16_384 floor for
+uncataloged ids. The Anthropic wire uses it and
+`Config::input_limit` subtracts the same value; `max_tokens` is now
+reserved in options so an override cannot desync the pair.
+Compaction triggers at the identical token count as before (the old
+`context − 16k` term never won the `min()`). The uncataloged-model
+asymmetry in the config fallback path is recorded in
+sweep-cleanups. (3289226)

@@ -28,3 +28,13 @@ panic.
 ## Milestone
 
 12 — Health sweep
+
+## Outcome
+
+`original_offset` maps lowercased-haystack offsets back in one
+allocation-free walk of the original text, always landing on a real
+boundary; both the match start AND end map through it — the end was
+a second panic vector (`"i"` vs `"İstanbul"` sliced inside the
+combining mark) the sweep hadn't named. O(n) per entry now. Pinned
+by the Turkish-İ, exact-ASCII-offset, and lengthening-prefix tests.
+(adc37fe)

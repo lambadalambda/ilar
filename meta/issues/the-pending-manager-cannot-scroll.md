@@ -25,3 +25,15 @@ the file uses `list_window`. Bonus: the navigation hand-rolls
 ## Milestone
 
 12 — Health sweep
+
+## Outcome
+
+`render_pending_manager` windows rows with `list_window` around the
+(clamped) selection like every sibling; the manager's bare
+`selected` field became a private `ListNav` with
+`select`/`move_selection` that disarm on move, and stale click
+indexes clamp. Pinned by
+`a_scrolled_pending_manager_keeps_the_selection_on_screen`,
+`pending_manager_navigation_wraps_over_the_whole_list`, and
+`a_stale_pending_click_lands_on_the_last_row`. The inert mouse
+wheel is recorded in sweep-cleanups. (0d9737d)

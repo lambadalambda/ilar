@@ -26,7 +26,23 @@ verified, and safe to do opportunistically:
   ReasoningSummaryDelta append-or-create; `slash_candidates` vs
   `resolve_slash` builtins merge (and `slash_inventory`'s doc lies —
   SkillPicker consequently omits builtins like `/goal`).
-- **Small bugs**: web.rs `decode_entities` replaces `&amp;` first
+- **Pause-path residuals** (found while fixing
+  server-pauses-lose-usage-and-content, deliberately deferred): a
+  cancel with a *contentless* pause still drops usage (persist is
+  gated on `!paused_content.is_empty()`); `persist_failed_step` and
+  the abort branch are ~40-line near-duplicates; the
+  `announced_calls`-minus-`completed_ids` loop in turn.rs is dead
+  (`start_tool_call` covers every announced id); abort/error paths
+  publish no `StepComplete`, so live TUI totals and reloaded totals
+  diverge by the recovered usage.
+- **Small bugs**: the mouse wheel is inert in the pending manager,
+  which scrolls since 0d9737d — wire it to `move_selection` and
+  drop the stale "handful of rows" comment (app.rs:527-531);
+  uncataloged zai models are asymmetric after
+  3289226 — the wire reserves the 16k output floor but
+  `Config::input_limit`'s `fallback_context_limit` path reserves
+  nothing (pre-existing; fix means touching the fallback path);
+  web.rs `decode_entities` replaces `&amp;` first
   (double-decode; do it last); `login_flow` uses macOS-only `open`
   (use a platform opener or document); markdown/text tab expansion
   counts chars not display width; text.rs hard-wrap sentinel is a

@@ -23,3 +23,12 @@ of umask — surprising for source files.
 ## Milestone
 
 12 — Health sweep
+
+## Outcome
+
+`Mode::Preserve` on a missing destination now applies
+`0o666 & !process_umask()` (umask read once through a `OnceLock`,
+bounding the swap race to first use); existing destinations keep
+their mode byte-identically. Pinned by
+`new_file_honors_umask_while_overwrite_keeps_mode`, whose
+expectation is computed from the live umask. (5b747fb)
