@@ -131,7 +131,7 @@ pub(crate) fn nav_delta(code: KeyCode, control: bool) -> Option<isize> {
 /// length is passed per call — most pickers select within a filtered
 /// view whose length changes under the cursor. Reset hooks (armed
 /// state, pending deletes, errors, the theme preview) stay in the
-/// pickers.
+/// pickers, as `Picker::on_move` and `Picker::on_edit`.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ListNav {
     pub(crate) selected: usize,
@@ -165,6 +165,128 @@ fn list_window(selected: usize, len: usize, visible_rows: usize) -> usize {
         .saturating_add(1)
         .saturating_sub(visible_rows)
         .min(len.saturating_sub(visible_rows))
+}
+
+/// The indices a scrolled list actually draws.
+fn visible_rows(selected: usize, len: usize, row_count: usize) -> std::ops::Range<usize> {
+    let start = list_window(selected, len, row_count);
+    start..len.min(start.saturating_add(row_count))
+}
+
+/// The one row loop. Every modal list draws its window the same way:
+/// the caller's text for the row, truncated to the width, padded back
+/// out so a selected row's bar spans the modal, and pushed together
+/// with the index it shows so a click lands on what it looks like.
+fn push_row_window(
+    body: &mut ModalRows,
+    width: usize,
+    rows: std::ops::Range<usize>,
+    selected: usize,
+    mut row: impl FnMut(usize, bool) -> (String, Style),
+) {
+    for index in rows {
+        let (text, style) = row(index, index == selected);
+        let text = truncate_display(&text, width, Truncation::Right);
+        body.push(Line::styled(format!("{text:<width$}"), style), Some(index));
+    }
+}
+
+/// The line the filtering pickers open with, above their rows.
+fn filter_header(query: &str, width: usize) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("filter ", Style::default().fg(MUTED)),
+        Span::raw(truncate_display(
+            query,
+            width.saturating_sub(8),
+            Truncation::Middle,
+        )),
+    ])
+}
+
+/// A muted note where rows would be: nothing to list, or nothing matched.
+fn muted_line(text: &str) -> Line<'static> {
+    Line::styled(text.to_string(), Style::default().fg(MUTED))
+}
+
+/// The line a failed switch leaves behind, in the row the picker's
+/// subtitle would have used.
+fn error_line(error: &str, width: usize) -> Line<'static> {
+    Line::styled(
+        truncate_display(error, width, Truncation::Right),
+        Style::default().fg(ERROR),
+    )
+}
+
+/// The marker column of the "which one is running" lists carries two
+/// facts at once: where the cursor is, and which entry is in force.
+fn choice_marker(selected: bool, active: bool) -> &'static str {
+    match (selected, active) {
+        (true, true) => ">●",
+        (true, false) => "> ",
+        (false, true) => " ●",
+        (false, false) => "  ",
+    }
+}
+
+/// One such row: the id suffix keeps the right edge and the name takes
+/// whatever the marker and the suffix left.
+fn marked_row(width: usize, selected: bool, active: bool, name: &str, suffix: &str) -> String {
+    let marker = choice_marker(selected, active);
+    let name_width = width
+        .saturating_sub(UnicodeWidthStr::width(marker))
+        .saturating_sub(UnicodeWidthStr::width(suffix))
+        .saturating_sub(1);
+    format!(
+        "{marker} {}{suffix}",
+        truncate_display(name, name_width, Truncation::Right)
+    )
+}
+
+/// Cursor first, then the running entry's green, then plain.
+fn choice_style(selected: bool, active: bool) -> Style {
+    if selected {
+        theme::selected()
+    } else if active {
+        Style::default().fg(theme::SUCCESS)
+    } else {
+        Style::default()
+    }
+}
+
+/// The body every filtering picker draws: the "filter <query>" line,
+/// and under it either the visible window of rows or the note that
+/// stands in for them. The note maps no rows, so a click on "no
+/// matches" selects nothing.
+fn render_filtered_list(
+    frame: &mut Frame,
+    inner: Rect,
+    query: &str,
+    empty_note: &str,
+    len: usize,
+    selected: usize,
+    row: impl FnMut(usize, bool) -> (String, Style),
+) -> ModalHit {
+    let width = inner.width as usize;
+    let mut body = ModalRows::default();
+    body.push(filter_header(query, width), None);
+    if len == 0 {
+        body.push(muted_line(empty_note), None);
+        return body.finish_unmapped(frame, inner);
+    }
+    // At least one row, even on a terminal with no room for it: a
+    // zero-tall window would scroll the selection off the map.
+    let row_count = (inner.height as usize)
+        .saturating_sub(body.line_count())
+        .max(1);
+    let selected = selected.min(len - 1);
+    push_row_window(
+        &mut body,
+        width,
+        visible_rows(selected, len, row_count),
+        selected,
+        row,
+    );
+    body.finish(frame, inner)
 }
 
 /// The one query editor. Backspace removes the last grapheme — the
@@ -213,6 +335,146 @@ pub(crate) fn insert_query(query: &mut String, text: &str) -> bool {
 /// line at most, and the fuzzy scorer re-runs over every candidate per
 /// render — an unbounded clipboard would stall the draw loop.
 const QUERY_CAP: usize = 256;
+
+/// The fuzzy pipeline the ranking pickers share: keep what the query
+/// matches, best score first. `sort_by_key` is stable, so equal scores
+/// keep the input order — recency for sessions, the author's order for
+/// everything else. An empty query scores everything, which is how a
+/// fresh picker lists all of it.
+fn fuzzy_filter<T>(
+    query: &str,
+    items: impl IntoIterator<Item = T>,
+    haystack: impl Fn(&T) -> String,
+) -> Vec<T> {
+    let mut scored: Vec<(i64, T)> = items
+        .into_iter()
+        .filter_map(|item| fuzzy_score(query, &haystack(&item)).map(|score| (score, item)))
+        .collect();
+    scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+    scored.into_iter().map(|(_, item)| item).collect()
+}
+
+/// The other filter: every whitespace-separated term must appear
+/// somewhere in the item, and the list keeps its own order. The palette
+/// and the model picker are curated lists where that order says more
+/// than a score would.
+fn term_filter<T>(
+    query: &str,
+    items: impl IntoIterator<Item = T>,
+    haystack: impl Fn(&T) -> String,
+) -> Vec<T> {
+    let query = query.to_lowercase();
+    let terms: Vec<&str> = query.split_whitespace().collect();
+    items
+        .into_iter()
+        .filter(|item| {
+            let haystack = haystack(item).to_lowercase();
+            terms.iter().all(|term| haystack.contains(term))
+        })
+        .collect()
+}
+
+/// The picker skeleton, written once. Nine modals used to carry their
+/// own copy of it: the same cursor wrappers, the same key order
+/// (navigate → dismiss → choose → edit the filter), the same
+/// reset-on-edit. What genuinely differs stays in the picker — what it
+/// holds (`row_count`), what its action enum is called (`stay`,
+/// `dismiss`, `choose`), what a moved cursor or a changed query must
+/// clear (`on_move`, `on_edit`), and which extra chords it answers
+/// (matched in its own `handle_key`, ahead of `skeleton_key`).
+///
+/// The wrappers `App` calls — `select`, `move_selection`,
+/// `insert_query`, `handle_key` — stay inherent methods on each picker,
+/// because `app.rs` never imports this trait. They are one-liners over
+/// `nav_to`, `nav_by`, `paste_query` and `skeleton_key`.
+trait Picker {
+    /// The picker's own action enum.
+    type Action;
+
+    fn nav(&mut self) -> &mut ListNav;
+
+    /// Rows the cursor moves within: the *filtered* count, which
+    /// changes under the cursor as the query is typed.
+    fn row_count(&self) -> usize;
+
+    /// A key that changed nothing the caller has to act on.
+    fn stay(&self) -> Self::Action;
+
+    fn dismiss(&self) -> Self::Action;
+
+    /// Enter on the current selection. With nothing selected every
+    /// picker stays: a query matching nothing is a typo, and throwing
+    /// the modal away over one is Esc's job, not Enter's.
+    fn choose(&mut self) -> Self::Action;
+
+    /// The filter, for the pickers that have one. `None` means keys
+    /// that would type into it are ignored — the skill picker lists the
+    /// whole inventory and the reasoning picker a handful of levels, so
+    /// neither has anything to narrow.
+    fn query(&mut self) -> Option<&mut String> {
+        None
+    }
+
+    /// The cursor moved: disarm whatever was armed for the old row.
+    fn on_move(&mut self) {}
+
+    /// The query grew or shrank. The default jumps back to the best
+    /// match and disarms with it; pickers that rescan or re-anchor
+    /// instead override this.
+    fn on_edit(&mut self) -> Self::Action {
+        self.nav().reset();
+        self.on_move();
+        self.stay()
+    }
+
+    /// Click-to-select: the index comes from the frame's hit map, which
+    /// is a frame out of date by the time a click arrives, so
+    /// `ListNav::select` clamps it.
+    /// The count is read before the hook runs, so no `on_move` may
+    /// change the number of rows.
+    fn nav_to(&mut self, index: usize) {
+        let len = self.row_count();
+        self.on_move();
+        self.nav().select(index, len);
+    }
+
+    /// Arrow keys and the wheel, wrapping around the list. Reads the
+    /// count before the hook, like `nav_to`.
+    fn nav_by(&mut self, delta: isize) {
+        let len = self.row_count();
+        self.on_move();
+        self.nav().move_by(delta, len);
+    }
+
+    /// Clipboard text joins the filter the way typed characters do. A
+    /// paste that adds nothing — all control characters, or a query
+    /// already at the cap — must not move a selection or disarm
+    /// anything, so it reports `stay`.
+    fn paste_query(&mut self, text: &str) -> Self::Action {
+        let grew = self.query().is_some_and(|query| insert_query(query, text));
+        if grew { self.on_edit() } else { self.stay() }
+    }
+
+    /// Navigate, dismiss, choose, or edit the filter — in that order.
+    /// Chords a picker claims for itself are matched before it delegates
+    /// here, so they never reach the query editor.
+    fn skeleton_key(&mut self, code: KeyCode, control: bool) -> Self::Action {
+        if let Some(delta) = nav_delta(code, control) {
+            self.nav_by(delta);
+            return self.stay();
+        }
+        match (code, control) {
+            (KeyCode::Esc, _) => self.dismiss(),
+            (KeyCode::Enter, _) => self.choose(),
+            _ => {
+                let edited = self
+                    .query()
+                    .is_some_and(|query| edit_query(query, code, control));
+                if edited { self.on_edit() } else { self.stay() }
+            }
+        }
+    }
+}
 
 /// The overlay that owns the keyboard. Render and key dispatch both
 /// derive their precedence from `App::active_modal`, so adding a variant
@@ -397,62 +659,67 @@ impl CommandPalette {
     }
 
     fn filtered_commands(&self) -> Vec<&PaletteItem> {
-        let query = self.query.to_lowercase();
-        let terms = query.split_whitespace().collect::<Vec<_>>();
-        self.items
-            .iter()
-            .filter(|item| {
-                let haystack = format!("{} {} {}", item.label, item.shortcut, item.search_terms)
-                    .to_lowercase();
-                terms.iter().all(|term| haystack.contains(term))
-            })
-            .collect()
+        term_filter(&self.query, self.items.iter(), |item| {
+            format!("{} {} {}", item.label, item.shortcut, item.search_terms)
+        })
     }
 
     /// Click-to-select: the index is into the filtered list.
     pub(crate) fn select(&mut self, index: usize) {
-        self.nav.select(index, self.filtered_commands().len());
+        self.nav_to(index);
     }
 
     pub(crate) fn move_selection(&mut self, delta: isize) {
-        let count = self.filtered_commands().len();
-        self.nav.move_by(delta, count);
+        self.nav_by(delta);
     }
 
     pub(crate) fn insert_query(&mut self, text: &str) {
-        if insert_query(&mut self.query, text) {
-            self.nav.reset();
-        }
+        self.paste_query(text);
     }
 
     pub(crate) fn handle_key(&mut self, code: KeyCode, control: bool) -> CommandPaletteAction {
-        if let Some(delta) = nav_delta(code, control) {
-            self.move_selection(delta);
-            return CommandPaletteAction::Stay;
-        }
         match (code, control) {
-            (KeyCode::Esc, _) => CommandPaletteAction::Dismiss,
-            (KeyCode::Enter, _) => self
-                .filtered_commands()
-                .get(self.nav.selected)
-                .map(|item| CommandPaletteAction::Choose(item.action.clone()))
-                .unwrap_or(CommandPaletteAction::Stay),
             (KeyCode::Home, _) => {
                 self.nav.reset();
                 CommandPaletteAction::Stay
             }
             (KeyCode::End, _) => {
-                self.nav.selected = self.filtered_commands().len().saturating_sub(1);
+                self.nav.selected = self.row_count().saturating_sub(1);
                 CommandPaletteAction::Stay
             }
-            (KeyCode::Backspace, _) | (KeyCode::Char(_), _) => {
-                if edit_query(&mut self.query, code, control) {
-                    self.nav.reset();
-                }
-                CommandPaletteAction::Stay
-            }
-            _ => CommandPaletteAction::Stay,
+            _ => self.skeleton_key(code, control),
         }
+    }
+}
+
+impl Picker for CommandPalette {
+    type Action = CommandPaletteAction;
+
+    fn nav(&mut self) -> &mut ListNav {
+        &mut self.nav
+    }
+
+    fn row_count(&self) -> usize {
+        self.filtered_commands().len()
+    }
+
+    fn stay(&self) -> Self::Action {
+        CommandPaletteAction::Stay
+    }
+
+    fn dismiss(&self) -> Self::Action {
+        CommandPaletteAction::Dismiss
+    }
+
+    fn choose(&mut self) -> Self::Action {
+        self.filtered_commands()
+            .get(self.nav.selected)
+            .map(|item| CommandPaletteAction::Choose(item.action.clone()))
+            .unwrap_or(CommandPaletteAction::Stay)
+    }
+
+    fn query(&mut self) -> Option<&mut String> {
+        Some(&mut self.query)
     }
 }
 
@@ -653,49 +920,40 @@ pub(crate) fn render_pending_manager(frame: &mut Frame, snapshot: &PendingSnapsh
     };
     if snapshot.rows.is_empty() {
         frame.render_widget(
-            Paragraph::new(Line::styled(
+            Paragraph::new(muted_line(
                 "nothing pending — queued messages, the goal, background jobs, and retry offers appear here",
-                Style::default().fg(MUTED),
             )),
             inner,
         );
         return ModalHit::default();
     }
+    let width = inner.width as usize;
     let selected = snapshot.selected.min(snapshot.rows.len().saturating_sub(1));
-    let row_count = inner.height as usize;
-    let start = list_window(selected, snapshot.rows.len(), row_count);
     let mut body = ModalRows::default();
-    for (index, label) in snapshot.rows.iter().enumerate().skip(start).take(row_count) {
-        let armed = snapshot.armed && index == selected;
-        let marker = if index == selected {
-            if armed { "✗ " } else { "> " }
-        } else {
-            "  "
-        };
-        let text = truncate_display(
-            &format!("{marker}{label}"),
-            inner.width as usize,
-            Truncation::Right,
-        );
-        let style = if index == selected {
-            if armed {
+    push_row_window(
+        &mut body,
+        width,
+        visible_rows(selected, snapshot.rows.len(), inner.height as usize),
+        selected,
+        |index, is_selected| {
+            let armed = snapshot.armed && is_selected;
+            let marker = if is_selected {
+                if armed { "✗ " } else { "> " }
+            } else {
+                "  "
+            };
+            let style = if armed {
                 // Armed deletion is the one place a full bar is the
                 // point; it is still a colour, not inverted video.
                 Style::default().fg(theme::SELECTED_FG).bg(ERROR)
-            } else {
+            } else if is_selected {
                 theme::selected()
-            }
-        } else {
-            Style::default().fg(theme::PRIMARY)
-        };
-        body.push(
-            Line::styled(
-                format!("{text:<width$}", width = inner.width as usize),
-                style,
-            ),
-            Some(index),
-        );
-    }
+            } else {
+                Style::default().fg(theme::PRIMARY)
+            };
+            (format!("{marker}{}", snapshot.rows[index]), style)
+        },
+    );
     body.finish(frame, inner)
 }
 
@@ -879,27 +1137,44 @@ impl SkillPicker {
 
     /// Click-to-select: the index comes from the frame's hit map.
     pub(crate) fn select(&mut self, index: usize) {
-        self.nav.select(index, self.skills.len());
+        self.nav_to(index);
     }
 
     pub(crate) fn move_selection(&mut self, delta: isize) {
-        self.nav.move_by(delta, self.skills.len());
+        self.nav_by(delta);
     }
 
     pub(crate) fn handle_key(&mut self, code: KeyCode, control: bool) -> PickerAction {
-        if let Some(delta) = nav_delta(code, control) {
-            self.move_selection(delta);
-            return PickerAction::Stay;
-        }
-        match (code, control) {
-            (KeyCode::Esc, _) => PickerAction::Dismiss,
-            (KeyCode::Enter, _) => self
-                .skills
-                .get(self.nav.selected)
-                .map(|(name, _)| PickerAction::Choose(name.clone()))
-                .unwrap_or(PickerAction::Dismiss),
-            _ => PickerAction::Stay,
-        }
+        self.skeleton_key(code, control)
+    }
+}
+
+/// The whole inventory is always listed, so there is no query: typed
+/// characters fall through to `stay`.
+impl Picker for SkillPicker {
+    type Action = PickerAction;
+
+    fn nav(&mut self) -> &mut ListNav {
+        &mut self.nav
+    }
+
+    fn row_count(&self) -> usize {
+        self.skills.len()
+    }
+
+    fn stay(&self) -> Self::Action {
+        PickerAction::Stay
+    }
+
+    fn dismiss(&self) -> Self::Action {
+        PickerAction::Dismiss
+    }
+
+    fn choose(&mut self) -> Self::Action {
+        self.skills
+            .get(self.nav.selected)
+            .map(|(name, _)| PickerAction::Choose(name.clone()))
+            .unwrap_or(PickerAction::Stay)
     }
 }
 
@@ -918,30 +1193,23 @@ pub(crate) fn render_skill_picker(frame: &mut Frame, picker: &SkillPicker) -> Mo
         .nav
         .selected
         .min(picker.skills.len().saturating_sub(1));
-    let row_count = inner.height as usize;
-    let start = list_window(selected, picker.skills.len(), row_count);
     let mut body = ModalRows::default();
-    for (index, (name, description)) in picker.skills.iter().enumerate().skip(start).take(row_count)
-    {
-        let marker = if index == selected { "> " } else { "  " };
-        let text = truncate_display(
-            &format!("{marker}/{name} — {description}"),
-            inner.width as usize,
-            Truncation::Right,
-        );
-        let style = if index == selected {
-            theme::selected()
-        } else {
-            Style::default().fg(theme::PRIMARY)
-        };
-        body.push(
-            Line::styled(
-                format!("{text:<width$}", width = inner.width as usize),
-                style,
-            ),
-            Some(index),
-        );
-    }
+    push_row_window(
+        &mut body,
+        inner.width as usize,
+        visible_rows(selected, picker.skills.len(), inner.height as usize),
+        selected,
+        |index, is_selected| {
+            let (name, description) = &picker.skills[index];
+            let marker = if is_selected { "> " } else { "  " };
+            let style = if is_selected {
+                theme::selected()
+            } else {
+                Style::default().fg(theme::PRIMARY)
+            };
+            (format!("{marker}/{name} — {description}"), style)
+        },
+    );
     body.finish(frame, inner)
 }
 
@@ -977,16 +1245,9 @@ impl SessionPicker {
     /// Sessions matching the query, best fuzzy score first (stable, so
     /// equal scores keep recency order).
     fn filtered(&self) -> Vec<&ilar::session::SessionSummary> {
-        let mut scored: Vec<(i64, &ilar::session::SessionSummary)> = self
-            .sessions
-            .iter()
-            .filter_map(|session| {
-                let haystack = format!("{} {}", session.title.as_deref().unwrap_or(""), session.id);
-                fuzzy_score(&self.query, &haystack).map(|score| (score, session))
-            })
-            .collect();
-        scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
-        scored.into_iter().map(|(_, session)| session).collect()
+        fuzzy_filter(&self.query, self.sessions.iter(), |session| {
+            format!("{} {}", session.title.as_deref().unwrap_or(""), session.id)
+        })
     }
 
     fn selected_id(&self) -> Option<String> {
@@ -998,34 +1259,19 @@ impl SessionPicker {
     /// Click-to-select. Disarms a pending delete, like any other
     /// selection move.
     pub(crate) fn select(&mut self, index: usize) {
-        self.pending_delete = None;
-        self.nav.select(index, self.filtered().len());
+        self.nav_to(index);
     }
 
     pub(crate) fn move_selection(&mut self, delta: isize) {
-        self.pending_delete = None;
-        let count = self.filtered().len();
-        self.nav.move_by(delta, count);
+        self.nav_by(delta);
     }
 
     pub(crate) fn insert_query(&mut self, text: &str) {
-        if insert_query(&mut self.query, text) {
-            self.nav.reset();
-            self.pending_delete = None;
-        }
+        self.paste_query(text);
     }
 
     pub(crate) fn handle_key(&mut self, code: KeyCode, control: bool) -> SessionPickerAction {
-        if let Some(delta) = nav_delta(code, control) {
-            self.move_selection(delta);
-            return SessionPickerAction::Stay;
-        }
         match (code, control) {
-            (KeyCode::Esc, _) => SessionPickerAction::Dismiss,
-            (KeyCode::Enter, _) => self
-                .selected_id()
-                .map(SessionPickerAction::Resume)
-                .unwrap_or(SessionPickerAction::Dismiss),
             (KeyCode::Char('d'), true) => match (self.selected_id(), self.pending_delete.take()) {
                 (Some(id), Some(pending)) if pending == id => SessionPickerAction::Delete(id),
                 (Some(id), _) => {
@@ -1039,15 +1285,42 @@ impl SessionPicker {
                 .map(SessionPickerAction::Fork)
                 .unwrap_or(SessionPickerAction::Stay),
             (KeyCode::Char('g'), true) => SessionPickerAction::ContentSearch,
-            (KeyCode::Backspace, _) | (KeyCode::Char(_), _) => {
-                if edit_query(&mut self.query, code, control) {
-                    self.nav.reset();
-                    self.pending_delete = None;
-                }
-                SessionPickerAction::Stay
-            }
-            _ => SessionPickerAction::Stay,
+            _ => self.skeleton_key(code, control),
         }
+    }
+}
+
+impl Picker for SessionPicker {
+    type Action = SessionPickerAction;
+
+    fn nav(&mut self) -> &mut ListNav {
+        &mut self.nav
+    }
+
+    fn row_count(&self) -> usize {
+        self.filtered().len()
+    }
+
+    fn stay(&self) -> Self::Action {
+        SessionPickerAction::Stay
+    }
+
+    fn dismiss(&self) -> Self::Action {
+        SessionPickerAction::Dismiss
+    }
+
+    fn choose(&mut self) -> Self::Action {
+        self.selected_id()
+            .map(SessionPickerAction::Resume)
+            .unwrap_or(SessionPickerAction::Stay)
+    }
+
+    fn query(&mut self) -> Option<&mut String> {
+        Some(&mut self.query)
+    }
+
+    fn on_move(&mut self) {
+        self.pending_delete = None;
     }
 }
 
@@ -1116,11 +1389,11 @@ impl SessionSearch {
     }
 
     pub(crate) fn select(&mut self, index: usize) {
-        self.nav.select(index, self.rows.len());
+        self.nav_to(index);
     }
 
     pub(crate) fn move_selection(&mut self, delta: isize) {
-        self.nav.move_by(delta, self.rows.len());
+        self.nav_by(delta);
     }
 
     /// Accept a batch from the scanner, unless it answers a query the
@@ -1143,42 +1416,59 @@ impl SessionSearch {
     /// Pasted text extends the grep query, which invalidates whatever
     /// the running scan is about to deliver.
     pub(crate) fn insert_query(&mut self, text: &str) -> SessionSearchAction {
-        if !insert_query(&mut self.query, text) {
-            return SessionSearchAction::Stay;
-        }
-        self.nav.reset();
-        self.rows.clear();
-        self.generation += 1;
-        self.scanning = true;
-        SessionSearchAction::Rescan
+        self.paste_query(text)
     }
 
     pub(crate) fn handle_key(&mut self, code: KeyCode, control: bool) -> SessionSearchAction {
-        if let Some(delta) = nav_delta(code, control) {
-            self.move_selection(delta);
-            return SessionSearchAction::Stay;
-        }
         match (code, control) {
-            (KeyCode::Esc, _) => SessionSearchAction::Dismiss,
             (KeyCode::Char('g'), true) => SessionSearchAction::ListMode,
-            (KeyCode::Enter, _) => self
-                .selected()
-                .map(|row| SessionSearchAction::Resume(row.session_id.clone()))
-                .unwrap_or(SessionSearchAction::Stay),
-            (KeyCode::Backspace, _) | (KeyCode::Char(_), _) => {
-                if edit_query(&mut self.query, code, control) {
-                    self.nav.reset();
-                    self.rows.clear();
-                    self.generation += 1;
-                    // Empty query included: that rescans as the
-                    // recent-sessions listing.
-                    self.scanning = true;
-                    return SessionSearchAction::Rescan;
-                }
-                SessionSearchAction::Stay
-            }
-            _ => SessionSearchAction::Stay,
+            _ => self.skeleton_key(code, control),
         }
+    }
+}
+
+impl Picker for SessionSearch {
+    type Action = SessionSearchAction;
+
+    fn nav(&mut self) -> &mut ListNav {
+        &mut self.nav
+    }
+
+    /// The rows are whatever the scan delivered; there is no local
+    /// filter to apply, because the query is the scan.
+    fn row_count(&self) -> usize {
+        self.rows.len()
+    }
+
+    fn stay(&self) -> Self::Action {
+        SessionSearchAction::Stay
+    }
+
+    fn dismiss(&self) -> Self::Action {
+        SessionSearchAction::Dismiss
+    }
+
+    fn choose(&mut self) -> Self::Action {
+        self.selected()
+            .map(|row| SessionSearchAction::Resume(row.session_id.clone()))
+            .unwrap_or(SessionSearchAction::Stay)
+    }
+
+    fn query(&mut self) -> Option<&mut String> {
+        Some(&mut self.query)
+    }
+
+    /// Editing the query does not re-filter a list here, it retires
+    /// one: the rows on screen answer the old query, and the scan
+    /// still delivering them is stamped stale.
+    fn on_edit(&mut self) -> Self::Action {
+        self.nav.reset();
+        self.rows.clear();
+        self.generation += 1;
+        // Empty query included: that rescans as the recent-sessions
+        // listing.
+        self.scanning = true;
+        SessionSearchAction::Rescan
     }
 }
 
@@ -1198,53 +1488,56 @@ impl LinkPicker {
     }
 
     fn filtered(&self) -> Vec<&crate::links::LinkEntry> {
-        let mut scored: Vec<(i64, &crate::links::LinkEntry)> = self
-            .links
-            .iter()
-            .filter_map(|link| {
-                let haystack = format!("{} {}", link.label, link.url);
-                fuzzy_score(&self.query, &haystack).map(|score| (score, link))
-            })
-            .collect();
-        scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
-        scored.into_iter().map(|(_, link)| link).collect()
+        fuzzy_filter(&self.query, self.links.iter(), |link| {
+            format!("{} {}", link.label, link.url)
+        })
     }
 
     pub(crate) fn select(&mut self, index: usize) {
-        self.nav.select(index, self.filtered().len());
+        self.nav_to(index);
     }
 
     pub(crate) fn move_selection(&mut self, delta: isize) {
-        let count = self.filtered().len();
-        self.nav.move_by(delta, count);
+        self.nav_by(delta);
     }
 
     pub(crate) fn insert_query(&mut self, text: &str) {
-        if insert_query(&mut self.query, text) {
-            self.nav.reset();
-        }
+        self.paste_query(text);
     }
 
     pub(crate) fn handle_key(&mut self, code: KeyCode, control: bool) -> PickerAction {
-        if let Some(delta) = nav_delta(code, control) {
-            self.move_selection(delta);
-            return PickerAction::Stay;
-        }
-        match (code, control) {
-            (KeyCode::Esc, _) => PickerAction::Dismiss,
-            (KeyCode::Enter, _) => self
-                .filtered()
-                .get(self.nav.selected)
-                .map(|link| PickerAction::Choose(link.url.clone()))
-                .unwrap_or(PickerAction::Dismiss),
-            (KeyCode::Backspace, _) | (KeyCode::Char(_), _) => {
-                if edit_query(&mut self.query, code, control) {
-                    self.nav.reset();
-                }
-                PickerAction::Stay
-            }
-            _ => PickerAction::Stay,
-        }
+        self.skeleton_key(code, control)
+    }
+}
+
+impl Picker for LinkPicker {
+    type Action = PickerAction;
+
+    fn nav(&mut self) -> &mut ListNav {
+        &mut self.nav
+    }
+
+    fn row_count(&self) -> usize {
+        self.filtered().len()
+    }
+
+    fn stay(&self) -> Self::Action {
+        PickerAction::Stay
+    }
+
+    fn dismiss(&self) -> Self::Action {
+        PickerAction::Dismiss
+    }
+
+    fn choose(&mut self) -> Self::Action {
+        self.filtered()
+            .get(self.nav.selected)
+            .map(|link| PickerAction::Choose(link.url.clone()))
+            .unwrap_or(PickerAction::Stay)
+    }
+
+    fn query(&mut self) -> Option<&mut String> {
+        Some(&mut self.query)
     }
 }
 
@@ -1259,62 +1552,47 @@ pub(crate) fn render_link_picker(frame: &mut Frame, picker: &LinkPicker) -> Moda
     ) else {
         return ModalHit::default();
     };
-    let mut body = ModalRows::default();
-    body.push(
-        Line::from(vec![
-            Span::styled("filter ", Style::default().fg(MUTED)),
-            Span::raw(truncate_display(
-                &picker.query,
-                (inner.width as usize).saturating_sub(8),
-                Truncation::Middle,
-            )),
-        ]),
-        None,
-    );
+    let width = inner.width as usize;
     let links = picker.filtered();
-    if links.is_empty() {
-        body.push(
-            Line::styled(
-                if picker.links.is_empty() {
-                    "no links in this transcript"
-                } else {
-                    "no matches"
-                },
-                Style::default().fg(MUTED),
-            ),
-            None,
-        );
-        return body.finish_unmapped(frame, inner);
-    }
-    let selected = picker.nav.selected.min(links.len() - 1);
-    let row_count = (inner.height as usize)
-        .saturating_sub(body.line_count())
-        .max(1);
-    let start = list_window(selected, links.len(), row_count);
-    for (index, link) in links.iter().enumerate().skip(start).take(row_count) {
-        let marker = if index == selected { "> " } else { "  " };
-        let width = inner.width as usize;
-        let text = if link.label == link.url {
-            truncate_display(&format!("{marker}{}", link.url), width, Truncation::Middle)
+    render_filtered_list(
+        frame,
+        inner,
+        &picker.query,
+        if picker.links.is_empty() {
+            "no links in this transcript"
         } else {
-            let url_budget = width.saturating_sub(
-                UnicodeWidthStr::width(marker) + UnicodeWidthStr::width(link.label.as_str()) + 1,
-            );
-            let url = truncate_display(&link.url, url_budget, Truncation::Middle);
-            truncate_display(
-                &format!("{marker}{} {url}", link.label),
-                width,
-                Truncation::Middle,
-            )
-        };
-        let style = if index == selected {
-            theme::selected()
-        } else {
-            Style::default().fg(theme::PRIMARY)
-        };
-        body.push(Line::styled(format!("{text:<width$}"), style), Some(index));
-    }
-    body.finish(frame, inner)
+            "no matches"
+        },
+        links.len(),
+        picker.nav.selected,
+        |index, is_selected| {
+            let link = links[index];
+            let marker = if is_selected { "> " } else { "  " };
+            // A bare url is its own label; middle truncation keeps the
+            // host and the tail, which is what identifies a link.
+            let text = if link.label == link.url {
+                truncate_display(&format!("{marker}{}", link.url), width, Truncation::Middle)
+            } else {
+                let url_budget = width.saturating_sub(
+                    UnicodeWidthStr::width(marker)
+                        + UnicodeWidthStr::width(link.label.as_str())
+                        + 1,
+                );
+                let url = truncate_display(&link.url, url_budget, Truncation::Middle);
+                truncate_display(
+                    &format!("{marker}{} {url}", link.label),
+                    width,
+                    Truncation::Middle,
+                )
+            };
+            let style = if is_selected {
+                theme::selected()
+            } else {
+                Style::default().fg(theme::PRIMARY)
+            };
+            (text, style)
+        },
+    )
 }
 
 /// One rewindable turn: a user message in the loaded session, newest
@@ -1393,13 +1671,7 @@ impl TurnPicker {
     }
 
     fn filtered(&self) -> Vec<&TurnEntry> {
-        let mut scored: Vec<(i64, &TurnEntry)> = self
-            .turns
-            .iter()
-            .filter_map(|turn| fuzzy_score(&self.query, &turn.excerpt).map(|score| (score, turn)))
-            .collect();
-        scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
-        scored.into_iter().map(|(_, turn)| turn).collect()
+        fuzzy_filter(&self.query, self.turns.iter(), |turn| turn.excerpt.clone())
     }
 
     fn selected_turn(&self) -> Option<&TurnEntry> {
@@ -1418,44 +1690,19 @@ impl TurnPicker {
     }
 
     pub(crate) fn select(&mut self, index: usize) {
-        self.armed = None;
-        self.nav.select(index, self.filtered().len());
+        self.nav_to(index);
     }
 
     pub(crate) fn move_selection(&mut self, delta: isize) {
-        self.armed = None;
-        let count = self.filtered().len();
-        self.nav.move_by(delta, count);
+        self.nav_by(delta);
     }
 
     pub(crate) fn insert_query(&mut self, text: &str) {
-        if insert_query(&mut self.query, text) {
-            self.nav.reset();
-            self.armed = None;
-        }
+        self.paste_query(text);
     }
 
     pub(crate) fn handle_key(&mut self, code: KeyCode, control: bool) -> TurnPickerAction {
-        if let Some(delta) = nav_delta(code, control) {
-            self.move_selection(delta);
-            return TurnPickerAction::Stay;
-        }
         match (code, control) {
-            (KeyCode::Esc, _) => TurnPickerAction::Dismiss,
-            (KeyCode::Enter, _) => match self.selected_turn() {
-                Some(turn) if self.armed.as_deref() == Some(turn.user_id.as_str()) => {
-                    TurnPickerAction::Rewind {
-                        cut: turn.cut,
-                        target: turn.user_id.clone(),
-                        discarded: self.selected_stakes().map_or(0, |(discarded, _)| discarded),
-                    }
-                }
-                Some(turn) => {
-                    self.armed = Some(turn.user_id.clone());
-                    TurnPickerAction::Stay
-                }
-                None => TurnPickerAction::Dismiss,
-            },
             (KeyCode::Char('y'), true) => self
                 .selected_turn()
                 .map(|turn| TurnPickerAction::Fork {
@@ -1463,15 +1710,55 @@ impl TurnPicker {
                     target: turn.user_id.clone(),
                 })
                 .unwrap_or(TurnPickerAction::Stay),
-            (KeyCode::Backspace, _) | (KeyCode::Char(_), _) => {
-                if edit_query(&mut self.query, code, control) {
-                    self.nav.reset();
-                    self.armed = None;
+            _ => self.skeleton_key(code, control),
+        }
+    }
+}
+
+impl Picker for TurnPicker {
+    type Action = TurnPickerAction;
+
+    fn nav(&mut self) -> &mut ListNav {
+        &mut self.nav
+    }
+
+    fn row_count(&self) -> usize {
+        self.filtered().len()
+    }
+
+    fn stay(&self) -> Self::Action {
+        TurnPickerAction::Stay
+    }
+
+    fn dismiss(&self) -> Self::Action {
+        TurnPickerAction::Dismiss
+    }
+
+    /// Rewind is destructive, so Enter arms the row and the next Enter
+    /// on the same row fires it.
+    fn choose(&mut self) -> Self::Action {
+        match self.selected_turn() {
+            Some(turn) if self.armed.as_deref() == Some(turn.user_id.as_str()) => {
+                TurnPickerAction::Rewind {
+                    cut: turn.cut,
+                    target: turn.user_id.clone(),
+                    discarded: self.selected_stakes().map_or(0, |(discarded, _)| discarded),
                 }
+            }
+            Some(turn) => {
+                self.armed = Some(turn.user_id.clone());
                 TurnPickerAction::Stay
             }
-            _ => TurnPickerAction::Stay,
+            None => TurnPickerAction::Stay,
         }
+    }
+
+    fn query(&mut self) -> Option<&mut String> {
+        Some(&mut self.query)
+    }
+
+    fn on_move(&mut self) {
+        self.armed = None;
     }
 }
 
@@ -1485,86 +1772,59 @@ pub(crate) fn render_turn_picker(frame: &mut Frame, picker: &TurnPicker) -> Moda
     let Some(inner) = modal_frame(frame, area, " rewind to turn ", theme::MARKUP, footer) else {
         return ModalHit::default();
     };
-    let mut body = ModalRows::default();
-    body.push(
-        Line::from(vec![
-            Span::styled("filter ", Style::default().fg(MUTED)),
-            Span::raw(truncate_display(
-                &picker.query,
-                (inner.width as usize).saturating_sub(8),
-                Truncation::Middle,
-            )),
-        ]),
-        None,
-    );
-    let turns = picker.filtered();
-    if turns.is_empty() {
-        body.push(
-            Line::styled(
-                if picker.turns.is_empty() {
-                    "no turns to rewind to"
-                } else {
-                    "no matches"
-                },
-                Style::default().fg(MUTED),
-            ),
-            None,
-        );
-        return body.finish_unmapped(frame, inner);
-    }
+    let width = inner.width as usize;
     let now = std::time::SystemTime::now();
-    let selected = picker.nav.selected.min(turns.len() - 1);
-    let row_count = (inner.height as usize)
-        .saturating_sub(body.line_count())
-        .max(1);
-    let start = list_window(selected, turns.len(), row_count);
-    for (index, turn) in turns.iter().enumerate().skip(start).take(row_count) {
-        let armed = index == selected && picker.armed.as_deref() == Some(turn.user_id.as_str());
-        let marker = if index == selected {
-            if armed { "✗ " } else { "> " }
+    let turns = picker.filtered();
+    render_filtered_list(
+        frame,
+        inner,
+        &picker.query,
+        if picker.turns.is_empty() {
+            "no turns to rewind to"
         } else {
-            "  "
-        };
-        let right = if armed {
-            match picker.selected_stakes() {
-                Some((discarded, true)) => format!("↵ drops {discarded}, restores tree"),
-                Some((discarded, false)) => format!("↵ drops {discarded}, chat only"),
-                None => String::new(),
-            }
-        } else {
-            let age = session_age(std::time::SystemTime::from(turn.ts), now);
-            if turn.has_tree {
-                format!("⎇ {age}")
+            "no matches"
+        },
+        turns.len(),
+        picker.nav.selected,
+        |index, is_selected| {
+            let turn = turns[index];
+            let armed = is_selected && picker.armed.as_deref() == Some(turn.user_id.as_str());
+            let marker = if is_selected {
+                if armed { "✗ " } else { "> " }
             } else {
-                age
-            }
-        };
-        let label_width = (inner.width as usize)
-            .saturating_sub(UnicodeWidthStr::width(marker))
-            .saturating_sub(UnicodeWidthStr::width(right.as_str()))
-            .saturating_sub(1);
-        let label = truncate_display(&turn.excerpt, label_width, Truncation::Right);
-        let text = format!(
-            "{marker}{label:<label_width$} {right}",
-            label_width = label_width
-        );
-        let text = truncate_display(&text, inner.width as usize, Truncation::Right);
-        let style = if armed {
-            Style::default().fg(theme::SELECTED_FG).bg(theme::ERROR)
-        } else if index == selected {
-            theme::selected()
-        } else {
-            Style::default().fg(theme::PRIMARY)
-        };
-        body.push(
-            Line::styled(
-                format!("{text:<width$}", width = inner.width as usize),
-                style,
-            ),
-            Some(index),
-        );
-    }
-    body.finish(frame, inner)
+                "  "
+            };
+            // The right column is the age, until the row is armed —
+            // then it states what the confirming Enter would cost.
+            let right = if armed {
+                match picker.selected_stakes() {
+                    Some((discarded, true)) => format!("↵ drops {discarded}, restores tree"),
+                    Some((discarded, false)) => format!("↵ drops {discarded}, chat only"),
+                    None => String::new(),
+                }
+            } else {
+                let age = session_age(std::time::SystemTime::from(turn.ts), now);
+                if turn.has_tree {
+                    format!("⎇ {age}")
+                } else {
+                    age
+                }
+            };
+            let label_width = width
+                .saturating_sub(UnicodeWidthStr::width(marker))
+                .saturating_sub(UnicodeWidthStr::width(right.as_str()))
+                .saturating_sub(1);
+            let label = truncate_display(&turn.excerpt, label_width, Truncation::Right);
+            let style = if armed {
+                Style::default().fg(theme::SELECTED_FG).bg(theme::ERROR)
+            } else if is_selected {
+                theme::selected()
+            } else {
+                Style::default().fg(theme::PRIMARY)
+            };
+            (format!("{marker}{label:<label_width$} {right}"), style)
+        },
+    )
 }
 
 pub(crate) fn session_age(modified: std::time::SystemTime, now: std::time::SystemTime) -> String {
@@ -1587,80 +1847,50 @@ pub(crate) fn render_session_picker(frame: &mut Frame, picker: &SessionPicker) -
     let Some(inner) = modal_frame(frame, area, " sessions ", theme::MARKUP, footer) else {
         return ModalHit::default();
     };
-    let mut body = ModalRows::default();
-    body.push(
-        Line::from(vec![
-            Span::styled("filter ", Style::default().fg(MUTED)),
-            Span::raw(truncate_display(
-                &picker.query,
-                (inner.width as usize).saturating_sub(8),
-                Truncation::Middle,
-            )),
-        ]),
-        None,
-    );
-    let sessions = picker.filtered();
-    if sessions.is_empty() {
-        body.push(
-            Line::styled(
-                if picker.sessions.is_empty() {
-                    "no other sessions"
-                } else {
-                    "no matches"
-                },
-                Style::default().fg(MUTED),
-            ),
-            None,
-        );
-        return body.finish_unmapped(frame, inner);
-    }
+    let width = inner.width as usize;
     let now = std::time::SystemTime::now();
-    let selected = picker.nav.selected.min(sessions.len() - 1);
-    let row_count = (inner.height as usize)
-        .saturating_sub(body.line_count())
-        .max(1);
-    let start = list_window(selected, sessions.len(), row_count);
-    for (index, session) in sessions.iter().enumerate().skip(start).take(row_count) {
-        let marker = if index == selected {
-            if picker.pending_delete.as_deref() == Some(session.id.as_str()) {
+    let sessions = picker.filtered();
+    render_filtered_list(
+        frame,
+        inner,
+        &picker.query,
+        if picker.sessions.is_empty() {
+            "no other sessions"
+        } else {
+            "no matches"
+        },
+        sessions.len(),
+        picker.nav.selected,
+        |index, is_selected| {
+            let session = sessions[index];
+            let armed =
+                is_selected && picker.pending_delete.as_deref() == Some(session.id.as_str());
+            let marker = if !is_selected {
+                "  "
+            } else if armed {
                 "✗ "
             } else {
                 "> "
-            }
-        } else {
-            "  "
-        };
-        let age =
-            if picker.pending_delete.as_deref() == Some(session.id.as_str()) && index == selected {
+            };
+            let age = if armed {
                 "^D deletes".to_string()
             } else {
                 session_age(session.modified, now)
             };
-        let title = session.title.as_deref().unwrap_or("(no messages yet)");
-        let label_width = (inner.width as usize)
-            .saturating_sub(UnicodeWidthStr::width(marker))
-            .saturating_sub(UnicodeWidthStr::width(age.as_str()))
-            .saturating_sub(1);
-        let label = truncate_display(title, label_width, Truncation::Right);
-        let text = format!(
-            "{marker}{label:<label_width$} {age}",
-            label_width = label_width
-        );
-        let text = truncate_display(&text, inner.width as usize, Truncation::Right);
-        let style = if index == selected {
-            theme::selected()
-        } else {
-            Style::default().fg(theme::PRIMARY)
-        };
-        body.push(
-            Line::styled(
-                format!("{text:<width$}", width = inner.width as usize),
-                style,
-            ),
-            Some(index),
-        );
-    }
-    body.finish(frame, inner)
+            let title = session.title.as_deref().unwrap_or("(no messages yet)");
+            let label_width = width
+                .saturating_sub(UnicodeWidthStr::width(marker))
+                .saturating_sub(UnicodeWidthStr::width(age.as_str()))
+                .saturating_sub(1);
+            let label = truncate_display(title, label_width, Truncation::Right);
+            let style = if is_selected {
+                theme::selected()
+            } else {
+                Style::default().fg(theme::PRIMARY)
+            };
+            (format!("{marker}{label:<label_width$} {age}"), style)
+        },
+    )
 }
 
 /// Spans for `text` with every case-insensitive occurrence of `needle`
@@ -1821,16 +2051,18 @@ pub(crate) fn render_session_search(frame: &mut Frame, search: &SessionSearch) -
         } else {
             "no matches"
         };
-        body.push(Line::styled(hint, Style::default().fg(MUTED)), None);
+        body.push(muted_line(hint), None);
         return body.finish_unmapped(frame, inner);
     }
 
     let row_count = (inner.height as usize)
         .saturating_sub(body.line_count())
         .max(1);
-    let start = list_window(selected, search.rows.len(), row_count);
     let width = inner.width as usize;
-    for (index, row) in search.rows.iter().enumerate().skip(start).take(row_count) {
+    // Not `push_rows`: an unselected row is a run of spans, because the
+    // matched substring is highlighted inside the excerpt.
+    for index in visible_rows(selected, search.rows.len(), row_count) {
+        let row = &search.rows[index];
         let marker = if index == selected { "> " } else { "  " };
         // The title gets a bounded column so the excerpt always shows;
         // the age keeps the right edge.
@@ -1893,17 +2125,9 @@ impl ModelPicker {
     }
 
     fn filtered_models(&self) -> Vec<&'static ilar::model::ModelInfo> {
-        let query = self.query.to_lowercase();
-        let terms: Vec<_> = query.split_whitespace().collect();
-        self.models
-            .iter()
-            .copied()
-            .filter(|model| {
-                let haystack =
-                    format!("{} {} {}", model.provider, model.id, model.name).to_lowercase();
-                terms.iter().all(|term| haystack.contains(term))
-            })
-            .collect()
+        term_filter(&self.query, self.models.iter().copied(), |model| {
+            format!("{} {} {}", model.provider, model.id, model.name)
+        })
     }
 
     #[cfg(test)]
@@ -1920,48 +2144,27 @@ impl ModelPicker {
     /// Click-to-select: the index is into the filtered list, which is
     /// what the hit map was built from.
     pub(crate) fn select(&mut self, index: usize) {
-        self.nav.select(index, self.filtered_models().len());
+        self.nav_to(index);
     }
 
     pub(crate) fn move_selection(&mut self, delta: isize) {
-        let count = self.filtered_models().len();
-        self.nav.move_by(delta, count);
+        self.nav_by(delta);
     }
 
     pub(crate) fn insert_query(&mut self, text: &str) {
-        if insert_query(&mut self.query, text) {
-            self.nav.reset();
-            self.error = None;
-        }
+        self.paste_query(text);
     }
 
     fn select_boundary(&mut self, end: bool) {
         self.nav.selected = if end {
-            self.filtered_models().len().saturating_sub(1)
+            self.row_count().saturating_sub(1)
         } else {
             0
         };
     }
 
     pub(crate) fn handle_key(&mut self, code: KeyCode, control: bool) -> PickerAction {
-        if let Some(delta) = nav_delta(code, control) {
-            self.move_selection(delta);
-            return PickerAction::Stay;
-        }
         match (code, control) {
-            (KeyCode::Esc, _) => PickerAction::Dismiss,
-            (KeyCode::Enter, _) => self
-                .filtered_models()
-                .get(self.nav.selected)
-                .map(|model| {
-                    let id = model.full_id();
-                    if id == self.active_model && model.variants().is_empty() {
-                        PickerAction::Dismiss
-                    } else {
-                        PickerAction::Choose(id)
-                    }
-                })
-                .unwrap_or(PickerAction::Stay),
             (KeyCode::PageUp, _) => {
                 self.move_selection(-10);
                 PickerAction::Stay
@@ -1978,15 +2181,56 @@ impl ModelPicker {
                 self.select_boundary(true);
                 PickerAction::Stay
             }
-            (KeyCode::Backspace, _) | (KeyCode::Char(_), _) => {
-                if edit_query(&mut self.query, code, control) {
-                    self.nav.reset();
-                    self.error = None;
-                }
-                PickerAction::Stay
-            }
-            _ => PickerAction::Stay,
+            _ => self.skeleton_key(code, control),
         }
+    }
+}
+
+impl Picker for ModelPicker {
+    type Action = PickerAction;
+
+    fn nav(&mut self) -> &mut ListNav {
+        &mut self.nav
+    }
+
+    fn row_count(&self) -> usize {
+        self.filtered_models().len()
+    }
+
+    fn stay(&self) -> Self::Action {
+        PickerAction::Stay
+    }
+
+    fn dismiss(&self) -> Self::Action {
+        PickerAction::Dismiss
+    }
+
+    /// Choosing the model already running is a no-op unless it has
+    /// reasoning variants to descend into, so it just closes.
+    fn choose(&mut self) -> Self::Action {
+        self.filtered_models()
+            .get(self.nav.selected)
+            .map(|model| {
+                let id = model.full_id();
+                if id == self.active_model && model.variants().is_empty() {
+                    PickerAction::Dismiss
+                } else {
+                    PickerAction::Choose(id)
+                }
+            })
+            .unwrap_or(PickerAction::Stay)
+    }
+
+    fn query(&mut self) -> Option<&mut String> {
+        Some(&mut self.query)
+    }
+
+    /// The error is about the model the last Enter tried to switch to;
+    /// re-filtering retires it, but merely moving the cursor does not.
+    fn on_edit(&mut self) -> Self::Action {
+        self.nav.reset();
+        self.error = None;
+        PickerAction::Stay
     }
 }
 
@@ -2039,13 +2283,11 @@ impl VariantPicker {
 
     /// Click-to-select. Clears the error like a selection move does.
     pub(crate) fn select(&mut self, index: usize) {
-        self.nav.select(index, self.choice_count());
-        self.error = None;
+        self.nav_to(index);
     }
 
     pub(crate) fn move_selection(&mut self, delta: isize) {
-        self.nav.move_by(delta, self.choice_count());
-        self.error = None;
+        self.nav_by(delta);
     }
 
     fn selected_variant(&self) -> Option<String> {
@@ -2057,20 +2299,7 @@ impl VariantPicker {
     }
 
     pub(crate) fn handle_key(&mut self, code: KeyCode, control: bool) -> VariantPickerAction {
-        if let Some(delta) = nav_delta(code, control) {
-            self.move_selection(delta);
-            return VariantPickerAction::Stay;
-        }
         match (code, control) {
-            (KeyCode::Esc, _) => VariantPickerAction::Dismiss,
-            (KeyCode::Enter, _) => {
-                let selected = self.selected_variant();
-                if selected == self.active_variant {
-                    VariantPickerAction::Dismiss
-                } else {
-                    VariantPickerAction::Choose(selected)
-                }
-            }
             (KeyCode::Home, _) => {
                 self.nav.reset();
                 VariantPickerAction::Stay
@@ -2079,8 +2308,43 @@ impl VariantPicker {
                 self.nav.selected = self.model.variants().len();
                 VariantPickerAction::Stay
             }
-            _ => VariantPickerAction::Stay,
+            _ => self.skeleton_key(code, control),
         }
+    }
+}
+
+/// A handful of fixed levels: no query, and always a selection.
+impl Picker for VariantPicker {
+    type Action = VariantPickerAction;
+
+    fn nav(&mut self) -> &mut ListNav {
+        &mut self.nav
+    }
+
+    fn row_count(&self) -> usize {
+        self.choice_count()
+    }
+
+    fn stay(&self) -> Self::Action {
+        VariantPickerAction::Stay
+    }
+
+    fn dismiss(&self) -> Self::Action {
+        VariantPickerAction::Dismiss
+    }
+
+    /// Re-choosing the running level changes nothing, so it closes.
+    fn choose(&mut self) -> Self::Action {
+        let selected = self.selected_variant();
+        if selected == self.active_variant {
+            VariantPickerAction::Dismiss
+        } else {
+            VariantPickerAction::Choose(selected)
+        }
+    }
+
+    fn on_move(&mut self) {
+        self.error = None;
     }
 }
 
@@ -2136,18 +2400,13 @@ impl ThemePicker {
     /// find their theme. The active theme stays selected if it survives.
     fn refresh(&mut self) -> ThemePickerAction {
         let previous = self.selected_theme();
-        let mut ranked: Vec<(i64, theme::ThemeId)> = theme::ThemeId::ALL
-            .into_iter()
-            .filter_map(|candidate| {
-                let haystack = format!("{} {}", candidate.label(), candidate.id());
-                fuzzy_score(&self.query, &haystack).map(|score| (score, candidate))
-            })
-            .collect();
-        ranked.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+        let ranked = fuzzy_filter(&self.query, theme::ThemeId::ALL, |candidate| {
+            format!("{} {}", candidate.label(), candidate.id())
+        });
         self.matches = if ranked.is_empty() {
             theme::ThemeId::ALL.to_vec()
         } else {
-            ranked.into_iter().map(|(_, theme)| theme).collect()
+            ranked
         };
         self.nav.selected = self
             .matches
@@ -2159,49 +2418,70 @@ impl ThemePicker {
     }
 
     pub(crate) fn select(&mut self, selected: usize) -> ThemePickerAction {
-        self.nav.select(selected, self.matches.len());
-        self.error = None;
+        self.nav_to(selected);
         ThemePickerAction::Preview(self.selected_theme())
     }
 
     pub(crate) fn move_selection(&mut self, delta: isize) -> ThemePickerAction {
-        // Re-anchor the cursor first: it is only clamped on read.
-        self.nav.selected = self.selected_index();
-        self.nav.move_by(delta, self.matches.len());
-        self.error = None;
+        self.nav_by(delta);
         ThemePickerAction::Preview(self.selected_theme())
     }
 
     /// Like the typed path, the selection is not reset: `refresh()`
     /// re-anchors it on whatever theme was highlighted.
     pub(crate) fn insert_query(&mut self, text: &str) -> ThemePickerAction {
-        if insert_query(&mut self.query, text) {
-            self.refresh()
-        } else {
-            ThemePickerAction::Preview(self.selected_theme())
-        }
+        self.paste_query(text)
     }
 
     pub(crate) fn handle_key(&mut self, code: KeyCode, control: bool) -> ThemePickerAction {
-        if let Some(delta) = nav_delta(code, control) {
-            return self.move_selection(delta);
-        }
         match (code, control) {
-            (KeyCode::Esc, _) => ThemePickerAction::Dismiss,
-            (KeyCode::Enter, _) => ThemePickerAction::Choose(self.selected_theme()),
             (KeyCode::Home, _) => self.select(0),
             (KeyCode::End, _) => self.select(self.matches.len().saturating_sub(1)),
-            (KeyCode::Backspace, _) | (KeyCode::Char(_), false) => {
-                // The selection is not reset here: refresh() re-anchors
-                // it on whatever theme was highlighted.
-                if edit_query(&mut self.query, code, control) {
-                    self.refresh()
-                } else {
-                    ThemePickerAction::Preview(self.selected_theme())
-                }
-            }
-            _ => ThemePickerAction::Preview(self.selected_theme()),
+            _ => self.skeleton_key(code, control),
         }
+    }
+}
+
+/// The one picker whose every key is an answer: it previews live, so
+/// even a key that does nothing reports what is highlighted.
+impl Picker for ThemePicker {
+    type Action = ThemePickerAction;
+
+    fn nav(&mut self) -> &mut ListNav {
+        &mut self.nav
+    }
+
+    fn row_count(&self) -> usize {
+        self.matches.len()
+    }
+
+    fn stay(&self) -> Self::Action {
+        ThemePickerAction::Preview(self.selected_theme())
+    }
+
+    fn dismiss(&self) -> Self::Action {
+        ThemePickerAction::Dismiss
+    }
+
+    fn choose(&mut self) -> Self::Action {
+        ThemePickerAction::Choose(self.selected_theme())
+    }
+
+    fn query(&mut self) -> Option<&mut String> {
+        Some(&mut self.query)
+    }
+
+    fn on_move(&mut self) {
+        // Re-anchor the cursor first: it is only clamped on read.
+        self.nav.selected = self.selected_index();
+        self.error = None;
+    }
+
+    /// Unlike every other picker, a filter edit does not jump to the
+    /// top: `refresh` re-ranks and then finds the highlighted theme
+    /// again, so narrowing the query never previews something else.
+    fn on_edit(&mut self) -> Self::Action {
+        self.refresh()
     }
 }
 
@@ -2272,62 +2552,62 @@ pub(crate) fn render_command_palette(frame: &mut Frame, palette: &CommandPalette
     let commands = palette.filtered_commands();
     if commands.is_empty() {
         if inner.height > 1 {
-            body.push(
-                Line::styled(" no matching commands", Style::default().fg(MUTED)),
-                None,
-            );
+            body.push(muted_line(" no matching commands"), None);
         }
     } else {
         if inner.height >= 4 {
             body.push(Line::default(), None);
         }
+        let width = inner.width as usize;
         let available = inner.height.saturating_sub(body.line_count() as u16) as usize;
         let selected = palette.nav.selected.min(commands.len().saturating_sub(1));
+        // Not the shared window: this one spends two of its rows on the
+        // "N more" markers instead of scrolling silently.
         let (start, row_count) = palette_window(commands.len(), available, selected);
         if start > 0 {
-            body.push(
-                Line::styled(format!("  ↑ {start} more"), Style::default().fg(MUTED)),
-                None,
-            );
+            body.push(muted_line(&format!("  ↑ {start} more")), None);
         }
-        for (index, command) in commands.iter().enumerate().skip(start).take(row_count) {
-            let marker = if index == selected { "> " } else { "  " };
-            let shortcut = (inner.width >= 32 && !command.shortcut.is_empty())
-                .then_some(command.shortcut.as_str());
-            let suffix_width = shortcut
-                .map(|shortcut| UnicodeWidthStr::width(shortcut).saturating_add(1))
-                .unwrap_or(0);
-            let label_width = (inner.width as usize)
-                .saturating_sub(UnicodeWidthStr::width(marker))
-                .saturating_sub(suffix_width);
-            let label = truncate_display(&command.label, label_width, Truncation::Right);
-            let gap = shortcut
-                .map(|shortcut| {
-                    " ".repeat(
-                        (inner.width as usize)
-                            .saturating_sub(UnicodeWidthStr::width(marker))
-                            .saturating_sub(UnicodeWidthStr::width(label.as_str()))
-                            .saturating_sub(UnicodeWidthStr::width(shortcut)),
-                    )
-                })
-                .unwrap_or_default();
-            let text = shortcut
-                .map(|shortcut| format!("{marker}{label}{gap}{shortcut}"))
-                .unwrap_or_else(|| format!("{marker}{label}"));
-            let text = format!("{text:<width$}", width = inner.width as usize);
-            let style = if index == selected {
-                theme::selected()
-            } else {
-                Style::default()
-            };
-            body.push(Line::styled(text, style), Some(index));
-        }
+        push_row_window(
+            &mut body,
+            width,
+            start..commands.len().min(start.saturating_add(row_count)),
+            selected,
+            |index, is_selected| {
+                let command = commands[index];
+                let marker = if is_selected { "> " } else { "  " };
+                let shortcut = (inner.width >= 32 && !command.shortcut.is_empty())
+                    .then_some(command.shortcut.as_str());
+                let suffix_width = shortcut
+                    .map(|shortcut| UnicodeWidthStr::width(shortcut).saturating_add(1))
+                    .unwrap_or(0);
+                let label_width = width
+                    .saturating_sub(UnicodeWidthStr::width(marker))
+                    .saturating_sub(suffix_width);
+                let label = truncate_display(&command.label, label_width, Truncation::Right);
+                // The shortcut keeps the right edge, so the gap is
+                // whatever the label left over.
+                let text = shortcut
+                    .map(|shortcut| {
+                        let gap = " ".repeat(
+                            width
+                                .saturating_sub(UnicodeWidthStr::width(marker))
+                                .saturating_sub(UnicodeWidthStr::width(label.as_str()))
+                                .saturating_sub(UnicodeWidthStr::width(shortcut)),
+                        );
+                        format!("{marker}{label}{gap}{shortcut}")
+                    })
+                    .unwrap_or_else(|| format!("{marker}{label}"));
+                let style = if is_selected {
+                    theme::selected()
+                } else {
+                    Style::default()
+                };
+                (text, style)
+            },
+        );
         let below = commands.len().saturating_sub(start + row_count);
         if below > 0 {
-            body.push(
-                Line::styled(format!("  ↓ {below} more"), Style::default().fg(MUTED)),
-                None,
-            );
+            body.push(muted_line(&format!("  ↓ {below} more")), None);
         }
     }
 
@@ -2352,13 +2632,7 @@ pub(crate) fn render_variant_picker(frame: &mut Frame, picker: &VariantPicker) -
 
     let mut body = ModalRows::default();
     if let Some(error) = &picker.error {
-        body.push(
-            Line::styled(
-                truncate_display(error, inner.width as usize, Truncation::Right),
-                Style::default().fg(ERROR),
-            ),
-            None,
-        );
+        body.push(error_line(error, inner.width as usize), None);
     } else if inner.height >= 6 {
         body.push(
             Line::styled(
@@ -2369,47 +2643,30 @@ pub(crate) fn render_variant_picker(frame: &mut Frame, picker: &VariantPicker) -
         );
     }
 
+    let width = inner.width as usize;
     let row_count = inner.height.saturating_sub(body.line_count() as u16) as usize;
     let choice_count = picker.choice_count();
     let selected = picker.nav.selected.min(choice_count.saturating_sub(1));
-    let start = list_window(selected, choice_count, row_count);
-    for index in start..choice_count.min(start.saturating_add(row_count)) {
-        let (id, name) = if index == 0 {
-            ("default", "Provider default")
-        } else {
-            let variant = &picker.model.variants()[index - 1];
-            (variant.id, variant.name)
-        };
-        let active = picker.active_variant.as_deref() == (index > 0).then_some(id);
-        let marker = if index == selected && active {
-            ">●"
-        } else if index == selected {
-            "> "
-        } else if active {
-            " ●"
-        } else {
-            "  "
-        };
-        let suffix = format!("  {id}");
-        let name_width = (inner.width as usize)
-            .saturating_sub(UnicodeWidthStr::width(marker))
-            .saturating_sub(UnicodeWidthStr::width(suffix.as_str()))
-            .saturating_sub(1);
-        let text = format!(
-            "{marker} {}{suffix}",
-            truncate_display(name, name_width, Truncation::Right)
-        );
-        let text = truncate_display(&text, inner.width as usize, Truncation::Right);
-        let text = format!("{text:<width$}", width = inner.width as usize);
-        let style = if index == selected {
-            theme::selected()
-        } else if active {
-            Style::default().fg(theme::SUCCESS)
-        } else {
-            Style::default()
-        };
-        body.push(Line::styled(text, style), Some(index));
-    }
+    push_row_window(
+        &mut body,
+        width,
+        visible_rows(selected, choice_count, row_count),
+        selected,
+        |index, is_selected| {
+            // Row 0 is the synthetic "let the provider decide" choice.
+            let (id, name) = if index == 0 {
+                ("default", "Provider default")
+            } else {
+                let variant = &picker.model.variants()[index - 1];
+                (variant.id, variant.name)
+            };
+            let active = picker.active_variant.as_deref() == (index > 0).then_some(id);
+            (
+                marked_row(width, is_selected, active, name, &format!("  {id}")),
+                choice_style(is_selected, active),
+            )
+        },
+    );
     body.finish(frame, inner)
 }
 
@@ -2430,13 +2687,7 @@ pub(crate) fn render_theme_picker(frame: &mut Frame, picker: &ThemePicker) -> Mo
     let selected = picker.selected_index();
     let mut body = ModalRows::default();
     if let Some(error) = &picker.error {
-        body.push(
-            Line::styled(
-                truncate_display(error, inner.width as usize, Truncation::Right),
-                Style::default().fg(ERROR),
-            ),
-            None,
-        );
+        body.push(error_line(error, inner.width as usize), None);
     } else if picker.query.is_empty() {
         body.push(
             Line::styled(
@@ -2472,41 +2723,31 @@ pub(crate) fn render_theme_picker(frame: &mut Frame, picker: &ThemePicker) -> Mo
         .saturating_sub(body.line_count() as u16)
         .saturating_sub(u16::from(show_sample))
         .max(1) as usize;
-    let start = list_window(selected, choices.len(), row_count);
-    for (index, choice) in choices.iter().enumerate().skip(start).take(row_count) {
-        let active = *choice == picker.active_theme;
-        let marker = if index == selected { "> " } else { "  " };
-        let suffix = if active {
-            "  saved".to_string()
-        } else if inner.width >= 34 {
-            format!("  {}", choice.id())
-        } else {
-            String::new()
-        };
-        let label_width = (inner.width as usize)
-            .saturating_sub(UnicodeWidthStr::width(marker))
-            .saturating_sub(UnicodeWidthStr::width(suffix.as_str()))
-            .saturating_sub(1);
-        let text = format!(
-            "{marker} {}{suffix}",
-            truncate_display(choice.label(), label_width, Truncation::Right)
-        );
-        let text = truncate_display(&text, inner.width as usize, Truncation::Right);
-        let text = format!("{text:<width$}", width = inner.width as usize);
-        body.push(
-            Line::styled(
-                text,
-                if index == selected {
-                    theme::selected()
-                } else if active {
-                    Style::default().fg(theme::SUCCESS)
-                } else {
-                    Style::default()
-                },
-            ),
-            Some(index),
-        );
-    }
+    let width = inner.width as usize;
+    push_row_window(
+        &mut body,
+        width,
+        visible_rows(selected, choices.len(), row_count),
+        selected,
+        |index, is_selected| {
+            let choice = choices[index];
+            let active = choice == picker.active_theme;
+            // The saved theme says so where the others show their id;
+            // the cursor marker stays plain, since the row already
+            // reads as active through its colour and that word.
+            let suffix = if active {
+                "  saved".to_string()
+            } else if inner.width >= 34 {
+                format!("  {}", choice.id())
+            } else {
+                String::new()
+            };
+            (
+                marked_row(width, is_selected, false, choice.label(), &suffix),
+                choice_style(is_selected, active),
+            )
+        },
+    );
     if show_sample {
         body.push(
             Line::from(vec![
@@ -2569,15 +2810,11 @@ pub(crate) fn render_model_picker(frame: &mut Frame, picker: &ModelPicker) -> Mo
     ]);
     let mut body = ModalRows::default();
     if let Some(error) = &picker.error {
-        let error = Line::styled(
-            truncate_display(error, inner.width as usize, Truncation::Right),
-            Style::default().fg(ERROR),
-        );
         // On a squeezed terminal the error takes the search line's row.
         if inner.height >= 3 {
             body.push(search_line, None);
         }
-        body.push(error, None);
+        body.push(error_line(error, inner.width as usize), None);
     } else {
         body.push(search_line, None);
         if inner.height >= 6 {
@@ -2594,52 +2831,45 @@ pub(crate) fn render_model_picker(frame: &mut Frame, picker: &ModelPicker) -> Mo
             );
         }
     }
+    let width = inner.width as usize;
     let row_count = inner.height.saturating_sub(body.line_count() as u16) as usize;
     if models.is_empty() && row_count > 0 {
-        body.push(
-            Line::styled(" no matching models", Style::default().fg(MUTED)),
-            None,
-        );
+        body.push(muted_line(" no matching models"), None);
     } else if row_count > 0 {
         let selected = picker.nav.selected.min(models.len().saturating_sub(1));
-        let start = list_window(selected, models.len(), row_count);
-        for (index, model) in models.iter().enumerate().skip(start).take(row_count) {
-            let full_id = model.full_id();
-            let active = full_id == picker.active_model;
-            let marker = if index == selected && active {
-                ">●"
-            } else if index == selected {
-                "> "
-            } else if active {
-                " ●"
-            } else {
-                "  "
-            };
-            let context = format_tokens_compact(model.context_limit);
-            let text = if inner.width >= 50 {
-                let suffix = format!("  {full_id}  {context}");
-                let name_width = (inner.width as usize)
-                    .saturating_sub(UnicodeWidthStr::width(marker))
-                    .saturating_sub(UnicodeWidthStr::width(suffix.as_str()))
-                    .saturating_sub(2);
-                format!(
-                    "{marker} {}{suffix}",
-                    truncate_display(model.name, name_width, Truncation::Right)
-                )
-            } else {
-                format!("{marker} {full_id}")
-            };
-            let text = truncate_display(&text, inner.width as usize, Truncation::Right);
-            let text = format!("{text:<width$}", width = inner.width as usize);
-            let style = if index == selected {
-                theme::selected()
-            } else if active {
-                Style::default().fg(theme::SUCCESS)
-            } else {
-                Style::default()
-            };
-            body.push(Line::styled(text, style), Some(index));
-        }
+        push_row_window(
+            &mut body,
+            width,
+            visible_rows(selected, models.len(), row_count),
+            selected,
+            |index, is_selected| {
+                let model = models[index];
+                let full_id = model.full_id();
+                let active = full_id == picker.active_model;
+                let marker = choice_marker(is_selected, active);
+                // Narrow terminals drop the display name and the
+                // context column; the id alone still identifies it.
+                let text = if inner.width >= 50 {
+                    let suffix = format!(
+                        "  {full_id}  {}",
+                        format_tokens_compact(model.context_limit)
+                    );
+                    // A column wider than `marked_row` reserves: the
+                    // context number must not touch the border.
+                    let name_width = width
+                        .saturating_sub(UnicodeWidthStr::width(marker))
+                        .saturating_sub(UnicodeWidthStr::width(suffix.as_str()))
+                        .saturating_sub(2);
+                    format!(
+                        "{marker} {}{suffix}",
+                        truncate_display(model.name, name_width, Truncation::Right)
+                    )
+                } else {
+                    format!("{marker} {full_id}")
+                };
+                (text, choice_style(is_selected, active))
+            },
+        );
     }
 
     let hit = body.finish(frame, inner);
@@ -2768,12 +2998,15 @@ mod tests {
         );
     }
 
+    /// Enter with nothing selected stays put in every picker: a query
+    /// that matches nothing is a typo, and throwing the modal away
+    /// costs the user the list they were browsing. Esc dismisses.
     #[test]
-    fn empty_turn_picker_dismisses_on_enter() {
+    fn empty_turn_picker_stays_on_enter() {
         let mut picker = TurnPicker::new(Vec::new());
         assert_eq!(
             picker.handle_key(KeyCode::Enter, false),
-            TurnPickerAction::Dismiss
+            TurnPickerAction::Stay
         );
     }
 
@@ -3276,7 +3509,8 @@ mod tests {
         let mut empty = SessionPicker::new(Vec::new());
         assert_eq!(
             empty.handle_key(KeyCode::Enter, false),
-            SessionPickerAction::Dismiss
+            SessionPickerAction::Stay,
+            "nothing to resume, but the modal is not the user's mistake"
         );
     }
 
@@ -3433,15 +3667,13 @@ mod tests {
             picker.handle_key(KeyCode::Enter, false),
             PickerAction::Choose("https://bugs.example/two".into())
         );
-        // No match: Enter dismisses instead of choosing.
+        // No match: Enter has nothing to open, so the picker stays and
+        // the query can be corrected.
         for character in "zzz".chars() {
             picker.handle_key(KeyCode::Char(character), false);
         }
         assert!(picker.filtered().is_empty());
-        assert_eq!(
-            picker.handle_key(KeyCode::Enter, false),
-            PickerAction::Dismiss
-        );
+        assert_eq!(picker.handle_key(KeyCode::Enter, false), PickerAction::Stay);
         // Backspace edits the query back to a match.
         for _ in 0..7 {
             picker.handle_key(KeyCode::Backspace, false);
@@ -3453,10 +3685,7 @@ mod tests {
         );
 
         let mut empty = LinkPicker::new(Vec::new());
-        assert_eq!(
-            empty.handle_key(KeyCode::Enter, false),
-            PickerAction::Dismiss
-        );
+        assert_eq!(empty.handle_key(KeyCode::Enter, false), PickerAction::Stay);
     }
 
     #[test]
@@ -3521,10 +3750,7 @@ mod tests {
         );
 
         let mut empty = SkillPicker::new(Vec::new());
-        assert_eq!(
-            empty.handle_key(KeyCode::Enter, false),
-            PickerAction::Dismiss
-        );
+        assert_eq!(empty.handle_key(KeyCode::Enter, false), PickerAction::Stay);
     }
 
     #[test]
