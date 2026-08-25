@@ -204,6 +204,130 @@ async fn read_distinguishes_empty_file_from_offset_past_end() {
     );
 }
 
+fn png_bytes(width: u32, height: u32) -> Vec<u8> {
+    let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+    bytes.extend_from_slice(&13_u32.to_be_bytes());
+    bytes.extend_from_slice(b"IHDR");
+    bytes.extend_from_slice(&width.to_be_bytes());
+    bytes.extend_from_slice(&height.to_be_bytes());
+    bytes.extend_from_slice(&[8, 6, 0, 0, 0]);
+    bytes.extend_from_slice(&[0x1f, 0x15, 0xc4, 0x89]);
+    bytes.extend_from_slice(&(0..=255_u32).map(|b| b as u8).collect::<Vec<u8>>());
+    bytes
+}
+
+#[tokio::test]
+async fn read_describes_png_instead_of_returning_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let bytes = png_bytes(48, 32);
+    std::fs::write(dir.path().join("shot.png"), &bytes).unwrap();
+    let out = run(
+        &registry(),
+        "read",
+        serde_json::json!({"path": "shot.png"}),
+        &ctx(dir.path()),
+    )
+    .await;
+    assert!(!out.is_error, "{}", out.content);
+    assert!(out.content.contains("shot.png"), "{}", out.content);
+    assert!(out.content.contains("PNG image"), "{}", out.content);
+    assert!(out.content.contains("48x32"), "{}", out.content);
+    assert!(
+        out.content.contains(&format!("{} bytes", bytes.len())),
+        "{}",
+        out.content
+    );
+    assert!(
+        out.content.contains("cannot be read as text"),
+        "{}",
+        out.content
+    );
+    assert!(out.content.lines().count() == 1, "{}", out.content);
+    assert!(!out.content.contains('\u{fffd}'), "{}", out.content);
+    assert!(!out.content.contains("1→"), "{}", out.content);
+}
+
+#[tokio::test]
+async fn read_describes_png_even_with_offset_and_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shot.png"), png_bytes(4, 4)).unwrap();
+    let out = run(
+        &registry(),
+        "read",
+        serde_json::json!({"path": "shot.png", "offset": 2, "limit": 5}),
+        &ctx(dir.path()),
+    )
+    .await;
+    assert!(!out.is_error, "{}", out.content);
+    assert!(out.content.contains("PNG image"), "{}", out.content);
+}
+
+#[tokio::test]
+async fn read_describes_generic_binary_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let bytes: Vec<u8> = (0..4096).map(|i| (i % 256) as u8).collect();
+    std::fs::write(dir.path().join("blob.bin"), &bytes).unwrap();
+    let out = run(
+        &registry(),
+        "read",
+        serde_json::json!({"path": "blob.bin"}),
+        &ctx(dir.path()),
+    )
+    .await;
+    assert!(!out.is_error, "{}", out.content);
+    assert!(out.content.contains("blob.bin"), "{}", out.content);
+    assert!(out.content.contains("binary data"), "{}", out.content);
+    assert!(out.content.contains("4096 bytes"), "{}", out.content);
+    assert!(
+        out.content.contains("cannot be read as text"),
+        "{}",
+        out.content
+    );
+    assert!(out.content.lines().count() == 1, "{}", out.content);
+    assert!(!out.content.contains('\u{fffd}'), "{}", out.content);
+}
+
+#[tokio::test]
+async fn read_keeps_utf8_source_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "fn main() {\n    println!(\"héllo — 世界 🌍\");\n}\n";
+    std::fs::write(dir.path().join("main.rs"), source).unwrap();
+    let out = run(
+        &registry(),
+        "read",
+        serde_json::json!({"path": "main.rs"}),
+        &ctx(dir.path()),
+    )
+    .await;
+    assert!(!out.is_error, "{}", out.content);
+    assert!(out.content.contains("1→fn main() {"), "{}", out.content);
+    assert!(out.content.contains("héllo — 世界 🌍"), "{}", out.content);
+    assert!(!out.content.contains("binary"), "{}", out.content);
+}
+
+#[tokio::test]
+async fn read_keeps_text_with_ansi_escapes_as_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = String::new();
+    for i in 1..=20 {
+        log.push_str(&format!(
+            "\u{1b}[32mINFO\u{1b}[0m step {i}: \u{1b}[1;31mfailed\u{1b}[0m retrying\n"
+        ));
+    }
+    std::fs::write(dir.path().join("run.log"), &log).unwrap();
+    let out = run(
+        &registry(),
+        "read",
+        serde_json::json!({"path": "run.log"}),
+        &ctx(dir.path()),
+    )
+    .await;
+    assert!(!out.is_error, "{}", out.content);
+    assert!(out.content.contains("1→"), "{}", out.content);
+    assert!(out.content.contains("step 1:"), "{}", out.content);
+    assert!(!out.content.contains("binary"), "{}", out.content);
+}
+
 // ---- write ----
 
 #[tokio::test]

@@ -31,7 +31,8 @@ impl Tool for ReadTool {
 
     fn description(&self) -> &'static str {
         "Read a text file. Returns numbered lines (N→line). Use offset/limit \
-         for large files."
+         for large files. Binary files (images, archives, executables) return \
+         a one-line description instead of their bytes."
     }
 
     fn concurrency(&self) -> ToolConcurrency {
@@ -85,7 +86,13 @@ fn read_window(
         Ok(file) => file,
         Err(error) => return ToolOutput::error(format!("read {display_path}: {error}")),
     };
-    let mut reader = std::io::BufReader::new(file);
+    let total_bytes = file.metadata().map(|meta| meta.len()).ok();
+    let mut reader = std::io::BufReader::with_capacity(super::binary::SNIFF_BYTES, file);
+    match sniff_binary(&mut reader, display_path, total_bytes) {
+        Ok(Some(description)) => return ToolOutput::text(description),
+        Ok(None) => {}
+        Err(error) => return ToolOutput::error(format!("read {display_path}: {error}")),
+    }
     let mut line_number = 0_usize;
     let mut emitted = 0_usize;
     let mut out = String::new();
@@ -146,6 +153,19 @@ fn read_window(
         out.push_str(MARKER);
     }
     ToolOutput::text(out)
+}
+
+/// Peeks the buffered head without consuming it; `Some` description means
+/// the caller must not emit bytes. Fires regardless of offset/limit —
+/// windowing binary content is never useful.
+fn sniff_binary<R: BufRead>(
+    reader: &mut R,
+    display_path: &str,
+    total_bytes: Option<u64>,
+) -> std::io::Result<Option<String>> {
+    let head = reader.fill_buf()?;
+    let total_bytes = total_bytes.unwrap_or(head.len() as u64);
+    Ok(super::binary::describe(display_path, head, total_bytes))
 }
 
 fn truncate_utf8(value: &mut String, max_bytes: usize) {

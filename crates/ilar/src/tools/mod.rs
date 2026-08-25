@@ -1,6 +1,7 @@
 //! Built-in tools — see meta/issues/core-tools.md.
 
 pub mod bash;
+pub mod binary;
 pub mod edit;
 pub mod executor;
 pub mod glob;
