@@ -183,3 +183,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Hover underlines clickable transcript rows](issues/hover-underlines-clickable-rows.md)
 - [x] [Image input: paste a screenshot, the model sees it](issues/image-input.md)
 - [x] [Clipboard images are downscaled before they enter the session](issues/downscale-clipboard-images.md)
+- [x] [GLM vision models are hidden on the coding plan and get no images](issues/glm-vision-on-the-coding-plan.md)

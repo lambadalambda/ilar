@@ -71,10 +71,11 @@ impl ZaiProvider {
                 // Messages: moving cache breakpoint on the last block of the
                 // last message (the canonical incremental-caching pattern —
                 // each turn's entry covers everything up to that turn's end).
+                let vision = crate::model::supports_vision(&req.model);
                 let mut wire_messages: Vec<serde_json::Value> = req
                     .messages
                     .iter()
-                    .map(anthropic_message)
+                    .map(|message| anthropic_message(message, vision))
                     .collect::<anyhow::Result<Vec<_>>>()?
                     .into_iter()
                     .flatten()
@@ -130,7 +131,12 @@ impl ZaiProvider {
                         "content": system,
                     }));
                 }
-                messages.extend(req.messages.iter().flat_map(openai_message));
+                let vision = crate::model::supports_vision(&req.model);
+                messages.extend(
+                    req.messages
+                        .iter()
+                        .flat_map(|message| openai_message(message, vision)),
+                );
                 body.insert("messages".into(), serde_json::json!(messages));
                 body.insert(
                     "tools".into(),
@@ -179,7 +185,7 @@ impl ZaiProvider {
 
 /// Neutral -> Anthropic wire: content-block preserving (thinking blocks
 /// must round-trip when tool use interleaves with thinking).
-fn anthropic_message(msg: &ChatMessage) -> anyhow::Result<Option<serde_json::Value>> {
+fn anthropic_message(msg: &ChatMessage, vision: bool) -> anyhow::Result<Option<serde_json::Value>> {
     let role = match msg.role {
         Role::User => "user",
         Role::Assistant => "assistant",
@@ -258,8 +264,16 @@ fn anthropic_message(msg: &ChatMessage) -> anyhow::Result<Option<serde_json::Val
         .iter()
         .filter_map(|block| match block {
             ContentBlock::Text { text } => Some(serde_json::json!({"type": "text", "text": text})),
-            // GLM image parts are a follow-up; degrade to a named gap so
-            // a session with images survives a switch to a text model.
+            // Vision models get the real block; the placeholder keeps a
+            // session with images usable on a text-only model.
+            ContentBlock::Image { image } if vision => Some(serde_json::json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": image.media_type,
+                    "data": image.data,
+                },
+            })),
             ContentBlock::Image { .. } => Some(serde_json::json!({
                 "type": "text",
                 "text": "[image omitted: this model cannot view images]",
@@ -319,17 +333,24 @@ fn anthropic_tool(tool: &ToolDefinition) -> serde_json::Value {
 
 /// Neutral -> OpenAI chat-completions wire. Tool results expand into
 /// separate `role: "tool"` messages (the wire format requires it).
-fn openai_message(msg: &ChatMessage) -> Vec<serde_json::Value> {
+fn openai_message(msg: &ChatMessage, vision: bool) -> Vec<serde_json::Value> {
     let role = match msg.role {
         Role::User => "user",
         Role::Assistant => "assistant",
     };
     let mut content_text = String::new();
+    let mut image_parts = Vec::new();
     let mut tool_calls = Vec::new();
     let mut tool_results = Vec::new();
     for block in &msg.content {
         match block {
             ContentBlock::Text { text } => content_text.push_str(text),
+            // Vision models get the real part; the placeholder keeps a
+            // session with images usable on a text-only model.
+            ContentBlock::Image { image } if vision => image_parts.push(serde_json::json!({
+                "type": "image_url",
+                "image_url": {"url": image.data_url()},
+            })),
             ContentBlock::Image { .. } => {
                 content_text.push_str("[image omitted: this model cannot view images]");
             }
@@ -363,6 +384,24 @@ fn openai_message(msg: &ChatMessage) -> Vec<serde_json::Value> {
             })),
         }
     }
+    // A message with images carries parts; text-only stays the plain
+    // string it always was, so cached prefixes do not move.
+    let content_value = |content_text: &str, image_parts: Vec<serde_json::Value>| {
+        if image_parts.is_empty() {
+            if content_text.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::json!(content_text)
+            }
+        } else {
+            let mut parts = Vec::new();
+            if !content_text.is_empty() {
+                parts.push(serde_json::json!({"type": "text", "text": content_text}));
+            }
+            parts.extend(image_parts);
+            serde_json::json!(parts)
+        }
+    };
     if !tool_results.is_empty() {
         let mut messages = Vec::new();
         if !tool_calls.is_empty() {
@@ -373,27 +412,20 @@ fn openai_message(msg: &ChatMessage) -> Vec<serde_json::Value> {
             messages.push(serde_json::Value::Object(value));
         }
         messages.extend(tool_results);
-        if !content_text.is_empty() {
+        if !content_text.is_empty() || !image_parts.is_empty() {
             messages.push(serde_json::json!({
                 "role": role,
-                "content": content_text,
+                "content": content_value(&content_text, image_parts),
             }));
         }
         return messages;
     }
-    if content_text.is_empty() && tool_calls.is_empty() {
+    if content_text.is_empty() && image_parts.is_empty() && tool_calls.is_empty() {
         return Vec::new();
     }
     let mut value = serde_json::Map::new();
     value.insert("role".into(), serde_json::json!(role));
-    value.insert(
-        "content".into(),
-        if content_text.is_empty() {
-            serde_json::Value::Null
-        } else {
-            serde_json::json!(content_text)
-        },
-    );
+    value.insert("content".into(), content_value(&content_text, image_parts));
     if !tool_calls.is_empty() {
         value.insert("tool_calls".into(), serde_json::json!(tool_calls));
     }
@@ -1120,6 +1152,54 @@ fn merge_usage(usage: &mut Usage, wire: &serde_json::Map<String, serde_json::Val
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn image_message() -> ChatMessage {
+        ChatMessage {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Text {
+                    text: "what is this?".into(),
+                },
+                ContentBlock::Image {
+                    image: crate::session::ImageContent {
+                        media_type: "image/png".into(),
+                        data: "aGVsbG8=".into(),
+                    },
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn vision_models_get_real_image_parts_and_text_models_a_named_gap() {
+        // OpenAI flavor, vision: one message, text + image_url parts.
+        let wire = openai_message(&image_message(), true);
+        assert_eq!(wire.len(), 1);
+        let content = wire[0]["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "image_url");
+        assert_eq!(
+            content[1]["image_url"]["url"],
+            "data:image/png;base64,aGVsbG8="
+        );
+
+        // OpenAI flavor, no vision: plain string with the named gap.
+        let wire = openai_message(&image_message(), false);
+        let content = wire[0]["content"].as_str().unwrap();
+        assert!(content.contains("[image omitted"), "{content}");
+
+        // Text-only stays the plain string it always was.
+        let wire = openai_message(&ChatMessage::user_text("hi"), true);
+        assert_eq!(wire[0]["content"], "hi");
+
+        // Anthropic flavor, vision: a base64 image source block.
+        let wire = anthropic_message(&image_message(), true).unwrap().unwrap();
+        assert_eq!(wire["content"][1]["type"], "image");
+        assert_eq!(wire["content"][1]["source"]["data"], "aGVsbG8=");
+        // And without vision, the named gap.
+        let wire = anthropic_message(&image_message(), false).unwrap().unwrap();
+        assert_eq!(wire["content"][1]["type"], "text");
+    }
 
     #[test]
     fn openai_flavor_cached_input_is_normalized_out_of_prompt_total() {

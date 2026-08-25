@@ -65,7 +65,7 @@ restore and fork. Text on the clipboard still pastes the normal way;
 Ctrl-V only intercepts images.
 
 The catalog knows which models see: every OpenAI model does, on z.ai
-only the V-series. Attaching on anything else is refused with a notice
+only the V-series (available on the coding plan too). Attaching on anything else is refused with a notice
 naming the model, and attachments only ride a *fresh* turn — while a
 turn runs, submit puts your text back and asks you to wait, because
 steering carries text only. Esc discards attachments along with the

@@ -690,7 +690,14 @@ static CATALOG: &[ModelInfo] = &[
         ZaiBoth
     ),
     model!("zai", "glm-5", "GLM-5", 204_800, 131_072, Zai),
-    model!("zai", "glm-5v-turbo", "GLM-5V-Turbo", 200_000, 131_072, Zai),
+    model!(
+        "zai",
+        "glm-5v-turbo",
+        "GLM-5V-Turbo",
+        200_000,
+        131_072,
+        ZaiBoth
+    ),
     model!("zai", "glm-4.7", "GLM-4.7", 204_800, 131_072, ZaiBoth),
     model!(
         "zai",
@@ -708,9 +715,9 @@ static CATALOG: &[ModelInfo] = &[
         131_072,
         Zai
     ),
-    model!("zai", "glm-4.6v", "GLM-4.6V", 128_000, 32_768, Zai),
+    model!("zai", "glm-4.6v", "GLM-4.6V", 128_000, 32_768, ZaiBoth),
     model!("zai", "glm-4.6", "GLM-4.6", 204_800, 131_072, Zai),
-    model!("zai", "glm-4.5v", "GLM-4.5V", 64_000, 16_384, Zai),
+    model!("zai", "glm-4.5v", "GLM-4.5V", 64_000, 16_384, ZaiBoth),
     model!("zai", "glm-4.5-air", "GLM-4.5-Air", 131_072, 98_304, Zai),
     model!(
         "zai",

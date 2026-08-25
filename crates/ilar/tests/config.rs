@@ -435,6 +435,14 @@ fn zai_openai_flavor_uses_coding_plan_catalog() {
 
     assert!(models.iter().any(|model| model.full_id() == "zai/glm-5.3"));
     assert!(!models.iter().any(|model| model.full_id() == "zai/glm-4.6"));
+    // The V-series answers on the coding-plan endpoint (verified live
+    // 2026-08-25; models.dev's international record lags).
+    assert!(models.iter().any(|model| model.full_id() == "zai/glm-4.6v"));
+    assert!(
+        models
+            .iter()
+            .any(|model| model.full_id() == "zai/glm-5v-turbo")
+    );
 }
 
 #[test]
