@@ -88,9 +88,10 @@ event: delta     data: {"type":"text_delta","text":"…"}   (no id)
 ```
 
 `delta` frames stream the in-flight step from the turn's ephemeral
-`.live` scratch: text and thinking as they generate, tool
-started/finished markers. They carry no `id:` and are excluded from
-`Last-Event-ID` replay — the committed event always follows on
+`.live` scratch: text and thinking as they generate, a
+`{"type":"thinking_break"}` where one thought ends and the next
+begins, and tool started/finished markers. They carry no `id:` and are
+excluded from `Last-Event-ID` replay — the committed event always follows on
 `append`, which is when the client drops its streaming row. Thinking
 text rides these frames ephemerally; it is never persisted and never
 served after the step commits.

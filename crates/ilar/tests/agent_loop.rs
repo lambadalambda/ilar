@@ -3152,6 +3152,100 @@ async fn a_live_scratch_streams_a_turn_and_is_deleted_at_the_end() {
     assert_eq!(text, "hello worlddone", "both steps landed in full");
 }
 
+/// Successive thoughts are separate thoughts, and the scratch has to
+/// say where one ends: a reader with no boundary to split on renders a
+/// step's every summary as one run-on paragraph.
+#[tokio::test]
+async fn successive_reasoning_summaries_are_broken_apart_on_the_scratch() {
+    use ilar::session::LiveDelta;
+
+    let (store, session_id) = temp_session("build");
+    let registry = registry_with(EchoTool {
+        calls: Arc::new(Mutex::new(Vec::new())),
+    });
+    let provider = PacedProvider::new(
+        vec![
+            vec![
+                ProviderEvent::ReasoningSummaryDelta("**Planning**".into()),
+                ProviderEvent::ReasoningSummaryCompleted,
+                ProviderEvent::ReasoningSummaryDelta("**Checking**".into()),
+                ProviderEvent::ReasoningSummaryCompleted,
+                ProviderEvent::ThinkingDelta("raw".into()),
+                ProviderEvent::ThinkingCompleted,
+                ProviderEvent::ToolCallStarted {
+                    id: "echo-1".into(),
+                    name: "echo".into(),
+                    item_id: None,
+                },
+                tool_call_event("echo-1", "ping"),
+                ProviderEvent::TurnComplete {
+                    stop_reason: StopReason::ToolUse,
+                    usage: Default::default(),
+                },
+            ],
+            vec![
+                ProviderEvent::TextDelta("done".into()),
+                ProviderEvent::TurnComplete {
+                    stop_reason: StopReason::EndTurn,
+                    usage: Default::default(),
+                },
+            ],
+        ],
+        Duration::from_millis(40),
+    );
+
+    let scratch = scratch_path(&store, &session_id);
+    let stop = CancellationToken::new();
+    let sampler = tokio::spawn(sample_scratch(scratch.clone(), stop.clone()));
+
+    let outcome = run_turn(
+        &provider,
+        &registry,
+        &store,
+        &session_id,
+        "say hello",
+        &[],
+        None,
+        LoopConfig::default(),
+        events_channel().0,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+        None,
+    )
+    .await
+    .unwrap();
+    stop.cancel();
+    let seen = sampler.await.unwrap();
+    assert_eq!(outcome, TurnOutcome::Completed);
+
+    let streaming = seen
+        .iter()
+        .filter(|snapshot| step_of(snapshot) == 0)
+        .max_by_key(|snapshot| snapshot.len())
+        .expect("a first-generation snapshot");
+    assert_eq!(
+        &streaming[1..],
+        [
+            LiveDelta::ThinkingDelta {
+                text: "**Planning**".into()
+            },
+            LiveDelta::ThinkingBreak,
+            LiveDelta::ThinkingDelta {
+                text: "**Checking**".into()
+            },
+            LiveDelta::ThinkingBreak,
+            LiveDelta::ThinkingDelta { text: "raw".into() },
+            LiveDelta::ThinkingBreak,
+            LiveDelta::ToolStarted {
+                id: "echo-1".into(),
+                name: "echo".into(),
+                summary: "msg=ping".into(),
+            },
+        ],
+        "each thought is closed where the provider closed it"
+    );
+}
+
 /// An aborted turn is still a turn that ended: the drop guard runs on
 /// the way out, whatever the outcome.
 #[tokio::test]

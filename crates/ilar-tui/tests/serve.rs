@@ -456,6 +456,11 @@ async fn a_live_turn_streams_delta_frames_before_its_step_commits() {
     let mut frames = Frames::open(&server, &format!("/api/sessions/{id}/events")).await;
 
     let mut live = ilar::session::LiveScratch::start(&server.store, &id);
+    live.thinking("**Planning**");
+    // The thought is closed before the tool starts, and the boundary is
+    // a frame of its own: nothing else on the wire says where one
+    // thought ends and the next begins.
+    live.thinking_break();
     live.tool_started("bash-1", "bash", "cargo test");
     let frame = frames.next().await;
     assert_eq!(frame.event, "delta");
@@ -463,6 +468,13 @@ async fn a_live_turn_streams_delta_frames_before_its_step_commits() {
         frame.id, None,
         "ephemeral: a scratch line is not a line of the log, so it never enters Last-Event-ID"
     );
+    assert_eq!(frame.data["type"], "thinking_delta");
+    assert_eq!(frame.data["text"], "**Planning**");
+    let frame = frames.next().await;
+    assert_eq!(frame.event, "delta");
+    assert_eq!(frame.data["type"], "thinking_break");
+    let frame = frames.next().await;
+    assert_eq!(frame.event, "delta");
     assert_eq!(frame.data["type"], "tool_started");
     assert_eq!(frame.data["name"], "bash");
     assert_eq!(frame.data["summary"], "cargo test");
@@ -484,10 +496,21 @@ async fn a_live_turn_streams_delta_frames_before_its_step_commits() {
     // handed the row as it already stands rather than starting from
     // whatever the turn says next.
     let mut joined = Frames::open(&server, &format!("/api/sessions/{id}/events")).await;
-    let frame = joined.next().await;
-    assert_eq!(frame.event, "delta");
-    assert_eq!(frame.data["type"], "tool_started");
-    assert_eq!(frame.data["summary"], "cargo test");
+    let mut handed: Vec<Value> = Vec::new();
+    while handed.len() < 3 {
+        let frame = joined.next().await;
+        assert_eq!(frame.event, "delta");
+        handed.push(frame.data);
+    }
+    assert_eq!(
+        handed
+            .iter()
+            .map(|data| data["type"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["thinking_delta", "thinking_break", "tool_started"],
+        "the step so far, boundaries included"
+    );
+    assert_eq!(handed[2]["summary"], "cargo test");
     drop(joined);
 
     // The step commits: the committed event arrives on the main stream,

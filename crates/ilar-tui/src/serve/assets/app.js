@@ -91,35 +91,54 @@ function tokens(count) {
 
 // ------------------------------------------------------- text render
 
-// Plain text first: fenced blocks, inline backticks, bare http(s) links
-// and diff colouring. Everything else is left exactly as written —
-// asterisks stay asterisks, because guessing at markdown in a shell
-// transcript is how a path turns into italics.
-const INLINE = /`([^`\n]+)`|(https?:\/\/[^\s<>"'`)\]]+)/g;
+// Plain text first: fenced blocks, inline backticks, paired **bold**,
+// bare http(s) links and diff colouring. Everything else is left exactly
+// as written — a lone asterisk stays an asterisk, because guessing at
+// markdown in a shell transcript is how a path turns into italics.
+// **…** is the exception because models emit it constantly (every
+// reasoning summary opens with one) and the raw markers are noise on
+// screen; the pair must open and close on one line against non-space,
+// so a glob or a footnote marker is not bold. Both quantifiers in the
+// body are lazy — a greedy one would match `**a** and **b**` as a
+// single span and put the seam it swallowed back on screen — and the
+// bound keeps one very long line with an unclosed `**` from costing a
+// scan to the end of it per marker.
+const INLINE = /`([^`\n]+)`|\*\*(\S(?:[^\n]{0,400}?\S)??)\*\*|(https?:\/\/[^\s<>"'`)\]]+)/g;
 const TRAILING = /[.,;:!?]+$/;
 
-function inlineText(text) {
-  const node = el("div", "text");
+// Tokenize into `host`, appending text nodes and elements only: every
+// span the server sent lands through textContent, never a parser.
+function inline(host, text) {
+  const source = String(text === null || text === undefined ? "" : text);
   let last = 0;
-  for (const match of String(text).matchAll(INLINE)) {
-    if (match.index > last) node.appendChild(document.createTextNode(text.slice(last, match.index)));
+  for (const match of source.matchAll(INLINE)) {
+    if (match.index > last) host.appendChild(document.createTextNode(source.slice(last, match.index)));
     if (match[1] !== undefined) {
-      node.appendChild(el("code", "inline", match[1]));
+      host.appendChild(el("code", "inline", match[1]));
+    } else if (match[2] !== undefined) {
+      // Recursed, so a link or a backticked flag inside a bold span is
+      // still a link and still a code span. The body cannot contain a
+      // closed pair, so this bottoms out at one level.
+      host.appendChild(inline(el("strong", "bold"), match[2]));
     } else {
-      const url = match[2].replace(TRAILING, "");
+      const url = match[3].replace(TRAILING, "");
       const link = el("a", "link", url);
       // The regex admits http(s) only, so no javascript: URL can reach
       // an href here.
       link.href = url;
       link.target = "_blank";
       link.rel = "noreferrer noopener";
-      node.appendChild(link);
-      node.appendChild(document.createTextNode(match[2].slice(url.length)));
+      host.appendChild(link);
+      host.appendChild(document.createTextNode(match[3].slice(url.length)));
     }
     last = match.index + match[0].length;
   }
-  node.appendChild(document.createTextNode(text.slice(last)));
-  return node;
+  host.appendChild(document.createTextNode(source.slice(last)));
+  return host;
+}
+
+function inlineText(text) {
+  return inline(el("div", "text"), text);
 }
 
 function codeBlock(body) {
@@ -227,7 +246,19 @@ function images(host, sessionId, eventId, descriptors) {
 // The first line of something long, for a row that is still collapsed.
 function preview(text) {
   const line = String(text || "").split("\n").find((one) => one.trim()) || "";
-  return line.length > 90 ? line.slice(0, 89) + "…" : line;
+  // Unconditionally: the cut is one way to orphan a marker, and a bold
+  // span the model wrapped across two lines is the other.
+  return unpaired(line.length > 90 ? line.slice(0, 89) + "…" : line);
+}
+
+// A first line that ends inside a **bold** span keeps its opening
+// marker, and an unpaired marker renders as the two asterisks it is.
+// Drop the orphan and keep its words.
+function unpaired(cut) {
+  const marks = cut.match(/\*\*/g);
+  if (!marks || marks.length % 2 === 0) return cut;
+  const at = cut.lastIndexOf("**");
+  return cut.slice(0, at) + cut.slice(at + 2);
 }
 
 function row(host, className, who) {
@@ -332,7 +363,10 @@ function renderEvents(host, events, sessionId) {
           if (block.type === "text") {
             renderText(row(host, "assistant", event.model || "assistant"), block.text);
           } else if (block.type === "reasoning_summary") {
-            const label = el("span", "tag", " thinking · " + preview(block.text));
+            // The title a model writes is `**Planning…**`; it is prose,
+            // so it renders as prose rather than as its own markers.
+            const label = el("span", "tag", " thinking · ");
+            inline(label, preview(block.text));
             disclosure(row(host, "thought"), label, false, (body) => renderText(body, block.text));
           } else if (block.type === "tool_call") {
             const result = results.get(block.id);
@@ -401,7 +435,7 @@ function sessionRow(session) {
   const dot = el("span", "dot " + (session.state || "idle"));
   if (session.state === "stalled") dot.title = "a turn is running but has not written for a minute";
   link.appendChild(dot);
-  link.appendChild(el("span", "row-title", session.title || session.id));
+  link.appendChild(inline(el("span", "row-title"), session.title || session.id));
   if (session.activity) link.appendChild(el("span", "tag activity", session.activity));
   if (session.agent) link.appendChild(el("span", "tag", session.agent));
   if (session.model) link.appendChild(el("span", "tag", session.model));
@@ -450,29 +484,75 @@ const view = {
 // What the running step has produced so far, rebuilt from `delta`
 // frames. Never folded into `view.events`: it is a stand-in for a step
 // nobody has committed, dropped the moment the real event arrives.
+//
+// `thoughts` is a list because the wire says where one thought ends —
+// a `thinking_break` per closed summary. Appending them all to one
+// string is what used to run a step's whole reasoning together into a
+// single paragraph seamed with stray `**`.
 function liveApply(data) {
   if (data.type === "reset") return void (view.live = null);
-  const live = view.live || (view.live = { text: "", thought: "", tools: [] });
+  const live = view.live || (view.live = { text: "", thoughts: [], tools: [] });
   if (data.type === "text_delta") live.text += data.text;
-  else if (data.type === "thinking_delta") live.thought += data.text;
-  else if (data.type === "tool_started") live.tools.push({ id: data.id, name: data.name, summary: data.summary });
-  else if (data.type === "tool_finished") {
+  else if (data.type === "thinking_delta") {
+    if (!live.thoughts.length) live.thoughts.push("");
+    live.thoughts[live.thoughts.length - 1] += data.text;
+  } else if (data.type === "thinking_break") {
+    if (live.thoughts.length && live.thoughts[live.thoughts.length - 1].trim()) live.thoughts.push("");
+  } else if (data.type === "tool_started") {
+    live.tools.push({ id: data.id, name: data.name, summary: data.summary });
+  } else if (data.type === "tool_finished") {
     const tool = live.tools.find((one) => one.id === data.id);
     if (tool) tool.ok = data.ok;
   }
 }
 
+// One thought, as one line: the same first-line preview a committed
+// `reasoning_summary` row shows collapsed, so a step reads the same
+// before and after it commits.
+function thoughtLine(text, active) {
+  const line = el("div", "live-thought" + (active ? " active" : ""));
+  line.appendChild(el("span", "badge", "▸"));
+  inline(line, preview(text));
+  return line;
+}
+
+// The same label a committed tool call gets, so the row does not change
+// shape when the real event replaces it — with the waiting badge swapped
+// for the spinner, because a running tool is the one thing here that is
+// happening rather than written.
+function liveTool(tool) {
+  const done = tool.ok !== undefined;
+  const label = toolLabel(tool, done ? { is_error: !tool.ok } : null);
+  if (!done) label.replaceChild(el("span", "spinner"), label.firstChild);
+  const node = el("div", "live-tool");
+  node.appendChild(label);
+  return node;
+}
+
+// The in-flight step: one container, shaped like a transcript row, that
+// the committed event replaces whole. Everything the step has said so
+// far lives inside it — the thoughts it closed, the text it is writing,
+// the tools it started — so a running turn is one thing on screen
+// rather than a stack of boxes.
 function renderLive(host) {
   const live = view.live;
   if (!live) return;
-  if (live.thought) renderText(row(host, "thought streaming", "thinking"), live.thought);
-  if (live.text) renderText(row(host, "assistant streaming", "streaming"), live.text);
-  // The same label a committed tool call gets, so a row does not change
-  // shape when the real event replaces this one.
-  for (const tool of live.tools) {
-    const done = tool.ok !== undefined;
-    row(host, "tool streaming").appendChild(toolLabel(tool, done ? { is_error: !tool.ok } : null));
+  const thoughts = live.thoughts.filter((one) => one.trim());
+  if (!thoughts.length && !live.text.trim() && !live.tools.length) return;
+  const step = row(host, "live", "working");
+  // Exactly one thing says "this is what is happening now": the
+  // spinner while a tool runs, the caret on the newest words otherwise.
+  const busy = live.tools.some((tool) => tool.ok === undefined);
+  const writing = live.text.trim();
+  thoughts.forEach((thought, index) => {
+    const active = !busy && !writing && index === thoughts.length - 1;
+    step.appendChild(thoughtLine(thought, active));
+  });
+  if (writing) {
+    const text = renderText(el("div", "live-text" + (busy ? "" : " active")), live.text);
+    step.appendChild(text);
   }
+  for (const tool of live.tools) step.appendChild(liveTool(tool));
 }
 
 function status(text, live) {
@@ -528,7 +608,9 @@ function renderHead(page) {
   const session = page.session || {};
   const meta = view.events.find((event) => event.type === "meta") || {};
   const host = clear($("session-head"));
-  host.appendChild(el("h1", null, session.title || view.id));
+  // A title is the first user message, markers and all: it renders the
+  // way the message it came from does.
+  host.appendChild(inline(el("h1"), session.title || view.id));
   const facts = el("div", "facts");
   const fact = (text) => text && facts.appendChild(el("span", null, text));
   fact(session.model || meta.model);
@@ -541,7 +623,7 @@ function renderHead(page) {
   else if (usage.plan) fact("plan");
   fact(page.count + " events");
   host.appendChild(facts);
-  clear($("crumb")).appendChild(document.createTextNode(session.title || view.id));
+  inline(clear($("crumb")), session.title || view.id);
 }
 
 function attach() {

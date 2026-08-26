@@ -92,6 +92,12 @@ pub enum LiveDelta {
     ThinkingDelta {
         text: String,
     },
+    /// The thought before this ended: the provider closed a summary or a
+    /// thinking block, and whatever comes next is a new one. The wire
+    /// needs the boundary because the deltas carry none — a reader
+    /// without it concatenates a step's every thought into one run-on
+    /// paragraph, seams and all.
+    ThinkingBreak,
     ToolStarted {
         id: String,
         name: String,
@@ -139,6 +145,12 @@ pub struct LiveScratch {
     /// This scratch's half of the generation, fixed for its lifetime.
     turn: String,
     step: u64,
+    /// Whether a thought is open — the one thing a break needs to know.
+    /// A provider that closes a summary *and* its thinking block reports
+    /// one boundary twice, and a step can open with a close; neither is
+    /// a separator, and writing them would put empty thoughts on a
+    /// reader's screen.
+    thinking: bool,
 }
 
 impl LiveScratch {
@@ -167,6 +179,7 @@ impl LiveScratch {
             due: std::time::Instant::now() + FLUSH_INTERVAL,
             turn: super::event::new_id(),
             step: 0,
+            thinking: false,
         };
         scratch.open_generation();
         scratch
@@ -188,7 +201,22 @@ impl LiveScratch {
     }
 
     pub fn thinking(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.thinking = true;
         self.push(LiveDelta::ThinkingDelta { text: text.into() }, false);
+    }
+
+    /// The thought that was streaming is finished. Deltas alone say
+    /// nothing about where one thought ends and the next begins, so this
+    /// is the only place a reader can learn it.
+    pub fn thinking_break(&mut self) {
+        if !self.thinking {
+            return;
+        }
+        self.thinking = false;
+        self.push(LiveDelta::ThinkingBreak, false);
     }
 
     /// A marker, flushed at once: it is what a supervisor reads as the
@@ -227,6 +255,7 @@ impl LiveScratch {
     pub fn commit(&mut self) {
         self.buffer.clear();
         self.step += 1;
+        self.thinking = false;
         let reset = self.file.as_mut().map(|file| {
             file.set_len(0)
                 .and_then(|()| file.seek(std::io::SeekFrom::Start(0)))
@@ -274,6 +303,7 @@ impl LiveScratch {
     fn disable(&mut self) {
         self.file = None;
         self.buffer.clear();
+        self.thinking = false;
         self.remove();
     }
 
@@ -429,6 +459,52 @@ mod tests {
             next.0, aborted_generation.0,
             "but never reuses the generation the abandoned turn had"
         );
+    }
+
+    /// Two thoughts are two thoughts on the wire. Without the break
+    /// between them a reader has nothing to split on and renders every
+    /// summary of a step as one run-on paragraph; a break with nothing
+    /// in front of it separates nothing and is never written.
+    #[test]
+    fn a_thinking_break_separates_two_thoughts_and_never_doubles() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("turn.live");
+        let mut scratch = LiveScratch::create(path.clone());
+
+        scratch.thinking_break();
+        scratch.thinking("**Planning**");
+        scratch.thinking_break();
+        // A provider that closes a summary and its thinking block says
+        // the same thing twice; the scratch says it once.
+        scratch.thinking_break();
+        scratch.thinking("**Checking**");
+        scratch.thinking_break();
+        scratch.tool_started("call-1", "bash", "cargo test");
+
+        assert_eq!(
+            generation(&path).1,
+            vec![
+                LiveDelta::ThinkingDelta {
+                    text: "**Planning**".into()
+                },
+                LiveDelta::ThinkingBreak,
+                LiveDelta::ThinkingDelta {
+                    text: "**Checking**".into()
+                },
+                LiveDelta::ThinkingBreak,
+                LiveDelta::ToolStarted {
+                    id: "call-1".into(),
+                    name: "bash".into(),
+                    summary: "cargo test".into(),
+                },
+            ]
+        );
+
+        // A fresh generation has nothing to separate either.
+        scratch.commit();
+        scratch.thinking_break();
+        scratch.tool_started("call-2", "read", "src/lib.rs");
+        assert_eq!(generation(&path).1.len(), 1);
     }
 
     /// A heartbeat says "still here" and nothing else: the timestamp

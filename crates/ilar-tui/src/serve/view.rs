@@ -198,9 +198,14 @@ pub(crate) fn project_events(events: &[SessionEvent]) -> Vec<Value> {
 /// above deliberately drops — see the module doc for why the live view
 /// is the exception.
 ///
+/// `thinking_break` closes the thought that was streaming: the deltas
+/// carry no boundary of their own, so it is the only thing telling a
+/// client where one summary ends and the next begins.
+///
 /// ```json
 /// {"type":"text_delta","text":"on it"}
 /// {"type":"thinking_delta","text":"weighing the two"}
+/// {"type":"thinking_break"}
 /// {"type":"tool_started","id":"bash-1","name":"bash","summary":"cargo test"}
 /// {"type":"tool_finished","id":"bash-1","ok":true}
 /// {"type":"reset"}
@@ -215,6 +220,7 @@ pub(crate) fn project_live_delta(delta: &LiveDelta) -> Value {
         }
         LiveDelta::TextDelta { text } => json!({ "type": "text_delta", "text": text }),
         LiveDelta::ThinkingDelta { text } => json!({ "type": "thinking_delta", "text": text }),
+        LiveDelta::ThinkingBreak => json!({ "type": "thinking_break" }),
         LiveDelta::ToolStarted { id, name, summary } => json!({
             "type": "tool_started",
             "id": id,
@@ -692,6 +698,58 @@ mod tests {
         assert_eq!(projected[9]["to"], json!(1));
         // Every event carries a timestamp the client can render.
         assert!(projected.iter().all(|value| value["ts"].is_string()));
+    }
+
+    /// The live frames, with the core enum's own serde spelling — a
+    /// client switches on `type` across both halves of the wire.
+    #[test]
+    fn live_deltas_project_with_the_core_spelling() {
+        let deltas = [
+            LiveDelta::TurnStarted {
+                turn: "turn-1".into(),
+                step: 2,
+            },
+            LiveDelta::TextDelta {
+                text: "on it".into(),
+            },
+            LiveDelta::ThinkingDelta {
+                text: "**Planning**".into(),
+            },
+            LiveDelta::ThinkingBreak,
+            LiveDelta::ToolStarted {
+                id: "bash-1".into(),
+                name: "bash".into(),
+                summary: "cargo test".into(),
+            },
+            LiveDelta::ToolFinished {
+                id: "bash-1".into(),
+                ok: true,
+            },
+        ];
+        assert_eq!(
+            deltas.iter().map(project_live_delta).collect::<Vec<_>>(),
+            vec![
+                json!({ "type": "turn_started", "turn": "turn-1", "step": 2 }),
+                json!({ "type": "text_delta", "text": "on it" }),
+                json!({ "type": "thinking_delta", "text": "**Planning**" }),
+                json!({ "type": "thinking_break" }),
+                json!({
+                    "type": "tool_started",
+                    "id": "bash-1",
+                    "name": "bash",
+                    "summary": "cargo test",
+                }),
+                json!({ "type": "tool_finished", "id": "bash-1", "ok": true }),
+            ]
+        );
+        // The projection's tag is the enum's own, not a second spelling
+        // of it maintained by hand.
+        for delta in &deltas {
+            assert_eq!(
+                serde_json::to_value(delta).unwrap()["type"],
+                project_live_delta(delta)["type"]
+            );
+        }
     }
 
     #[test]

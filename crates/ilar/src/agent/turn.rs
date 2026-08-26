@@ -1348,6 +1348,11 @@ async fn run_turn_inner(
                         acc.push_thinking(t);
                     }
                     ProviderEvent::ThinkingCompleted => {
+                        // The accumulator closes the block; the scratch
+                        // marks the same boundary, because a streaming
+                        // reader has only the deltas and would otherwise
+                        // run this thought into the next one.
+                        live.thinking_break();
                         acc.complete_thinking();
                     }
                     ProviderEvent::ReasoningSummaryDelta(summary) => {
@@ -1358,6 +1363,7 @@ async fn run_turn_inner(
                         acc.push_reasoning_summary(summary);
                     }
                     ProviderEvent::ReasoningSummaryCompleted => {
+                        live.thinking_break();
                         events
                             .publish(LoopEvent::ReasoningSummaryCompleted, &cancel)
                             .await;

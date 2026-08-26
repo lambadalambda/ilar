@@ -10,6 +10,10 @@
   --fg: #d7dbe0;
   --dim: #8b93a1;
   --accent: #7aa2f7;
+  /* The accent as a wash and as a resting state, for the one thing on
+     the page that has to be visible without being loud: the live step. */
+  --accent-soft: rgba(122, 162, 247, 0.07);
+  --accent-dim: #3c5586;
   --user: #9ece6a;
   --thought: #a48ce0;
   --tool: #7dcfff;
@@ -189,7 +193,7 @@ button:hover {
 .transcript {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
   padding-top: 12px;
 }
 .row {
@@ -200,6 +204,7 @@ button:hover {
   color: var(--dim);
   font-size: 11px;
   letter-spacing: 0.06em;
+  margin-bottom: 2px;
 }
 .row.user {
   border-color: var(--user);
@@ -222,16 +227,80 @@ button:hover {
 .row.error {
   border-color: var(--err);
 }
-/* The stand-in for a step that has not been committed yet: dimmed, with
-   a caret, so it never reads as part of the transcript. */
-.row.streaming {
-  opacity: 0.85;
-  border-style: dashed;
+/* The step nobody has committed yet: one container the shape of the
+   transcript row it is about to become — no dashed box, just a breathing
+   accent bar and a tint. Everything the running step has said lives
+   inside it, so a live turn is one thing on screen. */
+.row.live {
+  border-color: var(--accent);
+  background: linear-gradient(90deg, var(--accent-soft), transparent 65%);
+  animation: breathe 2.4s ease-in-out infinite;
+  padding-bottom: 3px;
 }
-.row.streaming::after {
+.row.live .who {
+  color: var(--accent);
+}
+@keyframes breathe {
+  50% {
+    border-left-color: var(--accent-dim);
+  }
+}
+
+/* One closed thought per line, the same first-line preview a committed
+   thinking row shows collapsed. */
+.live-thought {
+  color: var(--dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.live-thought .badge {
+  color: var(--thought);
+}
+.live-text {
+  margin-top: 3px;
+}
+/* A compact row per tool: running spins, finished ticks. Never a box —
+   it is part of the step above it. */
+.live-tool {
+  margin-top: 3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.spinner {
+  display: inline-block;
+  vertical-align: middle;
+  margin: 0 3px 0 1px;
+  width: 9px;
+  height: 9px;
+  border: 1.5px solid var(--line);
+  border-top-color: var(--tool);
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+/* The caret marks the one thing still being written, and only that —
+   the last block of it, whether that is a paragraph or a code fence. */
+.live-thought.active::after,
+.live-text.active > :last-child::after {
   content: "▌";
   color: var(--accent);
   animation: pulse 1.1s steps(2, start) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dot.working,
+  .row.live,
+  .spinner,
+  .live-thought.active::after,
+  .live-text.active > :last-child::after {
+    animation: none;
+  }
 }
 
 .text {
@@ -243,6 +312,11 @@ code.inline {
   background: var(--panel-2);
   border-radius: 3px;
   padding: 0 3px;
+}
+/* Paired **…** as the emphasis it is; the markers themselves are noise. */
+.bold {
+  font-weight: 700;
+  color: var(--fg);
 }
 pre.code,
 pre.detail,
