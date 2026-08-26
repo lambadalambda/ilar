@@ -25,6 +25,18 @@ pub fn steer_channel() -> (SteerSender, SteerReceiver) {
     tokio::sync::mpsc::unbounded_channel()
 }
 
+/// The session's most recent compaction, if it has ever been compacted.
+/// Only its identity matters (see
+/// [`crate::tools::SeenFiles::forget_after_compaction`]) — and unlike a
+/// count it survives the replay checkpoint, which keeps only the last
+/// compaction in a loaded session's window.
+fn last_compaction(session: &crate::session::Session) -> Option<&str> {
+    session.events().iter().rev().find_map(|event| match event {
+        SessionEvent::Compaction { id, .. } => Some(id.as_str()),
+        _ => None,
+    })
+}
+
 /// Take everything pending without waiting.
 fn drain_steers(steer: Option<&mut SteerReceiver>) -> Vec<String> {
     let mut pending = Vec::new();
@@ -1179,6 +1191,14 @@ async fn run_turn_inner(
             .await;
     }
 
+    // A compaction — this turn's own, or one performed between turns —
+    // truncated the model's memory of what the workspace's files say, so
+    // everything it had read stops counting as read: the first edit
+    // afterwards has to look at the file again.
+    tool_ctx
+        .seen_files
+        .forget_after_compaction(last_compaction(&session));
+
     tool_ctx.session_id = session_id.to_string();
     // The model bound above is the one every result of this turn is
     // written for — including a subagent's, whose session (not its
@@ -1256,6 +1276,11 @@ async fn run_turn_inner(
             )
             .await?
         {
+            // Same as at turn start: the summary replaced the file
+            // contents the model was working from.
+            tool_ctx
+                .seen_files
+                .forget_after_compaction(last_compaction(&session));
             events
                 .publish(
                     LoopEvent::Compacted {

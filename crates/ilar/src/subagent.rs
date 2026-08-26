@@ -692,6 +692,9 @@ impl SubagentSpawner {
             // from the child session's own model, which is the one that
             // will be looking at whatever its tools return.
             vision: false,
+            // Empty, not the parent's: the child model has seen nothing
+            // of the workspace, so its first edit reads the file itself.
+            seen_files: crate::tools::SeenFiles::default(),
         };
 
         if input.background == Some(true) {
@@ -1191,6 +1194,9 @@ task's scope yourself; continue only clearly disjoint work."
                     // Set by the turn below from the notified session's
                     // own model.
                     vision: false,
+                    // A routed notification is a fresh view of the
+                    // session: nothing has been read on this context yet.
+                    seen_files: crate::tools::SeenFiles::default(),
                 },
                 // Subagents have no interactive user to steer them.
                 None,

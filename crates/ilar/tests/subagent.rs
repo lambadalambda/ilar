@@ -2889,3 +2889,110 @@ async fn a_foreground_task_is_running_while_it_runs() {
     assert_eq!(seen, Some(("read the config".to_string(), false)));
     assert!(spawner.running_tasks().is_empty());
 }
+
+/// The child model has seen nothing, whatever its parent read: a fresh
+/// session's edits are gated on the child's own reads.
+#[tokio::test]
+async fn a_child_inherits_none_of_the_parents_reads() {
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("a.txt"), "alpha\n").unwrap();
+    let child = Arc::new(MockProvider::new(vec![
+        vec![
+            ProviderEvent::ToolCallStarted {
+                id: "child-edit".into(),
+                name: "edit".into(),
+                item_id: None,
+            },
+            ProviderEvent::ToolCallCompleted {
+                id: "child-edit".into(),
+                name: "edit".into(),
+                input: serde_json::json!({
+                    "path": "a.txt",
+                    "old_string": "alpha",
+                    "new_string": "beta"
+                }),
+            },
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+                usage: Usage::default(),
+            },
+        ],
+        vec![
+            ProviderEvent::TextDelta("could not edit".into()),
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            },
+        ],
+    ]));
+    let (store, parent_id) = temp_store();
+    let spawner = Arc::new(SubagentSpawner::new(
+        Arc::new(FixedProviderResolver::new(child)),
+        store.clone(),
+        vec![AgentDefinition {
+            name: "explore".into(),
+            description: "explores things".into(),
+            model: None,
+            prompt: String::new(),
+            workspace_mode: AgentWorkspaceMode::Mutable,
+            tools: None,
+        }],
+        workspace.path().to_path_buf(),
+        0,
+        1,
+        1,
+    ));
+    let mut context = ToolContext::root(workspace.path().to_path_buf());
+    context.session_id = parent_id;
+    // The parent has read the file. The child has not.
+    let read = ToolRegistry::builtin()
+        .get("read")
+        .unwrap()
+        .run(serde_json::json!({"path": "a.txt"}), context.clone())
+        .await;
+    assert!(!read.is_error, "{}", read.content);
+
+    let output = spawner
+        .run_task(
+            TaskInput {
+                description: "edit".into(),
+                prompt: "change alpha to beta".into(),
+                subagent_type: "explore".into(),
+                task_id: None,
+                background: None,
+                workspace: None,
+                model: None,
+                reasoning: None,
+            },
+            &context,
+        )
+        .await;
+
+    let child_id = output
+        .child_session_id()
+        .expect("task produced no child session");
+    let (content, is_error) = store
+        .load(child_id)
+        .unwrap()
+        .events()
+        .iter()
+        .find_map(|event| match event {
+            SessionEvent::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+                ..
+            } if tool_use_id == "child-edit" => Some((content.clone(), *is_error)),
+            _ => None,
+        })
+        .expect("child never ran the edit");
+    assert!(is_error, "{content}");
+    assert!(
+        content.contains("you have not read this file in this session"),
+        "{content}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("a.txt")).unwrap(),
+        "alpha\n"
+    );
+}

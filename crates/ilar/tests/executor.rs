@@ -555,6 +555,13 @@ async fn real_mutating_tools_complete_through_the_executor() {
         Duration::from_secs(10),
         execute_calls(
             vec![
+                // Edit is gated on having read the file in this session,
+                // so the batch reads it first — as a model would.
+                ToolCall {
+                    id: "read-1".into(),
+                    name: "read".into(),
+                    input: serde_json::json!({"path": "a.txt"}),
+                },
                 ToolCall {
                     id: "edit-1".into(),
                     name: "edit".into(),

@@ -7,7 +7,8 @@ use std::io::BufRead;
 use std::sync::atomic::Ordering;
 
 use super::{
-    Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, WorkspaceAccess, parse_input,
+    SeenFiles, Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, WorkspaceAccess,
+    parse_input,
 };
 use crate::text::truncate_bytes;
 
@@ -74,8 +75,17 @@ impl Tool for ReadTool {
             let start = input.offset.unwrap_or(1).max(1);
             let limit = input.limit.unwrap_or(MAX_LINES).min(MAX_LINES);
             let vision = ctx.vision;
+            let seen_files = ctx.seen_files.clone();
             match super::blocking_scan(move |cancelled| {
-                read_window(&path, &input.path, start, limit, vision, &cancelled)
+                read_window(
+                    &path,
+                    &input.path,
+                    start,
+                    limit,
+                    vision,
+                    &seen_files,
+                    &cancelled,
+                )
             })
             .await
             {
@@ -92,6 +102,7 @@ fn read_window(
     start: usize,
     limit: usize,
     vision: bool,
+    seen_files: &SeenFiles,
     cancelled: &std::sync::atomic::AtomicBool,
 ) -> ToolOutput {
     let file = match std::fs::File::open(path) {
@@ -152,6 +163,7 @@ fn read_window(
     }
 
     if line_number == 0 && reached_eof {
+        seen_files.record_from_disk(path);
         return ToolOutput::text(format!("(empty file: {display_path})"));
     }
     if emitted == 0 && reached_eof && start > line_number {
@@ -159,6 +171,11 @@ fn read_window(
             "read {display_path}: offset {start} is beyond end of file ({line_number} lines)"
         ));
     }
+    // The model has now seen this version of the file — a window of it is
+    // still a window of *this* version — which is what licenses an edit.
+    // Binary reads deliberately do not get here: a one-line description
+    // is nothing the model can match `old_string` against.
+    seen_files.record_from_disk(path);
     if truncated {
         const MARKER: &str = "…\n(truncated)\n";
         truncate_bytes(&mut out, MAX_OUTPUT_BYTES.saturating_sub(MARKER.len()));

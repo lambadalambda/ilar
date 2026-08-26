@@ -1163,3 +1163,231 @@ async fn the_plan_is_state_not_conversation() {
         "the summary is gone too: {transcript}"
     );
 }
+
+// ---- compaction and what the model has seen of the workspace ----
+
+fn tool_call_turn(id: &str, name: &str, input: serde_json::Value) -> Vec<ProviderEvent> {
+    vec![
+        ProviderEvent::ToolCallStarted {
+            id: id.into(),
+            name: name.into(),
+            item_id: None,
+        },
+        ProviderEvent::ToolCallCompleted {
+            id: id.into(),
+            name: name.into(),
+            input,
+        },
+        ProviderEvent::TurnComplete {
+            stop_reason: StopReason::ToolUse,
+            usage: Usage::default(),
+        },
+    ]
+}
+
+fn read_then_edit_script(read_id: &str, edit_id: &str) -> Vec<Vec<ProviderEvent>> {
+    vec![
+        tool_call_turn(read_id, "read", serde_json::json!({"path": "a.txt"})),
+        text_turn("read it"),
+        tool_call_turn(
+            edit_id,
+            "edit",
+            serde_json::json!({
+                "path": "a.txt",
+                "old_string": "alpha",
+                "new_string": "beta"
+            }),
+        ),
+        text_turn("edited it"),
+    ]
+}
+
+fn tool_result(store: &SessionStore, session_id: &str, call_id: &str) -> (String, bool) {
+    store
+        .load(session_id)
+        .unwrap()
+        .events()
+        .iter()
+        .find_map(|event| match event {
+            SessionEvent::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+                ..
+            } if tool_use_id == call_id => Some((content.clone(), *is_error)),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no tool result for {call_id}"))
+}
+
+/// Control for the two tests below: without a compaction in between, the
+/// read in one turn still licenses the edit in the next.
+#[tokio::test]
+async fn a_read_licenses_an_edit_in_a_later_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "alpha\n").unwrap();
+    let (store, session_id) = temp_session();
+    let provider = MockProvider::new(read_then_edit_script("read-1", "edit-1"));
+    let context = ToolContext::root(dir.path().to_path_buf());
+
+    for prompt in ["look at a.txt", "now change it"] {
+        run_turn(
+            &provider,
+            &ToolRegistry::builtin(),
+            &store,
+            &session_id,
+            prompt,
+            &[],
+            None,
+            LoopConfig::default(),
+            loop_event_channel(LOOP_EVENT_CAPACITY).0,
+            tokio_util::sync::CancellationToken::new(),
+            context.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+    }
+
+    let (content, is_error) = tool_result(&store, &session_id, "edit-1");
+    assert!(!is_error, "{content}");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+        "beta\n"
+    );
+}
+
+/// The summary truncated the model's memory of what the file said, so
+/// the first edit after a compaction has to re-read.
+#[tokio::test]
+async fn a_compaction_makes_the_next_edit_re_read_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "alpha\n").unwrap();
+    let (store, session_id) = temp_session();
+    let mut script = read_then_edit_script("read-1", "edit-1");
+    // The forced compaction of turn 2 consumes a provider response of
+    // its own, ahead of the edit.
+    script.insert(2, text_turn("handover: we were editing a.txt"));
+    let provider = MockProvider::new(script);
+    let context = ToolContext::root(dir.path().to_path_buf());
+
+    for (prompt, config) in [
+        ("look at a.txt", LoopConfig::default()),
+        (
+            "now change it",
+            LoopConfig {
+                force_compaction: true,
+                ..LoopConfig::default()
+            },
+        ),
+    ] {
+        run_turn(
+            &provider,
+            &ToolRegistry::builtin(),
+            &store,
+            &session_id,
+            prompt,
+            &[],
+            None,
+            config,
+            loop_event_channel(LOOP_EVENT_CAPACITY).0,
+            tokio_util::sync::CancellationToken::new(),
+            context.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+    }
+
+    let (content, is_error) = tool_result(&store, &session_id, "edit-1");
+    assert!(is_error, "{content}");
+    assert!(
+        content.contains("you have not read this file in this session"),
+        "{content}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+        "alpha\n"
+    );
+}
+
+/// Same for a compaction the user asked for between turns: the next turn
+/// notices the session was compacted and drops what the model had seen.
+///
+/// Compacted twice on purpose. A loaded session carries only the events
+/// after its replay checkpoint, and publishing that checkpoint drops
+/// every compaction but the last — so anything that tries to notice a
+/// compaction by *counting* them sees 1 forever and stops clearing after
+/// the first one.
+#[tokio::test]
+async fn a_manual_compaction_makes_the_next_edit_re_read_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "alpha\n").unwrap();
+    let (store, session_id) = temp_session();
+    let provider = MockProvider::new(vec![
+        tool_call_turn("read-1", "read", serde_json::json!({"path": "a.txt"})),
+        text_turn("read it"),
+        text_turn("handover: we were looking at a.txt"),
+        tool_call_turn("read-2", "read", serde_json::json!({"path": "a.txt"})),
+        text_turn("read it again"),
+        text_turn("handover: we are still looking at a.txt"),
+        tool_call_turn(
+            "edit-1",
+            "edit",
+            serde_json::json!({
+                "path": "a.txt",
+                "old_string": "alpha",
+                "new_string": "beta"
+            }),
+        ),
+        text_turn("edited it"),
+    ]);
+    let context = ToolContext::root(dir.path().to_path_buf());
+    let cancel = tokio_util::sync::CancellationToken::new();
+
+    for prompt in ["look at a.txt", "look again"] {
+        run_turn(
+            &provider,
+            &ToolRegistry::builtin(),
+            &store,
+            &session_id,
+            prompt,
+            &[],
+            None,
+            LoopConfig::default(),
+            loop_event_channel(LOOP_EVENT_CAPACITY).0,
+            cancel.clone(),
+            context.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+        compact_session(&provider, &store, &session_id, None, &[], &cancel)
+            .await
+            .unwrap();
+    }
+
+    run_turn(
+        &provider,
+        &ToolRegistry::builtin(),
+        &store,
+        &session_id,
+        "now change it",
+        &[],
+        None,
+        LoopConfig::default(),
+        loop_event_channel(LOOP_EVENT_CAPACITY).0,
+        cancel,
+        context,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let (content, is_error) = tool_result(&store, &session_id, "edit-1");
+    assert!(is_error, "{content}");
+    assert!(
+        content.contains("you have not read this file in this session"),
+        "{content}"
+    );
+}

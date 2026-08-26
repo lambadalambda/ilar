@@ -1058,6 +1058,7 @@ async fn stall_watchdog_fires_on_silent_child() {
                 cancel: tokio_util::sync::CancellationToken::new(),
                 output_tail: None,
                 vision: false,
+                seen_files: ilar::tools::SeenFiles::default(),
             },
         )
         .await;

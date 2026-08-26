@@ -328,6 +328,102 @@ impl OutputTailSink {
     }
 }
 
+/// Files past this size are never tracked in [`SeenFiles`]: `edit`
+/// refuses to load them at all (same cap), so hashing them would buy
+/// nothing but a second pass over the disk.
+pub(crate) const MAX_TRACKED_FILE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// What the model has actually been shown of the workspace: canonical
+/// path → SHA-256 of the file's contents at the moment it saw them.
+/// Content identity, not wall-clock: a file rewritten to the same bytes
+/// is still the file the model read.
+///
+/// Every clone of a session's [`ToolContext`] shares one map, so a read
+/// in one tool call licenses an edit in the next. A subagent starts with
+/// an empty one — the child model has seen nothing — and compaction
+/// empties it, because the summary truncated the model's memory of what
+/// the files said.
+#[derive(Clone, Default)]
+pub struct SeenFiles {
+    inner: Arc<std::sync::Mutex<SeenFilesState>>,
+}
+
+#[derive(Default)]
+struct SeenFilesState {
+    digests: HashMap<PathBuf, [u8; 32]>,
+    /// The compaction this map has already reacted to (see
+    /// [`SeenFiles::forget_after_compaction`]).
+    compaction: Option<String>,
+}
+
+impl SeenFiles {
+    /// Record contents the caller already holds (write, edit). Contents
+    /// past [`MAX_TRACKED_FILE_BYTES`] are dropped, so the map never
+    /// claims to have seen a file `edit` would refuse to open anyway.
+    pub(crate) fn record(&self, path: &std::path::Path, contents: &[u8]) {
+        if contents.len() as u64 > MAX_TRACKED_FILE_BYTES {
+            return;
+        }
+        self.inner
+            .lock()
+            .unwrap()
+            .digests
+            .insert(canonical_key(path), digest(contents));
+    }
+
+    /// Record whatever is on disk right now (read, which streams a window
+    /// and so never holds the whole file). Silently does nothing when the
+    /// file cannot be read or is past [`MAX_TRACKED_FILE_BYTES`] — the
+    /// stat is what keeps an oversized file from being loaded at all.
+    /// Failing to record only means the next edit asks for a re-read.
+    pub(crate) fn record_from_disk(&self, path: &std::path::Path) {
+        let Ok(metadata) = std::fs::metadata(path) else {
+            return;
+        };
+        if metadata.len() > MAX_TRACKED_FILE_BYTES {
+            return;
+        }
+        if let Ok(contents) = std::fs::read(path) {
+            self.record(path, &contents);
+        }
+    }
+
+    pub(crate) fn digest_of(&self, path: &std::path::Path) -> Option<[u8; 32]> {
+        self.inner
+            .lock()
+            .unwrap()
+            .digests
+            .get(&canonical_key(path))
+            .copied()
+    }
+
+    /// Drop everything when the session's latest compaction is not the
+    /// one this map last reacted to. An identity, not a count: a loaded
+    /// session carries only the events after its replay checkpoint, and
+    /// publishing that checkpoint drops every compaction but the last, so
+    /// counting them would stop noticing after the first. One comparison
+    /// covers every path that can compact a session — the turn's own
+    /// threshold check and a manual `/compact` between turns alike.
+    pub(crate) fn forget_after_compaction(&self, latest: Option<&str>) {
+        let mut state = self.inner.lock().unwrap();
+        if state.compaction.as_deref() != latest {
+            state.compaction = latest.map(str::to_string);
+            state.digests.clear();
+        }
+    }
+}
+
+/// Best-effort canonical path. A path that cannot be resolved (the file
+/// is gone, a permission error) keys on itself: two lookups of the same
+/// unresolvable path still agree, which is all the map needs.
+fn canonical_key(path: &std::path::Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn digest(contents: &[u8]) -> [u8; 32] {
+    <sha2::Sha256 as sha2::Digest>::digest(contents).into()
+}
+
 /// Per-invocation context. No permission checks — the sandbox is the
 /// permission system.
 #[derive(Clone)]
@@ -353,6 +449,9 @@ pub struct ToolContext {
     /// images. Set per turn from the session's own model, so a tool
     /// producing an image never hands one to a model that would drop it.
     pub vision: bool,
+    /// Files this session has shown the model, and what they said at the
+    /// time. `edit` refuses to touch anything absent or stale here.
+    pub seen_files: SeenFiles,
 }
 
 impl ToolContext {
@@ -372,6 +471,7 @@ impl ToolContext {
             cancel: tokio_util::sync::CancellationToken::new(),
             output_tail: None,
             vision: false,
+            seen_files: SeenFiles::default(),
         }
     }
 
@@ -980,6 +1080,83 @@ mod tests {
     #[test]
     fn a_root_tool_context_has_no_vision_until_a_turn_says_otherwise() {
         assert!(!super::ToolContext::root(std::env::temp_dir()).vision);
+    }
+
+    /// Content identity, not wall-clock: a file rewritten to the same
+    /// bytes is still the file the model read.
+    #[test]
+    fn seen_files_track_contents_not_moments() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "alpha\n").unwrap();
+        let seen = super::SeenFiles::default();
+        assert_eq!(seen.digest_of(&path), None);
+
+        seen.record_from_disk(&path);
+        let digest = seen.digest_of(&path).expect("recorded");
+        std::fs::write(&path, "alpha\n").unwrap();
+        seen.record_from_disk(&path);
+        assert_eq!(seen.digest_of(&path), Some(digest));
+
+        std::fs::write(&path, "beta\n").unwrap();
+        seen.record_from_disk(&path);
+        assert_ne!(seen.digest_of(&path), Some(digest));
+    }
+
+    /// A path that resolves to the same file is the same entry, however
+    /// the tool call spelled it.
+    #[test]
+    fn seen_files_key_on_the_canonical_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "alpha\n").unwrap();
+        let seen = super::SeenFiles::default();
+
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+
+        seen.record_from_disk(&path);
+
+        assert!(seen.digest_of(&dir.path().join("./a.txt")).is_some());
+        assert!(seen.digest_of(&dir.path().join("sub/../a.txt")).is_some());
+    }
+
+    #[test]
+    fn a_file_past_the_tracking_cap_is_never_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("huge.txt");
+        std::fs::write(
+            &path,
+            vec![b'x'; super::MAX_TRACKED_FILE_BYTES as usize + 1],
+        )
+        .unwrap();
+        let seen = super::SeenFiles::default();
+
+        seen.record_from_disk(&path);
+
+        assert_eq!(seen.digest_of(&path), None);
+    }
+
+    /// Which compaction it is, not how many there have been: a session
+    /// loaded from its replay checkpoint has forgotten the earlier ones,
+    /// so a map that reacted to "the second" would never fire again.
+    #[test]
+    fn seen_files_are_dropped_when_the_latest_compaction_changes() {
+        let seen = super::SeenFiles::default();
+        let path = std::path::Path::new("/nonexistent/a.txt");
+        seen.record(path, b"alpha");
+
+        seen.forget_after_compaction(None);
+        assert!(seen.digest_of(path).is_some(), "an uncompacted session");
+
+        seen.forget_after_compaction(Some("compaction-1"));
+        assert_eq!(seen.digest_of(path), None);
+
+        seen.record(path, b"alpha");
+        seen.forget_after_compaction(Some("compaction-1"));
+        assert!(seen.digest_of(path).is_some(), "the same compaction twice");
+
+        seen.forget_after_compaction(Some("compaction-2"));
+        assert_eq!(seen.digest_of(path), None, "a later compaction");
     }
 
     #[test]

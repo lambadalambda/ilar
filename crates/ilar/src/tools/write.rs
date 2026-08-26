@@ -75,6 +75,7 @@ impl Tool for WriteTool {
             };
             let cancel = ctx.cancel;
             let path = ctx.cwd.join(&display_path);
+            let seen_files = ctx.seen_files.clone();
             let result = run_blocking_io(lease, move || {
                 if cancel.is_cancelled() {
                     return Err(std::io::Error::new(
@@ -90,7 +91,12 @@ impl Tool for WriteTool {
                     &content,
                     crate::atomic_file::Mode::Preserve,
                     &cancel,
-                )
+                )?;
+                // Whoever wrote the file knows what is in it, so write
+                // licenses the edits that follow it. (Write itself needs
+                // no licence: whole content, nothing to match against.)
+                seen_files.record(&path, &content);
+                Ok(())
             })
             .await;
 

@@ -21,6 +21,13 @@ async fn run(
     tool.run(input, ctx.clone()).await
 }
 
+/// What a model does before editing, and what edit now requires: read the
+/// file through this very context.
+async fn read_first(reg: &ToolRegistry, path: &str, ctx: &ToolContext) {
+    let out = run(reg, "read", serde_json::json!({"path": path}), ctx).await;
+    assert!(!out.is_error, "priming read failed: {}", out.content);
+}
+
 // ---- kinds ----
 
 #[test]
@@ -520,11 +527,13 @@ async fn edit_replaces_unique_match() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
     }
+    let context = ctx(dir.path());
+    read_first(&registry(), "a.txt", &context).await;
     let out = run(
         &registry(),
         "edit",
         serde_json::json!({"path": "a.txt", "old_string": "beta", "new_string": "BETA"}),
-        &ctx(dir.path()),
+        &context,
     )
     .await;
     assert!(!out.is_error, "{}", out.content);
@@ -587,11 +596,13 @@ async fn cancelled_edit_preserves_the_original_file() {
 async fn edit_ambiguous_match_errors_without_replace_all() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("a.txt"), "x x x\n").unwrap();
+    let context = ctx(dir.path());
+    read_first(&registry(), "a.txt", &context).await;
     let out = run(
         &registry(),
         "edit",
         serde_json::json!({"path": "a.txt", "old_string": "x", "new_string": "y"}),
-        &ctx(dir.path()),
+        &context,
     )
     .await;
     assert!(out.is_error);
@@ -611,11 +622,13 @@ async fn edit_ambiguous_match_errors_without_replace_all() {
 async fn edit_no_match_errors() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("a.txt"), "content\n").unwrap();
+    let context = ctx(dir.path());
+    read_first(&registry(), "a.txt", &context).await;
     let out = run(
         &registry(),
         "edit",
         serde_json::json!({"path": "a.txt", "old_string": "zzz", "new_string": "y"}),
-        &ctx(dir.path()),
+        &context,
     )
     .await;
     assert!(out.is_error);
@@ -625,11 +638,13 @@ async fn edit_no_match_errors() {
 async fn edit_replace_all() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("a.txt"), "x x x\n").unwrap();
+    let context = ctx(dir.path());
+    read_first(&registry(), "a.txt", &context).await;
     let out = run(
         &registry(),
         "edit",
         serde_json::json!({"path": "a.txt", "old_string": "x", "new_string": "y", "replace_all": true}),
-        &ctx(dir.path()),
+        &context,
     )
     .await;
     assert!(!out.is_error, "{}", out.content);
@@ -637,6 +652,474 @@ async fn edit_replace_all() {
         std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
         "y y y\n"
     );
+}
+
+// ---- edit: what the model has seen ----
+
+#[tokio::test]
+async fn edit_refuses_a_file_this_session_never_read() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "alpha\n").unwrap();
+
+    let out = run(
+        &registry(),
+        "edit",
+        serde_json::json!({"path": "a.txt", "old_string": "alpha", "new_string": "beta"}),
+        &ctx(dir.path()),
+    )
+    .await;
+
+    assert!(out.is_error, "{}", out.content);
+    assert!(
+        out.content
+            .contains("you have not read this file in this session; read it first"),
+        "{}",
+        out.content
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+        "alpha\n"
+    );
+}
+
+#[tokio::test]
+async fn edit_refuses_a_file_that_changed_since_the_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.txt");
+    std::fs::write(&path, "alpha\n").unwrap();
+    let context = ctx(dir.path());
+    read_first(&registry(), "a.txt", &context).await;
+    // Out of band: a bash command (or another process) rewrote it.
+    std::fs::write(&path, "alpha\nbeta\n").unwrap();
+
+    let out = run(
+        &registry(),
+        "edit",
+        serde_json::json!({"path": "a.txt", "old_string": "alpha", "new_string": "gamma"}),
+        &context,
+    )
+    .await;
+
+    assert!(out.is_error, "{}", out.content);
+    assert!(
+        out.content.contains(
+            "the file changed since you last read it (a command or another process wrote it); \
+             re-read before editing"
+        ),
+        "{}",
+        out.content
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "alpha\nbeta\n");
+}
+
+#[tokio::test]
+async fn edit_succeeds_after_re_reading_the_changed_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.txt");
+    std::fs::write(&path, "alpha\n").unwrap();
+    let context = ctx(dir.path());
+    read_first(&registry(), "a.txt", &context).await;
+    std::fs::write(&path, "alpha\nbeta\n").unwrap();
+    read_first(&registry(), "a.txt", &context).await;
+
+    let out = run(
+        &registry(),
+        "edit",
+        serde_json::json!({"path": "a.txt", "old_string": "alpha", "new_string": "gamma"}),
+        &context,
+    )
+    .await;
+
+    assert!(!out.is_error, "{}", out.content);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "gamma\nbeta\n");
+}
+
+/// The window came from this version of the file, so the model has seen
+/// this version — editing outside the window is its own business.
+#[tokio::test]
+async fn a_windowed_read_unlocks_the_whole_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.txt");
+    std::fs::write(&path, "one\ntwo\nthree\nfour\n").unwrap();
+    let context = ctx(dir.path());
+    let read = run(
+        &registry(),
+        "read",
+        serde_json::json!({"path": "a.txt", "offset": 1, "limit": 2}),
+        &context,
+    )
+    .await;
+    assert!(!read.is_error, "{}", read.content);
+
+    let out = run(
+        &registry(),
+        "edit",
+        serde_json::json!({"path": "a.txt", "old_string": "four", "new_string": "FOUR"}),
+        &context,
+    )
+    .await;
+
+    assert!(!out.is_error, "{}", out.content);
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "one\ntwo\nthree\nFOUR\n"
+    );
+}
+
+/// A read that returned nothing showed the model nothing.
+#[tokio::test]
+async fn a_failed_read_does_not_unlock_edits() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "alpha\n").unwrap();
+    let context = ctx(dir.path());
+    let read = run(
+        &registry(),
+        "read",
+        serde_json::json!({"path": "a.txt", "offset": 10}),
+        &context,
+    )
+    .await;
+    assert!(read.is_error, "{}", read.content);
+
+    let out = run(
+        &registry(),
+        "edit",
+        serde_json::json!({"path": "a.txt", "old_string": "alpha", "new_string": "beta"}),
+        &context,
+    )
+    .await;
+
+    assert!(out.is_error, "{}", out.content);
+    assert!(
+        out.content.contains("you have not read this file"),
+        "{}",
+        out.content
+    );
+}
+
+/// A binary file's read returns a description, not contents — the model
+/// has seen nothing it could match on, so edit stays shut.
+#[tokio::test]
+async fn reading_a_binary_file_does_not_unlock_edits() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.bin");
+    // Valid UTF-8 (so edit's own read succeeds) but binary to the sniffer.
+    std::fs::write(&path, "alpha\0beta\n").unwrap();
+    let context = ctx(dir.path());
+    let read = run(
+        &registry(),
+        "read",
+        serde_json::json!({"path": "a.bin"}),
+        &context,
+    )
+    .await;
+    assert!(read.content.contains("binary file"), "{}", read.content);
+
+    let out = run(
+        &registry(),
+        "edit",
+        serde_json::json!({"path": "a.bin", "old_string": "alpha", "new_string": "ALPHA"}),
+        &context,
+    )
+    .await;
+
+    assert!(out.is_error, "{}", out.content);
+    assert!(
+        out.content.contains("you have not read this file"),
+        "{}",
+        out.content
+    );
+}
+
+#[tokio::test]
+async fn a_written_file_can_be_edited_without_reading_it_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let context = ctx(dir.path());
+    let written = run(
+        &registry(),
+        "write",
+        serde_json::json!({"path": "a.txt", "content": "alpha\n"}),
+        &context,
+    )
+    .await;
+    assert!(!written.is_error, "{}", written.content);
+
+    let out = run(
+        &registry(),
+        "edit",
+        serde_json::json!({"path": "a.txt", "old_string": "alpha", "new_string": "beta"}),
+        &context,
+    )
+    .await;
+
+    assert!(!out.is_error, "{}", out.content);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+        "beta\n"
+    );
+}
+
+#[tokio::test]
+async fn a_successful_edit_leaves_the_file_editable_again() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "alpha\n").unwrap();
+    let context = ctx(dir.path());
+    read_first(&registry(), "a.txt", &context).await;
+    let first = run(
+        &registry(),
+        "edit",
+        serde_json::json!({"path": "a.txt", "old_string": "alpha", "new_string": "beta"}),
+        &context,
+    )
+    .await;
+    assert!(!first.is_error, "{}", first.content);
+
+    let second = run(
+        &registry(),
+        "edit",
+        serde_json::json!({"path": "a.txt", "old_string": "beta", "new_string": "gamma"}),
+        &context,
+    )
+    .await;
+
+    assert!(!second.is_error, "{}", second.content);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+        "gamma\n"
+    );
+}
+
+/// Two contexts, two models: what one has seen tells the other nothing.
+#[tokio::test]
+async fn one_contexts_read_does_not_unlock_anothers_edit() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "alpha\n").unwrap();
+    let reader = ctx(dir.path());
+    read_first(&registry(), "a.txt", &reader).await;
+
+    let out = run(
+        &registry(),
+        "edit",
+        serde_json::json!({"path": "a.txt", "old_string": "alpha", "new_string": "beta"}),
+        &ctx(dir.path()),
+    )
+    .await;
+
+    assert!(out.is_error, "{}", out.content);
+    assert!(
+        out.content.contains("you have not read this file"),
+        "{}",
+        out.content
+    );
+}
+
+// ---- edit: no-match diagnostics ----
+
+#[tokio::test]
+async fn edit_no_match_shows_the_closest_region_with_line_numbers() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("a.txt"),
+        "fn main() {\n    let total = compute(2);\n    println!(\"{total}\");\n}\n",
+    )
+    .unwrap();
+    let context = ctx(dir.path());
+    read_first(&registry(), "a.txt", &context).await;
+
+    let out = run(
+        &registry(),
+        "edit",
+        serde_json::json!({
+            "path": "a.txt",
+            // Drifted: the model remembers compute(1).
+            "old_string": "    let total = compute(1);",
+            "new_string": "    let total = compute(3);"
+        }),
+        &context,
+    )
+    .await;
+
+    assert!(out.is_error, "{}", out.content);
+    assert!(
+        out.content.contains("2→    let total = compute(2);"),
+        "{}",
+        out.content
+    );
+    assert!(out.content.contains("line 2"), "{}", out.content);
+}
+
+#[tokio::test]
+async fn edit_no_match_says_when_nothing_in_the_file_is_close() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "alpha\nbeta\ngamma\n").unwrap();
+    let context = ctx(dir.path());
+    read_first(&registry(), "a.txt", &context).await;
+
+    let out = run(
+        &registry(),
+        "edit",
+        serde_json::json!({
+            "path": "a.txt",
+            "old_string": "zzzzzzzzzzzzzzzzzzzzz",
+            "new_string": "y"
+        }),
+        &context,
+    )
+    .await;
+
+    assert!(out.is_error, "{}", out.content);
+    assert!(
+        out.content.contains("nothing in the file is close to it"),
+        "{}",
+        out.content
+    );
+}
+
+#[tokio::test]
+async fn edit_names_old_string_when_it_carries_read_line_numbers() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "alpha\nbeta\n").unwrap();
+    let context = ctx(dir.path());
+    read_first(&registry(), "a.txt", &context).await;
+
+    let out = run(
+        &registry(),
+        "edit",
+        serde_json::json!({
+            "path": "a.txt",
+            "old_string": "1→alpha\n2→beta",
+            "new_string": "alpha\nBETA"
+        }),
+        &context,
+    )
+    .await;
+
+    assert!(out.is_error, "{}", out.content);
+    assert!(out.content.contains("old_string"), "{}", out.content);
+    assert!(!out.content.contains("new_string"), "{}", out.content);
+    assert!(out.content.contains("N→"), "{}", out.content);
+}
+
+/// The destructive case: old_string matches, so without this the edit
+/// would happily write read's line numbers into the file.
+#[tokio::test]
+async fn edit_refuses_a_new_string_that_pasted_read_output() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "alpha\nbeta\n").unwrap();
+    let context = ctx(dir.path());
+    read_first(&registry(), "a.txt", &context).await;
+
+    let out = run(
+        &registry(),
+        "edit",
+        serde_json::json!({
+            "path": "a.txt",
+            "old_string": "alpha\nbeta",
+            "new_string": "1→ALPHA\n2→BETA"
+        }),
+        &context,
+    )
+    .await;
+
+    assert!(out.is_error, "{}", out.content);
+    assert!(
+        out.content
+            .contains("the file would end up containing them"),
+        "{}",
+        out.content
+    );
+    assert!(out.content.contains("use write"), "{}", out.content);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+        "alpha\nbeta\n"
+    );
+}
+
+/// One `12→…` line is something a document may legitimately quote, so
+/// the refusal wants the two-consecutive-numbers signature of pasted
+/// read output before it fires.
+#[tokio::test]
+async fn a_single_line_number_in_new_string_still_edits() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.md"), "quote:\nPLACEHOLDER\n").unwrap();
+    let context = ctx(dir.path());
+    read_first(&registry(), "a.md", &context).await;
+
+    let out = run(
+        &registry(),
+        "edit",
+        serde_json::json!({
+            "path": "a.md",
+            "old_string": "PLACEHOLDER",
+            "new_string": "12→    let total = compute(2);"
+        }),
+        &context,
+    )
+    .await;
+
+    assert!(!out.is_error, "{}", out.content);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("a.md")).unwrap(),
+        "quote:\n12→    let total = compute(2);\n"
+    );
+}
+
+/// A file that really does contain read output: old_string was copied
+/// out of it and carries the prefixes too, which is what tells the
+/// asymmetric rule this edit is the genuine article.
+#[tokio::test]
+async fn symmetric_line_numbers_edit_a_file_that_really_contains_them() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("a.md"),
+        "read output:\n12→fn main() {\n13→    work();\n14→}\n",
+    )
+    .unwrap();
+    let context = ctx(dir.path());
+    read_first(&registry(), "a.md", &context).await;
+
+    let out = run(
+        &registry(),
+        "edit",
+        serde_json::json!({
+            "path": "a.md",
+            "old_string": "12→fn main() {\n13→    work();",
+            "new_string": "12→fn main() {\n13→    rest();"
+        }),
+        &context,
+    )
+    .await;
+
+    assert!(!out.is_error, "{}", out.content);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("a.md")).unwrap(),
+        "read output:\n12→fn main() {\n13→    rest();\n14→}\n"
+    );
+}
+
+#[tokio::test]
+async fn edit_names_new_string_when_it_carries_read_line_numbers() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "alpha\nbeta\n").unwrap();
+    let context = ctx(dir.path());
+    read_first(&registry(), "a.txt", &context).await;
+
+    let out = run(
+        &registry(),
+        "edit",
+        serde_json::json!({
+            "path": "a.txt",
+            "old_string": "alpha\ndelta",
+            "new_string": "1→alpha\n2→BETA"
+        }),
+        &context,
+    )
+    .await;
+
+    assert!(out.is_error, "{}", out.content);
+    assert!(out.content.contains("new_string"), "{}", out.content);
+    assert!(!out.content.contains("old_string"), "{}", out.content);
+    assert!(out.content.contains("N→"), "{}", out.content);
 }
 
 // ---- bash ----
