@@ -414,7 +414,10 @@ mod tests {
         assert_eq!(value["tool_use_id"], "read-1");
         assert_eq!(
             value["text"],
-            json!(format!("shot.png: 640x480{}", ilar::image::markers(&images)))
+            json!(format!(
+                "shot.png: 640x480{}",
+                ilar::image::markers(&images)
+            ))
         );
         assert_eq!(value["truncated"], json!(false));
         assert_eq!(
