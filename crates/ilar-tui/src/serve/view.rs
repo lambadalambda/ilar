@@ -52,11 +52,20 @@
 //! A `tool_call` for the `task` tool carries `agent: {name, model}`;
 //! every other tool carries `agent: null`. Assistant content keeps only
 //! what a surface shows: raw thinking, opaque reasoning state,
-//! diagnostics and half-streamed summaries never leave the process.
+//! diagnostics and half-streamed summaries never leave the process *in
+//! a committed event*.
+//!
+//! The live scratch is the one exception, and a deliberate one: a turn
+//! streaming its reasoning shows it as it arrives ([`project_live_delta`]),
+//! exactly as the TUI does, and then the committed message drops it
+//! again. Nothing is retained — the frame is ephemeral, unresumable and
+//! gone the moment the step commits — but it *is* a surface that shows
+//! reasoning text where the transcript would not. See
+//! meta/issues/the-live-turn-lives-in-the-store.md.
 
 use serde_json::{Value, json};
 
-use ilar::session::{ContentBlock, ImageContent, SessionEvent, Usage};
+use ilar::session::{ContentBlock, ImageContent, LiveDelta, SessionEvent, Usage};
 
 /// One canonical event as the wire sees it. Total: every event projects,
 /// so the result array indexes the same way `Rewind.to` does.
@@ -177,6 +186,51 @@ pub(crate) fn project_event(event: &SessionEvent) -> Value {
 
 pub(crate) fn project_events(events: &[SessionEvent]) -> Vec<Value> {
     events.iter().map(project_event).collect()
+}
+
+/// One line of a running turn's scratch, for the ephemeral `delta`
+/// frame. Same contract as above and the same `type` spelling as the
+/// core enum's serde tag — but nothing here is a canonical event, so it
+/// carries no id, no timestamp and no line number: it is a hint that the
+/// committed event will replace.
+///
+/// `thinking_delta` is reasoning text, which the committed projection
+/// above deliberately drops — see the module doc for why the live view
+/// is the exception.
+///
+/// ```json
+/// {"type":"text_delta","text":"on it"}
+/// {"type":"thinking_delta","text":"weighing the two"}
+/// {"type":"tool_started","id":"bash-1","name":"bash","summary":"cargo test"}
+/// {"type":"tool_finished","id":"bash-1","ok":true}
+/// {"type":"reset"}
+/// ```
+pub(crate) fn project_live_delta(delta: &LiveDelta) -> Value {
+    match delta {
+        // Never sent: the tailer consumes the generation marker itself.
+        // Projected anyway, because a total projection cannot surprise a
+        // caller later.
+        LiveDelta::TurnStarted { turn, step } => {
+            json!({ "type": "turn_started", "turn": turn, "step": step })
+        }
+        LiveDelta::TextDelta { text } => json!({ "type": "text_delta", "text": text }),
+        LiveDelta::ThinkingDelta { text } => json!({ "type": "thinking_delta", "text": text }),
+        LiveDelta::ToolStarted { id, name, summary } => json!({
+            "type": "tool_started",
+            "id": id,
+            "name": name,
+            "summary": summary,
+        }),
+        LiveDelta::ToolFinished { id, ok } => {
+            json!({ "type": "tool_finished", "id": id, "ok": ok })
+        }
+    }
+}
+
+/// The frame that retires a client's streaming row: the step committed,
+/// or the turn ended.
+pub(crate) fn live_reset() -> Value {
+    json!({ "type": "reset" })
 }
 
 /// The `?invocation=` slice: one child-session turn, from the

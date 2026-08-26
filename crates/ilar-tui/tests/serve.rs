@@ -104,15 +104,26 @@ impl Server {
     /// The listing is fed by a 100 ms directory scan (`--poll-ms 25`),
     /// so a just-created session takes a tick to appear.
     async fn sessions_once_there_are(&self, count: usize) -> Vec<Value> {
+        self.sessions_once(
+            |sessions| sessions.len() >= count,
+            &format!("reached {count} sessions"),
+        )
+        .await
+    }
+
+    /// The listing, once it says what the test is waiting for. Polling a
+    /// condition rather than a count: liveness changes without the row
+    /// count moving.
+    async fn sessions_once(&self, ready: impl Fn(&[Value]) -> bool, expected: &str) -> Vec<Value> {
         for _ in 0..100 {
             let listing = self.json("/api/sessions").await;
             let sessions = listing["sessions"].as_array().unwrap().clone();
-            if sessions.len() >= count {
+            if ready(&sessions) {
                 return sessions;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        panic!("the listing never reached {count} sessions");
+        panic!("the listing never {expected}");
     }
 }
 
@@ -297,7 +308,11 @@ async fn the_listing_carries_a_row_per_root_session() {
     assert_eq!(row["cwd"], "/tmp/alpha", "the page groups by this");
     assert_eq!(row["agent"], "build");
     assert_eq!(row["model"], "zai/glm-4.7");
-    assert_eq!(row["live"], true, "written a moment ago");
+    assert_eq!(
+        row["state"], "idle",
+        "written a moment ago, but not running"
+    );
+    assert_eq!(row["activity"], Value::Null);
     assert!(row["modified"].as_str().unwrap().contains('T'), "RFC 3339");
     assert!(
         sessions
@@ -428,6 +443,68 @@ async fn the_event_stream_delivers_an_append_made_after_it_opened() {
     let frame = frames.next().await;
     assert_eq!(frame.id.as_deref(), Some("3"));
     assert_eq!(frame.data["event"]["content"][0]["text"], "live answer");
+}
+
+/// Phase 3's point: a turn's tokens reach the browser before the step
+/// that produced them is committed. The scratch here is written by the
+/// same core writer `run_turn` uses, so this is the real format on the
+/// real wire — only the turn around it is missing.
+#[tokio::test]
+async fn a_live_turn_streams_delta_frames_before_its_step_commits() {
+    let server = Server::start(None);
+    let (id, mut session) = start_session(&server.store, "/tmp/alpha");
+    let mut frames = Frames::open(&server, &format!("/api/sessions/{id}/events")).await;
+
+    let mut live = ilar::session::LiveScratch::start(&server.store, &id);
+    live.tool_started("bash-1", "bash", "cargo test");
+    let frame = frames.next().await;
+    assert_eq!(frame.event, "delta");
+    assert_eq!(
+        frame.id, None,
+        "ephemeral: a scratch line is not a line of the log, so it never enters Last-Event-ID"
+    );
+    assert_eq!(frame.data["type"], "tool_started");
+    assert_eq!(frame.data["name"], "bash");
+    assert_eq!(frame.data["summary"], "cargo test");
+
+    // And the listing says the same thing about the same turn.
+    let row = server
+        .sessions_once(
+            |sessions| sessions.iter().any(|row| row["state"] == "working"),
+            "showed a working session",
+        )
+        .await
+        .into_iter()
+        .find(|row| row["id"] == id.as_str())
+        .expect("the session");
+    assert_eq!(row["state"], "working");
+    assert_eq!(row["activity"], "bash: cargo test");
+
+    // The step commits: the committed event arrives on the main stream,
+    // and the scratch's reset retires the stand-in that preceded it.
+    session.append(assistant("all done")).unwrap();
+    live.commit();
+    let mut seen: Vec<(String, Value)> = Vec::new();
+    while seen.len() < 2 {
+        let frame = frames.next().await;
+        seen.push((frame.event, frame.data));
+    }
+    assert!(
+        seen.iter()
+            .any(|(event, data)| event == "append" && data["event"]["type"] == "assistant_message"),
+        "{seen:?}"
+    );
+    assert!(
+        seen.iter()
+            .any(|(event, data)| event == "delta" && data["type"] == "reset"),
+        "{seen:?}"
+    );
+
+    // The turn ends with the scratch, and so does the streaming row.
+    drop(live);
+    let frame = frames.next().await;
+    assert_eq!(frame.event, "delta");
+    assert_eq!(frame.data["type"], "reset");
 }
 
 /// Reconnecting is a re-read and a skip: the client names the last line

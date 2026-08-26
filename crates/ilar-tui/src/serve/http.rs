@@ -42,12 +42,21 @@
 //! event: resync    data: {"line":43}   the view is stale; reload the transcript
 //! event: deleted   data: {}            terminal
 //! event: error     data: {"message":"…"}  terminal; the store's own words
+//! event: delta     data: {"type":"text_delta","text":"on "}   no id: ephemeral
 //! ```
 //!
 //! A client folds `append`/`rewind` onto the transcript it fetched with
 //! the same two lines the store uses: `rewind` truncates to `to`,
 //! anything else pushes. `resync` means a line was missed (a lagging
 //! subscriber, a repaired tail) and only a re-fetch is honest.
+//!
+//! `delta` is the running turn's scratch (see
+//! [`ilar::session::LiveScratch`]) and is the one frame that carries no
+//! `id:` — deliberately, because it is not a line of the log and must
+//! never enter `Last-Event-ID` replay: a reconnect resumes on the last
+//! *committed* line, and whatever was streaming arrives again as itself
+//! or as the committed event it became. `{"type":"reset"}` retires the
+//! client's streaming row; the committed `append` does the same.
 //!
 //! Auth: a loopback bind has none — anything that can reach it can read
 //! the store directly. Any other bind requires a bearer token, and so
@@ -79,8 +88,10 @@ use serde_json::{Value, json};
 
 use ilar::session::{SessionEvent, SessionStore, SessionTail, TailUpdate};
 
-use super::view::{invocation_slice, project_event, project_events, usage_totals};
-use super::watch::{SessionEntry, TailEnd, TailMessage, Watcher, next_message};
+use super::view::{
+    invocation_slice, live_reset, project_event, project_events, project_live_delta, usage_totals,
+};
+use super::watch::{LiveMessage, SessionEntry, TailEnd, TailMessage, Watcher, next_message};
 
 /// Events per transcript page. P7's worst session is 906 events; five
 /// pages of it is a scroll, not a stall.
@@ -613,6 +624,19 @@ fn frame(message: TailMessage, last_line: usize) -> Frame {
             line: last_line,
             terminal: true,
         },
+        // No `id:`, on purpose: a scratch line is not a line of the log,
+        // and a reconnect must resume on the last committed one.
+        TailMessage::Live(live) => Frame {
+            event: named(
+                "delta",
+                &match live {
+                    LiveMessage::Reset => live_reset(),
+                    LiveMessage::Delta(delta) => project_live_delta(&delta),
+                },
+            ),
+            line: last_line,
+            terminal: false,
+        },
     }
 }
 
@@ -620,8 +644,12 @@ fn named(event: &str, data: &Value) -> Event {
     Event::default().event(event).data(data.to_string())
 }
 
-/// One listing row. `live` is a recency judgement, not a lock probe —
-/// see [`super::watch::LIVE_WINDOW`].
+/// One listing row. `state` is `working`, `stalled` or `idle`, read off
+/// the session's live-turn scratch rather than guessed from its log's
+/// mtime — and never a lock probe, because acquiring the writer lease to
+/// ask would make a read-only server take the one thing it promised not
+/// to. `activity` names the tool a working session is running, when it
+/// is running one.
 fn summary(entry: &SessionEntry) -> Value {
     json!({
         "id": entry.head.id,
@@ -631,7 +659,8 @@ fn summary(entry: &SessionEntry) -> Value {
         "model": entry.head.meta.model,
         "parent_id": entry.head.meta.parent_id,
         "modified": rfc3339(entry.head.modified),
-        "live": entry.live,
+        "state": entry.state.as_str(),
+        "activity": entry.activity,
     })
 }
 

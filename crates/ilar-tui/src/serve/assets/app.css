@@ -15,6 +15,7 @@
   --tool: #7dcfff;
   --err: #f7768e;
   --ok: #9ece6a;
+  --warn: #e0af68;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
@@ -117,9 +118,24 @@ main {
   background: var(--line);
   flex: none;
 }
-.dot.on {
+/* Liveness, straight off the session's live-turn scratch: a working
+   turn pulses, a turn that has gone quiet sits amber, idle is plain. */
+.dot.working {
   background: var(--ok);
   box-shadow: 0 0 6px var(--ok);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+.dot.stalled {
+  background: var(--warn);
+  box-shadow: 0 0 6px var(--warn);
+}
+@keyframes pulse {
+  50% {
+    opacity: 0.3;
+  }
+}
+.activity {
+  color: var(--tool);
 }
 .row-title {
   flex: 1;
@@ -205,6 +221,17 @@ button:hover {
 }
 .row.error {
   border-color: var(--err);
+}
+/* The stand-in for a step that has not been committed yet: dimmed, with
+   a caret, so it never reads as part of the transcript. */
+.row.streaming {
+  opacity: 0.85;
+  border-style: dashed;
+}
+.row.streaming::after {
+  content: "▌";
+  color: var(--accent);
+  animation: pulse 1.1s steps(2, start) infinite;
 }
 
 .text {

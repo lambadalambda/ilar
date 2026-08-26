@@ -40,14 +40,24 @@
 //! blocking thread, because both have a path that reads a whole session
 //! file (a cold scan, a resync); [`Watcher::subscribe`] does not, and
 //! its caller — an HTTP handler — is the one that must.
+//!
+//! **The live turn.** A running turn writes batched deltas to a
+//! `<id>.live` scratch beside its log (see [`ilar::session::LiveScratch`]),
+//! so both loops read that too: the tailer fans its lines out between
+//! step commits ([`LiveTail`]), and the directory poller derives each
+//! row's liveness from it — working, stalled, or idle — instead of
+//! guessing from how recently the log was written.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
-use ilar::session::{SessionEvent, SessionHead, SessionId, SessionStore, SessionTail, TailUpdate};
+use ilar::session::{
+    LIVE_SUFFIX, LiveDelta, SessionEvent, SessionHead, SessionId, SessionStore, SessionTail,
+    TailUpdate, live_path, parse_scratch,
+};
 use tokio::sync::broadcast;
 
 /// One directory scan per second: P2 measured a 1,090-entry scan at
@@ -64,10 +74,20 @@ pub(crate) const IDLE_LINGER: Duration = Duration::from_secs(30);
 /// this is also a floor on lines-per-poll: a 250 ms window that commits
 /// more than this makes every subscriber resync, however fast it is.
 pub(crate) const BROADCAST_CAPACITY: usize = 256;
-/// A session counts as live while its file was touched this recently.
-/// Deliberately not a lock probe: acquiring the writer lease to ask
-/// would make a read-only server take the one thing it promised not to.
-pub(crate) const LIVE_WINDOW: Duration = Duration::from_secs(60);
+/// A scratch this old belongs to a turn that has gone quiet — a very
+/// long tool run, or a process that died without its drop guard. Either
+/// way it is a supervision signal, not an error: something claims to be
+/// running and has not said anything for a minute.
+pub(crate) const STALE_SCRATCH: Duration = Duration::from_secs(60);
+/// The most of a scratch that is read for an activity string. A running
+/// tool's marker is written the moment it starts, so the newest lines
+/// are the only ones that matter.
+const ACTIVITY_SCAN_BYTES: u64 = 64 * 1024;
+/// A scratch larger than this is not one this reader will try to hold in
+/// memory. One step's deltas cannot honestly reach it.
+const SCRATCH_MAX_BYTES: u64 = 4 * 1024 * 1024;
+/// How much of a tool marker rides on a listing row.
+const ACTIVITY_CHARS: usize = 80;
 /// Escape hatch for both intervals; `--poll-ms` outranks it.
 pub(crate) const POLL_MS_ENV: &str = "ILAR_SERVE_POLL_MS";
 
@@ -128,6 +148,20 @@ pub(crate) enum TailMessage {
     /// The tail stopped on a line this build cannot parse; the payload
     /// is the store's own diagnostic, verbatim.
     Failed(String),
+    /// Something the running turn wrote to its scratch. Ephemeral: never
+    /// replayed, never resumed, and superseded by the committed line
+    /// that follows it.
+    Live(LiveMessage),
+}
+
+/// The scratch half of a tail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LiveMessage {
+    /// Everything the scratch had said is void: the step committed (so
+    /// the real event is on the main stream), or the turn ended. A
+    /// client drops whatever stand-in it was showing.
+    Reset,
+    Delta(LiveDelta),
 }
 
 /// Why a tail is over. Carried on a [`Subscription`] as well as on the
@@ -196,39 +230,209 @@ fn inode_of(_metadata: &std::fs::Metadata) -> u64 {
     0
 }
 
-/// One listing row: the head the cache holds, plus whether the file was
-/// touched recently enough to call the session live.
+/// What a session is doing, read off its scratch rather than guessed
+/// from its log's mtime — which was wrong in both directions: dead
+/// through a long tool run, live for a minute after the turn finished.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LiveState {
+    /// A scratch, written recently: a turn is running.
+    Working,
+    /// A scratch nobody has written to for [`STALE_SCRATCH`].
+    Stalled,
+    /// No scratch at all.
+    Idle,
+}
+
+impl LiveState {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Working => "working",
+            Self::Stalled => "stalled",
+            Self::Idle => "idle",
+        }
+    }
+}
+
+/// One listing row: the head the cache holds, plus what its scratch says
+/// the session is doing right now.
 #[derive(Debug, Clone)]
 pub(crate) struct SessionEntry {
     pub(crate) head: SessionHead,
-    pub(crate) live: bool,
+    pub(crate) state: LiveState,
+    /// The tool the turn is running, as `name: summary`. `None` when
+    /// nothing is running — between tools, or while the model streams.
+    pub(crate) activity: Option<String>,
 }
 
-fn entry_of(head: &SessionHead) -> SessionEntry {
+fn entry_of(head: &SessionHead, scratch: Option<&Scratch>) -> SessionEntry {
+    let (state, activity) = match scratch {
+        // A clock that moved backwards leaves a file "in the future";
+        // read that as fresh rather than as ancient.
+        Some(scratch) => {
+            let stale = SystemTime::now()
+                .duration_since(scratch.modified)
+                .is_ok_and(|age| age >= STALE_SCRATCH);
+            let state = if stale {
+                LiveState::Stalled
+            } else {
+                LiveState::Working
+            };
+            (state, scratch.activity.clone())
+        }
+        None => (LiveState::Idle, None),
+    };
     SessionEntry {
         head: head.clone(),
-        // A clock that moved backwards leaves a file "in the future";
-        // read that as live rather than as ancient.
-        live: SystemTime::now()
-            .duration_since(head.modified)
-            .is_ok_and(|age| age < LIVE_WINDOW),
+        state,
+        activity,
     }
+}
+
+/// A session's scratch as the directory poller sees it.
+#[derive(Debug, Clone)]
+struct Scratch {
+    modified: SystemTime,
+    activity: Option<String>,
 }
 
 /// A cached head. `head` is `None` for a file that is not a readable
 /// session (a foreign file, a half-written first line, a log from a
 /// newer ilar): the stat is still remembered so the failing read is not
-/// repeated every second.
+/// repeated every second. `scratch` is refreshed on every pass, because
+/// unlike a head it is expected to change while nothing else does.
 #[derive(Debug, Clone)]
 struct Cached {
     stat: Stat,
     head: Option<SessionHead>,
+    scratch: Option<Scratch>,
 }
 
 #[derive(Debug)]
 struct TailState {
     tail: SessionTail,
+    live: LiveTail,
     ended: Option<TailEnd>,
+}
+
+/// The scratch half of a tailer: the same "see each line once"
+/// discipline the log tail has, for a file that is allowed to vanish and
+/// start over at any moment.
+///
+/// It reads the whole file each poll rather than a suffix from an
+/// offset, and for one reason: a step commit truncates the scratch and
+/// opens a new generation, and the generation lives in the first line.
+/// Between two polls a new generation can already be *longer* than the
+/// one it replaced, so a length comparison would splice one
+/// generation's lines onto another's. The file holds one step's deltas,
+/// so reading it whole costs nothing.
+#[derive(Debug)]
+struct LiveTail {
+    path: PathBuf,
+    /// Lines of the current generation already fanned out (the
+    /// generation's own `turn_started` line included, though it is never
+    /// sent).
+    consumed: usize,
+    /// The `(turn, step)` those lines belong to; `None` when no scratch
+    /// is open. Both halves, because a turn that never committed leaves
+    /// the next turn starting at step 0 again.
+    generation: Option<(String, u64)>,
+}
+
+impl LiveTail {
+    fn open(path: PathBuf) -> Self {
+        Self {
+            path,
+            consumed: 0,
+            generation: None,
+        }
+    }
+
+    fn poll(&mut self) -> Vec<LiveMessage> {
+        let Some(deltas) = self.read() else {
+            // Gone: the turn ended, so whatever a client was showing on
+            // its behalf goes with it.
+            return if self.forget() {
+                vec![LiveMessage::Reset]
+            } else {
+                Vec::new()
+            };
+        };
+        // A head that has not landed yet, or a file this build cannot
+        // read: nothing to fan out, and nothing to forget either.
+        let Some(LiveDelta::TurnStarted { turn, step }) = deltas.first() else {
+            return Vec::new();
+        };
+        let generation = (turn.clone(), *step);
+        let mut messages = Vec::new();
+        if self.generation.as_ref() != Some(&generation) || deltas.len() < self.consumed {
+            if self.forget() {
+                messages.push(LiveMessage::Reset);
+            }
+            self.generation = Some(generation);
+        }
+        messages.extend(
+            deltas[self.consumed..]
+                .iter()
+                .filter(|delta| !matches!(delta, LiveDelta::TurnStarted { .. }))
+                .map(|delta| LiveMessage::Delta(delta.clone())),
+        );
+        self.consumed = deltas.len();
+        messages
+    }
+
+    /// Drop the current generation; `true` when there was one to drop.
+    fn forget(&mut self) -> bool {
+        self.consumed = 0;
+        self.generation.take().is_some()
+    }
+
+    fn read(&self) -> Option<Vec<LiveDelta>> {
+        let metadata = std::fs::metadata(&self.path).ok()?;
+        if metadata.len() > SCRATCH_MAX_BYTES {
+            return Some(Vec::new());
+        }
+        Some(parse_scratch(&std::fs::read(&self.path).ok()?))
+    }
+}
+
+/// The tool a scratch says is running: the last one started that nothing
+/// has reported finishing. `None` while the model is streaming rather
+/// than executing, which is honest — there is no activity to name.
+fn activity_of(path: &Path) -> Option<String> {
+    let deltas = parse_scratch(&read_tail(path, ACTIVITY_SCAN_BYTES)?);
+    let finished: std::collections::HashSet<&str> = deltas
+        .iter()
+        .filter_map(|delta| match delta {
+            LiveDelta::ToolFinished { id, .. } => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+    deltas.iter().rev().find_map(|delta| match delta {
+        LiveDelta::ToolStarted { id, name, summary } if !finished.contains(id.as_str()) => {
+            let text = if summary.is_empty() {
+                name.clone()
+            } else {
+                format!("{name}: {summary}")
+            };
+            Some(text.chars().take(ACTIVITY_CHARS).collect())
+        }
+        _ => None,
+    })
+}
+
+/// The last `limit` bytes of a file. A read that starts mid-line is
+/// fine: [`parse_scratch`] drops what it cannot parse.
+fn read_tail(path: &Path, limit: u64) -> Option<Vec<u8>> {
+    use std::io::{Read, Seek};
+
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    if len > limit {
+        file.seek(std::io::SeekFrom::Start(len - limit)).ok()?;
+    }
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer).ok()?;
+    Some(buffer)
 }
 
 #[derive(Debug)]
@@ -255,13 +459,16 @@ impl Tailer {
         }
     }
 
-    /// One poll, fanned out. `false` means the tail is over.
+    /// One poll of both files, fanned out. `false` means the tail is
+    /// over.
     fn step(&self) -> bool {
         let mut state = lock(&self.state);
         if state.ended.is_some() {
             return false;
         }
-        match state.tail.poll() {
+        let polled = state.tail.poll();
+        let live = state.live.poll();
+        let alive = match polled {
             Ok(updates) => {
                 for update in updates {
                     if matches!(update, TailUpdate::Deleted) {
@@ -284,7 +491,16 @@ impl Tailer {
                 let _ = self.sender.send(TailMessage::Failed(message));
                 false
             }
+        };
+        // After the committed lines, deliberately: when a step commits,
+        // a client sees the real event first and only then the reset
+        // that retires the stand-in it was showing.
+        if alive {
+            for message in live {
+                let _ = self.sender.send(TailMessage::Live(message));
+            }
         }
+        alive
     }
 }
 
@@ -378,18 +594,26 @@ impl Watcher {
     /// a reason to read again.
     pub(crate) fn head(&self, id: &str) -> Option<SessionEntry> {
         if let Some(cached) = lock(&self.inner.cache).get(id) {
-            return cached.head.as_ref().map(entry_of);
+            return cached
+                .head
+                .as_ref()
+                .map(|head| entry_of(head, cached.scratch.as_ref()));
         }
-        self.inner.read_head(id).ok().as_ref().map(entry_of)
+        let head = self.inner.read_head(id).ok()?;
+        Some(entry_of(&head, self.inner.scratch_of(id).as_ref()))
     }
 
     fn select(&self, keep: impl Fn(&SessionHead) -> bool) -> Vec<SessionEntry> {
         let cache = lock(&self.inner.cache);
         let mut entries: Vec<SessionEntry> = cache
             .values()
-            .filter_map(|cached| cached.head.as_ref())
-            .filter(|head| keep(head))
-            .map(entry_of)
+            .filter(|cached| cached.head.as_ref().is_some_and(&keep))
+            .map(|cached| {
+                entry_of(
+                    cached.head.as_ref().expect("filtered above"),
+                    cached.scratch.as_ref(),
+                )
+            })
             .collect();
         drop(cache);
         entries.sort_by(|left, right| {
@@ -412,10 +636,15 @@ impl Watcher {
             return Ok(tailer.handoff());
         }
         let tail = SessionTail::open(&self.inner.store, id)?;
+        let live = LiveTail::open(live_path(&self.inner.store.session_path(id)?));
         let (sender, _) = broadcast::channel(self.inner.config.capacity);
         let tailer = Arc::new(Tailer {
             sender,
-            state: Mutex::new(TailState { tail, ended: None }),
+            state: Mutex::new(TailState {
+                tail,
+                live,
+                ended: None,
+            }),
         });
         // Prime before anyone can subscribe: the log so far belongs in
         // the snapshot, not in a burst down a 256-slot channel that a
@@ -466,13 +695,22 @@ impl Inner {
                 return;
             }
         };
-        let seen: HashMap<String, Stat> = entries
-            .flatten()
-            .filter_map(|entry| {
-                let id = session_id_of(&entry.file_name())?;
-                Some((id, stat_of(&entry.metadata().ok()?)))
-            })
-            .collect();
+        // One pass, two answers: the logs to summarize, and the
+        // scratches that say which of them are running right now.
+        let mut seen: HashMap<String, Stat> = HashMap::new();
+        let mut scratches: HashMap<String, Scratch> = HashMap::new();
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if let Some(id) = session_id_of(&name) {
+                if let Ok(metadata) = entry.metadata() {
+                    seen.insert(id, stat_of(&metadata));
+                }
+            } else if let Some(id) = scratch_id_of(&name)
+                && let Some(scratch) = read_scratch(&entry.path())
+            {
+                scratches.insert(id, scratch);
+            }
+        }
 
         // Diff under the lock, read heads without it: a cold pass parses
         // every head in the store (P8: up to 577 ms) and the listing
@@ -496,6 +734,7 @@ impl Inner {
                         Cached {
                             stat,
                             head: Some(head),
+                            scratch: None,
                         },
                     );
                 }
@@ -503,7 +742,14 @@ impl Inner {
                 // file, a torn first line, a log from a newer ilar).
                 // Remember the miss so it is not retried every second.
                 Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
-                    lock(&self.cache).insert(id, Cached { stat, head: None });
+                    lock(&self.cache).insert(
+                        id,
+                        Cached {
+                            stat,
+                            head: None,
+                            scratch: None,
+                        },
+                    );
                 }
                 // A transient failure — a descriptor limit, a racing
                 // rename — must not evict a session from the listing
@@ -511,6 +757,17 @@ impl Inner {
                 Err(_) => {}
             }
         }
+        // Liveness last, and unconditionally: a scratch changes while
+        // everything the head cache keys on stays exactly as it was.
+        let mut cache = lock(&self.cache);
+        for (id, cached) in cache.iter_mut() {
+            cached.scratch = scratches.remove(id);
+        }
+    }
+
+    /// One session's scratch, for a session the poller has not reached.
+    fn scratch_of(&self, id: &str) -> Option<Scratch> {
+        read_scratch(&live_path(&self.store.session_path(id).ok()?))
     }
 
     fn read_head(&self, id: &str) -> std::io::Result<SessionHead> {
@@ -588,8 +845,24 @@ impl Inner {
 /// The session id a directory entry names, or `None` for anything that
 /// is not a session log — sidecars, locks, and foreign files included.
 fn session_id_of(name: &std::ffi::OsStr) -> Option<String> {
-    let id = name.to_str()?.strip_suffix(".jsonl")?;
+    id_with_suffix(name, ".jsonl")
+}
+
+/// The same, for the live-turn scratch beside a log.
+fn scratch_id_of(name: &std::ffi::OsStr) -> Option<String> {
+    id_with_suffix(name, LIVE_SUFFIX)
+}
+
+fn id_with_suffix(name: &std::ffi::OsStr, suffix: &str) -> Option<String> {
+    let id = name.to_str()?.strip_suffix(suffix)?;
     SessionId::parse(id).ok().map(|id| id.as_str().to_string())
+}
+
+fn read_scratch(path: &Path) -> Option<Scratch> {
+    Some(Scratch {
+        modified: std::fs::metadata(path).ok()?.modified().ok()?,
+        activity: activity_of(path),
+    })
 }
 
 #[cfg(test)]
@@ -1012,7 +1285,11 @@ mod tests {
             entry.head.meta.cwd.as_deref(),
             Some(std::path::Path::new("/tmp/project"))
         );
-        assert!(entry.live, "a session written a moment ago is live");
+        assert_eq!(
+            entry.state,
+            LiveState::Idle,
+            "a session nobody is running is idle, however recently it was written"
+        );
     }
 
     /// P8's reason for the cache: a head parse is expensive, so an
@@ -1115,6 +1392,131 @@ mod tests {
 
         assert_eq!(watcher.head(&id).map(|entry| entry.head.id), Some(id));
         assert!(watcher.head(&new_id()).is_none());
+    }
+
+    // ---------------------------------------------------- live turn
+
+    /// Every fixture scratch is written by the real core writer, so
+    /// these tests exercise the format the turn loop actually produces.
+    fn scratch(store: &SessionStore, id: &str) -> ilar::session::LiveScratch {
+        ilar::session::LiveScratch::start(store, id)
+    }
+
+    fn age(path: &std::path::Path, age: Duration) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(SystemTime::now() - age))
+            .unwrap();
+    }
+
+    /// The point of the whole slice: what a turn writes before it
+    /// commits reaches a subscriber, and the commit that supersedes it
+    /// arrives as the reset that retires it.
+    #[tokio::test]
+    async fn scratch_deltas_reach_a_subscriber_and_a_commit_resets_them() {
+        let fixture = fixture();
+        let (id, session) = start(&fixture.store);
+        drop(session);
+        let watcher = Watcher::new(fixture.root.clone(), fast());
+        let mut subscription = watcher.subscribe(&id).unwrap();
+
+        let mut live = scratch(&fixture.store, &id);
+        live.tool_started("bash-1", "bash", "cargo test");
+        assert_eq!(
+            next(&mut subscription.receiver).await,
+            TailMessage::Live(LiveMessage::Delta(LiveDelta::ToolStarted {
+                id: "bash-1".into(),
+                name: "bash".into(),
+                summary: "cargo test".into(),
+            })),
+            "the turn's own words, before any of it is committed"
+        );
+
+        live.tool_finished("bash-1", true);
+        assert_eq!(
+            next(&mut subscription.receiver).await,
+            TailMessage::Live(LiveMessage::Delta(LiveDelta::ToolFinished {
+                id: "bash-1".into(),
+                ok: true,
+            })),
+            "and only what is new — the marker before it is not repeated"
+        );
+
+        // The step commits: the scratch truncates into a new generation,
+        // which the reader can only tell from the generation number.
+        live.commit();
+        live.tool_started("read-1", "read", "src/lib.rs");
+        assert_eq!(
+            next(&mut subscription.receiver).await,
+            TailMessage::Live(LiveMessage::Reset)
+        );
+        assert_eq!(
+            next(&mut subscription.receiver).await,
+            TailMessage::Live(LiveMessage::Delta(LiveDelta::ToolStarted {
+                id: "read-1".into(),
+                name: "read".into(),
+                summary: "src/lib.rs".into(),
+            })),
+            "the new generation streams from its own beginning"
+        );
+
+        // The turn ends: the scratch goes, and so does the stand-in.
+        drop(live);
+        assert_eq!(
+            next(&mut subscription.receiver).await,
+            TailMessage::Live(LiveMessage::Reset)
+        );
+    }
+
+    /// Liveness comes off the scratch, not the log: a session written a
+    /// moment ago is idle unless something is running it, and a running
+    /// turn that has gone quiet is stalled rather than dead.
+    #[tokio::test]
+    async fn liveness_is_derived_from_the_scratch_and_names_the_running_tool() {
+        let fixture = fixture();
+        let (id, mut session) = start(&fixture.store);
+        session.append(user("run the tests")).unwrap();
+        let state = |watcher: &Watcher| {
+            watcher.refresh();
+            let entry = watcher.sessions().into_iter().next().expect("one session");
+            (entry.state, entry.activity)
+        };
+        let watcher = Watcher::new(fixture.root.clone(), fast());
+        assert_eq!(state(&watcher), (LiveState::Idle, None));
+
+        let mut live = scratch(&fixture.store, &id);
+        assert_eq!(
+            state(&watcher),
+            (LiveState::Working, None),
+            "a turn that is only thinking is working with nothing to name"
+        );
+
+        live.tool_started("bash-1", "bash", "cargo test");
+        assert_eq!(
+            state(&watcher),
+            (LiveState::Working, Some("bash: cargo test".into()))
+        );
+        live.tool_finished("bash-1", true);
+        assert_eq!(
+            state(&watcher),
+            (LiveState::Working, None),
+            "a finished tool is not the current activity"
+        );
+
+        live.tool_started("bash-2", "bash", "cargo build");
+        age(live.path(), Duration::from_secs(300));
+        assert_eq!(
+            state(&watcher),
+            (LiveState::Stalled, Some("bash: cargo build".into())),
+            "quiet for five minutes, and still says what it is waiting on"
+        );
+
+        drop(live);
+        assert_eq!(state(&watcher), (LiveState::Idle, None));
+        // And the head cache never mistook a scratch for a session.
+        assert_eq!(watcher.sessions().len(), 1);
     }
 
     #[test]

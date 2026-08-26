@@ -398,8 +398,11 @@ function group(sessions) {
 function sessionRow(session) {
   const link = el("a", "session-row");
   link.href = "#/s/" + encodeURIComponent(session.id);
-  link.appendChild(el("span", "dot" + (session.live ? " on" : "")));
+  const dot = el("span", "dot " + (session.state || "idle"));
+  if (session.state === "stalled") dot.title = "a turn is running but has not written for a minute";
+  link.appendChild(dot);
   link.appendChild(el("span", "row-title", session.title || session.id));
+  if (session.activity) link.appendChild(el("span", "tag activity", session.activity));
   if (session.agent) link.appendChild(el("span", "tag", session.agent));
   if (session.model) link.appendChild(el("span", "tag", session.model));
   link.appendChild(el("span", "tag", relative(session.modified)));
@@ -418,8 +421,8 @@ async function renderList() {
     host.appendChild(section);
   }
   $("list-empty").hidden = sessions.length > 0;
-  const live = sessions.filter((session) => session.live).length;
-  status(sessions.length + " sessions · " + live + " live", live > 0);
+  const working = sessions.filter((session) => session.state === "working").length;
+  status(sessions.length + " sessions · " + working + " working", working > 0);
 }
 
 // ----------------------------------------------------------- session
@@ -439,7 +442,38 @@ const view = {
   follow: true,
   pending: false,
   rewound: null,
+  live: null,
 };
+
+// ------------------------------------------------- streaming tail row
+
+// What the running step has produced so far, rebuilt from `delta`
+// frames. Never folded into `view.events`: it is a stand-in for a step
+// nobody has committed, dropped the moment the real event arrives.
+function liveApply(data) {
+  if (data.type === "reset") return void (view.live = null);
+  const live = view.live || (view.live = { text: "", thought: "", tools: [] });
+  if (data.type === "text_delta") live.text += data.text;
+  else if (data.type === "thinking_delta") live.thought += data.text;
+  else if (data.type === "tool_started") live.tools.push({ id: data.id, name: data.name, summary: data.summary });
+  else if (data.type === "tool_finished") {
+    const tool = live.tools.find((one) => one.id === data.id);
+    if (tool) tool.ok = data.ok;
+  }
+}
+
+function renderLive(host) {
+  const live = view.live;
+  if (!live) return;
+  if (live.thought) renderText(row(host, "thought streaming", "thinking"), live.thought);
+  if (live.text) renderText(row(host, "assistant streaming", "streaming"), live.text);
+  // The same label a committed tool call gets, so a row does not change
+  // shape when the real event replaces this one.
+  for (const tool of live.tools) {
+    const done = tool.ok !== undefined;
+    row(host, "tool streaming").appendChild(toolLabel(tool, done ? { is_error: !tool.ok } : null));
+  }
+}
 
 function status(text, live) {
   const node = $("status");
@@ -482,6 +516,7 @@ function scheduleRender() {
 function renderTranscript() {
   const host = clear($("transcript"));
   renderEvents(host, view.events.slice(compactionCut(view.events, view.base)), view.id);
+  renderLive(host);
   if (view.rewound !== null) {
     host.appendChild(el("div", "divider", "rewound " + view.rewound + " events"));
   }
@@ -532,12 +567,25 @@ function attach() {
       status("stopped", false);
       banner(JSON.parse(message.data).message);
     } else {
+      // Deltas are not resumed on reconnect (they carry no id), so the
+      // half-message on screen would silently gain a hole in the middle.
+      view.live = null;
       status("reconnecting…", false);
+      scheduleRender();
     }
   });
   const on = (name, handler) => source.addEventListener(name, guard(handler));
   on("append", (data) => {
+    // The committed step supersedes the stand-in for it. Only that one:
+    // a tool result lands while the *other* tools of the same step are
+    // still streaming, and dropping the row there would lose them.
+    if (data.event && data.event.type === "assistant_message") view.live = null;
     fold("append", data);
+    scheduleRender();
+  });
+  // The running turn's scratch. Ephemeral by design — no id, no replay.
+  on("delta", (data) => {
+    liveApply(data);
     scheduleRender();
   });
   on("rewind", (data) => {
@@ -584,6 +632,7 @@ async function openSession(id) {
   view.id = id;
   view.follow = true;
   view.rewound = null;
+  view.live = null;
   banner("");
   status("loading…", false);
   show("session-view");
