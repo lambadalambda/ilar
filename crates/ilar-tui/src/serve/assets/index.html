@@ -1,15 +1,41 @@
 <!doctype html>
-<!-- Placeholder: slice 5 writes the page. The route wiring is real —
-     these three files are compiled into the binary by include_str!. -->
+<!-- The whole page: static chrome only. Every node that carries a value
+     from the store is built by app.js with createElement/textContent,
+     so nothing server-derived ever reaches an HTML parser. -->
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
     <title>ilar</title>
     <link rel="stylesheet" href="/app.css" />
   </head>
   <body>
-    <p>ilar serve is running. The API is at <code>/api/sessions</code>.</p>
+    <header class="topbar">
+      <a class="brand" href="#/">ilar</a>
+      <nav id="crumb" class="crumb"></nav>
+      <span id="status" class="status"></span>
+    </header>
+
+    <p id="banner" class="banner" hidden></p>
+
+    <main>
+      <section id="list-view" class="view" hidden>
+        <div id="groups"></div>
+        <p id="list-empty" class="empty" hidden>
+          No sessions in this store yet.
+        </p>
+      </section>
+
+      <section id="session-view" class="view" hidden>
+        <div id="session-head" class="session-head"></div>
+        <div class="earlier">
+          <button id="earlier" type="button" hidden>load earlier</button>
+        </div>
+        <div id="transcript" class="transcript"></div>
+      </section>
+    </main>
+
     <script src="/app.js"></script>
   </body>
 </html>

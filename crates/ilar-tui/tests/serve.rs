@@ -546,14 +546,27 @@ async fn the_result_and_image_routes_return_what_the_projection_left_out() {
 async fn the_router_serves_the_page_and_refuses_every_other_method() {
     let server = Server::start(None);
 
-    let response = server.get("/").await;
-    assert_eq!(response.status(), 200);
-    assert_eq!(
-        response.headers()["content-type"],
-        "text/html; charset=utf-8"
-    );
-    assert_eq!(server.get("/app.css").await.status(), 200);
-    assert_eq!(server.get("/app.js").await.status(), 200);
+    // The three assets are compiled in, so serving them is the whole
+    // deployment story: a body with something in it, under the type the
+    // browser needs to treat it as a page rather than a download.
+    for (path, content_type) in [
+        ("/", "text/html; charset=utf-8"),
+        ("/app.css", "text/css; charset=utf-8"),
+        ("/app.js", "text/javascript; charset=utf-8"),
+    ] {
+        let response = server.get(path).await;
+        assert_eq!(response.status(), 200, "GET {path}");
+        assert_eq!(response.headers()["content-type"], content_type, "{path}");
+        let body = response.text().await.unwrap();
+        assert!(!body.trim().is_empty(), "{path} is empty");
+    }
+
+    // The page loads its own two files and nothing else: no CDN, no
+    // webfont, no build step — `ilar serve` works on a plane.
+    let index = server.get("/").await.text().await.unwrap();
+    assert!(index.contains("href=\"/app.css\""), "{index}");
+    assert!(index.contains("src=\"/app.js\""), "{index}");
+    assert!(!index.contains("http"), "no external URL: {index}");
 
     for method in [reqwest::Method::POST, reqwest::Method::DELETE] {
         let response = server
@@ -597,6 +610,15 @@ async fn a_required_token_gates_every_route() {
     // 401 before 404: the token is not an oracle for what exists.
     let response = server.client.get(server.url("/nope")).send().await.unwrap();
     assert_eq!(response.status(), 401);
+
+    // The page is the exception, and has to be: the token arrives in the
+    // URL fragment, which a browser never sends, so a gated `/` would
+    // make the printed URL impossible to open. The three assets carry
+    // nothing from the store.
+    for path in ["/", "/app.css", "/app.js"] {
+        let response = server.client.get(server.url(path)).send().await.unwrap();
+        assert_eq!(response.status(), 200, "un-tokened GET {path}");
+    }
 
     // The right token, in the header and in the query.
     assert_eq!(server.get("/api/sessions").await.status(), 200);

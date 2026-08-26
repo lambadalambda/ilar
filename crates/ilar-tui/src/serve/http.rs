@@ -54,7 +54,10 @@
 //! does a loopback bind with `ILAR_SERVE_TOKEN` set, because pinning a
 //! token is an explicit request for one. Comparison is constant-time;
 //! a failure is 401 with an empty body, on every path including
-//! unmatched ones, so the token is not an oracle for what exists.
+//! unmatched ones, so the token is not an oracle for what exists — the
+//! sole exception being the three static assets, which have to load
+//! before the page can read the token out of the fragment
+//! ([`PUBLIC_PATHS`]).
 
 use std::collections::VecDeque;
 use std::convert::Infallible;
@@ -157,10 +160,22 @@ pub(crate) fn url_for(address: &SocketAddr, token: Option<&str>) -> String {
     }
 }
 
+/// The three static files, and the one exception to the gate. The token
+/// rides in the URL fragment, which a browser never sends upstream — so
+/// gating the page that reads that fragment would make the token
+/// impossible to deliver, and `--open` would open a 401. These bytes are
+/// identical for every install, already public inside the binary, and
+/// say nothing whatever about the store; the data behind them stays
+/// gated, including the fallback.
+const PUBLIC_PATHS: [&str; 3] = ["/", "/app.css", "/app.js"];
+
 async fn require_token(State(state): State<ServeState>, request: Request, next: Next) -> Response {
     let Some(expected) = state.token.as_deref() else {
         return next.run(request).await;
     };
+    if PUBLIC_PATHS.contains(&request.uri().path()) {
+        return next.run(request).await;
+    }
     let presented = bearer(request.headers()).or_else(|| query_token(request.uri().query()));
     match presented {
         Some(presented) if constant_time_eq(&presented, expected) => next.run(request).await,

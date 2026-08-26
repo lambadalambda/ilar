@@ -45,6 +45,9 @@ life: a watch-based follower would show a frozen session and then dump
 the entire conversation when the process exits. Stat is cheap
 (microseconds), so a few polls a second is both simpler and correct.
 
+[`ilar serve`](serve.md) is that reader, shipped: a read-only HTTP view
+of every session in the store, live over SSE.
+
 ## Compaction: handover, not amnesia
 
 Past `compaction.threshold`, ilar replaces the conversation with a
