@@ -2173,3 +2173,243 @@ async fn abort_all_kills_running_children() {
     .expect("children terminated");
     assert!(start.elapsed() < Duration::from_secs(2));
 }
+
+/// Holds its first step open until released, recording every request —
+/// the pacing a message aimed at a running child needs.
+#[derive(Clone, Default)]
+struct PacedProvider {
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+    requests: Arc<std::sync::Mutex<Vec<Request>>>,
+}
+
+impl PacedProvider {
+    fn requests(&self) -> Vec<Request> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+impl Provider for PacedProvider {
+    fn stream(&self, req: Request) -> anyhow::Result<EventStream> {
+        let first = {
+            let mut requests = self.requests.lock().unwrap();
+            requests.push(req);
+            requests.len() == 1
+        };
+        let started = self.started.clone();
+        let release = self.release.clone();
+        Ok(Box::pin(stream::unfold(0, move |state| {
+            let started = started.clone();
+            let release = release.clone();
+            async move {
+                match state {
+                    0 => {
+                        if first {
+                            started.notify_one();
+                            release.notified().await;
+                        }
+                        Some((ProviderEvent::TextDelta("step done".into()), 1))
+                    }
+                    1 => Some((
+                        ProviderEvent::TurnComplete {
+                            stop_reason: StopReason::EndTurn,
+                            usage: Usage::default(),
+                        },
+                        2,
+                    )),
+                    _ => None,
+                }
+            }
+        })))
+    }
+}
+
+/// Every text block a request carried, in one string — what the model
+/// was actually looking at when it was asked.
+fn transcript_text(request: &Request) -> String {
+    request
+        .messages
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn task_context(parent_id: &str, spawner: Arc<SubagentSpawner>) -> ToolContext {
+    background_tool_context(parent_id.to_string(), spawner, &std::env::temp_dir())
+}
+
+/// The running half of the message verb: the child sees it at its next
+/// step boundary, exactly as a root turn sees a mid-turn steer.
+#[tokio::test]
+async fn a_message_to_a_running_task_arrives_at_its_next_step() {
+    let (store, parent_id) = temp_store();
+    let provider = PacedProvider::default();
+    let spawner = patient_spawner(Arc::new(provider.clone()), &store);
+    let mut notifications = spawner.subscribe();
+    let registry = ToolRegistry::builtin()
+        .with_subagents(spawner.clone())
+        .unwrap();
+    let task = registry.get("task").unwrap();
+    let message = registry
+        .get("task_message")
+        .expect("task_message is registered");
+
+    let started = task
+        .run(
+            serde_json::json!({
+                "description": "deferred survey",
+                "prompt": "look around",
+                "subagent_type": "explore",
+                "background": true,
+            }),
+            task_context(&parent_id, spawner.clone()),
+        )
+        .await;
+    assert!(!started.is_error, "{}", started.content);
+    let child_id = started.child_session_id().unwrap().to_string();
+    // The child is mid-step: its first provider call is in flight.
+    provider.started.notified().await;
+
+    let sent = message
+        .run(
+            serde_json::json!({
+                "task_id": child_id,
+                "message": "use the staging config instead",
+            }),
+            task_context(&parent_id, spawner.clone()),
+        )
+        .await;
+
+    assert!(!sent.is_error, "{}", sent.content);
+    assert!(sent.content.contains("next step"), "{}", sent.content);
+    provider.release.notify_one();
+    let notification = tokio::time::timeout(Duration::from_secs(5), notifications.recv())
+        .await
+        .expect("notification arrives")
+        .expect("channel open");
+    assert!(!notification.is_error, "{}", notification.text);
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 2, "child never took a second step");
+    let second = transcript_text(&requests[1]);
+    assert!(
+        second.contains("use the staging config instead"),
+        "child never saw the message: {second}"
+    );
+    // Nothing is left waiting once the child has taken it.
+    let listing = registry
+        .get("tasks")
+        .unwrap()
+        .run(
+            serde_json::json!({}),
+            task_context(&parent_id, spawner.clone()),
+        )
+        .await;
+    assert!(!listing.content.contains("pending"), "{}", listing.content);
+
+    spawner.shutdown().await;
+}
+
+/// The undelivered rule, mirrored from the root: a message the child's
+/// turn ended before taking waits for its next resume instead of
+/// vanishing with the channel.
+#[tokio::test]
+async fn a_message_the_child_never_saw_lands_in_its_next_resume() {
+    let (store, parent_id) = temp_store();
+    let provider = PacedProvider::default();
+    let spawner = patient_spawner(Arc::new(provider.clone()), &store);
+    let mut notifications = spawner.subscribe();
+    let registry = ToolRegistry::builtin()
+        .with_subagents(spawner.clone())
+        .unwrap();
+    let task = registry.get("task").unwrap();
+    let tasks = registry.get("tasks").unwrap();
+    let message = registry.get("task_message").unwrap();
+
+    let started = task
+        .run(
+            serde_json::json!({
+                "description": "deferred survey",
+                "prompt": "look around",
+                "subagent_type": "explore",
+                "background": true,
+            }),
+            task_context(&parent_id, spawner.clone()),
+        )
+        .await;
+    let child_id = started.child_session_id().unwrap().to_string();
+    provider.started.notified().await;
+
+    let sent = message
+        .run(
+            serde_json::json!({
+                "task_id": child_id,
+                "message": "check the migration too",
+            }),
+            task_context(&parent_id, spawner.clone()),
+        )
+        .await;
+    assert!(!sent.is_error, "{}", sent.content);
+
+    // Visibility: the listing says the message has not been read.
+    let listing = tasks
+        .run(
+            serde_json::json!({}),
+            task_context(&parent_id, spawner.clone()),
+        )
+        .await;
+    assert!(
+        listing.content.contains("1 message pending"),
+        "{}",
+        listing.content
+    );
+
+    // The turn ends without ever reaching a step boundary.
+    spawner.abort_all();
+    let _ = tokio::time::timeout(Duration::from_secs(5), notifications.recv()).await;
+    for _ in 0..200 {
+        if !spawner.session_is_active(&child_id) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let resumed = task
+        .run(
+            serde_json::json!({
+                "description": "follow up",
+                "prompt": "continue where you left off",
+                "subagent_type": "explore",
+                "task_id": child_id,
+            }),
+            task_context(&parent_id, spawner.clone()),
+        )
+        .await;
+
+    assert!(!resumed.is_error, "{}", resumed.content);
+    let requests = provider.requests();
+    let last = transcript_text(requests.last().unwrap());
+    assert!(
+        last.contains("check the migration too"),
+        "the undelivered message vanished: {last}"
+    );
+    assert!(
+        last.contains("continue where you left off"),
+        "the resume prompt is missing: {last}"
+    );
+    // Carried once, not forever.
+    let listing = tasks
+        .run(
+            serde_json::json!({}),
+            task_context(&parent_id, spawner.clone()),
+        )
+        .await;
+    assert!(!listing.content.contains("pending"), "{}", listing.content);
+
+    spawner.shutdown().await;
+}

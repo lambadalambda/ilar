@@ -84,6 +84,8 @@ pub struct SubagentSpawner {
     /// Tasks working right now, nested ones included: the registry is
     /// shared with every child spawner.
     running_tasks: Arc<Mutex<Vec<RunningTask>>>,
+    /// What the parent has said to its children, keyed by child session.
+    child_steers: ChildSteers,
     /// Background completions land here; the session owner consumes.
     notify_tx: tokio::sync::mpsc::Sender<Notification>,
     /// The single notification receiver, handed out by `subscribe`.
@@ -125,6 +127,172 @@ impl Drop for RunningTaskGuard {
             .lock()
             .unwrap()
             .retain(|task| task.session_id != self.session_id);
+    }
+}
+
+/// What the parent has said to its children: the live steer channel of
+/// every child turn that is running, and the messages sent but not yet
+/// taken. Shared with every derived spawner, exactly like the running
+/// registry, so a nested task is reachable from the spawner its own
+/// parent holds.
+#[derive(Clone, Default)]
+struct ChildSteers(Arc<Mutex<std::collections::HashMap<String, ChildSteer>>>);
+
+#[derive(Default)]
+struct ChildSteer {
+    /// The running turn's steer channel; `None` once that turn ended.
+    sender: Option<crate::agent::SteerSender>,
+    /// Messages the child has not been seen to take. While its turn runs
+    /// they are in flight; once it ends they wait for its next resume —
+    /// the root rule, where an undelivered steer moves to the queue
+    /// instead of vanishing with the channel.
+    pending: Vec<String>,
+}
+
+impl ChildSteers {
+    /// The receiver a child's turn runs with, and the run's claim on
+    /// everything that was waiting for it.
+    fn open(&self, session_id: &str) -> (crate::agent::SteerReceiver, ChildTurnSteer) {
+        let (sender, receiver) = crate::agent::steer_channel();
+        (receiver, self.begin(session_id, Some(sender)))
+    }
+
+    /// The same claim for a turn that cannot be steered — a routed
+    /// notification, which is nonetheless a resume of that session and
+    /// so carries what the session never read.
+    fn adopt(&self, session_id: &str) -> ChildTurnSteer {
+        self.begin(session_id, None)
+    }
+
+    /// Install the turn's channel and take its queue in one step: with
+    /// both under the same lock, a message either goes to the turn that
+    /// is starting or into the prompt that turn starts from, and never
+    /// falls between the two.
+    fn begin(&self, session_id: &str, sender: Option<crate::agent::SteerSender>) -> ChildTurnSteer {
+        let mut steers = self.0.lock().unwrap();
+        let entry = steers.entry(session_id.to_string()).or_default();
+        entry.sender = sender;
+        let queued = std::mem::take(&mut entry.pending);
+        drop(steers);
+        ChildTurnSteer {
+            session_id: session_id.to_string(),
+            steers: self.clone(),
+            queued,
+        }
+    }
+
+    /// Hand a message to a running child's turn. False when no live
+    /// channel took it: the caller then decides between resuming the
+    /// task and holding the message for its next resume.
+    fn steer(&self, session_id: &str, text: String) -> bool {
+        let mut steers = self.0.lock().unwrap();
+        let Some(entry) = steers.get_mut(session_id) else {
+            return false;
+        };
+        let Some(sender) = entry.sender.as_ref() else {
+            return false;
+        };
+        if sender.send(text.clone()).is_err() {
+            return false;
+        }
+        entry.pending.push(text);
+        true
+    }
+
+    /// Hold a message for a child that cannot be steered right now.
+    fn queue(&self, session_id: &str, text: String) {
+        self.0
+            .lock()
+            .unwrap()
+            .entry(session_id.to_string())
+            .or_default()
+            .pending
+            .push(text);
+    }
+
+    /// The child took this message at a step boundary, so it is waiting
+    /// for nothing — matched by text, the way the root's pending strip
+    /// clears itself from the same `Steered` event.
+    fn delivered(&self, session_id: &str, text: &str) {
+        let mut steers = self.0.lock().unwrap();
+        if let Some(entry) = steers.get_mut(session_id)
+            && let Some(index) = entry.pending.iter().position(|held| held == text)
+        {
+            entry.pending.remove(index);
+        }
+        Self::prune(&mut steers, session_id);
+    }
+
+    /// How many messages this task has not read yet.
+    fn pending(&self, session_id: &str) -> usize {
+        self.0
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .map_or(0, |entry| entry.pending.len())
+    }
+
+    /// The turn is over: its channel is gone, and anything it took but
+    /// never started goes back to the head of the queue, ahead of
+    /// whatever was said while it was running.
+    fn end(&self, session_id: &str, restored: Vec<String>) {
+        let mut steers = self.0.lock().unwrap();
+        if let Some(entry) = steers.get_mut(session_id) {
+            entry.sender = None;
+            entry.pending.splice(0..0, restored);
+        }
+        Self::prune(&mut steers, session_id);
+    }
+
+    /// A child with no channel and nothing waiting is not a child this
+    /// map has anything to say about.
+    fn prune(steers: &mut std::collections::HashMap<String, ChildSteer>, session_id: &str) {
+        if steers
+            .get(session_id)
+            .is_some_and(|entry| entry.sender.is_none() && entry.pending.is_empty())
+        {
+            steers.remove(session_id);
+        }
+    }
+}
+
+/// One child turn's hold on its task's messages: the queue it starts
+/// from while it is starting, and the channel it reads while it runs.
+/// However it ends, the channel goes; a run that never got as far as its
+/// turn puts the queue back, because a lease it could not take must not
+/// swallow what the parent said.
+struct ChildTurnSteer {
+    session_id: String,
+    steers: ChildSteers,
+    queued: Vec<String>,
+}
+
+impl ChildTurnSteer {
+    /// The prompt this run actually starts from: what the task never
+    /// read, then what the parent is asking now.
+    fn prompt(&self, prompt: &str) -> String {
+        if self.queued.is_empty() {
+            return prompt.to_string();
+        }
+        self.queued
+            .iter()
+            .map(String::as_str)
+            .chain(std::iter::once(prompt))
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
+    /// The turn is going ahead with that prompt: the messages in it are
+    /// delivered, not waiting.
+    fn started(&mut self) {
+        self.queued.clear();
+    }
+}
+
+impl Drop for ChildTurnSteer {
+    fn drop(&mut self) {
+        self.steers
+            .end(&self.session_id, std::mem::take(&mut self.queued));
     }
 }
 
@@ -176,6 +344,7 @@ impl SubagentSpawner {
             active_sessions: Arc::new(Mutex::new(std::collections::HashSet::new())),
             active_sessions_changed,
             running_tasks: Arc::new(Mutex::new(Vec::new())),
+            child_steers: ChildSteers::default(),
             notify_tx,
             activity_tx,
             stall_timeout: std::time::Duration::from_secs(600),
@@ -316,6 +485,7 @@ impl SubagentSpawner {
             active_sessions: self.active_sessions.clone(),
             active_sessions_changed: self.active_sessions_changed.clone(),
             running_tasks: self.running_tasks.clone(),
+            child_steers: self.child_steers.clone(),
             notify_tx: self.notify_tx.clone(),
             notify_rx: self.notify_rx.clone(),
             activity_tx: self.activity_tx.clone(),
@@ -669,6 +839,15 @@ impl SubagentSpawner {
             background: input.background == Some(true),
             started: std::time::Instant::now(),
         });
+        // The channel and the queue in one step, under the claim taken
+        // above: from here a message reaches the turn that is starting,
+        // and one that arrived before it heads that turn's prompt —
+        // anything the parent said while the task's last turn was ending
+        // never reached it, and the root rule is that such a steer waits
+        // in the queue rather than vanishing. A task's queue is the
+        // prompt of its next run, which this is.
+        let (steer_rx, mut child_steer) = self.child_steers.open(&session_id);
+        let prompt = child_steer.prompt(&input.prompt);
         let parent_call_id = ctx.call_id.clone().unwrap_or_default();
 
         // The child delegates one level deeper, sharing this spawner's
@@ -722,7 +901,6 @@ impl SubagentSpawner {
             // loop; the tool call returns immediately.
             let spawner = Arc::clone(self);
             let description = input.description.clone();
-            let prompt = input.prompt.clone();
             let parent_session_id = ctx.session_id.clone();
             let stall_timeout = self.stall_timeout;
             // A child of the turn's token, so one token stands for "this
@@ -746,6 +924,7 @@ impl SubagentSpawner {
             let task_registry = self.background_tasks.clone();
             let activity = ActivityPublisher {
                 tx: self.activity_tx.clone(),
+                steers: self.child_steers.clone(),
                 parent_session_id: parent_session_id.clone(),
                 parent_call_id,
                 child_session_id: session_id.clone(),
@@ -763,6 +942,10 @@ impl SubagentSpawner {
                 };
                 let _active_session = _active_session;
                 let _running_task = _running_task; // deregisters when the task ends
+                // Declared with the other guards so it drops before
+                // them: the channel is gone before the session can be
+                // claimed again.
+                let mut child_steer = child_steer;
                 let _slot = _guard; // hold the concurrency slot for the run
                 // Nobody is waiting on a background task, so it stops the
                 // moment it is told to — including part-way through the
@@ -833,6 +1016,9 @@ impl SubagentSpawner {
                         }
                     }
                 };
+                // Nothing after this point declines to start, so the
+                // queue folded into the prompt is delivered, not waiting.
+                child_steer.started();
                 let mut turn = Box::pin(run_turn(
                     spawner.resolver.as_ref(),
                     &registry,
@@ -845,8 +1031,9 @@ impl SubagentSpawner {
                     tx,
                     cancel.clone(),
                     child_ctx,
-                    // Subagents have no interactive user to steer them.
-                    None,
+                    // Not a user: the parent, whose message reaches this
+                    // child at the same step boundary a root steer does.
+                    Some(steer_rx),
                 ));
                 // Whichever way this ends, the child stops the same way a
                 // foreground one does: the token is cancelled and the turn
@@ -947,8 +1134,10 @@ task's scope yourself; continue only clearly disjoint work."
             on_start();
         }
         let (tx, mut rx_evt) = loop_event_channel(LOOP_EVENT_CAPACITY);
+        child_steer.started();
         let activity = ActivityPublisher {
             tx: self.activity_tx.clone(),
+            steers: self.child_steers.clone(),
             parent_session_id: ctx.session_id.clone(),
             parent_call_id,
             child_session_id: session_id.clone(),
@@ -958,15 +1147,17 @@ task's scope yourself; continue only clearly disjoint work."
             &registry,
             &self.store,
             &session_id,
-            &input.prompt,
+            &prompt,
             &[],
             Some(&system_prompt),
             self.loop_config.clone(),
             tx,
             ctx.cancel.clone(),
             child_ctx,
-            // Subagents have no interactive user to steer them.
-            None,
+            // Same channel as the background path: the parent of a
+            // foreground task is blocked on it and cannot use it, but
+            // the wiring is the child's, not the caller's.
+            Some(steer_rx),
         );
         tokio::pin!(turn);
         let outcome = loop {
@@ -1010,6 +1201,121 @@ task's scope yourself; continue only clearly disjoint work."
         output
             .with_appended_text(&format!("\n\n(task_id: {session_id})"))
             .with_child_session(session_id.clone())
+    }
+
+    /// The one verb for talking to a task: steer it where it stands if
+    /// its turn is running, resume it from its transcript if it has
+    /// finished. The caller never has to know which case it is in, so
+    /// every answer here says what actually happened to the message.
+    pub async fn message_task(
+        self: &Arc<Self>,
+        input: TaskMessageInput,
+        ctx: &ToolContext,
+    ) -> ToolOutput {
+        self.message_task_observed(input, ctx, None).await
+    }
+
+    async fn message_task_observed(
+        self: &Arc<Self>,
+        input: TaskMessageInput,
+        ctx: &ToolContext,
+        mut on_start: Option<ToolStartObserver>,
+    ) -> ToolOutput {
+        let text = input.message.trim().to_string();
+        if text.is_empty() {
+            return ToolOutput::error("message must not be empty");
+        }
+        let task_id = input.task_id.trim().to_string();
+        // Only this session's own tasks: an id from somewhere else names
+        // a conversation this session has no standing in, and the resume
+        // path would refuse it a moment later anyway.
+        let meta = match self.store.load(&task_id) {
+            Ok(session) => match session.meta() {
+                Some(meta) if meta.parent_id.as_deref() == Some(ctx.session_id.as_str()) => {
+                    meta.clone()
+                }
+                Some(_) => {
+                    return ToolOutput::error(format!(
+                        "task {task_id:?} was not spawned by this session; the tasks tool lists the ones that were"
+                    ));
+                }
+                None => {
+                    return ToolOutput::error(format!("task {task_id:?} has no metadata"));
+                }
+            },
+            Err(error) => {
+                return ToolOutput::error(format!(
+                    "unknown task {task_id:?}: {error}. Use an id from a task result, a \
+                     task-notification, or the tasks tool, and never invent one."
+                ));
+            }
+        };
+        if self
+            .running_tasks()
+            .iter()
+            .any(|task| task.session_id == task_id && !task.background)
+        {
+            return ToolOutput::error(format!(
+                "task {task_id} is a foreground task of the turn you are in: you are blocked on \
+                 its result, so nothing said now can reach it before it comes back. Messaging \
+                 serves background tasks, which keep working while you do — start one with the \
+                 task tool's background flag — and finished tasks, which this call resumes."
+            ));
+        }
+        if self.child_steers.steer(&task_id, text.clone()) {
+            if let Some(on_start) = on_start.take() {
+                on_start();
+            }
+            // Not "delivered": the task takes it at its next step, and a
+            // task that stops before reaching one leaves it waiting for
+            // its resume. Saying more than that would have the model
+            // count on a reading that may not happen.
+            return ToolOutput::text(format!(
+                "Message queued for running task {task_id}; it reaches that task at its next \
+                 step, and waits for the task's next resume if the task stops before then. Its \
+                 answer comes back the way that task's answers always do — as its result or its \
+                 completion notification — so do not wait for a reply here and do not repeat the \
+                 message."
+            ))
+            .with_child_session(task_id);
+        }
+        if self.session_is_active(&task_id) {
+            // Running a turn this spawner did not start — a completion
+            // routed to it. Holding the message is the undelivered rule:
+            // that turn is already under way with its own prompt, so the
+            // resume after it is the one that carries this.
+            self.child_steers.queue(&task_id, text);
+            if let Some(on_start) = on_start.take() {
+                on_start();
+            }
+            return ToolOutput::text(format!(
+                "Task {task_id} is busy with a completion of its own and has no live channel; \
+                 your message is held and delivered at its next resume."
+            ))
+            .with_child_session(task_id);
+        }
+        // The one thing a resume needs that a message does not name: the
+        // worktree the task ran in. It is in the task's own metadata, so
+        // ask for it there rather than making the model know which case
+        // it is in.
+        let workspace = input
+            .workspace
+            .or_else(|| persisted_worktree(&meta, &ctx.location));
+        self.run_task_observed(
+            TaskInput {
+                description: format!("message: {}", snippet(&text, TASK_MESSAGE_LABEL_CHARS)),
+                prompt: text,
+                subagent_type: meta.agent,
+                task_id: Some(task_id),
+                background: None,
+                workspace,
+                model: None,
+                reasoning: None,
+            },
+            ctx,
+            on_start,
+        )
+        .await
     }
 
     pub async fn spawn_background_tool(
@@ -1198,12 +1504,19 @@ task's scope yourself; continue only clearly disjoint work."
             if cancel.is_cancelled() {
                 return Ok(RouteOutcome::Requeue(notification));
             }
+            // A routed notification is a resume of this session, so it
+            // carries what the session never read — the parent's
+            // messages go in ahead of the completion that woke it. The
+            // hold is per attempt: an attempt that never appended
+            // anything puts them back when it drops.
+            let mut queued = self.child_steers.adopt(&notification.parent_session_id);
+            let text = queued.prompt(&notification.text);
             let result = run_turn(
                 self.resolver.as_ref(),
                 &registry,
                 &self.store,
                 &notification.parent_session_id,
-                &notification.text,
+                &text,
                 &[],
                 Some(&system_prompt),
                 self.loop_config.clone(),
@@ -1232,7 +1545,9 @@ task's scope yourself; continue only clearly disjoint work."
                     // to spill into and truncates as it always did.
                     spill_dir: None,
                 },
-                // Subagents have no interactive user to steer them.
+                // No live channel: this turn is not the parent's to
+                // steer, so a message that arrives while it runs waits
+                // for the resume after it.
                 None,
             )
             .await;
@@ -1255,7 +1570,10 @@ task's scope yourself; continue only clearly disjoint work."
                         () = tokio::time::sleep(NOTIFICATION_LOCK_RETRY) => {}
                     }
                 }
-                result => break result,
+                result => {
+                    queued.started();
+                    break result;
+                }
             }
         };
         let Some(grandparent_id) = meta.parent_id else {
@@ -1518,6 +1836,26 @@ impl TaskVariant {
     }
 }
 
+/// The isolated workspace a task was persisted with, as the task tool
+/// takes it — `None` when the task ran in the caller's own checkout and
+/// no workspace has to be named at all.
+fn persisted_worktree(
+    meta: &SessionMeta,
+    parent: &crate::tools::WorkspaceLocation,
+) -> Option<TaskWorkspaceInput> {
+    let persisted = meta.workspace.as_ref()?;
+    if persisted == parent {
+        return None;
+    }
+    match persisted.isolation() {
+        crate::tools::WorkspaceIsolation::Shared => None,
+        crate::tools::WorkspaceIsolation::GitWorktree { .. } => Some(TaskWorkspaceInput {
+            cwd: persisted.cwd().to_path_buf(),
+            isolation: TaskWorkspaceIsolation::GitWorktree,
+        }),
+    }
+}
+
 /// A task's workspace lease, or why the task never started.
 enum LeaseOutcome {
     Acquired(Arc<crate::tools::WorkspaceLease>),
@@ -1622,6 +1960,9 @@ impl TaskOutcome {
 #[derive(Clone)]
 struct ActivityPublisher {
     tx: tokio::sync::broadcast::Sender<SubagentActivity>,
+    /// The same events say when the child took a message, so this is
+    /// where a delivered one stops counting as pending.
+    steers: ChildSteers,
     parent_session_id: String,
     parent_call_id: String,
     child_session_id: String,
@@ -1629,6 +1970,9 @@ struct ActivityPublisher {
 
 impl ActivityPublisher {
     fn publish(&self, event: LoopEvent) {
+        if let LoopEvent::Steered { text } = &event {
+            self.steers.delivered(&self.child_session_id, text);
+        }
         let _ = self.tx.send(SubagentActivity {
             parent_session_id: self.parent_session_id.clone(),
             parent_call_id: self.parent_call_id.clone(),
@@ -1827,6 +2171,17 @@ where
         .map_err(serde::de::Error::custom)
 }
 
+/// One message for one task, whatever that task is currently doing.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TaskMessageInput {
+    pub task_id: String,
+    pub message: String,
+    /// The task's own worktree, when it has one: a resume has to name it
+    /// again, exactly as the task tool's `task_id` does.
+    #[serde(default, deserialize_with = "deserialize_optional_workspace")]
+    pub workspace: Option<TaskWorkspaceInput>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskWorkspaceInput {
@@ -1985,9 +2340,107 @@ impl Tool for TaskTool {
     }
 }
 
+/// task_message: the one verb for talking to a task, running or
+/// finished. Same concurrency and workspace declarations as the task
+/// tool, because its finished branch *is* a task invocation.
+pub struct TaskMessageTool {
+    spawner: Arc<SubagentSpawner>,
+}
+
+impl TaskMessageTool {
+    pub fn new(spawner: Arc<SubagentSpawner>) -> Self {
+        Self { spawner }
+    }
+}
+
+impl Tool for TaskMessageTool {
+    fn name(&self) -> &'static str {
+        "task_message"
+    }
+
+    fn description(&self) -> &'static str {
+        "Send a message to a task you spawned — one verb whether it is still running or already finished, and you do not need to know which. A task that is still running receives it at its next step, the way a message reaches you mid-turn, and keeps going: its answer arrives as that task's own result or completion notification, never as the output of this call. A task that has finished is resumed from its transcript with your message as its prompt, and this call returns its answer exactly as a task call does. A message a running task ended before reading is not lost: it waits and is delivered ahead of the prompt of that task's next resume, and the tasks tool shows what is still waiting. Use it to correct a background task's course, add a constraint it should have had, or ask a finished task a follow-up question with its context intact. A foreground task of the turn you are in cannot be messaged: you are blocked on its result, so it is over before you can speak again — that is what background tasks are for."
+    }
+
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::Concurrent
+    }
+
+    fn workspace_access(&self) -> WorkspaceAccess {
+        WorkspaceAccess::Mutating
+    }
+
+    fn manages_workspace_access(&self) -> bool {
+        true
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "description": "One message for one task. Running: it lands at that task's next step and the task keeps its own result path. Finished: it resumes the task from its transcript and this call returns what the task says.",
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": "Task session UUID to talk to. Use an id reported by a task result, a task-notification, or the tasks tool, and never invent a value; it must be a task this session spawned."
+                },
+                "message": {
+                    "type": "string",
+                    "description": "What to tell the task — a correction, a constraint it should have had, or a follow-up question. Write it as if you could interrupt it, because for a running task that is exactly what this is."
+                },
+                "workspace": {
+                    "type": ["object", "null"],
+                    "description": format!("The Git worktree a finished task is resumed in. Set null or omit: a task that ran in its own worktree is resumed there from its own metadata, which is why this call needs nothing but an id. Pass it only to name that same worktree explicitly, the way the task tool's resume does — it must be the registered worktree the task actually ran in ({WORKTREE_CORRECTION}), and one that has been removed has to be restored at that path."),
+                    "properties": {
+                        "cwd": {"type": "string"},
+                        "isolation": {"type": "string", "enum": ["git_worktree"]}
+                    },
+                    "required": ["cwd", "isolation"],
+                    "additionalProperties": false
+                }
+            },
+            "required": ["task_id", "message"]
+        })
+    }
+
+    fn run(&self, input: serde_json::Value, ctx: ToolContext) -> ToolFuture {
+        let spawner = self.spawner.clone();
+        Box::pin(async move {
+            match parse_task_message(input) {
+                Ok(input) => spawner.message_task(input, &ctx).await,
+                Err(error) => error,
+            }
+        })
+    }
+
+    /// Same deferral as the task tool: the resume branch is a task
+    /// start, and it is announced when it starts rather than when the
+    /// call is made.
+    fn run_observed(
+        &self,
+        input: serde_json::Value,
+        ctx: ToolContext,
+        on_start: ToolStartObserver,
+    ) -> ToolFuture {
+        let spawner = self.spawner.clone();
+        Box::pin(async move {
+            match parse_task_message(input) {
+                Ok(input) => spawner.message_task_observed(input, &ctx, Some(on_start)).await,
+                Err(error) => error,
+            }
+        })
+    }
+}
+
+fn parse_task_message(input: serde_json::Value) -> Result<TaskMessageInput, ToolOutput> {
+    serde_json::from_value(input)
+        .map_err(|error| ToolOutput::error(format!("invalid input for task_message: {error}")))
+}
+
 /// How many tasks the listing reports, newest first. A long session
 /// can accumulate dozens; the recent ones are the resumable ones.
 const TASK_LISTING_LIMIT: usize = 20;
+/// Display width of the message a resume is named by.
+const TASK_MESSAGE_LABEL_CHARS: usize = 40;
 /// Display width of a task's last reply in the listing.
 const TASK_SNIPPET_CHARS: usize = 200;
 
@@ -2035,9 +2488,12 @@ impl Tool for TasksTool {
 
     fn description(&self) -> &'static str {
         "List the subagent tasks this session has spawned: id, agent, \
-         model, whether one is still running, and a snippet of what it \
-         last said. Pass an id back as the task tool's task_id to ask a \
-         finished task a follow-up question with its context intact."
+         model, whether one is still running, how many of your messages \
+         it has not read yet (pending), and a snippet of what it last \
+         said. Pass an id to task_message to talk to one — a running \
+         task is steered at its next step, a finished one is resumed \
+         with its context intact — or back as the task tool's task_id to \
+         give a finished task a fresh scope."
     }
 
     fn concurrency(&self) -> ToolConcurrency {
@@ -2078,8 +2534,17 @@ impl Tool for TasksTool {
                             None => String::new(),
                         }
                     };
+                    // What the parent said and the task has not read:
+                    // in flight while it runs, waiting for its resume
+                    // once it has stopped. Either way it is owed a
+                    // reading, so the listing says so.
+                    let waiting = match spawner.child_steers.pending(&child.id) {
+                        0 => String::new(),
+                        1 => " · 1 message pending".to_string(),
+                        count => format!(" · {count} messages pending"),
+                    };
                     format!(
-                        "{} · {} · {} · {status} · {}\n  task: {}{last}",
+                        "{} · {} · {} · {status}{waiting} · {}\n  task: {}{last}",
                         child.id,
                         child.agent,
                         child.model,
@@ -2153,6 +2618,62 @@ mod tests {
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .collect();
         assert!(leftovers.is_empty(), "rollback left {leftovers:?}");
+    }
+
+    /// The undelivered rule at its own level: a run that never started
+    /// hands the queue back in order, and a run that did takes it.
+    #[test]
+    fn an_unstarted_run_hands_its_queue_back_in_order() {
+        let steers = ChildSteers::default();
+        steers.queue("child", "first".into());
+        steers.queue("child", "second".into());
+
+        {
+            let (_receiver, run) = steers.open("child");
+            assert_eq!(run.prompt("go on"), "first\n\nsecond\n\ngo on");
+            assert_eq!(steers.pending("child"), 0, "the run holds them");
+        }
+        assert_eq!(steers.pending("child"), 2, "an unstarted run kept them");
+
+        let (_receiver, mut run) = steers.open("child");
+        run.started();
+        drop(run);
+        assert_eq!(steers.pending("child"), 0);
+    }
+
+    #[test]
+    fn a_message_reaches_a_running_turn_and_stops_pending_once_taken() {
+        let steers = ChildSteers::default();
+        assert!(!steers.steer("child", "before any turn".into()));
+
+        let (mut receiver, mut run) = steers.open("child");
+        run.started();
+        assert!(steers.steer("child", "mid-turn".into()));
+        assert_eq!(receiver.try_recv().unwrap(), "mid-turn");
+        assert_eq!(steers.pending("child"), 1, "sent is not yet read");
+
+        steers.delivered("child", "mid-turn");
+        assert_eq!(steers.pending("child"), 0);
+        drop(run);
+        assert!(!steers.steer("child", "after the turn".into()));
+    }
+
+    /// A steer the turn ended before reading is the message the next run
+    /// opens with — the root rule, one level down.
+    #[test]
+    fn a_steer_the_turn_never_read_heads_the_next_run() {
+        let steers = ChildSteers::default();
+        let (receiver, mut run) = steers.open("child");
+        run.started();
+        assert!(steers.steer("child", "look at the migration".into()));
+        drop(receiver);
+        drop(run);
+
+        let (_receiver, next) = steers.open("child");
+        assert_eq!(
+            next.prompt("continue"),
+            "look at the migration\n\ncontinue"
+        );
     }
 
     #[test]

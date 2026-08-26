@@ -738,6 +738,7 @@ pub struct ChildTool(&'static str);
 impl ChildTool {
     pub const TASK: Self = Self("task");
     pub const TASKS: Self = Self("tasks");
+    pub const TASK_MESSAGE: Self = Self("task_message");
     pub const SERVICE: Self = Self("service");
     pub const MODELS: Self = Self("models");
     pub const HISTORY: Self = Self("history");
@@ -746,6 +747,7 @@ impl ChildTool {
     pub const ALL: &'static [Self] = &[
         Self::TASK,
         Self::TASKS,
+        Self::TASK_MESSAGE,
         Self::SERVICE,
         Self::MODELS,
         Self::HISTORY,
@@ -935,7 +937,11 @@ impl ToolRegistry {
         )?
         .with_child_tool(
             ChildTool::TASKS,
-            Arc::new(crate::subagent::TasksTool::new(spawner)),
+            Arc::new(crate::subagent::TasksTool::new(spawner.clone())),
+        )?
+        .with_child_tool(
+            ChildTool::TASK_MESSAGE,
+            Arc::new(crate::subagent::TaskMessageTool::new(spawner)),
         )
     }
 

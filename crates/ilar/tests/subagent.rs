@@ -3218,3 +3218,332 @@ async fn a_child_inherits_none_of_the_parents_reads() {
         "alpha\n"
     );
 }
+
+/// Holds its first step open until released — long enough for a message
+/// aimed at a task that is still running.
+#[derive(Clone, Default)]
+struct PacedProvider {
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+    calls: Arc<std::sync::Mutex<usize>>,
+}
+
+impl Provider for PacedProvider {
+    fn stream(&self, _req: Request) -> anyhow::Result<EventStream> {
+        let first = {
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            *calls == 1
+        };
+        let started = self.started.clone();
+        let release = self.release.clone();
+        Ok(Box::pin(futures::stream::unfold(0, move |state| {
+            let started = started.clone();
+            let release = release.clone();
+            async move {
+                match state {
+                    0 => {
+                        if first {
+                            started.notify_one();
+                            release.notified().await;
+                        }
+                        Some((ProviderEvent::TextDelta("paced answer".into()), 1))
+                    }
+                    1 => Some((
+                        ProviderEvent::TurnComplete {
+                            stop_reason: StopReason::EndTurn,
+                            usage: Usage::default(),
+                        },
+                        2,
+                    )),
+                    _ => None,
+                }
+            }
+        })))
+    }
+}
+
+fn transcript_text(request: &Request) -> String {
+    request
+        .messages
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The finished half of the one verb: the same call that steers a
+/// running task resumes a stopped one from its transcript, so the child
+/// answers with everything it already knows.
+#[tokio::test]
+async fn a_message_to_a_finished_task_resumes_it_with_context_intact() {
+    let (store, parent_id) = temp_store();
+    let answer = |text: &str| {
+        vec![
+            ProviderEvent::TextDelta(text.into()),
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            },
+        ]
+    };
+    let provider = Arc::new(MockProvider::new(vec![
+        answer("first answer"),
+        answer("second answer"),
+    ]));
+    let registry = parent_registry(spawner(provider.clone(), &store, 10, 3));
+    let task = registry.get("task").unwrap();
+    let message = registry
+        .get("task_message")
+        .expect("task_message is registered");
+
+    let first = task
+        .run(
+            serde_json::json!({
+                "description": "survey",
+                "prompt": "look around the repository",
+                "subagent_type": "explore",
+            }),
+            task_context(&parent_id),
+        )
+        .await;
+    let child_id = first.child_session_id().unwrap().to_string();
+
+    let followup = message
+        .run(
+            serde_json::json!({
+                "task_id": child_id,
+                "message": "one more question: which file was it?",
+            }),
+            task_context(&parent_id),
+        )
+        .await;
+
+    assert!(!followup.is_error, "{}", followup.content);
+    assert!(
+        followup.content.contains("second answer"),
+        "{}",
+        followup.content
+    );
+    assert!(
+        followup.content.contains(&format!("task_id: {child_id}")),
+        "{}",
+        followup.content
+    );
+    assert_eq!(followup.child_session_id(), Some(child_id.as_str()));
+    let resumed = transcript_text(&provider.requests()[1]);
+    assert!(resumed.contains("look around the repository"), "{resumed}");
+    assert!(resumed.contains("first answer"), "{resumed}");
+    assert!(
+        resumed.contains("one more question: which file was it?"),
+        "{resumed}"
+    );
+}
+
+/// A task nobody here spawned is not this session's to talk to.
+#[tokio::test]
+async fn a_message_to_another_sessions_task_is_refused() {
+    let (store, parent_id) = temp_store();
+    let provider = Arc::new(MockProvider::new(vec![vec![
+        ProviderEvent::TextDelta("done".into()),
+        ProviderEvent::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        },
+    ]]));
+    let registry = parent_registry(spawner(provider, &store, 10, 3));
+    let task = registry.get("task").unwrap();
+    let message = registry.get("task_message").unwrap();
+
+    let first = task
+        .run(
+            serde_json::json!({
+                "description": "survey",
+                "prompt": "look around",
+                "subagent_type": "explore",
+            }),
+            task_context(&parent_id),
+        )
+        .await;
+    let child_id = first.child_session_id().unwrap().to_string();
+
+    let stranger = message
+        .run(
+            serde_json::json!({"task_id": child_id, "message": "hello"}),
+            task_context(&new_id()),
+        )
+        .await;
+    assert!(stranger.is_error, "{}", stranger.content);
+    assert!(
+        stranger.content.contains("not spawned by this session"),
+        "{}",
+        stranger.content
+    );
+
+    let invented = message
+        .run(
+            serde_json::json!({"task_id": new_id(), "message": "hello"}),
+            task_context(&parent_id),
+        )
+        .await;
+    assert!(invented.is_error, "{}", invented.content);
+    assert!(invented.content.contains("unknown task"), "{}", invented.content);
+}
+
+/// A foreground task of the turn the model is in cannot be talked to:
+/// the parent is blocked on its result. The refusal names the case the
+/// verb does serve rather than leaving the model to guess.
+#[tokio::test]
+async fn a_message_to_a_foreground_task_of_this_turn_names_background_tasks() {
+    let (store, parent_id) = temp_store();
+    let provider = PacedProvider::default();
+    let spawner = spawner(Arc::new(provider.clone()), &store, 10, 3);
+    let registry = parent_registry(spawner.clone());
+    let task = registry.get("task").unwrap();
+    let message = registry.get("task_message").unwrap();
+
+    let context = task_context(&parent_id);
+    let running = tokio::spawn(async move {
+        task.run(
+            serde_json::json!({
+                "description": "survey",
+                "prompt": "look around",
+                "subagent_type": "explore",
+            }),
+            context,
+        )
+        .await
+    });
+    provider.started.notified().await;
+    let child_id = spawner
+        .running_tasks()
+        .first()
+        .expect("the foreground task is running")
+        .session_id
+        .clone();
+
+    let refused = message
+        .run(
+            serde_json::json!({"task_id": child_id, "message": "stop and look at the tests"}),
+            task_context(&parent_id),
+        )
+        .await;
+
+    assert!(refused.is_error, "{}", refused.content);
+    assert!(
+        refused.content.contains("foreground"),
+        "{}",
+        refused.content
+    );
+    assert!(
+        refused.content.contains("background"),
+        "{}",
+        refused.content
+    );
+    provider.release.notify_one();
+    let output = running.await.unwrap();
+    assert!(!output.is_error, "{}", output.content);
+}
+
+/// One verb, both cases documented: the model must be able to send a
+/// message without first working out whether the task is still running.
+#[test]
+fn task_message_schema_covers_the_running_and_the_finished_case() {
+    let (store, _) = temp_store();
+    let registry = parent_registry(spawner(Arc::new(MockProvider::new(vec![])), &store, 10, 3));
+    let message = registry.get("task_message").unwrap();
+    let schema = message.input_schema();
+    let properties = schema["properties"].as_object().unwrap();
+    let description = message.description();
+
+    assert!(description.contains("still running"), "{description}");
+    assert!(description.contains("next step"), "{description}");
+    assert!(description.contains("resumed"), "{description}");
+    assert!(
+        description.contains("do not need to know which"),
+        "{description}"
+    );
+    assert!(description.contains("is not lost"), "{description}");
+    assert!(description.contains("foreground"), "{description}");
+    assert_eq!(schema["required"], serde_json::json!(["task_id", "message"]));
+    let task_id = properties["task_id"]["description"].as_str().unwrap();
+    assert!(task_id.contains("never invent"), "{task_id}");
+    assert!(task_id.contains("tasks tool"), "{task_id}");
+    assert_eq!(
+        properties["workspace"]["type"],
+        serde_json::json!(["object", "null"])
+    );
+    let workspace = properties["workspace"]["description"].as_str().unwrap();
+    assert!(workspace.contains("worktree"), "{workspace}");
+
+    // The listing is where the model finds an id to message, so it is
+    // where the verb has to be named.
+    let tasks = registry.get("tasks").unwrap().description().to_string();
+    assert!(tasks.contains("task_message"), "{tasks}");
+    assert!(tasks.contains("pending"), "{tasks}");
+}
+
+/// One verb, no case analysis: the model does not carry the worktree a
+/// task ran in, so the resume reads it from the task's own metadata.
+#[tokio::test]
+async fn a_message_resumes_an_isolated_task_without_being_told_its_worktree() {
+    let (_repo, root, worktree) = repository_with_worktree();
+    let (store, parent_id) = temp_store();
+    let persisted = ilar::tools::WorkspaceLocation::validated_git_worktree(
+        &ilar::tools::WorkspaceLocation::shared(root.clone()),
+        worktree.clone(),
+    )
+    .await
+    .unwrap();
+    let child_id = new_id();
+    drop(
+        store
+            .create(SessionMeta {
+                session_id: child_id.clone(),
+                parent_id: Some(parent_id.clone()),
+                agent: "explore".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: Some(persisted),
+                cwd: None,
+            })
+            .unwrap(),
+    );
+    let message = parent_registry(spawner(
+        Arc::new(MockProvider::new(vec![vec![
+            ProviderEvent::TextDelta("still in the worktree".into()),
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            },
+        ]])),
+        &store,
+        10,
+        3,
+    ))
+    .get("task_message")
+    .unwrap();
+    let mut ctx = ToolContext::root(root);
+    ctx.session_id = parent_id;
+
+    let output = message
+        .run(
+            serde_json::json!({
+                "task_id": child_id,
+                "message": "one more thing before you finish",
+            }),
+            ctx,
+        )
+        .await;
+
+    assert!(!output.is_error, "{}", output.content);
+    assert!(
+        output.content.contains("still in the worktree"),
+        "{}",
+        output.content
+    );
+    assert_eq!(output.child_session_id(), Some(child_id.as_str()));
+}
