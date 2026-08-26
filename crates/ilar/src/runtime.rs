@@ -423,7 +423,14 @@ impl RuntimePlan {
         } else {
             (registry, None)
         };
-        let tool_ctx = ToolContext::root(self.cwd).with_subagents(spawner.clone());
+        // Oversized bash output is written here, and last week's is
+        // swept on the way past. Never fatal: a state directory that
+        // cannot be read simply has nothing to clean.
+        let spill_dir = crate::tools::bash::spill_dir(config.state_dir());
+        crate::tools::bash::clean_spills(&spill_dir);
+        let tool_ctx = ToolContext::root(self.cwd)
+            .with_subagents(spawner.clone())
+            .with_spill_dir(spill_dir);
 
         Ok(SessionRuntime {
             store,

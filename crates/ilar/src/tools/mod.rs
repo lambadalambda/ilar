@@ -452,6 +452,10 @@ pub struct ToolContext {
     /// Files this session has shown the model, and what they said at the
     /// time. `edit` refuses to touch anything absent or stale here.
     pub seen_files: SeenFiles,
+    /// Directory oversized tool output is written to, so the model can
+    /// grep what did not fit in its result. `None` — a context with no
+    /// state directory behind it — simply truncates as before.
+    pub spill_dir: Option<PathBuf>,
 }
 
 impl ToolContext {
@@ -472,7 +476,14 @@ impl ToolContext {
             output_tail: None,
             vision: false,
             seen_files: SeenFiles::default(),
+            spill_dir: None,
         }
+    }
+
+    /// Context that may spill oversized tool output into `dir`.
+    pub fn with_spill_dir(mut self, dir: PathBuf) -> Self {
+        self.spill_dir = Some(dir);
+        self
     }
 
     /// Context with a subagent spawner attached.
@@ -985,29 +996,6 @@ where
     })
     .await
     .map_err(|error| std::io::Error::other(format!("blocking io task failed: {error}")))?
-}
-
-/// Reject a user-supplied path or pattern that would leave the directory
-/// the tool was pointed at. `Path::join` on an absolute path silently
-/// replaces the base, so without this a `path` of `/` walks the disk.
-///
-/// This is a blast-radius guard for accidents, not a security boundary —
-/// ilar has no sandbox by design (see the README).
-pub(crate) fn ensure_workspace_relative(requested: &str, tool: &str) -> Result<(), ToolOutput> {
-    let escapes = std::path::Path::new(requested)
-        .components()
-        .any(|component| {
-            !matches!(
-                component,
-                std::path::Component::Normal(_) | std::path::Component::CurDir
-            )
-        });
-    if escapes {
-        return Err(ToolOutput::error(format!(
-            "{tool}: {requested:?} must stay within the workspace (no leading / or ..)"
-        )));
-    }
-    Ok(())
 }
 
 struct CancelBlockingScan(std::sync::Arc<std::sync::atomic::AtomicBool>);

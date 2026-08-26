@@ -1098,6 +1098,7 @@ async fn stall_watchdog_fires_on_silent_child() {
                 output_tail: None,
                 vision: false,
                 seen_files: ilar::tools::SeenFiles::default(),
+                spill_dir: None,
             },
         )
         .await;

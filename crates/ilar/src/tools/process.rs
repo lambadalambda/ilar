@@ -27,6 +27,15 @@ impl Captured {
     }
 }
 
+/// Read buffer for one stream, sized against its retention. Retention
+/// moves every retained byte for each chunk that overflows it, so
+/// 8 KiB reads against a megabyte cap turn a loud command into a
+/// memmove benchmark. A short read still returns as soon as bytes are
+/// there, so nothing about the live tail gets lazier.
+fn read_buffer_len(cap: usize) -> usize {
+    (cap / 16).clamp(8 * 1024, 256 * 1024)
+}
+
 /// Read `reader` to EOF into `captured`, keeping at most `cap` bytes.
 pub(crate) async fn drain<R: tokio::io::AsyncRead + Unpin>(
     mut reader: R,
@@ -35,7 +44,9 @@ pub(crate) async fn drain<R: tokio::io::AsyncRead + Unpin>(
 ) {
     use tokio::io::AsyncReadExt;
 
-    let mut buffer = [0u8; 8192];
+    // Heap, not the stack: this future is spawned per stream and a
+    // buffer this size inside it would be carried around whole.
+    let mut buffer = vec![0u8; read_buffer_len(cap)];
     loop {
         match reader.read(&mut buffer).await {
             Ok(0) => break,
@@ -119,6 +130,14 @@ mod tests {
         let state = captured(&[b"abcde", b"fgh"], 4);
         assert_eq!(state.retained, b"efgh");
         assert_eq!(state.total, 8);
+    }
+
+    /// Reads scale with retention, within bounds a pipe still likes.
+    #[test]
+    fn the_read_buffer_scales_with_the_cap() {
+        assert_eq!(read_buffer_len(1024), 8 * 1024);
+        assert_eq!(read_buffer_len(2 * 1024 * 1024), 128 * 1024);
+        assert_eq!(read_buffer_len(usize::MAX), 256 * 1024);
     }
 
     #[test]

@@ -29,7 +29,7 @@ Environment variables:
 | Variable | Purpose |
 | --- | --- |
 | `ILAR_CONFIG_DIR` | Replaces the default `~/.config/ilar` user configuration directory. |
-| `ILAR_STATE_DIR` | Replaces the default `~/.local/state/ilar` session and authentication directory. |
+| `ILAR_STATE_DIR` | Replaces the default `~/.local/state/ilar` session, authentication and spilled-tool-output directory. |
 | `ILAR_OPENAI_API_KEY` | Fallback OpenAI API key. |
 | `ILAR_ZAI_API_KEY` | Fallback z.ai API key. |
 | `ILAR_TAVILY_API_KEY` | Switches web search to the Tavily API (recommended). |

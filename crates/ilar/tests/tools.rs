@@ -11,6 +11,34 @@ fn registry() -> ToolRegistry {
     ToolRegistry::builtin()
 }
 
+/// A context that spills oversized tool output, under a known session
+/// and call id — what the executor hands a tool during a real turn.
+fn spilling_ctx(cwd: &std::path::Path, spill_dir: &std::path::Path, call_id: &str) -> ToolContext {
+    let mut ctx = ToolContext::root(cwd.to_path_buf()).with_spill_dir(spill_dir.to_path_buf());
+    ctx.session_id = "session-1".into();
+    ctx.call_id = Some(call_id.to_string());
+    ctx
+}
+
+/// The path out of the `full output: <path> (…)` hint, which leads the
+/// result: the TUI cuts a tool result head-first, so a hint anywhere
+/// else is one only the model would see.
+fn hinted_spill_path(content: &str) -> std::path::PathBuf {
+    let hint = content
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix("full output: "))
+        .unwrap_or_else(|| panic!("no leading spill hint in: {content}"));
+    let (path, rest) = hint
+        .rsplit_once(" (")
+        .unwrap_or_else(|| panic!("malformed spill hint: {hint}"));
+    assert!(
+        rest.contains("lines) — grep or read it for what you need"),
+        "malformed spill hint: {hint}"
+    );
+    std::path::PathBuf::from(path)
+}
+
 async fn run(
     reg: &ToolRegistry,
     name: &str,
@@ -1147,7 +1175,7 @@ async fn bash_drains_output_larger_than_pipe_buffer() {
     // concurrently with wait(): the child would block on the full pipe,
     // never exit, and only the 10s timeout would break the deadlock.
     // Proof of draining: fast, successful exit (output truncated to the
-    // 100KB cap by design, which is fine).
+    // 30KB preview by design, which is fine).
     let dir = tempfile::tempdir().unwrap();
     let start = std::time::Instant::now();
     let out = run(
@@ -1159,11 +1187,11 @@ async fn bash_drains_output_larger_than_pipe_buffer() {
     .await;
     assert!(!out.is_error, "{}", out.content);
     assert!(
-        out.content.len() >= 90_000,
+        out.content.len() >= 25_000,
         "output suspiciously small: {}",
         out.content.len()
     );
-    assert!(out.content.len() < 110_000, "output was not bounded");
+    assert!(out.content.len() < 40_000, "output was not bounded");
     assert!(
         start.elapsed() < std::time::Duration::from_secs(8),
         "looked like a pipe deadlock: {:?}",
@@ -1202,13 +1230,13 @@ async fn bash_drains_high_volume_stdout_and_stderr_together() {
     )
     .await;
     assert!(!out.is_error, "{}", out.content);
-    assert!(out.content.len() < 110_000, "output was not bounded");
+    assert!(out.content.len() < 40_000, "output was not bounded");
 }
 
 #[tokio::test]
-async fn bash_keeps_stderr_and_the_stdout_tail_when_stdout_fills_the_cap() {
+async fn bash_keeps_stderr_and_the_stdout_tail_when_stdout_fills_the_preview() {
     // The failure of a chatty build lives in the last stdout lines and in
-    // stderr; keeping the first 100KB of the concatenation loses both.
+    // stderr; keeping the first 30KB of the concatenation loses both.
     let dir = tempfile::tempdir().unwrap();
     let out = run(
         &registry(),
@@ -1232,12 +1260,140 @@ async fn bash_keeps_stderr_and_the_stdout_tail_when_stdout_fills_the_cap() {
         "stdout tail was dropped: {}",
         &out.content[out.content.len().saturating_sub(400)..]
     );
-    assert!(out.content.len() < 110_000, "output was not bounded");
+    assert!(out.content.len() < 40_000, "output was not bounded");
     // 300000 + "stdout-tail\n" (12) + "fatal: the real error\n" (22)
     assert!(
         out.content.contains("from 300034 raw bytes"),
         "raw byte total misreported: {}",
         &out.content[out.content.len().saturating_sub(400)..]
+    );
+    // Nowhere to spill to: the preview is still the whole answer.
+    assert!(
+        !out.content.contains("full output:"),
+        "{}",
+        &out.content[out.content.len().saturating_sub(400)..]
+    );
+}
+
+/// The spill workflow end to end: the model gets a small tail preview
+/// with stderr intact and a path it can grep for everything else.
+#[tokio::test]
+async fn bash_spills_output_past_the_preview_and_names_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let spill_dir = state.path().join("tool-output");
+    let out = run(
+        &registry(),
+        "bash",
+        serde_json::json!({
+            "command": "yes 0123456789 | head -c 300000; printf 'stdout-tail\\n'; \
+                        printf 'fatal: the real error\\n' >&2; exit 1",
+            "timeout_ms": 10000
+        }),
+        &spilling_ctx(dir.path(), &spill_dir, "call-spill-1"),
+    )
+    .await;
+
+    assert!(out.is_error, "{}", out.content);
+    assert!(out.content.len() < 40_000, "preview was not bounded");
+    assert!(
+        out.content.contains("fatal: the real error"),
+        "stderr was dropped: {}",
+        out.content
+    );
+    assert!(
+        out.content.contains("stdout-tail"),
+        "stdout tail was dropped: {}",
+        out.content
+    );
+
+    let path = hinted_spill_path(&out.content);
+    assert_eq!(path.parent(), Some(spill_dir.as_path()), "{path:?}");
+    // Session-qualified: a provider call id is unique within a response,
+    // not across the sessions sharing this directory.
+    assert_eq!(path.file_name().unwrap(), "session-1-call-spill-1.txt");
+    // The hint leads, the preview follows, the truncation note closes it.
+    let after_hint = out
+        .content
+        .split_once('\n')
+        .expect("the result is more than its hint")
+        .1;
+    assert!(after_hint.contains("stdout-tail"), "{after_hint}");
+    assert!(
+        after_hint.contains("fatal: the real error"),
+        "stderr moved above the hint"
+    );
+    assert!(
+        out.content.rfind("output truncated at") > out.content.find("stdout-tail"),
+        "the truncation note left the end of the preview"
+    );
+    let spilled = std::fs::read_to_string(&path).expect("the hinted file exists");
+    assert!(spilled.contains("=== stdout ==="), "{}", &spilled[..64]);
+    assert!(spilled.contains("=== stderr ==="));
+    assert!(spilled.contains("fatal: the real error"));
+    assert!(spilled.contains("stdout-tail"));
+    assert!(
+        spilled.len() > 300_000,
+        "the file holds a preview, not the capture: {}",
+        spilled.len()
+    );
+    // Nothing was dropped on the way to disk, so no raw-total caveat.
+    assert!(!out.content.contains("holds the last"), "{}", out.content);
+}
+
+#[tokio::test]
+async fn bash_output_within_the_preview_spills_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let spill_dir = state.path().join("tool-output");
+    let out = run(
+        &registry(),
+        "bash",
+        serde_json::json!({"command": "echo small-enough"}),
+        &spilling_ctx(dir.path(), &spill_dir, "call-spill-2"),
+    )
+    .await;
+
+    assert!(!out.is_error, "{}", out.content);
+    assert!(out.content.contains("small-enough"));
+    assert!(!out.content.contains("full output:"), "{}", out.content);
+    assert!(!spill_dir.exists(), "a small result created a spill file");
+}
+
+/// Even the 2 MiB capture has an end. What survives is the tail, and the
+/// hint says so instead of implying the file holds everything.
+#[tokio::test]
+async fn bash_spill_reports_raw_totals_when_the_capture_itself_truncated() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let spill_dir = state.path().join("tool-output");
+    let out = run(
+        &registry(),
+        "bash",
+        serde_json::json!({
+            "command": "yes 0123456789 | head -c 3000000; printf 'the-very-end\\n'",
+            "timeout_ms": 20000
+        }),
+        &spilling_ctx(dir.path(), &spill_dir, "call-spill-3"),
+    )
+    .await;
+
+    assert!(!out.is_error, "{}", out.content);
+    let path = hinted_spill_path(&out.content);
+    let spilled = std::fs::read(&path).expect("the hinted file exists");
+    assert_eq!(spilled.len(), 2 * 1024 * 1024, "capture cap moved");
+    assert!(
+        spilled.ends_with(b"the-very-end\n"),
+        "the capture kept the head, not the tail"
+    );
+    // Second line, right under the hint it qualifies.
+    assert!(
+        out.content
+            .lines()
+            .nth(1)
+            .is_some_and(|line| line.contains("holds the last 2.0 MiB of 3000013 raw bytes")),
+        "raw totals misreported: {}",
+        &out.content[..out.content.len().min(400)]
     );
 }
 
@@ -1484,25 +1640,31 @@ async fn glob_still_matches_dotted_paths_the_pattern_asks_for() {
     );
 }
 
+/// Spilled tool output lives in the state dir, outside any workspace:
+/// an absolute pattern has to reach it, and report absolute paths.
 #[tokio::test]
-async fn glob_rejects_patterns_that_escape_the_workspace() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(dir.path().join("src")).unwrap();
-    for pattern in ["../*.rs", "/etc/*", "src/../../*.rs"] {
-        let out = run(
-            &registry(),
-            "glob",
-            serde_json::json!({ "pattern": pattern }),
-            &ctx(dir.path()),
-        )
-        .await;
-        assert!(
-            out.is_error,
-            "{pattern} should be rejected: {}",
-            out.content
-        );
-        assert!(out.content.contains("workspace"), "{}", out.content);
-    }
+async fn glob_accepts_absolute_patterns_outside_cwd() {
+    let cwd = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let outside = std::fs::canonicalize(elsewhere.path()).unwrap();
+    std::fs::write(outside.join("call-1.txt"), "spilled\n").unwrap();
+    std::fs::write(outside.join("other.md"), "").unwrap();
+
+    let out = run(
+        &registry(),
+        "glob",
+        serde_json::json!({ "pattern": format!("{}/*.txt", outside.display()) }),
+        &ctx(cwd.path()),
+    )
+    .await;
+
+    assert!(!out.is_error, "{}", out.content);
+    assert_eq!(
+        out.content,
+        outside.join("call-1.txt").to_string_lossy(),
+        "{}",
+        out.content
+    );
 }
 
 // ---- grep ----
@@ -1593,20 +1755,32 @@ async fn grep_orders_results_by_path_then_line() {
     );
 }
 
+/// The workflow the spill hint asks for: grep a file the model was
+/// pointed at by absolute path, from a cwd that does not contain it.
 #[tokio::test]
-async fn grep_rejects_paths_that_escape_the_workspace() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("a.txt"), "hello\n").unwrap();
-    for path in ["..", "/etc", "a/../.."] {
+async fn grep_accepts_absolute_paths_outside_cwd() {
+    let cwd = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let outside = std::fs::canonicalize(elsewhere.path()).unwrap();
+    let spill = outside.join("call-1.txt");
+    std::fs::write(&spill, "noise\nthe needle\n").unwrap();
+
+    for path in [spill.clone(), outside.clone()] {
         let out = run(
             &registry(),
             "grep",
-            serde_json::json!({"pattern": "hello", "path": path}),
-            &ctx(dir.path()),
+            serde_json::json!({"pattern": "needle", "path": path.to_string_lossy()}),
+            &ctx(cwd.path()),
         )
         .await;
-        assert!(out.is_error, "{path} should be rejected: {}", out.content);
-        assert!(out.content.contains("workspace"), "{}", out.content);
+        assert!(!out.is_error, "{}", out.content);
+        assert!(
+            out.content
+                .contains(&format!("{}:2:the needle", spill.display())),
+            "searching {}: {}",
+            path.display(),
+            out.content
+        );
     }
 }
 

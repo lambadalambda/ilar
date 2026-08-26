@@ -695,6 +695,9 @@ impl SubagentSpawner {
             // Empty, not the parent's: the child model has seen nothing
             // of the workspace, so its first edit reads the file itself.
             seen_files: crate::tools::SeenFiles::default(),
+            // Inherited: a child's oversized output is worth keeping for
+            // the same reason its parent's is.
+            spill_dir: ctx.spill_dir.clone(),
         };
 
         if input.background == Some(true) {
@@ -1209,6 +1212,10 @@ task's scope yourself; continue only clearly disjoint work."
                     // A routed notification is a fresh view of the
                     // session: nothing has been read on this context yet.
                     seen_files: crate::tools::SeenFiles::default(),
+                    // The spawner is built from configuration, not from a
+                    // tool context, so this path has no state directory
+                    // to spill into and truncates as it always did.
+                    spill_dir: None,
                 },
                 // Subagents have no interactive user to steer them.
                 None,

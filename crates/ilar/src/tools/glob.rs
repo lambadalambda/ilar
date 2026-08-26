@@ -44,25 +44,30 @@ impl Default for Limits {
 /// can start there instead of the workspace root, which is the whole
 /// difference between opening one directory and enumerating a monorepo.
 ///
-/// Errors when the pattern is absolute or contains `..`, which would
-/// walk outside the workspace.
-fn literal_prefix(pattern: &str) -> Result<PathBuf, ToolOutput> {
-    super::ensure_workspace_relative(pattern, "glob")?;
+/// A root or `..` is kept, not dropped: joined onto cwd it is exactly
+/// where the caller pointed — an absolute prefix replaces the base, a
+/// `..` climbs out of it.
+fn literal_prefix(pattern: &str) -> PathBuf {
     let path = Path::new(pattern);
     let mut prefix = PathBuf::new();
     for component in path.components() {
-        let Component::Normal(part) = component else {
-            continue;
-        };
-        if part
-            .to_string_lossy()
-            .contains(['*', '?', '[', ']', '{', '}'])
-        {
-            break;
+        match component {
+            Component::CurDir => continue,
+            Component::Prefix(_) | Component::RootDir | Component::ParentDir => {
+                prefix.push(component.as_os_str());
+            }
+            Component::Normal(part) => {
+                if part
+                    .to_string_lossy()
+                    .contains(['*', '?', '[', ']', '{', '}'])
+                {
+                    break;
+                }
+                prefix.push(part);
+            }
         }
-        prefix.push(part);
     }
-    Ok(prefix)
+    prefix
 }
 
 /// A runaway like `{a,b}{a,b}{a,b}...` multiplies; far above anything a
@@ -171,17 +176,18 @@ fn scan(
         Ok(compiled) => compiled,
         Err(error) => return ToolOutput::error(format!("glob: invalid pattern: {error}")),
     };
-    let prefix = match literal_prefix(pattern) {
-        Ok(prefix) => prefix,
-        Err(error) => return error,
-    };
     let options = glob::MatchOptions {
         case_sensitive: true,
         require_literal_separator: true,
         require_literal_leading_dot: false,
     };
 
-    let root = cwd.join(&prefix);
+    // `Path::join` replaces the base for an absolute prefix, which is
+    // the behaviour: an absolute pattern is matched against absolute
+    // paths and reported as such, a relative one against paths relative
+    // to cwd. Same semantics as read/write/edit.
+    let absolute = Path::new(pattern).is_absolute();
+    let root = cwd.join(literal_prefix(pattern));
     let threads = std::thread::available_parallelism()
         .map(|count| count.get())
         .unwrap_or(1)
@@ -219,13 +225,18 @@ fn scan(
             let Ok(entry) = entry else {
                 return ignore::WalkState::Continue;
             };
-            let Ok(relative) = entry.path().strip_prefix(cwd) else {
-                return ignore::WalkState::Continue;
+            let candidate = if absolute {
+                entry.path()
+            } else {
+                match entry.path().strip_prefix(cwd) {
+                    Ok(relative) => relative,
+                    Err(_) => return ignore::WalkState::Continue,
+                }
             };
-            if relative.as_os_str().is_empty()
+            if candidate.as_os_str().is_empty()
                 || !compiled
                     .iter()
-                    .any(|pattern| pattern.matches_path_with(relative, options))
+                    .any(|pattern| pattern.matches_path_with(candidate, options))
             {
                 return ignore::WalkState::Continue;
             }
@@ -234,7 +245,7 @@ fn scan(
                 capped_matches.store(true, Ordering::Release);
                 return ignore::WalkState::Quit;
             }
-            matches.push(relative.to_string_lossy().into_owned());
+            matches.push(candidate.to_string_lossy().into_owned());
             ignore::WalkState::Continue
         })
     });
@@ -266,8 +277,8 @@ impl Tool for GlobTool {
     }
 
     fn description(&self) -> &'static str {
-        "Find files by glob pattern (e.g. src/**/*.{rs,toml}), relative to cwd. \
-         Supports {a,b} alternation. \
+        "Find files by glob pattern (e.g. src/**/*.{rs,toml}), relative to cwd \
+         or absolute (/tmp/**/*.txt). Supports {a,b} alternation. \
          Gitignored paths are skipped unless include_ignored is set."
     }
 
@@ -282,7 +293,10 @@ impl Tool for GlobTool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "pattern": {"type": "string"},
+                "pattern": {
+                    "type": "string",
+                    "description": "Glob pattern, relative to cwd or absolute"
+                },
                 "include_ignored": {
                     "type": "boolean",
                     "description": "Include gitignored paths (default false)"
@@ -322,27 +336,70 @@ mod tests {
 
     #[test]
     fn literal_prefix_stops_at_the_first_metacharacter() {
-        assert_eq!(literal_prefix("src/**/*.rs").unwrap(), Path::new("src"));
+        assert_eq!(literal_prefix("src/**/*.rs"), Path::new("src"));
         assert_eq!(
-            literal_prefix("worktrees/manteca/*").unwrap(),
+            literal_prefix("worktrees/manteca/*"),
             Path::new("worktrees/manteca")
         );
-        assert_eq!(literal_prefix("*.txt").unwrap(), Path::new(""));
-        assert_eq!(literal_prefix("**/foo").unwrap(), Path::new(""));
-        assert_eq!(literal_prefix("src/a[0-9]/b").unwrap(), Path::new("src"));
-        assert_eq!(
-            literal_prefix("src/main.rs").unwrap(),
-            Path::new("src/main.rs")
-        );
-        assert_eq!(literal_prefix("./src/*.rs").unwrap(), Path::new("src"));
-        assert_eq!(literal_prefix("src/{a,b}/x").unwrap(), Path::new("src"));
+        assert_eq!(literal_prefix("*.txt"), Path::new(""));
+        assert_eq!(literal_prefix("**/foo"), Path::new(""));
+        assert_eq!(literal_prefix("src/a[0-9]/b"), Path::new("src"));
+        assert_eq!(literal_prefix("src/main.rs"), Path::new("src/main.rs"));
+        assert_eq!(literal_prefix("./src/*.rs"), Path::new("src"));
+        assert_eq!(literal_prefix("src/{a,b}/x"), Path::new("src"));
     }
 
+    /// A prefix that leaves cwd is kept whole: joined onto cwd it is the
+    /// directory the caller asked for, which is where the walk starts.
     #[test]
-    fn literal_prefix_rejects_escapes() {
-        for pattern in ["../*.rs", "/etc/*", "src/../../*.rs"] {
-            assert!(literal_prefix(pattern).is_err(), "{pattern}");
-        }
+    fn literal_prefix_keeps_roots_and_parents() {
+        assert_eq!(literal_prefix("/etc/*"), Path::new("/etc"));
+        assert_eq!(
+            literal_prefix("/tmp/spill/x.txt"),
+            Path::new("/tmp/spill/x.txt")
+        );
+        assert_eq!(literal_prefix("../*.rs"), Path::new(".."));
+        assert_eq!(literal_prefix("src/../../*.rs"), Path::new("src/../.."));
+    }
+
+    /// An absolute pattern matches (and reports) absolute paths, so a
+    /// spill file in the state dir is reachable from any cwd.
+    #[test]
+    fn scan_matches_absolute_patterns_outside_cwd() {
+        let cwd = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let spill = std::fs::canonicalize(elsewhere.path())
+            .unwrap()
+            .join("call-1.txt");
+        std::fs::write(&spill, "").unwrap();
+        let cancelled = AtomicBool::new(false);
+
+        let out = scan(
+            cwd.path(),
+            &format!("{}/*.txt", spill.parent().unwrap().display()),
+            false,
+            Limits::default(),
+            &cancelled,
+        );
+
+        assert!(!out.is_error, "{}", out.content);
+        assert_eq!(out.content, spill.to_string_lossy());
+    }
+
+    /// A relative pattern that climbs out of cwd stays relative, both in
+    /// what it matches and in what it reports.
+    #[test]
+    fn scan_matches_patterns_that_climb_out_of_cwd() {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("nested");
+        std::fs::create_dir(&cwd).unwrap();
+        std::fs::write(root.path().join("sibling.txt"), "").unwrap();
+        let cancelled = AtomicBool::new(false);
+
+        let out = scan(&cwd, "../*.txt", false, Limits::default(), &cancelled);
+
+        assert!(!out.is_error, "{}", out.content);
+        assert_eq!(out.content, "../sibling.txt");
     }
 
     #[test]

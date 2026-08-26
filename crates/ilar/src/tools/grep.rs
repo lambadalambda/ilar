@@ -45,7 +45,8 @@ impl Tool for GrepTool {
     }
 
     fn description(&self) -> &'static str {
-        "Search file contents with a regex, recursively from cwd (or path). \
+        "Search file contents with a regex, recursively from cwd (or path, \
+         which may be relative to cwd or absolute). \
          Gitignored files are skipped unless include_ignored is set. \
          Returns file:line:match."
     }
@@ -62,7 +63,7 @@ impl Tool for GrepTool {
             "type": "object",
             "properties": {
                 "pattern": {"type": "string", "description": "Rust regex"},
-                "path": {"type": "string", "description": "Subdirectory to search (default: cwd)"},
+                "path": {"type": "string", "description": "File or directory to search, relative to cwd or absolute (default: cwd)"},
                 "include_ignored": {
                     "type": "boolean",
                     "description": "Search gitignored files too (default false)"
@@ -78,11 +79,13 @@ impl Tool for GrepTool {
                 Ok(v) => v,
                 Err(e) => return e,
             };
-            let relative = input.path.as_deref().unwrap_or(".");
-            if let Err(error) = super::ensure_workspace_relative(relative, "grep") {
-                return error;
-            }
-            let root = ctx.cwd.join(relative);
+            // Same path semantics as read/write/edit: `Path::join`
+            // replaces the base when the requested path is absolute, so
+            // an absolute path stands and a relative one resolves from
+            // cwd. Searching outside the workspace is allowed on
+            // purpose — spilled tool output lives in the state dir.
+            let requested = input.path.as_deref().unwrap_or(".");
+            let root = ctx.cwd.join(requested);
             match super::blocking_scan(move |cancelled| {
                 grep_files(
                     &ctx.cwd,

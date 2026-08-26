@@ -91,6 +91,20 @@ all. Subagents share the session's services. Note that foreground bash
 deliberately kills its process group on completion, so this tool is the
 supported way to keep a server alive.
 
+## Large tool output
+
+`bash` returns at most ~30 KiB to the model: the tail of each stream,
+with a guaranteed share for stderr. When a command says more than that,
+up to 2 MiB per stream is written to
+`${ILAR_STATE_DIR:-~/.local/state/ilar}/tool-output/<session-id>-<call-id>.txt`
+and the result *opens* with the path, its size and line count — first
+line, where both the model and the head-biased tool-result view can see
+it — so the next step is a targeted `grep` or `read` instead of the
+same command run again. `grep` and `glob` take absolute paths, which is what makes that
+file reachable from any working directory. Spill files older than seven
+days are removed at startup; filtering at the source (`jq`, `grep`,
+`head`) is still cheaper than reading one back.
+
 ## MCP
 
 ilar deliberately ships no built-in MCP client. The built-in `mcp-via-cli`
