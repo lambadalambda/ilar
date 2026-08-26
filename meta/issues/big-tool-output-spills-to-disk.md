@@ -46,3 +46,21 @@ on behavior shaping and composes with ilar's existing tools.
 ## Milestone
 
 13 — Guard rails
+
+## Outcome
+
+Landed per the opencode pattern: preview shrank 100→30 KiB
+(tail-biased, stderr half-share preserved), capture grew to 2 MiB
+per stream, overflow writes
+`state_dir/tool-output/<session>-<call>.txt` and the hint leads the
+result — first line, so the TUI's head-biased display shows the
+path to the human too, not just the model. Honest raw-totals caveat
+when even the capture truncated; write failures degrade to a note,
+never an error; 7-day startup sweep. grep and glob accept absolute
+paths (`ensure_workspace_relative` deleted, schemas updated), so
+the model greps the spill directly — the acceptance test does
+exactly that. The Forgejo-session case drops from ~30k tokens per
+dump to ~9k, with the full data one grep away. Recorded residuals:
+notification-routed turns have no spill dir; spill files are 0644
+like session logs; the drain read-buffer now scales with the cap
+(perf fix that rode along).

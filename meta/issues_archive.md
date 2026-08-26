@@ -228,3 +228,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Skip the project instructions](issues/skip-the-project-instructions.md)
 - [x] [Edits gate on what the model has seen](issues/edits-gate-on-what-the-model-has-seen.md)
 - [x] [Sweep deferred decisions](issues/sweep-deferred-decisions.md)
+- [x] [Big tool output spills to disk](issues/big-tool-output-spills-to-disk.md)
