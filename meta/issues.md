@@ -54,3 +54,4 @@
 ## Milestone 13 — Guard rails
 
 - [ ] [Kernel sandbox for tool processes](issues/kernel-sandbox-for-tool-processes.md)
+- [ ] [Big tool output spills to disk](issues/big-tool-output-spills-to-disk.md)
