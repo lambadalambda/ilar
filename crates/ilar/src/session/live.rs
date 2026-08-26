@@ -18,6 +18,11 @@
 //! - **Never fsynced**, buffered, and flushed on a deadline checked at
 //!   write time (~150 ms) or at 4 KiB — no background timer, so a turn
 //!   that stops streaming stops writing.
+//! - **A busy turn is never silent.** A tool that runs for minutes says
+//!   nothing, and a reader judging liveness by mtime would call that
+//!   stalled — the very complaint this work exists to fix. So the turn
+//!   loop [`LiveScratch::touch`]es the scratch while it waits on tools:
+//!   the timestamp moves, the bytes do not. A heartbeat is not content.
 //! - **Truncate means "reset"**: a step commit empties the file, because
 //!   everything it held has just landed on the main stream. Deletion
 //!   means the turn ended, and a drop guard makes that true for every
@@ -45,6 +50,12 @@ pub const LIVE_SUFFIX: &str = ".live";
 const FLUSH_INTERVAL: Duration = Duration::from_millis(150);
 /// …or sooner, once this much is buffered.
 const FLUSH_BYTES: usize = 4 * 1024;
+
+/// How often a turn that is busy but silent — waiting on a tool — moves
+/// its scratch's timestamp. Comfortably inside the window a reader calls
+/// stale (60 s in `ilar serve`), with room for a couple of missed ticks
+/// on a loaded machine.
+pub const SCRATCH_HEARTBEAT: Duration = Duration::from_secs(20);
 
 /// How long a scratch may sit before a startup sweep treats it as a
 /// crash leftover. Generously long on purpose: a turn stuck in a very
@@ -192,6 +203,23 @@ impl LiveScratch {
 
     pub fn tool_finished(&mut self, id: &str, ok: bool) {
         self.mark(LiveDelta::ToolFinished { id: id.into(), ok });
+    }
+
+    /// Say "still here" without saying anything: move the timestamp and
+    /// leave the bytes alone. This is what keeps a turn that is three
+    /// minutes into a `cargo test` reading as working rather than
+    /// stalled, and writing a line instead would put noise a reader has
+    /// to parse (and render) into a file whose every line is meant to be
+    /// the turn's own words.
+    ///
+    /// Unlike a failed write, a failed touch does not retire the scratch:
+    /// nothing was lost and nothing is inconsistent — the worst case is
+    /// the liveness this call exists to prevent, which is where a
+    /// filesystem without `futimens` would have left us anyway.
+    pub fn touch(&mut self) {
+        if let Some(file) = self.file.as_ref() {
+            let _ = file.set_times(std::fs::FileTimes::new().set_modified(SystemTime::now()));
+        }
     }
 
     /// The step committed. Everything the scratch held is now on the
@@ -401,6 +429,45 @@ mod tests {
             next.0, aborted_generation.0,
             "but never reuses the generation the abandoned turn had"
         );
+    }
+
+    /// A heartbeat says "still here" and nothing else: the timestamp
+    /// moves, the bytes do not, and a reader parses exactly what it
+    /// parsed before.
+    #[test]
+    fn a_heartbeat_moves_the_timestamp_without_writing_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("turn.live");
+        let mut scratch = LiveScratch::create(path.clone());
+        scratch.tool_started("call-1", "bash", "cargo test");
+
+        let before = std::fs::metadata(&path).unwrap();
+        let deltas = read(&path);
+        // Back-date the file the way a tool that has run for minutes
+        // leaves it, so the touch has something to move.
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(SystemTime::now() - Duration::from_secs(300)),
+            )
+            .unwrap();
+
+        scratch.touch();
+
+        let after = std::fs::metadata(&path).unwrap();
+        assert!(
+            after.modified().unwrap() > before.modified().unwrap(),
+            "the heartbeat did not move the timestamp"
+        );
+        assert_eq!(after.len(), before.len(), "a heartbeat is not content");
+        assert_eq!(read(&path), deltas, "and nothing new is there to parse");
+
+        // A retired scratch has nothing to touch, and says so silently.
+        scratch.disable();
+        scratch.touch();
     }
 
     /// The whole failure policy: a scratch that cannot be opened is

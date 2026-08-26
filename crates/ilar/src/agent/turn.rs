@@ -71,6 +71,12 @@ pub struct LoopConfig {
     pub compaction_threshold: f64,
     /// Compact before this turn regardless of the threshold (user-requested).
     pub force_compaction: bool,
+    /// How often a turn waiting on tools touches its live scratch, so a
+    /// supervisor can tell a long tool run from a dead process. A value
+    /// rather than the constant so a test can observe the behaviour in
+    /// milliseconds instead of sleeping through the shipped interval —
+    /// the same trade `serve`'s `WatchConfig` makes with its polls.
+    pub live_heartbeat: std::time::Duration,
 }
 
 impl Default for LoopConfig {
@@ -83,6 +89,7 @@ impl Default for LoopConfig {
             context_limit: None,
             compaction_threshold: 0.85,
             force_compaction: false,
+            live_heartbeat: crate::session::SCRATCH_HEARTBEAT,
         }
     }
 }
@@ -1821,6 +1828,15 @@ async fn run_turn_inner(
             },
         );
         tokio::pin!(execution);
+        // Tools are where a turn goes quiet for minutes at a time, and
+        // this loop is already the place it waits — so the heartbeat is
+        // one more branch of the select rather than a task to own,
+        // cancel, and reason about against the drop guard. The first
+        // tick is consumed here because the marker written a moment ago
+        // is a fresher timestamp than any touch could be.
+        let mut heartbeat = tokio::time::interval(config.live_heartbeat);
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        heartbeat.tick().await;
         let outcomes = loop {
             tokio::select! {
                 biased;
@@ -1830,6 +1846,7 @@ async fn run_turn_inner(
                         .publish(tool_execution_loop_event(lifecycle, &received_bytes), &cancel)
                         .await;
                 }
+                _ = heartbeat.tick() => live.touch(),
                 outcomes = &mut execution => {
                     while let Ok(lifecycle) = lifecycle_rx.try_recv() {
                         note_execution_start(&mut live, &lifecycle, &executing);

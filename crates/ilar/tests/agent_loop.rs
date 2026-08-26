@@ -3234,3 +3234,139 @@ async fn a_scratch_that_cannot_be_written_never_disturbs_the_turn() {
         Some(ContentBlock::Text { text }) if text == "all done"
     ));
 }
+
+/// A tool that outlasts several heartbeats, reporting what the scratch
+/// looked like on the way in and on the way out.
+#[derive(Clone)]
+struct SlowTool {
+    scratch: std::path::PathBuf,
+    seen: Arc<Mutex<Vec<(u64, std::time::SystemTime)>>>,
+}
+
+impl SlowTool {
+    fn observe(&self) {
+        let metadata = std::fs::metadata(&self.scratch).expect("the turn's scratch");
+        self.seen
+            .lock()
+            .unwrap()
+            .push((metadata.len(), metadata.modified().unwrap()));
+    }
+
+    /// The loop announces a tool in the scratch from its own task, so a
+    /// tool that looked immediately would be racing that write — and the
+    /// claim under test is about what *heartbeats* add, not markers.
+    async fn once_announced(&self) {
+        for _ in 0..400 {
+            let announced =
+                ilar::session::parse_scratch(&std::fs::read(&self.scratch).unwrap_or_default())
+                    .iter()
+                    .any(|delta| matches!(delta, ilar::session::LiveDelta::ToolStarted { .. }));
+            if announced {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("the turn never announced the running tool");
+    }
+}
+
+impl Tool for SlowTool {
+    fn name(&self) -> &'static str {
+        "slow"
+    }
+    fn description(&self) -> &'static str {
+        "takes its time"
+    }
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::Concurrent
+    }
+    fn workspace_access(&self) -> WorkspaceAccess {
+        WorkspaceAccess::None
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    fn run(&self, _input: serde_json::Value, _ctx: ToolContext) -> ToolFuture {
+        let tool = self.clone();
+        Box::pin(async move {
+            tool.once_announced().await;
+            tool.observe();
+            tokio::time::sleep(HEARTBEAT * 6).await;
+            tool.observe();
+            ToolOutput::text("eventually")
+        })
+    }
+}
+
+/// Short enough to watch, long enough that the sleep above spans several
+/// of them. The shipped interval is `SCRATCH_HEARTBEAT`.
+const HEARTBEAT: Duration = Duration::from_millis(40);
+
+/// The complaint this whole feature exists to answer: a turn three
+/// minutes into a `cargo test` must not read as dead. The tool watches
+/// its own turn's scratch, so nothing here races a sampler, and the
+/// interval is a config value, so the minutes cost milliseconds.
+#[tokio::test]
+async fn a_long_tool_run_keeps_the_scratch_alive_without_writing_to_it() {
+    let (store, session_id) = temp_session("build");
+    let tool = SlowTool {
+        scratch: scratch_path(&store, &session_id),
+        seen: Arc::new(Mutex::new(Vec::new())),
+    };
+    let registry = ToolRegistry::builtin()
+        .with_tool(Arc::new(tool.clone()))
+        .unwrap();
+    let provider = MockProvider::new(vec![
+        vec![
+            ProviderEvent::ToolCallStarted {
+                id: "slow-1".into(),
+                name: "slow".into(),
+                item_id: None,
+            },
+            ProviderEvent::ToolCallCompleted {
+                id: "slow-1".into(),
+                name: "slow".into(),
+                input: serde_json::json!({}),
+            },
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+                usage: Default::default(),
+            },
+        ],
+        plain_turn("that took a while"),
+    ]);
+
+    let outcome = run_turn(
+        &provider,
+        &registry,
+        &store,
+        &session_id,
+        "run the slow thing",
+        &[],
+        None,
+        LoopConfig {
+            live_heartbeat: HEARTBEAT,
+            ..LoopConfig::default()
+        },
+        events_channel().0,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, TurnOutcome::Completed);
+    let seen = tool.seen.lock().unwrap().clone();
+    let [(entered_len, entered_at), (left_len, left_at)] = seen[..] else {
+        panic!("the tool observed its scratch twice, got {seen:?}");
+    };
+    assert!(
+        left_at > entered_at,
+        "the scratch went stale under a running tool: {entered_at:?} → {left_at:?}"
+    );
+    assert_eq!(
+        left_len, entered_len,
+        "a heartbeat wrote something a reader would have to parse"
+    );
+}
