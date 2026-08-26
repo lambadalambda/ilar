@@ -233,8 +233,12 @@ pub fn persist_model_change(
     Ok(())
 }
 
+fn sessions_dir(config: &Config) -> std::path::PathBuf {
+    config.state_dir().join("sessions")
+}
+
 pub fn session_store(config: &Config) -> SessionStore {
-    SessionStore::new(config.state_dir().join("sessions"))
+    SessionStore::new(sessions_dir(config))
 }
 
 impl RuntimePlan {
@@ -428,6 +432,9 @@ impl RuntimePlan {
         // cannot be read simply has nothing to clean.
         let spill_dir = crate::tools::bash::spill_dir(config.state_dir());
         crate::tools::bash::clean_spills(&spill_dir);
+        // Same errand, same indifference to failure: live-turn scratches
+        // whose process died before its drop guard ran.
+        crate::session::sweep_live_scratches(&sessions_dir(config));
         let tool_ctx = ToolContext::root(self.cwd)
             .with_subagents(spawner.clone())
             .with_spill_dir(spill_dir);

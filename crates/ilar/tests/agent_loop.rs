@@ -2938,3 +2938,299 @@ async fn child_session_turns_never_checkpoint_even_without_a_call_id() {
         .unwrap();
     assert!(!no_ref.status.success());
 }
+
+// ------------------------------------------------------- live scratch
+
+/// A scripted provider that paces its events, so a test can watch the
+/// live scratch grow between them instead of after the whole step.
+struct PacedProvider {
+    steps: Arc<Mutex<std::collections::VecDeque<Vec<ProviderEvent>>>>,
+    gap: Duration,
+}
+
+impl PacedProvider {
+    fn new(steps: Vec<Vec<ProviderEvent>>, gap: Duration) -> Self {
+        Self {
+            steps: Arc::new(Mutex::new(steps.into())),
+            gap,
+        }
+    }
+}
+
+impl Provider for PacedProvider {
+    fn stream(&self, _request: Request) -> anyhow::Result<EventStream> {
+        let events = self.steps.lock().unwrap().pop_front().unwrap_or_default();
+        let gap = self.gap;
+        Ok(Box::pin(futures::stream::iter(events).then(
+            move |event| async move {
+                tokio::time::sleep(gap).await;
+                event
+            },
+        )))
+    }
+}
+
+/// Every distinct state the scratch file passed through, sampled far
+/// faster than the turn writes. A file that is gone, empty or torn is
+/// simply not a state — `parse_scratch` drops incomplete lines.
+async fn sample_scratch(
+    path: std::path::PathBuf,
+    stop: CancellationToken,
+) -> Vec<Vec<ilar::session::LiveDelta>> {
+    let mut seen: Vec<Vec<ilar::session::LiveDelta>> = Vec::new();
+    while !stop.is_cancelled() {
+        if let Ok(bytes) = std::fs::read(&path) {
+            let deltas = ilar::session::parse_scratch(&bytes);
+            if !deltas.is_empty() && seen.last() != Some(&deltas) {
+                seen.push(deltas);
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    seen
+}
+
+fn step_of(snapshot: &[ilar::session::LiveDelta]) -> u64 {
+    match snapshot.first() {
+        Some(ilar::session::LiveDelta::TurnStarted { step, .. }) => *step,
+        other => panic!("every generation opens with turn_started, got {other:?}"),
+    }
+}
+
+fn scratch_path(store: &SessionStore, session_id: &str) -> std::path::PathBuf {
+    ilar::session::live_path(&store.session_path(session_id).unwrap())
+}
+
+/// The writer's whole lifecycle across a scripted two-step turn: deltas
+/// reach the file while the first step is still streaming, the step
+/// commit resets it to a new generation naming the tool now running, and
+/// the end of the turn takes the file with it.
+#[tokio::test]
+async fn a_live_scratch_streams_a_turn_and_is_deleted_at_the_end() {
+    use ilar::session::LiveDelta;
+
+    let (store, session_id) = temp_session("build");
+    let registry = registry_with(EchoTool {
+        calls: Arc::new(Mutex::new(Vec::new())),
+    });
+    let provider = PacedProvider::new(
+        vec![
+            vec![
+                ProviderEvent::TextDelta("hello ".into()),
+                ProviderEvent::ThinkingDelta("hmm".into()),
+                ProviderEvent::TextDelta("world".into()),
+                ProviderEvent::ToolCallStarted {
+                    id: "echo-1".into(),
+                    name: "echo".into(),
+                    item_id: None,
+                },
+                tool_call_event("echo-1", "ping"),
+                ProviderEvent::TurnComplete {
+                    stop_reason: StopReason::ToolUse,
+                    usage: Default::default(),
+                },
+            ],
+            vec![
+                ProviderEvent::TextDelta("done".into()),
+                ProviderEvent::TurnComplete {
+                    stop_reason: StopReason::EndTurn,
+                    usage: Default::default(),
+                },
+            ],
+        ],
+        Duration::from_millis(80),
+    );
+
+    let scratch = scratch_path(&store, &session_id);
+    let stop = CancellationToken::new();
+    let sampler = tokio::spawn(sample_scratch(scratch.clone(), stop.clone()));
+
+    let outcome = run_turn(
+        &provider,
+        &registry,
+        &store,
+        &session_id,
+        "say hello",
+        &[],
+        None,
+        LoopConfig::default(),
+        events_channel().0,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+        None,
+    )
+    .await
+    .unwrap();
+    stop.cancel();
+    let seen = sampler.await.unwrap();
+
+    assert_eq!(outcome, TurnOutcome::Completed);
+    assert!(!scratch.exists(), "the scratch outlived its turn");
+    assert!(seen.len() >= 2, "nothing was ever streamed: {seen:?}");
+
+    // The first generation, mid-step: text and thinking, batched but on
+    // disk long before the assistant message is committed.
+    let streaming = seen
+        .iter()
+        .filter(|snapshot| step_of(snapshot) == 0)
+        .max_by_key(|snapshot| snapshot.len())
+        .expect("a first-generation snapshot");
+    assert_eq!(
+        &streaming[1..],
+        [
+            LiveDelta::TextDelta {
+                text: "hello ".into()
+            },
+            LiveDelta::ThinkingDelta { text: "hmm".into() },
+            LiveDelta::TextDelta {
+                text: "world".into()
+            },
+            LiveDelta::ToolStarted {
+                id: "echo-1".into(),
+                name: "echo".into(),
+                summary: "msg=ping".into(),
+            },
+        ],
+        "everything the step streamed, in order, behind its generation line"
+    );
+
+    // The commit truncated it: the next generation carries the tool the
+    // turn went off to run, and none of the text that is now committed.
+    let running = seen
+        .iter()
+        .filter(|snapshot| step_of(snapshot) > 0)
+        .max_by_key(|snapshot| snapshot.len())
+        .expect("a post-commit snapshot");
+    assert_eq!(step_of(running), 1);
+    assert!(
+        running.contains(&LiveDelta::ToolStarted {
+            id: "echo-1".into(),
+            name: "echo".into(),
+            summary: "msg=ping".into(),
+        }),
+        "the running tool is the turn's activity: {running:?}"
+    );
+    assert!(
+        running.contains(&LiveDelta::ToolFinished {
+            id: "echo-1".into(),
+            ok: true,
+        }),
+        "{running:?}"
+    );
+    // The committed step's own deltas, specifically: a later generation
+    // legitimately carries the *next* step's, which are not committed
+    // yet.
+    let committed = ["hello ", "world", "hmm"];
+    assert!(
+        seen.iter()
+            .filter(|snapshot| step_of(snapshot) > 0)
+            .all(|snapshot| !snapshot.iter().any(|delta| match delta {
+                LiveDelta::TextDelta { text } | LiveDelta::ThinkingDelta { text } =>
+                    committed.contains(&text.as_str()),
+                _ => false,
+            })),
+        "a committed step's deltas survived the truncate: {seen:?}"
+    );
+
+    // And the turn itself is untouched by any of it: the committed
+    // message carries every delta the scratch only ever hinted at.
+    let text: String = store
+        .load(&session_id)
+        .unwrap()
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::AssistantMessage { content, .. } => Some(content.clone()),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text, "hello worlddone", "both steps landed in full");
+}
+
+/// An aborted turn is still a turn that ended: the drop guard runs on
+/// the way out, whatever the outcome.
+#[tokio::test]
+async fn an_aborted_turn_still_deletes_its_scratch() {
+    let (store, session_id) = temp_session("build");
+    let registry = ToolRegistry::builtin();
+    let provider = SlowProvider {
+        first: Arc::new(Mutex::new(true)),
+    };
+    let scratch = scratch_path(&store, &session_id);
+    let stop = CancellationToken::new();
+    let sampler = tokio::spawn(sample_scratch(scratch.clone(), stop.clone()));
+
+    let cancel = CancellationToken::new();
+    let cancel_clone = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        cancel_clone.cancel();
+    });
+    let outcome = run_turn(
+        &provider,
+        &registry,
+        &store,
+        &session_id,
+        "slow request",
+        &[],
+        None,
+        LoopConfig::default(),
+        events_channel().0,
+        cancel,
+        ToolContext::root(std::env::temp_dir()),
+        None,
+    )
+    .await
+    .unwrap();
+    stop.cancel();
+    let seen = sampler.await.unwrap();
+
+    assert_eq!(outcome, TurnOutcome::Aborted);
+    assert!(!seen.is_empty(), "the scratch never existed to begin with");
+    assert!(!scratch.exists(), "an aborted turn left its scratch behind");
+}
+
+/// The failure policy, end to end: a scratch that cannot be written is
+/// not a turn that cannot run. The unwritable path is a directory where
+/// the file belongs — what a full or read-only disk looks like from
+/// inside the loop.
+#[tokio::test]
+async fn a_scratch_that_cannot_be_written_never_disturbs_the_turn() {
+    let (store, session_id) = temp_session("build");
+    let scratch = scratch_path(&store, &session_id);
+    std::fs::create_dir_all(&scratch).unwrap();
+
+    let registry = registry_with(EchoTool {
+        calls: Arc::new(Mutex::new(Vec::new())),
+    });
+    let provider = MockProvider::new(vec![echo_call("echo-1", "ping"), plain_turn("all done")]);
+    let outcome = run_turn(
+        &provider,
+        &registry,
+        &store,
+        &session_id,
+        "say hello",
+        &[],
+        None,
+        LoopConfig::default(),
+        events_channel().0,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, TurnOutcome::Completed);
+    assert!(scratch.is_dir(), "the loop tried to delete what it found");
+    let transcript = store.load(&session_id).unwrap().transcript();
+    assert!(matches!(
+        transcript.last().map(|message| &message.content[0]),
+        Some(ContentBlock::Text { text }) if text == "all done"
+    ));
+}

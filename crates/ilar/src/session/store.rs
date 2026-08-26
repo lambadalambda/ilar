@@ -1666,6 +1666,49 @@ mod tests {
         }
     }
 
+    /// The store scans for `.jsonl` and nothing else. Pinned because the
+    /// session directory now also holds live-turn scratches, which are
+    /// ephemera the audit view must never see — not in the listing, not
+    /// as a child, not as a head.
+    #[test]
+    fn the_listing_ignores_everything_that_is_not_a_session_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf());
+        let id = new_id();
+        let session = store
+            .create(SessionMeta {
+                session_id: id.clone(),
+                parent_id: None,
+                agent: "build".into(),
+                model: "test/model".into(),
+                workspace: None,
+                cwd: None,
+            })
+            .unwrap();
+        drop(session);
+
+        // The sidecars a running turn leaves beside the log, plus a
+        // scratch whose stem is a perfectly good session id.
+        let scratch = super::super::live::live_path(&store.session_path(&id).unwrap());
+        std::fs::write(
+            &scratch,
+            b"{\"type\":\"turn_started\",\"turn\":\"t-1\",\"step\":0}\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join(format!("{}.live", new_id())), b"").unwrap();
+
+        assert_eq!(
+            store
+                .list()
+                .iter()
+                .map(|s| s.id.clone())
+                .collect::<Vec<_>>(),
+            vec![id.clone()]
+        );
+        assert!(store.children_of(&id).is_empty());
+        assert!(scratch.exists(), "the store did not touch the scratch");
+    }
+
     /// Tail-parse diagnostics name a line in the file, so the offset the
     /// checkpoint carries has to be a physical line count. A rewind makes
     /// the folded event count smaller than the file — the two numbers must

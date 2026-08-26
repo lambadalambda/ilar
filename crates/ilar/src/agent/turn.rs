@@ -444,6 +444,21 @@ enum ToolExecutionLifecycle {
     },
 }
 
+/// Record the tool a step is now running in the live scratch. Only the
+/// start: the finish rides with the result, which is where the turn
+/// already knows whether it worked.
+fn note_execution_start(
+    live: &mut crate::session::LiveScratch,
+    lifecycle: &ToolExecutionLifecycle,
+    executing: &std::collections::HashMap<String, (String, String)>,
+) {
+    if let ToolExecutionLifecycle::Started { id, .. } = lifecycle
+        && let Some((name, summary)) = executing.get(id)
+    {
+        live.tool_started(id, name, summary);
+    }
+}
+
 fn tool_execution_loop_event(
     lifecycle: ToolExecutionLifecycle,
     received_bytes: &std::collections::HashMap<String, u64>,
@@ -1121,6 +1136,12 @@ async fn run_turn_inner(
             })?;
         }
     }
+    // The live scratch, from here to the end of the turn: batched deltas
+    // for anything tailing the store while this turn runs. Constructed
+    // from what `run_turn` already holds, silent about every failure, and
+    // deleted by its own drop guard on every path out of this function —
+    // see `session::live`.
+    let mut live = crate::session::LiveScratch::start(store, session_id);
     events.publish(LoopEvent::TurnStarted, &cancel).await;
 
     let tools = registry.definitions();
@@ -1306,12 +1327,14 @@ async fn run_turn_inner(
                 }
                 match event {
                     ProviderEvent::TextDelta(t) => {
+                        live.text(&t);
                         events
                             .publish(LoopEvent::TextDelta(t.clone()), &cancel)
                             .await;
                         acc.push_text(t);
                     }
                     ProviderEvent::ThinkingDelta(t) => {
+                        live.thinking(&t);
                         events
                             .publish(LoopEvent::ThinkingDelta(t.clone()), &cancel)
                             .await;
@@ -1321,6 +1344,7 @@ async fn run_turn_inner(
                         acc.complete_thinking();
                     }
                     ProviderEvent::ReasoningSummaryDelta(summary) => {
+                        live.thinking(&summary);
                         events
                             .publish(LoopEvent::ReasoningSummaryDelta(summary.clone()), &cancel)
                             .await;
@@ -1379,6 +1403,10 @@ async fn run_turn_inner(
                             break;
                         }
                         let arguments = summarize_tool_input(&name, &input);
+                        // The scratch names the call as soon as its
+                        // arguments are known: that is when a streaming
+                        // row can say what the tool is about to do.
+                        live.tool_started(&id, &name, &arguments);
                         if acc.arguments_changed(&id, &arguments) {
                             events
                                 .publish(
@@ -1571,6 +1599,10 @@ async fn run_turn_inner(
                 ts: Utc::now(),
             })?;
         }
+        // The step is on the main stream now, so the scratch copy of it
+        // is worse than useless: it resets, and a reader drops whatever
+        // it was showing in favour of the committed event.
+        live.commit();
         events
             .publish(
                 LoopEvent::StepComplete {
@@ -1752,6 +1784,22 @@ async fn run_turn_inner(
                 input: (*input).clone(),
             })
             .collect();
+        // What each executing call is, for the marker the scratch writes
+        // when it starts: after the commit above the scratch is empty, so
+        // this is what tells a supervisor the turn is off running `bash:
+        // cargo test` rather than sitting idle. The summaries are the
+        // ones already published for these calls — one string, computed
+        // once, wherever it is shown.
+        let executing: std::collections::HashMap<String, (String, String)> = calls
+            .iter()
+            .map(|call| {
+                let summary = acc.published_arguments.get(&call.id).cloned();
+                (
+                    call.id.clone(),
+                    (call.name.clone(), summary.unwrap_or_default()),
+                )
+            })
+            .collect();
         let mut call_ctx = tool_ctx.clone();
         call_ctx.cancel = cancel.clone();
         let received_bytes = acc.tool_received_bytes.clone();
@@ -1777,12 +1825,14 @@ async fn run_turn_inner(
             tokio::select! {
                 biased;
                 Some(lifecycle) = lifecycle_rx.recv() => {
+                    note_execution_start(&mut live, &lifecycle, &executing);
                     events
                         .publish(tool_execution_loop_event(lifecycle, &received_bytes), &cancel)
                         .await;
                 }
                 outcomes = &mut execution => {
                     while let Ok(lifecycle) = lifecycle_rx.try_recv() {
+                        note_execution_start(&mut live, &lifecycle, &executing);
                         events
                             .publish(tool_execution_loop_event(lifecycle, &received_bytes), &cancel)
                             .await;
@@ -1834,6 +1884,7 @@ async fn run_turn_inner(
                 ts: Utc::now(),
             })?;
             output.commit_session_state();
+            live.tool_finished(&outcome.id, !is_error);
             events
                 .publish(
                     LoopEvent::ToolFinished {
