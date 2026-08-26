@@ -235,3 +235,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Fetch less, guess less](issues/fetch-less-guess-less.md)
 - [x] [Talk to your tasks](issues/talk-to-your-tasks.md)
 - [x] [Background by default, for readers](issues/background-by-default-for-readers.md)
+- [x] [Bring your own model](issues/bring-your-own-model.md)

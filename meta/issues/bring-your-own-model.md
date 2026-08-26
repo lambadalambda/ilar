@@ -55,3 +55,26 @@ generalizes it rather than adding a second.
 ## Milestone
 
 13 — Guard rails
+
+## Outcome
+
+`[models.<name>]` → `custom/<name>` over the extracted
+chat-completions core (`provider/chat.rs`, `ChatDialect`): zai
+became a ~40-line newtype keeping its quirks, wire proven
+byte-identical; custom entries get configured URL/wire-id/vision,
+no Authorization when keyless, no tool_stream, and an `options`
+table merged into every body with reserved keys refused at config
+validation. Runtime catalog rows answer through the same `find()`
+surface (strings leaked once at startup — the type every consumer
+passes around stays `&'static ModelInfo`); no pricing → tokens-only
+display; the models tool shows the endpoint host in the price
+slot. Docs cover every field, both worked examples, and what
+custom models don't get. Hardened same-day: `[models.*]` is
+user-scoped — project declarations are warned about and ignored
+wholesale (half-merged entries would pair a project URL with a
+user key). The pre-existing `providers.*` project-override hole is
+filed separately. Residuals: registry rows outlive deleted config
+entries (benign — resolution checks config first); `output` shapes
+the input budget, not generation (`max_tokens` remains settable
+via options); the test http_server is duplicated across two
+integration files.

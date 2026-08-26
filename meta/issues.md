@@ -53,4 +53,4 @@
 ## Milestone 13 — Guard rails
 
 - [ ] [Kernel sandbox for tool processes](issues/kernel-sandbox-for-tool-processes.md)
-- [ ] [Bring your own model](issues/bring-your-own-model.md)
+- [ ] [Provider config is user configuration](issues/provider-config-is-user-configuration.md)
