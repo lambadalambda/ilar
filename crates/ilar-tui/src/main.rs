@@ -13,6 +13,7 @@ mod modals;
 mod questions;
 mod schedule;
 mod selection;
+mod serve;
 mod session_view;
 mod sidebar;
 mod text;
