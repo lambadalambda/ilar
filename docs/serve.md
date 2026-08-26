@@ -14,9 +14,11 @@ anywhere on the machine it supervises every ilar process on it: the TUI,
 `ilar exec`, subagents, all of them, because they all write the same
 append-only JSONL.
 
-Liveness is step-granular. Events land as steps complete, which is what
-the log records; token-by-token streaming would need to be in-process
-and is not what this is.
+Committed events land as steps complete — that is what the log
+records — and the in-flight step streams live on top of them: while a
+turn runs, its text, thinking and tool activity ride an ephemeral
+`.live` scratch beside the log, so the page shows tokens as they
+generate without the server ever joining the writing process.
 
 ## The page
 
