@@ -53,4 +53,3 @@
 ## Milestone 13 — Guard rails
 
 - [ ] [Kernel sandbox for tool processes](issues/kernel-sandbox-for-tool-processes.md)
-- [ ] [Background by default, for readers](issues/background-by-default-for-readers.md)

@@ -234,3 +234,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [The task tool explains itself](issues/the-task-tool-explains-itself.md)
 - [x] [Fetch less, guess less](issues/fetch-less-guess-less.md)
 - [x] [Talk to your tasks](issues/talk-to-your-tasks.md)
+- [x] [Background by default, for readers](issues/background-by-default-for-readers.md)
