@@ -132,6 +132,7 @@ fn spawner_with_mode(
         0,
         max_concurrent,
         max_depth,
+        ProjectInstructions::Include,
     ))
 }
 
@@ -181,6 +182,7 @@ async fn foreground_subagent_receives_user_and_exact_workspace_context() {
             0,
             1,
             1,
+            ProjectInstructions::Include,
         )
         .with_user_config_dir(user.path().to_path_buf()),
     );
@@ -246,9 +248,9 @@ async fn a_refused_project_file_never_reaches_a_subagent() {
             0,
             1,
             1,
+            ProjectInstructions::Skip,
         )
-        .with_user_config_dir(user.path().to_path_buf())
-        .with_project_instructions(ProjectInstructions::Skip),
+        .with_user_config_dir(user.path().to_path_buf()),
     );
     let mut context = ToolContext::root(workspace.path().to_path_buf());
     context.session_id = parent_id;
@@ -315,6 +317,7 @@ async fn invalid_subagent_context_fails_before_creating_a_child_session() {
             0,
             1,
             1,
+            ProjectInstructions::Include,
         )
         .with_user_config_dir(user.path().to_path_buf()),
     );
@@ -606,6 +609,7 @@ async fn mutable_tasks_in_distinct_validated_worktrees_may_overlap() {
         0,
         10,
         3,
+        ProjectInstructions::Include,
     ));
     let workspace_call = |id: &str, cwd: &std::path::Path| ProviderEvent::ToolCallCompleted {
         id: id.into(),
@@ -987,6 +991,7 @@ async fn depth_cap_errors_with_guidance() {
         2,
         10,
         2,
+        ProjectInstructions::Include,
     );
     let registry = ToolRegistry::builtin()
         .with_subagents(Arc::new(deep))
@@ -1008,6 +1013,7 @@ async fn depth_cap_errors_with_guidance() {
                 2,
                 10,
                 2,
+                ProjectInstructions::Include,
             ))),
         )
         .await;
@@ -1130,6 +1136,7 @@ async fn null_task_id_starts_a_new_session_in_a_validated_worktree() {
         0,
         10,
         3,
+        ProjectInstructions::Include,
     ));
     let task = parent_registry(spawner.clone()).get("task").unwrap();
     let mut context = ToolContext::root(root).with_subagents(spawner);
@@ -1247,6 +1254,7 @@ async fn live_chatgpt_generates_a_new_task_call_without_placeholders() {
         0,
         10,
         3,
+        ProjectInstructions::Include,
     ));
     let tools = parent_registry(spawner)
         .definitions()
@@ -1313,6 +1321,7 @@ async fn foreground_subagent_max_iterations_is_error() {
             0,
             10,
             3,
+            ProjectInstructions::Include,
         )
         .with_loop_config(LoopConfig {
             max_iterations: 0,
@@ -1644,6 +1653,7 @@ async fn subagent_turns_use_the_configured_compaction_threshold() {
             0,
             10,
             3,
+            ProjectInstructions::Include,
         )
         .with_loop_config(LoopConfig {
             context_limit: Some(120),
@@ -1906,6 +1916,7 @@ async fn isolated_resume_rejects_a_different_cwd_in_the_same_worktree() {
         0,
         10,
         3,
+        ProjectInstructions::Include,
     ));
     let task = parent_registry(spawner).get("task").unwrap();
     let mut ctx = ToolContext::root(root);
@@ -2030,6 +2041,7 @@ async fn legacy_resume_cannot_adopt_an_isolated_workspace() {
         0,
         10,
         3,
+        ProjectInstructions::Include,
     ));
     let task = parent_registry(spawner).get("task").unwrap();
     let mut ctx = ToolContext::root(root);
@@ -2186,6 +2198,7 @@ async fn subagent_model_override_resolves_its_own_provider() {
         0,
         10,
         3,
+        ProjectInstructions::Include,
     ));
     let task = parent_registry(spawner).get("task").unwrap();
     let mut ctx = ToolContext::root(std::env::temp_dir());
@@ -2255,6 +2268,7 @@ async fn resumed_subagent_uses_its_persisted_model() {
         0,
         10,
         3,
+        ProjectInstructions::Include,
     ));
     let task = parent_registry(spawner).get("task").unwrap();
     let mut ctx = ToolContext::root(std::env::temp_dir());
@@ -2941,6 +2955,7 @@ async fn a_child_inherits_none_of_the_parents_reads() {
         0,
         1,
         1,
+        ProjectInstructions::Include,
     ));
     let mut context = ToolContext::root(workspace.path().to_path_buf());
     context.session_id = parent_id;

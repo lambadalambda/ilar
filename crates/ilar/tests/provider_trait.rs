@@ -179,9 +179,7 @@ async fn thinking_events_stream_and_complete() {
     let provider = MockProvider::new(vec![vec![
         ProviderEvent::ThinkingDelta("hmm".into()),
         ProviderEvent::ThinkingDelta(" hmm".into()),
-        ProviderEvent::ThinkingCompleted {
-            signature: Some("sig123".into()),
-        },
+        ProviderEvent::ThinkingCompleted,
         ProviderEvent::TextDelta("Answer".into()),
         ProviderEvent::TurnComplete {
             stop_reason: StopReason::EndTurn,
@@ -194,8 +192,5 @@ async fn thinking_events_stream_and_complete() {
         events.push(event);
     }
     assert_eq!(events.len(), 5);
-    assert!(matches!(
-        &events[2],
-        ProviderEvent::ThinkingCompleted { signature: Some(s) } if s == "sig123"
-    ));
+    assert!(matches!(&events[2], ProviderEvent::ThinkingCompleted));
 }

@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use futures::{StreamExt, stream};
 use ilar::agent::{LOOP_EVENT_CAPACITY, LoopConfig, TurnOutcome, loop_event_channel, run_turn};
-use ilar::config::{AgentDefinition, AgentWorkspaceMode};
+use ilar::config::{AgentDefinition, AgentWorkspaceMode, ProjectInstructions};
 use ilar::provider::{
     EventStream, FixedProviderResolver, MockProvider, Provider, ProviderEvent, Request, StopReason,
 };
@@ -126,6 +126,43 @@ impl Provider for NotifyingDelayedText {
     }
 }
 
+/// Makes the child run one shell command and then hang, so the child is
+/// still inside its tool when the task is cancelled.
+#[derive(Clone)]
+struct BashThenPending {
+    command: String,
+}
+
+impl Provider for BashThenPending {
+    fn stream(&self, request: Request) -> anyhow::Result<EventStream> {
+        let ran = request.messages.iter().any(|message| {
+            message
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+        });
+        if ran {
+            return Ok(Box::pin(stream::pending()));
+        }
+        Ok(Box::pin(stream::iter(vec![
+            ProviderEvent::ToolCallStarted {
+                id: "bash-1".into(),
+                name: "bash".into(),
+                item_id: None,
+            },
+            ProviderEvent::ToolCallCompleted {
+                id: "bash-1".into(),
+                name: "bash".into(),
+                input: serde_json::json!({"command": self.command}),
+            },
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+                usage: Usage::default(),
+            },
+        ])))
+    }
+}
+
 #[derive(Clone)]
 struct NestedBackgroundProvider {
     worktree: std::path::PathBuf,
@@ -243,6 +280,7 @@ fn unwatched_spawner(
         0,
         10,
         3,
+        ProjectInstructions::Include,
     )
 }
 
@@ -591,6 +629,7 @@ async fn background_subagent_max_iterations_is_error() {
             0,
             10,
             3,
+            ProjectInstructions::Include,
         )
         .with_loop_config(LoopConfig {
             max_iterations: 0,
@@ -1221,6 +1260,7 @@ async fn routed_abort_after_append_is_terminal_instead_of_requeued() {
         0,
         10,
         3,
+        ProjectInstructions::Include,
     ));
     let cancel = tokio_util::sync::CancellationToken::new();
     let routed_spawner = spawner.clone();
@@ -1279,6 +1319,7 @@ async fn routed_notification_requeues_when_the_parent_stays_locked() {
         0,
         10,
         3,
+        ProjectInstructions::Include,
     ));
     // Another turn owns the writer lease for the whole call: the route
     // must give up and hand the notification back instead of spinning.
@@ -2031,6 +2072,62 @@ async fn notification_reinvokes_parent_loop_as_synthetic_user_turn() {
         })
         .unwrap();
     assert!(format!("{:?}", last_user.content).contains("answer from bg"));
+}
+
+/// Cancelling a background task has to reach the tool its child is
+/// running, not just the child's turn: the context the child hands its
+/// tools carries the task-scoped token, so `abort_all` stops a command
+/// already in flight instead of letting it finish detached.
+#[tokio::test]
+async fn cancelling_a_background_task_cancels_the_tool_its_child_runs() {
+    let (store, session_id) = temp_store();
+    let dir = tempfile::tempdir().unwrap();
+    let started = dir.path().join("started");
+    let survived = dir.path().join("survived");
+    let spawner = patient_spawner(
+        Arc::new(BashThenPending {
+            command: format!(
+                "touch {}; sleep 1; touch {}",
+                started.display(),
+                survived.display()
+            ),
+        }),
+        &store,
+    );
+    let _notifications = spawner.subscribe();
+    let registry = ToolRegistry::builtin()
+        .with_subagents(spawner.clone())
+        .unwrap();
+
+    registry
+        .get("task")
+        .unwrap()
+        .run(
+            serde_json::json!({
+                "description": "bg with a slow tool",
+                "prompt": "work",
+                "subagent_type": "explore",
+                "background": true,
+            }),
+            background_tool_context(session_id, spawner.clone(), dir.path()),
+        )
+        .await;
+
+    // Cancel only once the child's tool is genuinely running.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !started.exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("child never started its tool");
+    spawner.abort_all();
+
+    tokio::time::sleep(Duration::from_millis(1400)).await;
+    assert!(
+        !survived.exists(),
+        "the child's tool outlived the cancelled task"
+    );
 }
 
 #[tokio::test]

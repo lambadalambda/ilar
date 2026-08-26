@@ -32,19 +32,38 @@ pub fn format_bytes(bytes: u64) -> String {
 /// How much of a tool result any surface keeps.
 pub const MAX_DETAIL_CHARS: usize = 16 * 1024;
 
-/// Marker appended when [`truncate_detail`] cut something.
+/// Marker appended when [`bounded_detail`] cut something.
 pub const DETAIL_TRUNCATED: &str = "\n… output truncated";
 
-/// Cap a tool detail at [`MAX_DETAIL_CHARS`]. The live row bounds the
-/// text as it streams and the restored row bounds it again on reload;
-/// both call this, so the two halves of a description cannot be cut at
-/// different lengths or marked with different words.
-pub fn truncate_detail(mut detail: String) -> String {
+/// Cap a detail at [`MAX_DETAIL_CHARS`], marker included, so the
+/// result of one call is never long enough for a second one to cut
+/// again: the live row bounds the text as it streams and then bounds
+/// what it was handed once more on the way to the screen, which must
+/// land on the same characters the restored row's single pass keeps.
+fn truncate_detail(mut detail: String) -> String {
     if detail.chars().count() > MAX_DETAIL_CHARS {
-        detail = detail.chars().take(MAX_DETAIL_CHARS).collect();
+        let kept = MAX_DETAIL_CHARS.saturating_sub(DETAIL_TRUNCATED.chars().count());
+        detail = detail.chars().take(kept).collect();
         detail.push_str(DETAIL_TRUNCATED);
     }
     detail
+}
+
+/// The one cap every surface applies to a tool detail: control
+/// characters dropped (newlines and tabs survive), then the text cut to
+/// [`MAX_DETAIL_CHARS`] with [`DETAIL_TRUNCATED`] in place of the rest.
+///
+/// Both the live row and the restored one bound *this* representation —
+/// the raw text, tabs still one character each. A surface that expands
+/// tabs for display does it after, so a tab-heavy result cuts at the
+/// same character however it reached the screen.
+pub fn bounded_detail(text: &str) -> String {
+    truncate_detail(
+        text.chars()
+            .filter(|character| matches!(character, '\n' | '\t') || !character.is_control())
+            .take(MAX_DETAIL_CHARS + 1)
+            .collect::<String>(),
+    )
 }
 
 /// The largest char-boundary index at or below `end`.
@@ -191,6 +210,23 @@ mod tests {
         assert_eq!(truncate_chars_ellipsis("abcd", 3), "abc…");
         assert_eq!(truncate_chars_ellipsis("", 0), "");
         assert_eq!(truncate_chars_ellipsis("éx", 1), "é…");
+    }
+
+    /// The live row bounds a detail and is then handed its own output to
+    /// bound again on the way to the screen; the restored row bounds the
+    /// stored text once. The second pass has to be a no-op, or the two
+    /// cut at different characters.
+    #[test]
+    fn bounding_a_bounded_detail_changes_nothing() {
+        let once = bounded_detail(&"x".repeat(MAX_DETAIL_CHARS * 2));
+        assert_eq!(once.chars().count(), MAX_DETAIL_CHARS);
+        assert!(once.ends_with(DETAIL_TRUNCATED));
+        assert_eq!(bounded_detail(&once), once);
+
+        // Under the cap, control characters go and newlines and tabs stay.
+        let kept = bounded_detail("a\tb\u{7}c\nd");
+        assert_eq!(kept, "a\tbc\nd");
+        assert_eq!(bounded_detail(&kept), kept);
     }
 
     #[test]

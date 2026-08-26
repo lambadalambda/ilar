@@ -333,13 +333,16 @@ fn restored_session_invocation_view(
                         ToolState::Succeeded
                     };
                     // The same markers the live ToolFinished row appended,
-                    // from the same helper: a restored transcript must
-                    // show what the running one did.
-                    *result = Some(format!(
-                        "{}{}",
-                        bounded_detail(content),
+                    // from the same helper — and bounded the way that row
+                    // bounds them: the live path hands the whole
+                    // description, markers included, to `bounded_detail`,
+                    // so a restored transcript that bounded only the text
+                    // would keep a trailing blank line the live row folds
+                    // away (and keep markers a truncated live row drops).
+                    *result = Some(bounded_detail(&format!(
+                        "{content}{}",
                         ilar::image::markers(images)
-                    ));
+                    )));
                     *stored_child_session = child_session_id.clone();
                 }
             }
@@ -469,7 +472,6 @@ mod tests {
                     },
                     ilar::session::ContentBlock::Thinking {
                         text: "hidden thought".into(),
-                        signature: None,
                     },
                     ilar::session::ContentBlock::ReasoningSummary {
                         text: "**Reviewing restored state**\n\nDetails remain collapsed.".into(),
@@ -891,6 +893,126 @@ mod tests {
                 .iter()
                 .any(|line| matches!(line, Line_::Assistant(text) if text == "Later answer"))
         }));
+    }
+
+    /// A tab-heavy result over the cap must read the same whether it
+    /// arrived as a live `ToolFinished` or was reloaded from the log: the
+    /// live row is handed text the agent loop already bounded and bounds
+    /// it again for display, the restored row bounds the stored text
+    /// once, and both cut the raw representation before expanding tabs.
+    #[test]
+    fn an_over_long_tab_heavy_detail_cuts_the_same_live_and_restored() {
+        let raw = "\tname\tvalue\n".repeat(4_000);
+        assert!(raw.chars().count() > ilar::text::MAX_DETAIL_CHARS);
+        let (live, restored) = live_and_restored(&raw, &[]);
+        assert_eq!(live, restored);
+        assert!(live.ends_with("… output truncated"), "{live:?}");
+        assert!(!live.contains('\t'), "tabs are expanded for display");
+
+        // Images ride along on the same string, so they have to be
+        // bounded on the same side of the cut in both paths.
+        let image = ilar::session::ImageContent::png(&[0u8; 128]);
+        let (live, restored) = live_and_restored(&raw, std::slice::from_ref(&image));
+        assert_eq!(live, restored);
+        // A description that ends in a newline is the common case, and
+        // it is where the two used to differ by a blank line.
+        let (live, restored) = live_and_restored("one\ttwo\n", std::slice::from_ref(&image));
+        assert_eq!(live, restored);
+        assert!(live.ends_with(&ilar::image::markers(std::slice::from_ref(&image))));
+    }
+
+    /// The same tool result down both paths: the live row settles what
+    /// the agent loop published, the restored one is rebuilt from the
+    /// log. Returns (live, restored).
+    fn live_and_restored(raw: &str, images: &[ilar::session::ImageContent]) -> (String, String) {
+        // What the agent loop publishes and stores is the same string.
+        let published = format!(
+            "{}{}",
+            ilar::text::bounded_detail(raw),
+            ilar::image::markers(images)
+        );
+        let mut live = vec![Line_::Tool {
+            id: "call-1".into(),
+            group_id: "g".into(),
+            name: "bash".into(),
+            kind: ToolKind::Tool,
+            arguments: String::new(),
+            argument_detail: "{}".into(),
+            diff: Vec::new(),
+            tail: String::new(),
+            result: None,
+            state: ToolState::Running,
+            progress: ToolProgress::None,
+            expanded: false,
+            full: false,
+            child_lines: Vec::new(),
+            child_group: 0,
+            child_running: false,
+            child_session_id: None,
+        }];
+        crate::transcript::finish_tool_row(&mut live, "call-1", false, &published, &None);
+        let Some(Line_::Tool {
+            result: Some(live_result),
+            ..
+        }) = live.first()
+        else {
+            panic!("the live row must have settled");
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(directory.path().join("sessions"));
+        let session_id = new_id();
+        let mut session = store
+            .create(SessionMeta {
+                session_id: session_id.clone(),
+                parent_id: None,
+                agent: "build".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+                cwd: None,
+            })
+            .unwrap();
+        session
+            .append(ilar::session::SessionEvent::AssistantMessage {
+                id: new_id(),
+                model: "zai/glm-4.7".into(),
+                content: vec![ilar::session::ContentBlock::ToolCall {
+                    id: "call-1".into(),
+                    name: "bash".into(),
+                    input: serde_json::json!({ "command": "cat table.tsv" }),
+                    item_id: None,
+                }],
+                usage: Default::default(),
+                stop_reason: "tool_use".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        session
+            .append(ilar::session::SessionEvent::ToolResult {
+                id: new_id(),
+                tool_use_id: "call-1".into(),
+                content: raw.to_string(),
+                is_error: false,
+                images: images.to_vec(),
+                child_session_id: None,
+                state: None,
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        drop(session);
+
+        let restored = restored_session_view(&store.load(&session_id).unwrap());
+        let Some(Line_::Tool {
+            result: Some(restored_result),
+            ..
+        }) = restored
+            .lines
+            .iter()
+            .find(|line| matches!(line, Line_::Tool { .. }))
+        else {
+            panic!("expected a restored tool row: {:?}", restored.lines);
+        };
+        (live_result.clone(), restored_result.clone())
     }
 
     #[test]

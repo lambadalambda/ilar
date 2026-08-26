@@ -518,15 +518,46 @@ fn zai_lists_the_coding_plan_catalog() {
     let model = ilar::model::find("zai/glm-4.7").unwrap();
     assert_eq!(config.input_limit("zai/glm-4.7"), Some(model.input_limit));
 
-    assert!(models.iter().any(|model| model.full_id() == "zai/glm-5.3"));
-    assert!(!models.iter().any(|model| model.full_id() == "zai/glm-4.6"));
-    // The V-series answers on the coding-plan endpoint (verified live
-    // 2026-08-25; models.dev's international record lags).
-    assert!(models.iter().any(|model| model.full_id() == "zai/glm-4.6v"));
+    // Every cataloged z.ai row answers on that endpoint — the V-series
+    // (verified live 2026-08-25) and the rows that used to be listed as
+    // API-only (verified live 2026-08-26) alike — so a keyed config
+    // lists the whole z.ai lineup and nothing is cataloged-but-dark.
+    for id in [
+        "zai/glm-5.3",
+        "zai/glm-5.1",
+        "zai/glm-4.6",
+        "zai/glm-4.5-flash",
+        "zai/glm-4.6v",
+        "zai/glm-5v-turbo",
+    ] {
+        assert!(
+            models.iter().any(|model| model.full_id() == id),
+            "{id} is not listed"
+        );
+    }
+    let listed = models
+        .iter()
+        .filter(|model| model.provider == "zai")
+        .count();
+    let cataloged = ilar::model::catalog()
+        .iter()
+        .filter(|model| model.provider == "zai")
+        .count();
+    assert_eq!(listed, cataloged);
+    // The plan refuses this one (error 1113, "Insufficient balance"), so
+    // it is not in the catalog to be listed.
+    assert!(ilar::model::find("zai/glm-4.7-flashx").is_none());
+
+    // The key is what makes them reachable: a keyless z.ai section lists
+    // nothing at all.
+    let (_keyless_guard, keyless_dir) = tempdir();
+    write(&keyless_dir.join("ilar.toml"), "[providers.zai]\n");
+    let keyless = Loader::no_env().config_dir(keyless_dir).resolve().unwrap();
     assert!(
-        models
+        !keyless
+            .available_models()
             .iter()
-            .any(|model| model.full_id() == "zai/glm-5v-turbo")
+            .any(|model| model.provider == "zai")
     );
 }
 

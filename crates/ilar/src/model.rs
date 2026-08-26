@@ -184,11 +184,6 @@ static PRICING: &[(&str, &str, ModelPricing)] = &[
         "glm-4.7-flash",
         pricing!(0.0, 0.0, Some(0.0), Some(0.0)),
     ),
-    (
-        "zai",
-        "glm-4.7-flashx",
-        pricing!(0.07, 0.4, Some(0.01), Some(0.0)),
-    ),
     ("zai", "glm-5", pricing!(1.0, 3.2, Some(0.2), Some(0.0))),
     (
         "zai",
@@ -396,11 +391,16 @@ impl ModelInfo {
     }
 }
 
+/// How a configuration reaches a row. The z.ai pair is a real
+/// distinction and not a route one: the only route is the coding-plan
+/// endpoint, but `ZaiCodingPlan` marks the models that endpoint serves
+/// *exclusively* — they have no published per-token price, so the UI
+/// shows the plan instead of dollars — while `ZaiBoth` marks the ones
+/// that are also sold through the API and therefore have one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ModelAccess {
     OpenAi,
     OpenAiBoth,
-    Zai,
     ZaiCodingPlan,
     ZaiBoth,
 }
@@ -424,6 +424,18 @@ macro_rules! model {
 // Z.AI, and Z.AI Coding Plan provider records. Image, embedding, realtime,
 // and deprecated models are intentionally excluded. GPT-5.6 coding defaults
 // follow Codex while models.dev remains the source for their maximum windows.
+//
+// Every z.ai row here is one the coding-plan endpoint answers for —
+// that endpoint is the only route, so a row it refuses would be
+// cataloged and permanently dark. The seven that were listed as
+// API-only were probed live on 2026-08-26 with one-token requests:
+// glm-5.1, glm-5, glm-4.6, glm-4.7-flash, glm-4.5-air, glm-4.5 and
+// glm-4.5-flash all replied, so they join the rows already known to
+// answer there. glm-4.7-flashx replied with error 1113 ("Insufficient
+// balance") — the plan does not carry it, so its row and its price are
+// gone rather than listed and unusable. They are `ZaiBoth` rather than
+// `ZaiCodingPlan` because they have published per-token prices: the
+// pair says whether a price exists, not which route serves the model.
 static CATALOG: &[ModelInfo] = &[
     model!(
         "openai",
@@ -654,7 +666,7 @@ static CATALOG: &[ModelInfo] = &[
         ZaiCodingPlan
     ),
     model!("zai", "glm-5.2", "GLM-5.2", 1_000_000, 131_072, ZaiBoth),
-    model!("zai", "glm-5.1", "GLM-5.1", 200_000, 131_072, Zai),
+    model!("zai", "glm-5.1", "GLM-5.1", 200_000, 131_072, ZaiBoth),
     model!(
         "zai",
         "glm-5-turbo",
@@ -663,7 +675,7 @@ static CATALOG: &[ModelInfo] = &[
         131_072,
         ZaiBoth
     ),
-    model!("zai", "glm-5", "GLM-5", 204_800, 131_072, Zai),
+    model!("zai", "glm-5", "GLM-5", 204_800, 131_072, ZaiBoth),
     model!(
         "zai",
         "glm-5v-turbo",
@@ -676,33 +688,32 @@ static CATALOG: &[ModelInfo] = &[
     model!("zai", "glm-4.7", "GLM-4.7", 204_800, 131_072, ZaiBoth),
     model!(
         "zai",
-        "glm-4.7-flashx",
-        "GLM-4.7-FlashX",
-        200_000,
-        131_072,
-        Zai
-    ),
-    model!(
-        "zai",
         "glm-4.7-flash",
         "GLM-4.7-Flash",
         200_000,
         131_072,
-        Zai
+        ZaiBoth
     ),
     model!("zai", "glm-4.6v", "GLM-4.6V", 128_000, 32_768, ZaiBoth).vision(),
-    model!("zai", "glm-4.6", "GLM-4.6", 204_800, 131_072, Zai),
+    model!("zai", "glm-4.6", "GLM-4.6", 204_800, 131_072, ZaiBoth),
     model!("zai", "glm-4.5v", "GLM-4.5V", 64_000, 16_384, ZaiBoth).vision(),
-    model!("zai", "glm-4.5-air", "GLM-4.5-Air", 131_072, 98_304, Zai),
+    model!(
+        "zai",
+        "glm-4.5-air",
+        "GLM-4.5-Air",
+        131_072,
+        98_304,
+        ZaiBoth
+    ),
     model!(
         "zai",
         "glm-4.5-flash",
         "GLM-4.5-Flash",
         131_072,
         98_304,
-        Zai
+        ZaiBoth
     ),
-    model!("zai", "glm-4.5", "GLM-4.5", 131_072, 98_304, Zai),
+    model!("zai", "glm-4.5", "GLM-4.5", 131_072, 98_304, ZaiBoth),
 ];
 
 pub fn catalog() -> &'static [ModelInfo] {

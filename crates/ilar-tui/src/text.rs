@@ -411,13 +411,19 @@ pub(crate) fn safe_lines(text: &str) -> Vec<String> {
     }
 }
 
-/// The restore path's half of the tool-detail bound. The live row uses
-/// `ilar::agent`'s `bounded_tool_detail`; both go through
-/// `ilar::text::truncate_detail`, so the length and the marker are one
-/// definition. (What each feeds it still differs: this one expands tabs
-/// first, so a tab-heavy result can cut at a different character.)
+/// The tool-detail bound, for the live row and the restored one alike.
+/// The cut is `ilar::text::bounded_detail`'s — the same one the agent
+/// loop applied on the way to the session log — and tabs are expanded
+/// only afterwards, for display. Bounding first and expanding second is
+/// what makes a tab-heavy result read identically live and restored:
+/// the live row is handed already-bounded text and re-bounding it is a
+/// no-op, while the restored row bounds the stored text itself.
 pub(crate) fn bounded_detail(text: &str) -> String {
-    ilar::text::truncate_detail(text.lines().map(safe_text).collect::<Vec<_>>().join("\n"))
+    ilar::text::bounded_detail(text)
+        .lines()
+        .map(safe_text)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 pub(crate) fn fuzzy_score(needle: &str, haystack: &str) -> Option<i64> {
     if needle.trim().is_empty() {

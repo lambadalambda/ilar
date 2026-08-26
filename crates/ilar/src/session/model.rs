@@ -56,14 +56,12 @@ pub enum ContentBlock {
     Image {
         image: ImageContent,
     },
-    /// Extended-thinking block. Anthropic-style APIs require passing these
-    /// back on the next request when thinking interleaves with tool use.
+    /// Extended-thinking block. No cataloged provider signs or replays
+    /// these, so the block is the thought and nothing else; sessions
+    /// written when one did carry a `signature` field, which serde
+    /// ignores on load.
     Thinking {
         text: String,
-        /// Signature for verifiable thinking (Anthropic-style); providers
-        /// that don't sign leave it out.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        signature: Option<String>,
     },
     /// Provider-approved reasoning summary shown to the user but never replayed.
     ReasoningSummary {

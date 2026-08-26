@@ -107,16 +107,10 @@ async fn openai_reasoning_runs_close_at_content_and_tool_boundaries() {
     let events = drain(provider.stream(request()).unwrap()).await;
 
     assert_eq!(events[0], ProviderEvent::ThinkingDelta("think-1".into()));
-    assert_eq!(
-        events[1],
-        ProviderEvent::ThinkingCompleted { signature: None }
-    );
+    assert_eq!(events[1], ProviderEvent::ThinkingCompleted);
     assert_eq!(events[2], ProviderEvent::TextDelta("text-1".into()));
     assert_eq!(events[3], ProviderEvent::ThinkingDelta("think-2".into()));
-    assert_eq!(
-        events[4],
-        ProviderEvent::ThinkingCompleted { signature: None }
-    );
+    assert_eq!(events[4], ProviderEvent::ThinkingCompleted);
     assert!(matches!(events[5], ProviderEvent::ToolCallStarted { .. }));
 }
 

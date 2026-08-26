@@ -739,9 +739,7 @@ async fn multi_turn_tool_conversation_end_to_end() {
     let provider = MockProvider::new(vec![
         vec![
             ProviderEvent::ThinkingDelta("plan".into()),
-            ProviderEvent::ThinkingCompleted {
-                signature: Some("sig-plan".into()),
-            },
+            ProviderEvent::ThinkingCompleted,
             ProviderEvent::TextDelta("checking".into()),
             ProviderEvent::ToolCallStarted {
                 id: "t1".into(),
@@ -808,9 +806,7 @@ async fn multi_turn_tool_conversation_end_to_end() {
     ));
     let assistant1 = &transcript[1];
     assert_eq!(assistant1.content.len(), 5);
-    assert!(
-        matches!(&assistant1.content[0], ContentBlock::Thinking { text, .. } if text == "plan")
-    );
+    assert!(matches!(&assistant1.content[0], ContentBlock::Diagnostic { text } if text == "plan"));
     assert!(matches!(&assistant1.content[1], ContentBlock::Text { text } if text == "checking"));
     assert!(matches!(&assistant1.content[2], ContentBlock::ToolCall { id, .. } if id == "t1"));
     assert!(matches!(&assistant1.content[3], ContentBlock::Text { text } if text == "after first"));
@@ -904,18 +900,14 @@ async fn multi_turn_tool_conversation_end_to_end() {
 }
 
 #[tokio::test]
-async fn multiple_thinking_runs_preserve_order_and_signatures() {
+async fn multiple_thinking_runs_preserve_order() {
     let (store, session_id) = temp_session("build");
     let provider = MockProvider::new(vec![vec![
         ProviderEvent::ThinkingDelta("first thought".into()),
-        ProviderEvent::ThinkingCompleted {
-            signature: Some("sig-1".into()),
-        },
+        ProviderEvent::ThinkingCompleted,
         ProviderEvent::TextDelta("between".into()),
         ProviderEvent::ThinkingDelta("second thought".into()),
-        ProviderEvent::ThinkingCompleted {
-            signature: Some("sig-2".into()),
-        },
+        ProviderEvent::ThinkingCompleted,
         ProviderEvent::TextDelta("answer".into()),
         ProviderEvent::TurnComplete {
             stop_reason: StopReason::EndTurn,
@@ -943,14 +935,16 @@ async fn multiple_thinking_runs_preserve_order_and_signatures() {
 
     let transcript = store.load(&session_id).unwrap().transcript();
     let content = &transcript[1].content;
+    // Thinking is never replayed, so each closed run is persisted as the
+    // diagnostic the reader sees — in the order it was streamed.
     assert!(
-        matches!(&content[0], ContentBlock::Thinking { text, signature: Some(signature) }
-        if text == "first thought" && signature == "sig-1")
+        matches!(&content[0], ContentBlock::Diagnostic { text } if text == "first thought"),
+        "{content:?}"
     );
     assert!(matches!(&content[1], ContentBlock::Text { text } if text == "between"));
     assert!(
-        matches!(&content[2], ContentBlock::Thinking { text, signature: Some(signature) }
-        if text == "second thought" && signature == "sig-2")
+        matches!(&content[2], ContentBlock::Diagnostic { text } if text == "second thought"),
+        "{content:?}"
     );
     assert!(matches!(&content[3], ContentBlock::Text { text } if text == "answer"));
 }
@@ -1128,7 +1122,7 @@ async fn unsigned_thinking_is_persisted_as_diagnostic_text() {
     let (store, session_id) = temp_session("build");
     let provider = MockProvider::new(vec![vec![
         ProviderEvent::ThinkingDelta("unfinished".into()),
-        ProviderEvent::ThinkingCompleted { signature: None },
+        ProviderEvent::ThinkingCompleted,
         ProviderEvent::TextDelta("answer".into()),
         ProviderEvent::TurnComplete {
             stop_reason: StopReason::EndTurn,

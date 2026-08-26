@@ -121,10 +121,11 @@ impl StepAccumulator {
         self.content
             .iter()
             .filter_map(|block| match block {
-                ContentBlock::Thinking {
-                    text,
-                    signature: None,
-                } => Some(ContentBlock::Diagnostic { text: text.clone() }),
+                // Thinking is never replayed to a provider, so it is
+                // persisted as what it is to a reader: a diagnostic.
+                ContentBlock::Thinking { text } => {
+                    Some(ContentBlock::Diagnostic { text: text.clone() })
+                }
                 ContentBlock::ReasoningSummary {
                     completed: false, ..
                 } => None,
@@ -147,7 +148,6 @@ impl StepAccumulator {
             None => {
                 self.content.push(ContentBlock::Thinking {
                     text: String::new(),
-                    signature: None,
                 });
                 let index = self.content.len() - 1;
                 self.thinking_open = Some(index);
@@ -159,14 +159,10 @@ impl StepAccumulator {
         }
     }
 
-    fn complete_thinking(&mut self, signature: Option<String>) {
-        if let Some(index) = self.thinking_open.take()
-            && let ContentBlock::Thinking {
-                signature: stored, ..
-            } = &mut self.content[index]
-        {
-            *stored = signature;
-        }
+    /// Closes the open thinking block: the next thinking delta starts a
+    /// new one rather than extending this thought.
+    fn complete_thinking(&mut self) {
+        self.thinking_open = None;
     }
 
     fn push_reasoning_summary(&mut self, delta: String) {
@@ -386,9 +382,11 @@ async fn persist_failed_step(
         ts: Utc::now(),
     })?;
     let result = format!("provider error before execution: {message}");
+    // Every announced call is one of these: the announcement only
+    // happens after `start_tool_call` pushed the block this reads back,
+    // and nothing removes a block. So answering the accumulated calls
+    // answers everything the frontend was told about.
     let calls = acc.tool_calls();
-    let completed_ids: std::collections::HashSet<&str> =
-        calls.iter().map(|(id, _, _, _)| id.as_str()).collect();
     for (id, name, _, _) in &calls {
         session.append(SessionEvent::ToolResult {
             id: new_id(),
@@ -406,28 +404,12 @@ async fn persist_failed_step(
                     id: (*id).clone(),
                     name: (*name).clone(),
                     is_error: true,
-                    result: bounded_tool_detail(&result),
+                    result: crate::text::bounded_detail(&result),
                     child_session_id: None,
                 },
                 cancel,
             )
             .await;
-    }
-    for (id, name) in &acc.announced_calls {
-        if !completed_ids.contains(id.as_str()) {
-            events
-                .publish(
-                    LoopEvent::ToolFinished {
-                        id: id.clone(),
-                        name: name.clone(),
-                        is_error: true,
-                        result: bounded_tool_detail(&result),
-                        child_session_id: None,
-                    },
-                    cancel,
-                )
-                .await;
-        }
     }
     // A failed turn ends like an aborted one for anybody watching the
     // channel — the same outcome every caller synthesizes from the
@@ -836,15 +818,6 @@ pub fn summarize_task_input(input: &serde_json::Value) -> Option<(String, String
     ))
 }
 
-fn bounded_tool_detail(text: &str) -> String {
-    crate::text::truncate_detail(
-        text.chars()
-            .filter(|character| matches!(character, '\n' | '\t') || !character.is_control())
-            .take(crate::text::MAX_DETAIL_CHARS + 1)
-            .collect::<String>(),
-    )
-}
-
 pub fn tool_argument_detail(name: &str, input: &serde_json::Value) -> String {
     fn redact(name: &str, value: &serde_json::Value) -> serde_json::Value {
         match value {
@@ -870,7 +843,9 @@ pub fn tool_argument_detail(name: &str, input: &serde_json::Value) -> String {
         }
     }
     let input = redact(name, input);
-    bounded_tool_detail(&serde_json::to_string_pretty(&input).unwrap_or_else(|_| input.to_string()))
+    crate::text::bounded_detail(
+        &serde_json::to_string_pretty(&input).unwrap_or_else(|_| input.to_string()),
+    )
 }
 
 fn collapse_whitespace(value: &str) -> String {
@@ -1342,8 +1317,8 @@ async fn run_turn_inner(
                             .await;
                         acc.push_thinking(t);
                     }
-                    ProviderEvent::ThinkingCompleted { signature } => {
-                        acc.complete_thinking(signature);
+                    ProviderEvent::ThinkingCompleted => {
+                        acc.complete_thinking();
                     }
                     ProviderEvent::ReasoningSummaryDelta(summary) => {
                         events
@@ -1759,7 +1734,7 @@ async fn run_turn_inner(
                         id: id.clone(),
                         name: name.clone(),
                         is_error,
-                        result: bounded_tool_detail(&content),
+                        result: crate::text::bounded_detail(&content),
                         child_session_id: None,
                     },
                     &cancel,
@@ -1845,7 +1820,7 @@ async fn run_turn_inner(
             // the restored transcript will from the stored event.
             let result = format!(
                 "{}{}",
-                bounded_tool_detail(&content),
+                crate::text::bounded_detail(&content),
                 crate::image::markers(&images)
             );
             session.append(SessionEvent::ToolResult {
@@ -1939,7 +1914,7 @@ mod tests {
 
     #[test]
     fn expanded_tool_details_are_sanitized_and_bounded() {
-        let detail = bounded_tool_detail(&format!("ok\u{1b}[31m{}", "x".repeat(20_000)));
+        let detail = crate::text::bounded_detail(&format!("ok\u{1b}[31m{}", "x".repeat(20_000)));
 
         assert!(!detail.contains('\u{1b}'));
         assert!(detail.ends_with("… output truncated"));

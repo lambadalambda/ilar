@@ -329,7 +329,7 @@ impl OpenAiMapper {
     fn close_thinking(&mut self, events: &mut Vec<ProviderEvent>) {
         if self.thinking_open {
             self.thinking_open = false;
-            events.push(ProviderEvent::ThinkingCompleted { signature: None });
+            events.push(ProviderEvent::ThinkingCompleted);
         }
     }
 

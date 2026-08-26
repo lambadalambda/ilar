@@ -396,12 +396,9 @@ impl RuntimePlan {
                 0,
                 config.subagents.max_concurrent,
                 config.subagents.max_depth,
+                self.project_instructions,
             )
             .with_user_config_dir(config.dirs().0.to_path_buf())
-            // A refused project file stays refused for the agents this
-            // session delegates to: injecting it one level down would
-            // hand back exactly what the launch declined.
-            .with_project_instructions(self.project_instructions)
             .with_background_tool_timeout(std::time::Duration::from_millis(
                 config.subagents.background_tool_timeout_ms,
             ))

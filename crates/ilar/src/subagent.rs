@@ -135,6 +135,10 @@ struct BackgroundRegistry {
 }
 
 impl SubagentSpawner {
+    /// `project_instructions` is stated, never defaulted: a refused
+    /// project file must stay refused for the agents a session delegates
+    /// to, and a constructor default would let a new call site silently
+    /// hand back exactly what the launch declined.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         resolver: Arc<dyn ProviderResolver>,
@@ -144,6 +148,7 @@ impl SubagentSpawner {
         depth: usize,
         max_concurrent: usize,
         max_depth: usize,
+        project_instructions: ProjectInstructions,
     ) -> Self {
         let (notify_tx, notify_rx) = tokio::sync::mpsc::channel(NOTIFICATION_CAPACITY);
         let (activity_tx, _) = tokio::sync::broadcast::channel(ACTIVITY_CAPACITY);
@@ -156,7 +161,7 @@ impl SubagentSpawner {
             store,
             agents,
             user_config_dir: std::path::PathBuf::from("/nonexistent"),
-            project_instructions: ProjectInstructions::Include,
+            project_instructions,
             workspace_location,
             depth,
             max_concurrent,
@@ -185,11 +190,6 @@ impl SubagentSpawner {
 
     pub fn with_user_config_dir(mut self, dir: std::path::PathBuf) -> Self {
         self.user_config_dir = dir;
-        self
-    }
-
-    pub fn with_project_instructions(mut self, project: ProjectInstructions) -> Self {
-        self.project_instructions = project;
         self
     }
 
@@ -790,6 +790,12 @@ impl SubagentSpawner {
                 // abort. Wiring it to `task_cancel` would let the turn
                 // report a plain abort before the select noticed.
                 let cancel = root_cancel.child_token();
+                // The child's own token, not the root's: everything
+                // inside this task stops when the task does. The turn
+                // overrides this for the tools it runs, so the two agree
+                // rather than one of them naming a token that outlives
+                // the task.
+                child_ctx.cancel = cancel.clone();
                 let (tx, mut rx_evt) = loop_event_channel(LOOP_EVENT_CAPACITY);
                 // Activity tracker: any child event counts as progress.
                 let last_activity = Arc::new(Mutex::new(std::time::Instant::now()));
@@ -1010,7 +1016,11 @@ task's scope yourself; continue only clearly disjoint work."
         };
         let job_id = new_id();
         let notification_id = job_id.clone();
-        let background_cancel = tokio_util::sync::CancellationToken::new();
+        // Same shape as a background task: a child of the caller's
+        // token, so one token stands for "this job should stop" — an
+        // interrupted turn takes the job with it, and
+        // `abort_all`/`shutdown` can still cancel it alone.
+        let background_cancel = root_cancel.child_token();
         let task_cancel = background_cancel.clone();
         let workspace = self.workspace.clone();
         {
@@ -1040,7 +1050,6 @@ task's scope yourself; continue only clearly disjoint work."
                         future.await
                     }) => Some(outcome),
                     () = task_cancel.cancelled() => None,
-                    () = root_cancel.cancelled() => None,
                 };
                 let (text, is_error) = match outcome {
                     Some(Ok(output)) if output.is_error => (
@@ -1146,7 +1155,10 @@ task's scope yourself; continue only clearly disjoint work."
             lease = workspace.acquire_lease(workspace_access) => lease,
             () = cancel.cancelled() => return Ok(RouteOutcome::Requeue(notification)),
         };
-        let (leased_location, leased_depth) = match revalidate_after_lease_for_session(
+        // The lease may have been waited on for a while: re-derive the
+        // workspace and make sure it is still the one that was resolved
+        // before the wait.
+        let (leased_location, leased_depth) = match session_workspace_location(
             &self.store,
             &notification.parent_session_id,
             &self.workspace_location,
@@ -1363,14 +1375,6 @@ async fn session_workspace_location(
         location = restored;
     }
     Ok((location, chain.len().saturating_sub(1)))
-}
-
-async fn revalidate_after_lease_for_session(
-    store: &SessionStore,
-    session_id: &str,
-    root: &crate::tools::WorkspaceLocation,
-) -> anyhow::Result<(crate::tools::WorkspaceLocation, usize)> {
-    session_workspace_location(store, session_id, root).await
 }
 
 fn workspace_route_failure(

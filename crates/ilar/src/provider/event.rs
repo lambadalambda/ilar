@@ -21,8 +21,8 @@ pub enum StopReason {
 /// - text: any number of `TextDelta`s; a new text run begins after any
 ///   other event kind (loop segments on non-text boundaries — this is how
 ///   text → tool call → more text round-trips without block ids)
-/// - thinking: `ThinkingDelta`s, then one `ThinkingCompleted` carrying the
-///   provider signature (if any)
+/// - thinking: `ThinkingDelta`s, then one `ThinkingCompleted` closing the
+///   block
 /// - reasoning summaries: `ReasoningSummaryDelta`s, then one
 ///   `ReasoningSummaryCompleted`; summaries are public display text, not hidden
 ///   chain-of-thought or replay state
@@ -41,8 +41,9 @@ pub enum ProviderEvent {
     TextDelta(String),
     /// A chunk of extended thinking (providers may forward none).
     ThinkingDelta(String),
-    /// A thinking block completed; signature if the provider signs.
-    ThinkingCompleted { signature: Option<String> },
+    /// A thinking block completed. No cataloged provider signs its
+    /// thinking, and none replays it, so the event carries nothing.
+    ThinkingCompleted,
     /// A chunk of provider-approved, user-visible reasoning summary text.
     ReasoningSummaryDelta(String),
     /// The current reasoning summary block completed.

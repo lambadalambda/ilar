@@ -1264,6 +1264,38 @@ fn an_event_type_from_a_newer_ilar_is_named_instead_of_called_malformed() {
     assert!(!message.contains("malformed"), "{message}");
 }
 
+/// Sessions written while the z.ai Anthropic flavor existed carry
+/// `"signature"` on their thinking blocks. The field is gone from the
+/// model; those lines must still load, with the thought intact.
+#[test]
+fn a_thinking_block_from_a_signed_session_still_loads() {
+    let (store, _dir) = temp_store();
+    let meta = sample_meta();
+    drop(store.create(meta.clone()).unwrap());
+    let path = store.session_path(&meta.session_id).unwrap();
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    let signed = r#"{"type":"assistant_message","id":"a","model":"zai/glm-4.7","content":[{"type":"thinking","text":"signed thought","signature":"10f-abc"}],"usage":{"input_tokens":1,"output_tokens":2},"stop_reason":"end_turn","ts":"2026-01-01T00:00:00Z"}"#;
+    writeln!(file, "{signed}").unwrap();
+    drop(file);
+
+    let session = store.load(&meta.session_id).expect("signed line must load");
+    let content = session
+        .events()
+        .iter()
+        .find_map(|event| match event {
+            SessionEvent::AssistantMessage { content, .. } => Some(content.clone()),
+            _ => None,
+        })
+        .expect("assistant message");
+    assert!(
+        matches!(&content[0], ContentBlock::Thinking { text } if text == "signed thought"),
+        "{content:?}"
+    );
+}
+
 #[test]
 fn a_known_event_type_with_broken_fields_is_still_malformed() {
     let message = error_for_committed_line("{\"type\":\"user_message\",\"id\":\"a\"}");
