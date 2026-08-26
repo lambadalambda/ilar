@@ -37,8 +37,18 @@ sentence instead of re-explaining the scope to a fresh agent. Resuming is
 guarded: the persisted agent, parent session and workspace must match, and a
 task that is still running refuses a second driver. The read-only `tasks` tool
 lists the current session's tasks (id, agent, model, running or finished, age,
-opening prompt, and a snippet of the last reply) so the agent can find the one
-worth resuming. On wide terminals an `agents` panel in the sidebar shows what
+opening prompt, a snippet of the last reply, and any messages still waiting
+for it) so the agent can find the one worth resuming.
+
+`task_message` talks to a task by id — one verb whether it is running or
+finished, and the sender never needs to know which. A running background task
+receives the message at its next step, exactly the way a steer reaches the
+root turn, and keeps its own result path; a finished task is resumed from its
+transcript with the message as its prompt, worktree and agent recovered from
+its own metadata. A message the task's turn ended before reading is not lost:
+it heads the prompt of that task's next resume, and the `tasks` listing shows
+it as pending until it is actually seen. In the transcript, a delivered
+message appears inside the child's rows at the moment the child saw it. On wide terminals an `agents` panel in the sidebar shows what
 is in flight right now — description, agent, a `bg` marker for detached work,
 and a live elapsed time — and disappears when nothing is running.
 

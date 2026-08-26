@@ -233,3 +233,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [The live turn lives in the store](issues/the-live-turn-lives-in-the-store.md)
 - [x] [The task tool explains itself](issues/the-task-tool-explains-itself.md)
 - [x] [Fetch less, guess less](issues/fetch-less-guess-less.md)
+- [x] [Talk to your tasks](issues/talk-to-your-tasks.md)

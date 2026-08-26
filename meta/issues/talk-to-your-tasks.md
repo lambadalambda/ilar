@@ -42,3 +42,26 @@ strip showing the steer's fate.
 ## Milestone
 
 13 — Guard rails
+
+## Outcome
+
+`task_message` (a sibling tool — a message needs none of task's
+required fields) with the four-way decision table the model never
+sees: live channel → steer at the child's next step (real steer
+receivers wired into both child run_turn call sites; turn.rs
+untouched); active-without-channel → queued with an honest reply;
+finished → resume from transcript with agent/worktree recovered
+from the task's own meta; same-turn foreground → explanatory
+error. Undelivered messages head the next resume — acked only on
+the observed Steered event, put back on drop if a run dies before
+its turn. The tasks listing counts pending messages, and the TUI
+now renders a delivered child steer inside the child's rows at the
+moment it was seen (the "subagents are never steered" comment was
+the last holdout). Review killed two High race findings pre-report.
+Residuals: a message landing at the instant of a kill can repeat
+at the next resume (same shape as root steering; the fix is acking
+inside turn.rs); a never-resumed task holds its queue for the
+process life; notification-routed turns drain the queue into their
+prompt but cannot receive live (their event sender discards —
+documented). The agents-panel steer affordance for the USER
+remains the follow-up. (528f1e0)

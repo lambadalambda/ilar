@@ -1010,8 +1010,11 @@ pub(crate) fn prune_incomplete_thoughts(lines: &mut Vec<Line_>) -> Option<usize>
 
 fn apply_child_loop_event(lines: &mut Vec<Line_>, group: &mut u64, scope: &str, event: &LoopEvent) {
     match event {
-        // Subagents have no interactive user, so they are never steered.
-        LoopEvent::Steered { .. } => {}
+        // A parent's task_message, delivered — shown when the child
+        // actually saw it, like the root's own steers.
+        LoopEvent::Steered { text } => {
+            lines.push(Line_::User(text.clone()));
+        }
         LoopEvent::TextDelta(text) => {
             append_text_delta(lines, text);
         }
