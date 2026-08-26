@@ -230,3 +230,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Sweep deferred decisions](issues/sweep-deferred-decisions.md)
 - [x] [Big tool output spills to disk](issues/big-tool-output-spills-to-disk.md)
 - [x] [ilar serve reads the store](issues/ilar-serve-reads-the-store.md)
+- [x] [The live turn lives in the store](issues/the-live-turn-lives-in-the-store.md)

@@ -51,7 +51,7 @@ handler can forget to check.
 
 | Route | What it returns |
 | --- | --- |
-| `GET /api/sessions` | The listing: `id`, `title`, `cwd`, `agent`, `model`, `parent_id`, `modified`, `state` (`working` / `stalled` / `idle`, derived from the turn's live scratch — not from mtime guessing), and `activity` (the running tool, e.g. `bash: cargo test`) while one is named. Child sessions are excluded. |
+| `GET /api/sessions` | The listing: `id`, `title`, `cwd`, `agent`, `model`, `parent_id`, `modified`, `state` (`working` / `stalled` / `idle`, derived from the turn's live scratch — not from mtime guessing), and `activity` (the running tool, e.g. `bash: cargo test`) while one is named. A long tool run stays `working` — the turn heartbeats the scratch every 20 s while a tool executes — so `stalled` means a genuinely dead or wedged process, not a slow build. Child sessions are excluded. |
 | `GET /api/sessions/{id}?from=&invocation=&limit=` | One page of the transcript, newest page first: `events`, `cursor`, `has_more`, `count`, `line`, `usage`. `?invocation=<tool call id>` narrows to one subagent invocation. |
 | `GET /api/sessions/{id}/events?from=&token=` | The live tail, as SSE. |
 | `GET /api/sessions/{id}/children` | The sessions whose `parent_id` is this one. |

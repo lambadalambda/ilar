@@ -45,7 +45,6 @@
 ## Milestone 11 — Beyond the terminal
 
 - [ ] [A web frontend](issues/web-frontend.md)
-- [ ] [The live turn lives in the store](issues/the-live-turn-lives-in-the-store.md)
 
 ## Milestone 12 — Health sweep
 

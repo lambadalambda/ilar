@@ -56,3 +56,24 @@ polls reads as live.
 ## Milestone
 
 11 — Beyond the terminal
+
+## Outcome
+
+Shipped in four commits (87df0e4 writer, 99fc051 serve, then the
+heartbeat and the mid-step handoff). Generation-stamped scratch
+(the (turn, step) stamp exists because a truncated file can be
+longer at the next poll — length alone splices generations),
+150 ms flushes, truncate per commit, drop-guard deletion,
+self-retirement on IO error, 24 h sweep. Serve tails it with the
+established discipline; SSE delta frames (no id, excluded from
+replay); liveness became working/stalled/idle with the running
+tool named — and the 20 s in-tool heartbeat (a third select!
+branch, timestamp-only touch) makes stalled mean a dead process,
+not a slow build. Mid-step joins get the generation so far in the
+handoff snapshot, which also closed the reconnect hole properly.
+E2E-verified twice in a real browser: text growing with the log
+uncommitted; a cold page arriving 2,531 chars into a live step;
+75 s of sleep holding working; a planted dead scratch reading
+stalled with its last command named. Thinking rides the frames
+ephemerally by design, documented. app.js at 698/700 — the
+framework tripwire is officially the next JS feature's problem.
