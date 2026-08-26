@@ -51,7 +51,7 @@ handler can forget to check.
 
 | Route | What it returns |
 | --- | --- |
-| `GET /api/sessions` | The listing: `id`, `title`, `cwd`, `agent`, `model`, `parent_id`, `modified`, `live`. Child sessions are excluded. |
+| `GET /api/sessions` | The listing: `id`, `title`, `cwd`, `agent`, `model`, `parent_id`, `modified`, `state` (`working` / `stalled` / `idle`, derived from the turn's live scratch — not from mtime guessing), and `activity` (the running tool, e.g. `bash: cargo test`) while one is named. Child sessions are excluded. |
 | `GET /api/sessions/{id}?from=&invocation=&limit=` | One page of the transcript, newest page first: `events`, `cursor`, `has_more`, `count`, `line`, `usage`. `?invocation=<tool call id>` narrows to one subagent invocation. |
 | `GET /api/sessions/{id}/events?from=&token=` | The live tail, as SSE. |
 | `GET /api/sessions/{id}/children` | The sessions whose `parent_id` is this one. |
@@ -82,7 +82,16 @@ event: rewind    data: {"line":43,"to":7,"event":{…}}     (id: 43)
 event: resync    data: {"line":43}
 event: deleted   data: {}
 event: error     data: {"message":"…"}
+event: delta     data: {"type":"text_delta","text":"…"}   (no id)
 ```
+
+`delta` frames stream the in-flight step from the turn's ephemeral
+`.live` scratch: text and thinking as they generate, tool
+started/finished markers. They carry no `id:` and are excluded from
+`Last-Event-ID` replay — the committed event always follows on
+`append`, which is when the client drops its streaming row. Thinking
+text rides these frames ephemerally; it is never persisted and never
+served after the step commits.
 
 `append` and `rewind` are the only two a client folds, and the fold is
 two lines, because `Rewind.to` indexes the canonical stream:
