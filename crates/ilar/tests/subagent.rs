@@ -1308,8 +1308,7 @@ fn task_schema_explains_the_workspace_decision_before_the_first_call() {
         "{description}"
     );
     assert!(
-        description
-            .contains("{\"cwd\": \"../ilar-task-<name>\", \"isolation\": \"git_worktree\"}"),
+        description.contains("{\"cwd\": \"../ilar-task-<name>\", \"isolation\": \"git_worktree\"}"),
         "{description}"
     );
     assert!(
@@ -3433,7 +3432,11 @@ async fn a_message_to_another_sessions_task_is_refused() {
         )
         .await;
     assert!(invented.is_error, "{}", invented.content);
-    assert!(invented.content.contains("unknown task"), "{}", invented.content);
+    assert!(
+        invented.content.contains("unknown task"),
+        "{}",
+        invented.content
+    );
 }
 
 /// A foreground task of the turn the model is in cannot be talked to:
@@ -3511,7 +3514,10 @@ fn task_message_schema_covers_the_running_and_the_finished_case() {
     );
     assert!(description.contains("is not lost"), "{description}");
     assert!(description.contains("foreground"), "{description}");
-    assert_eq!(schema["required"], serde_json::json!(["task_id", "message"]));
+    assert_eq!(
+        schema["required"],
+        serde_json::json!(["task_id", "message"])
+    );
     let task_id = properties["task_id"]["description"].as_str().unwrap();
     assert!(task_id.contains("never invent"), "{task_id}");
     assert!(task_id.contains("tasks tool"), "{task_id}");

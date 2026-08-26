@@ -2324,7 +2324,10 @@ impl Tool for TaskTool {
             Some(example) => format!(
                 "One agent, one bounded scope. Example: {example}. Add a workspace only in the cases described below."
             ),
-            None => "One agent, one bounded scope. Add a workspace only in the cases described below.".to_string(),
+            None => {
+                "One agent, one bounded scope. Add a workspace only in the cases described below."
+                    .to_string()
+            }
         };
         serde_json::json!({
             "type": "object",
@@ -2477,7 +2480,11 @@ impl Tool for TaskMessageTool {
         let spawner = self.spawner.clone();
         Box::pin(async move {
             match parse_task_message(input) {
-                Ok(input) => spawner.message_task_observed(input, &ctx, Some(on_start)).await,
+                Ok(input) => {
+                    spawner
+                        .message_task_observed(input, &ctx, Some(on_start))
+                        .await
+                }
                 Err(error) => error,
             }
         })
@@ -2723,10 +2730,7 @@ mod tests {
         drop(run);
 
         let (_receiver, next) = steers.open("child");
-        assert_eq!(
-            next.prompt("continue"),
-            "look at the migration\n\ncontinue"
-        );
+        assert_eq!(next.prompt("continue"), "look at the migration\n\ncontinue");
     }
 
     #[test]
