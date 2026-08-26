@@ -474,6 +474,17 @@ async fn events(
                     last_line = from;
                 }
             }
+            // After every committed line, because that is where the
+            // running step stands: a connection opened mid-step gets the
+            // row as it already is, then continues it. Unconditional on
+            // resume — deltas carry no id, so a reconnecting client threw
+            // its copy away and needs this one.
+            pending.extend(
+                subscription
+                    .live
+                    .iter()
+                    .map(|delta| named("delta", &project_live_delta(delta))),
+            );
         }
     }
 

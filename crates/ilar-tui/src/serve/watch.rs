@@ -181,6 +181,11 @@ pub(crate) struct Subscription {
     /// The folded canonical view at that line — what the client's
     /// two-line fold (`rewind` → truncate, else push) continues from.
     pub(crate) events: Vec<SessionEvent>,
+    /// What the running step has streamed so far, if one is running.
+    /// Not part of the log and never resumed — but without it, a page
+    /// opened mid-step would show a message that begins wherever the
+    /// reader happened to join.
+    pub(crate) live: Vec<LiveDelta>,
     /// Set when the tail was already over at handoff.
     pub(crate) ended: Option<TailEnd>,
     pub(crate) receiver: broadcast::Receiver<TailMessage>,
@@ -328,11 +333,12 @@ struct TailState {
 #[derive(Debug)]
 struct LiveTail {
     path: PathBuf,
-    /// Lines of the current generation already fanned out (the
-    /// generation's own `turn_started` line included, though it is never
-    /// sent).
-    consumed: usize,
-    /// The `(turn, step)` those lines belong to; `None` when no scratch
+    /// The current generation's deltas, in the order they were fanned
+    /// out. Kept, not just counted, so a subscriber arriving in the
+    /// middle of a step starts with the row every other client is
+    /// already looking at rather than with whatever comes next.
+    current: Vec<LiveDelta>,
+    /// The `(turn, step)` those deltas belong to; `None` when no scratch
     /// is open. Both halves, because a turn that never committed leaves
     /// the next turn starting at step 0 again.
     generation: Option<(String, u64)>,
@@ -342,9 +348,15 @@ impl LiveTail {
     fn open(path: PathBuf) -> Self {
         Self {
             path,
-            consumed: 0,
+            current: Vec::new(),
             generation: None,
         }
+    }
+
+    /// What the running step has said so far — the snapshot a new
+    /// subscriber is handed.
+    fn current(&self) -> &[LiveDelta] {
+        &self.current
     }
 
     fn poll(&mut self) -> Vec<LiveMessage> {
@@ -363,26 +375,28 @@ impl LiveTail {
             return Vec::new();
         };
         let generation = (turn.clone(), *step);
+        // Everything after the generation's own opening line.
+        let content = &deltas[1..];
         let mut messages = Vec::new();
-        if self.generation.as_ref() != Some(&generation) || deltas.len() < self.consumed {
+        if self.generation.as_ref() != Some(&generation) || content.len() < self.current.len() {
             if self.forget() {
                 messages.push(LiveMessage::Reset);
             }
             self.generation = Some(generation);
         }
         messages.extend(
-            deltas[self.consumed..]
+            content[self.current.len()..]
                 .iter()
-                .filter(|delta| !matches!(delta, LiveDelta::TurnStarted { .. }))
-                .map(|delta| LiveMessage::Delta(delta.clone())),
+                .cloned()
+                .map(LiveMessage::Delta),
         );
-        self.consumed = deltas.len();
+        self.current = content.to_vec();
         messages
     }
 
     /// Drop the current generation; `true` when there was one to drop.
     fn forget(&mut self) -> bool {
-        self.consumed = 0;
+        self.current.clear();
         self.generation.take().is_some()
     }
 
@@ -454,6 +468,7 @@ impl Tailer {
         Subscription {
             line: state.tail.line(),
             events: state.tail.events().to_vec(),
+            live: state.live.current().to_vec(),
             ended: state.ended.clone(),
             receiver: self.sender.subscribe(),
         }
@@ -1470,6 +1485,61 @@ mod tests {
         );
     }
 
+    /// A page opened in the middle of a step has to show the row that is
+    /// already on every other screen. The deltas are not resumable, so
+    /// the only place they can come from is the handoff.
+    #[tokio::test]
+    async fn a_subscriber_joining_mid_step_is_handed_the_generation_so_far() {
+        let fixture = fixture();
+        let (id, session) = start(&fixture.store);
+        drop(session);
+        let watcher = Watcher::new(fixture.root.clone(), fast());
+
+        let mut live = scratch(&fixture.store, &id);
+        live.tool_started("bash-1", "bash", "cargo test");
+        live.tool_finished("bash-1", true);
+
+        let mut first = watcher.subscribe(&id).unwrap();
+        assert_eq!(
+            first.live,
+            vec![
+                LiveDelta::ToolStarted {
+                    id: "bash-1".into(),
+                    name: "bash".into(),
+                    summary: "cargo test".into(),
+                },
+                LiveDelta::ToolFinished {
+                    id: "bash-1".into(),
+                    ok: true,
+                },
+            ],
+            "the step so far, not just whatever comes next"
+        );
+
+        // What follows still arrives once, on the channel — the snapshot
+        // and the stream meet without a gap or a repeat, exactly as they
+        // do for the log itself.
+        live.tool_started("read-1", "read", "src/lib.rs");
+        let read = LiveDelta::ToolStarted {
+            id: "read-1".into(),
+            name: "read".into(),
+            summary: "src/lib.rs".into(),
+        };
+        assert_eq!(
+            next(&mut first.receiver).await,
+            TailMessage::Live(LiveMessage::Delta(read.clone()))
+        );
+
+        // And a later subscriber is handed all three.
+        let second = watcher.subscribe(&id).unwrap();
+        assert_eq!(second.live.len(), 3);
+        assert_eq!(second.live[2], read);
+
+        // The commit clears the snapshot with everything else.
+        live.commit();
+        until(|| watcher.subscribe(&id).unwrap().live.is_empty()).await;
+    }
+
     /// Liveness comes off the scratch, not the log: a session written a
     /// moment ago is idle unless something is running it, and a running
     /// turn that has gone quiet is stalled rather than dead.
@@ -1511,6 +1581,22 @@ mod tests {
             state(&watcher),
             (LiveState::Stalled, Some("bash: cargo build".into())),
             "quiet for five minutes, and still says what it is waiting on"
+        );
+
+        // The heartbeat a turn sends while it waits on that tool is what
+        // separates "three minutes into a cargo test" from "the process
+        // died": the same file, still silent, but its clock moving.
+        live.touch();
+        assert_eq!(
+            state(&watcher),
+            (LiveState::Working, Some("bash: cargo build".into())),
+            "a heartbeat brings a quiet turn back from stalled"
+        );
+        age(live.path(), Duration::from_secs(300));
+        assert_eq!(
+            state(&watcher).0,
+            LiveState::Stalled,
+            "and a scratch nobody touches stalls again"
         );
 
         drop(live);

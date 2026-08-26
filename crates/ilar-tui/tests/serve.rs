@@ -480,6 +480,16 @@ async fn a_live_turn_streams_delta_frames_before_its_step_commits() {
     assert_eq!(row["state"], "working");
     assert_eq!(row["activity"], "bash: cargo test");
 
+    // A second connection, opened in the middle of the same step: it is
+    // handed the row as it already stands rather than starting from
+    // whatever the turn says next.
+    let mut joined = Frames::open(&server, &format!("/api/sessions/{id}/events")).await;
+    let frame = joined.next().await;
+    assert_eq!(frame.event, "delta");
+    assert_eq!(frame.data["type"], "tool_started");
+    assert_eq!(frame.data["summary"], "cargo test");
+    drop(joined);
+
     // The step commits: the committed event arrives on the main stream,
     // and the scratch's reset retires the stand-in that preceded it.
     session.append(assistant("all done")).unwrap();
