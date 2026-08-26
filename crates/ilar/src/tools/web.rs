@@ -433,7 +433,10 @@ impl Tool for WebFetchTool {
         "webfetch"
     }
     fn description(&self) -> &'static str {
-        "Fetch a URL and return its content as plain text (HTML converted)."
+        "Fetch a URL and return its content as plain text (HTML converted). \
+         Fetch URLs you were given or that a search returned: guessed URLs \
+         mostly 404. When you do not already have the exact URL, websearch \
+         for the page first and fetch a URL from its results."
     }
     fn concurrency(&self) -> ToolConcurrency {
         ToolConcurrency::Concurrent
@@ -511,7 +514,11 @@ impl Tool for WebFetchTool {
                     }
                 }
                 Ok(response) => ToolOutput::error(bounded_format(
-                    format_args!("webfetch {display_url}: HTTP {}", response.status()),
+                    format_args!(
+                        "webfetch {display_url}: HTTP {}{}",
+                        response.status(),
+                        guessed_url_hint(response.status())
+                    ),
                     MAX_FETCH_ERROR_CHARS,
                 )),
                 Err(error) => ToolOutput::error(bounded_format(
@@ -523,6 +530,19 @@ impl Tool for WebFetchTool {
                 )),
             }
         })
+    }
+}
+
+/// The nudge appended to the two statuses a guessed URL produces. 404 and
+/// 403 are most of webfetch's failures store-wide, and both are worth one
+/// search: a 404 is usually the wrong path, and a 403 is either the wrong
+/// path or a site that will refuse every variant of it too.
+fn guessed_url_hint(status: reqwest::StatusCode) -> &'static str {
+    match status.as_u16() {
+        403 | 404 => {
+            " — the URL may be guessed wrong; websearch for the page instead of retrying variants"
+        }
+        _ => "",
     }
 }
 
@@ -554,7 +574,8 @@ impl Tool for WebSearchTool {
         "websearch"
     }
     fn description(&self) -> &'static str {
-        "Search the web. Returns titles, URLs and snippets."
+        "Search the web. Returns titles, URLs and snippets. Use it to locate \
+         the real pages webfetch should fetch instead of guessing a URL."
     }
     fn concurrency(&self) -> ToolConcurrency {
         ToolConcurrency::Concurrent
@@ -1131,6 +1152,49 @@ mod tests {
             );
             assert!(started.elapsed() < Duration::from_secs(1));
         }
+    }
+
+    /// 404 and 403 are what a guessed URL returns, so those two carry the
+    /// steer — and only those two: a 500 is the server's problem, not the
+    /// URL's, and searching again would not help.
+    #[tokio::test]
+    async fn fetch_404_and_403_steer_toward_websearch() {
+        for status in ["404 Not Found", "403 Forbidden"] {
+            let url = spawn_server(
+                format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
+                Vec::new(),
+                Duration::ZERO,
+                Duration::ZERO,
+            )
+            .await;
+            let output = fetch(&WebFetchTool::for_test(Duration::from_secs(2)), &url).await;
+            assert!(output.is_error, "{}", output.content);
+            assert!(
+                output.content.contains(&format!("HTTP {status}")),
+                "{}",
+                output.content
+            );
+            assert!(output.content.contains("127.0.0.1"), "{}", output.content);
+            assert!(
+                output
+                    .content
+                    .contains("the URL may be guessed wrong; websearch for the page instead of retrying variants"),
+                "{}",
+                output.content
+            );
+        }
+
+        let url = spawn_server(
+            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .into(),
+            Vec::new(),
+            Duration::ZERO,
+            Duration::ZERO,
+        )
+        .await;
+        let output = fetch(&WebFetchTool::for_test(Duration::from_secs(2)), &url).await;
+        assert!(output.is_error, "{}", output.content);
+        assert!(!output.content.contains("websearch"), "{}", output.content);
     }
 
     #[tokio::test]

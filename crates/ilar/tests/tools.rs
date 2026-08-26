@@ -132,6 +132,30 @@ fn web_tools_always_include_websearch() {
     );
 }
 
+/// Steering, not machinery: the two descriptions are the only thing
+/// standing between a model and a fetched guess.
+#[test]
+fn web_tool_descriptions_route_unknown_urls_through_websearch() {
+    let registry = ToolRegistry::builtin().with_web_tools().unwrap();
+
+    let webfetch = registry.get("webfetch").unwrap().description();
+    assert!(webfetch.contains("guessed URLs mostly 404"), "{webfetch}");
+    assert!(
+        webfetch.contains("websearch for the page first"),
+        "{webfetch}"
+    );
+
+    let websearch = registry.get("websearch").unwrap().description();
+    assert!(
+        websearch.contains("the real pages webfetch should fetch"),
+        "{websearch}"
+    );
+    assert!(
+        websearch.contains("instead of guessing a URL"),
+        "{websearch}"
+    );
+}
+
 #[test]
 fn composed_web_registry_has_unique_definitions() {
     let registry = ToolRegistry::builtin().with_web_tools().unwrap();
