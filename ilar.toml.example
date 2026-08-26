@@ -36,6 +36,31 @@ theme = "carbon"
 #   base_url = "https://api.z.ai/api/coding/paas/v4"
 # api_key from ILAR_ZAI_API_KEY (env).
 
+# Your own OpenAI-compatible endpoint (llama.cpp, ollama, vLLM, a
+# gateway...). Each section is one model, reachable as custom/<name>.
+# Required: base_url and context. Everything else is optional.
+#
+# [models.qwen]
+# # Everything up to /chat/completions.
+# base_url = "http://127.0.0.1:8080/v1"
+# # The window the server actually serves: this is what the context meter
+# # and compaction measure against, since no catalog row knows it.
+# context = 32768
+# # Reply budget carved out of context; a quarter of it by default.
+# output = 8192
+# # Wire id, when the server calls the model something else. Defaults to
+# # the section name (ollama, for instance, wants "llama3.3:70b").
+# model = "qwen3-coder"
+# # Omit for a local server: with no key, no Authorization header is sent
+# # at all. There is no env-var fallback for these entries.
+# api_key = "sk-local"
+# vision = false
+# display_name = "Qwen3 Coder (local)"
+# # Extra body fields, merged into every request as typed. The wire owns
+# # model/messages/tools/stream/stream_options; naming one here is an
+# # error at startup.
+# options = { temperature = 0.7, top_p = 0.9, min_p = 0.05 }
+
 [agent]
 # Max provider calls per user turn — a runaway-loop backstop, not a
 # working limit. Long-thinking models need hundreds on big tasks.

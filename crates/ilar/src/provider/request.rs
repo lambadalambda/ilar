@@ -35,6 +35,22 @@ impl Request {
     }
 }
 
+/// Keys of an options table that the wire owns, in a stable order. The
+/// one implementation: a config file checking its own options at startup
+/// and a request checking them at send time must agree on the answer.
+pub(super) fn reserved_conflicts(
+    options: &serde_json::Map<String, serde_json::Value>,
+    reserved: &[&str],
+) -> Vec<String> {
+    let mut conflicts = options
+        .keys()
+        .filter(|key| reserved.contains(&key.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    conflicts.sort();
+    conflicts
+}
+
 pub(super) fn merge_options(
     body: &mut serde_json::Map<String, serde_json::Value>,
     options: &serde_json::Value,
@@ -46,12 +62,7 @@ pub(super) fn merge_options(
         }
         anyhow::bail!("provider options must be an object or null");
     };
-    let mut conflicts = options
-        .keys()
-        .filter(|key| reserved.contains(&key.as_str()))
-        .cloned()
-        .collect::<Vec<_>>();
-    conflicts.sort();
+    let conflicts = reserved_conflicts(options, reserved);
     if !conflicts.is_empty() {
         anyhow::bail!("provider options cannot override: {}", conflicts.join(", "));
     }

@@ -22,6 +22,10 @@ pub struct ModelInfo {
     /// spelling.
     pub(crate) variants: &'static [ModelVariant],
     pub(crate) access: ModelAccess,
+    /// Where a configured row is served from — `host:port` of its base
+    /// URL, shown where a cataloged model shows a price. `None` for
+    /// catalog rows, whose provenance is the provider name.
+    pub(crate) origin: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -349,6 +353,7 @@ impl ModelInfo {
             vision: false,
             variants: NO_VARIANTS,
             access,
+            origin: None,
         }
     }
 
@@ -389,6 +394,12 @@ impl ModelInfo {
     pub fn variants(&self) -> &'static [ModelVariant] {
         self.variants
     }
+
+    /// `host:port` this row is served from, for rows that came from
+    /// configuration rather than the catalog.
+    pub fn origin(&self) -> Option<&'static str> {
+        self.origin
+    }
 }
 
 /// How a configuration reaches a row. The z.ai pair is a real
@@ -403,6 +414,9 @@ pub(crate) enum ModelAccess {
     OpenAiBoth,
     ZaiCodingPlan,
     ZaiBoth,
+    /// A `[models.<name>]` entry. Its configuration *is* its route, so
+    /// there is no reachability question to ask about it.
+    Custom,
 }
 
 /// A base catalog row; capabilities are appended with the builders on
@@ -720,6 +734,95 @@ pub fn catalog() -> &'static [ModelInfo] {
     CATALOG
 }
 
+/// Provider prefix every configured model is addressed under.
+pub const CUSTOM_PROVIDER: &str = "custom";
+
+/// A `[models.<name>]` entry as the catalog needs to see it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RuntimeModel {
+    /// The section name, which is also the id in `custom/<name>`.
+    pub id: String,
+    pub name: String,
+    pub context_limit: u64,
+    pub output_limit: u64,
+    pub vision: bool,
+    /// `host:port` of the endpoint, shown where a price would be.
+    pub origin: String,
+}
+
+/// Rows that came from configuration. Published here rather than kept on
+/// the `Config` so that [`find`] — the one surface every consumer already
+/// reads capabilities through — answers for them exactly as it does for a
+/// catalog row.
+static RUNTIME: std::sync::RwLock<Vec<&'static ModelInfo>> = std::sync::RwLock::new(Vec::new());
+
+/// Publish configured rows and hand back the `&'static` views of them.
+///
+/// The strings are leaked, deliberately and once: configuration lives for
+/// the whole process anyway, and leaking is what keeps [`ModelInfo`] the
+/// plain `Copy`/`&'static` row that the TUI, the models tool and the
+/// subagent registry all already pass around — an owned variant would
+/// have to be threaded through every one of them to say the same thing.
+/// Re-registering a name replaces the published row, so a process that
+/// loads configuration twice — only tests do; a run loads it once — sees
+/// the newer entry here rather than silently keeping the first. The
+/// displaced row stays valid for whoever already holds it, which is the
+/// point of leaking rather than freeing.
+pub(crate) fn register_runtime(models: &[RuntimeModel]) -> Vec<&'static ModelInfo> {
+    let mut registry = RUNTIME.write().expect("runtime model registry");
+    models
+        .iter()
+        .map(|model| {
+            let existing = registry.iter().position(|row| row.id == model.id);
+            if let Some(index) = existing
+                && same_row(registry[index], model)
+            {
+                return registry[index];
+            }
+            let leaked: &'static ModelInfo = Box::leak(Box::new(ModelInfo {
+                provider: CUSTOM_PROVIDER,
+                id: String::leak(model.id.clone()),
+                name: String::leak(model.name.clone()),
+                context_limit: model.context_limit,
+                input_limit: model.context_limit.saturating_sub(model.output_limit),
+                output_limit: model.output_limit,
+                reasoning_summaries: false,
+                vision: model.vision,
+                variants: NO_VARIANTS,
+                access: ModelAccess::Custom,
+                origin: Some(String::leak(model.origin.clone())),
+            }));
+            match existing {
+                Some(index) => registry[index] = leaked,
+                None => registry.push(leaked),
+            }
+            leaked
+        })
+        .collect()
+}
+
+/// Whether a published row already says exactly what this entry says.
+fn same_row(row: &ModelInfo, model: &RuntimeModel) -> bool {
+    row.id == model.id
+        && row.name == model.name
+        && row.context_limit == model.context_limit
+        && row.output_limit == model.output_limit
+        && row.vision == model.vision
+        && row.origin == Some(model.origin.as_str())
+}
+
+fn find_runtime(provider: &str, id: &str) -> Option<&'static ModelInfo> {
+    if provider != CUSTOM_PROVIDER {
+        return None;
+    }
+    RUNTIME
+        .read()
+        .expect("runtime model registry")
+        .iter()
+        .find(|row| row.id == id)
+        .copied()
+}
+
 /// The limit compaction must measure against. Providers reject a request
 /// on its *input* size, not on the whole window, so measuring against
 /// `context_limit` fires after the request is already unsendable — that
@@ -739,12 +842,14 @@ pub fn compaction_limit(model: &ModelInfo) -> u64 {
     model.input_limit.min(model.context_limit)
 }
 
+/// A model by full id, from the catalog or from configuration — the same
+/// answer either way, so nothing downstream has to know which it was.
 pub fn find(full_id: &str) -> Option<&'static ModelInfo> {
-    CATALOG.iter().find(|model| {
-        full_id
-            .split_once('/')
-            .is_some_and(|(provider, id)| provider == model.provider && id == model.id)
-    })
+    let (provider, id) = full_id.split_once('/')?;
+    CATALOG
+        .iter()
+        .find(|model| provider == model.provider && id == model.id)
+        .or_else(|| find_runtime(provider, id))
 }
 
 /// Vision by full id; unknown models refuse conservatively.

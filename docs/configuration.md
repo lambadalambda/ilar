@@ -18,6 +18,7 @@ one is reported in the transcript at startup rather than silently ignored.
 | `providers.openai.auth` | `api_key` | `api_key` or `chatgpt`; see [OpenAI ChatGPT OAuth](#openai-chatgpt-oauth). |
 | `providers.zai.base_url` | `https://api.z.ai/api/coding/paas/v4` | Override the z.ai OpenAI-compatible base URL. |
 | `providers.zai.api_key` | `ILAR_ZAI_API_KEY` | z.ai API key. |
+| `models.<name>.*` | — | Your own OpenAI-compatible endpoint, used as `custom/<name>`. See [Bring your own model](#bring-your-own-model). |
 | `agent.max_iterations` | `1000` | Max provider calls per user turn (runaway-loop backstop). |
 | `compaction.threshold` | `0.85` | Context fraction at which history is handed over; must be between 0 and 1. |
 | `subagents.max_concurrent` | `10` | Maximum concurrent subagents; must be at least 1. |
@@ -42,6 +43,99 @@ the hosted [Exa](https://exa.ai) MCP endpoint anonymously. Keyless access is
 best-effort and rate-limited by Exa, so for real use you should bring your own
 key — either `ILAR_TAVILY_API_KEY` to use Tavily, or `ILAR_EXA_API_KEY` to
 authenticate against Exa. If both are set, Tavily wins.
+
+## Bring your own model
+
+Any server that speaks the OpenAI `/chat/completions` dialect can be a model in
+ilar: llama.cpp, ollama, vLLM, LM Studio, a company gateway, a third-party API.
+Each one is a `[models.<name>]` section, and each one becomes the model id
+`custom/<name>` — selectable in the picker, usable as an agent's `model`, listed
+by the `models` tool.
+
+| Field | Required | Default | Description |
+| --- | --- | --- | --- |
+| `base_url` | yes | — | Everything up to `/chat/completions`, e.g. `http://127.0.0.1:8080/v1`. Must be an `http://` or `https://` URL with a host. |
+| `context` | yes | — | The window the endpoint serves, in tokens. There is no catalog row behind a custom model, so this number is the only thing input budgeting and compaction have; see below. |
+| `model` | no | the section name | The id to put on the wire, when the server calls the model something else (`llama3.3:70b`). |
+| `api_key` | no | none | Sent as `Authorization: Bearer …`. With no key, **no Authorization header is sent at all** — which is what a local server wants. There is no environment-variable fallback for these entries. |
+| `output` | no | a quarter of `context` | Tokens reserved for the reply. A local server's window is one budget shared by prompt and reply, so some of it is held back. |
+| `vision` | no | `false` | Whether the model accepts images. When false, images in the session are replaced with `[image omitted: this model cannot view images]` rather than refused. |
+| `display_name` | no | the section name | Name shown in the picker and the models tool. |
+| `options` | no | none | A table of extra body fields merged into every request to this model. |
+
+`options` is passed through as typed — `temperature = 0.7` arrives as the number
+`0.7`, a string stays a string — and is merged into the request body alongside
+the fields the wire builds itself. Those fields are reserved: `model`,
+`messages`, `tools`, `stream` and `stream_options` cannot appear in `options`,
+and a config that names one is refused at startup rather than mid-turn:
+
+```
+~/.config/ilar/ilar.toml: models.qwen.options cannot override: model, stream
+```
+
+Names are validated too: no slashes (the id already has one), not empty, and not
+`openai`, `zai` or `custom` — a section named after a provider would produce an
+id nothing could resolve.
+
+### Context and compaction
+
+`context` is what the context meter fills and what compaction triggers against.
+The budget is `context - output`, so `context = 32768` with no `output` compacts
+against 24576 tokens at `compaction.threshold`. Declaring more than the server
+actually serves is the failure mode to avoid: requests are rejected at the
+server rather than compacted in time. If the server was started with
+`--ctx-size 32768`, write 32768.
+
+### Two worked examples
+
+llama.cpp, keyless, serving one local model with its own sampling defaults:
+
+```toml
+[models.qwen]
+base_url = "http://127.0.0.1:8080/v1"
+context = 32768
+display_name = "Qwen3 Coder (local)"
+options = { temperature = 0.7, top_p = 0.9, min_p = 0.05 }
+```
+
+ollama, whose wire ids carry a tag the section name should not have to:
+
+```toml
+[models.llama]
+base_url = "http://127.0.0.1:11434/v1"
+model = "llama3.3:70b"
+context = 128000
+output = 8000
+display_name = "Llama 3.3 70B"
+```
+
+Then select either one:
+
+```toml
+[general]
+model = "custom/qwen"
+```
+
+### What custom models do not get
+
+- **No reasoning variants.** `general.reasoning` and an agent's reasoning input
+  are rejected for a `custom/*` model: ilar has no ladder for an endpoint it
+  knows nothing about, and the vocabulary is per-model.
+- **No pricing.** Usage is reported in tokens; there is no cost line, because
+  there is no price list for your own server. The `models` tool prints the
+  endpoint's host where a cataloged model prints its rate — `custom/qwen · ctx
+  32k · 127.0.0.1:8080`.
+- **No cache metrics unless the server reports them.** Cache reads and writes
+  come from the `usage` frames a server sends; llama.cpp and friends generally
+  send none, and a stream with no usage at all completes normally with a zero
+  token count rather than erroring.
+- **No `tool_stream`.** That body field is z.ai's and is not sent here.
+
+Project configuration layers by section name: a `[models.<name>]` in
+`./ilar.toml` replaces a user entry of that name **outright** rather than
+merging into it field by field — an endpoint description is one thing, and a
+project's `base_url` inheriting the user's `api_key` is not a thing to send.
+Entries the project does not name are inherited untouched.
 
 ## OpenAI ChatGPT OAuth
 

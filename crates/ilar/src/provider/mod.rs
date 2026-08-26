@@ -8,6 +8,7 @@ mod request;
 mod sse;
 mod transport;
 
+pub mod chat;
 pub mod openai;
 pub mod zai;
 pub use event::{ProviderEvent, StopReason};

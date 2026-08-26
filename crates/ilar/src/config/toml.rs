@@ -30,6 +30,93 @@ pub struct ProviderConfig {
     pub auth: Option<String>,
 }
 
+/// A `[models.<name>]` entry: one OpenAI-compatible endpoint, reachable
+/// as `custom/<name>`. The escape hatch for llamacpp, ollama and any
+/// third-party service that speaks chat-completions.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CustomModel {
+    /// Everything up to `/chat/completions`, e.g. `http://127.0.0.1:8080/v1`.
+    pub base_url: String,
+    /// Id the endpoint knows the model by, when that is not the section
+    /// name (ollama's `llama3.3:70b`, for one).
+    pub model: Option<String>,
+    /// Local servers need none, and without one the request carries no
+    /// Authorization header at all.
+    pub api_key: Option<String>,
+    /// The window this endpoint serves. Nothing else knows it — there is
+    /// no catalog row to fall back on — so it is what input budgeting and
+    /// compaction measure against.
+    pub context: u64,
+    /// Reply budget carved out of `context`; [`DEFAULT_OUTPUT_FRACTION`]
+    /// of it when unstated.
+    pub output: Option<u64>,
+    /// Whether the model accepts image input.
+    #[serde(default)]
+    pub vision: bool,
+    /// Name shown in the picker and the models tool; the section name
+    /// when unstated.
+    pub display_name: Option<String>,
+    /// Body fields merged into every request to this endpoint —
+    /// `temperature`, `top_p`, whatever the server takes. Keys the wire
+    /// owns are refused when the config is read.
+    pub options: Option<serde_json::Value>,
+}
+
+/// Share of a declared window left for the reply when an entry states no
+/// `output`. A local server's `context` is one budget shared by prompt
+/// and reply, so some of it has to be held back; a quarter is the
+/// conservative reading, in the same spirit as the catalog's windows.
+const DEFAULT_OUTPUT_FRACTION: u64 = 4;
+
+impl CustomModel {
+    /// The catalog row this entry publishes under `custom/<name>`.
+    fn runtime(&self, name: &str) -> crate::model::RuntimeModel {
+        crate::model::RuntimeModel {
+            id: name.to_string(),
+            name: self
+                .display_name
+                .clone()
+                .unwrap_or_else(|| name.to_string()),
+            context_limit: self.context,
+            output_limit: self
+                .output
+                .unwrap_or(self.context / DEFAULT_OUTPUT_FRACTION),
+            vision: self.vision,
+            origin: endpoint_origin(&self.base_url),
+        }
+    }
+
+    /// The wire dialect this entry describes.
+    fn dialect(&self, name: &str) -> crate::provider::chat::ChatDialect {
+        let dialect = crate::provider::chat::ChatDialect::custom(
+            self.base_url.trim_end_matches('/').to_string(),
+            self.model.clone().unwrap_or_else(|| name.to_string()),
+            self.api_key.clone(),
+            self.vision,
+        );
+        match &self.options {
+            Some(options) => dialect.with_options(options.clone()),
+            None => dialect,
+        }
+    }
+}
+
+/// `host:port` of a base URL, for showing where a model is served from.
+/// Never the URL itself: validation has already refused the ones without
+/// a host, and echoing a raw URL would put any `user:pass@` in it on
+/// screen for the sake of a provenance label.
+fn endpoint_origin(base_url: &str) -> String {
+    let host = url::Url::parse(base_url)
+        .ok()
+        .and_then(|url| match (url.host_str(), url.port()) {
+            (Some(host), Some(port)) => Some(format!("{host}:{port}")),
+            (Some(host), None) => Some(host.to_string()),
+            (None, _) => None,
+        });
+    host.unwrap_or_else(|| "unknown host".to_string())
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentConfig {
@@ -108,6 +195,7 @@ fn default_background_tool_timeout_ms() -> u64 {
 struct FileConfig {
     general: Option<GeneralConfig>,
     providers: Option<HashMap<String, ProviderConfig>>,
+    models: Option<HashMap<String, CustomModel>>,
     agent: Option<AgentLayer>,
     compaction: Option<CompactionLayer>,
     subagents: Option<SubagentLayer>,
@@ -229,6 +317,9 @@ fn zai_provider(
 pub struct Config {
     pub general: GeneralConfigResolved,
     pub providers: HashMap<String, ProviderConfigResolved>,
+    /// `[models.<name>]` entries, by name. Their catalog rows are
+    /// published to [`crate::model`]; these are the endpoints behind them.
+    pub models: HashMap<String, CustomModel>,
     pub agent: AgentConfig,
     pub compaction: CompactionConfig,
     pub subagents: SubagentConfig,
@@ -236,6 +327,9 @@ pub struct Config {
     /// the frontend to show. A silently ignored setting reads as a bug
     /// in the program rather than a rule about the setting.
     pub warnings: Vec<String>,
+    /// Catalog rows for `models`, in name order — the listing side of
+    /// what `models` describes.
+    custom_models: Vec<&'static crate::model::ModelInfo>,
     user_dir: PathBuf,
     project_dir: PathBuf,
     state_dir: PathBuf,
@@ -399,6 +493,17 @@ impl Config {
 
         let providers = resolve_providers(&merged, env, PROVIDERS);
 
+        // Configured models join the catalog before anything reads it:
+        // `general.model` may name one, and so may its reasoning check.
+        let models = merged.models.take().unwrap_or_default();
+        let mut names = models.keys().cloned().collect::<Vec<_>>();
+        names.sort();
+        let rows = names
+            .iter()
+            .map(|name| models[name].runtime(name))
+            .collect::<Vec<_>>();
+        let custom_models = crate::model::register_runtime(&rows);
+
         let model = merged
             .general
             .as_ref()
@@ -424,6 +529,8 @@ impl Config {
                 project_instructions: user_project_instructions.unwrap_or(true),
             },
             providers,
+            models,
+            custom_models,
             agent: AgentConfig {
                 max_iterations: merged
                     .agent
@@ -487,15 +594,26 @@ impl Config {
     /// Build a concrete provider for "provider/model-id", or None if the
     /// provider name is unknown.
     pub fn provider_for(&self, model: &str) -> Option<Box<dyn crate::provider::Provider>> {
-        let (provider_name, _model_id) = crate::provider::resolve_model(model).ok()?;
+        let (provider_name, model_id) = crate::provider::resolve_model(model).ok()?;
+        // A configured entry carries its own endpoint, so it needs no
+        // row in the provider table to be reachable.
+        if provider_name == crate::model::CUSTOM_PROVIDER {
+            let entry = self.models.get(model_id)?;
+            return Some(Box::new(crate::provider::chat::ChatProvider::new(
+                entry.dialect(model_id),
+            )));
+        }
         let settings = self.providers.get(provider_name)?;
         let kind = provider_kind(provider_name, PROVIDERS)?;
         (kind.build)(self, settings)
     }
 
-    /// Chat-capable catalog models exposed by currently configured providers.
+    /// Chat-capable models this configuration can reach: the catalog rows
+    /// its providers serve, then the endpoints it declared itself.
     pub fn available_models(&self) -> Vec<&'static crate::model::ModelInfo> {
-        available_models_in(&self.providers, PROVIDERS)
+        let mut models = available_models_in(&self.providers, PROVIDERS);
+        models.extend(self.custom_models.iter().copied());
+        models
     }
 
     /// User + project config dirs (agents searched in both).
@@ -535,6 +653,8 @@ impl Config {
             },
             agent: AgentConfig::default(),
             providers,
+            models: HashMap::new(),
+            custom_models: Vec::new(),
             compaction: CompactionConfig::default(),
             subagents: SubagentConfig::default(),
             warnings: Vec::new(),
@@ -701,6 +821,17 @@ fn merge_file(base: FileConfig, text: &str, origin: &Path) -> anyhow::Result<Fil
             );
         }
     }
+    // Unlike `[providers.*]`, a model entry is replaced whole rather than
+    // merged field by field: it describes one endpoint, and half an
+    // endpoint description — a project's base_url still carrying the
+    // user's api_key — is not something to hand a server. This is the
+    // rule agent definitions follow, by name.
+    if let Some(models) = parsed.models {
+        merged
+            .models
+            .get_or_insert_with(HashMap::new)
+            .extend(models);
+    }
     if let Some(agent) = parsed.agent {
         overlay!(
             merged.agent.get_or_insert_with(AgentLayer::default),
@@ -856,6 +987,92 @@ fn validate_file(config: &FileConfig, origin: &Path) -> anyhow::Result<()> {
     }
     if let Some(providers) = &config.providers {
         validate_providers(providers, origin, PROVIDERS)?;
+    }
+    if let Some(models) = &config.models {
+        validate_models(models, origin, PROVIDERS)?;
+    }
+    Ok(())
+}
+
+/// `[models.<name>]` entries: the name has to be usable as the second
+/// half of a model id, and the endpoint has to be described well enough
+/// to send a request to and to budget a context against. Checked per
+/// file, in name order, so the same config always reports the same first
+/// offender.
+fn validate_models(
+    models: &HashMap<String, CustomModel>,
+    origin: &Path,
+    kinds: &[ProviderKind],
+) -> anyhow::Result<()> {
+    let mut names = models.keys().collect::<Vec<_>>();
+    names.sort();
+    for name in names {
+        let entry = &models[name];
+        anyhow::ensure!(
+            !name.is_empty(),
+            "{}: a model name must not be empty",
+            origin.display()
+        );
+        anyhow::ensure!(
+            !name.contains('/'),
+            "{}: model name {name:?} must not contain a slash",
+            origin.display()
+        );
+        // `custom/openai` would read as the OpenAI provider's, and
+        // `custom/custom` as nothing at all.
+        anyhow::ensure!(
+            provider_kind(name, kinds).is_none() && name != crate::model::CUSTOM_PROVIDER,
+            "{}: model name {name:?} must not be a provider name",
+            origin.display()
+        );
+        // The scheme is checked too: a URL reqwest cannot post to is the
+        // same kind of mistake as a malformed one, and finding out
+        // mid-turn is the thing this function exists to prevent.
+        anyhow::ensure!(
+            url::Url::parse(&entry.base_url)
+                .is_ok_and(|url| url.has_host() && matches!(url.scheme(), "http" | "https")),
+            "{}: models.{name}.base_url must be an http:// or https:// URL",
+            origin.display()
+        );
+        anyhow::ensure!(
+            entry.context > 0,
+            "{}: models.{name}.context must be at least 1",
+            origin.display()
+        );
+        if let Some(output) = entry.output {
+            // Zero is not "no reservation": it would hand the whole
+            // window to the prompt and compact only once the reply had
+            // nowhere to go.
+            anyhow::ensure!(
+                output > 0,
+                "{}: models.{name}.output must be at least 1",
+                origin.display()
+            );
+            anyhow::ensure!(
+                output < entry.context,
+                "{}: models.{name}.output must be below its context",
+                origin.display()
+            );
+        }
+        if let Some(options) = &entry.options {
+            let options = options.as_object().with_context(|| {
+                format!(
+                    "{}: models.{name}.options must be a table",
+                    origin.display()
+                )
+            })?;
+            // Refused here rather than at request time: a body field the
+            // wire owns is a mistake to learn about at startup, not four
+            // turns into a session. The list comes from the dialect that
+            // will send them, so the two cannot drift apart.
+            let conflicts = crate::provider::chat::reserved_conflicts(options);
+            anyhow::ensure!(
+                conflicts.is_empty(),
+                "{}: models.{name}.options cannot override: {}",
+                origin.display(),
+                conflicts.join(", ")
+            );
+        }
     }
     Ok(())
 }
