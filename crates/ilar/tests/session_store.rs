@@ -1758,6 +1758,55 @@ fn list_returns_root_sessions_most_recent_first_with_titles() {
     );
 }
 
+/// The listing is one head read per file; `head` is the same read for
+/// one id. They are one implementation, and this pins that they agree —
+/// a watcher refreshing a single row must see what the listing shows.
+#[test]
+fn head_reads_what_the_listing_reads() {
+    let (store, dir) = temp_store();
+    let mut meta = sample_meta();
+    meta.cwd = Some(dir.path().to_path_buf());
+    let mut session = store.create(meta.clone()).unwrap();
+    session
+        .append(SessionEvent::UserMessage {
+            id: new_id(),
+            text: "  a   question  ".into(),
+            images: Vec::new(),
+            ts: Utc::now(),
+        })
+        .unwrap();
+    drop(session);
+
+    let head = store.head(&meta.session_id).unwrap();
+    let summary = store
+        .list()
+        .into_iter()
+        .find(|session| session.id == meta.session_id)
+        .unwrap();
+    assert_eq!(head.id, summary.id);
+    assert_eq!(head.title, summary.title);
+    assert_eq!(head.title.as_deref(), Some("a question"));
+    assert_eq!(head.modified, summary.modified);
+    assert_eq!(head.meta.cwd, summary.cwd);
+    assert_eq!(head.meta.agent, meta.agent);
+
+    assert_eq!(
+        store.head(&new_id()).unwrap_err().kind(),
+        std::io::ErrorKind::NotFound
+    );
+    // A file that is not a session has no head to read.
+    let headless = new_id();
+    std::fs::write(dir.path().join(format!("{headless}.jsonl")), "not json\n").unwrap();
+    assert_eq!(
+        store.head(&headless).unwrap_err().kind(),
+        std::io::ErrorKind::InvalidData
+    );
+    assert!(
+        !store.list().iter().any(|session| session.id == headless),
+        "and the listing skips it, as before"
+    );
+}
+
 /// The listing is what the resume surfaces group by directory, so the
 /// launch directory the meta records has to survive into the summary —
 /// through the log line it was written to, and back.

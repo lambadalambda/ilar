@@ -24,6 +24,27 @@ Sessions name themselves: after the first completed turn a short topic
 is generated and shown in the title bar, the listing, and the terminal
 window title.
 
+## Following a session as it is written
+
+Because the log is append-only, a second process can read a running
+session without touching it. The rule is the newline: only complete
+lines are events, so a reader takes the file's length, reads exactly
+that many bytes, cuts at the last newline, and leaves a half-written
+line for its next pass. Rewind markers arrive like any other line and
+the reader applies the same fold replay does; the `.replay.*` files
+next to the log are the writer's own cache and no reader consults
+them. Committed lines are never taken back — the only truncation that
+ever happens is a writer repairing its own torn last line, which no
+reader had accepted — so a reader can resume from a line number and
+skip forward.
+
+That reader polls, deliberately. On macOS the filesystem watcher
+(FSEvents) does not report appends made through a file descriptor the
+writer holds open, and ilar's writer holds one for the session's whole
+life: a watch-based follower would show a frozen session and then dump
+the entire conversation when the process exits. Stat is cheap
+(microseconds), so a few polls a second is both simpler and correct.
+
 ## Compaction: handover, not amnesia
 
 Past `compaction.threshold`, ilar replaces the conversation with a

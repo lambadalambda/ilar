@@ -135,12 +135,14 @@ pub struct SessionSummary {
 }
 
 /// A session file's head: enough to summarize it without reading the
-/// whole log.
-struct SessionHead {
-    id: String,
-    meta: SessionMeta,
-    title: Option<String>,
-    modified: std::time::SystemTime,
+/// whole log. The listing is this read applied to every file in the
+/// root; [`SessionStore::head`] is the same read for one id.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionHead {
+    pub id: String,
+    pub meta: SessionMeta,
+    pub title: Option<String>,
+    pub modified: std::time::SystemTime,
 }
 
 /// One subagent task belonging to a session.
@@ -162,6 +164,69 @@ const SUMMARY_TITLE_CHARS: usize = 80;
 fn summary_title(text: &str) -> String {
     let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
     truncate_chars_ellipsis(&collapsed, SUMMARY_TITLE_CHARS)
+}
+
+/// A directory entry's head, or `None` for anything that is not a
+/// readable session file — the listing skips those by construction.
+fn scan_head(entry: &std::fs::DirEntry) -> Option<SessionHead> {
+    let name = entry.file_name();
+    let id = name.to_str()?.strip_suffix(".jsonl")?.to_string();
+    SessionId::parse(&id).ok()?;
+    let modified = entry.metadata().ok()?.modified().ok()?;
+    read_head(&entry.path(), id, modified)
+}
+
+fn summarize_entry(entry: &std::fs::DirEntry) -> Option<SessionSummary> {
+    let head = scan_head(entry)?;
+    if head.meta.parent_id.is_some() {
+        return None;
+    }
+    Some(SessionSummary {
+        id: head.id,
+        title: head.title,
+        modified: head.modified,
+        cwd: head.meta.cwd,
+    })
+}
+
+/// Parse a session file's head: its metadata and opening prompt,
+/// without loading the whole log.
+fn read_head(
+    path: &std::path::Path,
+    id: String,
+    modified: std::time::SystemTime,
+) -> Option<SessionHead> {
+    let file = File::open(path).ok()?;
+    let head = std::io::BufReader::new(file.take(SUMMARY_SCAN_BYTES));
+    let mut lines = std::io::BufRead::lines(head);
+    let meta_line = lines.next()?.ok()?;
+    let SessionEvent::Meta { meta, .. } = serde_json::from_str(&meta_line).ok()? else {
+        return None;
+    };
+    // A generated topic beats the opening message, which is often a
+    // stack trace or "hey can you look at something".
+    let mut opening = None;
+    let mut topic = None;
+    for event in lines
+        .take(SUMMARY_SCAN_EVENTS)
+        .map_while(|line| line.ok())
+        .filter_map(|line| serde_json::from_str::<SessionEvent>(&line).ok())
+    {
+        match event {
+            SessionEvent::Topic { text, .. } => topic = Some(summary_title(&text)),
+            SessionEvent::UserMessage { text, .. } if opening.is_none() => {
+                opening = Some(summary_title(&text));
+            }
+            _ => {}
+        }
+    }
+    let title = topic.or(opening);
+    Some(SessionHead {
+        id,
+        meta,
+        title,
+        modified,
+    })
 }
 
 impl SessionStore {
@@ -186,11 +251,7 @@ impl SessionStore {
         let id = SessionId::parse(id)?;
         let path = self.session_path_for(&id);
         let bytes = std::fs::read(&path)?;
-        let complete_len = bytes
-            .iter()
-            .rposition(|byte| *byte == b'\n')
-            .map_or(0, |position| position + 1);
-        parse_event_bytes(&bytes[..complete_len], id.as_str(), 0)
+        parse_event_bytes(&bytes[..committed_len(&bytes)], id.as_str(), 0)
     }
 
     pub fn acquire_writer(&self, id: &str) -> std::io::Result<SessionWriter> {
@@ -279,7 +340,7 @@ impl SessionStore {
         };
         let mut sessions: Vec<SessionSummary> = entries
             .flatten()
-            .filter_map(|entry| self.summarize_entry(&entry))
+            .filter_map(|entry| summarize_entry(&entry))
             .collect();
         sessions.sort_by(|left, right| {
             right
@@ -304,7 +365,7 @@ impl SessionStore {
         };
         let mut children: Vec<(std::time::SystemTime, ChildSummary)> = entries
             .flatten()
-            .filter_map(|entry| self.scan_head(&entry))
+            .filter_map(|entry| scan_head(&entry))
             .filter(|head| head.meta.parent_id.as_deref() == Some(parent_id))
             .map(|head| {
                 (
@@ -328,56 +389,19 @@ impl SessionStore {
         children.into_iter().map(|(_, child)| child).collect()
     }
 
-    fn summarize_entry(&self, entry: &std::fs::DirEntry) -> Option<SessionSummary> {
-        let head = self.scan_head(entry)?;
-        if head.meta.parent_id.is_some() {
-            return None;
-        }
-        Some(SessionSummary {
-            id: head.id,
-            title: head.title,
-            modified: head.modified,
-            cwd: head.meta.cwd,
-        })
-    }
-
-    /// Parse a session file's head: its metadata and opening prompt,
-    /// without loading the whole log.
-    fn scan_head(&self, entry: &std::fs::DirEntry) -> Option<SessionHead> {
-        let name = entry.file_name();
-        let id = name.to_str()?.strip_suffix(".jsonl")?.to_string();
-        SessionId::parse(&id).ok()?;
-        let modified = entry.metadata().ok()?.modified().ok()?;
-        let file = File::open(entry.path()).ok()?;
-        let head = std::io::BufReader::new(file.take(SUMMARY_SCAN_BYTES));
-        let mut lines = std::io::BufRead::lines(head);
-        let meta_line = lines.next()?.ok()?;
-        let SessionEvent::Meta { meta, .. } = serde_json::from_str(&meta_line).ok()? else {
-            return None;
-        };
-        // A generated topic beats the opening message, which is often a
-        // stack trace or "hey can you look at something".
-        let mut opening = None;
-        let mut topic = None;
-        for event in lines
-            .take(SUMMARY_SCAN_EVENTS)
-            .map_while(|line| line.ok())
-            .filter_map(|line| serde_json::from_str::<SessionEvent>(&line).ok())
-        {
-            match event {
-                SessionEvent::Topic { text, .. } => topic = Some(summary_title(&text)),
-                SessionEvent::UserMessage { text, .. } if opening.is_none() => {
-                    opening = Some(summary_title(&text));
-                }
-                _ => {}
-            }
-        }
-        let title = topic.or(opening);
-        Some(SessionHead {
-            id,
-            meta,
-            title,
-            modified,
+    /// One session's head by id: its metadata and title, without
+    /// loading the log. Same read [`Self::list`] performs per file.
+    pub fn head(&self, id: &str) -> std::io::Result<SessionHead> {
+        let parsed = SessionId::parse(id)?;
+        let path = self.session_path_for(&parsed);
+        // lstat, matching what the listing reads off its directory
+        // entries: the two must not disagree about a session's mtime.
+        let modified = std::fs::symlink_metadata(&path)?.modified()?;
+        read_head(&path, parsed.as_str().to_string(), modified).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("session {parsed}: unreadable head"),
+            )
         })
     }
 
@@ -717,7 +741,20 @@ fn read_indexed_replay(
     })
 }
 
-fn parse_event_bytes(
+/// Where the newline-committed prefix of `bytes` ends. A trailing
+/// partial line is not a record yet — every reader in this module cuts
+/// here before parsing, which is what makes a torn tail harmless.
+pub(super) fn committed_len(bytes: &[u8]) -> usize {
+    bytes
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |position| position + 1)
+}
+
+/// Parse committed JSONL bytes into events, naming any bad line by its
+/// physical position (`line_offset` lines precede `bytes` in the file).
+/// Shared with the incremental reader in [`super::tail`].
+pub(super) fn parse_event_bytes(
     bytes: &[u8],
     id: &str,
     line_offset: usize,
@@ -784,10 +821,7 @@ fn read_events(
     {
         return invalid_replay(id, "session changed during canonical replay");
     }
-    let complete_len = bytes
-        .iter()
-        .rposition(|byte| *byte == b'\n')
-        .map_or(0, |position| position + 1);
+    let complete_len = committed_len(&bytes);
     let committed = &bytes[..complete_len];
     // Every committed line, counted before rewinds fold any of them away:
     // this is what a later tail-parse diagnostic offsets its line numbers
@@ -859,7 +893,7 @@ fn replay_state(
 /// already-folded stream, since markers are appended against the folded
 /// view — and disappears itself. `truncate` tolerates an out-of-range
 /// `to` from a damaged file by keeping everything.
-fn fold_rewinds(events: Vec<SessionEvent>) -> Vec<SessionEvent> {
+pub(super) fn fold_rewinds(events: Vec<SessionEvent>) -> Vec<SessionEvent> {
     if !events
         .iter()
         .any(|event| matches!(event, SessionEvent::Rewind { .. }))
