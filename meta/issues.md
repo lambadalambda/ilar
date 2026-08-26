@@ -45,6 +45,7 @@
 ## Milestone 11 — Beyond the terminal
 
 - [ ] [A web frontend](issues/web-frontend.md)
+- [ ] [ilar serve reads the store](issues/ilar-serve-reads-the-store.md)
 
 ## Milestone 12 — Health sweep
 
