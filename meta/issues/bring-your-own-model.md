@@ -31,9 +31,15 @@ generalizes it rather than adding a second.
   unchanged — config lives for the process anyway). No pricing →
   the existing tokens-only display. Listed by the models tool and
   the picker like any model.
+- `options` (added 2026-08-27): an arbitrary per-model TOML table
+  (`temperature`, `top_p`, …) merged into every request body via
+  the existing `merge_options` path; reserved wire keys refused at
+  config validation, not at request time. Custom entries only.
 - Validation errors in the config voice (the PROVIDERS table's
   wording conventions); docs/configuration.md gains the section
-  with a llamacpp and an ollama example.
+  with a llamacpp and an ollama example, every field's
+  default/required status, the options rules, and an explicit list
+  of what custom models do not support (variants, pricing).
 
 ## Acceptance Criteria
 
