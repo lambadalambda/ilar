@@ -226,3 +226,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [The render cache clones the world](issues/the-render-cache-clones-the-world.md)
 - [x] [Sweep cleanups](issues/sweep-cleanups.md)
 - [x] [Skip the project instructions](issues/skip-the-project-instructions.md)
+- [x] [Edits gate on what the model has seen](issues/edits-gate-on-what-the-model-has-seen.md)

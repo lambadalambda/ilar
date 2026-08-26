@@ -57,4 +57,3 @@ Follow-ups:
 ## Milestone 13 — Guard rails
 
 - [ ] [Kernel sandbox for tool processes](issues/kernel-sandbox-for-tool-processes.md)
-- [ ] [Edits gate on what the model has seen](issues/edits-gate-on-what-the-model-has-seen.md)

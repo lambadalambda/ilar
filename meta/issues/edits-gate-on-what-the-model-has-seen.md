@@ -47,3 +47,25 @@ exact-match contract).
 ## Milestone
 
 13 — Guard rails
+
+## Outcome
+
+`SeenFiles` (Arc-shared per session, canonical paths, SHA-256,
+16 MiB cap aligned with edit's own limit) records on text reads
+(whole-file hash even for windowed reads; binary/image reads never
+license edits), writes, and successful edits; children start blind;
+the map clears when the *identity* of the latest compaction event
+changes — a count would freeze at 1 because checkpoint rebuilds
+drop all but the newest Compaction (caught in review, verified
+red). Edit refuses unread and changed-since files with distinct
+actionable wordings. No-match errors show the nearest
+whitespace-normalized region with line numbers (bounded: 20-line
+probe, 5k-line scan, 400-byte line cap) or say nothing is close.
+`N→` contamination is named per field on the no-match path, and the
+destructive variant — clean old_string matching, prefixed
+new_string — is refused pre-write under the asymmetric rule (two
+adjacent consecutive-numbered lines in new only; symmetric
+prefixes and single cited examples still edit; write stays the
+escape hatch). 29+5 tests. Accepted nit for later: the hash is a
+second full read pass — incremental hashing off the open reader
+would also close a narrow TOCTOU.
