@@ -36,3 +36,23 @@ never explains the workspace options up front.
 ## Milestone
 
 13 — Guard rails
+
+## Outcome
+
+The schema now teaches the decision before the first call: agent
+type fixes tools and writability; same checkout = mutable tasks
+serialize behind the write lease, each sees the last one's edits,
+nothing merges (dependent work); separate worktrees = parallel,
+you merge (independent work); the exact `git worktree add`
+incantation and input shape inline, with the example naming an
+agent configured in THIS install. Both dominant errors quote one
+shared corrective shape. **Auto-provisioning: investigated and
+rejected** — a mutable task's product is its worktree diff, so an
+ilar-created-and-removed worktree silently discards work behind a
+success string, retention would mean sweeping uncommitted work on
+heuristics, and `worktree add` mutates the parent repo unasked; the
+error-plus-recipe is strictly better. The worktree-isolation skill's
+contradicting line fixed alongside. Recorded residual: a relative
+workspace.cwd canonicalizes against the process cwd, not the
+location (pre-existing; works because worktrees are conventionally
+siblings).

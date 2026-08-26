@@ -231,3 +231,5 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Big tool output spills to disk](issues/big-tool-output-spills-to-disk.md)
 - [x] [ilar serve reads the store](issues/ilar-serve-reads-the-store.md)
 - [x] [The live turn lives in the store](issues/the-live-turn-lives-in-the-store.md)
+- [x] [The task tool explains itself](issues/the-task-tool-explains-itself.md)
+- [x] [Fetch less, guess less](issues/fetch-less-guess-less.md)

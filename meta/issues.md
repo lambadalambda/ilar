@@ -53,7 +53,5 @@
 ## Milestone 13 — Guard rails
 
 - [ ] [Kernel sandbox for tool processes](issues/kernel-sandbox-for-tool-processes.md)
-- [ ] [The task tool explains itself](issues/the-task-tool-explains-itself.md)
-- [ ] [Fetch less, guess less](issues/fetch-less-guess-less.md)
 - [ ] [Talk to your tasks](issues/talk-to-your-tasks.md)
 - [ ] [Background by default, for readers](issues/background-by-default-for-readers.md)

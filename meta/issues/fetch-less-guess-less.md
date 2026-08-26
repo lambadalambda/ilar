@@ -25,3 +25,11 @@ store. The machinery is fine; the steering is absent.
 ## Milestone
 
 13 — Guard rails
+
+## Outcome
+
+webfetch's description says guessed URLs mostly 404 and routes
+URL-finding through websearch; websearch says it exists to feed
+webfetch; 404/403 errors append the nudge (other statuses
+untouched). No machinery — steering only, to be re-measured with
+the store-scan method after real use.
