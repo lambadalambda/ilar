@@ -476,6 +476,11 @@ impl Config {
             .as_ref()
             .and_then(|general| general.project_instructions);
         let mut warnings = Vec::new();
+        // Model endpoints are user configuration, never a project's: a
+        // cloned repository must not be able to route the conversation —
+        // prompts, code, tool output — to an endpoint it chose.
+        let user_models = merged.models.clone();
+        let mut project_declared_models = false;
         for path in [
             project_dir.join("ilar.toml"),
             project_dir.join(".ilar/ilar.toml"),
@@ -487,8 +492,18 @@ impl Config {
                         path.display()
                     ));
                 }
+                if declares_models(&text) {
+                    project_declared_models = true;
+                    warnings.push(format!(
+                        "{}: [models] is user configuration and is ignored in project config",
+                        path.display()
+                    ));
+                }
                 merged = merge_file(merged, &text, &path)?;
             }
+        }
+        if project_declared_models {
+            merged.models = user_models;
         }
 
         let providers = resolve_providers(&merged, env, PROVIDERS);
@@ -770,6 +785,14 @@ fn user_scoped_general_keys(text: &str) -> Vec<&'static str> {
     .filter(|(_, declared)| *declared)
     .map(|(key, _)| key)
     .collect()
+}
+
+/// Whether a config layer declares `[models.*]` entries at all.
+fn declares_models(text: &str) -> bool {
+    toml::from_str::<FileConfig>(text)
+        .ok()
+        .and_then(|parsed| parsed.models)
+        .is_some_and(|models| !models.is_empty())
 }
 
 fn read_config_file(path: &Path) -> anyhow::Result<Option<String>> {
