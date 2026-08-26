@@ -48,11 +48,7 @@
 
 ## Milestone 12 — Health sweep
 
-Refactors:
-
-- [ ] [Sweep deferred decisions](issues/sweep-deferred-decisions.md)
-
-Follow-ups:
+(all complete — see issues_archive.md)
 
 ## Milestone 13 — Guard rails
 

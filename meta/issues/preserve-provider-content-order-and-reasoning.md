@@ -18,3 +18,7 @@ The agent reorders streamed content blocks and drops opaque OpenAI reasoning ite
 - A two-request OpenAI Responses tool round-trip includes prior reasoning items.
 - Anthropic signature deltas concatenate and valid signatures round-trip.
 - Tests cover thinking-text-tool-text and z.ai reasoning completion boundaries.
+
+> Historical note (2026-08-26): thinking `signature` preservation
+> described here was removed with the zai Anthropic flavor — see
+> sweep-deferred-decisions.
