@@ -101,3 +101,24 @@ record is the tracker).
 ## Milestone
 
 11 — Beyond the terminal
+
+## Outcome
+
+Shipped across six slices, each reviewed and committed separately
+(cd903a8 tail reader, 9c12639 projection, 32d8dd2 supervisor+API,
+this commit the page+docs). The probes drove everything: polling
+because FSEvents is blind to held-fd appends, a dedicated
+incremental reader because load() fails 86.6% under a live writer,
+snapshot handoff, line-numbered SSE resume. The page is 649 lines
+of framework-free JS (tripwire 700), textContent-only, verified in
+a real browser: live appends, rewind folding with a divider,
+compaction cut, image thumbnails, nested child transcripts, and
+all four token paths. Design deviations, all reviewed: `Rewound`
+carries the marker event (the wire needs its id/ts); assets are
+public under token auth (the fragment cannot ride the first
+request — data routes stay gated); the list has title only (topic
+folds into it). Recorded residuals: the list view rebuilds DOM
+every 3s (keyed patching if keyboard nav arrives); watcher could
+reuse an exposed read_head; LIVE_WINDOW untestable-false;
+notification-routed child sessions tail fine (they are ordinary
+files). Phase 3 — interaction — remains with the parent issue.

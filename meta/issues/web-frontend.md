@@ -50,6 +50,10 @@ gets there, not a commitment to that feature list.
 
 ## Phasing
 
+> Status 2026-08-26: phase 1 (`ilar exec`) and phase 2 (`ilar
+> serve`, read-only — see ilar-serve-reads-the-store) are done.
+> Phase 3 (interaction) is the open remainder of this issue.
+
 1. **`ilar exec`** — headless one-shot. Small, useful on its own, and
    it forces the core to prove it is drivable without a TUI, which is
    where the coupling shows.
