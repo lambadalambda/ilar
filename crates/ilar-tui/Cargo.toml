@@ -24,6 +24,13 @@ unicode-width = { workspace = true }
 unicode-segmentation = { workspace = true }
 arboard = { version = "3.6", default-features = false, features = ["wayland-data-control", "image-data"] }
 serde_json.workspace = true
+serde.workspace = true
+# `ilar serve`, the read-only web view. Minimal axum: no http2, no
+# form/multipart/ws, no tracing — the router is GET-only by design.
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "query"] }
+base64 = "0.23"
+getrandom = "0.4"
 
 [dev-dependencies]
 tempfile = "3"
+reqwest = { workspace = true }

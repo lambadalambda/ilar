@@ -88,6 +88,24 @@ enum Command {
     Login,
     /// Run one turn without a terminal and print the answer
     Exec(ExecArgs),
+    /// Read the session store over HTTP (read-only, no turns run)
+    Serve(ServeArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct ServeArgs {
+    /// Address to bind. Anything but loopback requires a token.
+    #[arg(long, default_value = "127.0.0.1:7777")]
+    bind: std::net::SocketAddr,
+
+    /// Open the page in a browser once the server is up.
+    #[arg(long)]
+    open: bool,
+
+    /// Session tail poll interval in milliseconds (default 250);
+    /// overrides ILAR_SERVE_POLL_MS.
+    #[arg(long)]
+    poll_ms: Option<u64>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -977,6 +995,20 @@ async fn main() -> Result<()> {
     if let Some(Command::Exec(exec_args)) = args.command {
         let code = run_exec(&config, exec_args).await?;
         std::process::exit(code);
+    }
+    // Serving reads the store and only the store: it takes the state
+    // directory out of the config and stops there, so a machine with no
+    // provider configured can still browse what it already recorded.
+    if let Some(Command::Serve(serve_args)) = args.command {
+        return serve::run(
+            config.state_dir(),
+            serve::ServeOptions {
+                bind: serve_args.bind,
+                open: serve_args.open,
+                poll_ms: serve_args.poll_ms,
+            },
+        )
+        .await;
     }
     if let Some(Command::Login) = args.command {
         let store = ilar::auth::AuthStore::open(config.state_dir().to_path_buf());
