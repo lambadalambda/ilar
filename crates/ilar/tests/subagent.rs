@@ -1225,6 +1225,213 @@ fn task_schema_guides_new_calls_without_placeholder_routing_values() {
     assert!(!subagent.contains("Prefer explore"), "{subagent}");
 }
 
+/// The workspace model has to be legible before the first call, not after
+/// it: both branches of the decision, what each buys, and the exact input
+/// the isolated branch takes.
+#[test]
+fn task_schema_explains_the_workspace_decision_before_the_first_call() {
+    let (store, _) = temp_store();
+    let task = parent_registry(spawner(Arc::new(MockProvider::new(vec![])), &store, 10, 3))
+        .get("task")
+        .unwrap();
+    let schema = task.input_schema();
+    let description = task.description();
+
+    assert!(
+        description.contains("subagent_type names the agent"),
+        "{description}"
+    );
+    assert!(
+        description.contains("Omit workspace by default"),
+        "{description}"
+    );
+    assert!(
+        description.contains("serialize behind its write lease"),
+        "{description}"
+    );
+    assert!(
+        description.contains("dependent, sequential work"),
+        "{description}"
+    );
+    assert!(
+        description.contains("tasks in separate worktrees run at the same time"),
+        "{description}"
+    );
+    assert!(
+        description.contains("merge their divergent results yourself"),
+        "{description}"
+    );
+    assert!(
+        description.contains("git worktree add ../ilar-task-<name> -b task/<name>"),
+        "{description}"
+    );
+    assert!(
+        description
+            .contains("{\"cwd\": \"../ilar-task-<name>\", \"isolation\": \"git_worktree\"}"),
+        "{description}"
+    );
+    assert!(
+        description.contains("ilar validates it and never creates one"),
+        "{description}"
+    );
+    assert!(
+        description.contains("when you are yourself running as a subagent"),
+        "{description}"
+    );
+    assert!(
+        description.contains("for a mutable background task"),
+        "{description}"
+    );
+    // A root session handles a background task's completion on an
+    // ordinary turn, holding no lease, so it must not be told it does.
+    assert!(
+        !description.contains("answering a completed background task"),
+        "{description}"
+    );
+    let task_id = schema["properties"]["task_id"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(
+        task_id.contains("requires that same workspace passed again"),
+        "{task_id}"
+    );
+
+    // One example, naming an agent this install actually configures.
+    let overview = schema["description"].as_str().unwrap();
+    assert!(overview.contains("Example:"), "{overview}");
+    assert!(
+        overview.contains("\"subagent_type\":\"explore\""),
+        "{overview}"
+    );
+
+    let workspace = schema["properties"]["workspace"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(
+        workspace.contains("Set null or omit to use the current checkout"),
+        "{workspace}"
+    );
+    assert!(
+        workspace.contains("git worktree add ../ilar-task-<name> -b task/<name>"),
+        "{workspace}"
+    );
+    assert!(workspace.contains("never creates one"), "{workspace}");
+}
+
+/// The dominant task failure store-wide. The refusal has to hand back the
+/// input that would have worked, not only the rule that was broken.
+#[tokio::test]
+async fn a_held_checkout_names_the_worktree_input_a_mutable_task_needs() {
+    let (store, session_id) = temp_store();
+    let spawner = spawner(Arc::new(MockProvider::new(vec![vec![]])), &store, 10, 3);
+    let task = parent_registry(spawner.clone()).get("task").unwrap();
+    let mut ctx = ToolContext::root(std::env::temp_dir()).with_subagents(spawner);
+    ctx.session_id = session_id;
+    ctx.workspace_lease = Some(
+        ctx.workspace
+            .acquire_lease(ilar::tools::WorkspaceAccess::Mutating)
+            .await,
+    );
+
+    let output = task
+        .run(
+            serde_json::json!({
+                "description": "nested edit",
+                "prompt": "edit the parser",
+                "subagent_type": "explore",
+            }),
+            ctx,
+        )
+        .await;
+
+    assert!(output.is_error, "{}", output.content);
+    assert!(
+        output
+            .content
+            .contains("nested mutable tasks cannot reuse their parent checkout"),
+        "{}",
+        output.content
+    );
+    assert!(
+        output
+            .content
+            .contains("git worktree add ../ilar-task-<name> -b task/<name>"),
+        "{}",
+        output.content
+    );
+    assert!(
+        output.content.contains(
+            "\"workspace\": {\"cwd\": \"../ilar-task-<name>\", \"isolation\": \"git_worktree\"}"
+        ),
+        "{}",
+        output.content
+    );
+    assert!(
+        output.content.contains("read-only subagent_type"),
+        "{}",
+        output.content
+    );
+}
+
+/// The other dominant failure: a workspace that does not validate. The
+/// error names the path that failed and the shape that would pass.
+#[tokio::test]
+async fn an_unvalidatable_workspace_names_the_worktree_input_to_pass() {
+    let outside = tempfile::tempdir().unwrap();
+    let (store, session_id) = temp_store();
+    let spawner = spawner(Arc::new(MockProvider::new(vec![vec![]])), &store, 10, 3);
+    let task = parent_registry(spawner.clone()).get("task").unwrap();
+    let mut ctx = ToolContext::root(std::env::temp_dir()).with_subagents(spawner);
+    ctx.session_id = session_id;
+
+    let output = task
+        .run(
+            serde_json::json!({
+                "description": "isolated edit",
+                "prompt": "edit the parser",
+                "subagent_type": "explore",
+                "workspace": {"cwd": outside.path(), "isolation": "git_worktree"},
+            }),
+            ctx,
+        )
+        .await;
+
+    assert!(output.is_error, "{}", output.content);
+    assert!(
+        output.content.starts_with("invalid task workspace"),
+        "{}",
+        output.content
+    );
+    assert!(
+        output
+            .content
+            .contains(outside.path().to_str().unwrap_or_default()),
+        "{}",
+        output.content
+    );
+    assert!(
+        output
+            .content
+            .contains("must already be a registered Git worktree of this repository"),
+        "{}",
+        output.content
+    );
+    assert!(
+        output
+            .content
+            .contains("git worktree add ../ilar-task-<name> -b task/<name>"),
+        "{}",
+        output.content
+    );
+    assert!(
+        output
+            .content
+            .contains("omit workspace to run in the current checkout"),
+        "{}",
+        output.content
+    );
+}
+
 /// Live smoke for the provider behavior that triggered the launch regression.
 /// Requires ILAR_LIVE_CHATGPT_STATE_DIR pointing at a state dir with auth.json.
 #[tokio::test]

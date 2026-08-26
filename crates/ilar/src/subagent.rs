@@ -32,6 +32,12 @@ const BACKGROUND_ABORT_GRACE: std::time::Duration = std::time::Duration::from_se
 /// the universe.
 const NOTIFICATION_LOCK_RETRY: std::time::Duration = std::time::Duration::from_millis(25);
 const NOTIFICATION_LOCK_ATTEMPTS: usize = 120;
+/// The one wording for "make a worktree and name it here". Both refusals
+/// that send the model there quote it, and so does the schema: a
+/// corrective that drifts between sites is one the model has to learn
+/// again at every site.
+const WORKTREE_CORRECTION: &str = "`git worktree add ../ilar-task-<name> -b task/<name>`, then \
+     pass \"workspace\": {\"cwd\": \"../ilar-task-<name>\", \"isolation\": \"git_worktree\"}";
 
 /// A completed background task's notification — the synthetic user
 /// message that re-invokes the parent loop.
@@ -404,7 +410,13 @@ impl SubagentSpawner {
                 {
                     Ok(location) => location,
                     Err(error) => {
-                        return ToolOutput::error(format!("invalid task workspace: {error:#}"));
+                        return ToolOutput::error(format!(
+                            "invalid task workspace {:?}: {error:#}. workspace.cwd must already be \
+                             a registered Git worktree of this repository: {WORKTREE_CORRECTION}. \
+                             Outside a Git repository no workspace is valid: omit workspace to run \
+                             in the current checkout.",
+                            workspace.cwd
+                        ));
                     }
                 }
             }
@@ -431,9 +443,12 @@ impl SubagentSpawner {
             && same_workspace
             && ctx.has_workspace_lease()
         {
-            return ToolOutput::error(
-                "nested mutable tasks cannot reuse their parent checkout; use a validated worktree",
-            );
+            return ToolOutput::error(format!(
+                "nested mutable tasks cannot reuse their parent checkout; this one is held for the \
+                 whole of the task you are running in. Run it in a sibling worktree instead: \
+                 {WORKTREE_CORRECTION}. If the task only needs to read, pass a read-only \
+                 subagent_type and omit workspace."
+            ));
         }
         let inherited_lease = if same_workspace {
             match ctx.workspace_coverage(workspace_access) {
@@ -1843,7 +1858,7 @@ impl Tool for TaskTool {
     }
 
     fn description(&self) -> &'static str {
-        "Delegate one clearly bounded unit of work. Delegation transfers ownership: do not perform the delegated scope yourself. Independent reviews must be explicitly delegated as separate bounded review tasks. Prefer an agent marked read-only for repository inspection and review so sibling tasks can run concurrently; use a mutable agent only when edits or mutating tools are required. Omit background when the result is needed for the current answer; foreground sibling tasks can be called together for parallel work. Use background only for intentionally deferred work that should trigger a separate follow-up turn."
+        "Delegate one clearly bounded unit of work to a configured agent. Delegation transfers ownership: do not perform the delegated scope yourself. Independent reviews must be explicitly delegated as separate bounded review tasks. subagent_type names the agent, and the agent — not this call — fixes its tools and whether it may write: prefer an agent marked read-only for repository inspection and review so sibling tasks can run concurrently, and use a mutable agent only when edits or mutating tools are required.\n\nOmit workspace by default and the task runs in your own checkout. Always omit it for a read-only agent: read-only tasks share the checkout, so they run alongside each other. Omit it for a mutable agent too on an ordinary foreground turn: mutable tasks sharing one checkout serialize behind its write lease, so each one sees the previous one's edits and nothing has to be merged — that is what you want for dependent, sequential work. Pass workspace when independent mutable tasks should run in parallel: write leases are per workspace, so tasks in separate worktrees run at the same time, and you merge their divergent results yourself once each has reported. Pass it also when you are yourself running as a subagent and delegate a mutable task, since your own checkout is already held for the whole of your run, and for a mutable background task, which would otherwise hold your checkout — and block your own edits — until it finishes. A workspace must be an existing Git worktree of this repository that you create first (`git worktree add ../ilar-task-<name> -b task/<name>`) and then name as {\"cwd\": \"../ilar-task-<name>\", \"isolation\": \"git_worktree\"} — ilar validates it and never creates one, so outside a Git repository there is no isolated workspace and parallel mutable tasks are unavailable.\n\nOmit background when the result is needed for the current answer; foreground sibling tasks can be called together for parallel work. Use background only for intentionally deferred work that should trigger a separate follow-up turn."
     }
 
     fn concurrency(&self) -> ToolConcurrency {
@@ -1886,19 +1901,37 @@ impl Tool for TaskTool {
             })
             .collect::<Vec<_>>()
             .join("; ");
+        // Built from the configured agents, so the shape the model copies
+        // names an agent that exists here rather than one from another
+        // install; the scope is inspection, which every agent may do,
+        // because which agents are mutable is per install.
+        let example = self.spawner.agents().first().map(|agent| {
+            serde_json::json!({
+                "description": "trace the retry path",
+                "prompt": "Find where the HTTP client retries in src/, and report the call sites and the backoff policy.",
+                "subagent_type": agent.name,
+            })
+        });
+        let overview = match example {
+            Some(example) => format!(
+                "One agent, one bounded scope. Example: {example}. Add a workspace only in the cases described below."
+            ),
+            None => "One agent, one bounded scope. Add a workspace only in the cases described below.".to_string(),
+        };
         serde_json::json!({
             "type": "object",
+            "description": overview,
             "properties": {
                 "description": {"type": "string", "description": "Short task description (3-5 words)"},
                 "prompt": {"type": "string", "description": "Full instructions for one bounded scope. The parent should continue only clearly disjoint work."},
                 "subagent_type": {
                     "type": "string",
                     "enum": agents,
-                    "description": format!("Configured agent to run. Available agents: {agent_guidance}. Prefer an agent marked read-only for repository review and parallel inspection; use a mutable agent only when edits or mutating tools are required.")
+                    "description": format!("Configured agent to run; it fixes the tools the task gets and whether the task may write. Available agents: {agent_guidance}. Prefer an agent marked read-only for repository review and parallel inspection; use a mutable agent only when edits or mutating tools are required.")
                 },
                 "task_id": {
                     "type": ["string", "null"],
-                    "description": "Existing task session UUID to resume, replaying that task's full context — prefer it over a fresh task for follow-up questions on the same scope. Use an id reported by a task result, a task-notification, or the tasks tool; set null or omit to start a new task, and never invent a value."
+                    "description": "Existing task session UUID to resume, replaying that task's full context — prefer it over a fresh task for follow-up questions on the same scope. Use an id reported by a task result, a task-notification, or the tasks tool; set null or omit to start a new task, and never invent a value. Resuming a task that ran in its own worktree requires that same workspace passed again."
                 },
                 "model": {
                     "type": ["string", "null"],
@@ -1911,7 +1944,7 @@ impl Tool for TaskTool {
                 "background": {"type": "boolean", "description": "Run detached only for intentionally deferred work whose completion should trigger a separate follow-up turn. Do not use when the result is needed for the current answer; call foreground sibling tasks together for parallel current-answer work. Do not poll."}
                 ,"workspace": {
                     "type": ["object", "null"],
-                    "description": "Validated sibling Git worktree for isolation. Set null or omit to use the current workspace. This is a cooperative scheduling domain, not a sandbox.",
+                    "description": format!("Sibling Git worktree to run this task in. Set null or omit to use the current checkout — right for every read-only agent, and for a mutable agent unless you already hold this checkout or want independent mutable tasks to run in parallel. cwd must already be a registered worktree of this repository, because ilar validates the path and never creates one: {WORKTREE_CORRECTION}. This is a cooperative scheduling domain, not a sandbox: tasks in separate worktrees run at the same time and their results are yours to merge afterwards."),
                     "properties": {
                         "cwd": {"type": "string"},
                         "isolation": {"type": "string", "enum": ["git_worktree"]}

@@ -29,7 +29,8 @@ To run a task in a separately scheduled Git worktree:
 2. Invoke the `task` tool with structured workspace routing:
    `{"workspace":{"cwd":"../ilar-task-<name>","isolation":"git_worktree"}}`.
    Include the same field when resuming from a different parent workspace.
-   Omit it when a nested task simply inherited its immediate parent's worktree.
+   Omit it only for a read-only nested task inheriting its immediate
+   parent's worktree; a nested mutable task always needs its own.
 3. When the subagent finishes, review the diff in the worktree
    (`git -C ../ilar-task-<name> diff`), merge or cherry-pick if good.
 4. Clean up: `git worktree remove ../ilar-task-<name>` and delete the
