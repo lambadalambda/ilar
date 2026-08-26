@@ -94,9 +94,11 @@ enum Command {
 
 #[derive(clap::Args, Debug)]
 struct ServeArgs {
-    /// Address to bind. Anything but loopback requires a token.
-    #[arg(long, default_value = "127.0.0.1:7777")]
-    bind: std::net::SocketAddr,
+    /// Address to bind (default 127.0.0.1:4527, falling back to an
+    /// ephemeral port when taken). Anything but loopback requires a
+    /// token; an explicit address never falls back.
+    #[arg(long)]
+    bind: Option<std::net::SocketAddr>,
 
     /// Open the page in a browser once the server is up.
     #[arg(long)]

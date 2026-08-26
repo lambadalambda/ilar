@@ -1,7 +1,7 @@
 # ilar serve
 
 ```sh
-ilar serve                          # http://127.0.0.1:7777/
+ilar serve                          # http://127.0.0.1:4527/ (or an ephemeral port when taken)
 ilar serve --open                   # and open a browser
 ilar serve --bind 10.0.0.2:7777     # prints a URL with a token in it
 ```
@@ -120,7 +120,7 @@ there is no code path that writes to the store, starts a turn, or runs a
 tool. Anything else on a known path is a 405 from the router itself.
 
 **Loopback by default, and no token there.** The default bind is
-`127.0.0.1:7777` with no authentication, because anything that can reach
+`127.0.0.1:4527` with no authentication, because anything that can reach
 loopback on your machine can already read `~/.local/state/ilar/sessions`
 directly — a token there would be theatre.
 
