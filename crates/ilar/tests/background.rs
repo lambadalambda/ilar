@@ -284,6 +284,397 @@ fn unwatched_spawner(
     )
 }
 
+/// A read-only spawner whose notification channel holds exactly one
+/// permit, so "background capacity is full" is one hung child away.
+fn crowded_read_only_spawner(
+    provider: Arc<dyn Provider>,
+    store: &SessionStore,
+) -> Arc<SubagentSpawner> {
+    Arc::new(
+        unwatched_spawner(
+            provider,
+            store,
+            AgentWorkspaceMode::ReadOnly,
+            std::env::temp_dir(),
+        )
+        // The hung child must stay hung: a watchdog firing would free
+        // the permit this test is about.
+        .with_stall_timeout(Duration::from_secs(60))
+        .with_notification_capacity(1),
+    )
+}
+
+/// Hangs forever on the prompt "hang", answers anything else at once —
+/// one provider for a test that needs a child to occupy a slot and
+/// another to finish in it.
+#[derive(Clone)]
+struct PendingOnHang;
+
+impl Provider for PendingOnHang {
+    fn stream(&self, request: Request) -> anyhow::Result<EventStream> {
+        let opening = request
+            .messages
+            .first()
+            .and_then(|message| message.content.first())
+            .and_then(|block| match block {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            });
+        if opening == Some("hang") {
+            return Ok(Box::pin(stream::pending()));
+        }
+        Ok(Box::pin(stream::iter(vec![
+            ProviderEvent::TextDelta("answered in the turn".into()),
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            },
+        ])))
+    }
+}
+
+fn task_tool(spawner: Arc<SubagentSpawner>) -> Arc<dyn ilar::tools::Tool> {
+    ToolRegistry::builtin()
+        .with_subagents(spawner)
+        .unwrap()
+        .get("task")
+        .unwrap()
+}
+
+/// The default a read-only agent carries: nothing to merge, nothing to
+/// wait for, so the call returns at once and the answer arrives as a
+/// notification.
+#[tokio::test]
+async fn a_read_only_task_defaults_to_background() {
+    let (store, session_id) = temp_store();
+    let spawner = spawner_for_workspace(
+        Arc::new(DelayedText {
+            text: "read-only answer",
+            delay_ms: 100,
+        }),
+        &store,
+        AgentWorkspaceMode::ReadOnly,
+        std::env::temp_dir(),
+    );
+    let mut notifications = spawner.subscribe();
+    let task = task_tool(spawner.clone());
+    let ctx = background_tool_context(session_id.clone(), spawner.clone(), &std::env::temp_dir());
+
+    let started = std::time::Instant::now();
+    let output = task
+        .run(
+            serde_json::json!({
+                "description": "survey the retries",
+                "prompt": "find things",
+                "subagent_type": "explore",
+            }),
+            ctx,
+        )
+        .await;
+
+    assert!(!output.is_error, "{}", output.content);
+    assert!(
+        output.content.contains("Deferred background task started"),
+        "{}",
+        output.content
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(80),
+        "defaulted read-only task blocked the caller: {:?}",
+        started.elapsed()
+    );
+    let notification = tokio::time::timeout(Duration::from_secs(5), notifications.recv())
+        .await
+        .expect("notification within timeout")
+        .expect("notification present");
+    assert_eq!(notification.parent_session_id, session_id);
+    assert!(
+        notification.text.contains("read-only answer"),
+        "{}",
+        notification.text
+    );
+    spawner.shutdown().await;
+}
+
+/// The other half of the default: a mutable task's edits are wanted
+/// before the next call reads them, so it stays in the turn.
+#[tokio::test]
+async fn a_mutable_task_defaults_to_the_foreground() {
+    let (store, session_id) = temp_store();
+    let spawner = spawner_for_workspace(
+        Arc::new(DelayedText {
+            text: "mutable answer",
+            delay_ms: 10,
+        }),
+        &store,
+        AgentWorkspaceMode::Mutable,
+        std::env::temp_dir(),
+    );
+    let task = task_tool(spawner.clone());
+    let ctx = background_tool_context(session_id, spawner.clone(), &std::env::temp_dir());
+
+    let output = task
+        .run(
+            serde_json::json!({
+                "description": "apply the fix",
+                "prompt": "edit things",
+                "subagent_type": "explore",
+            }),
+            ctx,
+        )
+        .await;
+
+    assert!(!output.is_error, "{}", output.content);
+    assert!(
+        output.content.contains("mutable answer"),
+        "{}",
+        output.content
+    );
+    assert!(output.content.contains("(task_id:"), "{}", output.content);
+    assert!(
+        !output.content.contains("Deferred background task"),
+        "{}",
+        output.content
+    );
+}
+
+/// An explicit false beats the read-only default: the caller says it
+/// needs the answer now, and gets it in the result.
+#[tokio::test]
+async fn an_explicit_foreground_beats_the_read_only_default() {
+    let (store, session_id) = temp_store();
+    let spawner = spawner_for_workspace(
+        Arc::new(DelayedText {
+            text: "answer in hand",
+            delay_ms: 10,
+        }),
+        &store,
+        AgentWorkspaceMode::ReadOnly,
+        std::env::temp_dir(),
+    );
+    let task = task_tool(spawner.clone());
+    let ctx = background_tool_context(session_id, spawner.clone(), &std::env::temp_dir());
+
+    let output = task
+        .run(
+            serde_json::json!({
+                "description": "survey the retries",
+                "prompt": "find things",
+                "subagent_type": "explore",
+                "background": false,
+            }),
+            ctx,
+        )
+        .await;
+
+    assert!(!output.is_error, "{}", output.content);
+    assert!(
+        output.content.contains("answer in hand"),
+        "{}",
+        output.content
+    );
+    assert!(
+        !output.content.contains("Deferred background task"),
+        "{}",
+        output.content
+    );
+}
+
+/// And an explicit true beats the mutable default.
+#[tokio::test]
+async fn an_explicit_background_beats_the_mutable_default() {
+    let (store, session_id) = temp_store();
+    let spawner = spawner_for_workspace(
+        Arc::new(DelayedText {
+            text: "deferred answer",
+            delay_ms: 100,
+        }),
+        &store,
+        AgentWorkspaceMode::Mutable,
+        std::env::temp_dir(),
+    );
+    let mut notifications = spawner.subscribe();
+    let task = task_tool(spawner.clone());
+    let ctx = background_tool_context(session_id, spawner.clone(), &std::env::temp_dir());
+
+    let output = task
+        .run(
+            serde_json::json!({
+                "description": "deferred edit",
+                "prompt": "edit things",
+                "subagent_type": "explore",
+                "background": true,
+            }),
+            ctx,
+        )
+        .await;
+
+    assert!(!output.is_error, "{}", output.content);
+    assert!(
+        output.content.contains("Deferred background task started"),
+        "{}",
+        output.content
+    );
+    let notification = tokio::time::timeout(Duration::from_secs(5), notifications.recv())
+        .await
+        .expect("notification within timeout")
+        .expect("notification present");
+    assert!(
+        notification.text.contains("deferred answer"),
+        "{}",
+        notification.text
+    );
+    spawner.shutdown().await;
+}
+
+/// The default is ilar's choice, not the model's, so a full background
+/// channel demotes it to the foreground instead of refusing work the
+/// caller never asked to defer — and the result says what happened.
+#[tokio::test]
+async fn a_defaulted_background_task_runs_in_the_foreground_at_capacity() {
+    let (store, session_id) = temp_store();
+    let spawner = crowded_read_only_spawner(Arc::new(PendingOnHang), &store);
+    let task = task_tool(spawner.clone());
+
+    let occupant = task
+        .run(
+            serde_json::json!({
+                "description": "occupy the slot",
+                "prompt": "hang",
+                "subagent_type": "explore",
+                "background": true,
+            }),
+            background_tool_context(session_id.clone(), spawner.clone(), &std::env::temp_dir()),
+        )
+        .await;
+    assert!(!occupant.is_error, "{}", occupant.content);
+
+    let output = task
+        .run(
+            serde_json::json!({
+                "description": "survey the retries",
+                "prompt": "find things",
+                "subagent_type": "explore",
+            }),
+            background_tool_context(session_id, spawner.clone(), &std::env::temp_dir()),
+        )
+        .await;
+
+    assert!(!output.is_error, "{}", output.content);
+    assert!(
+        output.content.contains("answered in the turn"),
+        "{}",
+        output.content
+    );
+    assert!(
+        !output.content.contains("Deferred background task"),
+        "{}",
+        output.content
+    );
+    assert!(
+        output.content.contains("Ran in the foreground"),
+        "the demotion went unsaid: {}",
+        output.content
+    );
+    assert!(
+        output.content.contains("background capacity was full"),
+        "{}",
+        output.content
+    );
+    spawner.shutdown().await;
+}
+
+/// An explicit background: true is a request, and a request that cannot
+/// be met is an error, exactly as before.
+#[tokio::test]
+async fn an_explicit_background_task_still_fails_at_capacity() {
+    let (store, session_id) = temp_store();
+    let spawner = crowded_read_only_spawner(Arc::new(PendingOnHang), &store);
+    let task = task_tool(spawner.clone());
+
+    let occupant = task
+        .run(
+            serde_json::json!({
+                "description": "occupy the slot",
+                "prompt": "hang",
+                "subagent_type": "explore",
+                "background": true,
+            }),
+            background_tool_context(session_id.clone(), spawner.clone(), &std::env::temp_dir()),
+        )
+        .await;
+    assert!(!occupant.is_error, "{}", occupant.content);
+
+    let output = task
+        .run(
+            serde_json::json!({
+                "description": "another deferred survey",
+                "prompt": "find things",
+                "subagent_type": "explore",
+                "background": true,
+            }),
+            background_tool_context(session_id, spawner.clone(), &std::env::temp_dir()),
+        )
+        .await;
+
+    assert!(output.is_error, "{}", output.content);
+    assert!(
+        output.content.contains("background task capacity is full"),
+        "{}",
+        output.content
+    );
+    spawner.shutdown().await;
+}
+
+/// The same demotion at the other gate: a task holding a workspace lease
+/// cannot leave a detached child behind it, so its read-only delegation
+/// runs in the turn rather than being refused for a default it never
+/// chose.
+#[tokio::test]
+async fn a_leased_parent_runs_a_defaulted_read_only_task_in_the_foreground() {
+    let (store, session_id) = temp_store();
+    let spawner = spawner_for_workspace(
+        Arc::new(DelayedText {
+            text: "nested read-only answer",
+            delay_ms: 10,
+        }),
+        &store,
+        AgentWorkspaceMode::ReadOnly,
+        std::env::temp_dir(),
+    );
+    let task = task_tool(spawner.clone());
+    let mut ctx = background_tool_context(session_id, spawner.clone(), &std::env::temp_dir());
+    ctx.workspace_lease = Some(
+        spawner
+            .workspace()
+            .acquire_lease(ilar::tools::WorkspaceAccess::Mutating)
+            .await,
+    );
+
+    let output = task
+        .run(
+            serde_json::json!({
+                "description": "check the callers",
+                "prompt": "find things",
+                "subagent_type": "explore",
+            }),
+            ctx,
+        )
+        .await;
+
+    assert!(!output.is_error, "{}", output.content);
+    assert!(
+        output.content.contains("nested read-only answer"),
+        "{}",
+        output.content
+    );
+    assert!(
+        output.content.contains("Ran in the foreground"),
+        "the demotion went unsaid: {}",
+        output.content
+    );
+}
+
 fn repository_with_worktree() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
     fn git(cwd: &std::path::Path, args: &[&str]) {
         let output = std::process::Command::new("git")

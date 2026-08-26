@@ -140,6 +140,9 @@ fn parent_registry(spawner: Arc<SubagentSpawner>) -> ToolRegistry {
     ToolRegistry::builtin().with_subagents(spawner).unwrap()
 }
 
+/// A foreground task call, said out loud: a read-only agent's task now
+/// detaches when the flag is omitted, and every test built on this
+/// helper is about what happens inside the turn.
 fn task_call(id: &str, prompt: &str) -> ProviderEvent {
     ProviderEvent::ToolCallCompleted {
         id: id.into(),
@@ -148,6 +151,7 @@ fn task_call(id: &str, prompt: &str) -> ProviderEvent {
             "description": "explore",
             "prompt": prompt,
             "subagent_type": "explore",
+            "background": false,
         }),
     }
 }
@@ -196,7 +200,9 @@ async fn foreground_subagent_receives_user_and_exact_workspace_context() {
                 prompt: "inspect this workspace".into(),
                 subagent_type: "explore".into(),
                 task_id: None,
-                background: None,
+                // Foreground on purpose: this is about the prompt the
+                // child was handed, so the child has to have run.
+                background: Some(false),
                 workspace: None,
                 model: None,
                 reasoning: None,
@@ -262,7 +268,9 @@ async fn a_refused_project_file_never_reaches_a_subagent() {
                 prompt: "inspect this workspace".into(),
                 subagent_type: "explore".into(),
                 task_id: None,
-                background: None,
+                // Foreground on purpose: the assertion is about what the
+                // child's prompt did not contain.
+                background: Some(false),
                 workspace: None,
                 model: None,
                 reasoning: None,
@@ -1208,17 +1216,51 @@ fn task_schema_guides_new_calls_without_placeholder_routing_values() {
         "{tool_description}"
     );
     let background = properties["background"]["description"].as_str().unwrap();
+    // The default is per agent type, and both overrides are spelled out:
+    // a model that reads only this property must know what omitting it
+    // buys and how to ask for the other thing.
     assert!(
-        background.contains("intentionally deferred"),
+        background.contains(
+            "a read-only agent's task runs in the background, a mutable agent's in the foreground"
+        ),
+        "{background}"
+    );
+    assert!(
+        background.contains(
+            "Pass false when you need the result to continue this turn's work; read-only tasks \
+             otherwise run in the background and report back as notifications, freeing you to \
+             keep working"
+        ),
+        "{background}"
+    );
+    assert!(
+        background.contains("Pass true for a mutable task"),
         "{background}"
     );
     assert!(
         background.contains("separate follow-up turn"),
         "{background}"
     );
-    assert!(background.contains("foreground sibling"), "{background}");
-    assert!(background.contains("current answer"), "{background}");
     assert!(background.contains("Do not poll"), "{background}");
+    assert!(background.contains("task_message"), "{background}");
+    // The prose paragraph teaches the same default the property does; the
+    // sentence it replaced told the model the opposite.
+    assert!(
+        tool_description.contains("read-only agent's task you delegate runs in the background"),
+        "{tool_description}"
+    );
+    assert!(
+        tool_description.contains("Pass background false when you need the result"),
+        "{tool_description}"
+    );
+    assert!(
+        tool_description.contains("Pass background true for a mutable task"),
+        "{tool_description}"
+    );
+    assert!(
+        !tool_description.contains("Omit background when the result is needed"),
+        "{tool_description}"
+    );
     let subagent = properties["subagent_type"]["description"].as_str().unwrap();
     assert!(subagent.contains("explore (mutable)"), "{subagent}");
     assert!(subagent.contains("marked read-only"), "{subagent}");

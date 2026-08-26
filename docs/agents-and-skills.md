@@ -26,6 +26,15 @@ the agent definition's model or inherits the parent's model and reasoning. The
 read-only `models` tool lists available models with context windows, pricing,
 and reasoning variants so agents can choose informedly.
 
+A task's `background` follows its agent when the call omits it: a read-only
+agent's task (`explore`) detaches and reports back as a completion
+notification, leaving the parent free to keep working, while a mutable agent's
+task runs inside the turn. An explicit value always wins. A *defaulted*
+background task that cannot detach — background capacity is full, or the caller
+holds a workspace lease the child would outlive — runs in the foreground
+instead of failing, and its result says so; an explicit `background: true` in
+those spots is still an error.
+
 To have something *looked at*: save the image, then spawn a task with
 `model` set to a vision model and point it at the file — the child's
 `read` returns the picture itself, not just a description.

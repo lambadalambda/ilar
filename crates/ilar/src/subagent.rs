@@ -38,6 +38,16 @@ const NOTIFICATION_LOCK_ATTEMPTS: usize = 120;
 /// again at every site.
 const WORKTREE_CORRECTION: &str = "`git worktree add ../ilar-task-<name> -b task/<name>`, then \
      pass \"workspace\": {\"cwd\": \"../ilar-task-<name>\", \"isolation\": \"git_worktree\"}";
+/// Why a task that would have been detached ran in the turn instead.
+/// Both cases are refusals for an explicit `background: true`, but a
+/// default is ilar's choice rather than the caller's: demoting it keeps
+/// the work happening, and the note keeps the result honest about which
+/// path it took.
+const BACKGROUND_DEMOTED_BY_CAPACITY: &str = "Ran in the foreground: read-only tasks default to \
+     background, but background capacity was full, so this one ran here instead of failing.";
+const BACKGROUND_DEMOTED_BY_LEASE: &str = "Ran in the foreground: read-only tasks default to \
+     background, but a background task cannot outlive the workspace lease you hold, so this one \
+     ran here instead of failing.";
 
 /// A completed background task's notification — the synthetic user
 /// message that re-invokes the parent loop.
@@ -373,6 +383,16 @@ impl SubagentSpawner {
         self
     }
 
+    /// Shrink the notification channel (tests): filling the real one
+    /// would mean holding sixty-four children open at once, and what the
+    /// capacity path does at its edge is worth testing cheaply.
+    pub fn with_notification_capacity(mut self, capacity: usize) -> Self {
+        let (notify_tx, notify_rx) = tokio::sync::mpsc::channel(capacity);
+        self.notify_tx = notify_tx;
+        self.notify_rx = Arc::new(Mutex::new(Some(notify_rx)));
+        self
+    }
+
     pub fn with_available_models(mut self, models: Vec<&'static crate::model::ModelInfo>) -> Self {
         self.available_models = models;
         self
@@ -569,6 +589,20 @@ impl SubagentSpawner {
             AgentWorkspaceMode::Mutable => WorkspaceAccess::Mutating,
             AgentWorkspaceMode::ReadOnly => WorkspaceAccess::ReadOnly,
         };
+        // The one place `background` stops being a maybe. A read-only
+        // task is independent by nature — no edits to merge, no write
+        // lease to hand back — so omitting the flag means "detach and
+        // tell me when it lands", which leaves the parent free to keep
+        // working. A mutable task's edits are usually wanted before the
+        // next call reads them, so its default stays in the turn.
+        // Everything below sees a bool, so capacity and notification
+        // wiring never have to ask what the caller meant.
+        let background_explicit = input.background.is_some();
+        let mut background = input.background.unwrap_or(match agent.workspace_mode {
+            AgentWorkspaceMode::ReadOnly => true,
+            AgentWorkspaceMode::Mutable => false,
+        });
+        let mut background_demoted: Option<&'static str> = None;
         let child_location = match &input.workspace {
             Some(workspace) => {
                 let TaskWorkspaceIsolation::GitWorktree = workspace.isolation;
@@ -604,10 +638,14 @@ impl SubagentSpawner {
                 "task workspace is already held by an ancestor; finish the intervening task before returning to it",
             );
         }
-        if input.background == Some(true) && same_workspace && ctx.has_workspace_lease() {
-            return ToolOutput::error(
-                "background tasks cannot outlive a parent workspace lease; use a foreground task or validated worktree",
-            );
+        if background && same_workspace && ctx.has_workspace_lease() {
+            if background_explicit {
+                return ToolOutput::error(
+                    "background tasks cannot outlive a parent workspace lease; use a foreground task or validated worktree",
+                );
+            }
+            background = false;
+            background_demoted = Some(BACKGROUND_DEMOTED_BY_LEASE);
         }
         if workspace_access == WorkspaceAccess::Mutating
             && same_workspace
@@ -633,13 +671,18 @@ impl SubagentSpawner {
         } else {
             None
         };
-        let notification_permit = if input.background == Some(true) {
+        let notification_permit = if background {
             match self.notify_tx.clone().try_reserve_owned() {
                 Ok(permit) => Some(permit),
-                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) if background_explicit => {
                     return ToolOutput::error(
                         "background task capacity is full; retry after a notification is handled",
                     );
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    background = false;
+                    background_demoted = Some(BACKGROUND_DEMOTED_BY_CAPACITY);
+                    None
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                     return ToolOutput::error("background notification receiver is closed");
@@ -836,7 +879,7 @@ impl SubagentSpawner {
             session_id: session_id.clone(),
             description: input.description.clone(),
             agent: agent.name.clone(),
-            background: input.background == Some(true),
+            background,
             started: std::time::Instant::now(),
         });
         // The channel and the queue in one step, under the claim taken
@@ -894,7 +937,7 @@ impl SubagentSpawner {
             spill_dir: ctx.spill_dir.clone(),
         };
 
-        if input.background == Some(true) {
+        if background {
             let notification_permit = notification_permit.expect("reserved for background task");
             // Detached: run the child on a spawned task with a stall
             // watchdog; completion lands as a notification for the parent
@@ -1193,6 +1236,13 @@ task's scope yourself; continue only clearly disjoint work."
                 ToolOutput::error("subagent aborted")
             }
         };
+        // A default that could not be honoured says so: the schema
+        // promised this task would be detached, and a silently blocking
+        // call is exactly the surprise the promise was meant to remove.
+        let output = match background_demoted {
+            Some(note) => output.with_appended_text(&format!("\n\n({note})")),
+            None => output,
+        };
         // The session outlives the call, so name it: without this the
         // model cannot resume a task it just ran, and the resume path
         // tells it never to invent an id. A failed run is worth naming
@@ -1307,7 +1357,10 @@ task's scope yourself; continue only clearly disjoint work."
                 prompt: text,
                 subagent_type: meta.agent,
                 task_id: Some(task_id),
-                background: None,
+                // Stated, not defaulted: this call promises to return
+                // the task's answer, so it runs in the turn whatever the
+                // agent's own default would have been.
+                background: Some(false),
                 workspace,
                 model: None,
                 reasoning: None,
@@ -2213,7 +2266,7 @@ impl Tool for TaskTool {
     }
 
     fn description(&self) -> &'static str {
-        "Delegate one clearly bounded unit of work to a configured agent. Delegation transfers ownership: do not perform the delegated scope yourself. Independent reviews must be explicitly delegated as separate bounded review tasks. subagent_type names the agent, and the agent — not this call — fixes its tools and whether it may write: prefer an agent marked read-only for repository inspection and review so sibling tasks can run concurrently, and use a mutable agent only when edits or mutating tools are required.\n\nOmit workspace by default and the task runs in your own checkout. Always omit it for a read-only agent: read-only tasks share the checkout, so they run alongside each other. Omit it for a mutable agent too on an ordinary foreground turn: mutable tasks sharing one checkout serialize behind its write lease, so each one sees the previous one's edits and nothing has to be merged — that is what you want for dependent, sequential work. Pass workspace when independent mutable tasks should run in parallel: write leases are per workspace, so tasks in separate worktrees run at the same time, and you merge their divergent results yourself once each has reported. Pass it also when you are yourself running as a subagent and delegate a mutable task, since your own checkout is already held for the whole of your run, and for a mutable background task, which would otherwise hold your checkout — and block your own edits — until it finishes. A workspace must be an existing Git worktree of this repository that you create first (`git worktree add ../ilar-task-<name> -b task/<name>`) and then name as {\"cwd\": \"../ilar-task-<name>\", \"isolation\": \"git_worktree\"} — ilar validates it and never creates one, so outside a Git repository there is no isolated workspace and parallel mutable tasks are unavailable.\n\nOmit background when the result is needed for the current answer; foreground sibling tasks can be called together for parallel work. Use background only for intentionally deferred work that should trigger a separate follow-up turn."
+        "Delegate one clearly bounded unit of work to a configured agent. Delegation transfers ownership: do not perform the delegated scope yourself. Independent reviews must be explicitly delegated as separate bounded review tasks. subagent_type names the agent, and the agent — not this call — fixes its tools and whether it may write: prefer an agent marked read-only for repository inspection and review so sibling tasks can run concurrently, and use a mutable agent only when edits or mutating tools are required.\n\nOmit workspace by default and the task runs in your own checkout. Always omit it for a read-only agent: read-only tasks share the checkout, so they run alongside each other. Omit it for a mutable agent too on an ordinary foreground turn: mutable tasks sharing one checkout serialize behind its write lease, so each one sees the previous one's edits and nothing has to be merged — that is what you want for dependent, sequential work. Pass workspace when independent mutable tasks should run in parallel: write leases are per workspace, so tasks in separate worktrees run at the same time, and you merge their divergent results yourself once each has reported. Pass it also when you are yourself running as a subagent and delegate a mutable task, since your own checkout is already held for the whole of your run, and for a mutable background task, which would otherwise hold your checkout — and block your own edits — until it finishes. A workspace must be an existing Git worktree of this repository that you create first (`git worktree add ../ilar-task-<name> -b task/<name>`) and then name as {\"cwd\": \"../ilar-task-<name>\", \"isolation\": \"git_worktree\"} — ilar validates it and never creates one, so outside a Git repository there is no isolated workspace and parallel mutable tasks are unavailable.\n\nBackground follows the agent: a read-only agent's task you delegate runs in the background and reports back as a notification while you keep working, and a mutable agent's task runs in the foreground. Pass background false when you need the result to continue this turn's work — foreground sibling tasks can be called together for parallel current-answer work. Pass background true for a mutable task whose deferred completion should trigger a separate follow-up turn, with a workspace of its own. Never poll a detached task: task_message steers it mid-flight, and its completion comes to you."
     }
 
     fn concurrency(&self) -> ToolConcurrency {
@@ -2296,7 +2349,7 @@ impl Tool for TaskTool {
                     "type": ["string", "null"],
                     "description": "Reasoning variant for the chosen model (see the models tool). Omit for the model's default."
                 },
-                "background": {"type": "boolean", "description": "Run detached only for intentionally deferred work whose completion should trigger a separate follow-up turn. Do not use when the result is needed for the current answer; call foreground sibling tasks together for parallel current-answer work. Do not poll."}
+                "background": {"type": "boolean", "description": "Whether the task runs detached. Omit it and the agent decides: a read-only agent's task runs in the background, a mutable agent's in the foreground. Pass false when you need the result to continue this turn's work; read-only tasks otherwise run in the background and report back as notifications, freeing you to keep working. Pass true for a mutable task whose completion should trigger a separate follow-up turn, and give it its own workspace. Do not poll a detached task: its completion finds you as a notification, and task_message corrects its course mid-flight."}
                 ,"workspace": {
                     "type": ["object", "null"],
                     "description": format!("Sibling Git worktree to run this task in. Set null or omit to use the current checkout — right for every read-only agent, and for a mutable agent unless you already hold this checkout or want independent mutable tasks to run in parallel. cwd must already be a registered worktree of this repository, because ilar validates the path and never creates one: {WORKTREE_CORRECTION}. This is a cooperative scheduling domain, not a sandbox: tasks in separate worktrees run at the same time and their results are yours to merge afterwards."),
