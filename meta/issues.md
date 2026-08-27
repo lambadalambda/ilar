@@ -53,3 +53,4 @@
 ## Milestone 13 — Guard rails
 
 - [ ] [Kernel sandbox for tool processes](issues/kernel-sandbox-for-tool-processes.md)
+- [ ] [Advisory read leases](issues/advisory-read-leases.md)
