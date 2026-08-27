@@ -119,7 +119,13 @@ up to 2 MiB per stream is written to
 and the result *opens* with the path, its size and line count — first
 line, where both the model and the head-biased tool-result view can see
 it — so the next step is a targeted `grep` or `read` instead of the
-same command run again. `grep` and `glob` take absolute paths, which is what makes that
+same command run again. When the spilled stdout is one complete JSON
+document, the preview is its shape — the top-level keys with each
+value's type and size — instead of a 30 KiB window into the middle of
+it, and the hint says to `jq` the file. `grep` follows the same
+discipline: matches past the preview budget go to the same directory
+and the result opens with the pointer plus the head of the list.
+`grep` and `glob` take absolute paths, which is what makes a spill
 file reachable from any working directory. Spill files older than seven
 days are removed at startup; filtering at the source (`jq`, `grep`,
 `head`) is still cheaper than reading one back.

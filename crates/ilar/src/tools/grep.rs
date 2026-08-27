@@ -86,6 +86,7 @@ impl Tool for GrepTool {
             // purpose — spilled tool output lives in the state dir.
             let requested = input.path.as_deref().unwrap_or(".");
             let root = ctx.cwd.join(requested);
+            let spill = super::bash::SpillTarget::from_context(&ctx);
             match super::blocking_scan(move |cancelled| {
                 grep_files(
                     &ctx.cwd,
@@ -98,7 +99,7 @@ impl Tool for GrepTool {
             })
             .await
             {
-                Ok(output) => output,
+                Ok(output) => spill_over_budget(output, spill.as_ref()).await,
                 Err(error) => ToolOutput::error(format!("grep worker failed: {error}")),
             }
         })
@@ -274,9 +275,118 @@ fn grep_files(
     ToolOutput::text(out)
 }
 
+/// Past the bash preview budget the full match list goes to disk and
+/// the result opens with the pointer — same discipline, same directory,
+/// same sweep. Head-biased, unlike bash: matches are sorted by path, so
+/// the front is where the grouping starts.
+async fn spill_over_budget(
+    output: ToolOutput,
+    spill: Option<&super::bash::SpillTarget>,
+) -> ToolOutput {
+    let Some(target) = spill else {
+        return output;
+    };
+    if output.is_error || output.content.len() <= super::bash::MAX_PREVIEW {
+        return output;
+    }
+    let full = output.content;
+    let note = target
+        .write_note(full.as_bytes(), "grep or read it for what you need")
+        .await;
+    // The closing notice (match cap, entry budget) must not vanish into
+    // the file: carry it past the cut.
+    let closing = full
+        .lines()
+        .next_back()
+        .filter(|line| line.starts_with('…'))
+        .map(str::to_string);
+    let mut head = full;
+    truncate_bytes_ellipsis(&mut head, super::bash::MAX_PREVIEW);
+    if let Some(cut) = head.rfind('\n') {
+        head.truncate(cut + 1);
+    }
+    head.push_str("…(the preview ends here; the file has every match)\n");
+    if let Some(closing) = closing {
+        head.push_str(&closing);
+        head.push('\n');
+    }
+    ToolOutput::text(format!("{note}\n{head}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn matches_past_the_preview_budget_spill_to_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        // 240 matches of ~300 chars: past the match cap AND past the
+        // preview budget once the surviving 200 are rendered.
+        let line = format!("needle {}\n", "x".repeat(290));
+        for index in 0..4 {
+            std::fs::write(dir.path().join(format!("f{index}.txt")), line.repeat(60)).unwrap();
+        }
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        let full = grep_files(
+            dir.path(),
+            dir.path(),
+            "needle",
+            false,
+            MAX_ENTRIES,
+            &cancelled,
+        );
+        assert!(full.content.len() > super::super::bash::MAX_PREVIEW);
+
+        let spill_dir = tempfile::tempdir().unwrap();
+        let ctx = ToolContext::root(dir.path().to_path_buf())
+            .with_spill_dir(spill_dir.path().to_path_buf());
+        let target = super::super::bash::SpillTarget::from_context(&ctx);
+        let out = spill_over_budget(full.clone(), target.as_ref()).await;
+
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.starts_with("full output: "), "{}", out.content);
+        assert!(
+            out.content.len() < super::super::bash::MAX_PREVIEW + 1024,
+            "preview stayed near the budget: {} bytes",
+            out.content.len()
+        );
+        assert!(
+            out.content.contains("the file has every match"),
+            "{}",
+            out.content
+        );
+        // The match-cap notice survives the cut.
+        assert!(
+            out.content.trim_end().ends_with("…(truncated)"),
+            "{}",
+            out.content
+        );
+        // The file holds the full rendering, byte for byte.
+        let file = std::fs::read_dir(spill_dir.path())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert_eq!(std::fs::read_to_string(file).unwrap(), full.content);
+    }
+
+    #[tokio::test]
+    async fn matches_within_the_budget_never_spill() {
+        let spill_dir = tempfile::tempdir().unwrap();
+        let ctx = ToolContext::root(std::path::PathBuf::from("."))
+            .with_spill_dir(spill_dir.path().to_path_buf());
+        let target = super::super::bash::SpillTarget::from_context(&ctx);
+        let small = ToolOutput::text("a.txt:1:hit\n".to_string());
+        let out = spill_over_budget(small.clone(), target.as_ref()).await;
+        assert_eq!(out.content, small.content);
+        assert!(
+            std::fs::read_dir(spill_dir.path())
+                .unwrap()
+                .next()
+                .is_none()
+        );
+    }
 
     /// The match cap only short-circuits when matches exist; a rare or
     /// no-match search over a monorepo needs its own bound, and it must

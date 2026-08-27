@@ -19,7 +19,8 @@ const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 /// What the model is shown. Small on purpose: four unfiltered API dumps
 /// once filled a 100 KiB cap with minified JSON and taught the model
 /// nothing, so the bulk goes to disk instead of into the context window.
-const MAX_PREVIEW: usize = 30 * 1024;
+/// Grep budgets its own previews against the same number.
+pub(crate) const MAX_PREVIEW: usize = 30 * 1024;
 /// Share of the preview stderr can always claim, however loud stdout
 /// was: the diagnosis is usually there.
 const MIN_STDERR_SHARE: usize = MAX_PREVIEW / 2;
@@ -69,13 +70,44 @@ fn stream_budgets(stdout_len: usize, stderr_len: usize) -> (usize, usize) {
 
 /// Where one tool call's full output is written, when the runtime gave
 /// this context a state directory to write it in.
-struct SpillTarget {
+pub(crate) struct SpillTarget {
     dir: PathBuf,
     session_id: String,
     call_id: String,
 }
 
 impl SpillTarget {
+    /// The target for a context, if it carries a spill directory. The
+    /// provider's call id names the file, so a result and its spill can
+    /// be matched up after the fact; a call without one (a background
+    /// job) still gets a file, under a fresh id.
+    pub(crate) fn from_context(ctx: &ToolContext) -> Option<Self> {
+        ctx.spill_dir.clone().map(|dir| SpillTarget {
+            dir,
+            session_id: ctx.session_id.clone(),
+            call_id: ctx.call_id.clone().unwrap_or_else(crate::session::new_id),
+        })
+    }
+
+    /// Write a body and describe where it went. Never an error the tool
+    /// call fails on: the preview is still a result, and a note beats a
+    /// tool result the model cannot use at all.
+    pub(crate) async fn write_note(&self, body: &[u8], advice: &str) -> String {
+        let path = self.path();
+        if let Err(error) = tokio::fs::create_dir_all(&self.dir).await {
+            return format!("(could not save the full output: {error})");
+        }
+        if let Err(error) = tokio::fs::write(&path, body).await {
+            return format!("(could not save the full output: {error})");
+        }
+        format!(
+            "full output: {} ({}, {} lines) — {advice}",
+            path.display(),
+            human_bytes(body.len()),
+            line_count(body),
+        )
+    }
+
     /// `<session>-<call>.txt`: a provider's call id is only unique
     /// within one response, so the session is what keeps two sessions
     /// that were handed the same id apart. Either part may be missing —
@@ -151,24 +183,10 @@ fn human_bytes(bytes: usize) -> String {
     }
 }
 
-/// Write the capture and describe where it went. Never an error the tool
-/// call fails on: the preview is still a result, and a note beats a
-/// tool result the model cannot use at all.
-async fn spill_note(target: &SpillTarget, out: &Captured, err: &Captured) -> String {
+/// Write the capture and describe where it went.
+async fn spill_note(target: &SpillTarget, out: &Captured, err: &Captured, advice: &str) -> String {
     let body = spill_body(&out.retained, &err.retained);
-    let path = target.path();
-    if let Err(error) = tokio::fs::create_dir_all(&target.dir).await {
-        return format!("(could not save the full output: {error})");
-    }
-    if let Err(error) = tokio::fs::write(&path, &body).await {
-        return format!("(could not save the full output: {error})");
-    }
-    let mut note = format!(
-        "full output: {} ({}, {} lines) — grep or read it for what you need",
-        path.display(),
-        human_bytes(body.len()),
-        line_count(&body),
-    );
+    let mut note = target.write_note(&body, advice).await;
     // Retention is tail-biased, so a capture that overran says which end
     // of the raw output survived rather than implying all of it did.
     let retained = out.retained.len().saturating_add(err.retained.len());
@@ -181,6 +199,59 @@ async fn spill_note(target: &SpillTarget, out: &Captured, err: &Captured) -> Str
         ));
     }
     note
+}
+
+/// The shape of a spilled stdout that is one complete JSON document:
+/// what is in it, not a 30 KiB window into the middle of it. `None`
+/// when the capture lost its front (the tail of a JSON stream parses as
+/// nothing) or when the bytes are not JSON at all.
+fn json_shape(out: &Captured) -> Option<String> {
+    if out.error.is_some() || out.total != out.retained.len() {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_slice(&out.retained).ok()?;
+    // A scalar has no shape worth a preview; the tail already shows it.
+    if !value.is_object() && !value.is_array() {
+        return None;
+    }
+    let mut shape = format!("JSON shape: {}", describe_json(&value, true));
+    crate::text::truncate_bytes_ellipsis(&mut shape, 2048);
+    Some(shape)
+}
+
+/// One value, one line — except the top level, which lists its keys (or
+/// its first element) so the next call can be a targeted jq.
+fn describe_json(value: &serde_json::Value, top: bool) -> String {
+    use serde_json::Value;
+    /// Keys listed before the rest collapse into a count.
+    const MAX_KEYS: usize = 40;
+    match value {
+        Value::Object(map) if top => {
+            let mut text = format!("object, {} keys:", map.len());
+            for (key, value) in map.iter().take(MAX_KEYS) {
+                text.push_str(&format!("\n  {key}: {}", describe_json(value, false)));
+            }
+            if map.len() > MAX_KEYS {
+                text.push_str(&format!("\n  … {} more keys", map.len() - MAX_KEYS));
+            }
+            text
+        }
+        Value::Array(items) if top => match items.first() {
+            None => "empty array".into(),
+            Some(first) => format!(
+                "array, {} items; first: {}",
+                items.len(),
+                describe_json(first, true).replace('\n', "\n  "),
+            ),
+        },
+        Value::Object(map) => format!("object ({} keys)", map.len()),
+        Value::Array(items) => format!("array ({} items)", items.len()),
+        Value::String(text) if text.chars().count() <= 40 => format!("{text:?}"),
+        Value::String(text) => format!("string ({} chars)", text.chars().count()),
+        Value::Number(number) => number.to_string(),
+        Value::Bool(value) => value.to_string(),
+        Value::Null => "null".into(),
+    }
 }
 
 /// The model-facing preview, led by the pointer to the rest when the
@@ -202,6 +273,29 @@ async fn render_output(out: Captured, err: Captured, spill: Option<&SpillTarget>
     if total <= rendered {
         return content;
     }
+    // A complete JSON stdout gets its shape instead of a tail: a 30 KiB
+    // window into minified JSON teaches nothing, and the next call was
+    // going to be jq on the spilled file anyway.
+    if let Some(target) = spill
+        && let Some(shape) = json_shape(&out)
+    {
+        let note = spill_note(
+            target,
+            &out,
+            &err,
+            "stdout is one JSON document; jq the file for what you need",
+        )
+        .await;
+        let mut preview = format!("{note}\n{shape}");
+        if !stderr_tail.is_empty() {
+            preview.push_str("\n=== stderr (tail) ===\n");
+            preview.push_str(&String::from_utf8_lossy(stderr_tail));
+        }
+        if let Some(error) = &err.error {
+            preview.push_str(&format!("\n(stderr read error: {error})"));
+        }
+        return preview;
+    }
     content.push_str(&format!(
         "\n…(output truncated at {rendered} rendered bytes from {total} raw bytes; \
          kept the tail of each stream)"
@@ -213,7 +307,7 @@ async fn render_output(out: Captured, err: Captured, spill: Option<&SpillTarget>
     // it long before the end, so a hint appended after 30 KiB of preview
     // is one only the model would ever see — and the human is the reader
     // who has to decide whether the file is worth opening.
-    let note = spill_note(target, &out, &err).await;
+    let note = spill_note(target, &out, &err, "grep or read it for what you need").await;
     format!("{note}\n{content}")
 }
 
@@ -322,14 +416,7 @@ impl Tool for BashTool {
                 Ok(v) => v,
                 Err(e) => return e,
             };
-            // The provider's call id names the file, so a result and its
-            // spill can be matched up after the fact; a call without one
-            // (a background job) still gets a file, under a fresh id.
-            let spill = ctx.spill_dir.clone().map(|dir| SpillTarget {
-                dir,
-                session_id: ctx.session_id.clone(),
-                call_id: ctx.call_id.clone().unwrap_or_else(crate::session::new_id),
-            });
+            let spill = SpillTarget::from_context(&ctx);
             if input.run_in_background {
                 if ctx.has_workspace_lease() {
                     return ToolOutput::error(
@@ -600,6 +687,80 @@ mod tests {
 
         assert_eq!(rendered, "small\n");
         assert!(!target.dir.exists(), "an untruncated result made a file");
+    }
+
+    /// A spilled stdout that is one complete JSON document previews as
+    /// its shape — a 30 KiB window into minified JSON teaches nothing,
+    /// and the next call was going to be jq on the file anyway.
+    #[tokio::test]
+    async fn a_spilled_complete_json_stdout_previews_shape_not_tail() {
+        let rows: Vec<u64> = (0..20_000).collect();
+        let body =
+            serde_json::to_string(&serde_json::json!({"rows": rows, "title": "aeon"})).unwrap();
+        assert!(body.len() > MAX_PREVIEW);
+        let dir = tempfile::tempdir().unwrap();
+        let target = SpillTarget {
+            dir: dir.path().to_path_buf(),
+            session_id: "session-1".into(),
+            call_id: "call-json".into(),
+        };
+        let out = Captured {
+            total: body.len(),
+            retained: body.clone().into_bytes(),
+            error: None,
+        };
+        let err = Captured {
+            retained: b"one warning\n".to_vec(),
+            total: 12,
+            error: None,
+        };
+
+        let rendered = render_output(out, err, Some(&target)).await;
+
+        assert!(rendered.starts_with("full output: "), "{rendered}");
+        assert!(rendered.contains("jq the file"), "{rendered}");
+        assert!(rendered.contains("rows: array (20000 items)"), "{rendered}");
+        assert!(rendered.contains("title: \"aeon\""), "{rendered}");
+        assert!(
+            rendered.contains("=== stderr (tail) ===\none warning"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("kept the tail"), "{rendered}");
+        assert!(
+            rendered.len() < 4096,
+            "shape stayed small: {} bytes",
+            rendered.len()
+        );
+        let file = dir.path().join("session-1-call-json.txt");
+        let saved = std::fs::read_to_string(file).unwrap();
+        assert!(saved.contains(&body), "the file holds the whole document");
+    }
+
+    /// A JSON stream whose front was dropped by tail-biased retention
+    /// cannot parse, so it keeps the ordinary tail preview — along with
+    /// the note that says the front is gone.
+    #[tokio::test]
+    async fn a_truncated_json_stream_keeps_the_tail_preview() {
+        let rows: Vec<u64> = (0..20_000).collect();
+        let body =
+            serde_json::to_string(&serde_json::json!({"rows": rows, "title": "aeon"})).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let target = SpillTarget {
+            dir: dir.path().to_path_buf(),
+            session_id: "session-1".into(),
+            call_id: "call-cut".into(),
+        };
+        let out = Captured {
+            total: body.len() + 64,
+            retained: body.into_bytes(),
+            error: None,
+        };
+
+        let rendered = render_output(out, Captured::default(), Some(&target)).await;
+
+        assert!(rendered.contains("kept the tail"), "{rendered}");
+        assert!(!rendered.contains("JSON shape"), "{rendered}");
+        assert!(rendered.contains("filter at the source"), "{rendered}");
     }
 
     /// A state directory that cannot be written to costs the model its
