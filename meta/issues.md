@@ -53,3 +53,4 @@
 ## Milestone 13 — Guard rails
 
 - [ ] [Kernel sandbox for tool processes](issues/kernel-sandbox-for-tool-processes.md)
+- [ ] [Child processes can write to the terminal](issues/children-write-to-the-terminal.md)
