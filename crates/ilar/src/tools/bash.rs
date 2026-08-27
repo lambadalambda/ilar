@@ -21,9 +21,6 @@ const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 /// nothing, so the bulk goes to disk instead of into the context window.
 /// Grep budgets its own previews against the same number.
 pub(crate) const MAX_PREVIEW: usize = 30 * 1024;
-/// Share of the preview stderr can always claim, however loud stdout
-/// was: the diagnosis is usually there.
-const MIN_STDERR_SHARE: usize = MAX_PREVIEW / 2;
 /// Per-stream in-memory retention, tail-biased like the preview. Far
 /// above the preview so the spilled file is worth grepping;
 /// `Captured.total` still counts every byte that came past it.
@@ -61,11 +58,27 @@ impl Drop for DrainTask {
     }
 }
 
-/// Split the preview between the two streams: stderr keeps at least
-/// [`MIN_STDERR_SHARE`] when it needs it, stdout takes whatever is left.
-fn stream_budgets(stdout_len: usize, stderr_len: usize) -> (usize, usize) {
-    let stderr_keep = stderr_len.min(MIN_STDERR_SHARE.max(MAX_PREVIEW.saturating_sub(stdout_len)));
-    (stdout_len.min(MAX_PREVIEW - stderr_keep), stderr_keep)
+/// Split a preview budget between the two streams: stderr keeps at
+/// least half when it needs it, stdout takes whatever is left.
+fn stream_budgets(stdout_len: usize, stderr_len: usize, budget: usize) -> (usize, usize) {
+    let stderr_share = budget / 2;
+    let stderr_keep = stderr_len.min(stderr_share.max(budget.saturating_sub(stdout_len)));
+    (stdout_len.min(budget - stderr_keep), stderr_keep)
+}
+
+/// The preview budget a call runs under. The caller may declare the
+/// output size it expects — then a surprise flood costs that much
+/// preview instead of [`MAX_PREVIEW`], while the full capture still
+/// spills. Lower-only: a raisable cap would invite "give me everything
+/// inline". Failures ignore the declaration entirely — the budget
+/// applies to the output the caller expected, not to the error it did
+/// not, and a truncated diagnosis causes a re-run that costs more than
+/// the declaration ever saved.
+fn preview_budget(declared: Option<usize>, success: bool) -> usize {
+    match (declared, success) {
+        (Some(bytes), true) => bytes.clamp(1024, MAX_PREVIEW),
+        _ => MAX_PREVIEW,
+    }
 }
 
 /// Where one tool call's full output is written, when the runtime gave
@@ -256,9 +269,14 @@ fn describe_json(value: &serde_json::Value, top: bool) -> String {
 
 /// The model-facing preview, led by the pointer to the rest when the
 /// output did not fit in it.
-async fn render_output(out: Captured, err: Captured, spill: Option<&SpillTarget>) -> String {
+async fn render_output(
+    out: Captured,
+    err: Captured,
+    spill: Option<&SpillTarget>,
+    budget: usize,
+) -> String {
     let total = out.total.saturating_add(err.total);
-    let (stdout_keep, stderr_keep) = stream_budgets(out.retained.len(), err.retained.len());
+    let (stdout_keep, stderr_keep) = stream_budgets(out.retained.len(), err.retained.len(), budget);
     let stdout_tail = tail_bytes(&out.retained, stdout_keep);
     let stderr_tail = tail_bytes(&err.retained, stderr_keep);
     let rendered = stdout_tail.len() + stderr_tail.len();
@@ -371,6 +389,8 @@ struct Input {
     timeout_ms: Option<u64>,
     #[serde(default)]
     run_in_background: bool,
+    #[serde(default)]
+    preview_bytes: Option<usize>,
 }
 
 impl Tool for BashTool {
@@ -404,7 +424,8 @@ impl Tool for BashTool {
             "properties": {
                 "command": {"type": "string"},
                 "timeout_ms": {"type": "integer", "description": "Kill after this long (default 120000 foreground; configured default for background)"},
-                "run_in_background": {"type": "boolean", "description": "Run detached and deliver the result as a notification"}
+                "run_in_background": {"type": "boolean", "description": "Run detached and deliver the result as a notification"},
+                "preview_bytes": {"type": "integer", "description": "Output size you expect: on success the inline preview is capped at this (clamped 1024-30720) and the full output still goes to the spill file. Ignored when the command fails, so error output stays visible."}
             },
             "required": ["command"]
         })
@@ -440,6 +461,7 @@ impl Tool for BashTool {
                     timeout + std::time::Duration::from_secs(1),
                     None,
                     spill,
+                    input.preview_bytes,
                 );
                 return spawner
                     .spawn_background_tool(
@@ -455,7 +477,15 @@ impl Tool for BashTool {
             let timeout =
                 std::time::Duration::from_millis(input.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
             let tail_reporter = ctx.call_id.clone().zip(ctx.output_tail.clone());
-            run_command(input.command, ctx.cwd, timeout, tail_reporter, spill).await
+            run_command(
+                input.command,
+                ctx.cwd,
+                timeout,
+                tail_reporter,
+                spill,
+                input.preview_bytes,
+            )
+            .await
         })
     }
 }
@@ -496,6 +526,7 @@ fn run_command(
     timeout: std::time::Duration,
     tail_reporter: Option<(String, crate::tools::OutputTailSink)>,
     spill: Option<SpillTarget>,
+    declared_preview: Option<usize>,
 ) -> ToolFuture {
     Box::pin(async move {
         let mut child = match shell_command(&command_text, &cwd).spawn() {
@@ -520,7 +551,9 @@ fn run_command(
                     let out = stdout.finish(drain_grace).await;
                     let err = stderr.finish(drain_grace).await;
                     group.disarm();
-                    let rendered = render_output(out, err, spill.as_ref()).await;
+                    // A timeout is a failure: the full budget applies.
+                    let rendered =
+                        render_output(out, err, spill.as_ref(), MAX_PREVIEW).await;
                     return ToolOutput::error(format!(
                         "bash: timed out after {}ms\ncommand: {}\n{rendered}",
                         timeout.as_millis(),
@@ -543,7 +576,9 @@ fn run_command(
         group.disarm();
         let out = stdout.finish(drain_grace).await;
         let err = stderr.finish(drain_grace).await;
-        let mut content = render_output(out, err, spill.as_ref()).await;
+        let success = matches!(&status, Ok(status) if status.success());
+        let budget = preview_budget(declared_preview, success);
+        let mut content = render_output(out, err, spill.as_ref(), budget).await;
         match status {
             Ok(status) if status.success() => {
                 content.push_str("\n(exit 0)");
@@ -661,12 +696,17 @@ mod tests {
     /// the rest — the same split as before, at the new size.
     #[test]
     fn stderr_keeps_its_share_of_the_preview() {
-        assert_eq!(stream_budgets(10, 20), (10, 20));
-        let (stdout, stderr) = stream_budgets(MAX_PREVIEW * 4, MAX_PREVIEW);
-        assert_eq!(stderr, MIN_STDERR_SHARE);
-        assert_eq!(stdout, MAX_PREVIEW - MIN_STDERR_SHARE);
+        assert_eq!(stream_budgets(10, 20, MAX_PREVIEW), (10, 20));
+        let (stdout, stderr) = stream_budgets(MAX_PREVIEW * 4, MAX_PREVIEW, MAX_PREVIEW);
+        assert_eq!(stderr, MAX_PREVIEW / 2);
+        assert_eq!(stdout, MAX_PREVIEW - MAX_PREVIEW / 2);
         // A quiet stderr leaves the whole preview to stdout.
-        assert_eq!(stream_budgets(MAX_PREVIEW * 4, 12), (MAX_PREVIEW - 12, 12));
+        assert_eq!(
+            stream_budgets(MAX_PREVIEW * 4, 12, MAX_PREVIEW),
+            (MAX_PREVIEW - 12, 12)
+        );
+        // A declared budget splits the same way, at its own size.
+        assert_eq!(stream_budgets(4096, 4096, 2048), (1024, 1024));
     }
 
     #[tokio::test]
@@ -683,10 +723,83 @@ mod tests {
             error: None,
         };
 
-        let rendered = render_output(out, Captured::default(), Some(&target)).await;
+        let rendered = render_output(out, Captured::default(), Some(&target), MAX_PREVIEW).await;
 
         assert_eq!(rendered, "small\n");
         assert!(!target.dir.exists(), "an untruncated result made a file");
+    }
+
+    /// Declared expectations are lower-only, clamped, and void on
+    /// failure: the budget covers the output the caller expected, not
+    /// the error it did not.
+    #[test]
+    fn preview_budget_clamps_and_ignores_declarations_on_failure() {
+        assert_eq!(preview_budget(None, true), MAX_PREVIEW);
+        assert_eq!(preview_budget(Some(2048), true), 2048);
+        assert_eq!(preview_budget(Some(10), true), 1024);
+        assert_eq!(preview_budget(Some(usize::MAX), true), MAX_PREVIEW);
+        assert_eq!(preview_budget(Some(2048), false), MAX_PREVIEW);
+    }
+
+    /// The caller said "I expect ~2 KiB"; a 100 KiB flood costs 2 KiB
+    /// of preview and a pointer, not 30 KiB — and the full capture is
+    /// in the file.
+    #[tokio::test]
+    async fn a_declared_budget_caps_the_preview_on_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = SpillTarget {
+            dir: dir.path().to_path_buf(),
+            session_id: "session-1".into(),
+            call_id: "call-declared".into(),
+        };
+        let out = run_command(
+            "head -c 100000 /dev/zero | tr '\\0' x".into(),
+            std::path::PathBuf::from("."),
+            std::time::Duration::from_secs(30),
+            None,
+            Some(target),
+            Some(2048),
+        )
+        .await;
+
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.starts_with("full output: "), "{}", out.content);
+        assert!(
+            out.content.len() < 2048 + 512,
+            "preview stayed near the declaration: {} bytes",
+            out.content.len()
+        );
+        let file = dir.path().join("session-1-call-declared.txt");
+        assert_eq!(std::fs::metadata(file).unwrap().len(), 100_000);
+    }
+
+    /// The same declaration on a failing command changes nothing: the
+    /// diagnosis arrives at full size.
+    #[tokio::test]
+    async fn a_failure_renders_the_full_preview_despite_a_declaration() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = SpillTarget {
+            dir: dir.path().to_path_buf(),
+            session_id: "session-1".into(),
+            call_id: "call-failed".into(),
+        };
+        let out = run_command(
+            "head -c 100000 /dev/zero | tr '\\0' x; exit 3".into(),
+            std::path::PathBuf::from("."),
+            std::time::Duration::from_secs(30),
+            None,
+            Some(target),
+            Some(2048),
+        )
+        .await;
+
+        assert!(out.is_error);
+        assert!(out.content.contains("(exit code 3)"), "{}", out.content);
+        assert!(
+            out.content.len() > MAX_PREVIEW / 2,
+            "kept the full preview: {} bytes",
+            out.content.len()
+        );
     }
 
     /// A spilled stdout that is one complete JSON document previews as
@@ -715,7 +828,7 @@ mod tests {
             error: None,
         };
 
-        let rendered = render_output(out, err, Some(&target)).await;
+        let rendered = render_output(out, err, Some(&target), MAX_PREVIEW).await;
 
         assert!(rendered.starts_with("full output: "), "{rendered}");
         assert!(rendered.contains("jq the file"), "{rendered}");
@@ -756,7 +869,7 @@ mod tests {
             error: None,
         };
 
-        let rendered = render_output(out, Captured::default(), Some(&target)).await;
+        let rendered = render_output(out, Captured::default(), Some(&target), MAX_PREVIEW).await;
 
         assert!(rendered.contains("kept the tail"), "{rendered}");
         assert!(!rendered.contains("JSON shape"), "{rendered}");
@@ -782,7 +895,7 @@ mod tests {
             error: None,
         };
 
-        let rendered = render_output(out, Captured::default(), Some(&target)).await;
+        let rendered = render_output(out, Captured::default(), Some(&target), MAX_PREVIEW).await;
 
         assert!(
             rendered.starts_with("(could not save the full output:"),

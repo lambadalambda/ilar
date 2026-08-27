@@ -130,6 +130,14 @@ file reachable from any working directory. Spill files older than seven
 days are removed at startup; filtering at the source (`jq`, `grep`,
 `head`) is still cheaper than reading one back.
 
+`bash` also takes `preview_bytes` — the output size the model expects.
+On success the inline preview is capped at that (clamped to
+1 KiB–30 KiB, lower-only) while the full output still spills, so a
+surprise flood costs a declared budget instead of the full preview. A
+failing command ignores the declaration: the error output arrives at
+full size, because a truncated diagnosis just causes the command to be
+run again.
+
 ## MCP
 
 ilar deliberately ships no built-in MCP client. The built-in `mcp-via-cli`
