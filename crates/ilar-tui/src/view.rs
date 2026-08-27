@@ -838,6 +838,9 @@ impl App {
         if !self.queued_messages.is_empty() {
             input_title = format!("{}· {} queued ", input_title, self.queued_messages.len());
         }
+        if !self.input_stash.is_empty() {
+            input_title = format!("{}· {} stashed ", input_title, self.input_stash.len());
+        }
         if let Some((_, round)) = &self.goal {
             input_title = format!("{input_title}· goal {round}/{MAX_GOAL_ROUNDS} ");
         }
@@ -855,7 +858,9 @@ impl App {
                 theme::SECONDARY
             }),
         ));
-        let input_help = if input_chunk.width >= 48 {
+        let input_help = if input_chunk.width >= 62 {
+            " Enter send · Shift-Enter/Ctrl-J newline · Ctrl-S stash "
+        } else if input_chunk.width >= 48 {
             " Enter send · Shift-Enter/Ctrl-J newline "
         } else {
             " Enter send "

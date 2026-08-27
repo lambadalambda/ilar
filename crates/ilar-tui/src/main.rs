@@ -3077,6 +3077,9 @@ async fn run_app(
                     (KeyCode::Char('q'), true) => {
                         app.pending_manager = Some(PendingManager::default());
                     }
+                    (KeyCode::Char('s'), true) => {
+                        app.stash_or_pop_input();
+                    }
                     (KeyCode::Char('o'), true) => {
                         app.open_link_picker();
                     }

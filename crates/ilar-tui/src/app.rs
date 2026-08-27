@@ -91,6 +91,10 @@ pub(crate) struct App {
     /// Messages submitted during an active turn, auto-sent in order when
     /// the turn completes.
     pub(crate) queued_messages: Vec<String>,
+    /// Prompts put aside by Ctrl-S and popped back by the same key on a
+    /// blank prompt, newest first — for the half-written thought a more
+    /// urgent message would otherwise bulldoze.
+    pub(crate) input_stash: Vec<String>,
     /// Steers handed to a running turn but not yet delivered. Steering
     /// is fire-and-forget, so an aborted turn drops its receiver and
     /// would lose them silently; these get moved back to the queue.
@@ -261,6 +265,7 @@ impl App {
             turn_committed: false,
             retry_available: false,
             queued_messages: Vec::new(),
+            input_stash: Vec::new(),
             pending_steers: Vec::new(),
             goal: None,
             slash_selected: 0,
@@ -1547,6 +1552,30 @@ impl App {
             .context("writing clipboard")
     }
 
+    /// Ctrl-S, both directions: a prompt with text is put aside so a
+    /// quick message can go first; a blank prompt takes the newest
+    /// stash back. The input title shows a count while anything waits.
+    pub(crate) fn stash_or_pop_input(&mut self) {
+        if self.input.is_blank() {
+            match self.input_stash.pop() {
+                Some(text) => {
+                    self.input = crate::input::InputBuffer::from(text);
+                    self.clear_transient_notice();
+                }
+                None => self.set_notice("nothing stashed", NoticeLevel::Info),
+            }
+        } else {
+            self.input_stash.push(self.input.take());
+            self.set_notice(
+                format!(
+                    "input stashed ({}) · Ctrl-S on a blank prompt pops",
+                    self.input_stash.len()
+                ),
+                NoticeLevel::Info,
+            );
+        }
+    }
+
     pub(crate) fn set_notice(&mut self, text: impl Into<String>, level: NoticeLevel) {
         self.set_notice_with_lifetime(text, level, level == NoticeLevel::Error);
     }
@@ -1856,6 +1885,34 @@ mod tests {
     use crate::selection::{highlight_transcript_selection, transcript_cells};
     use crate::text::wrap_styled_line;
     use crate::view::{activity_line, stream_liveness};
+
+    #[test]
+    fn ctrl_s_stashes_the_prompt_and_pops_it_back_newest_first() {
+        let mut app = App::new();
+        app.input = crate::input::InputBuffer::from("half-written thought");
+        app.stash_or_pop_input();
+        assert!(app.input.is_blank());
+        assert_eq!(app.input_stash, vec!["half-written thought".to_string()]);
+        assert!(app.notice.is_some(), "stashing says where the text went");
+
+        app.input = crate::input::InputBuffer::from("second stash");
+        app.stash_or_pop_input();
+
+        app.stash_or_pop_input();
+        assert_eq!(app.input.text(), "second stash");
+        assert_eq!(app.input.cursor(), "second stash".len());
+        app.input.clear();
+        app.stash_or_pop_input();
+        assert_eq!(app.input.text(), "half-written thought");
+        assert!(app.input_stash.is_empty());
+
+        // Nothing left: the prompt stays blank and the status says why.
+        app.input.clear();
+        app.clear_notice();
+        app.stash_or_pop_input();
+        assert!(app.input.is_blank());
+        assert!(app.notice.is_some());
+    }
 
     #[test]
     fn activity_line_carries_stream_liveness() {
