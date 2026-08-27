@@ -20,3 +20,27 @@ changing behavior.
 ## Milestone
 
 13 — Guard rails
+
+## Outcome
+
+Scoped `[providers.*]` entirely: the "only the dangerous fields"
+option turned out to be the empty set's complement — base_url,
+api_key and auth are the section's ONLY fields, and each is an
+exfiltration or billing lever (re-route the user's key, substitute
+the repository's key, flip OAuth mode). Same mechanism as
+`[models]`: a project layer declaring `[providers]` is warned about
+in the established voice and ignored wholesale; the user file and
+provider env vars resolve as if the project section did not exist.
+`declares_models` generalized to `declares_entries` over either
+table. Two tests pinning the old convenience were rewritten as
+policy tests — notably `project_can_reset_inherited_chatgpt_auth`
+became `project_cannot_reset_chatgpt_auth_or_inject_a_key`: a
+project deciding which credential a session runs on was the bug
+wearing a feature's clothes. Per-project provider tweaks that were
+legitimately useful (API-key billing in one repo) still work via
+environment variables, which the person launching ilar controls.
+docs/configuration.md's layering paragraph — which still described
+project `[models]` entries replacing user entries, stale since the
+models hardening — now states the user-scoping rule for both
+sections. Field-wise provider merging across layers survives in
+`merge_file` but only the single user file feeds it now.

@@ -236,3 +236,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Talk to your tasks](issues/talk-to-your-tasks.md)
 - [x] [Background by default, for readers](issues/background-by-default-for-readers.md)
 - [x] [Bring your own model](issues/bring-your-own-model.md)
+- [x] [Provider config is user configuration](issues/provider-config-is-user-configuration.md)
