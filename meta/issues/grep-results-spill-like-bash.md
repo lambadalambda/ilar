@@ -34,3 +34,16 @@ opens with the pointer.
 ## Milestone
 
 13 — Guard rails
+
+## Outcome
+
+`SpillTarget` grew `from_context` and `write_note(body, advice)` —
+the write-and-point logic bash already had, now shared instead of
+copied — and grep's `run` finishes through `spill_over_budget`: a
+successful rendering past 30 KiB goes to the spill file whole, the
+result opens with the pointer, and the preview is the head of the
+match list cut on a line boundary. The closing notice (match cap,
+entry budget) is re-appended after the cut so it cannot vanish
+into the file. No spill dir → unchanged full output; errors never
+spill. Shipped in one commit with json-aware-spill-previews — the
+two shared the SpillTarget refactor.

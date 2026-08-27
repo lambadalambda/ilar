@@ -34,3 +34,16 @@ level keys and sizes, and the standing advice to jq the file.
 ## Milestone
 
 13 — Guard rails
+
+## Outcome
+
+In the bash spill path, a stdout that was captured completely and
+parses as a JSON object or array previews as `JSON shape:` — the
+top-level keys each with type and size (`array (20000 items)`,
+short strings verbatim), a top-level array as its length plus the
+first element's shape, the whole sketch capped at 2 KiB — under a
+hint that says jq the file. stderr keeps its tail and read-error
+notes. Scalars, non-JSON, and truncated captures (the front is
+gone, so the tail parses as nothing) keep today's tail preview and
+the "filter at the source" note. The ~8k-token tails the yodlpay
+session paid for its two API dumps become ~50-token sketches.

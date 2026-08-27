@@ -237,3 +237,5 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Background by default, for readers](issues/background-by-default-for-readers.md)
 - [x] [Bring your own model](issues/bring-your-own-model.md)
 - [x] [Provider config is user configuration](issues/provider-config-is-user-configuration.md)
+- [x] [Grep results spill like bash output](issues/grep-results-spill-like-bash.md)
+- [x] [JSON-aware spill previews](issues/json-aware-spill-previews.md)
