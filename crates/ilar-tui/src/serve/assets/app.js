@@ -55,7 +55,39 @@ async function fetchPath(path) {
 const api = (path) => fetchPath(path).then((response) => response.json());
 const apiText = (path) => fetchPath(path).then((response) => response.text());
 
+// The write path. Every failure the server explains — a session open in
+// another process, a directory that is not one, a model with no provider
+// — comes back as `{error}` with a status, and both are carried on the
+// thrown error because the page branches on the status (409 is a state,
+// not a mishap) and shows the words.
+async function post(path, body) {
+  const headers = { "Content-Type": "application/json" };
+  if (token) headers.Authorization = "Bearer " + token;
+  const response = await fetch(path, { method: "POST", headers, body: JSON.stringify(body) });
+  let data = {};
+  try {
+    data = await response.json();
+  } catch (error) {
+    data = {};
+  }
+  if (!response.ok) {
+    const failure = new Error(data.error || "POST " + path + " → " + response.status);
+    failure.status = response.status;
+    throw failure;
+  }
+  return data;
+}
+
 const message = (error) => String((error && error.message) || error);
+
+// What the page says about a write that worked. The server's word, in
+// the user's terms: a steer is not lost, it is queued for the step the
+// model is about to take.
+const FATE_WORDS = {
+  steering: "steering · next step",
+  started: "turn started",
+  aborted: "aborting …",
+};
 
 // ------------------------------------------------------------ format
 
@@ -852,9 +884,92 @@ function grouped(sessions) {
   return ordered;
 }
 
-function Sidebar({ sessions, current, error, onPick }) {
+// Start a session from the page. The three things a launch decides —
+// what to ask, where it runs, which model — and no more: everything else
+// is what `ilar` itself would resolve from configuration, which is the
+// point of the server running the same runtime the TUI does.
+//
+// The directory is a free text field with the store's own directories
+// suggested, because the browser cannot see the filesystem and a picker
+// that only offered previous directories would make the first session in
+// a new project impossible to start.
+function NewSession({ cwds, onCreated }) {
+  const [open, setOpen] = useState(false);
+  const [prompt, setPrompt] = useState("");
+  const [cwd, setCwd] = useState("");
+  const [model, setModel] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const submit = async (event) => {
+    event.preventDefault();
+    if (!prompt.trim() || busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      const created = await post("/api/sessions", {
+        prompt: prompt.trim(),
+        cwd: cwd.trim() || null,
+        model: model.trim() || null,
+      });
+      setPrompt("");
+      setOpen(false);
+      onCreated(created.id);
+    } catch (failure) {
+      setError(message(failure));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!open) {
+    return html`
+      <button class="new-toggle" type="button" onClick=${() => setOpen(true)}>+ new session</button>
+    `;
+  }
+  return html`
+    <form class="new-session" onSubmit=${submit}>
+      <textarea
+        class="new-prompt"
+        rows="3"
+        required
+        autofocus
+        placeholder="what should it do?"
+        value=${prompt}
+        onInput=${(event) => setPrompt(event.target.value)}
+      ></textarea>
+      <input
+        class="new-field"
+        list="known-cwds"
+        placeholder="working directory (this server's, if blank)"
+        value=${cwd}
+        onInput=${(event) => setCwd(event.target.value)}
+      />
+      <datalist id="known-cwds">
+        ${cwds.map((known) => html`<option key=${known} value=${known}></option>`)}
+      </datalist>
+      <input
+        class="new-field"
+        placeholder="config default"
+        value=${model}
+        onInput=${(event) => setModel(event.target.value)}
+      />
+      ${error && html`<p class="note error">${error}</p>`}
+      <div class="new-actions">
+        <button type="button" class="ghost" onClick=${() => setOpen(false)}>cancel</button>
+        <button type="submit" disabled=${busy || !prompt.trim()}>${busy ? "starting…" : "start"}</button>
+      </div>
+    </form>
+  `;
+}
+
+function Sidebar({ sessions, current, error, onPick, onCreated }) {
   const groups = useMemo(() => grouped(sessions), [sessions]);
   const working = sessions.filter((session) => session.state === "working").length;
+  const cwds = useMemo(
+    () => [...new Set(sessions.map((session) => session.cwd).filter(Boolean))].sort(),
+    [sessions],
+  );
   return html`
     <aside class="sidebar">
       <header class="sidebar-head">
@@ -864,6 +979,9 @@ function Sidebar({ sessions, current, error, onPick }) {
           ${working > 0 && html`<span class="working"> · ${working} working</span>`}
         </span>
       </header>
+      <div class="sidebar-new">
+        <${NewSession} cwds=${cwds} onCreated=${onCreated} />
+      </div>
       <div class="sidebar-body">
         ${error && html`<p class="note">${error}</p>`}
         ${!error && !sessions.length && html`<p class="note">No sessions in this store yet.</p>`}
@@ -883,9 +1001,11 @@ function Sidebar({ sessions, current, error, onPick }) {
   `;
 }
 
-// The strip where phase 3's input box goes: what the session is doing,
-// and what it has spent doing it.
-function StatusPill({ view, session }) {
+// The strip above the input box: what the session is doing, what it has
+// spent doing it, and — only for a turn this server is running — the
+// control that stops it. A session working under a TUI shows the same
+// dot and no button: nothing here can stop that one.
+function StatusPill({ view, session, onAbort, aborting }) {
   const state = (session && session.state) || (view.live ? "working" : "idle");
   const model = (session && session.model) || (view.session && view.session.model) || "";
   const activity = session && session.activity;
@@ -913,7 +1033,111 @@ function StatusPill({ view, session }) {
             ? " · plan"
             : ""}
       </span>
+      ${session &&
+      session.driven &&
+      html`
+        <button class="abort" type="button" disabled=${aborting} onClick=${onAbort} title="stop this turn">
+          ${aborting ? "stopping…" : "stop"}
+        </button>
+      `}
     </div>
+  `;
+}
+
+// The input box, in the spot the status pill was holding for it.
+//
+// Enter sends and Shift-Enter breaks the line, which is the shape every
+// chat surface has taught; the button is there for a phone. What the
+// send *did* is the server's word, shown briefly rather than as a row in
+// the transcript — the transcript is the session's, and a steer already
+// appears there when the model receives it.
+//
+// A 409 is not a failure to retry: the session belongs to another
+// process, and until that changes this tab is a watcher. The box locks
+// and says so, and the next successful send (after the TUI lets go)
+// clears it.
+function Composer({ id, session, view }) {
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [aborting, setAborting] = useState(false);
+  const [fate, setFate] = useState("");
+  const [refused, setRefused] = useState(false);
+
+  useEffect(() => {
+    setText("");
+    setFate("");
+    setRefused(false);
+    setAborting(false);
+  }, [id]);
+
+  // Say it and let it go: a stale "turn started" under a finished turn
+  // reads as a claim about now.
+  useEffect(() => {
+    if (!fate) return undefined;
+    const timer = setTimeout(() => setFate(""), 4000);
+    return () => clearTimeout(timer);
+  }, [fate]);
+
+  const send = useCallback(async () => {
+    const body = text.trim();
+    if (!body || busy) return;
+    setBusy(true);
+    try {
+      const result = await post(apiPath(id, "/message"), { text: body });
+      setText("");
+      setRefused(false);
+      setFate(FATE_WORDS[result.fate] || result.fate || "sent");
+    } catch (error) {
+      if (error.status === 409) setRefused(true);
+      setFate(message(error));
+    } finally {
+      setBusy(false);
+    }
+  }, [text, busy, id]);
+
+  const abort = useCallback(async () => {
+    setAborting(true);
+    try {
+      const result = await post(apiPath(id, "/abort"), {});
+      setFate(FATE_WORDS[result.fate] || result.fate || "aborted");
+    } catch (error) {
+      setFate(message(error));
+    } finally {
+      setAborting(false);
+    }
+  }, [id]);
+
+  const onKeyDown = (event) => {
+    if (event.key !== "Enter" || event.shiftKey) return;
+    event.preventDefault();
+    send();
+  };
+
+  return html`
+    ${refused &&
+    html`<p class="watching">This session is open in another process — watching only.</p>`}
+    <${StatusPill} view=${view} session=${session} onAbort=${abort} aborting=${aborting} />
+    <div class=${"input" + (refused ? " locked" : "")}>
+      <textarea
+        class="prompt"
+        rows="1"
+        placeholder=${refused ? "watching only" : "message this session — Enter sends, Shift-Enter for a new line"}
+        disabled=${refused}
+        value=${text}
+        onInput=${(event) => setText(event.target.value)}
+        onKeyDown=${onKeyDown}
+      ></textarea>
+      <button
+        class="send"
+        type="button"
+        disabled=${refused || busy || !text.trim()}
+        onClick=${send}
+        title="send"
+      >
+        ${busy ? "…" : "send"}
+      </button>
+    </div>
+    ${fate && html`<p class="fate">${fate}</p>`}
   `;
 }
 
@@ -1076,7 +1300,7 @@ function Center({ id, view, session, onDrawer }) {
       </div>
       <footer class="composer">
         ${!tailing && html`<button class="jump" type="button" onClick=${toBottom}>jump to live ↓</button>`}
-        ${id && html`<${StatusPill} view=${view} session=${session} />`}
+        ${id && html`<${Composer} id=${id} view=${view} session=${session} />`}
       </footer>
     </main>
   `;
@@ -1136,6 +1360,12 @@ function App() {
         current=${id}
         error=${error}
         onPick=${() => setDrawer(false)}
+        onCreated=${(created) => {
+          // The hash is the router: selecting the new session is the
+          // same gesture as clicking it in the list.
+          location.hash = "#/s/" + encodeURIComponent(created);
+          setDrawer(false);
+        }}
       />
       <${Center} id=${id} view=${view} session=${session} onDrawer=${() => setDrawer(!drawer)} />
       <${DetailPanel} id=${id} view=${view} />

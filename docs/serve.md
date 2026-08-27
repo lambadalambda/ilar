@@ -6,13 +6,24 @@ ilar serve --open                   # and open a browser
 ilar serve --bind 10.0.0.2:7777     # prints a URL with a token in it
 ```
 
-`ilar serve` is a **separate, read-only process that tails the session
-store**. It does not run turns, does not hold the writer's lease, and
-does not need a provider, an API key or a model — reading a log that
-already exists does not require the means to write another one. Started
-anywhere on the machine it supervises every ilar process on it: the TUI,
-`ilar exec`, subagents, all of them, because they all write the same
-append-only JSONL.
+`ilar serve` is a **separate process that tails the session store, and
+drives the sessions nothing else is holding**. Started anywhere on the
+machine it supervises every ilar process on it: the TUI, `ilar exec`,
+subagents, all of them, because they all write the same append-only
+JSONL.
+
+Reading needs nothing but the state directory — no provider, no API key,
+no model, and none of them is checked at startup, so a machine with no
+provider configured still browses everything it recorded. Writing needs
+what any ilar run needs, and asks for it per turn: the first message you
+send resolves the same runtime a TUI launch would, and fails on that one
+request if the configuration cannot answer.
+
+**One session, one writer, and the OS decides.** A turn only runs here
+if this process can take the session's writer lease. A session open in a
+TUI refuses it, and the page says so — that session stays watch-only
+until the TUI lets go. Nothing is queued behind the lock and nothing
+races it.
 
 Committed events land as steps complete — that is what the log
 records — and the in-flight step streams live on top of them: while a
@@ -38,6 +49,26 @@ replaceable.
   subagent tasks start collapsed and open on click; a task fetches its
   child's transcript only when you open it. `load earlier` walks back a
   page at a time. The view follows the tail unless you scroll up.
+- The input box under the transcript. **Enter** sends, **Shift-Enter**
+  breaks the line. What the send did is shown for a moment underneath —
+  `turn started` for a new turn, `steering · next step` when a turn was
+  already running here (the message reaches the model at its next step,
+  it is not queued until the turn ends). A session another process holds
+  locks the box and shows *watching only* until that process lets go.
+  **stop** appears in the status strip while this server is running the
+  turn — and only then: a session working under a TUI is not this
+  server's to stop.
+- **+ new session**, at the top of the session list: a prompt, a working
+  directory (free text, with the directories already in the store
+  suggested) and an optional model — blank means whatever configuration
+  says. The new session is created, its first turn starts, and the page
+  selects it.
+
+The question tool is not attached to a turn started here, the same way
+it is not attached to `ilar exec`: nobody in this process can answer, so
+a model that reaches for it is told so immediately rather than blocking
+on a human who is not there. An interactive answer modal in the browser
+is a follow-up.
 
 Rendering is plain-text-first: escaped text in `pre-wrap`, fenced blocks
 to `<pre><code>`, inline backticks, bare `http(s)` URLs to links, and
@@ -47,19 +78,23 @@ to an HTML parser — every value goes in through `textContent`.
 
 ## Routes
 
-Everything is `GET`. Phase 2 is read-only and the router is where that
-is enforced structurally: no handler exists for any other method, so no
-handler can forget to check.
+Reads are `GET`, writes are `POST`, and the router is where that is
+enforced structurally: every route names the methods it answers, so
+anything else on a known path is a 405 from the router rather than a
+check a handler could forget.
 
 | Route | What it returns |
 | --- | --- |
-| `GET /api/sessions` | The listing: `id`, `title`, `cwd`, `agent`, `model`, `parent_id`, `modified`, `state` (`working` / `stalled` / `idle`, derived from the turn's live scratch — not from mtime guessing), and `activity` (the running tool, e.g. `bash: cargo test`) while one is named. A long tool run stays `working` — the turn heartbeats the scratch every 20 s while a tool executes — so `stalled` means a genuinely dead or wedged process, not a slow build. Child sessions are excluded. |
+| `GET /api/sessions` | The listing: `id`, `title`, `cwd`, `agent`, `model`, `parent_id`, `modified`, `state` (`working` / `stalled` / `idle`, derived from the turn's live scratch — not from mtime guessing), `activity` (the running tool, e.g. `bash: cargo test`) while one is named, and `driven` (whether *this* server is running that turn, which is what the stop control keys off — a session can be `working` under a TUI). A long tool run stays `working` — the turn heartbeats the scratch every 20 s while a tool executes — so `stalled` means a genuinely dead or wedged process, not a slow build. Child sessions are excluded. |
 | `GET /api/sessions/{id}?from=&invocation=&limit=` | One page of the transcript, newest page first: `events`, `cursor`, `has_more`, `count`, `line`, `usage`. `?invocation=<tool call id>` narrows to one subagent invocation. |
 | `GET /api/sessions/{id}/events?from=&token=` | The live tail, as SSE. |
 | `GET /api/sessions/{id}/children` | The sessions whose `parent_id` is this one. |
 | `GET /api/sessions/{id}/results/{tool_use_id}` | The untruncated text behind a `truncated: true` tool result, as `text/plain`. |
 | `GET /api/sessions/{id}/images/{event_id}/{n}` | One image's bytes. Base64 never crosses the wire in JSON; the transcript carries a descriptor and a marker line. |
 | `GET /`, `/app.css`, `/app.js` | The page. |
+| `POST /api/sessions` | `{prompt, cwd?, model?}` — create a session and run its first turn. Returns `{"id", "fate":"started"}` immediately; the turn runs behind it and the page follows on the stream it would have opened anyway. `cwd` defaults to the server's own directory and must exist; `model` defaults to configuration. |
+| `POST /api/sessions/{id}/message` | `{text}` — `{"fate":"steering"}` when this server is running a turn there (the message reaches the model at its next step), `{"fate":"started"}` when it took the writer lease and started one. `409 {"error":"session is open in another process — watching only"}` when another process holds the lease; `404` when there is no such session; `500` with the configuration error when no runtime could be built. |
+| `POST /api/sessions/{id}/abort` | `{"fate":"aborted"}` — cancels the turn this server is running there. `404` when it is not running one: a turn under another process is not this server's to stop. |
 
 Two cursors, deliberately different, because they count different
 things. `cursor` indexes the **folded** canonical stream — what a
@@ -127,14 +162,19 @@ stat-polled every 250 ms (`--poll-ms`, `ILAR_SERVE_POLL_MS`).
 
 Read this before binding anything but loopback.
 
-**Read-only by construction.** Every route is registered as a `GET`;
-there is no code path that writes to the store, starts a turn, or runs a
-tool. Anything else on a known path is a 405 from the router itself.
+**There is a write path now, and this is what it is.** Three `POST`
+routes start turns, steer them and abort them. A turn started here runs
+with the same tools any ilar turn has — it edits files and runs
+commands in the directory the session names. Whoever can post to this
+server can make this machine do work. The read paragraphs below still
+hold, but "it only reads" no longer does.
 
 **Loopback by default, and no token there.** The default bind is
-`127.0.0.1:4527` with no authentication, because anything that can reach
-loopback on your machine can already read `~/.local/state/ilar/sessions`
-directly — a token there would be theatre.
+`127.0.0.1:4527` with no authentication. That is the same trust ilar
+already extends locally: anything that can reach loopback on your
+machine can already read `~/.local/state/ilar/sessions` *and* run `ilar`
+itself, so a token there would be theatre in both directions. It is a
+local process boundary, not a security one.
 
 **Any other bind generates a token.** A 256-bit token, printed once, in
 the fragment of the URL (`http://host:7777/#token=…`) — fragments are
@@ -159,4 +199,11 @@ it on the public internet.**
 roles, no per-session permissions, and no sandbox. Whoever holds it
 reads every session in the store — including the transcripts of anything
 your agent has ever seen, which is the most sensitive material on the
-machine.
+machine — and can start a turn on it, with tools, in any directory the
+server can reach. Treat the token as a shell on the machine, because
+that is what it is worth.
+
+**A session someone else is writing is safe from all of this.** The
+writer lease is an OS lock, so a session open in a TUI cannot be driven
+by the server whoever holds the token; they can watch it. That is a
+concurrency guarantee, not an access-control one.

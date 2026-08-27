@@ -18,6 +18,14 @@
 //!   bind-to-token decision itself is a unit test in `serve::http`.
 //! - **A browser.** `--open` is a call into the existing opener; there
 //!   is nothing here to observe.
+//!
+//! The write routes are here for what the *process* decides — the
+//! writer lease, the token, the method surface, a missing provider —
+//! and deliberately not for what a turn does: a real turn needs a
+//! provider, and a binary spawned with a key in its environment would
+//! call one. The turn-driving half is proven against a scripted
+//! provider in `serve::drive`, which can inject a resolver because it
+//! runs in-process.
 
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
@@ -55,6 +63,13 @@ impl Server {
             .env("ILAR_STATE_DIR", &state)
             .env("ILAR_CONFIG_DIR", &config)
             .env_remove("ILAR_SERVE_TOKEN")
+            // Hermetic in the direction that matters now that serve can
+            // run turns: with a key in the environment a write test
+            // would call a real provider. The write path is proven
+            // against a scripted one in `serve::drive`; here it must
+            // find no provider at all.
+            .env_remove("ILAR_ZAI_API_KEY")
+            .env_remove("ILAR_OPENAI_API_KEY")
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
         if let Some(token) = token {
@@ -93,6 +108,18 @@ impl Server {
 
     async fn get(&self, path: &str) -> reqwest::Response {
         self.request(path).send().await.expect("a response")
+    }
+
+    /// A write, with the token when this server wants one.
+    async fn post(&self, path: &str, body: Value) -> reqwest::Response {
+        let request = self.client.post(self.url(path)).json(&body);
+        match &self.token {
+            Some(token) => request.bearer_auth(token),
+            None => request,
+        }
+        .send()
+        .await
+        .expect("a response")
     }
 
     async fn json(&self, path: &str) -> Value {
@@ -681,8 +708,131 @@ async fn the_result_and_image_routes_return_what_the_projection_left_out() {
     );
 }
 
-/// Phase 2 is read-only, and the router is where that is enforced: no
-/// handler exists for any other method, so none can be forgotten.
+/// The writer lease is the whole concurrency story: a session another
+/// process is writing cannot be driven from the page, and the refusal
+/// carries the sentence the banner shows rather than a bare status.
+///
+/// The test holds the lease itself, which is exactly what a running TUI
+/// does — the lock is OS-backed and does not care which process it is.
+#[tokio::test]
+async fn a_session_open_in_another_process_refuses_a_message_with_a_watching_only_409() {
+    let server = Server::start(None);
+    let (id, session) = start_session(&server.store, "/tmp/alpha");
+    // `session` is the writer; it stays alive for the whole test.
+
+    let response = server
+        .post(
+            &format!("/api/sessions/{id}/message"),
+            serde_json::json!({"text": "are you there?"}),
+        )
+        .await;
+    assert_eq!(response.status(), 409);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(
+        body["error"],
+        "session is open in another process — watching only"
+    );
+
+    // And the refusal is about the lease, not about the session: once
+    // the other writer lets go, the same request gets past it. (With no
+    // provider configured this server then fails to build a runtime,
+    // which is a 500 — the point is that it is no longer a 409.)
+    drop(session);
+    let response = server
+        .post(
+            &format!("/api/sessions/{id}/message"),
+            serde_json::json!({"text": "are you there?"}),
+        )
+        .await;
+    assert_ne!(response.status(), 409, "the lease was released");
+}
+
+/// Aborting is scoped to the turns this server runs. A session it is not
+/// driving — one under a TUI, or one that is simply idle — is not its to
+/// stop, and it says so instead of pretending.
+#[tokio::test]
+async fn aborting_a_session_this_server_does_not_drive_says_so() {
+    let server = Server::start(None);
+    let (id, _session) = start_session(&server.store, "/tmp/alpha");
+
+    let response = server
+        .post(&format!("/api/sessions/{id}/abort"), serde_json::json!({}))
+        .await;
+    assert_eq!(response.status(), 404);
+    let body: Value = response.json().await.unwrap();
+    assert!(
+        body["error"].as_str().unwrap().contains("abort"),
+        "{body:?}"
+    );
+}
+
+/// Reads and writes are one auth story: the token gates the POSTs on
+/// exactly the terms it gates the GETs, and no write route is in
+/// `PUBLIC_PATHS`.
+#[tokio::test]
+async fn the_write_routes_need_the_token_too() {
+    let server = Server::start(Some("s3cret-token"));
+    let (id, _session) = start_session(&server.store, "/tmp/alpha");
+
+    for (path, body) in [
+        ("/api/sessions", serde_json::json!({"prompt": "hello"})),
+        (
+            &format!("/api/sessions/{id}/message"),
+            serde_json::json!({"text": "hello"}),
+        ),
+        (&format!("/api/sessions/{id}/abort"), serde_json::json!({})),
+    ] {
+        let response = server
+            .client
+            .post(server.url(path))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 401, "POST {path} without a token");
+        assert!(response.bytes().await.unwrap().is_empty(), "{path}");
+    }
+
+    // With the token the same request is answered on its merits: this
+    // server's session is held by the test's own writer, so the honest
+    // answer is the 409.
+    let response = server
+        .post(
+            &format!("/api/sessions/{id}/message"),
+            serde_json::json!({"text": "hello"}),
+        )
+        .await;
+    assert_eq!(response.status(), 409);
+}
+
+/// A store with no provider configured still serves, and only the one
+/// request that needed a provider fails — with the configuration error
+/// in its body rather than a stack trace or a hang.
+#[tokio::test]
+async fn a_write_without_a_provider_fails_on_that_request_and_nowhere_else() {
+    let server = Server::start(None);
+
+    let response = server
+        .post("/api/sessions", serde_json::json!({"prompt": "hello"}))
+        .await;
+    assert_eq!(response.status(), 500);
+    let body: Value = response.json().await.unwrap();
+    let error = body["error"].as_str().unwrap();
+    assert!(error.contains("provider"), "{error}");
+
+    // The reader is untouched by the failed write.
+    assert_eq!(server.get("/api/sessions").await.status(), 200);
+
+    // And an empty prompt is refused before any of that.
+    let response = server
+        .post("/api/sessions", serde_json::json!({"prompt": "   "}))
+        .await;
+    assert_eq!(response.status(), 400);
+}
+
+/// The router is where the method surface is enforced: reads are GET,
+/// the three writes are POST, and no handler exists for anything else,
+/// so none can be forgotten.
 #[tokio::test]
 async fn the_router_serves_the_page_and_refuses_every_other_method() {
     let server = Server::start(None);
@@ -731,14 +881,23 @@ async fn the_router_serves_the_page_and_refuses_every_other_method() {
         .unwrap();
     assert!(hooks.contains("preact"), "hooks resolve through the map");
 
-    for method in [reqwest::Method::POST, reqwest::Method::DELETE] {
+    // `/api/sessions` answers GET and POST; everything else on it is a
+    // 405 from the router. A transcript answers GET only — the write
+    // routes are their own paths, so a typo cannot land a POST on a
+    // reader.
+    for (method, path) in [
+        (reqwest::Method::DELETE, "/api/sessions"),
+        (reqwest::Method::PUT, "/api/sessions"),
+        (reqwest::Method::POST, "/api/sessions/whatever"),
+        (reqwest::Method::GET, "/api/sessions/whatever/abort"),
+    ] {
         let response = server
             .client
-            .request(method.clone(), server.url("/api/sessions"))
+            .request(method.clone(), server.url(path))
             .send()
             .await
             .unwrap();
-        assert_eq!(response.status(), 405, "{method} /api/sessions");
+        assert_eq!(response.status(), 405, "{method} {path}");
     }
     assert_eq!(server.get("/nope").await.status(), 404);
 }

@@ -1,25 +1,33 @@
-//! `ilar serve` — the read-only HTTP view of the session store.
+//! `ilar serve` — the HTTP view of the session store, and the write path
+//! back into it.
 //!
-//! Three parts, in the order a request meets them: [`watch`] polls the
-//! store and fans tails out, [`view`] projects events onto the wire, and
-//! [`http`] is the GET-only router over both. This file is the process:
-//! resolve the token, bind, say so once, serve.
+//! Four parts, in the order a request meets them: [`watch`] polls the
+//! store and fans tails out, [`view`] projects events onto the wire,
+//! [`drive`] runs turns for the write routes, and [`http`] is the router
+//! over all three. This file is the process: resolve the token, bind,
+//! say so once, serve.
 //!
-//! It needs the state directory and nothing else — no provider, no API
-//! key, no model, no validation of any of them. Reading a log that
-//! already exists does not require the means to write another one.
+//! Reading still needs the state directory and nothing else — no
+//! provider, no API key, no model, and none of them is validated at
+//! startup, because a machine with no provider configured must still be
+//! able to browse what it already recorded. The write path resolves its
+//! runtime per turn, so a missing provider is an error on the one
+//! request that needed it rather than a server that will not start.
 #![allow(dead_code)]
 
+pub(crate) mod drive;
 pub(crate) mod http;
 pub(crate) mod view;
 pub(crate) mod watch;
 
 use std::net::SocketAddr;
-use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
+use drive::Drive;
 use http::{ServeState, TOKEN_ENV};
+use ilar::config::Config;
 use watch::{WatchConfig, Watcher};
 
 /// The default bind: loopback, port 4527 — "ilar" on a phone keypad.
@@ -64,9 +72,11 @@ async fn bind(requested: Option<SocketAddr>) -> Result<tokio::net::TcpListener> 
     }
 }
 
-/// Serve the store under `state_dir` until the process is interrupted.
-pub(crate) async fn run(state_dir: &Path, options: ServeOptions) -> Result<()> {
-    let root = state_dir.join("sessions");
+/// Serve the store this configuration names until the process is
+/// interrupted. The configuration is here for the write path only:
+/// nothing about a read consults it beyond the state directory.
+pub(crate) async fn run(config: &Config, options: ServeOptions) -> Result<()> {
+    let root = config.state_dir().join("sessions");
     let watcher = Watcher::new(root.clone(), WatchConfig::from_env(options.poll_ms));
     // Warm the head cache before the first request rather than after:
     // a cold listing head-parses every session in the store (P8).
@@ -84,9 +94,10 @@ pub(crate) async fn run(state_dir: &Path, options: ServeOptions) -> Result<()> {
     println!("ilar serve · reading {}", root.display());
     if !address.ip().is_loopback() {
         // Said plainly, once, where it cannot be missed: this is a
-        // bearer token over plain HTTP.
+        // bearer token over plain HTTP, and it now buys the holder a
+        // turn on this machine, not only a read of one.
         eprintln!(
-            "warning: {address} is not loopback. Traffic and the token are unencrypted — put this behind a VPN or an SSH tunnel, never on the public internet."
+            "warning: {address} is not loopback. Traffic and the token are unencrypted, and the token can start turns here — put this behind a VPN or an SSH tunnel, never on the public internet."
         );
     }
     println!("{url}");
@@ -101,6 +112,10 @@ pub(crate) async fn run(state_dir: &Path, options: ServeOptions) -> Result<()> {
     let state = ServeState {
         watcher,
         token: token.map(Into::into),
+        drive: Arc::new(Drive::new(
+            config.clone(),
+            ilar::session::SessionStore::new(root),
+        )),
     };
     axum::serve(listener, http::router(state))
         .await

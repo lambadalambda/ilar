@@ -998,12 +998,14 @@ async fn main() -> Result<()> {
         let code = run_exec(&config, exec_args).await?;
         std::process::exit(code);
     }
-    // Serving reads the store and only the store: it takes the state
-    // directory out of the config and stops there, so a machine with no
-    // provider configured can still browse what it already recorded.
+    // Serving reads the store, and drives the sessions it can take the
+    // writer lease on. Nothing about a read consults the configuration
+    // beyond the state directory, so a machine with no provider
+    // configured still browses what it already recorded — the write path
+    // resolves its runtime per turn and fails there if it must.
     if let Some(Command::Serve(serve_args)) = args.command {
         return serve::run(
-            config.state_dir(),
+            &config,
             serve::ServeOptions {
                 bind: serve_args.bind,
                 open: serve_args.open,

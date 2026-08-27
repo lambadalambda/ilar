@@ -1,10 +1,13 @@
-//! The read-only HTTP surface: routes, the SSE envelope, and the token.
+//! The HTTP surface: routes, the SSE envelope, and the token.
 //!
-//! **GET only.** Phase 2 reads the store and nothing else, and that
-//! boundary is structural here — every route is registered with
-//! [`axum::routing::get`], so anything else on a known path is a 405
-//! from the router itself rather than a check some future handler could
-//! forget.
+//! **Reads are GET, writes are POST, and nothing else exists.** The
+//! router is still where that boundary lives: every route names the
+//! methods it answers, so anything else on a known path is a 405 from
+//! the router itself rather than a check some future handler could
+//! forget. The three POSTs are the whole write surface — a message, a
+//! new session, an abort — and each of them does its work through
+//! [`super::drive`], which runs turns the way `ilar exec` does. The
+//! store is never written from a handler.
 //!
 //! Reads never go through [`ilar::session::SessionStore::load`]: P3
 //! measured it failing 86.6% of calls against a live writer, because the
@@ -12,14 +15,17 @@
 //! reads through [`SessionTail`], which is failure-free by construction.
 //!
 //! ```text
-//! GET /api/sessions                                  the head cache
-//! GET /api/sessions/{id}?from=&invocation=&limit=     one page, walking back
-//! GET /api/sessions/{id}/events?from=&token=          SSE
-//! GET /api/sessions/{id}/children
-//! GET /api/sessions/{id}/results/{tool_use_id}        full untruncated text
-//! GET /api/sessions/{id}/images/{event_id}/{n}        image bytes
-//! GET /  /app.css  /app.js                            the page
-//! GET /vendor/{preact,hooks,htm}.module.js            its ESM modules
+//! GET  /api/sessions                                  the head cache
+//! GET  /api/sessions/{id}?from=&invocation=&limit=     one page, walking back
+//! GET  /api/sessions/{id}/events?from=&token=          SSE
+//! GET  /api/sessions/{id}/children
+//! GET  /api/sessions/{id}/results/{tool_use_id}        full untruncated text
+//! GET  /api/sessions/{id}/images/{event_id}/{n}        image bytes
+//! GET  /  /app.css  /app.js                            the page
+//! GET  /vendor/{preact,hooks,htm}.module.js            its ESM modules
+//! POST /api/sessions            {prompt,cwd?,model?}   create and run
+//! POST /api/sessions/{id}/message        {text}        steer or start
+//! POST /api/sessions/{id}/abort                        cancel a driven turn
 //! ```
 //!
 //! Two cursors, deliberately different, because they count different
@@ -80,7 +86,7 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Router, middleware};
 use futures::Stream;
 use serde::Deserialize;
@@ -88,6 +94,7 @@ use serde_json::{Value, json};
 
 use ilar::session::{SessionEvent, SessionStore, SessionTail, TailUpdate};
 
+use super::drive::{Drive, DriveError, Fate, NewSession};
 use super::view::{
     invocation_slice, live_reset, project_event, project_events, project_live_delta, usage_totals,
 };
@@ -115,6 +122,8 @@ pub(crate) struct ServeState {
     pub(crate) watcher: Watcher,
     /// `None` on a loopback bind with no pinned token: no auth at all.
     pub(crate) token: Option<Arc<str>>,
+    /// The write path: the turns this process is running.
+    pub(crate) drive: Arc<Drive>,
 }
 
 pub(crate) fn router(state: ServeState) -> Router {
@@ -125,12 +134,14 @@ pub(crate) fn router(state: ServeState) -> Router {
         .route("/vendor/preact.module.js", get(vendor_preact))
         .route("/vendor/hooks.module.js", get(vendor_hooks))
         .route("/vendor/htm.module.js", get(vendor_htm))
-        .route("/api/sessions", get(sessions))
+        .route("/api/sessions", get(sessions).post(create_session))
         .route("/api/sessions/{id}", get(transcript))
         .route("/api/sessions/{id}/events", get(events))
         .route("/api/sessions/{id}/children", get(children))
         .route("/api/sessions/{id}/results/{tool_use_id}", get(result_text))
         .route("/api/sessions/{id}/images/{event_id}/{n}", get(image))
+        .route("/api/sessions/{id}/message", post(message))
+        .route("/api/sessions/{id}/abort", post(abort))
         // On the whole router, fallback included: a 404 must not be
         // reachable without the token either.
         .layer(middleware::from_fn_with_state(state.clone(), require_token))
@@ -271,6 +282,12 @@ impl From<std::io::Error> for ApiError {
     }
 }
 
+impl From<DriveError> for ApiError {
+    fn from(error: DriveError) -> Self {
+        Self::new(error.status(), error.message())
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (self.status, Json(json!({ "error": self.message }))).into_response()
@@ -322,7 +339,7 @@ async fn sessions(State(state): State<ServeState>) -> Json<Value> {
             .watcher
             .sessions()
             .iter()
-            .map(summary)
+            .map(|entry| summary(entry, &state.drive))
             .collect::<Vec<_>>(),
     }))
 }
@@ -336,9 +353,65 @@ async fn children(
             .watcher
             .children(&id)
             .iter()
-            .map(summary)
+            .map(|entry| summary(entry, &state.drive))
             .collect::<Vec<_>>(),
     })))
+}
+
+// --------------------------------------------------------------- write
+
+/// A new session and its first turn. The id comes back immediately and
+/// the turn runs behind it: the page follows on the stream it would have
+/// opened anyway, so there is nothing to wait for here and no long
+/// request to lose.
+async fn create_session(
+    State(state): State<ServeState>,
+    Json(body): Json<CreateBody>,
+) -> Result<Json<Value>, ApiError> {
+    let id = state
+        .drive
+        .create(NewSession {
+            prompt: body.prompt,
+            cwd: body.cwd,
+            model: body.model,
+        })
+        .await?;
+    Ok(Json(json!({ "id": id, "fate": Fate::Started.as_str() })))
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateBody {
+    prompt: String,
+    cwd: Option<String>,
+    model: Option<String>,
+}
+
+/// A message for a session: a steer when this process is running a turn
+/// there, a new turn when it is not — and a 409 when another process
+/// holds the writer, which is the page's cue to say "watching only"
+/// rather than to retry.
+async fn message(
+    State(state): State<ServeState>,
+    Path(id): Path<String>,
+    Json(body): Json<MessageBody>,
+) -> Result<Json<Value>, ApiError> {
+    let fate = state.drive.message(&id, &body.text).await?;
+    Ok(Json(json!({ "fate": fate.as_str() })))
+}
+
+#[derive(Debug, Deserialize)]
+struct MessageBody {
+    text: String,
+}
+
+/// Stop the turn this process is running. A session driven by some other
+/// ilar is not this server's to stop, and says so.
+async fn abort(
+    State(state): State<ServeState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let fate = state.drive.abort(&id)?;
+    Ok(Json(json!({ "fate": fate.as_str() })))
 }
 
 #[derive(Debug, Deserialize)]
@@ -363,7 +436,11 @@ async fn transcript(
     let (start, end) = page_bounds(view.len(), query.from, query.limit);
     Ok(Json(json!({
         "id": id,
-        "session": state.watcher.head(&id).as_ref().map_or(Value::Null, summary),
+        "session": state
+            .watcher
+            .head(&id)
+            .as_ref()
+            .map_or(Value::Null, |entry| summary(entry, &state.drive)),
         "events": project_events(&view[start..end]),
         "cursor": start,
         "has_more": start > 0,
@@ -669,15 +746,22 @@ fn named(event: &str, data: &Value) -> Event {
 
 /// One listing row. `state` is `working`, `stalled` or `idle`, read off
 /// the session's live-turn scratch rather than guessed from its log's
-/// mtime — and never a lock probe, because acquiring the writer lease to
-/// ask would make a read-only server take the one thing it promised not
-/// to. `activity` names the tool a working session is running, when it
+/// mtime — and never a lock probe, because taking the writer lease to
+/// answer a *listing* would evict whoever is writing, which is the one
+/// thing a poll must never do (the write routes take it deliberately,
+/// once, for a turn). `activity` names the tool a working session is
+/// running, when it
 /// is running one. `context_limit` is the window the page's context bar
 /// measures against, `null` for a model this binary has no catalog row
 /// for — a listing row carries it because the panel needs it before any
-/// page of the transcript has reached the `meta` line.
-fn summary(entry: &SessionEntry) -> Value {
+/// page of the transcript has reached the `meta` line. `driven` is the
+/// one thing the store cannot say: whether *this* server is running the
+/// turn, which is the difference between an abort button and a dot. It
+/// is a new field beside `state`, not a fourth value of it — a session
+/// can be working under a TUI, and the page must not offer to stop it.
+fn summary(entry: &SessionEntry, drive: &Drive) -> Value {
     json!({
+        "driven": drive.drives(&entry.head.id),
         "id": entry.head.id,
         "title": entry.head.title,
         "cwd": entry.head.meta.cwd.as_ref().map(|cwd| cwd.display().to_string()),
