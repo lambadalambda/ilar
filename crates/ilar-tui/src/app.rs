@@ -95,6 +95,10 @@ pub(crate) struct App {
     /// blank prompt, newest first — for the half-written thought a more
     /// urgent message would otherwise bulldoze.
     pub(crate) input_stash: Vec<String>,
+    /// Ctrl-L: clear the backend and repaint everything next frame.
+    /// Diff rendering never repaints cells it believes unchanged, so
+    /// damage from outside writes to the terminal lingers without this.
+    pub(crate) force_full_redraw: bool,
     /// Steers handed to a running turn but not yet delivered. Steering
     /// is fire-and-forget, so an aborted turn drops its receiver and
     /// would lose them silently; these get moved back to the queue.
@@ -266,6 +270,7 @@ impl App {
             retry_available: false,
             queued_messages: Vec::new(),
             input_stash: Vec::new(),
+            force_full_redraw: false,
             pending_steers: Vec::new(),
             goal: None,
             slash_selected: 0,

@@ -1790,6 +1790,9 @@ impl schedule::Runtime for LoopRuntime<'_> {
             .iter()
             .filter(|(_, running, _)| *running)
             .count();
+        if std::mem::take(&mut app.force_full_redraw) {
+            self.terminal.clear()?;
+        }
         self.terminal.draw(|frame| app.render(frame))?;
         Ok(())
     }
@@ -3079,6 +3082,9 @@ async fn run_app(
                     }
                     (KeyCode::Char('s'), true) => {
                         app.stash_or_pop_input();
+                    }
+                    (KeyCode::Char('l'), true) => {
+                        app.force_full_redraw = true;
                     }
                     (KeyCode::Char('o'), true) => {
                         app.open_link_picker();

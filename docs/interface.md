@@ -63,6 +63,12 @@ counts them (`· 2 stashed`) so nothing is forgotten, and unlike the
 queue nothing is ever sent on its own: a stash only comes back when
 you pop it.
 
+**Ctrl-L** clears and repaints the whole screen. Tool commands run in
+their own session with no controlling terminal — a `sudo` password
+prompt fails fast with a readable error instead of drawing over the
+UI — but anything that still writes to the terminal from outside
+leaves damage the diff renderer won't touch; Ctrl-L is the eraser.
+
 ## Images
 
 Copy a screenshot, press **Ctrl-V**, and the image attaches to your

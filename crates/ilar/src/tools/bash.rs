@@ -729,6 +729,27 @@ mod tests {
         assert!(!target.dir.exists(), "an untruncated result made a file");
     }
 
+    /// A child has no controlling terminal, so a program that opens
+    /// /dev/tty (sudo's password prompt) errors fast with a message the
+    /// model can relay — instead of scribbling over the TUI and hanging
+    /// to timeout. (Vacuously green where the test runner itself has no
+    /// terminal; run from one, it pins the setsid behavior.)
+    #[tokio::test]
+    async fn children_cannot_open_the_controlling_terminal() {
+        let out = run_command(
+            "cat /dev/tty".into(),
+            std::path::PathBuf::from("."),
+            std::time::Duration::from_secs(10),
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        assert!(out.is_error, "{}", out.content);
+        assert!(!out.content.contains("timed out"), "{}", out.content);
+    }
+
     /// Declared expectations are lower-only, clamped, and void on
     /// failure: the budget covers the output the caller expected, not
     /// the error it did not.

@@ -60,7 +60,15 @@ pub(crate) async fn drain<R: tokio::io::AsyncRead + Unpin>(
 }
 
 /// `sh -c` in `cwd` with both pipes captured, no stdin, and its own
-/// process group so descendants can be killed as a unit.
+/// session so descendants can be killed as a unit.
+///
+/// A session, not just a process group: a child in the parent's session
+/// keeps the controlling terminal, and a program that opens `/dev/tty`
+/// (sudo's password prompt above all) bypasses the captured pipes,
+/// scribbles over the TUI wherever the cursor sits, and then blocks the
+/// call until its timeout. With no controlling terminal that open fails
+/// fast, with an error the model can read and relay. A session leader
+/// leads its own group too, so `killpg(pid)` reaping is unchanged.
 pub(crate) fn shell_command(command_text: &str, cwd: &std::path::Path) -> tokio::process::Command {
     let mut command = tokio::process::Command::new("sh");
     command
@@ -72,7 +80,18 @@ pub(crate) fn shell_command(command_text: &str, cwd: &std::path::Path) -> tokio:
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
     #[cfg(unix)]
-    command.process_group(0);
+    // SAFETY: setsid and setpgid are async-signal-safe; nothing here
+    // allocates or locks between fork and exec.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                // Cannot happen after fork (a fresh child leads nothing),
+                // but keep the kill-the-group guarantee if it somehow does.
+                libc::setpgid(0, 0);
+            }
+            Ok(())
+        });
+    }
     command
 }
 
