@@ -40,3 +40,32 @@ TUI stays watch-only (the writer lock refuses, the page says so).
 ## Milestone
 
 11 — Beyond the terminal
+
+## Outcome
+
+`serve/drive.rs` (815 lines, over half of it tests): serve embeds
+the exec-proven headless loop behind `Drive`, holding the OS-backed
+writer lock for sessions it runs — the 409 decision is made under a
+lock actually held, and a finishing turn removes only its own
+registry entry (epoch-tagged; the agent caught its own eviction
+race in self-review). Steer-vs-queue is `crate::decide::
+submit_target` itself, not a fork; serve has no queue, so an
+unreachable Queue target is a loud 500 rather than a silent
+second turn. Listing rows gained `driven` beside `state` — a
+session can be working under a TUI and must not offer a stop
+button. Question tool matches exec: never registered, immediate
+failure, web modal filed as follow-up. UI: composer with fate
+feedback and watching-only banner, stop button while driven, new
+session form with cwd datalist. 16 integration tests (writer-held
+409, token on writes, no-provider failure isolated to the request)
+plus 7 in-process MockProvider tests through the real router —
+steering asserted on the provider's own next-step request.
+Browser-verified end-to-end with 2 authorized one-line real calls
+against an isolated ILAR_STATE_DIR (the sandbox cannot write the
+real store — itself a nice confirmation of the lock model), state
+cleaned after. Residuals: no question modal; `with_resolver` test
+seam covers the top-level turn only; driven turns keep no
+server-side progress log beyond store+scratch; resume never
+overrides the persisted model; a configured OpenAI reasoning
+variant collides with non-OpenAI models typed into the form
+(pre-existing exec behavior, error shown honestly).

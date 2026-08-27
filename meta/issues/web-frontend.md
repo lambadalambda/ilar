@@ -50,9 +50,11 @@ gets there, not a commitment to that feature list.
 
 ## Phasing
 
-> Status 2026-08-26: phase 1 (`ilar exec`) and phase 2 (`ilar
-> serve`, read-only — see ilar-serve-reads-the-store) are done.
-> Phase 3 (interaction) is the open remainder of this issue.
+> Status 2026-08-28: phases 1-3 are done — exec, read-only serve,
+> the workspace layout (serve-wears-the-workspace-layout) and the
+> write path (serve-writes-back): send, steer, abort, new sessions.
+> Open remainders here: a web answer modal for the question tool,
+> model override on resume, and the far-field ideas below.
 
 1. **`ilar exec`** — headless one-shot. Small, useful on its own, and
    it forces the core to prove it is drivable without a TUI, which is

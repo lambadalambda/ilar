@@ -50,10 +50,6 @@
 
 (all complete — see issues_archive.md)
 
-## Milestone 11 — Beyond the terminal (reopened)
-
-- [ ] [Serve writes back](issues/serve-writes-back.md)
-
 ## Milestone 13 — Guard rails
 
 - [ ] [Kernel sandbox for tool processes](issues/kernel-sandbox-for-tool-processes.md)
