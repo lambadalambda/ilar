@@ -24,7 +24,12 @@ fn context_label(tokens: u64) -> String {
 
 fn describe(model: &crate::model::ModelInfo) -> String {
     let full_id = model.full_id();
-    let pricing = if crate::model::plan_billed(&full_id) {
+    // A configured endpoint has no price to quote, so it says where it is
+    // instead — which is the thing worth knowing about a model whose id
+    // was invented by whoever wrote the config.
+    let pricing = if let Some(origin) = model.origin() {
+        origin.to_string()
+    } else if crate::model::plan_billed(&full_id) {
         "subscription plan".to_string()
     } else {
         match crate::model::pricing_for(&full_id) {
@@ -106,6 +111,24 @@ mod tests {
         assert!(
             lines[1].contains("zai/glm-4.7") && lines[1].contains("$0.6/2.2 per Mtok"),
             "{lines:?}"
+        );
+    }
+
+    /// A configured endpoint is listed like any other model, with where
+    /// it lives standing in for the price it has none of.
+    #[test]
+    fn listing_shows_a_configured_endpoints_host_instead_of_pricing() {
+        let rows = crate::model::register_runtime(&[crate::model::RuntimeModel {
+            id: "qwen-listed-by-the-tool".into(),
+            name: "Qwen".into(),
+            context_limit: 32_768,
+            output_limit: 8_192,
+            vision: false,
+            origin: "localhost:8080".into(),
+        }]);
+        assert_eq!(
+            describe(rows[0]),
+            "custom/qwen-listed-by-the-tool · ctx 32k · localhost:8080"
         );
     }
 }
