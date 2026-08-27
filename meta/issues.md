@@ -50,6 +50,10 @@
 
 (all complete — see issues_archive.md)
 
+## Milestone 11 — Beyond the terminal (reopened)
+
+- [ ] [Serve wears the workspace layout](issues/serve-wears-the-workspace-layout.md)
+
 ## Milestone 13 — Guard rails
 
 - [ ] [Kernel sandbox for tool processes](issues/kernel-sandbox-for-tool-processes.md)
