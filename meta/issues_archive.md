@@ -242,3 +242,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Agent-declared preview budget](issues/agent-declared-preview-budget.md)
 - [x] [Child processes can write to the terminal](issues/children-write-to-the-terminal.md)
 - [x] [Serve wears the workspace layout](issues/serve-wears-the-workspace-layout.md)
+- [x] [Advisory read leases](issues/advisory-read-leases.md)

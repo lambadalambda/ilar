@@ -45,3 +45,26 @@ nothing, and accepts that the tree may shift while it looks.
 ## Milestone
 
 13 — Guard rails
+
+## Outcome
+
+`WorkspaceScheduler::acquire` returns a free permit for ReadOnly —
+the `WorkspacePermit::ReadOnly` variant is gone, and a new
+`try_acquire` backs both `try_acquire_lease` and the executor's
+waiting notice. The BY_LEASE demotion block, its const, and the
+"cannot outlive a parent workspace lease" error are deleted;
+background children stop inheriting the parent's lease (the Arc'd
+write permit would outlive the parent task — they take their own
+free read lease instead). The executor tries the permit first and
+reports "waiting for the workspace — a mutable task holds it"
+through the live tail before the blocking acquire, so the one
+remaining wait (writer vs writer) names itself under the queued
+row. Tests: a scheduler unit test pins the one-sentence rule;
+`leased_child_rejects_background_task` became
+`leased_child_detaches_a_background_reader`, and the foreground
+demotion test became
+`a_leased_parent_detaches_a_defaulted_read_only_task`. Docs state
+the rule and the drift bargain. Follow-up left open by design:
+checkpoint-materialized snapshot views for readers that need strict
+consistency — nono-style CAS restore, which ilar's checkpoint trees
+already implement.
