@@ -3,9 +3,12 @@
 The user configuration is `${ILAR_CONFIG_DIR:-~/.config/ilar}/ilar.toml`; see
 [`ilar.toml.example`](../ilar.toml.example). `./ilar.toml` and
 `./.ilar/ilar.toml` layer project settings over it, in that order. Nested
-sections merge by field. `general.theme` and `general.project_instructions` are
-user-scoped and are not overridden by project files; a project file that sets
-one is reported in the transcript at startup rather than silently ignored.
+sections merge by field. `general.theme`, `general.project_instructions`, and
+the whole of `[providers]` and `[models]` are user-scoped and are not
+overridden by project files; a project file that sets one is reported in the
+transcript at startup rather than silently ignored. Provider and model
+sections decide where the conversation — prompts, code, tool output, your API
+key — is sent, which is never a cloned repository's call to make.
 
 | Setting | Default | Description |
 | --- | --- | --- |
@@ -131,11 +134,11 @@ model = "custom/qwen"
   token count rather than erroring.
 - **No `tool_stream`.** That body field is z.ai's and is not sent here.
 
-Project configuration layers by section name: a `[models.<name>]` in
-`./ilar.toml` replaces a user entry of that name **outright** rather than
-merging into it field by field — an endpoint description is one thing, and a
-project's `base_url` inheriting the user's `api_key` is not a thing to send.
-Entries the project does not name are inherited untouched.
+`[models]` is user configuration only: a project file declaring model entries
+is warned about at startup and ignored wholesale, because a repository must
+not be able to route the conversation to an endpoint it chose. The same rule
+covers `[providers]` — a project `base_url` would send requests carrying
+*your* key wherever it pointed.
 
 ## OpenAI ChatGPT OAuth
 

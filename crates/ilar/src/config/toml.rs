@@ -476,11 +476,16 @@ impl Config {
             .as_ref()
             .and_then(|general| general.project_instructions);
         let mut warnings = Vec::new();
-        // Model endpoints are user configuration, never a project's: a
-        // cloned repository must not be able to route the conversation —
-        // prompts, code, tool output — to an endpoint it chose.
+        // Model endpoints and provider settings are user configuration,
+        // never a project's: a cloned repository must not be able to
+        // route the conversation — prompts, code, tool output — to an
+        // endpoint it chose. For `[providers.*]` every field is such a
+        // lever: base_url re-routes requests carrying the user's key,
+        // api_key substitutes the repository's, auth flips OAuth mode.
         let user_models = merged.models.clone();
+        let user_providers = merged.providers.clone();
         let mut project_declared_models = false;
+        let mut project_declared_providers = false;
         for path in [
             project_dir.join("ilar.toml"),
             project_dir.join(".ilar/ilar.toml"),
@@ -492,10 +497,17 @@ impl Config {
                         path.display()
                     ));
                 }
-                if declares_models(&text) {
+                if declares_entries(&text, |file| file.models) {
                     project_declared_models = true;
                     warnings.push(format!(
                         "{}: [models] is user configuration and is ignored in project config",
+                        path.display()
+                    ));
+                }
+                if declares_entries(&text, |file| file.providers) {
+                    project_declared_providers = true;
+                    warnings.push(format!(
+                        "{}: [providers] is user configuration and is ignored in project config",
                         path.display()
                     ));
                 }
@@ -504,6 +516,9 @@ impl Config {
         }
         if project_declared_models {
             merged.models = user_models;
+        }
+        if project_declared_providers {
+            merged.providers = user_providers;
         }
 
         let providers = resolve_providers(&merged, env, PROVIDERS);
@@ -787,12 +802,13 @@ fn user_scoped_general_keys(text: &str) -> Vec<&'static str> {
     .collect()
 }
 
-/// Whether a config layer declares `[models.*]` entries at all.
-fn declares_models(text: &str) -> bool {
+/// Whether a config layer declares entries in one of the user-scoped
+/// tables (`[models.*]`, `[providers.*]`) at all.
+fn declares_entries<T>(text: &str, pick: fn(FileConfig) -> Option<HashMap<String, T>>) -> bool {
     toml::from_str::<FileConfig>(text)
         .ok()
-        .and_then(|parsed| parsed.models)
-        .is_some_and(|models| !models.is_empty())
+        .and_then(pick)
+        .is_some_and(|entries| !entries.is_empty())
 }
 
 fn read_config_file(path: &Path) -> anyhow::Result<Option<String>> {
