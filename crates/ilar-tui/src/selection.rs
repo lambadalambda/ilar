@@ -27,7 +27,13 @@ pub(crate) enum RenderedCell {
     Character(char),
     Text(String),
     Space,
-    Continuation { lead: usize },
+    Continuation {
+        lead: usize,
+    },
+    /// The `│ ` pair a fenced code block is drawn with. It is chrome,
+    /// not content: it still occupies its columns for clicking and
+    /// highlighting, but copies skip it so code pastes clean.
+    Gutter,
 }
 
 pub(crate) type RenderedRow = Vec<RenderedCell>;
@@ -126,7 +132,9 @@ pub(crate) fn selected_transcript_text(
                             Some(RenderedCell::Character(value)) => text.push(*value),
                             Some(RenderedCell::Text(value)) => text.push_str(value),
                             Some(RenderedCell::Space) => text.push(' '),
-                            Some(RenderedCell::Continuation { .. }) | None => {}
+                            Some(RenderedCell::Gutter)
+                            | Some(RenderedCell::Continuation { .. })
+                            | None => {}
                         }
                     }
                     text.trim_end_matches(' ').to_string()
@@ -152,13 +160,35 @@ pub(crate) fn transcript_cells(buffer: &Buffer, area: Rect) -> Vec<RenderedRow> 
         .map(|row| {
             let mut rendered = Vec::with_capacity(area.width as usize);
             let mut column = area.x;
+            // The code gutter is recognised structurally — the block's
+            // bar glyph in the code colour, before any content on the
+            // row — so a literal `│` inside code or a table separator
+            // further in is still copied as the character it is. This
+            // scrape runs before `theme::apply`, while the buffer still
+            // holds logical colours.
+            let mut content_started = false;
+            let mut pad_after_gutter = false;
             while column < area.right() {
-                let symbol = buffer
-                    .cell((column, row))
-                    .map(|cell| cell.symbol())
-                    .unwrap_or(" ");
+                let cell = buffer.cell((column, row));
+                let symbol = cell.map(|cell| cell.symbol()).unwrap_or(" ");
                 if symbol == " " {
-                    rendered.push(RenderedCell::Space);
+                    rendered.push(if std::mem::take(&mut pad_after_gutter) {
+                        RenderedCell::Gutter
+                    } else {
+                        RenderedCell::Space
+                    });
+                    column += 1;
+                    continue;
+                }
+                pad_after_gutter = false;
+                let leading = !content_started;
+                content_started = true;
+                if leading
+                    && symbol == crate::text::CODE_GUTTER.trim_end()
+                    && cell.is_some_and(|cell| cell.style().fg == Some(crate::theme::CODE))
+                {
+                    rendered.push(RenderedCell::Gutter);
+                    pad_after_gutter = true;
                     column += 1;
                     continue;
                 }
@@ -300,6 +330,33 @@ mod tests {
         for column in 0..=2 {
             assert!(buffer[(column, 0)].modifier.contains(Modifier::REVERSED));
         }
+    }
+
+    #[test]
+    fn copied_code_lines_drop_the_gutter_but_keep_content_bars() {
+        let area = Rect::new(0, 0, 12, 3);
+        let mut buffer = Buffer::empty(area);
+        let gutter = Style::default().fg(crate::theme::CODE);
+        // Two code lines as markdown.rs draws them — the second indented
+        // the way a nested block renders, with code whose own leading
+        // spaces must survive the strip.
+        buffer.set_string(0, 0, "│ ", gutter);
+        buffer.set_string(2, 0, "a │ b", Style::default());
+        buffer.set_string(2, 1, "│ ", gutter);
+        buffer.set_string(4, 1, "  x", Style::default());
+        // A bar that is not the line's first non-space cell is content
+        // (a table separator, a box drawing in code) and stays.
+        buffer.set_string(0, 2, "c │ d", Style::default());
+        let rows = transcript_cells(&buffer, area);
+        let selection = TranscriptSelection {
+            anchor: SelectionPoint { row: 0, column: 0 },
+            focus: SelectionPoint { row: 2, column: 11 },
+        };
+
+        assert_eq!(
+            selected_transcript_text(&rows, selection).as_deref(),
+            Some("a │ b\n    x\nc │ d")
+        );
     }
 
     #[test]
