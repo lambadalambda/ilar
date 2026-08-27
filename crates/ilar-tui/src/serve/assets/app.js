@@ -1,13 +1,20 @@
-// The page, by hand: hash routing, one EventSource per open session,
-// and the two-line fold over append/rewind.
+// The page: a three-pane workspace — sessions, transcript, detail —
+// built with the vendored preact + htm in /vendor. No build step, no
+// npm, no CDN: the browser loads exactly what the binary carries.
 //
-// One rule runs through all of it: no string that came from the server
-// is ever handed to an HTML parser. Every value goes in through
-// textContent or createElement, so a session that contains "<script>"
-// renders those characters and nothing happens. There is no markdown
-// library and no innerHTML below this line.
+// One rule runs through all of it, unchanged from the hand-rolled page
+// this replaced: no string that came from the server is ever handed to
+// an HTML parser. htm builds vnodes from *this file's* literals only —
+// every server value arrives as an interpolated child or prop, which
+// preact sets through createTextNode/setAttribute — and there is no
+// `dangerouslySetInnerHTML` below this line. A session containing
+// "<script>" renders those characters and nothing happens.
 
-"use strict";
+import { h, render } from "preact";
+import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
+import htm from "htm";
+
+const html = htm.bind(h);
 
 // ------------------------------------------------------------- token
 
@@ -38,43 +45,33 @@ function withToken(path) {
 
 const apiPath = (id, suffix) => "/api/sessions/" + encodeURIComponent(id) + (suffix || "");
 
-async function api(path) {
+async function fetchPath(path) {
   const headers = token ? { Authorization: "Bearer " + token } : {};
   const response = await fetch(path, { headers });
   if (!response.ok) throw new Error("GET " + path + " → " + response.status);
-  return response.json();
+  return response;
 }
 
-// --------------------------------------------------------------- dom
+const api = (path) => fetchPath(path).then((response) => response.json());
+const apiText = (path) => fetchPath(path).then((response) => response.text());
 
-const $ = (id) => document.getElementById(id);
+const message = (error) => String((error && error.message) || error);
 
-function el(tag, className, text) {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (text !== undefined && text !== null) node.textContent = String(text);
-  return node;
-}
+// ------------------------------------------------------------ format
 
-function clear(node) {
-  while (node.firstChild) node.removeChild(node.firstChild);
-  return node;
-}
-
-function banner(message) {
-  const node = $("banner");
-  node.textContent = message || "";
-  node.hidden = !message;
-}
-
-function relative(iso) {
+// "11h 46m": two units at most, because a third is noise and one alone
+// rounds a fresh session into an hour it is not in yet.
+function age(iso) {
   const then = Date.parse(iso);
   if (Number.isNaN(then)) return "";
   const seconds = Math.max(0, (Date.now() - then) / 1000);
-  if (seconds < 60) return Math.floor(seconds) + "s ago";
-  if (seconds < 3600) return Math.floor(seconds / 60) + "m ago";
-  if (seconds < 86400) return Math.floor(seconds / 3600) + "h ago";
-  if (seconds < 86400 * 30) return Math.floor(seconds / 86400) + "d ago";
+  if (seconds < 60) return Math.floor(seconds) + "s";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return minutes + "m";
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return hours + "h " + (minutes % 60) + "m";
+  const days = Math.floor(hours / 24);
+  if (days < 30) return days + "d " + (hours % 24) + "h";
   return new Date(then).toISOString().slice(0, 10);
 }
 
@@ -87,6 +84,39 @@ function cost(dollars) {
 
 function tokens(count) {
   return Number(count || 0).toLocaleString("en-US");
+}
+
+// Big numbers where a bar is the point: 63k, 1.2M.
+function compact(count) {
+  const value = Number(count || 0);
+  if (value >= 1_000_000) return (value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1) + "M";
+  if (value >= 1_000) return Math.round(value / 1_000) + "k";
+  return String(value);
+}
+
+const basename = (path) => String(path || "").split("/").filter(Boolean).pop() || path || "";
+
+// A tool summary, with the session's own directory taken off the front
+// of every path in it. Twenty rows all beginning
+// `/Users/…/repos/thing/` say nothing twenty times; the directory is in
+// the panel, and the untouched summary stays in the row's title.
+function shorten(summary, cwd) {
+  const text = String(summary || "");
+  if (!cwd) return text;
+  return text.split(cwd + "/").join("").split(cwd).join(".");
+}
+
+// The tokens a turn was holding: the wire's four counters, which is what
+// `Usage::context_tokens` adds up for every provider that reports cached
+// input separately.
+function contextTokens(usage) {
+  if (!usage) return 0;
+  return (
+    Number(usage.input || 0) +
+    Number(usage.cache_read || 0) +
+    Number(usage.cache_creation || 0) +
+    Number(usage.output || 0)
+  );
 }
 
 // ------------------------------------------------------- text render
@@ -106,60 +136,51 @@ function tokens(count) {
 const INLINE = /`([^`\n]+)`|\*\*(\S(?:[^\n]{0,400}?\S)??)\*\*|(https?:\/\/[^\s<>"'`)\]]+)/g;
 const TRAILING = /[.,;:!?]+$/;
 
-// Tokenize into `host`, appending text nodes and elements only: every
-// span the server sent lands through textContent, never a parser.
-function inline(host, text) {
+// Tokenize into a child array: plain strings and vnodes only, so every
+// span the server sent lands as a text node.
+function inline(text) {
   const source = String(text === null || text === undefined ? "" : text);
+  const out = [];
   let last = 0;
   for (const match of source.matchAll(INLINE)) {
-    if (match.index > last) host.appendChild(document.createTextNode(source.slice(last, match.index)));
+    if (match.index > last) out.push(source.slice(last, match.index));
     if (match[1] !== undefined) {
-      host.appendChild(el("code", "inline", match[1]));
+      out.push(html`<code class="inline">${match[1]}</code>`);
     } else if (match[2] !== undefined) {
       // Recursed, so a link or a backticked flag inside a bold span is
       // still a link and still a code span. The body cannot contain a
       // closed pair, so this bottoms out at one level.
-      host.appendChild(inline(el("strong", "bold"), match[2]));
+      out.push(html`<strong class="bold">${inline(match[2])}</strong>`);
     } else {
-      const url = match[3].replace(TRAILING, "");
-      const link = el("a", "link", url);
       // The regex admits http(s) only, so no javascript: URL can reach
       // an href here.
-      link.href = url;
-      link.target = "_blank";
-      link.rel = "noreferrer noopener";
-      host.appendChild(link);
-      host.appendChild(document.createTextNode(match[3].slice(url.length)));
+      const url = match[3].replace(TRAILING, "");
+      out.push(
+        html`<a class="link" href=${url} target="_blank" rel="noreferrer noopener">${url}</a>`,
+      );
+      out.push(match[3].slice(url.length));
     }
     last = match.index + match[0].length;
   }
-  host.appendChild(document.createTextNode(source.slice(last)));
-  return host;
+  out.push(source.slice(last));
+  return out;
 }
 
-function inlineText(text) {
-  return inline(el("div", "text"), text);
-}
-
-function codeBlock(body) {
-  const pre = el("pre", "code");
-  pre.appendChild(el("code", null, body));
-  return pre;
-}
-
-function renderText(host, text) {
+function richText(text) {
   const lines = String(text === null || text === undefined ? "" : text).split("\n");
+  const out = [];
   let buffer = [];
   let fenced = null;
   const flush = () => {
-    if (buffer.join("\n").trim()) host.appendChild(inlineText(buffer.join("\n")));
+    const body = buffer.join("\n");
+    if (body.trim()) out.push(html`<div class="text">${inline(body)}</div>`);
     buffer = [];
   };
   for (const line of lines) {
     const fence = /^\s*```/.test(line);
     if (fenced !== null) {
       if (fence) {
-        host.appendChild(codeBlock(fenced.join("\n")));
+        out.push(html`<pre class="code"><code>${fenced.join("\n")}</code></pre>`);
         fenced = null;
       } else {
         fenced.push(line);
@@ -171,9 +192,9 @@ function renderText(host, text) {
       buffer.push(line);
     }
   }
-  if (fenced !== null) host.appendChild(codeBlock(fenced.join("\n")));
+  if (fenced !== null) out.push(html`<pre class="code"><code>${fenced.join("\n")}</code></pre>`);
   flush();
-  return host;
+  return out;
 }
 
 function looksLikeDiff(text) {
@@ -184,71 +205,33 @@ function looksLikeDiff(text) {
   return added > 0 && removed > 0 && added + removed >= lines.length * 0.3;
 }
 
-function diffBlock(text) {
-  const pre = el("pre", "diff");
-  for (const line of text.split("\n")) {
-    let kind = "ctx";
-    if (line.startsWith("@@")) kind = "hunk";
-    else if (/^\+(?!\+\+)/.test(line)) kind = "add";
-    else if (/^-(?!--)/.test(line)) kind = "del";
-    pre.appendChild(el("span", kind, line + "\n"));
-  }
-  return pre;
+function diffKind(line) {
+  if (line.startsWith("@@")) return "hunk";
+  if (/^\+(?!\+\+)/.test(line)) return "add";
+  if (/^-(?!--)/.test(line)) return "del";
+  return "ctx";
 }
 
 // A tool's detail or result: a diff if it reads like one, plain
 // pre-wrap otherwise. Never markdown — this is program output.
-function preformatted(text, className) {
-  return looksLikeDiff(text) ? diffBlock(text) : el("pre", className || "detail", text);
-}
-
-// A collapsed row that opens on click. The label is built by the
-// caller; nothing here interprets it.
-function disclosure(host, label, expanded, fill) {
-  const button = el("button", "disclosure");
-  button.type = "button";
-  const caret = el("span", "badge", expanded ? "▾" : "▸");
-  button.appendChild(caret);
-  button.appendChild(label);
-  const body = el("div", "body");
-  body.hidden = !expanded;
-  let filled = false;
-  const open = () => {
-    if (!filled) {
-      filled = true;
-      fill(body);
-    }
-  };
-  if (expanded) open();
-  button.addEventListener("click", () => {
-    body.hidden = !body.hidden;
-    caret.textContent = body.hidden ? "▸" : "▾";
-    if (!body.hidden) open();
-  });
-  host.appendChild(button);
-  host.appendChild(body);
-  return body;
-}
-
-// -------------------------------------------------------------- rows
-
-function images(host, sessionId, eventId, descriptors) {
-  for (const image of descriptors || []) {
-    const thumb = el("img", "thumb");
-    thumb.loading = "lazy";
-    thumb.alt = image.media_type + " · " + tokens(image.bytes) + " bytes";
-    const at = "/images/" + encodeURIComponent(eventId) + "/" + image.n;
-    thumb.src = withToken(apiPath(sessionId, at));
-    host.appendChild(thumb);
-  }
+// No whitespace inside the tags: this is a <pre>, and a prettier
+// template literal would be indentation on screen.
+function Preformatted({ text, className }) {
+  const body = String(text || "");
+  if (!looksLikeDiff(body)) return html`<pre class=${className || "detail"}>${body}</pre>`;
+  const lines = body
+    .split("\n")
+    .map((line) => html`<span class=${diffKind(line)}>${line + "\n"}</span>`);
+  return html`<pre class="diff">${lines}</pre>`;
 }
 
 // The first line of something long, for a row that is still collapsed.
-function preview(text) {
+function preview(text, width) {
   const line = String(text || "").split("\n").find((one) => one.trim()) || "";
+  const cap = width || 90;
   // Unconditionally: the cut is one way to orphan a marker, and a bold
   // span the model wrapped across two lines is the other.
-  return unpaired(line.length > 90 ? line.slice(0, 89) + "…" : line);
+  return unpaired(line.length > cap ? line.slice(0, cap - 1) + "…" : line);
 }
 
 // A first line that ends inside a **bold** span keeps its opening
@@ -261,67 +244,185 @@ function unpaired(cut) {
   return cut.slice(0, at) + cut.slice(at + 2);
 }
 
-function row(host, className, who) {
-  const node = el("div", "row " + className);
-  if (who) node.appendChild(el("div", "who", who));
-  host.appendChild(node);
-  return node;
+// ------------------------------------------------------------- glyphs
+
+// One glyph per tool family. Text, not an icon font: the page has no
+// webfont and must work on a plane.
+const GLYPHS = {
+  read: "▤",
+  write: "✎",
+  edit: "✎",
+  patch: "✎",
+  apply_patch: "✎",
+  bash: "▸",
+  shell: "▸",
+  grep: "⌕",
+  search: "⌕",
+  glob: "⌕",
+  list: "☰",
+  todo: "☑",
+  task: "◆",
+  web: "◍",
+  fetch: "◍",
+};
+
+function glyph(name) {
+  const key = String(name || "").toLowerCase();
+  return GLYPHS[key] || GLYPHS[key.split("_")[0]] || "•";
 }
 
-function toolLabel(call, result) {
+// The tool name as a person says it: `apply_patch` is "Apply Patch".
+function toolTitle(name) {
+  return String(name || "tool")
+    .split(/[_\-\s]+/)
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
+}
+
+// --------------------------------------------------------------- rows
+
+function Images({ sessionId, eventId, descriptors }) {
+  if (!descriptors || !descriptors.length) return null;
+  return descriptors.map(
+    (image) => html`
+      <img
+        class="thumb"
+        loading="lazy"
+        alt=${image.media_type + " · " + tokens(image.bytes) + " bytes"}
+        src=${withToken(apiPath(sessionId, "/images/" + encodeURIComponent(eventId) + "/" + image.n))}
+      />
+    `,
+  );
+}
+
+// One line per tool call: glyph, name, muted argument summary. The whole
+// row is the affordance — clicking it opens the input detail and the
+// result, and a truncated result is fetched whole from its own route
+// only once someone asks for it.
+function ToolRow({ call, result, sessionId, cwd }) {
+  const [open, setOpen] = useState(false);
+  const [full, setFull] = useState(null);
+  const truncated = result && result.truncated;
+
+  useEffect(() => {
+    if (!open || !truncated || full !== null) return;
+    let live = true;
+    apiText(apiPath(sessionId, "/results/" + encodeURIComponent(result.tool_use_id)))
+      .then((text) => live && setFull(text))
+      .catch((error) => live && setFull("could not load the full result: " + message(error)));
+    return () => {
+      live = false;
+    };
+  }, [open, truncated, full, sessionId, result && result.tool_use_id]);
+
   const state = !result ? "run" : result.is_error ? "err" : "ok";
-  const mark = !result ? "…" : result.is_error ? "!" : "✓";
-  const label = el("span");
-  label.appendChild(el("span", "badge " + state, mark));
-  label.appendChild(el("span", "tool-name", " " + call.name + " "));
-  if (call.agent && call.agent.name) {
-    label.appendChild(el("span", "tag", call.agent.name + " "));
-  }
-  label.appendChild(el("span", "summary", call.summary || ""));
-  return label;
-}
+  const body = open
+    ? html`
+        <div class="tool-body">
+          ${call.detail && html`<${Preformatted} text=${call.detail} />`}
+          ${!result && html`<p class="note">running…</p>`}
+          ${result &&
+          (result.text || full) &&
+          html`<${Preformatted}
+            text=${full === null ? result.text : full}
+            className=${result.is_error ? "detail error" : "detail"}
+          />`}
+          ${result && truncated && full === null && html`<p class="note">loading full result…</p>`}
+          ${result &&
+          html`<${Images}
+            sessionId=${sessionId}
+            eventId=${result.id}
+            descriptors=${result.images}
+          />`}
+        </div>
+      `
+    : null;
 
-function toolBody(body, sessionId, call, result) {
-  if (call.detail) body.appendChild(preformatted(call.detail));
-  if (!result) {
-    body.appendChild(el("p", "note", "running…"));
-    return;
-  }
-  if (result.text) body.appendChild(preformatted(result.text, result.is_error ? "detail error" : "detail"));
-  images(body, sessionId, result.id, result.images);
-  if (result.truncated) {
-    const at = "/results/" + encodeURIComponent(result.tool_use_id);
-    const link = el("a", "link", "full output");
-    link.href = withToken(apiPath(sessionId, at));
-    link.target = "_blank";
-    link.rel = "noreferrer noopener";
-    body.appendChild(link);
-  }
+  return html`
+    <div class=${"tool " + state + (open ? " open" : "")}>
+      <button class="tool-line" type="button" onClick=${() => setOpen(!open)}>
+        <span class=${"glyph " + state}>${!result ? html`<span class="spinner" />` : glyph(call.name)}</span>
+        <span class="tool-name">${toolTitle(call.name)}</span>
+        ${call.agent && call.agent.name && html`<span class="chip">${call.agent.name}</span>`}
+        <span class="tool-args" title=${call.summary || ""}
+          >${inline(preview(shorten(call.summary, cwd), 140))}</span
+        >
+      </button>
+      ${body}
+    </div>
+  `;
 }
 
 // A task row's detail is a whole child transcript, fetched only when
 // someone opens it — the parent log holds a link, never the turns.
-function taskBody(body, call, result) {
+function TaskRow({ call, result, sessionId, cwd }) {
+  const [open, setOpen] = useState(false);
   const child = result && result.child_session_id;
-  if (!child) {
-    body.appendChild(el("p", "note", result ? "no child session recorded" : "running…"));
-    return;
-  }
-  if (call.detail) body.appendChild(preformatted(call.detail));
-  const nested = el("div", "child");
-  body.appendChild(nested);
-  nested.appendChild(el("p", "note", "loading…"));
-  api(apiPath(child, "?invocation=" + encodeURIComponent(call.id)))
-    .then((page) => {
-      clear(nested);
-      renderEvents(nested, page.events.slice(compactionCut(page.events, page.cursor)), child);
-      const link = el("a", "link", "open the child session");
-      link.href = "#/s/" + encodeURIComponent(child);
-      nested.appendChild(link);
-    })
-    .catch((error) => {
-      clear(nested).appendChild(el("p", "note", String(error.message || error)));
-    });
+  const [page, setPage] = useState(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!open || !child || page) return;
+    let live = true;
+    api(apiPath(child, "?invocation=" + encodeURIComponent(call.id)))
+      .then((loaded) => live && setPage(loaded))
+      .catch((failure) => live && setError(message(failure)));
+    return () => {
+      live = false;
+    };
+  }, [open, child, page, call.id]);
+
+  const state = !result ? "run" : result.is_error ? "err" : "ok";
+  return html`
+    <div class=${"tool task " + state + (open ? " open" : "")}>
+      <button class="tool-line" type="button" onClick=${() => setOpen(!open)}>
+        <span class=${"glyph " + state}>${!result ? html`<span class="spinner" />` : "◆"}</span>
+        <span class="tool-name">Task</span>
+        ${call.agent && call.agent.name && html`<span class="chip">${call.agent.name}</span>`}
+        <span class="tool-args" title=${call.summary || ""}
+          >${inline(preview(shorten(call.summary, cwd), 140))}</span
+        >
+      </button>
+      ${open &&
+      html`
+        <div class="tool-body">
+          ${call.detail && html`<${Preformatted} text=${call.detail} />`}
+          ${!child && html`<p class="note">${result ? "no child session recorded" : "running…"}</p>`}
+          ${error && html`<p class="note">${error}</p>`}
+          ${child &&
+          !page &&
+          !error &&
+          html`<p class="note">loading…</p>`}
+          ${page &&
+          html`
+            <div class="child">
+              ${eventRows(page.events.slice(compactionCut(page.events, page.cursor)), child, cwd)}
+              <a class="link" href=${"#/s/" + encodeURIComponent(child)}>open the child session</a>
+            </div>
+          `}
+        </div>
+      `}
+    </div>
+  `;
+}
+
+// Reasoning, dim and closed: the title a model writes is `**Planning…**`,
+// which is prose, so it renders as prose rather than as its own markers.
+// A compaction summary wears the same row — it is the same gesture, a
+// long thing folded to one line.
+function ThinkingRow({ text, label }) {
+  const [open, setOpen] = useState(false);
+  return html`
+    <div class=${"thought" + (open ? " open" : "")}>
+      <button class="thought-line" type="button" onClick=${() => setOpen(!open)}>
+        <span class="glyph">${open ? "▾" : "▸"}</span>
+        <span class="thought-label">${label || "thinking"}</span>
+        <span class="thought-preview">${inline(preview(text, 120))}</span>
+      </button>
+      ${open && html`<div class="thought-body">${richText(text)}</div>`}
+    </div>
+  `;
 }
 
 // The compaction cut, applied at render time and only here. The full
@@ -344,73 +445,395 @@ function compactionCut(events, base) {
   return Math.max(0, cut);
 }
 
-function renderEvents(host, events, sessionId) {
+function eventRows(events, sessionId, cwd) {
   const results = new Map();
   for (const event of events) {
     if (event.type === "tool_result") results.set(event.tool_use_id, event);
   }
   const consumed = new Set();
-  for (const event of events) {
+  const rows = [];
+  events.forEach((event, index) => {
+    const key = (event.id || "e") + ":" + index;
     switch (event.type) {
-      case "user_message": {
-        const node = row(host, "user", "you");
-        renderText(node, event.text);
-        images(node, sessionId, event.id, event.images);
+      case "user_message":
+        rows.push(html`
+          <div class="block user" key=${key}>
+            <div class="who">you</div>
+            ${richText(event.text)}
+            <${Images} sessionId=${sessionId} eventId=${event.id} descriptors=${event.images} />
+          </div>
+        `);
         break;
-      }
       case "assistant_message":
-        for (const block of event.content || []) {
+        (event.content || []).forEach((block, at) => {
+          const inner = key + ":" + at;
           if (block.type === "text") {
-            renderText(row(host, "assistant", event.model || "assistant"), block.text);
+            rows.push(html`<div class="block assistant" key=${inner}>${richText(block.text)}</div>`);
           } else if (block.type === "reasoning_summary") {
-            // The title a model writes is `**Planning…**`; it is prose,
-            // so it renders as prose rather than as its own markers.
-            const label = el("span", "tag", " thinking · ");
-            inline(label, preview(block.text));
-            disclosure(row(host, "thought"), label, false, (body) => renderText(body, block.text));
+            rows.push(html`<${ThinkingRow} key=${inner} text=${block.text} />`);
           } else if (block.type === "tool_call") {
             const result = results.get(block.id);
             if (result) consumed.add(result.id);
-            const fill = (body) =>
-              block.name === "task"
-                ? taskBody(body, block, result)
-                : toolBody(body, sessionId, block, result);
-            disclosure(row(host, "tool"), toolLabel(block, result), false, fill);
+            const Row = block.name === "task" ? TaskRow : ToolRow;
+            rows.push(
+              html`<${Row}
+                key=${inner}
+                call=${block}
+                result=${result}
+                sessionId=${sessionId}
+                cwd=${cwd}
+              />`,
+            );
           }
-        }
+        });
         break;
-      case "tool_result": {
+      case "tool_result":
         // Only a result whose call is off the top of this page: the rest
         // render inside the call they answer.
         if (consumed.has(event.id)) break;
-        const node = row(host, event.is_error ? "tool error" : "tool", "result");
-        if (event.text) node.appendChild(preformatted(event.text));
-        images(node, sessionId, event.id, event.images);
+        rows.push(html`
+          <div class=${"block result" + (event.is_error ? " error" : "")} key=${key}>
+            <div class="who">result</div>
+            ${event.text && html`<${Preformatted} text=${event.text} />`}
+            <${Images} sessionId=${sessionId} eventId=${event.id} descriptors=${event.images} />
+          </div>
+        `);
         break;
-      }
       case "model_change":
-        row(host, "system", "model → " + event.model + (event.variant ? " · " + event.variant : ""));
+        rows.push(html`
+          <div class="note-row" key=${key}>
+            model → ${event.model}${event.variant ? " · " + event.variant : ""}
+          </div>
+        `);
         break;
-      case "compaction": {
-        const label = el("span", "tag", " transcript compacted");
-        disclosure(row(host, "system"), label, false, (body) => renderText(body, event.summary));
+      case "compaction":
+        rows.push(html`<${ThinkingRow} key=${key} label="compacted" text=${event.summary} />`);
         break;
-      }
       case "rewind":
-        host.appendChild(el("div", "divider", "rewound to event " + event.to));
+        rows.push(html`<div class="divider" key=${key}>rewound to event ${event.to}</div>`);
         break;
       default:
         // meta, checkpoint, topic, subagent_invocation: state, not
         // transcript. They keep their index and render nothing.
         break;
     }
-  }
-  return host;
+  });
+  return rows;
 }
 
-// -------------------------------------------------------------- list
+// ------------------------------------------------- streaming tail row
 
-function group(sessions) {
+// What the running step has produced so far, rebuilt from `delta`
+// frames. Never folded into the canonical events: it is a stand-in for a
+// step nobody has committed, dropped the moment the real event arrives.
+//
+// `thoughts` is a list because the wire says where one thought ends —
+// a `thinking_break` per closed summary. Appending them all to one
+// string is what used to run a step's whole reasoning together into a
+// single paragraph seamed with stray `**`.
+function liveApply(previous, data) {
+  if (data.type === "reset") return null;
+  const live = previous || { text: "", thoughts: [], tools: [] };
+  if (data.type === "text_delta") live.text += data.text;
+  else if (data.type === "thinking_delta") {
+    if (!live.thoughts.length) live.thoughts.push("");
+    live.thoughts[live.thoughts.length - 1] += data.text;
+  } else if (data.type === "thinking_break") {
+    if (live.thoughts.length && live.thoughts[live.thoughts.length - 1].trim()) live.thoughts.push("");
+  } else if (data.type === "tool_started") {
+    live.tools.push({ id: data.id, name: data.name, summary: data.summary });
+  } else if (data.type === "tool_finished") {
+    const tool = live.tools.find((one) => one.id === data.id);
+    if (tool) tool.ok = data.ok;
+  } else if (data.type === "turn_started") {
+    return { text: "", thoughts: [], tools: [] };
+  }
+  return live;
+}
+
+// The in-flight step: one container, shaped like the transcript rows it
+// is about to become. Everything the step has said so far lives inside
+// it — the thoughts it closed, the text it is writing, the tools it
+// started — so a running turn is one thing on screen.
+function LiveStep({ live }) {
+  if (!live) return null;
+  const thoughts = live.thoughts.filter((one) => one.trim());
+  const writing = live.text.trim();
+  if (!thoughts.length && !writing && !live.tools.length) return null;
+  // Exactly one thing says "this is what is happening now": the spinner
+  // while a tool runs, the caret on the newest words otherwise.
+  const busy = live.tools.some((tool) => tool.ok === undefined);
+  return html`
+    <div class="live">
+      ${thoughts.map(
+        (thought, index) => html`
+          <div class=${"live-thought" + (!busy && !writing && index === thoughts.length - 1 ? " active" : "")}>
+            <span class="glyph">▸</span>${inline(preview(thought, 120))}
+          </div>
+        `,
+      )}
+      ${writing && html`<div class=${"live-text" + (busy ? "" : " active")}>${richText(live.text)}</div>`}
+      ${live.tools.map(
+        (tool) => html`
+          <div class=${"tool-line live-tool " + (tool.ok === undefined ? "run" : tool.ok ? "ok" : "err")}>
+            <span class="glyph">
+              ${tool.ok === undefined ? html`<span class="spinner" />` : glyph(tool.name)}
+            </span>
+            <span class="tool-name">${toolTitle(tool.name)}</span>
+            <span class="tool-args">${inline(preview(tool.summary, 140))}</span>
+          </div>
+        `,
+      )}
+    </div>
+  `;
+}
+
+// ---------------------------------------------------------- transcript
+
+function blankView(id) {
+  return {
+    id,
+    events: [],
+    base: 0,
+    hasMore: false,
+    line: 0,
+    live: null,
+    rewound: null,
+    session: null,
+    usage: {},
+    count: 0,
+    status: id ? "loading…" : "",
+    error: "",
+    loading: Boolean(id),
+    pending: false,
+    earlier: null,
+  };
+}
+
+// One open session: the canonical folded stream from `base` onward, the
+// physical line the tail stands at (which is what the SSE stream resumes
+// from), and the running step's scratch.
+//
+// The state is a mutable object behind a ref rather than useState: the
+// fold is index arithmetic over an array that a rewind truncates in
+// place, and copying it per frame would make a busy turn quadratic. A
+// rAF-coalesced counter is what asks preact to look again.
+function useTranscript(id) {
+  const store = useRef(blankView(null));
+  const [, bump] = useState(0);
+  const scheduled = useRef(false);
+  const paint = useCallback(() => {
+    if (scheduled.current) return;
+    scheduled.current = true;
+    requestAnimationFrame(() => {
+      scheduled.current = false;
+      bump((count) => count + 1);
+    });
+  }, []);
+
+  useEffect(() => {
+    const view = blankView(id);
+    store.current = view;
+    paint();
+    if (!id) return undefined;
+
+    let alive = true;
+    let source = null;
+    const detach = () => {
+      if (source) {
+        source.close();
+        source = null;
+      }
+    };
+
+    // The design's fold, over the canonical array, with the one
+    // adjustment paging forces: index 0 of what we hold is canonical
+    // index `base`.
+    const fold = (kind, data) => {
+      if (kind === "rewind") {
+        if (data.to < view.base) return false;
+        view.rewound = view.base + view.events.length - data.to;
+        view.events.length = data.to - view.base;
+      } else {
+        view.rewound = null;
+        view.events.push(data.event);
+      }
+      view.line = data.line;
+      return true;
+    };
+
+    const attach = () => {
+      detach();
+      const stream = new EventSource(withToken(apiPath(id, "/events?from=" + view.line)));
+      source = stream;
+      const on = (name, handler) =>
+        stream.addEventListener(name, (frame) => {
+          if (!alive || source !== stream) return;
+          handler(JSON.parse(frame.data));
+        });
+      stream.addEventListener("open", () => {
+        if (!alive || source !== stream) return;
+        view.status = "live";
+        paint();
+      });
+      // The server's terminal `error` frame and `EventSource`'s own
+      // transport failure arrive under the same name; only the server's
+      // carries data. A dropped socket is not a reason to tear the page
+      // down — EventSource reconnects on its own, with `Last-Event-ID`.
+      stream.addEventListener("error", (frame) => {
+        if (!alive || source !== stream) return;
+        if (frame && typeof frame.data === "string") {
+          detach();
+          view.status = "stopped";
+          view.error = JSON.parse(frame.data).message;
+        } else {
+          // Deltas are not resumed on reconnect (they carry no id), so
+          // the half-message on screen would silently gain a hole.
+          view.live = null;
+          view.status = "reconnecting…";
+        }
+        paint();
+      });
+      on("append", (data) => {
+        // The committed step supersedes the stand-in for it. Only that
+        // one: a tool result lands while the *other* tools of the same
+        // step are still streaming, and dropping the row there would
+        // lose them.
+        if (data.event && data.event.type === "assistant_message") view.live = null;
+        fold("append", data);
+        view.count += 1;
+        paint();
+      });
+      // The running turn's scratch. Ephemeral by design — no id, no
+      // replay.
+      on("delta", (data) => {
+        view.live = liveApply(view.live, data);
+        paint();
+      });
+      on("rewind", (data) => {
+        // A rewind below the loaded window leaves nothing to fold onto.
+        if (fold("rewind", data)) paint();
+        else reload();
+      });
+      // The view is stale — a lagging subscriber or a repaired tail.
+      // Only a re-fetch is honest.
+      on("resync", () => reload());
+      on("deleted", () => {
+        detach();
+        view.status = "deleted";
+        view.error = "This session was deleted.";
+        paint();
+      });
+    };
+
+    const load = async () => {
+      try {
+        const page = await api(apiPath(id));
+        if (!alive) return;
+        view.events = page.events || [];
+        view.base = page.cursor;
+        view.hasMore = page.has_more;
+        view.line = page.line;
+        view.session = page.session || null;
+        view.usage = page.usage || {};
+        view.count = page.count;
+        view.loading = false;
+        view.error = "";
+        paint();
+        attach();
+      } catch (error) {
+        if (!alive) return;
+        view.loading = false;
+        view.status = "";
+        view.error = message(error);
+        paint();
+      }
+    };
+
+    const reload = () => {
+      detach();
+      view.live = null;
+      view.rewound = null;
+      view.loading = true;
+      paint();
+      load();
+    };
+
+    view.earlier = async () => {
+      if (view.pending || !view.hasMore) return;
+      view.pending = true;
+      paint();
+      try {
+        const page = await api(apiPath(id, "?from=" + view.base));
+        if (!alive) return;
+        view.events = page.events.concat(view.events);
+        view.base = page.cursor;
+        view.hasMore = page.has_more;
+      } catch (error) {
+        if (alive) view.error = message(error);
+      } finally {
+        view.pending = false;
+        paint();
+      }
+    };
+
+    load();
+    return () => {
+      alive = false;
+      detach();
+    };
+  }, [id, paint]);
+
+  // The effect runs after the render that changed `id`, so without this
+  // the first frame of a new session would draw the old one's events
+  // under the new one's header.
+  if (store.current.id !== id) store.current = blankView(id);
+  return store.current;
+}
+
+// --------------------------------------------------------- the panes
+
+function Dot({ state, title }) {
+  return html`<span class=${"dot " + (state || "idle")} title=${title || state || "idle"} />`;
+}
+
+function SessionGroup({ cwd, rows, current, onPick }) {
+  const [open, setOpen] = useState(true);
+  return html`
+    <section class="group">
+      <button class="group-head" type="button" title=${cwd || "sessions with no directory"} onClick=${() => setOpen(!open)}>
+        <span class="glyph">${open ? "▾" : "▸"}</span>
+        <span class="group-name">${cwd ? basename(cwd) : "elsewhere"}</span>
+        <span class="group-count">${rows.length}</span>
+      </button>
+      ${open &&
+      rows.map(
+        (session) => html`
+          <a
+            key=${session.id}
+            class=${"session" + (session.id === current ? " current" : "")}
+            href=${"#/s/" + encodeURIComponent(session.id)}
+            title=${session.cwd || ""}
+            onClick=${() => onPick && onPick()}
+          >
+            <${Dot}
+              state=${session.state}
+              title=${session.state === "stalled"
+                ? "a turn is running but has not written for a minute"
+                : session.state}
+            />
+            <span class="session-title">${inline(preview(session.title || session.id, 70))}</span>
+            <span class="session-age">${age(session.modified)}</span>
+          </a>
+        `,
+      )}
+    </section>
+  `;
+}
+
+// Newest group first, with the sessions that never named a directory
+// last: they have nothing to group by, not the newest nothing.
+function grouped(sessions) {
   const groups = new Map();
   for (const session of sessions) {
     const key = session.cwd || "";
@@ -423,358 +846,301 @@ function group(sessions) {
     rows.sort((left, right) => when(right) - when(left));
     ordered.push({ cwd, rows, newest: when(rows[0]) });
   }
-  // Newest group first, with the sessions that never named a directory
-  // last: they have nothing to group by, not the newest nothing.
-  ordered.sort((left, right) => (left.cwd === "") - (right.cwd === "") || right.newest - left.newest);
+  ordered.sort(
+    (left, right) => (left.cwd === "") - (right.cwd === "") || right.newest - left.newest,
+  );
   return ordered;
 }
 
-function sessionRow(session) {
-  const link = el("a", "session-row");
-  link.href = "#/s/" + encodeURIComponent(session.id);
-  const dot = el("span", "dot " + (session.state || "idle"));
-  if (session.state === "stalled") dot.title = "a turn is running but has not written for a minute";
-  link.appendChild(dot);
-  link.appendChild(inline(el("span", "row-title"), session.title || session.id));
-  if (session.activity) link.appendChild(el("span", "tag activity", session.activity));
-  if (session.agent) link.appendChild(el("span", "tag", session.agent));
-  if (session.model) link.appendChild(el("span", "tag", session.model));
-  link.appendChild(el("span", "tag", relative(session.modified)));
-  return link;
-}
-
-async function renderList() {
-  const listing = await api("/api/sessions");
-  if (view.route !== "list") return;
-  const sessions = listing.sessions || [];
-  const host = clear($("groups"));
-  for (const { cwd, rows } of group(sessions)) {
-    const section = el("div", "group");
-    section.appendChild(el("div", "group-cwd", cwd || "elsewhere"));
-    for (const session of rows) section.appendChild(sessionRow(session));
-    host.appendChild(section);
-  }
-  $("list-empty").hidden = sessions.length > 0;
+function Sidebar({ sessions, current, error, onPick }) {
+  const groups = useMemo(() => grouped(sessions), [sessions]);
   const working = sessions.filter((session) => session.state === "working").length;
-  status(sessions.length + " sessions · " + working + " working", working > 0);
+  return html`
+    <aside class="sidebar">
+      <header class="sidebar-head">
+        <a class="brand" href="#/">ilar</a>
+        <span class="sidebar-count">
+          ${sessions.length} session${sessions.length === 1 ? "" : "s"}
+          ${working > 0 && html`<span class="working"> · ${working} working</span>`}
+        </span>
+      </header>
+      <div class="sidebar-body">
+        ${error && html`<p class="note">${error}</p>`}
+        ${!error && !sessions.length && html`<p class="note">No sessions in this store yet.</p>`}
+        ${groups.map(
+          (group) => html`
+            <${SessionGroup}
+              key=${group.cwd}
+              cwd=${group.cwd}
+              rows=${group.rows}
+              current=${current}
+              onPick=${onPick}
+            />
+          `,
+        )}
+      </div>
+    </aside>
+  `;
 }
 
-// ----------------------------------------------------------- session
+// The strip where phase 3's input box goes: what the session is doing,
+// and what it has spent doing it.
+function StatusPill({ view, session }) {
+  const state = (session && session.state) || (view.live ? "working" : "idle");
+  const model = (session && session.model) || (view.session && view.session.model) || "";
+  const activity = session && session.activity;
+  const usage = view.usage || {};
+  // `status` is the stream's own word — "reconnecting…", "stopped",
+  // "deleted" — and only worth saying when it is not the ordinary
+  // "live", which would read as a claim about the session rather than
+  // about the socket.
+  const connection = view.status && view.status !== "live" ? view.status : "";
+  const saying =
+    state === "working"
+      ? activity || (model ? model + " is thinking …" : "working …")
+      : state === "stalled"
+        ? "quiet since the last write"
+        : connection || "idle";
+  return html`
+    <div class=${"pill " + state}>
+      <${Dot} state=${state} />
+      <span class="pill-say">${saying}</span>
+      <span class="pill-facts">
+        ${view.count} events · in ${compact(usage.input)} · out ${compact(usage.output)}
+        ${typeof usage.cost_dollars === "number"
+          ? " · " + cost(usage.cost_dollars)
+          : usage.plan
+            ? " · plan"
+            : ""}
+      </span>
+    </div>
+  `;
+}
 
-// One open session. `events` is the canonical folded stream from
-// `base` onward; `line` is the physical line the tail stands at, which
-// is what the SSE stream resumes from.
-const view = {
-  route: "list",
-  id: null,
-  epoch: 0,
-  events: [],
-  base: 0,
-  hasMore: false,
-  line: 0,
-  source: null,
-  follow: true,
-  pending: false,
-  rewound: null,
-  live: null,
-};
+function Card({ title, extra, children }) {
+  return html`
+    <section class="card">
+      <header class="card-head">
+        <h2>${title}</h2>
+        ${extra !== undefined && extra !== null && html`<span class="card-extra">${extra}</span>`}
+      </header>
+      ${children}
+    </section>
+  `;
+}
 
-// ------------------------------------------------- streaming tail row
-
-// What the running step has produced so far, rebuilt from `delta`
-// frames. Never folded into `view.events`: it is a stand-in for a step
-// nobody has committed, dropped the moment the real event arrives.
-//
-// `thoughts` is a list because the wire says where one thought ends —
-// a `thinking_break` per closed summary. Appending them all to one
-// string is what used to run a step's whole reasoning together into a
-// single paragraph seamed with stray `**`.
-function liveApply(data) {
-  if (data.type === "reset") return void (view.live = null);
-  const live = view.live || (view.live = { text: "", thoughts: [], tools: [] });
-  if (data.type === "text_delta") live.text += data.text;
-  else if (data.type === "thinking_delta") {
-    if (!live.thoughts.length) live.thoughts.push("");
-    live.thoughts[live.thoughts.length - 1] += data.text;
-  } else if (data.type === "thinking_break") {
-    if (live.thoughts.length && live.thoughts[live.thoughts.length - 1].trim()) live.thoughts.push("");
-  } else if (data.type === "tool_started") {
-    live.tools.push({ id: data.id, name: data.name, summary: data.summary });
-  } else if (data.type === "tool_finished") {
-    const tool = live.tools.find((one) => one.id === data.id);
-    if (tool) tool.ok = data.ok;
+// The context bar: what the newest turn was holding against the window
+// the model actually accepts. `context_limit` is null for a model this
+// binary has no catalog row for, and then there is no honest bar to draw.
+function ContextBar({ used, limit }) {
+  if (!limit) {
+    return html`<div class="fact"><span>Context</span><span>${compact(used)} tokens</span></div>`;
   }
+  const share = Math.min(1, used / limit);
+  const level = share > 0.9 ? "hot" : share > 0.7 ? "warm" : "cool";
+  return html`
+    <div class="context">
+      <div class="fact">
+        <span>Context</span>
+        <span>${(share * 100).toFixed(1)}%</span>
+      </div>
+      <div class="bar" title=${tokens(used) + " of " + tokens(limit) + " tokens"}>
+        <div class=${"bar-fill " + level} style=${"width:" + (share * 100).toFixed(2) + "%"} />
+      </div>
+      <div class="fact dim">
+        <span>${compact(used)} used</span>
+        <span>${compact(limit)} limit</span>
+      </div>
+    </div>
+  `;
 }
 
-// One thought, as one line: the same first-line preview a committed
-// `reasoning_summary` row shows collapsed, so a step reads the same
-// before and after it commits.
-function thoughtLine(text, active) {
-  const line = el("div", "live-thought" + (active ? " active" : ""));
-  line.appendChild(el("span", "badge", "▸"));
-  inline(line, preview(text));
-  return line;
-}
+function DetailPanel({ id, view }) {
+  const [children, setChildren] = useState([]);
+  useEffect(() => {
+    if (!id) return undefined;
+    let alive = true;
+    const refresh = () =>
+      api(apiPath(id, "/children"))
+        .then((page) => alive && setChildren(page.children || []))
+        .catch(() => alive && setChildren([]));
+    refresh();
+    const timer = setInterval(refresh, 5000);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, [id]);
 
-// The same label a committed tool call gets, so the row does not change
-// shape when the real event replaces it — with the waiting badge swapped
-// for the spinner, because a running tool is the one thing here that is
-// happening rather than written.
-function liveTool(tool) {
-  const done = tool.ok !== undefined;
-  const label = toolLabel(tool, done ? { is_error: !tool.ok } : null);
-  if (!done) label.replaceChild(el("span", "spinner"), label.firstChild);
-  const node = el("div", "live-tool");
-  node.appendChild(label);
-  return node;
-}
-
-// The in-flight step: one container, shaped like a transcript row, that
-// the committed event replaces whole. Everything the step has said so
-// far lives inside it — the thoughts it closed, the text it is writing,
-// the tools it started — so a running turn is one thing on screen
-// rather than a stack of boxes.
-function renderLive(host) {
-  const live = view.live;
-  if (!live) return;
-  const thoughts = live.thoughts.filter((one) => one.trim());
-  if (!thoughts.length && !live.text.trim() && !live.tools.length) return;
-  const step = row(host, "live", "working");
-  // Exactly one thing says "this is what is happening now": the
-  // spinner while a tool runs, the caret on the newest words otherwise.
-  const busy = live.tools.some((tool) => tool.ok === undefined);
-  const writing = live.text.trim();
-  thoughts.forEach((thought, index) => {
-    const active = !busy && !writing && index === thoughts.length - 1;
-    step.appendChild(thoughtLine(thought, active));
-  });
-  if (writing) {
-    const text = renderText(el("div", "live-text" + (busy ? "" : " active")), live.text);
-    step.appendChild(text);
-  }
-  for (const tool of live.tools) step.appendChild(liveTool(tool));
-}
-
-function status(text, live) {
-  const node = $("status");
-  node.textContent = text;
-  node.className = "status" + (live ? " live" : "");
-}
-
-function detach() {
-  if (view.source) {
-    view.source.close();
-    view.source = null;
-  }
-}
-
-// The design's fold, over the canonical array, with the one adjustment
-// paging forces: index 0 of what we hold is canonical index `base`.
-function fold(kind, data) {
-  if (kind === "rewind") {
-    if (data.to < view.base) return false;
-    view.rewound = view.base + view.events.length - data.to;
-    view.events.length = data.to - view.base;
-  } else {
-    view.rewound = null;
-    view.events.push(data.event);
-  }
-  view.line = data.line;
-  return true;
-}
-
-let scheduled = false;
-function scheduleRender() {
-  if (scheduled) return;
-  scheduled = true;
-  requestAnimationFrame(() => {
-    scheduled = false;
-    if (view.route === "session") renderTranscript();
-  });
-}
-
-function renderTranscript() {
-  const host = clear($("transcript"));
-  renderEvents(host, view.events.slice(compactionCut(view.events, view.base)), view.id);
-  renderLive(host);
-  if (view.rewound !== null) {
-    host.appendChild(el("div", "divider", "rewound " + view.rewound + " events"));
-  }
-  $("earlier").hidden = !view.hasMore;
-  if (view.follow) window.scrollTo(0, document.body.scrollHeight);
-}
-
-function renderHead(page) {
-  const session = page.session || {};
+  if (!id) return html`<aside class="panel"></aside>`;
+  const session = view.session || {};
   const meta = view.events.find((event) => event.type === "meta") || {};
-  const host = clear($("session-head"));
-  // A title is the first user message, markers and all: it renders the
-  // way the message it came from does.
-  host.appendChild(inline(el("h1"), session.title || view.id));
-  const facts = el("div", "facts");
-  const fact = (text) => text && facts.appendChild(el("span", null, text));
-  fact(session.model || meta.model);
-  fact(session.agent || meta.agent);
-  fact(session.cwd || meta.cwd);
-  const usage = page.usage || {};
-  fact("in " + tokens(usage.input) + " · out " + tokens(usage.output));
-  fact("cache " + tokens(usage.cache_read) + "/" + tokens(usage.cache_creation));
-  if (typeof usage.cost_dollars === "number") fact(cost(usage.cost_dollars));
-  else if (usage.plan) fact("plan");
-  fact(page.count + " events");
-  host.appendChild(facts);
-  inline(clear($("crumb")), session.title || view.id);
+  // The newest turn's own usage, which is what the model was holding —
+  // not the session total, which counts every turn's context again.
+  const latest = [...view.events].reverse().find((event) => event.type === "assistant_message");
+  const used = contextTokens(latest && latest.usage);
+  const compactions = view.events.filter((event) => event.type === "compaction").length;
+  const running = children.filter((child) => child.state !== "idle").length;
+
+  return html`
+    <aside class="panel">
+      <${Card} title="Session">
+        <${ContextBar} used=${used} limit=${session.context_limit} />
+        <div class="fact"><span>Model</span><span class="mono">${session.model || meta.model || "—"}</span></div>
+        <div class="fact"><span>Agent</span><span class="mono">${session.agent || meta.agent || "—"}</span></div>
+        <div class="fact">
+          <span>Directory</span>
+          <span class="mono ellipsis" title=${session.cwd || meta.cwd || ""}>
+            ${basename(session.cwd || meta.cwd) || "—"}
+          </span>
+        </div>
+        ${compactions > 0 &&
+        html`<div class="fact"><span>Compactions</span><span>${compactions}</span></div>`}
+      <//>
+      <${Card} title="Subagents" extra=${children.length ? running + "/" + children.length : "0"}>
+        ${!children.length && html`<p class="note">none</p>`}
+        ${children.map(
+          (child) => html`
+            <a class="subagent" key=${child.id} href=${"#/s/" + encodeURIComponent(child.id)}>
+              <span class="subagent-name">${preview(child.title || child.agent || child.id, 44)}</span>
+              <span class=${"subagent-state " + (child.state || "idle")}>
+                ${child.state === "working" ? "is working" : child.state === "stalled" ? "stalled" : "done"}
+              </span>
+            </a>
+          `,
+        )}
+      <//>
+    </aside>
+  `;
 }
 
-function attach() {
-  detach();
-  const source = new EventSource(withToken(apiPath(view.id, "/events?from=" + view.line)));
-  view.source = source;
-  const epoch = view.epoch;
-  const guard = (handler) => (message) => {
-    if (view.epoch !== epoch) return;
-    handler(JSON.parse(message.data));
+function Center({ id, view, session, onDrawer }) {
+  const stream = useRef(null);
+  const follow = useRef(true);
+  const [tailing, setTailing] = useState(true);
+
+  const toBottom = useCallback(() => {
+    const node = stream.current;
+    if (node) node.scrollTop = node.scrollHeight;
+    follow.current = true;
+    setTailing(true);
+  }, []);
+
+  // After every paint: the tail stays pinned unless someone scrolled up.
+  useEffect(() => {
+    if (follow.current && stream.current) stream.current.scrollTop = stream.current.scrollHeight;
+  });
+  useEffect(() => {
+    follow.current = true;
+    setTailing(true);
+  }, [id]);
+
+  const onScroll = () => {
+    const node = stream.current;
+    if (!node) return;
+    const bottom = node.scrollHeight - node.scrollTop - node.clientHeight < 80;
+    follow.current = bottom;
+    if (bottom !== tailing) setTailing(bottom);
   };
-  source.addEventListener("open", () => {
-    if (view.epoch === epoch) status("live", true);
-  });
-  // The server's terminal `error` frame and `EventSource`'s own
-  // transport failure arrive under the same name; only the server's
-  // carries data. A dropped socket is not a reason to tear the page
-  // down — EventSource reconnects on its own, with `Last-Event-ID`.
-  source.addEventListener("error", (message) => {
-    if (view.epoch !== epoch) return;
-    if (message && typeof message.data === "string") {
-      detach();
-      status("stopped", false);
-      banner(JSON.parse(message.data).message);
-    } else {
-      // Deltas are not resumed on reconnect (they carry no id), so the
-      // half-message on screen would silently gain a hole in the middle.
-      view.live = null;
-      status("reconnecting…", false);
-      scheduleRender();
-    }
-  });
-  const on = (name, handler) => source.addEventListener(name, guard(handler));
-  on("append", (data) => {
-    // The committed step supersedes the stand-in for it. Only that one:
-    // a tool result lands while the *other* tools of the same step are
-    // still streaming, and dropping the row there would lose them.
-    if (data.event && data.event.type === "assistant_message") view.live = null;
-    fold("append", data);
-    scheduleRender();
-  });
-  // The running turn's scratch. Ephemeral by design — no id, no replay.
-  on("delta", (data) => {
-    liveApply(data);
-    scheduleRender();
-  });
-  on("rewind", (data) => {
-    // A rewind below the loaded window leaves nothing to fold onto.
-    if (fold("rewind", data)) scheduleRender();
-    else openSession(view.id);
-  });
-  // The view is stale — a lagging subscriber or a repaired tail. Only a
-  // re-fetch is honest.
-  on("resync", () => openSession(view.id));
-  on("deleted", () => {
-    detach();
-    status("deleted", false);
-    banner("This session was deleted.");
-  });
+
+  const head = view.session || session || {};
+  const title = head.title || id || "";
+  const rows = id
+    ? eventRows(view.events.slice(compactionCut(view.events, view.base)), id, head.cwd)
+    : [];
+
+  return html`
+    <main class="center">
+      <header class="center-head">
+        <button class="drawer-toggle" type="button" onClick=${onDrawer} title="sessions">☰</button>
+        <h1>${id ? inline(preview(title, 120)) : "ilar"}</h1>
+      </header>
+      ${view.error && html`<p class="banner">${view.error}</p>`}
+      <div class="stream" ref=${stream} onScroll=${onScroll}>
+        <div class="stream-inner">
+          ${!id && html`<p class="empty">Pick a session on the left.</p>`}
+          ${id && view.loading && html`<p class="empty">loading…</p>`}
+          ${view.hasMore &&
+          html`
+            <div class="earlier">
+              <button type="button" disabled=${view.pending} onClick=${() => view.earlier && view.earlier()}>
+                ${view.pending ? "loading…" : "load earlier"}
+              </button>
+            </div>
+          `}
+          ${rows}
+          <${LiveStep} live=${view.live} />
+          ${view.rewound !== null &&
+          html`<div class="divider">rewound ${view.rewound} events</div>`}
+        </div>
+      </div>
+      <footer class="composer">
+        ${!tailing && html`<button class="jump" type="button" onClick=${toBottom}>jump to live ↓</button>`}
+        ${id && html`<${StatusPill} view=${view} session=${session} />`}
+      </footer>
+    </main>
+  `;
 }
 
-async function loadEarlier() {
-  if (view.pending || !view.hasMore) return;
-  view.pending = true;
-  const epoch = view.epoch;
-  const before = document.body.scrollHeight;
-  try {
-    const page = await api(apiPath(view.id, "?from=" + view.base));
-    if (view.epoch !== epoch) return;
-    view.events = page.events.concat(view.events);
-    view.base = page.cursor;
-    view.hasMore = page.has_more;
-    view.follow = false;
-    renderTranscript();
-    window.scrollBy(0, document.body.scrollHeight - before);
-  } catch (error) {
-    banner(String(error.message || error));
-  } finally {
-    view.pending = false;
-  }
-}
+// ------------------------------------------------------------- routing
 
-async function openSession(id) {
-  detach();
-  view.epoch += 1;
-  const epoch = view.epoch;
-  view.route = "session";
-  view.id = id;
-  view.follow = true;
-  view.rewound = null;
-  view.live = null;
-  banner("");
-  status("loading…", false);
-  show("session-view");
-  try {
-    const page = await api(apiPath(id));
-    if (view.epoch !== epoch) return;
-    view.events = page.events || [];
-    view.base = page.cursor;
-    view.hasMore = page.has_more;
-    view.line = page.line;
-    renderHead(page);
-    renderTranscript();
-    attach();
-  } catch (error) {
-    if (view.epoch !== epoch) return;
-    clear($("transcript"));
-    status("", false);
-    banner(String(error.message || error));
-  }
-}
-
-// ------------------------------------------------------ routing/boot
-
-function show(id) {
-  for (const section of document.querySelectorAll(".view")) {
-    section.hidden = section.id !== id;
-  }
-}
-
-let listTimer = null;
-
-function navigate() {
+function routeId() {
   const hash = location.hash.replace(/^#/, "");
-  detach();
-  if (listTimer) {
-    clearInterval(listTimer);
-    listTimer = null;
-  }
-  if (hash.startsWith("/s/")) {
-    openSession(decodeURIComponent(hash.slice(3)));
-    return;
-  }
-  view.epoch += 1;
-  view.route = "list";
-  view.id = null;
-  banner("");
-  clear($("crumb"));
-  show("list-view");
-  const refresh = () =>
-    renderList().catch((error) => banner(String(error.message || error)));
-  refresh();
+  return hash.startsWith("/s/") ? decodeURIComponent(hash.slice(3)) : null;
+}
+
+function App() {
+  const [id, setId] = useState(routeId());
+  const [sessions, setSessions] = useState([]);
+  const [error, setError] = useState("");
+  const [drawer, setDrawer] = useState(false);
+  // One fetch, one stream, two readers: the centre pane renders the
+  // transcript and the detail panel reads its usage and its compactions
+  // off the same array rather than asking for the page again.
+  const view = useTranscript(id);
+
+  useEffect(() => {
+    const onHash = () => {
+      setId(routeId());
+      setDrawer(false);
+    };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+
   // The listing is a poll on the server too; a slow one here keeps the
   // live dots honest without holding a socket open per tab.
-  listTimer = setInterval(refresh, 3000);
+  useEffect(() => {
+    let alive = true;
+    const refresh = () =>
+      api("/api/sessions")
+        .then((listing) => {
+          if (!alive) return;
+          setSessions(listing.sessions || []);
+          setError("");
+        })
+        .catch((failure) => alive && setError(message(failure)));
+    refresh();
+    const timer = setInterval(refresh, 3000);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, []);
+
+  const session = sessions.find((row) => row.id === id) || null;
+  return html`
+    <div class=${"app" + (drawer ? " drawer" : "")}>
+      <${Sidebar}
+        sessions=${sessions}
+        current=${id}
+        error=${error}
+        onPick=${() => setDrawer(false)}
+      />
+      <${Center} id=${id} view=${view} session=${session} onDrawer=${() => setDrawer(!drawer)} />
+      <${DetailPanel} id=${id} view=${view} />
+    </div>
+  `;
 }
 
-window.addEventListener("hashchange", navigate);
-window.addEventListener("scroll", () => {
-  const bottom = window.innerHeight + window.scrollY >= document.body.scrollHeight - 80;
-  view.follow = bottom;
-});
-$("earlier").addEventListener("click", loadEarlier);
-navigate();
+render(html`<${App} />`, document.getElementById("app"));

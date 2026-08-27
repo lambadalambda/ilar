@@ -18,7 +18,8 @@
 //! GET /api/sessions/{id}/children
 //! GET /api/sessions/{id}/results/{tool_use_id}        full untruncated text
 //! GET /api/sessions/{id}/images/{event_id}/{n}        image bytes
-//! GET /  /app.css  /app.js                            the page (slice 5)
+//! GET /  /app.css  /app.js                            the page
+//! GET /vendor/{preact,hooks,htm}.module.js            its ESM modules
 //! ```
 //!
 //! Two cursors, deliberately different, because they count different
@@ -64,9 +65,8 @@
 //! token is an explicit request for one. Comparison is constant-time;
 //! a failure is 401 with an empty body, on every path including
 //! unmatched ones, so the token is not an oracle for what exists — the
-//! sole exception being the three static assets, which have to load
-//! before the page can read the token out of the fragment
-//! ([`PUBLIC_PATHS`]).
+//! sole exception being the static assets, which have to load before the
+//! page can read the token out of the fragment ([`PUBLIC_PATHS`]).
 
 use std::collections::VecDeque;
 use std::convert::Infallible;
@@ -122,6 +122,9 @@ pub(crate) fn router(state: ServeState) -> Router {
         .route("/", get(index))
         .route("/app.css", get(stylesheet))
         .route("/app.js", get(script))
+        .route("/vendor/preact.module.js", get(vendor_preact))
+        .route("/vendor/hooks.module.js", get(vendor_hooks))
+        .route("/vendor/htm.module.js", get(vendor_htm))
         .route("/api/sessions", get(sessions))
         .route("/api/sessions/{id}", get(transcript))
         .route("/api/sessions/{id}/events", get(events))
@@ -171,14 +174,23 @@ pub(crate) fn url_for(address: &SocketAddr, token: Option<&str>) -> String {
     }
 }
 
-/// The three static files, and the one exception to the gate. The token
-/// rides in the URL fragment, which a browser never sends upstream — so
-/// gating the page that reads that fragment would make the token
-/// impossible to deliver, and `--open` would open a 401. These bytes are
-/// identical for every install, already public inside the binary, and
-/// say nothing whatever about the store; the data behind them stays
-/// gated, including the fallback.
-const PUBLIC_PATHS: [&str; 3] = ["/", "/app.css", "/app.js"];
+/// The static files, and the one exception to the gate. The token rides
+/// in the URL fragment, which a browser never sends upstream — so gating
+/// the page that reads that fragment would make the token impossible to
+/// deliver, and `--open` would open a 401. These bytes are identical for
+/// every install, already public inside the binary, and say nothing
+/// whatever about the store; the data behind them stays gated, including
+/// the fallback. The vendored modules are here for the same reason and
+/// with more force: a module the page imports is fetched by the module
+/// loader, which cannot be handed a token either.
+const PUBLIC_PATHS: [&str; 6] = [
+    "/",
+    "/app.css",
+    "/app.js",
+    "/vendor/preact.module.js",
+    "/vendor/hooks.module.js",
+    "/vendor/htm.module.js",
+];
 
 async fn require_token(State(state): State<ServeState>, request: Request, next: Next) -> Response {
     let Some(expected) = state.token.as_deref() else {
@@ -660,7 +672,10 @@ fn named(event: &str, data: &Value) -> Event {
 /// mtime — and never a lock probe, because acquiring the writer lease to
 /// ask would make a read-only server take the one thing it promised not
 /// to. `activity` names the tool a working session is running, when it
-/// is running one.
+/// is running one. `context_limit` is the window the page's context bar
+/// measures against, `null` for a model this binary has no catalog row
+/// for — a listing row carries it because the panel needs it before any
+/// page of the transcript has reached the `meta` line.
 fn summary(entry: &SessionEntry) -> Value {
     json!({
         "id": entry.head.id,
@@ -668,6 +683,7 @@ fn summary(entry: &SessionEntry) -> Value {
         "cwd": entry.head.meta.cwd.as_ref().map(|cwd| cwd.display().to_string()),
         "agent": entry.head.meta.agent,
         "model": entry.head.meta.model,
+        "context_limit": super::view::context_limit(&entry.head.meta.model),
         "parent_id": entry.head.meta.parent_id,
         "modified": rfc3339(entry.head.modified),
         "state": entry.state.as_str(),
@@ -681,8 +697,11 @@ fn rfc3339(time: std::time::SystemTime) -> String {
 
 // -------------------------------------------------------------- assets
 
-/// The page is three files compiled into the binary: one artifact to
-/// ship, and no path a request could traverse. Slice 5 fills them in.
+/// The page is a handful of files compiled into the binary: one artifact
+/// to ship, and no path a request could traverse. Three of them are the
+/// page itself and three are the vendored ESM modules it imports —
+/// preact, its hooks and htm, pinned and copied verbatim, so `ilar serve`
+/// still works on a plane and still has no build step.
 async fn index() -> Response {
     asset(
         "text/html; charset=utf-8",
@@ -695,10 +714,23 @@ async fn stylesheet() -> Response {
 }
 
 async fn script() -> Response {
-    asset(
-        "text/javascript; charset=utf-8",
-        include_str!("assets/app.js"),
-    )
+    script_asset(include_str!("assets/app.js"))
+}
+
+async fn vendor_preact() -> Response {
+    script_asset(include_str!("assets/vendor/preact.module.js"))
+}
+
+async fn vendor_hooks() -> Response {
+    script_asset(include_str!("assets/vendor/hooks.module.js"))
+}
+
+async fn vendor_htm() -> Response {
+    script_asset(include_str!("assets/vendor/htm.module.js"))
+}
+
+fn script_asset(body: &'static str) -> Response {
+    asset("text/javascript; charset=utf-8", body)
 }
 
 fn asset(content_type: &'static str, body: &'static str) -> Response {

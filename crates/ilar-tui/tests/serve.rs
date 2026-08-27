@@ -331,6 +331,37 @@ async fn the_listing_carries_a_row_per_root_session() {
     assert_eq!(children[0]["parent_id"], first.as_str());
 }
 
+/// The context bar's denominator, on both surfaces that can carry it:
+/// the listing row (which the panel has before any page has loaded) and
+/// the `meta` line of the transcript. Additive — every field the page
+/// already read is still there and still says the same thing.
+#[tokio::test]
+async fn the_context_limit_reaches_the_page_on_the_listing_and_the_meta_line() {
+    let server = Server::start(None);
+    let (id, mut session) = start_session(&server.store, "/tmp/alpha");
+    session.append(user("how big is my window?")).unwrap();
+
+    // zai/glm-4.7 is a 204 800-token window over a 131 072-token reply,
+    // so the input cap compaction measures against — and the meter with
+    // it — is 73 728.
+    let limit = Value::from(73_728);
+    let rows = server.sessions_once_there_are(1).await;
+    assert_eq!(rows[0]["context_limit"], limit);
+    assert_eq!(rows[0]["model"], "zai/glm-4.7", "the row is unchanged");
+
+    let page = server.json(&format!("/api/sessions/{id}")).await;
+    assert_eq!(page["session"]["context_limit"], limit);
+    let meta = &page["events"][0];
+    assert_eq!(meta["type"], "meta");
+    assert_eq!(meta["context_limit"], limit);
+    assert_eq!(meta["model"], "zai/glm-4.7");
+    assert_eq!(meta["agent"], "build");
+    assert_eq!(meta["cwd"], "/tmp/alpha");
+    // Nothing else grew a limit: it is a property of a session's model,
+    // not of every event.
+    assert!(page["events"][1].get("context_limit").is_none());
+}
+
 /// A transcript is read newest-first and paged backwards, because P7's
 /// worst session is 906 events and nobody scrolls from the top.
 #[tokio::test]
@@ -656,13 +687,16 @@ async fn the_result_and_image_routes_return_what_the_projection_left_out() {
 async fn the_router_serves_the_page_and_refuses_every_other_method() {
     let server = Server::start(None);
 
-    // The three assets are compiled in, so serving them is the whole
+    // Every asset is compiled in, so serving them is the whole
     // deployment story: a body with something in it, under the type the
     // browser needs to treat it as a page rather than a download.
     for (path, content_type) in [
         ("/", "text/html; charset=utf-8"),
         ("/app.css", "text/css; charset=utf-8"),
         ("/app.js", "text/javascript; charset=utf-8"),
+        ("/vendor/preact.module.js", "text/javascript; charset=utf-8"),
+        ("/vendor/hooks.module.js", "text/javascript; charset=utf-8"),
+        ("/vendor/htm.module.js", "text/javascript; charset=utf-8"),
     ] {
         let response = server.get(path).await;
         assert_eq!(response.status(), 200, "GET {path}");
@@ -671,12 +705,31 @@ async fn the_router_serves_the_page_and_refuses_every_other_method() {
         assert!(!body.trim().is_empty(), "{path} is empty");
     }
 
-    // The page loads its own two files and nothing else: no CDN, no
-    // webfont, no build step — `ilar serve` works on a plane.
+    // The page loads its own files and nothing else: no CDN, no webfont,
+    // no build step — `ilar serve` works on a plane. The vendored
+    // modules are reached through the import map, which is also what
+    // resolves the bare `preact` specifier inside the hooks build.
     let index = server.get("/").await.text().await.unwrap();
     assert!(index.contains("href=\"/app.css\""), "{index}");
     assert!(index.contains("src=\"/app.js\""), "{index}");
+    assert!(index.contains("\"/vendor/preact.module.js\""), "{index}");
+    assert!(index.contains("\"/vendor/hooks.module.js\""), "{index}");
+    assert!(index.contains("\"/vendor/htm.module.js\""), "{index}");
     assert!(!index.contains("http"), "no external URL: {index}");
+
+    // The module graph closes: app.js imports only names the map knows,
+    // and the one bare specifier a vendored file carries is `preact`.
+    let script = server.get("/app.js").await.text().await.unwrap();
+    for import in ["\"preact\"", "\"preact/hooks\"", "\"htm\""] {
+        assert!(script.contains(import), "app.js imports {import}");
+    }
+    let hooks = server
+        .get("/vendor/hooks.module.js")
+        .await
+        .text()
+        .await
+        .unwrap();
+    assert!(hooks.contains("preact"), "hooks resolve through the map");
 
     for method in [reqwest::Method::POST, reqwest::Method::DELETE] {
         let response = server
@@ -723,9 +776,17 @@ async fn a_required_token_gates_every_route() {
 
     // The page is the exception, and has to be: the token arrives in the
     // URL fragment, which a browser never sends, so a gated `/` would
-    // make the printed URL impossible to open. The three assets carry
-    // nothing from the store.
-    for path in ["/", "/app.css", "/app.js"] {
+    // make the printed URL impossible to open. The assets carry nothing
+    // from the store — and a module the page imports cannot be handed a
+    // token by the loader at all.
+    for path in [
+        "/",
+        "/app.css",
+        "/app.js",
+        "/vendor/preact.module.js",
+        "/vendor/hooks.module.js",
+        "/vendor/htm.module.js",
+    ] {
         let response = server.client.get(server.url(path)).send().await.unwrap();
         assert_eq!(response.status(), 200, "un-tokened GET {path}");
     }

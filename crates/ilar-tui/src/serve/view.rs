@@ -30,7 +30,8 @@
 //!
 //! ```json
 //! {"type":"meta","session_id":"…","parent_id":null,"agent":"build",
-//!  "model":"zai/glm-4.7","cwd":null,"ts":"2026-08-26T12:00:00+00:00"}
+//!  "model":"zai/glm-4.7","cwd":null,"context_limit":73728,
+//!  "ts":"2026-08-26T12:00:00+00:00"}
 //! {"type":"user_message","id":"…","text":"look\n[image attached: png · 12.3 KiB]",
 //!  "images":[{"n":0,"media_type":"image/png","bytes":12600}],"ts":"…"}
 //! {"type":"subagent_invocation","id":"…","parent_tool_call_id":"task-1","ts":"…"}
@@ -48,6 +49,13 @@
 //! {"type":"topic","id":"…","text":"serve","ts":"…"}
 //! {"type":"rewind","id":"…","to":1,"ts":"…"}
 //! ```
+//!
+//! `context_limit` on the `meta` line is the one field here that is not
+//! in the log: it is looked up per model in this binary's catalog
+//! ([`context_limit`]), so a context meter has an honest denominator
+//! without the client shipping a copy of the catalog. The session
+//! listing carries it too, because the panel needs it before any page
+//! has reached the `meta` line. `null` means the model is unknown here.
 //!
 //! A `tool_call` for the `task` tool carries `agent: {name, model}`;
 //! every other tool carries `agent: null`. Assistant content keeps only
@@ -79,6 +87,7 @@ pub(crate) fn project_event(event: &SessionEvent) -> Value {
             "agent": meta.agent,
             "model": meta.model,
             "cwd": meta.cwd.as_ref().map(|cwd| cwd.display().to_string()),
+            "context_limit": context_limit(&meta.model),
             "ts": ts,
         }),
         SessionEvent::UserMessage {
@@ -186,6 +195,28 @@ pub(crate) fn project_event(event: &SessionEvent) -> Value {
 
 pub(crate) fn project_events(events: &[SessionEvent]) -> Vec<Value> {
     events.iter().map(project_event).collect()
+}
+
+/// The window a context meter must measure against, by full model id;
+/// `null` for a model this binary has no catalog row for, because a bar
+/// drawn against a guessed denominator is worse than no bar.
+///
+/// This is [`ilar::model::compaction_limit`] — the provider's *input*
+/// cap — and not the whole context window, for exactly the reason the
+/// TUI's own meter reads that way: a request is rejected on its input
+/// size, so a meter against the window reads as comfortable headroom
+/// while the next request is already unsendable. The two surfaces quote
+/// the same number.
+///
+/// The catalog is consulted directly rather than through a
+/// `ProviderResolver`: `ilar serve` starts with no provider
+/// configuration at all, and a limit is a property of the model, not of
+/// who is serving it. A `custom/…` row registered from configuration
+/// answers here too, since [`ilar::model::find`] covers both.
+pub(crate) fn context_limit(model: &str) -> Value {
+    ilar::model::find(model).map_or(Value::Null, |info| {
+        json!(ilar::model::compaction_limit(info))
+    })
 }
 
 /// One line of a running turn's scratch, for the ephemeral `delta`
@@ -627,6 +658,28 @@ mod tests {
         );
         assert!(!value.to_string().contains("hidden thought"));
         assert!(!value.to_string().contains("half a thought"));
+    }
+
+    /// The one field on the wire that is not in the log: the window a
+    /// context meter measures against, looked up per model.
+    #[test]
+    fn a_meta_line_carries_the_context_limit_the_catalog_knows() {
+        let known = project_event(&meta("zai/glm-4.7"));
+        assert_eq!(
+            known["context_limit"],
+            json!(ilar::model::compaction_limit(
+                ilar::model::find("zai/glm-4.7").expect("a cataloged model")
+            ))
+        );
+        // The provider's input cap, not the whole 204 800 window: the
+        // meter says what compaction measures, exactly as the TUI's does.
+        assert_eq!(known["context_limit"], json!(73_728));
+
+        // A model this binary has never heard of gets no denominator
+        // rather than a guessed one — and the key is still there.
+        let unknown = project_event(&meta("nobody/nothing"));
+        assert_eq!(unknown["context_limit"], Value::Null);
+        assert!(unknown.as_object().unwrap().contains_key("context_limit"));
     }
 
     /// `Rewind.to` indexes the canonical stream, so the projection has to

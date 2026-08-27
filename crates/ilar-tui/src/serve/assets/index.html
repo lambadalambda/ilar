@@ -1,7 +1,12 @@
 <!doctype html>
-<!-- The whole page: static chrome only. Every node that carries a value
-     from the store is built by app.js with createElement/textContent,
-     so nothing server-derived ever reaches an HTML parser. -->
+<!-- The whole page: an empty root and the modules that fill it. Every
+     node that carries a value from the store is built by app.js as a
+     preact vnode, so nothing server-derived ever reaches an HTML parser.
+
+     The import map is what lets the vendored files stay verbatim copies:
+     preact's hooks build imports the bare specifier "preact", and this
+     is where that name is resolved to a path this server actually
+     serves. No CDN, no build step — every URL below is local. -->
 <html lang="en">
   <head>
     <meta charset="utf-8" />
@@ -9,33 +14,18 @@
     <meta name="referrer" content="no-referrer" />
     <title>ilar</title>
     <link rel="stylesheet" href="/app.css" />
+    <script type="importmap">
+      {
+        "imports": {
+          "preact": "/vendor/preact.module.js",
+          "preact/hooks": "/vendor/hooks.module.js",
+          "htm": "/vendor/htm.module.js"
+        }
+      }
+    </script>
   </head>
   <body>
-    <header class="topbar">
-      <a class="brand" href="#/">ilar</a>
-      <nav id="crumb" class="crumb"></nav>
-      <span id="status" class="status"></span>
-    </header>
-
-    <p id="banner" class="banner" hidden></p>
-
-    <main>
-      <section id="list-view" class="view" hidden>
-        <div id="groups"></div>
-        <p id="list-empty" class="empty" hidden>
-          No sessions in this store yet.
-        </p>
-      </section>
-
-      <section id="session-view" class="view" hidden>
-        <div id="session-head" class="session-head"></div>
-        <div class="earlier">
-          <button id="earlier" type="button" hidden>load earlier</button>
-        </div>
-        <div id="transcript" class="transcript"></div>
-      </section>
-    </main>
-
-    <script src="/app.js"></script>
+    <div id="app"></div>
+    <script type="module" src="/app.js"></script>
   </body>
 </html>
