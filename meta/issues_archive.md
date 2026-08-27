@@ -241,3 +241,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [JSON-aware spill previews](issues/json-aware-spill-previews.md)
 - [x] [Agent-declared preview budget](issues/agent-declared-preview-budget.md)
 - [x] [Child processes can write to the terminal](issues/children-write-to-the-terminal.md)
+- [x] [Serve wears the workspace layout](issues/serve-wears-the-workspace-layout.md)

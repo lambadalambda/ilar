@@ -40,3 +40,25 @@ components.
 ## Milestone
 
 11 — Beyond the terminal
+
+## Outcome
+
+Built by an agent, browser-verified against the real store (173
+sessions): preact 10.28.1 + htm 3.1.1 vendored verbatim (MIT, ~17 KB
+across three ESM files, import map in index.html, PUBLIC_PATHS grown
+to exactly the six static assets), app.js rewritten as components
+(1146 lines) porting the proven fold/rebase/live-delta logic intact,
+app.css to a three-pane custom-property grid (dark `:root`, light
+under prefers-color-scheme, single-column with a sidebar drawer
+under 760px). Contract addition: `context_limit` on the meta line
+AND the session listing row — the input cap via the catalog, same
+number the TUI shows, null off-catalog. 12 serve tests, fmt and
+clippy clean. Residuals, deliberately unfixed: compaction count is
+page-scoped (newest-200 window); the first user message card has no
+height cap (parity with the old page); liveness stays scratch-based
+so an appending-but-scratchless session reads idle; the context bar
+shows the input cap, not the full window — flip in
+`view.rs::context_limit` if the other reading wins; agent-browser's
+color-scheme emulation is unreliable, so the "dark" screenshots
+came out light — the CSS direction was verified by inspection
+instead.
