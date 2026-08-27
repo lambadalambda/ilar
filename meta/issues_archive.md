@@ -239,3 +239,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Provider config is user configuration](issues/provider-config-is-user-configuration.md)
 - [x] [Grep results spill like bash output](issues/grep-results-spill-like-bash.md)
 - [x] [JSON-aware spill previews](issues/json-aware-spill-previews.md)
+- [x] [Agent-declared preview budget](issues/agent-declared-preview-budget.md)

@@ -34,3 +34,20 @@ wrong guess is a pointer away instead of a re-run.
 ## Milestone
 
 13 — Guard rails
+
+## Outcome
+
+`preview_bytes` on bash, resolved by `preview_budget(declared,
+success)`: clamp to 1024..=MAX_PREVIEW on success, MAX_PREVIEW
+whenever the command failed — non-zero exit, spawn error, and the
+timeout path all count as failure. `stream_budgets` now takes the
+budget explicitly (stderr's guaranteed share became budget/2, so
+the split scales); the JSON-shape preview still takes precedence
+when it applies, which composes: a declared budget bounds the tail
+case, the shape bounds the JSON case. Background bash passes the
+declaration through unchanged. End-to-end tests pin both sides of
+the asymmetry: a 100 KiB flood under a 2 KiB declaration returns
+~2 KiB + pointer with all 100 KB in the file, and the same flood
+exiting 3 returns the full-size preview. Measurement joins the
+standing store-scan plan: usage rate, and whether re-runs follow
+declared-budget calls.
