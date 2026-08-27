@@ -30,10 +30,19 @@ A task's `background` follows its agent when the call omits it: a read-only
 agent's task (`explore`) detaches and reports back as a completion
 notification, leaving the parent free to keep working, while a mutable agent's
 task runs inside the turn. An explicit value always wins. A *defaulted*
-background task that cannot detach — background capacity is full, or the caller
-holds a workspace lease the child would outlive — runs in the foreground
-instead of failing, and its result says so; an explicit `background: true` in
-those spots is still an error.
+background task that cannot detach because background capacity is full runs in
+the foreground instead of failing, and its result says so; an explicit
+`background: true` there is still an error.
+
+Workspace rule, one sentence: mutable work runs in worktrees and never
+collides; read-only work runs in place, sees everything (uncommitted changes
+included), blocks nothing, and accepts that the tree may shift while it looks.
+Reads are advisory — a running explore never delays the parent's own edits or
+builds — while two mutable tasks in one checkout remain impossible, and the
+edit gate catches stale writes on the mutating side. The one wait that can
+still happen (a mutating tool while a same-checkout mutable task runs) names
+itself in the tool row: "waiting for the workspace — a mutable task holds
+it".
 
 To have something *looked at*: save the image, then spawn a task with
 `model` set to a vision model and point it at the file — the child's

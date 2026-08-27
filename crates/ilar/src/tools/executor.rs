@@ -186,7 +186,23 @@ where
                             tool.run_observed(input, call_ctx, start).await
                         }
                         WorkspaceCoverage::Absent => {
-                            let _permit = call_ctx.workspace.acquire(access).await;
+                            // The only wait left is writer-vs-writer; say
+                            // so, or "queued" reads as a hang.
+                            let _permit = match call_ctx.workspace.try_acquire(access) {
+                                Some(permit) => permit,
+                                None => {
+                                    if let Some((id, sink)) =
+                                        call_ctx.call_id.as_ref().zip(call_ctx.output_tail.as_ref())
+                                    {
+                                        sink.report(
+                                            id,
+                                            "waiting for the workspace — a mutable task holds it"
+                                                .to_string(),
+                                        );
+                                    }
+                                    call_ctx.workspace.acquire(access).await
+                                }
+                            };
                             tool.run_observed(input, call_ctx, start).await
                         }
                         WorkspaceCoverage::Incompatible => ToolOutput::error(format!(

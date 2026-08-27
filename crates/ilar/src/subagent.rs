@@ -45,9 +45,6 @@ const WORKTREE_CORRECTION: &str = "`git worktree add ../ilar-task-<name> -b task
 /// path it took.
 const BACKGROUND_DEMOTED_BY_CAPACITY: &str = "Ran in the foreground: read-only tasks default to \
      background, but background capacity was full, so this one ran here instead of failing.";
-const BACKGROUND_DEMOTED_BY_LEASE: &str = "Ran in the foreground: read-only tasks default to \
-     background, but a background task cannot outlive the workspace lease you hold, so this one \
-     ran here instead of failing.";
 
 /// A completed background task's notification — the synthetic user
 /// message that re-invokes the parent loop.
@@ -638,15 +635,6 @@ impl SubagentSpawner {
                 "task workspace is already held by an ancestor; finish the intervening task before returning to it",
             );
         }
-        if background && same_workspace && ctx.has_workspace_lease() {
-            if background_explicit {
-                return ToolOutput::error(
-                    "background tasks cannot outlive a parent workspace lease; use a foreground task or validated worktree",
-                );
-            }
-            background = false;
-            background_demoted = Some(BACKGROUND_DEMOTED_BY_LEASE);
-        }
         if workspace_access == WorkspaceAccess::Mutating
             && same_workspace
             && ctx.has_workspace_lease()
@@ -658,7 +646,11 @@ impl SubagentSpawner {
                  subagent_type and omit workspace."
             ));
         }
-        let inherited_lease = if same_workspace {
+        // A background child never shares the parent's lease: the Arc'd
+        // permit would keep a write lock alive past the parent task's
+        // end. Reads are advisory now, so a detached reader needs no
+        // lease at all; it acquires its own free one.
+        let inherited_lease = if same_workspace && !background {
             match ctx.workspace_coverage(workspace_access) {
                 crate::tools::WorkspaceCoverage::Covered => ctx.workspace_lease.clone(),
                 crate::tools::WorkspaceCoverage::Absent => None,

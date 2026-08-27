@@ -203,9 +203,6 @@ pub struct WorkspaceScheduler {
 
 pub enum WorkspacePermit {
     None,
-    ReadOnly {
-        _guard: tokio::sync::OwnedRwLockReadGuard<()>,
-    },
     Mutating {
         _guard: tokio::sync::OwnedRwLockWriteGuard<()>,
     },
@@ -258,16 +255,29 @@ impl WorkspaceScheduler {
             .clone()
     }
 
+    /// Reads are advisory: a reader never waits and never makes anyone
+    /// wait — it runs in place, sees everything, and accepts that the
+    /// tree may shift while it looks (the edit gate guards the write
+    /// side of that bargain). Only mutators exclude each other, because
+    /// two of them interleaving in one checkout is the failure nothing
+    /// can repair after the fact.
     pub async fn acquire(&self, access: WorkspaceAccess) -> WorkspacePermit {
-        let lock = self.lock();
         match access {
-            WorkspaceAccess::None => WorkspacePermit::None,
-            WorkspaceAccess::ReadOnly => WorkspacePermit::ReadOnly {
-                _guard: lock.read_owned().await,
-            },
+            WorkspaceAccess::None | WorkspaceAccess::ReadOnly => WorkspacePermit::None,
             WorkspaceAccess::Mutating => WorkspacePermit::Mutating {
-                _guard: lock.write_owned().await,
+                _guard: self.lock().write_owned().await,
             },
+        }
+    }
+
+    /// The permit if it is free right now; `None` means a mutable task
+    /// holds the workspace and the caller will have to wait.
+    pub fn try_acquire(&self, access: WorkspaceAccess) -> Option<WorkspacePermit> {
+        match access {
+            WorkspaceAccess::None | WorkspaceAccess::ReadOnly => Some(WorkspacePermit::None),
+            WorkspaceAccess::Mutating => Some(WorkspacePermit::Mutating {
+                _guard: self.lock().try_write_owned().ok()?,
+            }),
         }
     }
 
@@ -281,16 +291,7 @@ impl WorkspaceScheduler {
     }
 
     pub fn try_acquire_lease(&self, access: WorkspaceAccess) -> Option<Arc<WorkspaceLease>> {
-        let lock = self.lock();
-        let permit = match access {
-            WorkspaceAccess::None => WorkspacePermit::None,
-            WorkspaceAccess::ReadOnly => WorkspacePermit::ReadOnly {
-                _guard: lock.try_read_owned().ok()?,
-            },
-            WorkspaceAccess::Mutating => WorkspacePermit::Mutating {
-                _guard: lock.try_write_owned().ok()?,
-            },
-        };
+        let permit = self.try_acquire(access)?;
         Some(Arc::new(WorkspaceLease {
             scheduler: self.locks.clone(),
             id: self.id.clone(),
@@ -1034,6 +1035,27 @@ mod tests {
 
     fn image(bytes: usize) -> ImageContent {
         ImageContent::new("image/png", &vec![0u8; bytes])
+    }
+
+    /// The one-sentence rule: mutable work excludes mutable work;
+    /// read-only work runs in place, sees everything, blocks nothing,
+    /// and accepts that the tree may shift while it looks.
+    #[tokio::test]
+    async fn read_leases_are_advisory_and_writers_exclude_writers() {
+        use super::{WorkspaceAccess, WorkspaceScheduler};
+        let scheduler = WorkspaceScheduler::new();
+
+        let reader = scheduler.acquire_lease(WorkspaceAccess::ReadOnly).await;
+        // A held read lease blocks nobody, writer included…
+        let writer = scheduler
+            .try_acquire(WorkspaceAccess::Mutating)
+            .expect("a reader must not block a writer");
+        // …and a held write lease blocks no reader, only the next writer.
+        assert!(scheduler.try_acquire(WorkspaceAccess::ReadOnly).is_some());
+        assert!(scheduler.try_acquire(WorkspaceAccess::Mutating).is_none());
+        drop(writer);
+        assert!(scheduler.try_acquire(WorkspaceAccess::Mutating).is_some());
+        drop(reader);
     }
 
     #[test]

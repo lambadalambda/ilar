@@ -626,12 +626,11 @@ async fn an_explicit_background_task_still_fails_at_capacity() {
     spawner.shutdown().await;
 }
 
-/// The same demotion at the other gate: a task holding a workspace lease
-/// cannot leave a detached child behind it, so its read-only delegation
-/// runs in the turn rather than being refused for a default it never
-/// chose.
+/// A workspace lease no longer pins delegation to the turn: reads are
+/// advisory, so the defaulted read-only task detaches and reports back
+/// as a notification even while the caller holds the checkout.
 #[tokio::test]
-async fn a_leased_parent_runs_a_defaulted_read_only_task_in_the_foreground() {
+async fn a_leased_parent_detaches_a_defaulted_read_only_task() {
     let (store, session_id) = temp_store();
     let spawner = spawner_for_workspace(
         Arc::new(DelayedText {
@@ -664,15 +663,11 @@ async fn a_leased_parent_runs_a_defaulted_read_only_task_in_the_foreground() {
 
     assert!(!output.is_error, "{}", output.content);
     assert!(
-        output.content.contains("nested read-only answer"),
+        output.content.contains("Deferred background task started"),
         "{}",
         output.content
     );
-    assert!(
-        output.content.contains("Ran in the foreground"),
-        "the demotion went unsaid: {}",
-        output.content
-    );
+    spawner.shutdown().await;
 }
 
 fn repository_with_worktree() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
@@ -728,10 +723,19 @@ fn remove_worktree(root: &std::path::Path, worktree: &std::path::Path) {
     );
 }
 
+/// Reads are advisory: a leased child detaching a read-only task is
+/// fine now — the reader takes no lock, shares no lease, and simply
+/// tolerates the tree shifting while it looks. (This call used to be
+/// the "cannot outlive a parent workspace lease" error.)
 #[tokio::test]
-async fn leased_child_rejects_background_task() {
+async fn leased_child_detaches_a_background_reader() {
     let (store, session_id) = temp_store();
-    let spawner = spawner(Arc::new(MockProvider::new(vec![])), &store);
+    let spawner = spawner_for_workspace(
+        Arc::new(MockProvider::new(vec![])),
+        &store,
+        AgentWorkspaceMode::ReadOnly,
+        std::env::temp_dir(),
+    );
     let task = ToolRegistry::builtin()
         .with_subagents(spawner.clone())
         .unwrap()
@@ -757,12 +761,13 @@ async fn leased_child_rejects_background_task() {
         )
         .await;
 
-    assert!(output.is_error);
+    assert!(!output.is_error, "{}", output.content);
     assert!(
-        output.content.contains("cannot outlive"),
+        output.content.contains("Deferred background task started"),
         "{}",
         output.content
     );
+    spawner.shutdown().await;
 }
 
 fn bg_call(id: &str) -> ProviderEvent {
