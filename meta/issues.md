@@ -53,3 +53,5 @@
 ## Milestone 13 — Guard rails
 
 - [ ] [Kernel sandbox for tool processes](issues/kernel-sandbox-for-tool-processes.md)
+- [ ] [Grep results spill like bash output](issues/grep-results-spill-like-bash.md)
+- [ ] [JSON-aware spill previews](issues/json-aware-spill-previews.md)
