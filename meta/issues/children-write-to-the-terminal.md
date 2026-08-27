@@ -34,3 +34,20 @@ repaints cells it believes unchanged.
 ## Milestone
 
 13 — Guard rails
+
+## Outcome
+
+`shell_command` children now `setsid()` in `pre_exec` instead of
+`process_group(0)`: a fresh session has no controlling terminal, so
+`/dev/tty` opens fail fast — sudo becomes an immediate readable
+error instead of a screen-scribble plus a 120 s hang — and since a
+session leader leads its own group, `killpg(pid)` reaping is
+byte-for-byte unchanged. One helper, so bash and services are both
+covered; the fallback arm (setsid failing after fork) keeps the old
+setpgid guarantee. Ctrl-L sets `force_full_redraw`, which
+`present()` consumes as `terminal.clear()` before the next draw —
+the eraser for anything that still lands on the screen from
+outside. Test pins /dev/tty failing fast (vacuous where the runner
+has no terminal; real when run from one). Residual, noted in the
+issue: ilar's own git spawns (checkpoint, worktree ops) bypass
+`shell_command` and could in principle prompt on `/dev/tty`.
