@@ -96,8 +96,11 @@ async fn rejects_checkout_from_another_repository() {
     );
 }
 
+/// Reads are advisory: a held write permit stops a second *writer* on
+/// the same checkout and nothing else — a reader never waits, and a
+/// distinct worktree keys on its own lock.
 #[tokio::test]
-async fn keyed_scheduler_serializes_one_checkout_but_not_distinct_worktrees() {
+async fn keyed_scheduler_serializes_writers_per_checkout_but_never_readers() {
     let (temp, root) = repository();
     let worktree = temp.path().join("parallel-worktree");
     git(
@@ -119,14 +122,20 @@ async fn keyed_scheduler_serializes_one_checkout_but_not_distinct_worktrees() {
     let isolated_scheduler = scheduler.scoped(&isolated);
     let _parent_write = scheduler.acquire(WorkspaceAccess::Mutating).await;
 
+    tokio::time::timeout(
+        Duration::from_millis(50),
+        same_checkout_scheduler.acquire(WorkspaceAccess::ReadOnly),
+    )
+    .await
+    .expect("a reader waited behind a write permit");
     assert!(
         tokio::time::timeout(
             Duration::from_millis(50),
-            same_checkout_scheduler.acquire(WorkspaceAccess::ReadOnly)
+            same_checkout_scheduler.acquire(WorkspaceAccess::Mutating)
         )
         .await
         .is_err(),
-        "same checkout escaped its write barrier"
+        "a second writer escaped the same checkout's barrier"
     );
     tokio::time::timeout(
         Duration::from_millis(50),
