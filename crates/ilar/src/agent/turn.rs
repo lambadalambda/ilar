@@ -810,7 +810,56 @@ pub fn summarize_tool_input(name: &str, input: &serde_json::Value) -> String {
             .map(collapse_whitespace)
     };
     let summary = match name {
-        "bash" => string("command").map(|command| redact_command(&command)),
+        // Whether it was detached is part of what ran: a background
+        // command that summarised like a foreground one read as a turn
+        // waiting on something it had already let go of.
+        "bash" => string("command").map(|command| {
+            let command = redact_command(&command);
+            match input
+                .get("run_in_background")
+                .and_then(serde_json::Value::as_bool)
+            {
+                // Ahead of the command, not behind it: the summary is
+                // capped, and a long command would eat the one word
+                // this arm exists to add.
+                Some(true) => format!("background · {command}"),
+                _ => command,
+            }
+        }),
+        // Which service, not just which verb: four actions read the
+        // same when the name is missing.
+        "service" => {
+            let action = string("action").unwrap_or_else(|| "service".into());
+            let command = string("command").map(|command| redact_command(&command));
+            Some(match (string("name"), command) {
+                (Some(name), Some(command)) => format!("{action} {name} · {command}"),
+                (Some(name), None) => format!("{action} {name}"),
+                (None, Some(command)) => format!("{action} · {command}"),
+                (None, None) => action,
+            })
+        }
+        // The id first: it names the task, and a long message would
+        // otherwise push it past the summary's cap.
+        "task_message" => string("task_id").map(|task_id| match string("message") {
+            Some(message) => format!("{task_id} · {message}"),
+            None => task_id,
+        }),
+        // An array-only input summarised to nothing at all.
+        "todo" => Some(
+            match input.get("todos").and_then(serde_json::Value::as_array) {
+                Some(todos) => {
+                    let done = todos
+                        .iter()
+                        .filter(|todo| {
+                            todo.get("status").and_then(serde_json::Value::as_str)
+                                == Some("completed")
+                        })
+                        .count();
+                    format!("{} todos · {done} done", todos.len())
+                }
+                None => "read the list".into(),
+            },
+        ),
         "read" => string("path").map(|path| {
             let offset = input.get("offset").and_then(serde_json::Value::as_u64);
             let limit = input.get("limit").and_then(serde_json::Value::as_u64);
@@ -830,33 +879,85 @@ pub fn summarize_tool_input(name: &str, input: &serde_json::Value) -> String {
             Some(model) => format!("{description} · {agent} @ {model}"),
             None => format!("{description} · {agent}"),
         }),
-        _ => input.as_object().map(|values| {
-            values
-                .iter()
-                .filter_map(|(key, value)| {
-                    if sensitive_key(key) {
-                        return Some(format!("{key}=<redacted>"));
-                    }
-                    match value {
-                        serde_json::Value::String(value) => {
-                            Some(format!("{key}={}", collapse_whitespace(value)))
-                        }
-                        serde_json::Value::Number(_) | serde_json::Value::Bool(_) => {
-                            Some(format!("{key}={value}"))
-                        }
-                        _ => None,
-                    }
-                })
-                .take(3)
-                .collect::<Vec<_>>()
-                .join(" · ")
-        }),
+        _ => None,
     }
+    // Whatever an arm could not make sense of falls back to the
+    // arguments themselves rather than to a blank row: an input the
+    // model got half right still says which thing it was about.
+    .or_else(|| generic_summary(input))
     .unwrap_or_default();
     summary
         .chars()
         .take(MAX_TOOL_ARGUMENT_SUMMARY_CHARS)
         .collect()
+}
+
+/// Keys that say *which* thing a call acted on, most identifying
+/// first. Only three arguments fit in a summary, and serde_json hands
+/// an object's keys over in alphabetical order here, so without this
+/// the room went to whichever key sorted first — which is how a
+/// service lost its name and a task id lost its place to a message.
+const IDENTIFYING_KEYS: &[&str] = &[
+    "action",
+    "name",
+    "id",
+    "taskid",
+    "sessionid",
+    "path",
+    "file",
+    "pattern",
+    "query",
+    "url",
+    "command",
+    "cmd",
+    "description",
+];
+
+/// What a tool with no summary of its own says: its arguments, the
+/// identifying ones first and the rest alphabetically behind them.
+fn generic_summary(input: &serde_json::Value) -> Option<String> {
+    let values = input.as_object()?;
+    if values.is_empty() {
+        // Honest, and different from "we could not summarise this".
+        return Some("no arguments".into());
+    }
+    let mut keys = values.keys().collect::<Vec<_>>();
+    keys.sort_by_key(|key| {
+        let normalized = normalized_key(key);
+        (
+            IDENTIFYING_KEYS
+                .iter()
+                .position(|candidate| *candidate == normalized)
+                .unwrap_or(IDENTIFYING_KEYS.len()),
+            key.as_str(),
+        )
+    });
+    Some(
+        keys.into_iter()
+            .filter_map(|key| {
+                let value = summarized_value(key, values.get(key)?)?;
+                Some(format!("{key}={value}"))
+            })
+            .take(3)
+            .collect::<Vec<_>>()
+            .join(" · "),
+    )
+}
+
+fn summarized_value(key: &str, value: &serde_json::Value) -> Option<String> {
+    let redacted = redacted_argument(key, value);
+    match redacted.as_ref().unwrap_or(value) {
+        serde_json::Value::String(text) => Some(collapse_whitespace(text)),
+        serde_json::Value::Number(_) | serde_json::Value::Bool(_) => Some(value.to_string()),
+        // A list said nothing at all before; how long it is, at least,
+        // is something.
+        serde_json::Value::Array(items) => Some(format!(
+            "{} item{}",
+            items.len(),
+            if items.len() == 1 { "" } else { "s" }
+        )),
+        _ => None,
+    }
 }
 
 /// (description, agent, explicit model override) from task-tool input.
@@ -875,46 +976,89 @@ pub fn summarize_task_input(input: &serde_json::Value) -> Option<(String, String
     ))
 }
 
-pub fn tool_argument_detail(name: &str, input: &serde_json::Value) -> String {
-    fn redact(name: &str, value: &serde_json::Value) -> serde_json::Value {
-        match value {
-            serde_json::Value::Object(values) => serde_json::Value::Object(
-                values
-                    .iter()
-                    .map(|(key, value)| {
-                        let value = if sensitive_key(key) {
-                            serde_json::Value::String("<redacted>".into())
-                        } else if name == "bash" && key == "command" {
-                            serde_json::Value::String(redact_command(value.as_str().unwrap_or("")))
-                        } else {
-                            redact(name, value)
-                        };
-                        (key.clone(), value)
-                    })
-                    .collect(),
-            ),
-            serde_json::Value::Array(values) => {
-                serde_json::Value::Array(values.iter().map(|value| redact(name, value)).collect())
-            }
-            _ => value.clone(),
-        }
+/// The whole input, pretty-printed for the expanded row — secrets
+/// gone, by key name and by shell command alike, exactly as
+/// [`summarize_tool_input`] does it one line up.
+pub fn tool_argument_detail(_name: &str, input: &serde_json::Value) -> String {
+    crate::text::bounded_detail(&tool_argument_input(input))
+}
+
+/// The one redaction policy for one argument: a value under a
+/// sensitive name goes entirely, a shell command keeps its shape
+/// without its secrets, and anything else is not this function's to
+/// rewrite (`None`). Both the one-line summary and the expanded detail
+/// read it here — two copies of exactly this rule drifting apart is
+/// what published a `service` command that a `bash` one had redacted.
+fn redacted_argument(key: &str, value: &serde_json::Value) -> Option<serde_json::Value> {
+    if sensitive_key(key) {
+        return Some(serde_json::Value::String("<redacted>".into()));
     }
-    let input = redact(name, input);
-    crate::text::bounded_detail(
-        &serde_json::to_string_pretty(&input).unwrap_or_else(|_| input.to_string()),
-    )
+    value
+        .as_str()
+        .filter(|_| shell_command_argument(key))
+        .map(|command| serde_json::Value::String(redact_command(command)))
+}
+
+fn redact(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(values) => serde_json::Value::Object(
+            values
+                .iter()
+                .map(|(key, value)| {
+                    let redacted = redacted_argument(key, value).unwrap_or_else(|| redact(value));
+                    (key.clone(), redacted)
+                })
+                .collect(),
+        ),
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.iter().map(redact).collect())
+        }
+        _ => value.clone(),
+    }
+}
+
+/// The same, unbounded: what a surface needs when it has to *parse* the
+/// input rather than only show it. An `edit` renders as a diff, and a
+/// diff of a payload cut at 16 KiB is a diff of invalid JSON — nothing
+/// at all. Whoever displays this bounds it; whoever reads it gets what
+/// the model actually sent, which is what replay reads from the log.
+pub fn tool_argument_input(input: &serde_json::Value) -> String {
+    let input = redact(input);
+    serde_json::to_string_pretty(&input).unwrap_or_else(|_| input.to_string())
 }
 
 fn collapse_whitespace(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn sensitive_key(key: &str) -> bool {
-    let normalized = key
-        .chars()
+/// A key name reduced to its letters and digits, lowercased, so
+/// `api_key`, `apiKey` and `API-KEY` are one name.
+fn normalized_key(key: &str) -> String {
+    key.chars()
         .filter(|character| character.is_ascii_alphanumeric())
         .flat_map(char::to_lowercase)
-        .collect::<String>();
+        .collect()
+}
+
+/// Whether this argument's value is a command line handed to a shell.
+///
+/// Keyed on the argument, not on the tool: `bash` and `service` both
+/// run theirs through [`crate::tools::process::shell_command`], and the
+/// two sites that redact them had already drifted apart once while
+/// naming `bash` literally — a `service` command with a token in it was
+/// published verbatim. Anything that names an argument `command` is
+/// treated as a command line, which costs nothing when it is not one
+/// (redaction only rewrites tokens that look like secrets) and covers
+/// the next tool that takes one the day it is added.
+fn shell_command_argument(key: &str) -> bool {
+    matches!(
+        normalized_key(key).as_str(),
+        "command" | "cmd" | "commandline" | "shellcommand"
+    )
+}
+
+fn sensitive_key(key: &str) -> bool {
+    let normalized = normalized_key(key);
     [
         "token",
         "secret",
@@ -929,7 +1073,12 @@ fn sensitive_key(key: &str) -> bool {
     .any(|needle| normalized.contains(needle))
 }
 
-fn redact_command(command: &str) -> String {
+/// A command line with its secrets removed: the tokens that follow a
+/// sensitive flag or header, and the ones that announce themselves.
+/// Public because a command is named in more places than a tool row —
+/// a background job carries its command in the notification it ends
+/// in, which is persisted as text nothing redacts later.
+pub fn redact_command(command: &str) -> String {
     let mut redact_next = false;
     let mut allow_authorization_scheme = false;
     command
@@ -1127,10 +1276,11 @@ async fn run_turn_inner(
                     crate::checkpoint::snapshot(&tool_ctx.cwd, session_id).await
             {
                 // Root turns only: the parent's checkpoint covers the
-                // workspace a child shares, and `call_id` alone is not a
-                // root test (notification turns on child sessions carry
-                // none). A failed snapshot (or a non-git cwd) never
-                // blocks the turn.
+                // workspace a child shares, and the absence of a
+                // `call_id` is not a root test on its own — a routed
+                // notification runs a child session's turn under a
+                // call id of its own making. A failed snapshot (or a
+                // non-git cwd) never blocks the turn.
                 session.append(SessionEvent::Checkpoint {
                     id: new_id(),
                     commit: snapshot.commit,
@@ -1490,7 +1640,15 @@ async fn run_turn_inner(
                             .publish(
                                 LoopEvent::ToolInputComplete {
                                     id,
-                                    arguments: tool_argument_detail(&name, &input),
+                                    // Unbounded on purpose: a surface
+                                    // that renders an edit as a diff has
+                                    // to parse this, and a cut at 16 KiB
+                                    // is invalid JSON — which is why a
+                                    // large edit showed a diff on replay
+                                    // (which reads the raw input) and a
+                                    // wall of JSON live. Every consumer
+                                    // bounds it for display already.
+                                    arguments: tool_argument_input(&input),
                                 },
                                 &cancel,
                             )
@@ -2024,6 +2182,101 @@ mod tests {
         assert!(!custom.contains("secret"), "{custom}");
         assert!(!custom.contains("session"), "{custom}");
         assert!(custom.chars().count() <= MAX_TOOL_ARGUMENT_SUMMARY_CHARS);
+    }
+
+    /// Redaction follows the shell, not the tool name: `service` hands
+    /// its `command` to `sh -c` exactly as `bash` does, so the same
+    /// secret must not be published just because it rode a different
+    /// tool. Both the one-line summary and the expanded detail.
+    #[test]
+    fn a_shell_command_is_redacted_whichever_tool_runs_it() {
+        let secret = "curl -H 'Authorization: Bearer eyJhbGci.opaque.jwt' --api-key=also-secret";
+        // The last one has no arm of its own and calls the argument
+        // something else: the predicate is the whole point.
+        for (tool, key) in [
+            ("bash", "command"),
+            ("service", "command"),
+            ("deploy", "cmd"),
+        ] {
+            let input = serde_json::json!({
+                "action": "start",
+                "name": "web",
+                (key): secret,
+            });
+            let summary = summarize_tool_input(tool, &input);
+            assert!(!summary.contains("eyJhbGci"), "{tool}: {summary}");
+            assert!(!summary.contains("also-secret"), "{tool}: {summary}");
+            assert!(summary.contains("<redacted>"), "{tool}: {summary}");
+
+            let detail = tool_argument_detail(tool, &input);
+            assert!(!detail.contains("eyJhbGci"), "{tool}: {detail}");
+            assert!(!detail.contains("also-secret"), "{tool}: {detail}");
+            assert!(detail.contains("<redacted>"), "{tool}: {detail}");
+        }
+    }
+
+    /// A summary says which thing the call acted on. The generic path
+    /// used to take three keys in alphabetical order, which dropped the
+    /// service name, buried the task id behind a long message, and hid
+    /// that a command was detached.
+    #[test]
+    fn tool_summaries_lead_with_what_the_call_acted_on() {
+        let service = summarize_tool_input(
+            "service",
+            &serde_json::json!({"action": "logs", "name": "web", "lines": 20}),
+        );
+        assert!(service.contains("logs"), "{service}");
+        assert!(service.contains("web"), "{service}");
+
+        let background = summarize_tool_input(
+            "bash",
+            &serde_json::json!({"command": "cargo test", "run_in_background": true}),
+        );
+        assert!(background.contains("cargo test"), "{background}");
+        assert!(background.contains("background"), "{background}");
+
+        let message = summarize_tool_input(
+            "task_message",
+            &serde_json::json!({"task_id": "abc-123", "message": "x".repeat(2_000)}),
+        );
+        assert!(message.starts_with("abc-123"), "{message}");
+
+        let todo = summarize_tool_input(
+            "todo",
+            &serde_json::json!({"todos": [
+                {"content": "one", "status": "completed"},
+                {"content": "two", "status": "pending"},
+            ]}),
+        );
+        assert_eq!(todo, "2 todos · 1 done");
+
+        // An arm that cannot make sense of its input falls back to the
+        // arguments rather than to a blank row.
+        let malformed = summarize_tool_input("task_message", &serde_json::json!({"message": "hi"}));
+        assert_eq!(malformed, "message=hi");
+
+        // Array-only and empty schemas said nothing at all.
+        let question = summarize_tool_input(
+            "question",
+            &serde_json::json!({"questions": [{"prompt": "which?"}]}),
+        );
+        assert!(
+            !question.is_empty(),
+            "an array-only input summarised to nothing"
+        );
+        for empty in ["tasks", "models"] {
+            let summary = summarize_tool_input(empty, &serde_json::json!({}));
+            assert!(!summary.is_empty(), "{empty} summarised to nothing");
+        }
+
+        // The generic path still applies, ordered: an unknown tool's
+        // identifying key comes before an incidental one whatever the
+        // alphabet says.
+        let generic = summarize_tool_input(
+            "custom",
+            &serde_json::json!({"body": "x".repeat(600), "id": "target", "zzz": 1}),
+        );
+        assert!(generic.starts_with("id=target"), "{generic}");
     }
 
     #[test]

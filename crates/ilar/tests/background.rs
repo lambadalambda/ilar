@@ -880,6 +880,52 @@ async fn contended_background_bash_still_returns_immediately() {
     assert!(notification.text.contains("queued"));
 }
 
+/// A background job names itself with the command it runs, and that
+/// name rides its notification into the transcript as text — where
+/// nothing redacts it later. The command is redacted where the job is
+/// named, exactly as the tool row's copy is.
+#[tokio::test]
+async fn a_background_command_is_redacted_in_the_job_it_names() {
+    let (store, session_id) = temp_store();
+    let spawner = spawner(Arc::new(MockProvider::new(vec![])), &store);
+    let mut notifications = spawner.subscribe();
+    let registry = ToolRegistry::builtin()
+        .with_subagents(spawner.clone())
+        .unwrap();
+    let ctx = background_tool_context(session_id, spawner, std::env::temp_dir().as_ref());
+    let output = registry
+        .get("bash")
+        .unwrap()
+        .run(
+            serde_json::json!({
+                // The secret is an argument, not output: what the job
+                // prints is data and is not this test's business.
+                "command": "printf queued && true --api-key=opaque-deploy-token",
+                "run_in_background": true,
+            }),
+            ctx,
+        )
+        .await;
+    assert!(!output.is_error, "{}", output.content);
+
+    let notification = notifications.recv().await.unwrap();
+    assert!(
+        !notification.description.contains("opaque-deploy-token"),
+        "{}",
+        notification.description
+    );
+    assert!(
+        !notification.text.contains("opaque-deploy-token"),
+        "{}",
+        notification.text
+    );
+    assert!(
+        notification.description.contains("<redacted>"),
+        "{}",
+        notification.description
+    );
+}
+
 #[tokio::test]
 async fn background_tool_must_be_the_only_call_in_a_step() {
     let (store, session_id) = temp_store();
@@ -1567,6 +1613,166 @@ async fn nested_notification_runs_declared_parent_and_propagates_once() {
     assert_eq!(provider.requests()[0].model, "zai/glm-4.7");
     let child = store.load(&child_id).unwrap();
     assert!(format!("{:?}", child.transcript()).contains("nested result"));
+}
+
+/// A routed notification runs a whole turn on a child session, and it
+/// belongs to no call in the parent. Replay slices a child's log by
+/// `SubagentInvocation`, so a turn that writes none is read as a
+/// continuation of whichever invocation happened to be last: its tools
+/// and edits are drawn under a task row that never ran them. The turn
+/// opens a boundary of its own instead.
+#[tokio::test]
+async fn a_routed_notification_opens_its_own_invocation_slice() {
+    let (store, root_id) = temp_store();
+    let child_id = new_id();
+    drop(
+        store
+            .create(SessionMeta {
+                session_id: child_id.clone(),
+                parent_id: Some(root_id.clone()),
+                agent: "explore".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+                cwd: None,
+            })
+            .unwrap(),
+    );
+    // What the parent's `task` call already ran on this session.
+    let mut child = store.acquire_writer(&child_id).unwrap().load().unwrap();
+    child
+        .append(SessionEvent::SubagentInvocation {
+            id: new_id(),
+            parent_tool_call_id: "task-1".into(),
+            ts: chrono::Utc::now(),
+        })
+        .unwrap();
+    child
+        .append(SessionEvent::UserMessage {
+            id: new_id(),
+            text: "the task the parent asked for".into(),
+            images: Vec::new(),
+            ts: chrono::Utc::now(),
+        })
+        .unwrap();
+    drop(child);
+
+    let provider = MockProvider::new(vec![vec![
+        ProviderEvent::TextDelta("noted".into()),
+        ProviderEvent::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        },
+    ]]);
+    spawner(Arc::new(provider), &store)
+        .route_notification(
+            ilar::subagent::Notification {
+                parent_session_id: child_id.clone(),
+                description: "nested".into(),
+                text: "nested result".into(),
+                is_error: false,
+            },
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+    let child = store.load(&child_id).unwrap();
+    let events = child.events();
+    let invocations = events
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::SubagentInvocation {
+                parent_tool_call_id,
+                ..
+            } => Some(parent_tool_call_id.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        invocations.len(),
+        2,
+        "the routed turn wrote no boundary of its own: {events:?}"
+    );
+    assert_eq!(invocations[0], "task-1");
+    assert_ne!(
+        invocations[1], "task-1",
+        "the routed turn claimed the parent's call"
+    );
+
+    // The slicing every replay surface does: from an invocation naming
+    // a call, up to the next invocation. The parent's task row keeps
+    // what its call ran, and nothing else.
+    let slice_of = |call_id: &str| {
+        let start = events
+            .iter()
+            .position(|event| {
+                matches!(event, SessionEvent::SubagentInvocation { parent_tool_call_id, .. }
+                    if parent_tool_call_id == call_id)
+            })
+            .expect("an invocation naming the call");
+        let end = events[start + 1..]
+            .iter()
+            .position(|event| matches!(event, SessionEvent::SubagentInvocation { .. }))
+            .map_or(events.len(), |offset| start + 1 + offset);
+        format!("{:?}", &events[start + 1..end])
+    };
+    assert!(slice_of("task-1").contains("the task the parent asked for"));
+    assert!(
+        !slice_of("task-1").contains("nested result"),
+        "the notification turn landed in the parent call's slice"
+    );
+    assert!(slice_of(&invocations[1]).contains("nested result"));
+}
+
+/// The other half of that rule: a session with no parent is never
+/// sliced by invocation, so marking its turn buys nothing — and a
+/// `call_id` is what tells a root turn it is not one, which would cost
+/// it the checkpoint it takes instead.
+#[tokio::test]
+async fn a_routed_notification_marks_nothing_on_a_parentless_session() {
+    let (store, _) = temp_store();
+    let root_id = new_id();
+    drop(
+        store
+            .create(SessionMeta {
+                session_id: root_id.clone(),
+                parent_id: None,
+                agent: "explore".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+                cwd: None,
+            })
+            .unwrap(),
+    );
+    let provider = MockProvider::new(vec![vec![
+        ProviderEvent::TextDelta("noted".into()),
+        ProviderEvent::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        },
+    ]]);
+    spawner(Arc::new(provider), &store)
+        .route_notification(
+            ilar::subagent::Notification {
+                parent_session_id: root_id.clone(),
+                description: "job".into(),
+                text: "job result".into(),
+                is_error: false,
+            },
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+    let session = store.load(&root_id).unwrap();
+    assert!(
+        !session
+            .events()
+            .iter()
+            .any(|event| matches!(event, SessionEvent::SubagentInvocation { .. })),
+        "a root session was marked as somebody's subagent"
+    );
+    assert!(format!("{:?}", session.transcript()).contains("job result"));
 }
 
 #[tokio::test]

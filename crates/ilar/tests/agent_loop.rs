@@ -3224,6 +3224,150 @@ async fn a_live_scratch_streams_a_turn_and_is_deleted_at_the_end() {
     assert_eq!(text, "hello worlddone", "both steps landed in full");
 }
 
+/// `service` runs its `command` in a shell exactly as `bash` does, so
+/// a secret riding one must not reach the row, the expanded arguments,
+/// the scratch the UI replays from, or the summary a restart rebuilds
+/// from the log. It used to reach all four: redaction named `bash`.
+#[tokio::test]
+async fn a_service_command_is_redacted_everywhere_a_bash_one_is() {
+    use ilar::session::LiveDelta;
+
+    let (store, session_id) = temp_session("build");
+    let manager = ilar::tools::service::ServiceManager::new();
+    let registry = ToolRegistry::builtin()
+        .with_tool(Arc::new(ilar::tools::service::ServiceTool::new(
+            manager.clone(),
+        )))
+        .unwrap();
+    let secret = "opaque-deploy-token";
+    let input = serde_json::json!({
+        "action": "start",
+        "name": "deploy",
+        // Harmless to run, and shaped like the thing that leaked.
+        "command": format!("true --api-key={secret}"),
+    });
+    let provider = PacedProvider::new(
+        vec![
+            vec![
+                ProviderEvent::ToolCallStarted {
+                    id: "service-1".into(),
+                    name: "service".into(),
+                    item_id: None,
+                },
+                ProviderEvent::ToolCallCompleted {
+                    id: "service-1".into(),
+                    name: "service".into(),
+                    input: input.clone(),
+                },
+                ProviderEvent::TurnComplete {
+                    stop_reason: StopReason::ToolUse,
+                    usage: Default::default(),
+                },
+            ],
+            vec![
+                ProviderEvent::TextDelta("started".into()),
+                ProviderEvent::TurnComplete {
+                    stop_reason: StopReason::EndTurn,
+                    usage: Default::default(),
+                },
+            ],
+        ],
+        Duration::from_millis(40),
+    );
+
+    let scratch = scratch_path(&store, &session_id);
+    let stop = CancellationToken::new();
+    let sampler = tokio::spawn(sample_scratch(scratch, stop.clone()));
+    let (tx, mut rx) = events_channel();
+    let outcome = run_turn(
+        &provider,
+        &registry,
+        &store,
+        &session_id,
+        "start the deploy service",
+        &[],
+        None,
+        LoopConfig::default(),
+        tx,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+        None,
+    )
+    .await
+    .unwrap();
+    stop.cancel();
+    let seen = sampler.await.unwrap();
+    assert_eq!(outcome, TurnOutcome::Completed);
+
+    let mut published = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        published.push(event);
+    }
+    let summary = published
+        .iter()
+        .find_map(|event| match event {
+            LoopEvent::ToolArguments { id, arguments } if id == "service-1" => Some(arguments),
+            _ => None,
+        })
+        .expect("the summary the row shows");
+    assert!(!summary.contains(secret), "{summary}");
+    assert!(summary.contains("<redacted>"), "{summary}");
+    // Still says which service was acted on.
+    assert!(summary.contains("deploy"), "{summary}");
+
+    let detail = published
+        .iter()
+        .find_map(|event| match event {
+            LoopEvent::ToolInputComplete { id, arguments } if id == "service-1" => Some(arguments),
+            _ => None,
+        })
+        .expect("the expanded arguments");
+    assert!(!detail.contains(secret), "{detail}");
+    assert!(detail.contains("<redacted>"), "{detail}");
+
+    // What was persisted for the UI to replay: the scratch line, and
+    // the summary a restart rebuilds from the log's own tool call.
+    assert!(
+        seen.iter().flatten().any(|delta| matches!(
+            delta,
+            LiveDelta::ToolStarted { name, summary, .. }
+                if name == "service" && summary.contains("<redacted>")
+        )),
+        "the scratch never carried a redacted service summary: {seen:?}"
+    );
+    assert!(
+        !format!("{seen:?}").contains(secret),
+        "the secret reached the scratch file: {seen:?}"
+    );
+    let persisted = store
+        .load(&session_id)
+        .unwrap()
+        .events()
+        .iter()
+        .find_map(|event| match event {
+            SessionEvent::AssistantMessage { content, .. } => {
+                content.iter().find_map(|block| match block {
+                    ContentBlock::ToolCall { name, input, .. } if name == "service" => {
+                        Some((name.clone(), input.clone()))
+                    }
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .expect("the persisted service call");
+    let replayed = ilar::agent::summarize_tool_input(&persisted.0, &persisted.1);
+    assert!(!replayed.contains(secret), "{replayed}");
+    assert_eq!(
+        &replayed, summary,
+        "replay and live must say the same thing"
+    );
+    assert!(
+        !ilar::agent::tool_argument_detail(&persisted.0, &persisted.1).contains(secret),
+        "replayed detail leaked the secret"
+    );
+}
+
 /// Successive thoughts are separate thoughts, and the scratch has to
 /// say where one ends: a reader with no boundary to split on renders a
 /// step's every summary as one run-on paragraph.

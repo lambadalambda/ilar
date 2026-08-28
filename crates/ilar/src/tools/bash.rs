@@ -478,7 +478,14 @@ impl Tool for BashTool {
                     .timeout_ms
                     .map(std::time::Duration::from_millis)
                     .unwrap_or_else(|| spawner.background_tool_timeout());
-                let description = format!("bash: {}", truncate_chars_ellipsis(&input.command, 120));
+                // Redacted here, not at the sink: this name rides the
+                // job's notification into the transcript as plain text,
+                // and nothing redacts that later the way a tool row's
+                // arguments are redacted every time they are drawn.
+                let description = format!(
+                    "bash: {}",
+                    truncate_chars_ellipsis(&crate::agent::redact_command(&input.command), 120)
+                );
                 let parent_session_id = ctx.session_id.clone();
                 // Background jobs surface through notifications, not
                 // live tool rows; no tail reporter.
