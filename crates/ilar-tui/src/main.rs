@@ -1047,7 +1047,11 @@ async fn main() -> Result<()> {
     // session so switching via the picker restarts with full fidelity.
     let mut session_override: Option<String> = None;
     // Prefill + notice carried across a rewind/fork rebuild.
-    let mut carried: Option<(Option<String>, Option<String>)> = None;
+    let mut carried: Option<(
+        Option<String>,
+        Option<String>,
+        Vec<crate::app::StashedPrompt>,
+    )> = None;
     let mut first_run = true;
     let mut terminal_hold: Option<(ratatui::DefaultTerminal, TerminalSession)> = None;
     let mut active_theme = configured_theme;
@@ -1178,13 +1182,16 @@ async fn main() -> Result<()> {
         ) {
             app.push_transcript_line(Line_::System(line));
         }
-        if let Some((prefill, notice)) = carried.take() {
+        if let Some((prefill, notice, stash)) = carried.take() {
             if let Some(prefill) = prefill {
                 app.input = InputBuffer::from(prefill.as_str());
             }
             if let Some(notice) = notice {
                 app.set_notice(notice, NoticeLevel::Info);
             }
+            // Stashed prompts belong to the person, not to the session
+            // they were put aside in.
+            app.input_stash = stash;
         }
 
         if terminal_hold.is_none() {
@@ -1216,14 +1223,14 @@ async fn main() -> Result<()> {
         active_theme = app.theme;
         match exit {
             AppExit::Quit => return Ok(()),
-            AppExit::Switch(next) => session_override = Some(next),
             AppExit::SwitchInto {
                 id,
                 prefill,
                 notice,
+                stash,
             } => {
                 session_override = Some(id);
-                carried = Some((prefill, notice));
+                carried = Some((prefill, notice, stash));
             }
         }
     } // session loop
@@ -1920,25 +1927,16 @@ fn drain_motion_batch(
 }
 
 /// The reasons a session switch (resume, fork, rewind) must wait; the
-/// same set guards every path that tears the runtime down. The stash
-/// counts: a switch rebuilds `App` from scratch, so anything put aside
-/// dies with it just as surely as an unsent draft would.
-fn switch_blocked(
-    turn_running: bool,
-    background_agents: usize,
-    has_draft: bool,
-    stashed: usize,
-) -> Option<String> {
+/// same set guards every path that tears the runtime down. The stash is
+/// not among them: it rides along into the rebuilt app, so there is
+/// nothing to lose by leaving.
+fn switch_blocked(turn_running: bool, background_agents: usize, has_draft: bool) -> Option<String> {
     if turn_running {
         Some("finish or abort the current turn before switching sessions".into())
     } else if background_agents > 0 {
         Some("background agents are running; wait or abort them first".into())
     } else if has_draft {
         Some("input has an unsent draft; send or clear it first".into())
-    } else if stashed > 0 {
-        Some(format!(
-            "{stashed} stashed prompt(s) would be lost in the switch; Ctrl-S pops them"
-        ))
     } else {
         None
     }
@@ -1947,13 +1945,14 @@ fn switch_blocked(
 /// How run_app ended: quit the program, or restart against another session.
 enum AppExit {
     Quit,
-    Switch(String),
-    /// Switch carrying rewind/fork context into the rebuilt app: an
-    /// input prefill (the unsent message) and a notice.
+    /// Switch carrying what must survive the rebuild: a rewind or fork
+    /// prefill, its notice, and the stash — which belongs to the person,
+    /// not to the session they happened to be in.
     SwitchInto {
         id: String,
         prefill: Option<String>,
         notice: Option<String>,
+        stash: Vec<crate::app::StashedPrompt>,
     },
 }
 
@@ -2223,7 +2222,6 @@ async fn run_app(
                 turn_handle.is_some(),
                 spawner.running_background(),
                 !app.input.is_blank(),
-                app.input_stash.len(),
             ) {
                 app.set_notice(reason, NoticeLevel::Warning);
             } else if app.goal.is_some() {
@@ -2247,7 +2245,6 @@ async fn run_app(
                 turn_handle.is_some(),
                 spawner.running_background(),
                 !app.input.is_blank(),
-                app.input_stash.len(),
             ) {
                 app.set_notice(reason, NoticeLevel::Warning);
             } else {
@@ -2258,6 +2255,7 @@ async fn run_app(
                             id: fork_id,
                             prefill: None,
                             notice: Some(format!("forked from {session_id}")),
+                            stash: std::mem::take(&mut app.input_stash),
                         });
                     }
                     Err(error) => {
@@ -2660,7 +2658,6 @@ async fn run_app(
                                         turn_handle.is_some(),
                                         spawner.running_background(),
                                         !app.input.is_blank(),
-                                        app.input_stash.len(),
                                     );
                                     if let Some(reason) = blocked {
                                         app.set_notice(reason, NoticeLevel::Warning);
@@ -2669,7 +2666,12 @@ async fn run_app(
                                     match store.fork(&id) {
                                         Ok(fork_id) => {
                                             spawner.shutdown().await;
-                                            return Ok(AppExit::Switch(fork_id));
+                                            return Ok(AppExit::SwitchInto {
+                                                id: fork_id,
+                                                prefill: None,
+                                                notice: None,
+                                                stash: std::mem::take(&mut app.input_stash),
+                                            });
                                         }
                                         Err(error) => {
                                             app.set_notice(
@@ -2684,7 +2686,6 @@ async fn run_app(
                                         turn_handle.is_some(),
                                         spawner.running_background(),
                                         !app.input.is_blank(),
-                                        app.input_stash.len(),
                                     );
                                     if let Some(reason) = blocked {
                                         app.set_notice(reason, NoticeLevel::Warning);
@@ -2694,7 +2695,12 @@ async fn run_app(
                                         Some(reason) => app.set_notice(reason, NoticeLevel::Error),
                                         None => {
                                             spawner.shutdown().await;
-                                            return Ok(AppExit::Switch(new_session));
+                                            return Ok(AppExit::SwitchInto {
+                                                id: new_session,
+                                                prefill: None,
+                                                notice: None,
+                                                stash: std::mem::take(&mut app.input_stash),
+                                            });
                                         }
                                     }
                                 }
@@ -2738,7 +2744,6 @@ async fn run_app(
                                         turn_handle.is_some(),
                                         spawner.running_background(),
                                         !app.input.is_blank(),
-                                        app.input_stash.len(),
                                     );
                                     if let Some(reason) = blocked {
                                         app.set_notice(reason, NoticeLevel::Warning);
@@ -2749,7 +2754,12 @@ async fn run_app(
                                         None => {
                                             stop_session_scan(&mut search_cancel, &mut search_rx);
                                             spawner.shutdown().await;
-                                            return Ok(AppExit::Switch(new_session));
+                                            return Ok(AppExit::SwitchInto {
+                                                id: new_session,
+                                                prefill: None,
+                                                notice: None,
+                                                stash: std::mem::take(&mut app.input_stash),
+                                            });
                                         }
                                     }
                                 }
@@ -2772,7 +2782,6 @@ async fn run_app(
                                         turn_handle.is_some(),
                                         spawner.running_background(),
                                         false,
-                                        app.input_stash.len(),
                                     ) {
                                         app.set_notice(reason, NoticeLevel::Warning);
                                         continue;
@@ -2806,6 +2815,7 @@ async fn run_app(
                                                 id: session_id.to_string(),
                                                 prefill: Some(report.unsent),
                                                 notice: Some(notice),
+                                                stash: std::mem::take(&mut app.input_stash),
                                             });
                                         }
                                         Err(error) => {
@@ -2821,7 +2831,6 @@ async fn run_app(
                                         turn_handle.is_some(),
                                         spawner.running_background(),
                                         false,
-                                        app.input_stash.len(),
                                     ) {
                                         app.set_notice(reason, NoticeLevel::Warning);
                                         continue;
@@ -2860,6 +2869,7 @@ async fn run_app(
                                                 notice: Some(format!(
                                                     "forked at that turn from {session_id}"
                                                 )),
+                                                stash: std::mem::take(&mut app.input_stash),
                                             });
                                         }
                                         Err(error) => {
@@ -3315,29 +3325,52 @@ mod tests {
         );
     }
 
-    /// A switch rebuilds the app, so the stash has to be spent before
-    /// one can proceed — and the refusal has to say how much is at
-    /// stake, since the prompt itself looks empty.
+    /// A stash is a place to leave a thought, not a hostage: it rides
+    /// into the rebuilt app, so it never blocks a switch. The reasons
+    /// that do block still do, in the same order.
     #[test]
-    fn a_waiting_stash_blocks_a_session_switch() {
-        assert_eq!(switch_blocked(false, 0, false, 0), None);
-        let blocked = switch_blocked(false, 0, false, 2).expect("the stash blocks the switch");
-        assert!(blocked.contains('2'), "{blocked}");
-        assert!(blocked.contains("stashed"), "{blocked}");
+    fn a_waiting_stash_does_not_block_a_session_switch() {
+        assert_eq!(switch_blocked(false, 0, false), None);
 
-        // The louder reasons still come first.
         assert_eq!(
-            switch_blocked(true, 0, false, 2).as_deref(),
+            switch_blocked(true, 0, false).as_deref(),
             Some("finish or abort the current turn before switching sessions")
         );
         assert_eq!(
-            switch_blocked(false, 1, false, 2).as_deref(),
+            switch_blocked(false, 1, false).as_deref(),
             Some("background agents are running; wait or abort them first")
         );
         assert_eq!(
-            switch_blocked(false, 0, true, 2).as_deref(),
+            switch_blocked(false, 0, true).as_deref(),
             Some("input has an unsent draft; send or clear it first")
         );
+    }
+
+    /// The switch carries the stash, so the pops still work on the
+    /// other side — text and images both, newest first.
+    #[test]
+    fn a_switch_hands_the_stash_to_the_rebuilt_app() {
+        let mut before = App::new();
+        before.input = InputBuffer::from("the thought worth keeping");
+        // Set directly: attachment policy (vision support, caps) is a
+        // different test's business than whether the stash carries.
+        before.pending_images = vec![ilar::session::ImageContent::png(&[0u8; 32])];
+        before.stash_or_pop_input();
+        before.input = InputBuffer::from("and another");
+        before.stash_or_pop_input();
+
+        // What the exit carries, and what the rebuilt app is handed.
+        let carried = std::mem::take(&mut before.input_stash);
+        assert!(before.input_stash.is_empty(), "the old app kept a copy");
+        let mut after = App::new();
+        after.input_stash = carried;
+
+        after.stash_or_pop_input();
+        assert_eq!(after.input.text(), "and another");
+        after.input.clear();
+        after.stash_or_pop_input();
+        assert_eq!(after.input.text(), "the thought worth keeping");
+        assert_eq!(after.pending_images.len(), 1, "the image came along");
     }
 
     #[test]
