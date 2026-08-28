@@ -249,3 +249,8 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [The TUI replays turn errors](issues/the-tui-replays-turn-errors.md)
 - [x] [The stash rides along](issues/the-stash-rides-along.md)
 - [x] [A finished turn that never lets go](issues/a-finished-turn-that-never-lets-go.md)
+- [x] [Serve kills the background children](issues/serve-kills-the-background-children.md)
+- [x] [A panic eats the permit](issues/a-panic-eats-the-permit.md)
+- [x] [Steers outlive a turn that declines](issues/steers-outlive-a-turn-that-declines.md)
+- [x] [Completions survive the process](issues/completions-survive-the-process.md)
+- [x] [Results arrive like steers](issues/results-arrive-like-steers.md)

@@ -48,3 +48,28 @@ Serve has a session that continues; it just forgets between turns.
 ## Milestone
 
 11 — Beyond the terminal
+
+## Outcome
+
+The drive keeps one `Engine` — runtime, spawner, services, and a
+notification consumer — per session, for as long as the process
+serves it. Turns reuse it; the per-turn `shutdown()`/`stop_all()`
+are gone from the turn boundary and live in `Drive::shutdown`,
+which serve runs on Ctrl-C (a select against the axum future,
+since the SSE streams never end on their own). The web turn path
+and the delivery path share one `run_driven_turn`, so steers, SSE
+frames, the failure broadcast and slot cleanup behave identically.
+
+The consumer delivers strictly one at a time: own-session
+completions become follow-up turns through the same slot a web
+message takes (flat 250ms wait, cancel-aware); foreign ones go
+through `route_notification` with exponential backoff, Propagate
+fed back around, Requeue retried eight times before leaning on the
+outbox. Two red-first tests pin it: a background child's
+completion lands in the parent log between turns with no web
+request involved, and work spawned in one turn survives the next.
+
+Left for later: SIGTERM (as opposed to Ctrl-C) still skips
+teardown; service survival has no dedicated test; the engine does
+not yet load outbox pending at adoption — a TUI open of the same
+session delivers what serve dropped.

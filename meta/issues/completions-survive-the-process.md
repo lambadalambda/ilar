@@ -38,3 +38,24 @@ even once in-process routing is airtight.
 ## Milestone
 
 13 — Guard rails
+
+## Outcome
+
+Every published notification is appended to
+`state_dir/outbox/<parent_session_id>.jsonl` before it enters the
+channel — inside the permit guard's send, so even an
+abnormal-death notification is durable. At session open the TUI
+loads `outbox::pending`, which filters to entries whose parent
+session still exists, whose ancestry reaches the opened root (so
+concurrent ilar processes never adopt each other's trees), and
+whose text does not yet appear in a UserMessage of the parent's
+log — delivery is defined by the durable artifact itself, so no
+delivery path anywhere needs to report back. Compaction rewrites
+files as it reads them and sweeps dead sessions. Recovered
+completions seed the held queue and announce themselves; the quit
+warning now counts undelivered results and says they arrive next
+open — they survive, so it warns of delay, not loss.
+
+Known limitation, documented in code: two byte-identical
+notification texts for one parent dedupe as one. Serve-side outbox
+loading is noted in serve-kills-the-background-children's outcome.

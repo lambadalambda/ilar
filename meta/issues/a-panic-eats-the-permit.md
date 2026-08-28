@@ -45,3 +45,21 @@ exactly-one invariant against abnormal termination:
 ## Milestone
 
 13 — Guard rails
+
+## Outcome
+
+The reserved permit became `ReservedNotification`, a guard owning
+the permit plus the parent id and description: an explicit `send`
+consumes it, and a drop without one — a panic, a forgotten path —
+publishes a synthesized "ended abnormally" task notification, so a
+dying task is a failed task, not silence. The registration
+handshake's early return gets an explicit `disarm`, since that
+path already reported synchronously. All nineteen `.lock().unwrap()`
+sites went through a documented `lock_unpoisoned` helper
+(`PoisonError::into_inner`) — every guarded structure is a registry
+mutated in single operations, including the three unwraps that
+lived in `Drop` impls and would have aborted the process
+panicking-while-unwinding. Pinned by a test whose background task
+panics: the death notification arrives and the next task still
+works. The permit guard also carries the outbox hook, so even an
+abnormal ending is durable.

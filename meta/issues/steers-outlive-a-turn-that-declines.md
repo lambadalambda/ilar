@@ -50,3 +50,26 @@ destroyed *and* the model is told not to send it again.
 ## Milestone
 
 13 — Guard rails
+
+## Outcome
+
+`run_turn` now marks every pre-prompt-append failure — the writer
+acquire, the load, variant options, provider resolution, the
+pending-question bail, and both early appends — with
+`TurnNeverStarted`, and the three `started()` sites clear the
+child-steer queue only when the turn provably appended. The marker
+carries the message it wraps: the full workspace suite caught the
+first version hiding "pending question" and "already active"
+behind the marker's own display. The `WouldBlock` downcast
+threads through it, pinned by test.
+
+`message_task`'s resume branch parks the text in the pending queue
+before delegating and delegates with an empty prompt — the resume
+path already folds the queue into the prompt it appends, which
+makes delivery exactly-once for free: any early return leaves the
+text pending, success delivers it as the prompt head. A refusal
+that keeps the message says so: "queued and will be delivered when
+this task is next resumed" is appended to the error, correcting
+the concurrency limit's "Do not retry" finality for the message
+case. Pinned by a test that refuses a resume and asserts the later
+resume delivers.
