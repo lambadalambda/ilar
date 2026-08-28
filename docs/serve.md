@@ -93,8 +93,8 @@ check a handler could forget.
 | `GET /api/sessions/{id}/images/{event_id}/{n}` | One image's bytes. Base64 never crosses the wire in JSON; the transcript carries a descriptor and a marker line. |
 | `GET /`, `/app.css`, `/app.js` | The page. |
 | `POST /api/sessions` | `{prompt, cwd?, model?}` — create a session and run its first turn. Returns `{"id", "fate":"started"}` immediately; the turn runs behind it and the page follows on the stream it would have opened anyway. `cwd` defaults to the server's own directory and must exist; `model` defaults to configuration. |
-| `POST /api/sessions/{id}/message` | `{text}` — `{"fate":"steering"}` when this server is running a turn there (the message reaches the model at its next step), `{"fate":"started"}` when it took the writer lease and started one. `409 {"error":"session is open in another process — watching only"}` when another process holds the lease; `404` when there is no such session; `500` with the configuration error when no runtime could be built. |
-| `POST /api/sessions/{id}/abort` | `{"fate":"aborted"}` — cancels the turn this server is running there. `404` when it is not running one: a turn under another process is not this server's to stop. |
+| `POST /api/sessions/{id}/message` | `{text}` — `{"fate":"steering"}` when this server is running a turn there (the message reaches the model at its next step), `{"fate":"started"}` when it took the writer lease and started one. A started turn runs in **the directory the session recorded**, not the server's — that is where its tools edit and its project instructions come from. `409 {"error":"session is open in another process — watching only"}` when another process holds the lease; `503` when *this* server is between turns on that session (starting one, or unwinding an aborted one) and has nowhere to hold the message — send it again in a moment, the state clears itself; `404` when there is no such session; `500` with the configuration error when no runtime could be built. |
+| `POST /api/sessions/{id}/abort` | `{"fate":"aborted"}` — cancels the turn this server is running there. The session stays this server's until the cancelled turn lets go of the writer lease, and takes no messages meanwhile (`503`); the next one after that starts a turn. `404` when it is not running one: a turn under another process is not this server's to stop. |
 
 Two cursors, deliberately different, because they count different
 things. `cursor` indexes the **folded** canonical stream — what a
@@ -119,6 +119,7 @@ event: rewind    data: {"line":43,"to":7,"event":{…}}     (id: 43)
 event: resync    data: {"line":43}
 event: deleted   data: {}
 event: error     data: {"message":"…"}
+event: error     data: {"message":"…","scope":"turn"}
 event: delta     data: {"type":"text_delta","text":"…"}   (no id)
 ```
 
@@ -145,9 +146,24 @@ while drawing — dropping those events would shift every index a later
 rewind marker points at.
 
 `resync` means a line was missed (a lagging subscriber, a repaired tail)
-and only a re-fetch is honest. `deleted` and `error` are terminal;
-`error` carries the store's own words, which name the session and the
-line.
+and only a re-fetch is honest. `deleted` and a bare `error` are terminal;
+that `error` carries the store's own words, which name the session and
+the line.
+
+An `error` **with `"scope":"turn"`** is the exception, and the one frame
+that does not come from the store: a turn this server was running
+failed. The log has no line that says so — a provider failure is
+recorded as a diagnostic block the wire projection drops, and a failure
+before the loop even starts (an unresolvable runtime, a store that will
+not open) is never written at all — so without this frame the page would
+show a turn that simply stopped, and the reason would go to the server's
+stderr where nobody is looking. The tail is unharmed and the stream
+stays open.
+
+A reconnect resumes on `Last-Event-ID` **in preference to `?from=`**.
+An `EventSource` reconnect reuses the URL the tab attached with, so the
+query is frozen at that moment while the header holds the client's true
+position; the other order replays the whole window on every reconnect.
 
 Under the hood the tail is a **poll**, not a filesystem watch: on macOS
 FSEvents does not report appends made through a file descriptor the
@@ -169,6 +185,29 @@ commands in the directory the session names. Whoever can post to this
 server can make this machine do work. The read paragraphs below still
 hold, but "it only reads" no longer does.
 
+**A request must name this server by an IP literal or `localhost`.**
+This is the DNS-rebinding gate, and on a loopback bind it is the only
+thing between a hostile web page and a turn on this machine. A page on
+`evil.com` whose own DNS answers `127.0.0.1` on its second lookup is, as
+far as the browser is concerned, same-origin with `ilar serve`: it can
+read every transcript and `POST /api/sessions` with a prompt this
+machine will then execute. The one thing that attacker cannot forge is
+the name the page was loaded from, so the `Host` header is checked
+before anything else — before the token, because a loopback bind has no
+token to check. `127.0.0.1:4527`, `[::1]:4527` and `localhost:4527`
+pass, as does any IP literal (a literal cannot be rebound); the port,
+when the header names one, has to be the bound port. Every other name is
+`403` with the reason. An `Origin` header, when the browser sends one,
+is held to the same rule, so a cross-origin `fetch` cannot post blind
+either. A request with no `Host` at all is allowed only on a loopback
+bind: HTTP/1.1 requires the header, so what is left is HTTP/1.0 and
+hand-written local clients — never a browser.
+
+The practical consequence: **use the URL `ilar serve` printed.** A
+non-loopback bind reached by hostname (`http://mybox.local:7777/`) is
+refused; reach it by its address, or through an SSH tunnel, where it is
+`localhost`.
+
 **Loopback by default, and no token there.** The default bind is
 `127.0.0.1:4527` with no authentication. That is the same trust ilar
 already extends locally: anything that can reach loopback on your
@@ -183,12 +222,16 @@ not sent upstream and not written to server logs. The page moves it into
 `Bearer` header; `EventSource` and `<img>` cannot set headers, so those
 carry `?token=`. Comparison is constant-time. A failure is `401` with an
 empty body on **every** path, including unmatched ones, so the token is
-not an oracle for which sessions exist — the three static files (`/`,
-`/app.css`, `/app.js`) are the necessary exception, because the page has
-to load before it can read the fragment, and they carry nothing from the
-store. `ILAR_SERVE_TOKEN` pins a token
-instead of generating one, and pinning it requires the check on any
-bind, loopback included.
+not an oracle for which sessions exist — the six static files (`/`,
+`/app.css`, `/app.js` and the three vendored ESM modules under
+`/vendor/`) are the necessary exception, because the page has to load
+before it can read the fragment, a module the page imports cannot be
+handed a token by the loader at all, and none of them carries anything
+from the store. `ILAR_SERVE_TOKEN` pins a token instead of generating
+one, and pinning it requires the check on any bind, loopback included; a
+pinned token may be any text — it is percent-encoded into the printed
+URL and decoded out of `?token=`, so spaces and punctuation survive the
+round trip.
 
 **It is plain HTTP.** The token and every transcript cross the network
 in the clear. Put a non-loopback bind behind a VPN or an SSH tunnel
@@ -207,3 +250,12 @@ that is what it is worth.
 writer lease is an OS lock, so a session open in a TUI cannot be driven
 by the server whoever holds the token; they can watch it. That is a
 concurrency guarantee, not an access-control one.
+
+**There is no cap on how many sessions this server drives at once.**
+One turn per session is enforced by the lease; the number of sessions
+running turns in this process is bounded only by how many a client
+starts. Each is a real agent loop with real tools, so a client that
+starts a hundred is a client that runs a hundred agents on this machine
+— which is the same authority a single turn already has, spread wider.
+Said here rather than fixed, because a limit whose number is a guess
+would turn a busy machine into a broken one.

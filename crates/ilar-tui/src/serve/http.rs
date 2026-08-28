@@ -49,6 +49,7 @@
 //! event: resync    data: {"line":43}   the view is stale; reload the transcript
 //! event: deleted   data: {}            terminal
 //! event: error     data: {"message":"…"}  terminal; the store's own words
+//! event: error     data: {"message":"…","scope":"turn"}  a turn failed here
 //! event: delta     data: {"type":"text_delta","text":"on "}   no id: ephemeral
 //! ```
 //!
@@ -64,6 +65,17 @@
 //! *committed* line, and whatever was streaming arrives again as itself
 //! or as the committed event it became. `{"type":"reset"}` retires the
 //! client's streaming row; the committed `append` does the same.
+//!
+//! A `scope: "turn"` error is the one frame that does not come from the
+//! store: a turn this server ran failed, and the log has no line that
+//! says so (a provider failure is a `Diagnostic` block the projection
+//! drops; a failure before the loop is never written at all). The tail
+//! is unharmed and the stream stays open.
+//!
+//! Every request must name this server by an IP literal or `localhost`
+//! before any of the above happens — [`require_known_host`], the
+//! DNS-rebinding gate, which runs ahead of the token because a loopback
+//! bind has no token to run.
 //!
 //! Auth: a loopback bind has none — anything that can reach it can read
 //! the store directly. Any other bind requires a bearer token, and so
@@ -93,8 +105,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use ilar::session::{SessionEvent, SessionStore, SessionTail, TailUpdate};
+use tokio::sync::broadcast;
 
-use super::drive::{Drive, DriveError, Fate, NewSession};
+use super::drive::{Drive, DriveError, Fate, NewSession, TurnFailure};
 use super::view::{
     invocation_slice, live_reset, project_event, project_events, project_live_delta, usage_totals,
 };
@@ -124,6 +137,9 @@ pub(crate) struct ServeState {
     pub(crate) token: Option<Arc<str>>,
     /// The write path: the turns this process is running.
     pub(crate) drive: Arc<Drive>,
+    /// The address this server answers on, and therefore the only one a
+    /// request may name — see [`require_known_host`].
+    pub(crate) bind: SocketAddr,
 }
 
 pub(crate) fn router(state: ServeState) -> Router {
@@ -145,10 +161,128 @@ pub(crate) fn router(state: ServeState) -> Router {
         // On the whole router, fallback included: a 404 must not be
         // reachable without the token either.
         .layer(middleware::from_fn_with_state(state.clone(), require_token))
+        // Outermost, so it runs *before* the token check: on a loopback
+        // bind there is no token to fail, and this is the only thing
+        // between a hostile page and a turn on this machine.
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_known_host,
+        ))
         .with_state(state)
 }
 
-// ---------------------------------------------------------------- auth
+// ------------------------------------------------------- host and auth
+
+/// DNS rebinding, refused at the door.
+///
+/// A loopback bind is tokenless by design, and "can reach loopback"
+/// meant "is already on this machine" — until a browser is the one
+/// reaching. A page on `evil.com` whose DNS answers 127.0.0.1 on its
+/// second lookup is, to the browser, *same-origin with this server*: it
+/// can read every transcript and, now that there is a write path, POST a
+/// prompt and have this machine run it. The attacker controls
+/// everything about that request except one header: `Host` still says
+/// `evil.com`, because that is the name the page was loaded from.
+///
+/// So the rule is a name rule. A request may name this server by an IP
+/// literal or by `localhost` — which is exactly what the URL `ilar
+/// serve` prints contains, and what an SSH tunnel gives — and a port,
+/// when it names one, must be the bound port. Any other name is refused
+/// with 403 and the reason, before anything else looks at the request.
+/// An `Origin`, when the browser sends one, has to pass the same test:
+/// a cross-origin `fetch` reaches the socket even when its response
+/// would be unreadable, and a blind POST is enough to start a turn.
+///
+/// A missing `Host` is allowed only on a loopback bind. HTTP/1.1
+/// requires the header, so what is left is HTTP/1.0 and hand-written
+/// clients — local tools, in practice — and a browser is never among
+/// them.
+async fn require_known_host(
+    State(state): State<ServeState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let host = text_header(request.headers(), &header::HOST);
+    if !host_allowed(host.as_deref(), &state.bind) {
+        return refuse_name("Host", host.as_deref(), &state.bind);
+    }
+    let origin = text_header(request.headers(), &header::ORIGIN);
+    if let Some(origin) = &origin
+        && !origin_allowed(origin, &state.bind)
+    {
+        return refuse_name("Origin", Some(origin), &state.bind);
+    }
+    next.run(request).await
+}
+
+fn text_header(headers: &HeaderMap, name: &header::HeaderName) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
+}
+
+fn refuse_name(header: &str, value: Option<&str>, bind: &SocketAddr) -> Response {
+    let named = value.unwrap_or("(absent)");
+    ApiError::new(
+        StatusCode::FORBIDDEN,
+        format!(
+            "{header} {named:?} is not this server's address: ilar serve answers to {bind} \
+             (an IP literal or localhost, on port {}) and refuses any other name, because a \
+             name is what a DNS-rebinding attack has to use. Open the URL ilar serve printed.",
+            bind.port()
+        ),
+    )
+    .into_response()
+}
+
+/// Whether a `Host` may name this server. An IP literal cannot be
+/// rebound — the browser sends back whatever the address bar holds — so
+/// any literal is accepted, and so is `localhost`; a hostname is not.
+fn host_allowed(host: Option<&str>, bind: &SocketAddr) -> bool {
+    let Some(host) = host else {
+        return bind.ip().is_loopback();
+    };
+    let Some((name, port)) = split_host_port(host) else {
+        return false;
+    };
+    // A `Host` without a port is port 80, i.e. something in front; the
+    // name is what matters either way. A port that disagrees with the
+    // bind is not this server being addressed.
+    if port.is_some_and(|port| port != bind.port()) {
+        return false;
+    }
+    name.eq_ignore_ascii_case("localhost") || name.parse::<std::net::IpAddr>().is_ok()
+}
+
+/// The same test on an `Origin`, which is a scheme and an authority.
+fn origin_allowed(origin: &str, bind: &SocketAddr) -> bool {
+    origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+        .is_some_and(|authority| host_allowed(Some(authority), bind))
+}
+
+/// `host[:port]`, with the bracket form IPv6 needs. `None` for anything
+/// that is not one of those two shapes.
+fn split_host_port(host: &str) -> Option<(&str, Option<u16>)> {
+    let host = host.trim();
+    if host.is_empty() {
+        return None;
+    }
+    if let Some(rest) = host.strip_prefix('[') {
+        let (name, rest) = rest.split_once(']')?;
+        let port = match rest {
+            "" => None,
+            rest => Some(rest.strip_prefix(':')?.parse().ok()?),
+        };
+        return Some((name, port));
+    }
+    match host.rsplit_once(':') {
+        Some((name, port)) => Some((name, Some(port.parse().ok()?))),
+        None => Some((host, None)),
+    }
+}
 
 /// The token this bind requires, if any. Explicit pinning wins over the
 /// loopback exemption: someone who sets the variable wants the check.
@@ -180,7 +314,10 @@ pub(crate) fn generate_token() -> String {
 /// sessionStorage and appends `?token=` where `EventSource` needs it.
 pub(crate) fn url_for(address: &SocketAddr, token: Option<&str>) -> String {
     match token {
-        Some(token) => format!("http://{address}/#token={token}"),
+        // Percent-encoded, because a pinned token is whatever the user
+        // put in `ILAR_SERVE_TOKEN`: a space or a `#` printed raw is a
+        // URL that does not survive a copy into a browser.
+        Some(token) => format!("http://{address}/#token={}", percent_encode(token)),
         None => format!("http://{address}/"),
     }
 }
@@ -227,12 +364,62 @@ fn bearer(headers: &HeaderMap) -> Option<String> {
         .then(|| token.trim().to_string())
 }
 
-/// `?token=` for `EventSource`, which cannot set a header. The token is
-/// hex, so a percent-decode would have nothing to do.
+/// `?token=` for `EventSource` and `<img>`, neither of which can set a
+/// header. The middleware reads the raw query rather than a parsed one,
+/// so the percent-decode is this function's job: a generated token is
+/// hex and needs none, but a pinned `ILAR_SERVE_TOKEN` can hold anything
+/// at all, and the page sends it through `encodeURIComponent`.
+///
+/// `+` is left alone. It is a space only in form encoding, which nothing
+/// here produces, and treating it as one would break every token with a
+/// literal `+` in it.
 fn query_token(query: Option<&str>) -> Option<String> {
-    query?.split('&').find_map(|pair| {
-        pair.strip_prefix("token=")
-            .map(std::string::ToString::to_string)
+    query?
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("token="))
+        .map(percent_decode)
+}
+
+/// `%XX` back to bytes, then to text. Invalid escapes are kept verbatim:
+/// this feeds a comparison, and a token that does not decode is simply a
+/// token that will not match.
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match hex_pair(bytes.get(index + 1..index + 3)) {
+            Some(byte) if bytes[index] == b'%' => {
+                decoded.push(byte);
+                index += 3;
+            }
+            _ => {
+                decoded.push(bytes[index]);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
+fn hex_pair(pair: Option<&[u8]>) -> Option<u8> {
+    let pair = pair?;
+    let digit = |byte: u8| (byte as char).to_digit(16).map(|digit| digit as u8);
+    Some(digit(*pair.first()?)? << 4 | digit(*pair.get(1)?)?)
+}
+
+/// The unreserved set survives; everything else is escaped. Stricter
+/// than `encodeURIComponent`, which is the safe direction — the page
+/// decodes with `decodeURIComponent`, and that accepts both.
+fn percent_encode(value: &str) -> String {
+    value.bytes().fold(String::new(), |mut encoded, byte| {
+        use std::fmt::Write as _;
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            let _ = write!(encoded, "%{byte:02X}");
+        }
+        encoded
     })
 }
 
@@ -542,9 +729,14 @@ async fn events(
     let subscribed = id.clone();
     let subscription = blocking(move || watcher.subscribe(&subscribed)).await?;
 
-    // A browser resumes with the header; a first connection names its
-    // starting line explicitly, usually the transcript's `line`.
-    let resume = query.from.or_else(|| last_event_id(&headers));
+    // The header wins. `EventSource` reconnects reuse the *original*
+    // URL, so `?from=` is frozen at the moment the tab attached while
+    // `Last-Event-ID` holds the client's true position: preferring the
+    // query would replay everything since the tab opened, on every
+    // reconnect, for the client to fold in twice. A first connection has
+    // no header and names its starting line in the query instead,
+    // usually the transcript's `line`.
+    let resume = last_event_id(&headers).or(query.from);
     let mut pending: VecDeque<Event> = VecDeque::new();
     let mut last_line = subscription.line;
     let ended = subscription.ended.is_some();
@@ -579,6 +771,8 @@ async fn events(
 
     let feed = Feed {
         receiver: subscription.receiver,
+        failures: Some(state.drive.failures()),
+        id,
         pending,
         last_line,
         done: ended,
@@ -637,9 +831,30 @@ fn last_event_id(headers: &HeaderMap) -> Option<usize> {
 /// The SSE stream's state: what is queued, and where the client is.
 struct Feed {
     receiver: tokio::sync::broadcast::Receiver<TailMessage>,
+    /// Turn failures from this process's own write path, or `None` once
+    /// that channel is gone. Merged in here because the log cannot carry
+    /// them: see [`TurnFailure`].
+    failures: Option<tokio::sync::broadcast::Receiver<TurnFailure>>,
+    /// The session this stream follows — the failures channel is the
+    /// whole process's, so its frames are filtered on this.
+    id: String,
     pending: VecDeque<Event>,
     last_line: usize,
     done: bool,
+}
+
+/// Where the next frame came from.
+// Same trade `TailMessage` itself makes: boxing the line-bearing variant
+// to shrink the three rare ones would cost an allocation per line.
+#[allow(clippy::large_enum_variant)]
+enum Source {
+    Tail(TailMessage),
+    /// A turn this server was running on this session failed.
+    Failed(String),
+    /// A failure for some other session, or one this stream fell behind.
+    Ignored,
+    /// The write path is gone; stop watching it.
+    NoMoreFailures,
 }
 
 impl Feed {
@@ -651,7 +866,22 @@ impl Feed {
             if self.done {
                 return None;
             }
-            let message = next_message(&mut self.receiver).await?;
+            let message = match self.source().await? {
+                // A failed turn is not a failed *tail*: the log is
+                // intact and the stream stays open. `scope` is what says
+                // so, for a client that wants to tell this from the
+                // store's own terminal error.
+                Source::Failed(message) => {
+                    let event = named("error", &json!({ "message": message, "scope": "turn" }));
+                    return Some((Ok(event), self));
+                }
+                Source::Ignored => continue,
+                Source::NoMoreFailures => {
+                    self.failures = None;
+                    continue;
+                }
+                Source::Tail(message) => message,
+            };
             // Lines the catch-up read already sent: the broadcast and
             // the file overlap by design, and the line number is what
             // makes the overlap harmless.
@@ -664,6 +894,28 @@ impl Feed {
             self.last_line = frame.line;
             self.done = frame.terminal;
             return Some((Ok(frame.event), self));
+        }
+    }
+
+    /// The next thing to happen on either channel. `None` ends the
+    /// stream: the tailer is gone for good.
+    async fn source(&mut self) -> Option<Source> {
+        let Feed {
+            receiver,
+            failures,
+            id,
+            ..
+        } = self;
+        match failures {
+            Some(channel) => tokio::select! {
+                message = next_message(receiver) => message.map(Source::Tail),
+                failure = channel.recv() => Some(match failure {
+                    Ok(failure) if failure.session_id == *id => Source::Failed(failure.message),
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => Source::Ignored,
+                    Err(broadcast::error::RecvError::Closed) => Source::NoMoreFailures,
+                }),
+            },
+            None => next_message(receiver).await.map(Source::Tail),
         }
     }
 }
@@ -870,6 +1122,65 @@ mod tests {
             "http://10.0.0.2:7777/#token=abc",
             "a fragment is not sent upstream and not logged"
         );
+        // A pinned token is whatever the environment held, and a URL is
+        // printed to be copied: the escaping is the server's job.
+        assert_eq!(
+            url_for(&addr("10.0.0.2:7777"), Some("p@ss word%1")),
+            "http://10.0.0.2:7777/#token=p%40ss%20word%251"
+        );
+    }
+
+    /// The rebinding gate. A hostile page's request differs from the
+    /// page's own in exactly one place it cannot forge — the name it was
+    /// loaded from — so that is what is checked.
+    #[test]
+    fn only_this_servers_own_address_may_be_named() {
+        let bind = addr("127.0.0.1:4527");
+        assert!(host_allowed(Some("127.0.0.1:4527"), &bind));
+        assert!(host_allowed(Some("localhost:4527"), &bind));
+        assert!(host_allowed(Some("LocalHost:4527"), &bind));
+        assert!(host_allowed(Some("[::1]:4527"), &bind));
+        // A bare host is something in front of us; the name still has to
+        // be one a rebinding attack cannot use.
+        assert!(host_allowed(Some("127.0.0.1"), &bind));
+        assert!(host_allowed(Some("localhost"), &bind));
+
+        assert!(!host_allowed(Some("evil.com"), &bind), "the whole point");
+        assert!(!host_allowed(Some("evil.com:4527"), &bind));
+        assert!(!host_allowed(Some("localhost.evil.com:4527"), &bind));
+        assert!(!host_allowed(Some("127.0.0.1:9999"), &bind), "another port");
+        assert!(!host_allowed(Some(""), &bind));
+
+        // No `Host` at all: HTTP/1.0 and hand-written clients, which are
+        // local by nature. A browser always sends one.
+        assert!(host_allowed(None, &bind));
+        assert!(!host_allowed(None, &addr("10.0.0.2:7777")));
+
+        // A non-loopback bind is named by its own address, and by the
+        // tunnel that reaches it.
+        let public = addr("10.0.0.2:7777");
+        assert!(host_allowed(Some("10.0.0.2:7777"), &public));
+        assert!(host_allowed(Some("localhost:7777"), &public));
+        assert!(!host_allowed(Some("box.local:7777"), &public));
+
+        assert!(origin_allowed("http://127.0.0.1:4527", &bind));
+        assert!(origin_allowed("https://localhost:4527", &bind));
+        assert!(!origin_allowed("http://evil.com", &bind));
+        assert!(!origin_allowed("null", &bind), "a sandboxed frame");
+        assert!(!origin_allowed("127.0.0.1:4527", &bind), "not an origin");
+    }
+
+    #[test]
+    fn a_host_splits_into_a_name_and_an_optional_port() {
+        assert_eq!(
+            split_host_port("localhost:80"),
+            Some(("localhost", Some(80)))
+        );
+        assert_eq!(split_host_port("localhost"), Some(("localhost", None)));
+        assert_eq!(split_host_port("[::1]:4527"), Some(("::1", Some(4527))));
+        assert_eq!(split_host_port("[::1]"), Some(("::1", None)));
+        assert_eq!(split_host_port("localhost:nope"), None);
+        assert_eq!(split_host_port(""), None);
     }
 
     #[test]
@@ -892,6 +1203,40 @@ mod tests {
         assert_eq!(query_token(Some("from=3&token=abc")), Some("abc".into()));
         assert_eq!(query_token(Some("from=3")), None);
         assert_eq!(query_token(None), None);
+
+        // A pinned token is arbitrary text and the page sends it through
+        // `encodeURIComponent`; comparing the raw query against it would
+        // 401 the SSE and image routes forever.
+        assert_eq!(
+            query_token(Some("token=p%40ss%20word%25")),
+            Some("p@ss word%".into())
+        );
+        assert_eq!(
+            query_token(Some("from=3&token=a%2Bb")),
+            Some("a+b".into()),
+            "an encoded plus is a plus"
+        );
+        assert_eq!(
+            query_token(Some("token=a+b")),
+            Some("a+b".into()),
+            "and a bare one is not a space: nothing here is form-encoded"
+        );
+        // Nonsense decodes to itself and simply fails the comparison.
+        assert_eq!(query_token(Some("token=%zz%")), Some("%zz%".into()));
+    }
+
+    /// The round trip the page performs: printed encoded, read back
+    /// decoded, byte for byte.
+    #[test]
+    fn a_pinned_token_survives_the_url_it_is_printed_in() {
+        for token in ["p@ss word", "100%", "a+b", "üni/code?&#", "plain"] {
+            let url = url_for(&addr("127.0.0.1:4527"), Some(token));
+            let printed = url.split_once("#token=").expect("a fragment").1;
+            assert_eq!(
+                query_token(Some(&format!("token={printed}"))).as_deref(),
+                Some(token)
+            );
+        }
     }
 
     #[test]

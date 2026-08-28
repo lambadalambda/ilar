@@ -116,6 +116,10 @@ pub(crate) async fn run(config: &Config, options: ServeOptions) -> Result<()> {
             config.clone(),
             ilar::session::SessionStore::new(root),
         )),
+        // The bound address, not the requested one: the default bind
+        // falls back to an ephemeral port, and the port a request may
+        // name is the one actually listening.
+        bind: address,
     };
     axum::serve(listener, http::router(state))
         .await
