@@ -9,6 +9,18 @@
 //! session log and the `.live` scratch like any other turn, and the
 //! watcher was already reading both.
 //!
+//! The runtime is the *session's*, not the turn's. The first turn this
+//! process drives on a session resolves a [`SessionRuntime`] and keeps
+//! it — the same lifetime the TUI gives it — so the spawner's background
+//! children and the service manager's processes survive the turn that
+//! started them. Each kept runtime gets the one subscriber of its
+//! background-notification channel ([`Consumer`]): a completion for the
+//! driven session becomes a follow-up turn through the same slot and
+//! lease a web message takes, and a completion for a child's child is
+//! routed with `route_notification`. Teardown moved with the lifetime:
+//! [`Drive::shutdown`], at process exit, is where children are cancelled
+//! and services stopped.
+//!
 //! Three invariants hold this together:
 //!
 //! - **One turn per session, and the OS says so.** A session is driven
@@ -40,8 +52,9 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
 use axum::http::StatusCode;
 
@@ -50,6 +63,7 @@ use ilar::config::Config;
 use ilar::provider::ProviderResolver;
 use ilar::runtime::{RuntimeOptions, RuntimePlan, SessionRuntime};
 use ilar::session::{SessionStore, SessionWriter};
+use ilar::subagent::{Notification, RouteOutcome};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
@@ -174,6 +188,49 @@ impl DrivenTurn {
 /// The sessions this process is driving, by id.
 type Registry = Arc<Mutex<HashMap<String, DrivenTurn>>>;
 
+/// A session's long-lived machinery: the runtime every driven turn on
+/// it reuses, and the consumer that delivers its background
+/// completions. Built by the first turn, kept for as long as this
+/// process serves the session — exactly the lifetime the TUI gives the
+/// same objects — and torn down with the drive, never with a turn.
+struct Engine {
+    runtime: Arc<SessionRuntime>,
+    /// Stops the consumer, and whatever wait it is in, at teardown.
+    cancel: CancellationToken,
+    consumer: tokio::task::JoinHandle<()>,
+}
+
+/// The kept runtimes, by session id.
+type Engines = Arc<Mutex<HashMap<String, Engine>>>;
+
+/// Same poisoning stance as [`lock`]: the engines are consulted on the
+/// write path only, and a panic there must not wedge the next request.
+fn lock_engines(engines: &Engines) -> MutexGuard<'_, HashMap<String, Engine>> {
+    engines
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// How often a delivery waiting on the turn slot looks again. The slot
+/// always clears — a turn ends, or its panic drops it — so this wait is
+/// not backed off, only cancelled.
+const SLOT_RETRY: Duration = Duration::from_millis(250);
+/// First delay of the exponential backoff a delivery retries with.
+const RETRY_BASE: Duration = Duration::from_millis(500);
+/// Ceiling for any single backoff delay.
+const RETRY_CEILING: Duration = Duration::from_secs(5);
+/// `Requeue` outcomes retried before a routed notification is dropped.
+const ROUTE_RETRY_LIMIT: usize = 8;
+/// Lease attempts before a same-session delivery is dropped: another
+/// process (a TUI, say) has held the session for minutes.
+const LEASE_RETRY_LIMIT: u32 = 30;
+/// Hops a propagated notification may climb before the loop gives up —
+/// nesting deeper than this cannot exist under the spawner's depth cap.
+const PROPAGATION_HOPS: usize = 8;
+/// How long teardown waits for a consumer mid-delivery after cancelling
+/// its turn. A backstop, not the plan.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
+
 /// Take the registry lock, ignoring poisoning. A panic on the write path
 /// must not take the read routes down with it — `drives()` is on the
 /// listing, which every page polls. What a panic can leave behind is one
@@ -259,7 +316,8 @@ pub(crate) struct Drive {
     /// its subagents get.
     resolver: Option<Arc<dyn ProviderResolver>>,
     running: Registry,
-    epochs: Arc<std::sync::atomic::AtomicU64>,
+    engines: Engines,
+    epochs: Arc<AtomicU64>,
     failures: broadcast::Sender<TurnFailure>,
 }
 
@@ -270,7 +328,8 @@ impl Drive {
             store,
             resolver: None,
             running: Arc::new(Mutex::new(HashMap::new())),
-            epochs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            engines: Arc::new(Mutex::new(HashMap::new())),
+            epochs: Arc::new(AtomicU64::new(0)),
             failures: broadcast::channel(FAILURE_CAPACITY).0,
         }
     }
@@ -332,7 +391,7 @@ impl Drive {
             questions: false,
             ..RuntimeOptions::default()
         };
-        let runtime = self.plan(options).await?;
+        let runtime = self.adopt(self.plan(options).await?);
         let id = runtime.session_id.clone();
         // Nothing can be racing this one: the id was minted a moment ago
         // by the plan that created the session.
@@ -354,6 +413,16 @@ impl Drive {
         };
         // Everything from here can fail, and every failure drops the
         // slot, which gives the session back.
+        if let Some(runtime) = self.runtime_for(id) {
+            // Driven here before: the session's runtime — spawner,
+            // services, background children and all — is still alive,
+            // and re-planning it would orphan them. Only the lease
+            // pre-check stays per turn; it is what notices another
+            // process having taken the session in between.
+            let lease = self.acquire(id).await?;
+            self.spawn_turn(runtime, text, Some(lease), slot);
+            return Ok(Fate::Started);
+        }
         let cwd = self.turn_cwd(id).await?;
         let lease = self.acquire(id).await?;
         let options = RuntimeOptions {
@@ -362,7 +431,7 @@ impl Drive {
             questions: false,
             ..RuntimeOptions::default()
         };
-        let runtime = self.plan(options).await?;
+        let runtime = self.adopt(self.plan(options).await?);
         self.spawn_turn(runtime, text, Some(lease), slot);
         Ok(Fate::Started)
     }
@@ -433,23 +502,7 @@ impl Drive {
     /// Claim the session for a turn about to be prepared. The entry goes
     /// in before the slow part, and the slot is what gives it back.
     fn reserve(&self, running: &mut HashMap<String, DrivenTurn>, id: &str) -> TurnSlot {
-        let epoch = self.epochs.fetch_add(1, Ordering::Relaxed);
-        let cancel = CancellationToken::new();
-        running.insert(
-            id.to_string(),
-            DrivenTurn {
-                steer: None,
-                cancel: cancel.clone(),
-                stopping: false,
-                epoch,
-            },
-        );
-        TurnSlot {
-            running: self.running.clone(),
-            id: id.to_string(),
-            epoch,
-            cancel,
-        }
+        reserve_locked(running, &self.running, &self.epochs, id)
     }
 
     /// Where a resumed turn runs: the directory the session recorded.
@@ -485,19 +538,16 @@ impl Drive {
     /// Take the writer lease, or say who has it. Held from here until
     /// the turn task hands it to `run_turn`.
     async fn acquire(&self, id: &str) -> Result<SessionWriter, DriveError> {
-        let store = self.store.clone();
-        let owned = id.to_string();
-        let acquired = tokio::task::spawn_blocking(move || store.acquire_writer(&owned))
+        acquire_writer(self.store.clone(), id.to_string())
             .await
-            .map_err(|error| DriveError::Failed(format!("writer task failed: {error}")))?;
-        acquired.map_err(|error| match error.kind() {
-            std::io::ErrorKind::WouldBlock => DriveError::Locked,
-            std::io::ErrorKind::NotFound => {
-                DriveError::NotFound(format!("session not found: {id}"))
-            }
-            std::io::ErrorKind::InvalidInput => DriveError::Invalid(error.to_string()),
-            _ => DriveError::Failed(error.to_string()),
-        })
+            .map_err(|error| match error.kind() {
+                std::io::ErrorKind::WouldBlock => DriveError::Locked,
+                std::io::ErrorKind::NotFound => {
+                    DriveError::NotFound(format!("session not found: {id}"))
+                }
+                std::io::ErrorKind::InvalidInput => DriveError::Invalid(error.to_string()),
+                _ => DriveError::Failed(error.to_string()),
+            })
     }
 
     /// Resolve the same runtime a TUI launch would. Blocking: it reads
@@ -514,90 +564,399 @@ impl Drive {
     }
 
     /// Run the turn the slot was claimed for. The session has been
-    /// "driven" since that claim; what this adds is the steer channel,
-    /// so the caller's response tells the truth about what a follow-up
-    /// message will do.
+    /// "driven" since that claim; what the spawned task adds first is
+    /// the steer channel, so the caller's response tells the truth about
+    /// what a follow-up message will do.
     fn spawn_turn(
         &self,
-        runtime: SessionRuntime,
+        runtime: Arc<SessionRuntime>,
         prompt: String,
         lease: Option<SessionWriter>,
         slot: TurnSlot,
     ) {
-        let (steer, steer_rx) = steer_channel();
-        let cancel = slot.cancel.clone();
+        let ctx = self.turn_context(&runtime);
+        tokio::spawn(run_driven_turn(ctx, prompt, lease, slot));
+    }
+
+    /// Keep the freshly planned runtime for the session's lifetime under
+    /// this drive, and start the one consumer of its background
+    /// notifications. Keyed by session id; nothing short of
+    /// [`Self::shutdown`] invalidates an entry — `run_turn` re-reads the
+    /// effective model from the session log every turn, so a model
+    /// change never stales the cache, and configuration or agent
+    /// definitions edited on disk are picked up no later than the TUI
+    /// picks them up, which also builds once per session.
+    fn adopt(&self, runtime: SessionRuntime) -> Arc<SessionRuntime> {
+        let runtime = Arc::new(runtime);
         let id = runtime.session_id.clone();
+        let mut engines = lock_engines(&self.engines);
+        if let Some(engine) = engines.get(&id) {
+            // Cannot happen on today's paths — the turn slot serializes
+            // a session's turns, and `message` checks the cache before
+            // planning — but if a plan ever races an engine, the
+            // incumbent keeps the session: it holds the one notification
+            // subscription, and a second one would read nothing.
+            return engine.runtime.clone();
+        }
+        let cancel = CancellationToken::new();
+        // The channel's single subscription, taken exactly once, here.
+        let notifications = runtime.spawner.subscribe();
+        let consumer = Consumer {
+            session_id: id.clone(),
+            turn: self.turn_context(&runtime),
+            epochs: self.epochs.clone(),
+            cancel: cancel.clone(),
+        };
+        let handle = tokio::spawn(consumer.run(notifications));
+        engines.insert(
+            id,
+            Engine {
+                runtime: runtime.clone(),
+                cancel,
+                consumer: handle,
+            },
+        );
+        runtime
+    }
+
+    /// The kept runtime for a session this process drove before.
+    fn runtime_for(&self, id: &str) -> Option<Arc<SessionRuntime>> {
+        lock_engines(&self.engines)
+            .get(id)
+            .map(|engine| engine.runtime.clone())
+    }
+
+    fn turn_context(&self, runtime: &Arc<SessionRuntime>) -> TurnContext {
+        TurnContext {
+            runtime: runtime.clone(),
+            resolver: self
+                .resolver
+                .clone()
+                .unwrap_or_else(|| runtime.resolver.clone()),
+            running: self.running.clone(),
+            failures: self.failures.clone(),
+        }
+    }
+
+    /// Tear down every session this process drove: cancel the running
+    /// turns, stop the consumers, abort the background children with the
+    /// spawner's own grace, and kill the services. The teardown that was
+    /// once (wrongly) each turn's, now at the only boundary where
+    /// nothing survives anyway — process exit.
+    pub(crate) async fn shutdown(&self) {
+        let engines = lock_engines(&self.engines)
+            .drain()
+            .map(|(_, engine)| engine)
+            .collect::<Vec<_>>();
+        // Consumers first: a consumer between taking a slot and
+        // starting its turn would otherwise launch work the running
+        // sweep below has already missed.
+        for engine in &engines {
+            engine.cancel.cancel();
+        }
         {
+            // A turn still running stops the way an abort stops it; its
+            // slot cleans the registry entry up on the way out.
             let mut running = lock(&self.running);
-            // An abort that landed while the runtime resolved leaves the
-            // entry `stopping`; the cancelled token below carries that,
-            // and the ears stay closed.
-            if let Some(turn) = running.get_mut(&id)
-                && turn.epoch == slot.epoch
-                && !turn.stopping
-            {
-                turn.steer = Some(steer);
+            for turn in running.values_mut() {
+                turn.cancel.cancel();
+                turn.stopping = true;
+                turn.steer = None;
             }
         }
-        let failures = self.failures.clone();
-        let resolver = self
-            .resolver
-            .clone()
-            .unwrap_or_else(|| runtime.resolver.clone());
+        let mut background = 0;
+        for engine in engines {
+            // A consumer mid-delivery finishes its now-cancelled turn
+            // first; the grace is a backstop, not the plan.
+            let _ = tokio::time::timeout(SHUTDOWN_GRACE, engine.consumer).await;
+            background += engine.runtime.spawner.running_background();
+            engine.runtime.spawner.shutdown().await;
+            engine.runtime.services.stop_all();
+        }
+        if background > 0 {
+            // The same sentence `ilar exec` says at its exit.
+            eprintln!("serve: {background} background task(s) cancelled at exit");
+        }
+    }
+}
 
-        tokio::spawn(async move {
-            // The slot rides with the task: whether the turn returns,
-            // fails or panics, its exit is what stops the session being
-            // driven.
-            let slot = slot;
-            // The lease was this request's proof that nobody else owns
-            // the session; `run_turn` takes its own, so it is released
-            // here and nowhere earlier.
-            drop(lease);
-            let (events, mut receiver) = loop_event_channel(LOOP_EVENT_CAPACITY);
-            // The loop publishes with backpressure, so somebody has to
-            // read. Nothing here needs the events — the store and the
-            // live scratch are the record, and the SSE reads those — but
-            // an unread channel would stall the turn at 64 events.
-            let drain = tokio::spawn(async move { while receiver.recv().await.is_some() {} });
+/// What one driven turn needs of the drive, detached from it so the
+/// notification consumer can run turns without holding the `Drive`.
+#[derive(Clone)]
+struct TurnContext {
+    runtime: Arc<SessionRuntime>,
+    resolver: Arc<dyn ProviderResolver>,
+    running: Registry,
+    failures: broadcast::Sender<TurnFailure>,
+}
 
-            let outcome = ilar::agent::run_turn(
-                resolver.as_ref(),
-                &runtime.registry,
-                &runtime.store,
-                &id,
-                &prompt,
-                &[],
-                Some(&runtime.system_prompt),
-                runtime.loop_config.clone(),
-                events,
-                cancel,
-                runtime.tool_ctx.clone(),
-                Some(steer_rx),
-            )
-            .await;
-            drain.abort();
+/// One driven turn, start to cleanup — the web message's and the
+/// notification delivery's shared path, so SSE frames, the failure
+/// broadcast and the slot discipline cannot drift apart.
+async fn run_driven_turn(
+    ctx: TurnContext,
+    prompt: String,
+    lease: Option<SessionWriter>,
+    slot: TurnSlot,
+) {
+    let (steer, steer_rx) = steer_channel();
+    let cancel = slot.cancel.clone();
+    let id = ctx.runtime.session_id.clone();
+    {
+        let mut running = lock(&ctx.running);
+        // An abort that landed while the runtime resolved leaves the
+        // entry `stopping`; the cancelled token below carries that, and
+        // the ears stay closed.
+        if let Some(turn) = running.get_mut(&id)
+            && turn.epoch == slot.epoch
+            && !turn.stopping
+        {
+            turn.steer = Some(steer);
+        }
+    }
+    // The slot rides with this future: whether the turn returns, fails
+    // or panics, its exit is what stops the session being driven.
+    // The lease was the caller's proof that nobody else owns the
+    // session; `run_turn` takes its own, so it is released here and
+    // nowhere earlier.
+    drop(lease);
+    let (events, mut receiver) = loop_event_channel(LOOP_EVENT_CAPACITY);
+    // The loop publishes with backpressure, so somebody has to read.
+    // Nothing here needs the events — the store and the live scratch are
+    // the record, and the SSE reads those — but an unread channel would
+    // stall the turn at 64 events.
+    let drain = tokio::spawn(async move { while receiver.recv().await.is_some() {} });
 
-            // Nothing outlives the turn: a background task with no
-            // session to notify, or a service nobody will stop, is a
-            // leak — the same shutdown `ilar exec` performs at exit.
-            runtime.spawner.shutdown().await;
-            runtime.services.stop_all();
-            // The session stops being driven here, and not before the
-            // lease `run_turn` returned is already released.
-            drop(slot);
-            if let Err(error) = outcome {
-                let message = format!("the turn failed: {error:#}");
-                eprintln!("serve: turn on {id}: {message}");
-                // Whoever is watching this session hears it. Nobody
-                // watching is not an error: the send fails when there is
-                // no subscriber, which is the common case.
-                let _ = failures.send(TurnFailure {
-                    session_id: id,
-                    message,
-                });
-            }
+    let outcome = ilar::agent::run_turn(
+        ctx.resolver.as_ref(),
+        &ctx.runtime.registry,
+        &ctx.runtime.store,
+        &id,
+        &prompt,
+        &[],
+        Some(&ctx.runtime.system_prompt),
+        ctx.runtime.loop_config.clone(),
+        events,
+        cancel,
+        ctx.runtime.tool_ctx.clone(),
+        Some(steer_rx),
+    )
+    .await;
+    drain.abort();
+
+    // Deliberately no spawner shutdown and no service stop here: both
+    // are the session's, not the turn's, torn down in `Drive::shutdown`.
+    // A background child started by this turn keeps running, and the
+    // session's `Consumer` is what its completion reaches.
+
+    // The session stops being driven here, and not before the lease
+    // `run_turn` returned is already released.
+    drop(slot);
+    if let Err(error) = outcome {
+        let message = format!("the turn failed: {error:#}");
+        eprintln!("serve: turn on {id}: {message}");
+        // Whoever is watching this session hears it. Nobody watching is
+        // not an error: the send fails when there is no subscriber,
+        // which is the common case.
+        let _ = ctx.failures.send(TurnFailure {
+            session_id: id,
+            message,
         });
+    }
+}
+
+/// Claim the session for a turn about to be prepared, under the
+/// caller's lock on the registry.
+fn reserve_locked(
+    map: &mut HashMap<String, DrivenTurn>,
+    running: &Registry,
+    epochs: &AtomicU64,
+    id: &str,
+) -> TurnSlot {
+    let epoch = epochs.fetch_add(1, Ordering::Relaxed);
+    let cancel = CancellationToken::new();
+    map.insert(
+        id.to_string(),
+        DrivenTurn {
+            steer: None,
+            cancel: cancel.clone(),
+            stopping: false,
+            epoch,
+        },
+    );
+    TurnSlot {
+        running: running.clone(),
+        id: id.to_string(),
+        epoch,
+        cancel,
+    }
+}
+
+/// The consumer's claim: a notification turn starts only on an idle
+/// session — never a steer into a running one, which is also what the
+/// TUI does with a completion that lands mid-turn — so an occupied
+/// entry is "come back later", not a decision to make.
+fn try_reserve(running: &Registry, epochs: &AtomicU64, id: &str) -> Option<TurnSlot> {
+    let mut map = lock(running);
+    if map.contains_key(id) {
+        return None;
+    }
+    Some(reserve_locked(&mut map, running, epochs, id))
+}
+
+/// Take the writer lease off the async thread.
+async fn acquire_writer(store: SessionStore, id: String) -> std::io::Result<SessionWriter> {
+    tokio::task::spawn_blocking(move || store.acquire_writer(&id))
+        .await
+        .map_err(|error| std::io::Error::other(format!("writer task failed: {error}")))?
+}
+
+/// The single reader of one session's background-completion channel.
+/// Deliveries are strictly one at a time — a delivery is a whole
+/// follow-up turn, and two must never interleave on one session.
+struct Consumer {
+    session_id: String,
+    turn: TurnContext,
+    epochs: Arc<AtomicU64>,
+    /// The engine's token: teardown, not any turn's cancellation.
+    cancel: CancellationToken,
+}
+
+impl Consumer {
+    async fn run(self, mut notifications: tokio::sync::mpsc::Receiver<Notification>) {
+        loop {
+            let notification = tokio::select! {
+                () = self.cancel.cancelled() => return,
+                notification = notifications.recv() => match notification {
+                    Some(notification) => notification,
+                    // The spawner is gone; so is anything to deliver.
+                    None => return,
+                },
+            };
+            self.deliver(notification).await;
+        }
+    }
+
+    /// One completion, to whichever session it belongs: the driven
+    /// session's own become follow-up turns here; a child's child's are
+    /// routed downward, and what `Propagate` hands back climbs one hop
+    /// at a time until it is ours or the hop budget says the tree is
+    /// deeper than the spawner allows.
+    async fn deliver(&self, mut notification: Notification) {
+        for _ in 0..PROPAGATION_HOPS {
+            if self.cancel.is_cancelled() {
+                return;
+            }
+            if notification.parent_session_id == self.session_id {
+                self.follow_up(notification).await;
+                return;
+            }
+            match self.route(notification).await {
+                Some(propagated) => notification = propagated,
+                None => return,
+            }
+        }
+    }
+
+    /// Deliver a completion to the driven session as a follow-up turn,
+    /// through the same slot-and-lease path a web message takes. The
+    /// prompt is the notification's own text — the `<task-notification>`
+    /// envelope the parent loop unwraps, exactly what the TUI feeds its
+    /// notification turns.
+    async fn follow_up(&self, notification: Notification) {
+        let mut lease_attempts = 0_u32;
+        let mut delay = RETRY_BASE;
+        loop {
+            let Some(slot) = try_reserve(&self.turn.running, &self.epochs, &self.session_id)
+            else {
+                // A turn is running or starting; its slot always
+                // clears, so this wait is patient, not bounded.
+                if !self.pause(SLOT_RETRY).await {
+                    return;
+                }
+                continue;
+            };
+            // The lease pre-check a web message performs; `run_turn`
+            // takes its own. Locked means another *process* opened the
+            // session between turns — back off without holding the
+            // slot, so a web message meanwhile is answered honestly
+            // instead of being told this server is starting a turn.
+            match acquire_writer(self.turn.runtime.store.clone(), self.session_id.clone()).await {
+                Ok(lease) => {
+                    run_driven_turn(self.turn.clone(), notification.text, Some(lease), slot).await;
+                    return;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    drop(slot);
+                    lease_attempts += 1;
+                    if lease_attempts > LEASE_RETRY_LIMIT {
+                        // Dropped. Durability for completions nobody
+                        // could take is the notification outbox being
+                        // added in core, not this loop.
+                        eprintln!(
+                            "serve: dropping a task completion for {}: the session is held by another process",
+                            self.session_id
+                        );
+                        return;
+                    }
+                    if !self.pause(delay).await {
+                        return;
+                    }
+                    delay = (delay * 2).min(RETRY_CEILING);
+                }
+                Err(error) => {
+                    eprintln!(
+                        "serve: dropping a task completion for {}: {error}",
+                        self.session_id
+                    );
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Route a completion that belongs to a deeper session. `Propagate`
+    /// comes back to `deliver`; `Requeue` is retried with backoff and
+    /// then dropped — durability past that is the notification outbox
+    /// being added in core, not this loop.
+    async fn route(&self, mut notification: Notification) -> Option<Notification> {
+        let mut delay = RETRY_BASE;
+        for _ in 0..ROUTE_RETRY_LIMIT {
+            match self
+                .turn
+                .runtime
+                .spawner
+                .route_notification(notification, self.cancel.child_token())
+                .await
+            {
+                Ok(RouteOutcome::Complete) => return None,
+                Ok(RouteOutcome::Propagate(up)) => return Some(up),
+                Ok(RouteOutcome::Requeue(again)) => {
+                    notification = again;
+                    if !self.pause(delay).await {
+                        return None;
+                    }
+                    delay = (delay * 2).min(RETRY_CEILING);
+                }
+                Err(error) => {
+                    eprintln!("serve: routing a task completion failed: {error:#}");
+                    return None;
+                }
+            }
+        }
+        eprintln!(
+            "serve: dropping a task completion for {} after {ROUTE_RETRY_LIMIT} attempts",
+            notification.parent_session_id
+        );
+        None
+    }
+
+    /// Sleep, unless torn down first; `false` says stop delivering.
+    async fn pause(&self, delay: Duration) -> bool {
+        tokio::select! {
+            () = self.cancel.cancelled() => false,
+            () = tokio::time::sleep(delay) => true,
+        }
     }
 }
 
@@ -1286,6 +1645,153 @@ context = 200000
             drive.claim("session", "three").unwrap(),
             Claim::Start(_)
         ));
+    }
+
+    /// A task tool call that detaches. The child agent runs against the
+    /// runtime's own resolver — the configured dead port — so it fails
+    /// after the loop's transport retries and reports that failure as
+    /// its completion notification; what this scripts is not the child's
+    /// success but the *delivery machinery* the parent session needs
+    /// alive after its own turn has ended.
+    fn background_task_call(id: &str) -> Vec<ProviderEvent> {
+        vec![
+            ProviderEvent::ToolCallStarted {
+                id: id.into(),
+                name: "task".into(),
+                item_id: None,
+            },
+            ProviderEvent::ToolCallCompleted {
+                id: id.into(),
+                name: "task".into(),
+                input: json!({
+                    "description": "background probe",
+                    "prompt": "look around and report back",
+                    "subagent_type": "explore",
+                    "background": true,
+                }),
+            },
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+                usage: Usage::default(),
+            },
+        ]
+    }
+
+    /// Like `transcript_once`, with the patience a background child
+    /// needs: the child burns through the provider retry backoff before
+    /// it completes, and this machine is allowed to be slow on top.
+    async fn transcript_patiently(
+        harness: &Harness,
+        id: &str,
+        ready: impl Fn(&Value) -> bool,
+    ) -> Value {
+        for _ in 0..600 {
+            let page = harness.json(&format!("/api/sessions/{id}")).await;
+            if ready(&page) {
+                return page;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("the transcript never arrived");
+    }
+
+    /// The heart of the issue: a driven turn detaches a task, the turn
+    /// ends, and the completion must still find its way home with no web
+    /// request involved — a `<task-notification>` user message on the
+    /// parent's log and an assistant follow-up after it. Under the
+    /// per-turn runtime the spawner was shut down at the turn boundary,
+    /// so the child was cancelled and its notification channel died
+    /// unread; this test hangs there.
+    #[tokio::test]
+    async fn a_background_completion_arrives_between_turns_as_a_follow_up_turn() {
+        let harness = Harness::start(vec![
+            background_task_call("task-1"),
+            answer("kicked off"),
+            answer("noted the task result"),
+        ])
+        .await;
+        let (status, body) = harness
+            .post("/api/sessions", json!({"prompt": "delegate the probe"}))
+            .await;
+        assert_eq!(status, 200, "{body}");
+        let id = body["id"].as_str().unwrap().to_string();
+
+        // Nothing else is posted: the follow-up turn is the server's own
+        // doing, between turns.
+        let page = transcript_patiently(&harness, &id, |page| {
+            assistant_text(page).contains("noted the task result")
+        })
+        .await;
+
+        let events = page["events"].as_array().unwrap();
+        let delivered = events
+            .iter()
+            .position(|event| {
+                event["type"] == "user_message" && event["notification"]["kind"] == "task"
+            })
+            .expect("the completion is a task-notification user message");
+        let text = events[delivered].to_string();
+        assert!(text.contains("<task-notification>"), "{text}");
+        // And the follow-up is a turn of its own, after the first turn's
+        // answer — not words smuggled into the running one.
+        let first_answer = events
+            .iter()
+            .position(|event| event.to_string().contains("kicked off"))
+            .expect("the first turn answered");
+        let follow_up = events
+            .iter()
+            .position(|event| event.to_string().contains("noted the task result"))
+            .expect("the follow-up answered");
+        assert!(
+            first_answer < delivered && delivered < follow_up,
+            "turn, then delivery, then follow-up: {first_answer} {delivered} {follow_up}"
+        );
+    }
+
+    /// The runtime is the session's, not the turn's: work detached in
+    /// the first turn is still alive while a second driven turn runs,
+    /// and its completion still lands afterwards. Under the per-turn
+    /// runtime the first turn's shutdown killed the child on its way
+    /// out, and no notification ever arrived.
+    #[tokio::test]
+    async fn work_spawned_in_one_turn_survives_the_next_and_still_reports() {
+        let harness = Harness::start(vec![
+            background_task_call("task-1"),
+            answer("kicked off"),
+            answer("second turn ran"),
+            answer("task result noted"),
+        ])
+        .await;
+        let (status, body) = harness
+            .post("/api/sessions", json!({"prompt": "delegate the probe"}))
+            .await;
+        assert_eq!(status, 200, "{body}");
+        let id = body["id"].as_str().unwrap().to_string();
+        harness
+            .transcript_once(&id, |page| assistant_text(page).contains("kicked off"))
+            .await;
+        harness.until_idle(&id).await;
+
+        // A second turn, driven the ordinary way, while the child from
+        // the first is still out there.
+        let (status, body) = harness
+            .post(
+                &format!("/api/sessions/{id}/message"),
+                json!({"text": "keep going"}),
+            )
+            .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["fate"], "started");
+
+        // Both the second turn's answer and the delivered completion
+        // arrive, in whichever order the child finishes.
+        let page = transcript_patiently(&harness, &id, |page| {
+            let text = assistant_text(page);
+            text.contains("second turn ran") && text.contains("task result noted")
+        })
+        .await;
+        let text = serde_json::to_string(&page["events"]).unwrap();
+        assert!(text.contains("<task-notification>"), "{text}");
     }
 
     /// The abort rule, at the registry: steerable before, refused after,

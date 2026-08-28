@@ -10,9 +10,10 @@
 //! Reading still needs the state directory and nothing else — no
 //! provider, no API key, no model, and none of them is validated at
 //! startup, because a machine with no provider configured must still be
-//! able to browse what it already recorded. The write path resolves its
-//! runtime per turn, so a missing provider is an error on the one
-//! request that needed it rather than a server that will not start.
+//! able to browse what it already recorded. The write path resolves a
+//! session's runtime lazily, on the first turn driven there, so a
+//! missing provider is an error on the one request that needed it
+//! rather than a server that will not start.
 #![allow(dead_code)]
 
 pub(crate) mod drive;
@@ -109,21 +110,35 @@ pub(crate) async fn run(config: &Config, options: ServeOptions) -> Result<()> {
         }
     }
 
+    let drive = Arc::new(Drive::new(
+        config.clone(),
+        ilar::session::SessionStore::new(root),
+    ));
     let state = ServeState {
         watcher,
         token: token.map(Into::into),
-        drive: Arc::new(Drive::new(
-            config.clone(),
-            ilar::session::SessionStore::new(root),
-        )),
+        drive: drive.clone(),
         // The bound address, not the requested one: the default bind
         // falls back to an ephemeral port, and the port a request may
         // name is the one actually listening.
         bind: address,
     };
-    axum::serve(listener, http::router(state))
-        .await
-        .context("serving")
+    // Interrupt is a teardown, not merely an exit: the sessions driven
+    // here keep their background subagents and services alive *between*
+    // turns, so the drive's shutdown — cancel the children with the
+    // spawner's grace, kill the service process groups — has to run
+    // before the process goes. A plain select rather than axum's
+    // graceful shutdown, deliberately: the SSE streams never end, and a
+    // shutdown that waits for open connections would wait forever.
+    tokio::select! {
+        result = async { axum::serve(listener, http::router(state)).await } => {
+            result.context("serving")
+        }
+        _ = tokio::signal::ctrl_c() => {
+            drive.shutdown().await;
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]
