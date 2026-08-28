@@ -41,3 +41,27 @@ context meter, and `Compacted.context_tokens`.
 ## Milestone
 
 13 — Guard rails
+
+## Outcome
+
+`image::estimated_tokens` reads the dimensions out of the header
+(only the first 64 base64 characters are decoded) and bills
+width*height/750, floored at 200 and capped at 2400; an unreadable
+header takes a flat 1600, because the payload size is exactly the
+misleading quantity. Both call sites — attached images and
+tool-result images — go through it. The afterglow session's six
+screenshots drop from 3.2M estimated tokens to about 14k.
+
+Two tests pin it, and one existing test had to be inverted: it
+asserted `with_image - text_only == data.len() / 4` under a doc
+comment that stated the false premise out loud ("Base64 tokenizes
+roughly like text"). It now asserts that a payload a thousand times
+larger costs the same, since neither declares readable dimensions.
+
+Open question this raised, left for a decision: the estimate is
+`max(reported, chars/4)`, which re-guesses the whole transcript
+when the provider has already priced most of it exactly. Adding
+the delta since the last reported usage to that exact number would
+confine the guess to the untold tail — and would have prevented
+this bug on its own, since the images were inside the request the
+provider billed at 24,994.

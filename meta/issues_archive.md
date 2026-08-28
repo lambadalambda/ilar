@@ -245,3 +245,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Advisory read leases](issues/advisory-read-leases.md)
 - [x] [Serve writes back](issues/serve-writes-back.md)
 - [x] [Sweep after the write path](issues/sweep-after-the-write-path.md)
+- [x] [Images are not their base64](issues/images-are-not-their-base64.md)
