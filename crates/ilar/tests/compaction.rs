@@ -249,20 +249,30 @@ fn estimate_includes_system_prompt_and_tool_definitions() {
     );
 }
 
-/// A screenshot handed back by a tool is real context. Base64
-/// tokenizes roughly like text, so the estimate has to grow with the
-/// payload — otherwise an image-heavy session sails past the
-/// compaction threshold reporting a few hundred tokens.
+/// A screenshot handed back by a tool is real context, but its cost is
+/// what a vision model bills — pixel area, tiled and capped — not the
+/// length of its base64, which is transport. Counting the bytes read
+/// six screenshots as millions of tokens and compacted a session one
+/// exchange old.
 #[test]
-fn estimate_counts_tool_result_image_payloads() {
-    let data = "A".repeat(4_000);
-    let text_only = estimate_with_tool_result_images(Vec::new());
-    let with_image = estimate_with_tool_result_images(vec![ilar::session::ImageContent {
+fn estimate_counts_tool_result_images_by_their_cost_not_their_bytes() {
+    let image = |bytes: usize| ilar::session::ImageContent {
         media_type: "image/png".into(),
-        data: data.clone(),
-    }]);
+        data: "A".repeat(bytes),
+    };
+    let text_only = estimate_with_tool_result_images(Vec::new());
+    let small = estimate_with_tool_result_images(vec![image(4_000)]);
+    let enormous = estimate_with_tool_result_images(vec![image(4_000_000)]);
 
-    assert_eq!(with_image - text_only, (data.len() / 4) as u64);
+    assert!(small > text_only, "an image is not free");
+    assert_eq!(
+        small, enormous,
+        "a thousand times the payload is not a thousand times the cost"
+    );
+    assert!(
+        enormous - text_only < 3_000,
+        "one image cannot dominate the estimate"
+    );
 }
 
 fn estimate_with_tool_result_images(images: Vec<ilar::session::ImageContent>) -> u64 {

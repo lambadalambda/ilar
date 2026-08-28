@@ -259,8 +259,13 @@ fn estimate_tokens_from(
                 .iter()
                 .map(|block| match block {
                     crate::session::ContentBlock::Text { text } => text.chars().count(),
-                    // Base64 tokenizes roughly like text: count it.
-                    crate::session::ContentBlock::Image { image } => image.data.len(),
+                    // This sum is characters, divided by four below; an
+                    // image's cost is already tokens, so it enters
+                    // multiplied. Its base64 length says nothing about
+                    // what a vision model bills.
+                    crate::session::ContentBlock::Image { image } => {
+                        crate::image::estimated_tokens(image) as usize * 4
+                    }
                     crate::session::ContentBlock::Thinking { text, .. } => text.chars().count(),
                     crate::session::ContentBlock::ReasoningSummary { .. } => 0,
                     crate::session::ContentBlock::Reasoning { item } => {
@@ -274,7 +279,10 @@ fn estimate_tokens_from(
                         content, images, ..
                     } => {
                         content.chars().count()
-                            + images.iter().map(|image| image.data.len()).sum::<usize>()
+                            + images
+                                .iter()
+                                .map(|image| crate::image::estimated_tokens(image) as usize * 4)
+                                .sum::<usize>()
                     }
                 })
                 .sum::<usize>()
@@ -496,6 +504,47 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// A session one exchange old must not compact just because the
+    /// user attached screenshots. The estimate is
+    /// `max(reported, chars/4)`, so an image counted by its base64
+    /// length dominated everything the provider actually reported.
+    #[test]
+    fn attached_screenshots_do_not_trip_the_threshold_on_their_own() {
+        // A real screenshot's payload is megabytes of base64 behind a
+        // readable header. Padding a small PNG reproduces that shape
+        // without encoding noise: the estimator reads dimensions from
+        // the header, and the old one read the length.
+        let png = crate::image::encode_png(800, 600, &vec![0u8; 800 * 600 * 4]).expect("encodes");
+        let shots: Vec<_> = (0..6)
+            .map(|_| {
+                let mut image = crate::session::ImageContent::png(&png);
+                image.data.push_str(&"A".repeat(2_600_000));
+                image
+            })
+            .collect();
+        let base64_chars: usize = shots.iter().map(|image| image.data.len()).sum();
+        assert!(
+            base64_chars / 4 > 1_000_000,
+            "the old estimate has to be the huge one for this to prove anything"
+        );
+
+        let mut content = vec![ContentBlock::Text {
+            text: "make a web version of this".into(),
+        }];
+        content.extend(shots.into_iter().map(|image| ContentBlock::Image { image }));
+        let transcript = vec![ChatMessage {
+            role: Role::User,
+            content,
+        }];
+
+        let estimated = super::estimate_tokens_from(&[], &transcript, None, &[]);
+
+        assert!(
+            estimated < trigger_tokens(272_000, 0.85),
+            "a first message with screenshots compacted itself: {estimated}"
+        );
     }
 
     #[test]

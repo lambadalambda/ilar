@@ -160,8 +160,82 @@ pub fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// Roughly what a vision model bills for an image.
+///
+/// Not its base64 length, which is transport: providers tile an image
+/// and charge by pixel area (Anthropic documents width × height / 750,
+/// and OpenAI's tiling lands in the same neighbourhood), capped well
+/// below what a screenshot's bytes would suggest. Counting the base64
+/// instead once read six screenshots as 3.2 M tokens where the provider
+/// billed 25 k, which compacted a session one exchange old.
+///
+/// Only the header is decoded — dimensions live in the first bytes —
+/// and an image whose dimensions cannot be read takes the flat estimate
+/// rather than its size, because size is the thing that misleads.
+pub fn estimated_tokens(image: &ImageContent) -> u64 {
+    const PIXELS_PER_TOKEN: u64 = 750;
+    const FALLBACK: u64 = 1_600;
+    const FLOOR: u64 = 200;
+    const CEILING: u64 = 2_400;
+
+    match header_dimensions(&image.data) {
+        Some((width, height)) => {
+            (u64::from(width) * u64::from(height) / PIXELS_PER_TOKEN).clamp(FLOOR, CEILING)
+        }
+        None => FALLBACK,
+    }
+}
+
+/// Width and height from the first bytes of a base64 payload, for the
+/// formats that put them there.
+fn header_dimensions(data: &str) -> Option<(u32, u32)> {
+    use base64::Engine as _;
+
+    // 64 base64 characters decode to 48 bytes: past PNG's IHDR, and a
+    // whole number of quantums so the engine takes the slice as-is.
+    let head = data.get(..64).unwrap_or(data);
+    let head = head.get(..head.len() - head.len() % 4)?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(head)
+        .ok()?;
+    png_dimensions(&bytes)
+}
+
+/// PNG puts IHDR first: width and height are big-endian u32 at 16..24.
+fn png_dimensions(head: &[u8]) -> Option<(u32, u32)> {
+    if head.len() < 24 || !head.starts_with(b"\x89PNG\r\n\x1a\n") || &head[12..16] != b"IHDR" {
+        return None;
+    }
+    let width = u32::from_be_bytes(head[16..20].try_into().ok()?);
+    let height = u32::from_be_bytes(head[20..24].try_into().ok()?);
+    (width > 0 && height > 0).then_some((width, height))
+}
+
 #[cfg(test)]
 mod tests {
+    /// The bug this replaced: six screenshots estimated to 3.2 M tokens
+    /// from their base64 length, against a provider that billed 25 k for
+    /// the request that carried them — so the next turn compacted a
+    /// conversation one exchange old.
+    #[test]
+    fn a_screenshot_is_billed_by_its_pixels_not_its_bytes() {
+        let pixels = vec![0u8; 2560 * 1440 * 4];
+        let png = super::encode_png(2560, 1440, &pixels).expect("encodes");
+        let image = crate::session::ImageContent::png(&png);
+
+        let tokens = super::estimated_tokens(&image);
+        assert!(
+            (2000..=2400).contains(&tokens),
+            "a 2560x1440 screenshot costs about (w*h)/750, capped: {tokens}"
+        );
+        // Six of them are thousands of tokens, not millions.
+        assert!(tokens * 6 < 20_000, "{tokens}");
+
+        // An unreadable header takes the flat estimate, never the size.
+        let opaque = crate::session::ImageContent::new("image/jpeg", &vec![0u8; 3_000_000]);
+        assert_eq!(super::estimated_tokens(&opaque), 1_600);
+    }
+
     use super::*;
 
     #[test]
