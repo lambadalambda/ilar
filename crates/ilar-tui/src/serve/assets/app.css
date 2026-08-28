@@ -421,6 +421,34 @@ code.inline {
   font-weight: 650;
   color: var(--fg);
 }
+/* Headings and lists, the two block shapes a structured reply is made
+   of. Sized close to the body text: this is a transcript, not an
+   article, and a 2em <h1> in the middle of one shouts. */
+.md-h {
+  font-weight: 650;
+  margin: 10px 0 2px;
+  overflow-wrap: anywhere;
+}
+.md-h1 {
+  font-size: 1.15em;
+}
+.md-h2 {
+  font-size: 1.08em;
+}
+.md-h3,
+.md-h4 {
+  font-size: 1em;
+  color: var(--dim);
+}
+.md-list {
+  margin: 4px 0;
+  padding-left: 1.4em;
+}
+.md-list li {
+  margin: 1px 0;
+  overflow-wrap: anywhere;
+}
+
 pre.code,
 pre.detail,
 pre.diff {
@@ -449,6 +477,10 @@ pre.diff .del {
 }
 pre.diff .hunk {
   color: var(--thought);
+}
+/* Unchanged lines are the frame, not the news. */
+pre.diff .ctx {
+  color: var(--dim);
 }
 
 /* One line per tool call: a small glyph, the name in bold, the argument
@@ -548,6 +580,14 @@ pre.diff .hunk {
   padding: 2px 8px 8px 30px;
   color: var(--dim);
   font-size: 13px;
+}
+/* A background task or job reporting back wears the same folded row as a
+   thought, in its own colour: it is news about work, not reasoning. */
+.note-task .thought-label {
+  color: var(--tool);
+}
+.note-job .thought-label {
+  color: var(--warn);
 }
 
 .note-row,

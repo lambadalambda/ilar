@@ -19,6 +19,7 @@
 //! GET  /api/sessions/{id}?from=&invocation=&limit=     one page, walking back
 //! GET  /api/sessions/{id}/events?from=&token=          SSE
 //! GET  /api/sessions/{id}/children
+//! GET  /api/sessions/{id}/invocations/{tool_call_id}   the child a task is writing
 //! GET  /api/sessions/{id}/results/{tool_use_id}        full untruncated text
 //! GET  /api/sessions/{id}/images/{event_id}/{n}        image bytes
 //! GET  /  /app.css  /app.js                            the page
@@ -109,9 +110,12 @@ use tokio::sync::broadcast;
 
 use super::drive::{Drive, DriveError, Fate, NewSession, TurnFailure};
 use super::view::{
-    invocation_slice, live_reset, project_event, project_events, project_live_delta, usage_totals,
+    has_invocation, invocation_slice, live_reset, project_event, project_live_delta, project_page,
+    usage_totals,
 };
-use super::watch::{LiveMessage, SessionEntry, TailEnd, TailMessage, Watcher, next_message};
+use super::watch::{
+    LiveMessage, LiveState, SessionEntry, TailEnd, TailMessage, Watcher, next_message,
+};
 
 /// Events per transcript page. P7's worst session is 906 events; five
 /// pages of it is a scroll, not a stall.
@@ -154,6 +158,10 @@ pub(crate) fn router(state: ServeState) -> Router {
         .route("/api/sessions/{id}", get(transcript))
         .route("/api/sessions/{id}/events", get(events))
         .route("/api/sessions/{id}/children", get(children))
+        .route(
+            "/api/sessions/{id}/invocations/{tool_call_id}",
+            get(invocation),
+        )
         .route("/api/sessions/{id}/results/{tool_use_id}", get(result_text))
         .route("/api/sessions/{id}/images/{event_id}/{n}", get(image))
         .route("/api/sessions/{id}/message", post(message))
@@ -545,6 +553,67 @@ async fn children(
     })))
 }
 
+/// Which child session a task call is writing to, while it is still
+/// writing.
+///
+/// The parent's log only learns the child's id when the task *finishes*,
+/// on `ToolResult.child_session_id` — so for the twenty minutes a
+/// subagent runs, the parent transcript holds a spinner and no way to
+/// reach the work. The link exists the whole time in the other
+/// direction: the child opens each turn with a
+/// [`SessionEvent::SubagentInvocation`] naming the parent tool call. So
+/// this walks the children the head cache already knows about, newest
+/// first, and answers with the first one whose log names this call.
+///
+/// `child_session_id: null` is a real answer, not a 404: a task that has
+/// only just started has no child log yet, and the page asks again.
+async fn invocation(
+    State(state): State<ServeState>,
+    Path((id, tool_call_id)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    let store = state.watcher.store().clone();
+    // Newest first, as the head cache orders them: a subagent that is
+    // running now is the child that was written last, so the common case
+    // stops on the first log it opens.
+    let children: Vec<String> = state
+        .watcher
+        .children(&id)
+        .into_iter()
+        .map(|entry| entry.head.id)
+        .collect();
+    let wanted = tool_call_id.clone();
+    let found = blocking(move || {
+        Ok(children
+            .into_iter()
+            .find(|child| names_call(&store, child, &wanted)))
+    })
+    .await?;
+    Ok(Json(json!({
+        "parent_tool_call_id": tool_call_id,
+        "child_session_id": found,
+    })))
+}
+
+/// Whether one child's log holds the invocation for `tool_call_id`.
+///
+/// A byte scan rules the file out before anything is parsed: an id the
+/// file does not contain at all cannot be in an event of it, and the
+/// alternative — folding every child of a busy parent, several megabytes
+/// each, on a route the page polls — is the expensive way to reach the
+/// same answer. A file that *does* contain the string is then read
+/// properly, because a tool input can quote an id as easily as an event
+/// can name one.
+fn names_call(store: &SessionStore, child: &str, tool_call_id: &str) -> bool {
+    let mentions = store
+        .session_path(child)
+        .and_then(std::fs::read_to_string)
+        // A log this reader cannot even read as text is one the parse
+        // below will not manage either.
+        .is_ok_and(|text| text.contains(tool_call_id));
+    mentions
+        && read_session(store, child).is_ok_and(|(events, _)| has_invocation(&events, tool_call_id))
+}
+
 // --------------------------------------------------------------- write
 
 /// A new session and its first turn. The id comes back immediately and
@@ -620,15 +689,21 @@ async fn transcript(
         Some(invocation) => invocation_slice(&events, invocation),
         None => &events[..],
     };
+    let head = state.watcher.head(&id);
+    // Whether anything is running this session right now, which is what
+    // decides between a tool that is working and a tool nothing will ever
+    // answer. A stalled turn counts as live: its scratch is still there,
+    // so its process may yet come back — "quiet" is not "killed".
+    let live = head
+        .as_ref()
+        .is_some_and(|entry| entry.state != LiveState::Idle);
     let (start, end) = page_bounds(view.len(), query.from, query.limit);
     Ok(Json(json!({
         "id": id,
-        "session": state
-            .watcher
-            .head(&id)
+        "session": head
             .as_ref()
             .map_or(Value::Null, |entry| summary(entry, &state.drive)),
-        "events": project_events(&view[start..end]),
+        "events": project_page(view, &view[start..end], live),
         "cursor": start,
         "has_more": start > 0,
         "count": view.len(),

@@ -221,6 +221,35 @@ fn user(text: &str) -> SessionEvent {
     }
 }
 
+/// A turn that calls one tool and stops there — the shape every
+/// unanswered-call test needs.
+fn calling(id: &str, name: &str, input: Value) -> SessionEvent {
+    SessionEvent::AssistantMessage {
+        id: new_id(),
+        model: "zai/glm-4.7".into(),
+        content: vec![ContentBlock::ToolCall {
+            id: id.into(),
+            name: name.into(),
+            input,
+            item_id: None,
+        }],
+        usage: Usage::default(),
+        stop_reason: "tool_use".into(),
+        ts: chrono::Utc::now(),
+    }
+}
+
+/// Backdate a live scratch, so a test can watch a turn go quiet without
+/// waiting a minute for it.
+fn age(path: &std::path::Path, age: Duration) {
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::now() - age))
+        .unwrap();
+}
+
 fn assistant(text: &str) -> SessionEvent {
     SessionEvent::AssistantMessage {
         id: new_id(),
@@ -645,6 +674,274 @@ async fn deleting_a_session_ends_its_stream() {
     let mut frames = Frames::open(&server, &format!("/api/sessions/{id}/events")).await;
     server.store.delete(&id).unwrap();
     assert_eq!(frames.next().await.event, "deleted");
+}
+
+/// A process killed mid-`bash` leaves its call unanswered forever. Both
+/// TUI paths sweep that to failed on load; the page has to be told the
+/// same thing, or it spins an animated "running…" beside a session pill
+/// that says idle. A live turn is the other half of the same field: a
+/// call nothing has answered *yet* is still running.
+#[tokio::test]
+async fn an_unanswered_tool_call_reads_as_failed_until_a_turn_is_actually_running() {
+    let server = Server::start(None);
+    let (id, mut session) = start_session(&server.store, "/tmp/alpha");
+    session.append(user("run the tests")).unwrap();
+    session
+        .append(calling(
+            "bash-1",
+            "bash",
+            serde_json::json!({"command": "sleep 900"}),
+        ))
+        .unwrap();
+
+    let call = |page: &Value| page["events"][2]["content"][0].clone();
+    let page = server.json(&format!("/api/sessions/{id}")).await;
+    assert_eq!(call(&page)["name"], "bash");
+    assert_eq!(
+        call(&page)["state"],
+        "failed",
+        "nothing is running this session, so nothing will ever answer it"
+    );
+
+    // A turn starts: the same unanswered call is the tool that is
+    // running this second.
+    let mut live = ilar::session::LiveScratch::start(&server.store, &id);
+    live.tool_started("bash-1", "bash", "sleep 900");
+    server
+        .sessions_once(
+            |sessions| sessions.iter().any(|row| row["state"] == "working"),
+            "showed a working session",
+        )
+        .await;
+    let page = server.json(&format!("/api/sessions/{id}")).await;
+    assert_eq!(call(&page)["state"], "running");
+
+    // A turn that has gone quiet still counts as one. `stalled` is a
+    // scratch nobody has written to for a minute — a very long tool run
+    // as often as a dead process — and the listing row says exactly that
+    // beside the row, so the honest reading is "still running, quietly"
+    // rather than a verdict this server cannot support. A process killed
+    // hard leaves its scratch behind until the next ilar sweeps it; that
+    // window is the deliberate cost.
+    age(live.path(), Duration::from_secs(300));
+    server
+        .sessions_once(
+            |sessions| sessions.iter().any(|row| row["state"] == "stalled"),
+            "showed a stalled session",
+        )
+        .await;
+    let page = server.json(&format!("/api/sessions/{id}")).await;
+    assert_eq!(call(&page)["state"], "running");
+
+    // And an answered call carries no state: its result speaks for it.
+    session
+        .append(SessionEvent::ToolResult {
+            id: new_id(),
+            tool_use_id: "bash-1".into(),
+            content: "ok".into(),
+            is_error: false,
+            images: Vec::new(),
+            child_session_id: None,
+            state: None,
+            ts: chrono::Utc::now(),
+        })
+        .unwrap();
+    drop(live);
+    let page = server.json(&format!("/api/sessions/{id}")).await;
+    assert_eq!(call(&page)["state"], Value::Null);
+}
+
+/// A subagent's work has to be reachable while it works. The parent's log
+/// only names the child when the task *finishes*
+/// (`ToolResult.child_session_id`), so the link that exists throughout is
+/// the child's own `subagent_invocation` — and this route is what walks
+/// it back.
+#[tokio::test]
+async fn a_running_subagents_child_session_is_reachable_before_the_task_finishes() {
+    let server = Server::start(None);
+    let (parent, mut parent_session) = start_session(&server.store, "/tmp/alpha");
+    parent_session
+        .append(calling(
+            "task-1",
+            "task",
+            serde_json::json!({"description": "review this", "subagent_type": "explore"}),
+        ))
+        .unwrap();
+
+    // The task is running: no result, therefore no child_session_id.
+    let page = server.json(&format!("/api/sessions/{parent}")).await;
+    let call = &page["events"][1]["content"][0];
+    assert_eq!(call["name"], "task");
+    assert_eq!(call["state"], "failed", "nothing is running it here");
+
+    let (child, mut child_session) = start_child(&server.store, &parent);
+    child_session
+        .append(SessionEvent::SubagentInvocation {
+            id: new_id(),
+            parent_tool_call_id: "task-1".into(),
+            ts: chrono::Utc::now(),
+        })
+        .unwrap();
+    child_session.append(user("review this")).unwrap();
+    child_session.append(assistant("looking")).unwrap();
+
+    // The children cache is fed by the directory poll, so the answer
+    // arrives within a tick — which is why the page keeps asking.
+    let mut answer = Value::Null;
+    for _ in 0..100 {
+        answer = server
+            .json(&format!("/api/sessions/{parent}/invocations/task-1"))
+            .await;
+        if answer["child_session_id"] != Value::Null {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(answer["child_session_id"], child.as_str());
+    assert_eq!(answer["parent_tool_call_id"], "task-1");
+
+    // And the slice that link leads to is the child's turn.
+    let slice = server
+        .json(&format!("/api/sessions/{child}?invocation=task-1"))
+        .await;
+    assert_eq!(slice["events"][0]["text"], "review this");
+
+    // A call no child has claimed is `null`, not a 404: a task that has
+    // only just started has not written its first line yet.
+    let missing = server
+        .json(&format!("/api/sessions/{parent}/invocations/task-9"))
+        .await;
+    assert_eq!(missing["child_session_id"], Value::Null);
+}
+
+/// A child longer than one page keeps its head reachable: the slice pages
+/// backwards exactly as the centre pane does, so the page has something
+/// to put behind a "load earlier" instead of dropping the beginning in
+/// silence.
+#[tokio::test]
+async fn a_child_invocation_pages_backwards_like_any_other_transcript() {
+    let server = Server::start(None);
+    let (parent, _parent_session) = start_session(&server.store, "/tmp/alpha");
+    let (child, mut session) = start_child(&server.store, &parent);
+    session
+        .append(SessionEvent::SubagentInvocation {
+            id: new_id(),
+            parent_tool_call_id: "task-1".into(),
+            ts: chrono::Utc::now(),
+        })
+        .unwrap();
+    for turn in 0..8 {
+        session.append(user(&format!("step {turn}"))).unwrap();
+    }
+
+    let page = server
+        .json(&format!("/api/sessions/{child}?invocation=task-1&limit=5"))
+        .await;
+    assert_eq!(page["count"], 8);
+    assert_eq!(page["cursor"], 3);
+    assert_eq!(page["has_more"], true, "the head is off this window");
+    assert_eq!(page["events"][0]["text"], "step 3");
+
+    let head = server
+        .json(&format!(
+            "/api/sessions/{child}?invocation=task-1&from=3&limit=5"
+        ))
+        .await;
+    assert_eq!(head["cursor"], 0);
+    assert_eq!(head["has_more"], false);
+    assert_eq!(head["events"][0]["text"], "step 0");
+}
+
+/// A completed background task reports back through a user message,
+/// because that is the only way to hand a running session text. Nobody
+/// typed it: the wire carries the parse the TUI's task row makes, so the
+/// page can show a headline with the report behind a click instead of raw
+/// XML under a "you" label.
+#[tokio::test]
+async fn a_task_notification_reaches_the_page_already_unwrapped() {
+    let server = Server::start(None);
+    let (id, mut session) = start_session(&server.store, "/tmp/alpha");
+    session
+        .append(user(
+            "<task-notification>\nTask \"sweep the web\" completed.\n<result>\nDone.\n\
+             Two fixes.\n</result>\n</task-notification>",
+        ))
+        .unwrap();
+    session.append(user("thanks")).unwrap();
+
+    let page = server.json(&format!("/api/sessions/{id}")).await;
+    let note = &page["events"][1]["notification"];
+    assert_eq!(note["kind"], "task");
+    assert_eq!(note["headline"], "sweep the web completed.");
+    assert_eq!(note["body"], "Done.\nTwo fixes.");
+    assert!(
+        page["events"][1]["text"]
+            .as_str()
+            .unwrap()
+            .contains("<task-notification>"),
+        "the envelope still crosses verbatim"
+    );
+    assert_eq!(
+        page["events"][2]["notification"],
+        Value::Null,
+        "an ordinary message carries the key and nothing in it"
+    );
+}
+
+/// The web showed a wall of escaped JSON where the TUI shows a coloured
+/// diff. The ± lines now cross the wire as data, computed from the raw
+/// input — which is the only copy that survives past the 16 KiB cap on
+/// `detail`.
+#[tokio::test]
+async fn an_edit_and_a_write_carry_a_diff_the_page_can_colour() {
+    let server = Server::start(None);
+    let (id, mut session) = start_session(&server.store, "/tmp/alpha");
+    session
+        .append(calling(
+            "edit-1",
+            "edit",
+            serde_json::json!({"path": "f.rs", "old_string": "a\nb\nc", "new_string": "a\nB\nc"}),
+        ))
+        .unwrap();
+    session
+        .append(calling(
+            "write-1",
+            "write",
+            serde_json::json!({"path": "new.rs", "content": "one\ntwo"}),
+        ))
+        .unwrap();
+    session
+        .append(calling(
+            "read-1",
+            "read",
+            serde_json::json!({"path": "f.rs"}),
+        ))
+        .unwrap();
+
+    let page = server.json(&format!("/api/sessions/{id}")).await;
+    let diff = &page["events"][1]["content"][0]["diff"];
+    assert_eq!(
+        *diff,
+        serde_json::json!([
+            {"kind": "ctx", "text": "a"},
+            {"kind": "del", "text": "b"},
+            {"kind": "add", "text": "B"},
+            {"kind": "ctx", "text": "c"},
+        ])
+    );
+    assert_eq!(
+        page["events"][2]["content"][0]["diff"],
+        serde_json::json!([
+            {"kind": "add", "text": "one"},
+            {"kind": "add", "text": "two"},
+        ]),
+        "a write is its file, as pure additions"
+    );
+    assert_eq!(
+        page["events"][3]["content"][0]["diff"],
+        Value::Null,
+        "every other tool has no diff, and the key is still there"
+    );
 }
 
 /// The projection deliberately drops bulk: the full text and the image

@@ -198,15 +198,59 @@ function inline(text) {
   return out;
 }
 
+// The two block shapes a structured reply is actually made of. Both
+// demand the space after the marker and at most three columns of indent
+// — markdown's own rule, and the thing that keeps this from guessing:
+// `#include`, `-42` and `*ptr` are not markdown, a four-space indented
+// code block is not a list, and a `# comment` inside a fence never
+// reaches here because the fence is consumed first. Tables are
+// deliberately left as source — the parser they need is bigger than
+// everything above. Nested lists flatten into one level, which is the
+// price of not writing that parser either.
+const HEADING = /^(#{1,6})[ \t]+(\S.*)$/;
+const BULLET = /^ {0,3}[-*+][ \t]+(\S.*)$/;
+const ORDERED = /^ {0,3}(\d{1,9})[.)][ \t]+(\S.*)$/;
+
 function richText(text) {
   const lines = String(text === null || text === undefined ? "" : text).split("\n");
   const out = [];
   let buffer = [];
+  let list = null;
   let fenced = null;
+  // Invariant: prose and an open list are never both pending. A line
+  // that would break it closes the other first, which is what keeps
+  // `out` in the order the text was written — two accumulators emptied
+  // in whichever order they filled would print a paragraph before the
+  // list it followed.
   const flush = () => {
+    // Blank lines at either edge are the seam a heading or a list leaves
+    // behind, and `.text` is pre-wrap, so they would render as empty
+    // rows.
+    while (buffer.length && !buffer[0].trim()) buffer.shift();
+    while (buffer.length && !buffer[buffer.length - 1].trim()) buffer.pop();
     const body = buffer.join("\n");
     if (body.trim()) out.push(html`<div class="text">${inline(body)}</div>`);
     buffer = [];
+  };
+  // One <ul>/<ol> per run of items, so a list is one block on screen
+  // rather than a stack of orphaned lines.
+  const flushList = () => {
+    if (!list) return;
+    const items = list.items.map((item, index) => html`<li key=${index}>${inline(item)}</li>`);
+    out.push(
+      list.ordered
+        ? html`<ol class="md-list" start=${list.start}>
+            ${items}
+          </ol>`
+        : html`<ul class="md-list">
+            ${items}
+          </ul>`,
+    );
+    list = null;
+  };
+  const close = () => {
+    flushList();
+    flush();
   };
   for (const line of lines) {
     const fence = /^\s*```/.test(line);
@@ -217,15 +261,49 @@ function richText(text) {
       } else {
         fenced.push(line);
       }
-    } else if (fence) {
-      flush();
-      fenced = [];
-    } else {
-      buffer.push(line);
+      continue;
     }
+    if (fence) {
+      close();
+      fenced = [];
+      continue;
+    }
+    const heading = HEADING.exec(line);
+    if (heading) {
+      close();
+      out.push(
+        html`<div class=${"md-h md-h" + Math.min(heading[1].length, 4)}>
+          ${inline(heading[2])}
+        </div>`,
+      );
+      continue;
+    }
+    const bullet = BULLET.exec(line);
+    const ordered = bullet ? null : ORDERED.exec(line);
+    if (bullet || ordered) {
+      const wanted = Boolean(ordered);
+      if (list && list.ordered !== wanted) flushList();
+      // Only ever the prose that came *before* the list: the invariant
+      // says nothing was buffered while one was open.
+      flush();
+      if (!list) list = { ordered: wanted, start: ordered ? Number(ordered[1]) : 1, items: [] };
+      list.items.push(bullet ? bullet[1] : ordered[2]);
+      continue;
+    }
+    if (list) {
+      // An indented line under an item is the item, wrapped — which is
+      // how every model writes a long bullet. A blank line or a line
+      // starting in column zero ends the list instead.
+      if (/^[ \t]/.test(line) && line.trim()) {
+        list.items[list.items.length - 1] += " " + line.trim();
+        continue;
+      }
+      flushList();
+    }
+    buffer.push(line);
   }
   if (fenced !== null) out.push(html`<pre class="code"><code>${fenced.join("\n")}</code></pre>`);
-  flush();
+  close();
   return out;
 }
 
@@ -266,6 +344,71 @@ function Preformatted({ text, className }) {
   );
   if (!diff) return html`<pre class=${className || "detail"}>${body}</pre>`;
   return html`<pre class="diff">${lines}</pre>`;
+}
+
+// The projected diff for an edit or a write: `[{kind, text}]`, already
+// computed from the raw tool input server-side, so nothing here has to
+// guess whether a wall of escaped JSON was meant to be a diff. The marker
+// column is drawn rather than assumed, because the wire carries the kind
+// and the text separately — which is also what makes a copied line the
+// line as it will be on disk plus one leading character, exactly like
+// every other diff.
+const diffMark = (kind) => (kind === "add" ? "+" : kind === "del" ? "-" : " ");
+
+// Memoized on the array the wire sent, for the same reason
+// `Preformatted` is: an open row re-renders on every frame of a
+// streaming turn, and a four-hundred-line diff is four hundred vnodes
+// that cannot have changed while the array has not.
+function DiffBlock({ lines }) {
+  const rows = useMemo(
+    () =>
+      lines.map(
+        (line, index) =>
+          html`<span key=${index} class=${line.kind}>${diffMark(line.kind) + line.text + "\n"}</span
+            >`,
+      ),
+    [lines],
+  );
+  return html`<pre class="diff">${rows}</pre>`;
+}
+
+// A tool call's input, as the surface that can show it best: the diff
+// when the projection sent one, the redacted pretty input otherwise.
+function ToolInput({ call }) {
+  if (call.diff && call.diff.length) return html`<${DiffBlock} lines=${call.diff} />`;
+  if (!call.detail) return null;
+  return html`<${Preformatted} text=${call.detail} />`;
+}
+
+// Whether a call with no result is one nothing will ever answer. Two
+// sources, because they know at different times: `state: "failed"` is the
+// server's verdict when the page was loaded — the sweep both TUI paths do
+// on load — and `live === false` is the listing's word about the session
+// *now*, which is what catches the other direction: a tab open while the
+// process is killed folded that call in over SSE, where a single event
+// can only ever say "running". Without the second the page spins an
+// animated row beside a session pill reading "idle", which is the bug
+// itself. `live` is undefined where liveness is not known, and then the
+// server's word stands alone.
+function unanswerable(call, live) {
+  return call.state === "failed" || live === false;
+}
+
+// What a tool row is: answered and how, still running, or failed.
+function toolState(call, result, live) {
+  if (result) return result.is_error ? "err" : "ok";
+  return unanswerable(call, live) ? "err" : "run";
+}
+
+const UNANSWERED = "no result — the session stopped before this tool finished";
+
+// The spinner is a claim that something is happening, so only a call that
+// really is in flight gets one; a swept call wears the cross the TUI's
+// failed row does.
+function toolGlyph(call, result, live, resting) {
+  if (result) return resting;
+  if (unanswerable(call, live)) return "✕";
+  return html`<span class="spinner" />`;
 }
 
 // The first line of something long, for a row that is still collapsed.
@@ -343,28 +486,30 @@ function Images({ sessionId, eventId, descriptors }) {
 // row is the affordance — clicking it opens the input detail and the
 // result, and a truncated result is fetched whole from its own route
 // only once someone asks for it.
-function ToolRow({ call, result, sessionId, cwd }) {
+function ToolRow({ call, result, sessionId, cwd, live }) {
   const [open, setOpen] = useState(false);
   const [full, setFull] = useState(null);
   const truncated = result && result.truncated;
 
   useEffect(() => {
     if (!open || !truncated || full !== null) return;
-    let live = true;
+    let alive = true;
     apiText(apiPath(sessionId, "/results/" + encodeURIComponent(result.tool_use_id)))
-      .then((text) => live && setFull(text))
-      .catch((error) => live && setFull("could not load the full result: " + message(error)));
+      .then((text) => alive && setFull(text))
+      .catch((error) => alive && setFull("could not load the full result: " + message(error)));
     return () => {
-      live = false;
+      alive = false;
     };
   }, [open, truncated, full, sessionId, result && result.tool_use_id]);
 
-  const state = !result ? "run" : result.is_error ? "err" : "ok";
+  const state = toolState(call, result, live);
+  const dead = unanswerable(call, live);
   const body = open
     ? html`
         <div class="tool-body">
-          ${call.detail && html`<${Preformatted} text=${call.detail} />`}
-          ${!result && html`<p class="note">running…</p>`}
+          <${ToolInput} call=${call} />
+          ${!result &&
+          html`<p class=${dead ? "note error" : "note"}>${dead ? UNANSWERED : "running…"}</p>`}
           ${result &&
           (result.text || full) &&
           html`<${Preformatted}
@@ -385,7 +530,7 @@ function ToolRow({ call, result, sessionId, cwd }) {
   return html`
     <div class=${"tool " + state + (open ? " open" : "")}>
       <button class="tool-line" type="button" onClick=${() => setOpen(!open)}>
-        <span class=${"glyph " + state}>${!result ? html`<span class="spinner" />` : glyph(call.name)}</span>
+        <span class=${"glyph " + state}>${toolGlyph(call, result, live, glyph(call.name))}</span>
         <span class="tool-name">${toolTitle(call.name)}</span>
         ${call.agent && call.agent.name && html`<span class="chip">${call.agent.name}</span>`}
         <span class="tool-args" title=${call.summary || ""}
@@ -397,30 +542,151 @@ function ToolRow({ call, result, sessionId, cwd }) {
   `;
 }
 
+// How often a still-running task asks again which child session it
+// spawned, and how often an open row re-reads what that child has
+// written since. The answer to the first only appears once the child has
+// written its first line, which is a moment after the tool starts.
+const CHILD_POLL_MS = 3000;
+// And how many times the lookup asks, because it is not free — it walks
+// the parent's children on the server. A subagent writes its first line
+// as it starts, so a minute of asking is already generous; a task that
+// never spawns one must not poll for the rest of the afternoon.
+const CHILD_LOOKUP_TRIES = 20;
+
+// A newer window of the same child slice, folded onto the one on screen.
+// Both name their canonical origin, so the head someone loaded earlier
+// survives a refresh — and a window that cannot be reconciled (a rewind,
+// a compaction) is replaced rather than spliced.
+function mergeSlice(current, fresh) {
+  if (!current) return fresh;
+  const keep = fresh.cursor - current.cursor;
+  if (keep < 0 || keep > current.events.length) return fresh;
+  return {
+    ...fresh,
+    events: current.events.slice(0, keep).concat(fresh.events),
+    cursor: current.cursor,
+    has_more: current.has_more,
+  };
+}
+
 // A task row's detail is a whole child transcript, fetched only when
 // someone opens it — the parent log holds a link, never the turns.
-function TaskRow({ call, result, sessionId, cwd }) {
+//
+// That link is `ToolResult.child_session_id`, and it is written when the
+// task *finishes*: waiting for it is what made a twenty-minute subagent a
+// bare spinner. The other direction exists throughout — the child writes
+// a `subagent_invocation` naming this call — so an unanswered row asks
+// the server to look it up, and keeps asking until the child appears.
+function TaskRow({ call, result, sessionId, cwd, live }) {
   const [open, setOpen] = useState(false);
-  const child = result && result.child_session_id;
+  const recorded = (result && result.child_session_id) || null;
+  const [found, setFound] = useState(null);
   const [page, setPage] = useState(null);
+  const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
+  const child = recorded || found;
+
+  // A call nothing will ever answer gets one look — its child may exist
+  // and hold the work it did before it died — but never a poll.
+  const dead = unanswerable(call, live);
+  useEffect(() => {
+    if (!open || recorded || found) return undefined;
+    let alive = true;
+    let tries = 0;
+    const look = () => {
+      tries += 1;
+      if (tries > CHILD_LOOKUP_TRIES && timer) clearInterval(timer);
+      return api(apiPath(sessionId, "/invocations/" + encodeURIComponent(call.id)))
+        // A child that has not written its first line yet is not an
+        // error, it is an answer of `null`: ask again.
+        .then((answer) => alive && answer.child_session_id && setFound(answer.child_session_id))
+        .catch(() => {});
+    };
+    // Only while the call could still be running: a finished task with no
+    // child in its result, or a swept one, has nothing more to find.
+    const timer = result || dead ? null : setInterval(look, CHILD_POLL_MS);
+    look();
+    return () => {
+      alive = false;
+      if (timer) clearInterval(timer);
+    };
+  }, [open, recorded, found, sessionId, call.id, Boolean(result), dead]);
+
+  // One window of the child's slice of this call: the newest page, or
+  // the one before `from`.
+  const slice = (childId, from) =>
+    api(
+      apiPath(
+        childId,
+        "?invocation=" + encodeURIComponent(call.id) + (from === undefined ? "" : "&from=" + from),
+      ),
+    );
 
   useEffect(() => {
-    if (!open || !child || page) return;
-    let live = true;
-    api(apiPath(child, "?invocation=" + encodeURIComponent(call.id)))
-      .then((loaded) => live && setPage(loaded))
-      .catch((failure) => live && setError(message(failure)));
+    if (!open || !child || page) return undefined;
+    let alive = true;
+    slice(child)
+      .then((loaded) => {
+        if (!alive) return;
+        setPage(loaded);
+        setError("");
+      })
+      .catch((failure) => alive && setError(message(failure)));
     return () => {
-      live = false;
+      alive = false;
     };
   }, [open, child, page, call.id]);
 
-  const state = !result ? "run" : result.is_error ? "err" : "ok";
+  // A subagent that is still working keeps writing: an open row follows
+  // it, the way the TUI's live preview does. A dropped poll is not news
+  // — the next one is three seconds away and the rows on screen are
+  // still true.
+  useEffect(() => {
+    if (!open || !child || result || dead) return undefined;
+    let alive = true;
+    const timer = setInterval(() => {
+      slice(child)
+        .then((fresh) => alive && setPage((current) => mergeSlice(current, fresh)))
+        .catch(() => {});
+    }, CHILD_POLL_MS);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, [open, child, Boolean(result), dead, call.id]);
+
+  // The child's own "load earlier". Without it a subagent longer than one
+  // page lost its head in silence: the slice is the newest 200 events and
+  // `has_more` said so with nothing to press.
+  const earlier = async () => {
+    if (pending || !page || !page.has_more) return;
+    setPending(true);
+    try {
+      const head = await slice(child, page.cursor);
+      setPage((current) =>
+        // The window moved under us (a reload): keep what is on screen.
+        !current || current.cursor !== page.cursor
+          ? current
+          : {
+              ...current,
+              events: head.events.concat(current.events),
+              cursor: head.cursor,
+              has_more: head.has_more,
+            },
+      );
+      setError("");
+    } catch (failure) {
+      setError(message(failure));
+    } finally {
+      setPending(false);
+    }
+  };
+
+  const state = toolState(call, result, live);
   return html`
     <div class=${"tool task " + state + (open ? " open" : "")}>
       <button class="tool-line" type="button" onClick=${() => setOpen(!open)}>
-        <span class=${"glyph " + state}>${!result ? html`<span class="spinner" />` : "◆"}</span>
+        <span class=${"glyph " + state}>${toolGlyph(call, result, live, "◆")}</span>
         <span class="tool-name">Task</span>
         ${call.agent && call.agent.name && html`<span class="chip">${call.agent.name}</span>`}
         <span class="tool-args" title=${call.summary || ""}
@@ -430,17 +696,25 @@ function TaskRow({ call, result, sessionId, cwd }) {
       ${open &&
       html`
         <div class="tool-body">
-          ${call.detail && html`<${Preformatted} text=${call.detail} />`}
-          ${!child && html`<p class="note">${result ? "no child session recorded" : "running…"}</p>`}
+          <${ToolInput} call=${call} />
+          ${!child &&
+          html`<p class=${dead ? "note error" : "note"}>
+            ${result ? "no child session recorded" : dead ? UNANSWERED : "starting the subagent…"}
+          </p>`}
           ${error && html`<p class="note">${error}</p>`}
-          ${child &&
-          !page &&
-          !error &&
-          html`<p class="note">loading…</p>`}
+          ${child && !page && !error && html`<p class="note">loading…</p>`}
           ${page &&
           html`
             <div class="child">
-              ${pageRows(page.events, page.cursor, child, cwd)}
+              ${page.has_more &&
+              html`
+                <div class="earlier">
+                  <button type="button" disabled=${pending} onClick=${earlier}>
+                    ${pending ? "loading…" : "load earlier"}
+                  </button>
+                </div>
+              `}
+              ${pageRows(page.events, page.cursor, child, cwd, sessionLive(page.session))}
               <a class="link" href=${"#/s/" + encodeURIComponent(child)}>open the child session</a>
             </div>
           `}
@@ -464,6 +738,27 @@ function ThinkingRow({ text, label }) {
         <span class="thought-preview">${inline(preview(text, 120))}</span>
       </button>
       ${open && html`<div class="thought-body">${richText(text)}</div>`}
+    </div>
+  `;
+}
+
+// A background task or job reporting back. The envelope it arrives in is
+// a user message only because that is the only way to hand a running
+// session text — nobody typed it, so it does not wear the "you" label,
+// and its report sits behind a click the way the TUI's task/job rows do.
+// The parse is the server's: the wire carries the headline and the body
+// already split.
+function NoteRow({ note }) {
+  const [open, setOpen] = useState(false);
+  const body = note.body || "";
+  return html`
+    <div class=${"thought note-" + note.kind + (open ? " open" : "")}>
+      <button class="thought-line" type="button" onClick=${() => setOpen(!open)}>
+        <span class="glyph">${body ? (open ? "▾" : "▸") : "·"}</span>
+        <span class="thought-label">${note.kind}</span>
+        <span class="thought-preview">${inline(preview(note.headline, 120))}</span>
+      </button>
+      ${open && body && html`<div class="thought-body">${richText(body)}</div>`}
     </div>
   `;
 }
@@ -495,7 +790,7 @@ function compactionCut(events, base) {
 // would therefore change on every surviving row — preact would unmount
 // the list, collapsing open tool rows and throwing away results already
 // fetched — while the canonical index does not move.
-function eventRows(events, sessionId, cwd, offset) {
+function eventRows(events, sessionId, cwd, offset, live) {
   const results = new Map();
   for (const event of events) {
     if (event.type === "tool_result") results.set(event.tool_use_id, event);
@@ -507,13 +802,21 @@ function eventRows(events, sessionId, cwd, offset) {
     const key = event.id || "@" + (base + index);
     switch (event.type) {
       case "user_message":
-        rows.push(html`
-          <div class="block user" key=${key}>
-            <div class="who">you</div>
-            ${richText(event.text)}
-            <${Images} sessionId=${sessionId} eventId=${event.id} descriptors=${event.images} />
-          </div>
-        `);
+        rows.push(
+          event.notification
+            ? html`<${NoteRow} key=${key} note=${event.notification} />`
+            : html`
+                <div class="block user" key=${key}>
+                  <div class="who">you</div>
+                  ${richText(event.text)}
+                  <${Images}
+                    sessionId=${sessionId}
+                    eventId=${event.id}
+                    descriptors=${event.images}
+                  />
+                </div>
+              `,
+        );
         break;
       case "assistant_message":
         (event.content || []).forEach((block, at) => {
@@ -538,6 +841,7 @@ function eventRows(events, sessionId, cwd, offset) {
                 result=${result}
                 sessionId=${sessionId}
                 cwd=${cwd}
+                live=${live}
               />`,
             );
           }
@@ -577,11 +881,21 @@ function eventRows(events, sessionId, cwd, offset) {
   return rows;
 }
 
-// A window onto a log — the centre pane's, or a child invocation's —
-// cut at its compaction and keyed against its own canonical origin.
-function pageRows(events, cursor, sessionId, cwd) {
+// A window onto a log — the centre pane's, or a child invocation's — cut
+// at its compaction and keyed against its own canonical origin. `live` is
+// what that log's own session is doing right now, or `undefined` where
+// nobody has said: an unanswered tool row reads it to tell a tool that is
+// running from one that was killed.
+function pageRows(events, cursor, sessionId, cwd, live) {
   const cut = compactionCut(events, cursor);
-  return eventRows(events.slice(cut), sessionId, cwd, cursor + cut);
+  return eventRows(events.slice(cut), sessionId, cwd, cursor + cut, live);
+}
+
+// A session is live when something is running a turn on it — working, or
+// working and quiet. `undefined` when no listing row or transcript header
+// has said, which is not the same as "idle".
+function sessionLive(session) {
+  return session && session.state ? session.state !== "idle" : undefined;
 }
 
 // ------------------------------------------------- streaming tail row
@@ -1434,7 +1748,12 @@ function Center({ id, view, session, onDrawer }) {
 
   const head = view.session || session || {};
   const title = head.title || id || "";
-  const rows = id ? pageRows(view.events, view.base, id, head.cwd) : [];
+  // The listing's word first: it is three seconds old at worst, while the
+  // transcript's header is as old as the page load — and a session killed
+  // since then is exactly the case a spinning row has to notice.
+  const rows = id
+    ? pageRows(view.events, view.base, id, head.cwd, sessionLive(session || view.session))
+    : [];
 
   return html`
     <main class="center">
