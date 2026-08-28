@@ -51,9 +51,11 @@ pub enum LoopEvent {
         result: String,
         child_session_id: Option<String>,
     },
-    /// A message the user sent mid-turn, now delivered to the model.
+    /// A message the user sent mid-turn, now delivered to the model,
+    /// with whatever was attached to it.
     Steered {
         text: String,
+        images: Vec<crate::session::ImageContent>,
     },
     ProviderRetry {
         attempt: usize,

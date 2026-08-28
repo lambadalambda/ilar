@@ -434,19 +434,24 @@ impl App {
                 )
             })
             .collect();
-        let entries: Vec<(&str, &String)> = attachments
-            .iter()
+        // A waiting message says what rides with it: the strip has one
+        // line per entry, so the attachments are counted here where the
+        // transcript row lists them.
+        let entries: Vec<(&str, String)> = attachments
+            .into_iter()
             .map(|label| ("attached · sends with your next message", label))
-            .chain(
-                self.pending_steers
-                    .iter()
-                    .map(|text| ("steering · next step", text)),
-            )
-            .chain(
-                self.queued_messages
-                    .iter()
-                    .map(|text| ("queued · when the turn ends", text)),
-            )
+            .chain(self.pending_steers.iter().map(|message| {
+                (
+                    "steering · next step",
+                    crate::transcript::pending_summary(message),
+                )
+            }))
+            .chain(self.queued_messages.iter().map(|message| {
+                (
+                    "queued · when the turn ends",
+                    crate::transcript::pending_summary(message),
+                )
+            }))
             .collect();
         if entries.is_empty() {
             return Vec::new();

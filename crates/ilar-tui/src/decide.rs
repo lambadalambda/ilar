@@ -283,12 +283,11 @@ pub(crate) const ASIDE_USAGE: &str = "usage: /btw <question>";
 /// What a submitted prompt becomes. The decision (`submit_target`) and
 /// the payload travel together, so a call site cannot route the text
 /// one way while believing it decided another.
-pub(crate) fn submit(
-    state: &LoopState,
-    busy: bool,
-    attachments: usize,
-    text: String,
-) -> Vec<Intent> {
+///
+/// Attachments are not asked about: whatever is pending on the prompt
+/// rides the message wherever it goes — a fresh turn, a steer or the
+/// queue — so there is nothing here to refuse over.
+pub(crate) fn submit(state: &LoopState, busy: bool, text: String) -> Vec<Intent> {
     // Maintenance commands must never become steering text for the model.
     // An aside is read-only and runs beside anything — mid-turn is
     // exactly when it is wanted, and it must never become steering
@@ -315,21 +314,7 @@ pub(crate) fn submit(
             )];
         }
     }
-    let target = submit_target(state, busy);
-    // Attached images ride a fresh turn only: steering and queueing
-    // carry text, and silently dropping the images would be worse than
-    // making the user wait. The text goes back into the input.
-    if attachments > 0 && target != SubmitTarget::StartTurn {
-        return vec![
-            Intent::PasteInput(text),
-            Intent::Notice(
-                "attached images send with a fresh turn — wait for this one to end (Esc discards them)"
-                    .into(),
-                NoticeLevel::Warning,
-            ),
-        ];
-    }
-    match target {
+    match submit_target(state, busy) {
         SubmitTarget::StartTurn => vec![Intent::StartTurn(text)],
         SubmitTarget::Steer => vec![Intent::Steer(text)],
         SubmitTarget::Queue => vec![Intent::Queue(text)],
@@ -496,15 +481,15 @@ mod tests {
         // Steerable and running — a plain message would steer, but a
         // /btw runs beside the turn instead of talking into it.
         assert_eq!(
-            submit(&running, true, 0, "/btw which port was it?".into()),
+            submit(&running, true, "/btw which port was it?".into()),
             vec![Intent::Aside("which port was it?".into())]
         );
         assert_eq!(
-            submit(&idle(), false, 0, "/btw which port was it?".into()),
+            submit(&idle(), false, "/btw which port was it?".into()),
             vec![Intent::Aside("which port was it?".into())]
         );
         assert_eq!(
-            submit(&running, true, 0, "/btw".into()),
+            submit(&running, true, "/btw".into()),
             vec![Intent::Notice(
                 "usage: /btw <question>".into(),
                 NoticeLevel::Warning,
@@ -521,14 +506,14 @@ mod tests {
         };
 
         assert_eq!(
-            submit(&running, true, 0, "/compact".into()),
+            submit(&running, true, "/compact".into()),
             vec![Intent::Notice(
                 "wait for the current operation before /compact".into(),
                 NoticeLevel::Warning,
             )]
         );
         assert_eq!(
-            submit(&running, true, 0, "/compact now".into()),
+            submit(&running, true, "/compact now".into()),
             vec![Intent::Notice(
                 "usage: /compact".into(),
                 NoticeLevel::Warning,
@@ -696,7 +681,7 @@ mod tests {
     #[test]
     fn submitted_text_becomes_one_intent_carrying_it() {
         assert_eq!(
-            submit(&idle(), false, 0, "hi".into()),
+            submit(&idle(), false, "hi".into()),
             vec![Intent::StartTurn("hi".into())]
         );
         let steerable = LoopState {
@@ -705,7 +690,7 @@ mod tests {
             ..idle()
         };
         assert_eq!(
-            submit(&steerable, true, 0, "go left".into()),
+            submit(&steerable, true, "go left".into()),
             vec![Intent::Steer("go left".into())]
         );
         let routed = LoopState {
@@ -714,27 +699,39 @@ mod tests {
             ..idle()
         };
         assert_eq!(
-            submit(&routed, true, 0, "later".into()),
+            submit(&routed, true, "later".into()),
             vec![Intent::Queue("later".into())]
         );
     }
 
+    /// The inverse of the rule this replaced: a submit with images
+    /// attached used to come back as `PasteInput` plus a warning, which
+    /// left the message in the box and the images pending. A message is
+    /// a message whatever is attached to it — the images travel with it
+    /// (see `apply_intent`), so the decision never mentions them.
     #[test]
-    fn attachments_hold_the_submit_until_a_fresh_turn() {
+    fn attachments_never_hold_a_submit_back() {
         let steerable = LoopState {
             turn_running: true,
             steerable: true,
             ..idle()
         };
-        let intents = submit(&steerable, true, 1, "look at this".into());
-        assert_eq!(intents[0], Intent::PasteInput("look at this".into()));
-        assert!(matches!(
-            &intents[1],
-            Intent::Notice(_, NoticeLevel::Warning)
-        ));
-        // Idle, the attachments ride the turn like any submit.
         assert_eq!(
-            submit(&idle(), false, 1, "look".into()),
+            submit(&steerable, true, "look at this".into()),
+            vec![Intent::Steer("look at this".into())]
+        );
+        // Running but unsteerable: the queue takes it, images and all.
+        let routed = LoopState {
+            turn_running: true,
+            steerable: false,
+            ..idle()
+        };
+        assert_eq!(
+            submit(&routed, true, "look at this".into()),
+            vec![Intent::Queue("look at this".into())]
+        );
+        assert_eq!(
+            submit(&idle(), false, "look".into()),
             vec![Intent::StartTurn("look".into())]
         );
     }

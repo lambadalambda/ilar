@@ -13,13 +13,46 @@ use crate::tools::ToolRegistry;
 use crate::tools::executor::{CallOutcome, ToolCall, execute_calls_observed};
 use chrono::Utc;
 
-/// Messages the user sends while a turn is running, delivered to the
+/// A message the user sends while a turn is running, delivered to the
 /// model at the next step boundary rather than after the turn ends.
 ///
+/// Text and its attachments travel as one unit, for the same reason a
+/// stashed prompt does: steering is exactly when a screenshot is most
+/// useful — "no, look at this" — and delivering the words without the
+/// picture would be a message the model cannot act on.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Steer {
+    pub text: String,
+    pub images: Vec<crate::session::ImageContent>,
+}
+
+impl Steer {
+    /// Nothing for the model to read. An attachment counts as content,
+    /// so only a blank message with nothing attached is blank.
+    pub fn is_blank(&self) -> bool {
+        self.text.trim().is_empty() && self.images.is_empty()
+    }
+}
+
+impl From<String> for Steer {
+    fn from(text: String) -> Self {
+        Self {
+            text,
+            images: Vec::new(),
+        }
+    }
+}
+
+impl From<&str> for Steer {
+    fn from(text: &str) -> Self {
+        Self::from(text.to_string())
+    }
+}
+
 /// Unbounded on purpose: a steer that blocks the UI thread would defeat
 /// the point, and the volume is bounded by how fast a person types.
-pub type SteerSender = tokio::sync::mpsc::UnboundedSender<String>;
-pub type SteerReceiver = tokio::sync::mpsc::UnboundedReceiver<String>;
+pub type SteerSender = tokio::sync::mpsc::UnboundedSender<Steer>;
+pub type SteerReceiver = tokio::sync::mpsc::UnboundedReceiver<Steer>;
 
 pub fn steer_channel() -> (SteerSender, SteerReceiver) {
     tokio::sync::mpsc::unbounded_channel()
@@ -38,12 +71,12 @@ fn last_compaction(session: &crate::session::Session) -> Option<&str> {
 }
 
 /// Take everything pending without waiting.
-fn drain_steers(steer: Option<&mut SteerReceiver>) -> Vec<String> {
+fn drain_steers(steer: Option<&mut SteerReceiver>) -> Vec<Steer> {
     let mut pending = Vec::new();
     if let Some(steer) = steer {
-        while let Ok(text) = steer.try_recv() {
-            if !text.trim().is_empty() {
-                pending.push(text);
+        while let Ok(message) = steer.try_recv() {
+            if !message.is_blank() {
+                pending.push(message);
             }
         }
     }
@@ -1230,7 +1263,7 @@ async fn run_turn_inner(
         .collect();
     // Steers drained at the end of a step, waiting to be appended at the
     // top of the next one.
-    let mut pending_steers: Vec<String> = Vec::new();
+    let mut pending_steers: Vec<Steer> = Vec::new();
     while iterations < config.max_iterations {
         if cancel.is_cancelled() {
             events.publish_terminal(LoopEvent::TurnDone {
@@ -1246,14 +1279,19 @@ async fn run_turn_inner(
         // results and break the pairing.
         pending_steers.extend(drain_steers(steer.as_mut()));
         if !pending_steers.is_empty() {
-            for text in pending_steers.drain(..) {
+            for Steer { text, images } in pending_steers.drain(..) {
+                // Whatever was attached rides along: the model sees the
+                // picture on its next step, exactly as it would on a
+                // fresh turn.
                 session.append(SessionEvent::UserMessage {
                     id: new_id(),
                     text: text.clone(),
-                    images: Vec::new(),
+                    images: images.clone(),
                     ts: Utc::now(),
                 })?;
-                events.publish(LoopEvent::Steered { text }, &cancel).await;
+                events
+                    .publish(LoopEvent::Steered { text, images }, &cancel)
+                    .await;
             }
             // New instructions get a fresh step budget rather than
             // inheriting whatever the interrupted work had left.

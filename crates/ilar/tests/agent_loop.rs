@@ -2192,17 +2192,36 @@ impl Tool for SteerOnCallTool {
 }
 
 /// Emits one steer while producing its first response, standing in for
-/// the user typing as the model is wrapping up.
+/// the user typing as the model is wrapping up. It keeps every request
+/// it was handed, so what the steer put in front of the model can be
+/// inspected the way `MockProvider::requests` allows.
 struct SteerWhileRespondingProvider {
     steer: ilar::agent::SteerSender,
     calls: AtomicUsize,
-    text: String,
+    steer_message: ilar::agent::Steer,
+    requests: Mutex<Vec<Request>>,
+}
+
+impl SteerWhileRespondingProvider {
+    fn new(steer: ilar::agent::SteerSender, steer_message: impl Into<ilar::agent::Steer>) -> Self {
+        Self {
+            steer,
+            calls: AtomicUsize::new(0),
+            steer_message: steer_message.into(),
+            requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn requests(&self) -> Vec<Request> {
+        self.requests.lock().unwrap().clone()
+    }
 }
 
 impl Provider for SteerWhileRespondingProvider {
-    fn stream(&self, _req: Request) -> anyhow::Result<EventStream> {
+    fn stream(&self, req: Request) -> anyhow::Result<EventStream> {
+        self.requests.lock().unwrap().push(req);
         if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
-            let _ = self.steer.send(self.text.clone());
+            let _ = self.steer.send(self.steer_message.clone());
         }
         Ok(Box::pin(futures::stream::iter(plain_turn("done"))))
     }
@@ -2314,11 +2333,7 @@ async fn a_steer_reaches_the_model_at_the_next_step() {
 async fn a_steer_that_drains_to_nothing_does_not_reopen_the_turn() {
     let (store, session_id) = temp_session("build");
     let (steer, steer_rx) = ilar::agent::steer_channel();
-    let provider = SteerWhileRespondingProvider {
-        steer: steer.clone(),
-        calls: AtomicUsize::new(0),
-        text: "   ".into(),
-    };
+    let provider = SteerWhileRespondingProvider::new(steer.clone(), "   ");
 
     let outcome = run_turn(
         &provider,
@@ -2354,11 +2369,7 @@ async fn a_steer_that_drains_to_nothing_does_not_reopen_the_turn() {
 async fn a_steer_reopens_a_finishing_turn() {
     let (store, session_id) = temp_session("build");
     let (steer, steer_rx) = ilar::agent::steer_channel();
-    let provider = SteerWhileRespondingProvider {
-        steer,
-        calls: AtomicUsize::new(0),
-        text: "one more thing".into(),
-    };
+    let provider = SteerWhileRespondingProvider::new(steer, "one more thing");
 
     let outcome = run_turn(
         &provider,
@@ -2385,6 +2396,65 @@ async fn a_steer_reopens_a_finishing_turn() {
     );
     let rendered = format!("{:?}", store.load(&session_id).unwrap().transcript());
     assert!(rendered.contains("one more thing"), "{rendered}");
+}
+
+/// A screenshot is most useful exactly when steering — "no, look at
+/// this" — so the images a steer carries must reach the session event
+/// and, through it, the very next provider request. They used to be
+/// dropped for an unconditional empty vec.
+#[tokio::test]
+async fn a_steer_carries_its_images_into_the_next_request() {
+    let (store, session_id) = temp_session("build");
+    let (steer, steer_rx) = ilar::agent::steer_channel();
+    let screenshot = ilar::session::ImageContent::png(b"screenshot bytes");
+    let provider = SteerWhileRespondingProvider::new(
+        steer,
+        ilar::agent::Steer {
+            text: "look at this".into(),
+            images: vec![screenshot.clone()],
+        },
+    );
+
+    let outcome = run_turn(
+        &provider,
+        &ToolRegistry::builtin(),
+        &store,
+        &session_id,
+        "do the thing",
+        &[],
+        None,
+        LoopConfig::default(),
+        events_channel().0,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+        Some(steer_rx),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, TurnOutcome::Completed);
+    let steered = store
+        .load(&session_id)
+        .unwrap()
+        .events()
+        .iter()
+        .find_map(|event| match event {
+            SessionEvent::UserMessage { text, images, .. } if text == "look at this" => {
+                Some(images.clone())
+            }
+            _ => None,
+        })
+        .expect("the steer was appended as a user message");
+    assert_eq!(steered, vec![screenshot.clone()], "appended without them");
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 2, "the steer reopened the turn");
+    let sent = requests[1]
+        .messages
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .any(|block| matches!(block, ContentBlock::Image { image } if image == &screenshot));
+    assert!(sent, "the model's next step never saw the picture");
 }
 
 /// Without a steer, a turn that stops stays stopped.

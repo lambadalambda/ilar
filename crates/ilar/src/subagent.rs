@@ -203,7 +203,9 @@ impl ChildSteers {
         let Some(sender) = entry.sender.as_ref() else {
             return false;
         };
-        if sender.send(text.clone()).is_err() {
+        // `task_message` is words only: a parent steering a child has
+        // nothing attached to hand it.
+        if sender.send(text.clone().into()).is_err() {
             return false;
         }
         entry.pending.push(text);
@@ -2044,7 +2046,7 @@ struct ActivityPublisher {
 
 impl ActivityPublisher {
     fn publish(&self, event: LoopEvent) {
-        if let LoopEvent::Steered { text } = &event {
+        if let LoopEvent::Steered { text, .. } = &event {
             self.steers.delivered(&self.child_session_id, text);
         }
         let _ = self.tx.send(SubagentActivity {
@@ -2797,7 +2799,7 @@ mod tests {
         let (mut receiver, mut run) = steers.open("child");
         run.started();
         assert!(steers.steer("child", "mid-turn".into()));
-        assert_eq!(receiver.try_recv().unwrap(), "mid-turn");
+        assert_eq!(receiver.try_recv().unwrap().text, "mid-turn");
         assert_eq!(steers.pending("child"), 1, "sent is not yet read");
 
         steers.delivered("child", "mid-turn");

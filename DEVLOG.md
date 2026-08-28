@@ -1566,3 +1566,37 @@ the last settled point so a mid-flight snapshot with unpaired tool
 calls is still a valid request. The queue-release dance from the
 first implementation went with it: an aside no longer occupies
 anything a message could queue behind.
+
+## 2026-08-28 — Images ride with steers and queued messages
+
+Attaching a screenshot and typing while a turn ran did nothing
+useful: `decide::submit` saw attachments with a target of Steer or
+Queue and returned `PasteInput` plus a warning to wait for the turn
+to end. The message went back into the box and the images stayed
+pending — two bugs in one gesture ("it doesn't send", "it doesn't go
+away"), and the same mistake as refusing a session switch over a
+waiting stash: keeping something safe by holding the person hostage.
+Steering is exactly when a picture is most useful — "no, look at
+this" — so the fix is to carry them.
+
+The steer channel now carries `Steer { text, images }` instead of a
+bare `String`, and the `UserMessage` a steer appends carries the
+images that came with it; `turn.rs` had `images: Vec::new()`
+hardcoded at the append. `LoopEvent::Steered` carries them too, so
+the transcript row for a delivered steer shows the same attachment
+markers a fresh turn's message does, root and child alike. Queued
+messages hold their images until they are sent, at which point they
+go back onto `pending_images` ahead of anything attached since —
+`StartTurn` taking whatever is pending stays the single path images
+reach a turn by, rather than growing a second one. Undelivered steers
+moved back to the queue when a turn dies keep theirs, and pulling a
+queued message back into the prompt (Ctrl-Q, e) restores its
+attachments so re-sending sends the same message.
+
+`decide::submit` lost its `attachments` parameter entirely: with the
+refusal gone there was nothing left for it to decide, and the images
+are taken off the prompt in `apply_intent` whichever way the message
+goes. The test that pinned the old refusal is inverted rather than
+deleted. The other producers are words-only and stay that way: the
+web drive layer posts text, and a parent's `task_message` to a child
+has nothing to attach.

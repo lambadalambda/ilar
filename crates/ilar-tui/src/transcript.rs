@@ -538,6 +538,21 @@ pub(crate) fn user_text_with_images(text: &str, images: &[ilar::session::ImageCo
     format!("{text}{}", ilar::image::attachment_markers(images))
 }
 
+/// One line for a message that has not been sent yet — the pending
+/// strip and the pending manager both have a single row to say what is
+/// waiting, where the transcript has as many lines as it likes. The
+/// attachments are counted rather than listed, but they are named: a
+/// queued message whose image had silently vanished would look exactly
+/// like one that still has it.
+pub(crate) fn pending_summary(message: &ilar::agent::Steer) -> String {
+    let text = message.text.replace('\n', " ");
+    match message.images.len() {
+        0 => text,
+        1 => format!("{text} · 1 image"),
+        count => format!("{text} · {count} images"),
+    }
+}
+
 /// The hover affordance: underline what a click on this row would
 /// act on. Whitespace and box-drawing spans (indent, branch glyphs)
 /// are structure, not content, and stay bare.
@@ -1026,8 +1041,8 @@ fn apply_child_loop_event(lines: &mut Vec<Line_>, group: &mut u64, scope: &str, 
     match event {
         // A parent's task_message, delivered — shown when the child
         // actually saw it, like the root's own steers.
-        LoopEvent::Steered { text } => {
-            lines.push(Line_::User(text.clone()));
+        LoopEvent::Steered { text, images } => {
+            lines.push(Line_::User(user_text_with_images(text, images)));
         }
         LoopEvent::TextDelta(text) => {
             append_text_delta(lines, text);

@@ -406,7 +406,10 @@ impl Drive {
             // The channel is unbounded and the turn drains it at every
             // step boundary.
             SubmitTarget::Steer => match running.get(id).and_then(|turn| turn.steer.as_ref()) {
-                Some(steer) if steer.send(text.to_string()).is_ok() => Ok(Claim::Steered),
+                // Words only: the web client posts text, so there is
+                // nothing to attach here the way the TUI attaches what
+                // is pending on the prompt.
+                Some(steer) if steer.send(text.into()).is_ok() => Ok(Claim::Steered),
                 // The loop dropped its receiver between the decision and
                 // the send: the turn is over but has not cleaned up, and
                 // it still holds the writer lease. Starting one on top of
@@ -1300,7 +1303,7 @@ context = 200000
             drive.claim("session", "steer me").unwrap(),
             Claim::Steered
         ));
-        assert_eq!(steers.try_recv().unwrap(), "steer me");
+        assert_eq!(steers.try_recv().unwrap().text, "steer me");
 
         assert_eq!(drive.abort("session").unwrap(), Fate::Aborted);
         assert!(

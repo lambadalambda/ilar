@@ -60,6 +60,16 @@ pub(crate) struct StashedPrompt {
     pub(crate) images: Vec<ilar::session::ImageContent>,
 }
 
+/// The words of every waiting message, for the tests that care about
+/// which message is where rather than what is attached to it.
+#[cfg(test)]
+pub(crate) fn waiting_texts(messages: &[ilar::agent::Steer]) -> Vec<&str> {
+    messages
+        .iter()
+        .map(|message| message.text.as_str())
+        .collect()
+}
+
 pub(crate) struct App {
     /// Private on purpose: every mutation has to be paired with a
     /// `touch_transcript` so the render cache learns which rows moved,
@@ -99,8 +109,9 @@ pub(crate) struct App {
     pub(crate) turn_committed: bool,
     pub(crate) retry_available: bool,
     /// Messages submitted during an active turn, auto-sent in order when
-    /// the turn completes.
-    pub(crate) queued_messages: Vec<String>,
+    /// the turn completes — each with whatever was attached when it was
+    /// submitted, so waiting for the turn costs the user nothing.
+    pub(crate) queued_messages: Vec<ilar::agent::Steer>,
     /// Prompts put aside by Ctrl-S and popped back by the same key on a
     /// blank prompt, newest first — for the half-written thought a more
     /// urgent message would otherwise bulldoze.
@@ -114,8 +125,9 @@ pub(crate) struct App {
     pub(crate) force_full_redraw: bool,
     /// Steers handed to a running turn but not yet delivered. Steering
     /// is fire-and-forget, so an aborted turn drops its receiver and
-    /// would lose them silently; these get moved back to the queue.
-    pub(crate) pending_steers: Vec<String>,
+    /// would lose them silently; these get moved back to the queue —
+    /// images included, since the copy here is the only one left.
+    pub(crate) pending_steers: Vec<ilar::agent::Steer>,
     /// Active goal: (description, completed rounds). Turns auto-continue
     /// until the model emits GOAL_ACHIEVED or the round cap trips.
     pub(crate) goal: Option<(String, u32)>,
@@ -821,11 +833,20 @@ impl App {
         match event {
             // Shown when the loop delivers it, not when it was typed —
             // the transcript reflects what the model actually saw.
-            LoopEvent::Steered { text } => {
-                if let Some(index) = self.pending_steers.iter().position(|held| held == text) {
+            LoopEvent::Steered { text, images } => {
+                if let Some(index) = self
+                    .pending_steers
+                    .iter()
+                    .position(|held| &held.text == text)
+                {
                     self.pending_steers.remove(index);
                 }
-                self.lines.push(Line_::User(text.clone()));
+                // The same row a fresh turn's message gets: the words,
+                // then a marker per image.
+                self.lines
+                    .push(Line_::User(crate::transcript::user_text_with_images(
+                        text, images,
+                    )));
                 self.follow_tail = true;
                 Some(self.lines.len() - 1)
             }
@@ -1133,7 +1154,7 @@ impl App {
                         queue_index + 1,
                         self.queued_messages
                             .get(*queue_index)
-                            .map(|message| message.replace('\n', " "))
+                            .map(crate::transcript::pending_summary)
                             .unwrap_or_default()
                     ),
                     PendingItem::Goal => {
@@ -2958,7 +2979,9 @@ mod tests {
     #[test]
     fn pending_manager_navigation_wraps_over_the_whole_list() {
         let mut app = App::new();
-        app.queued_messages = (0..20).map(|index| format!("message {index}")).collect();
+        app.queued_messages = (0..20)
+            .map(|index| format!("message {index}").into())
+            .collect();
         app.pending_manager = Some(PendingManager::default());
 
         app.pending_manager_key(KeyCode::Up, false);
@@ -2980,7 +3003,9 @@ mod tests {
     #[test]
     fn a_stale_pending_click_lands_on_the_last_row() {
         let mut app = App::new();
-        app.queued_messages = (0..20).map(|index| format!("message {index}")).collect();
+        app.queued_messages = (0..20)
+            .map(|index| format!("message {index}").into())
+            .collect();
         app.pending_manager = Some(PendingManager::default());
         app.modal_hit = Some(crate::modals::ModalHit {
             area: Rect::new(0, 0, 10, 1),
@@ -3977,7 +4002,9 @@ mod tests {
     #[test]
     fn the_pending_strip_caps_and_counts_the_rest() {
         let mut app = App::new();
-        app.pending_steers = (0..6).map(|index| format!("steer {index}")).collect();
+        app.pending_steers = (0..6)
+            .map(|index| format!("steer {index}").into())
+            .collect();
         let lines = app.pending_strip_lines(80);
         assert_eq!(lines.len(), 5);
         let tail = lines
@@ -5906,6 +5933,7 @@ mod tests {
             }),
             Step::Loop(LoopEvent::Steered {
                 text: "also check the tests".into(),
+                images: Vec::new(),
             }),
             Step::Loop(LoopEvent::TurnDone {
                 outcome: TurnOutcome::Completed,
@@ -6562,7 +6590,7 @@ mod tests {
             sent,
             Some(crate::TurnRequest::New("first".into(), Vec::new()))
         );
-        assert_eq!(app.queued_messages, vec!["second"]);
+        assert_eq!(waiting_texts(&app.queued_messages), vec!["second"]);
         assert!(app.busy, "a started turn marks the app busy");
         assert!(
             matches!(app.lines.last(), Some(Line_::User(text)) if text == "first"),
@@ -6689,19 +6717,58 @@ mod tests {
             apply_intent(&mut app, Intent::Steer("go left".into()), Some(&tx)),
             None
         );
-        assert_eq!(rx.try_recv().ok().as_deref(), Some("go left"));
-        assert_eq!(app.pending_steers, vec!["go left"]);
+        assert_eq!(rx.try_recv().unwrap().text, "go left");
+        assert_eq!(waiting_texts(&app.pending_steers), vec!["go left"]);
         assert!(app.queued_messages.is_empty());
 
         // Receiver gone: the same intent queues instead of vanishing.
         drop(rx);
         apply_intent(&mut app, Intent::Steer("too late".into()), Some(&tx));
-        assert_eq!(app.queued_messages, vec!["too late"]);
+        assert_eq!(waiting_texts(&app.queued_messages), vec!["too late"]);
 
         // No channel at all — a routed notification turn.
         apply_intent(&mut app, Intent::Steer("no channel".into()), None);
-        assert_eq!(app.queued_messages, vec!["too late", "no channel"]);
-        assert_eq!(app.pending_steers, vec!["go left"]);
+        assert_eq!(
+            waiting_texts(&app.queued_messages),
+            vec!["too late", "no channel"]
+        );
+        assert_eq!(waiting_texts(&app.pending_steers), vec!["go left"]);
+    }
+
+    /// Attached images ride whichever way a mid-turn message goes.
+    /// Submitting with an attachment used to be refused outright, which
+    /// left the text back in the box and the images pending; now the
+    /// prompt hands them over and the message is whole wherever it
+    /// waits.
+    #[test]
+    fn a_mid_turn_message_takes_its_images_with_it() {
+        use crate::{Intent, TurnRequest, apply_intent};
+
+        let screenshot = ilar::session::ImageContent::png(b"screenshot");
+        let mut app = App::new();
+        let (tx, mut rx) = ilar::agent::steer_channel();
+        app.pending_images = vec![screenshot.clone()];
+
+        apply_intent(&mut app, Intent::Steer("look at this".into()), Some(&tx));
+        let steered = rx.try_recv().expect("the channel took it");
+        assert_eq!(steered.images, vec![screenshot.clone()], "sent bare");
+        assert!(app.pending_images.is_empty(), "the prompt kept a copy");
+        assert_eq!(app.pending_steers[0].images, vec![screenshot.clone()]);
+
+        // Queued the same way — and the queue is where a steer with no
+        // live channel lands, so the images must survive that hop too.
+        let mut app = App::new();
+        app.pending_images = vec![screenshot.clone()];
+        apply_intent(&mut app, Intent::Queue("look at this".into()), None);
+        assert!(app.pending_images.is_empty());
+        assert_eq!(app.queued_messages[0].images, vec![screenshot.clone()]);
+
+        // Sent, it reaches the spawn exactly as a fresh attachment does.
+        let sent = apply_intent(&mut app, Intent::SendQueued, None).expect("a turn to start");
+        assert_eq!(
+            sent,
+            TurnRequest::New("look at this".into(), vec![screenshot])
+        );
     }
 
     /// Delivery removes the pending entry the moment the loop reports
@@ -6714,9 +6781,10 @@ mod tests {
 
         app.push_loop_event(&LoopEvent::Steered {
             text: "go left".into(),
+            images: Vec::new(),
         });
 
-        assert_eq!(app.pending_steers, vec!["then stop"]);
+        assert_eq!(waiting_texts(&app.pending_steers), vec!["then stop"]);
         assert!(
             app.lines
                 .iter()
@@ -6727,9 +6795,44 @@ mod tests {
 
         app.push_loop_event(&LoopEvent::Steered {
             text: "then stop".into(),
+            images: Vec::new(),
         });
         assert!(app.pending_steers.is_empty());
         assert!(app.pending_strip_lines(80).is_empty(), "the strip lingered");
+    }
+
+    /// A delivered steer's row is a user message like any other: the
+    /// words, then one marker per image, so the transcript shows what
+    /// the model was actually given.
+    #[test]
+    fn a_delivered_steer_shows_its_attachment_in_the_transcript() {
+        let mut app = App::new();
+        let screenshot = ilar::session::ImageContent::png(b"screenshot");
+        app.pending_steers = vec![ilar::agent::Steer {
+            text: "look at this".into(),
+            images: vec![screenshot.clone()],
+        }];
+        // The strip says what is waiting, attachment included.
+        let strip = format!("{:?}", app.pending_strip_lines(80));
+        assert!(strip.contains("1 image"), "{strip}");
+
+        app.push_loop_event(&LoopEvent::Steered {
+            text: "look at this".into(),
+            images: vec![screenshot.clone()],
+        });
+
+        let row = app
+            .lines
+            .iter()
+            .find_map(|line| match line {
+                Line_::User(text) if text.starts_with("look at this") => Some(text.clone()),
+                _ => None,
+            })
+            .expect("the steer's row");
+        assert_eq!(
+            row,
+            crate::transcript::user_text_with_images("look at this", &[screenshot])
+        );
     }
 
     /// Paste intents land in the surface the decision named.
@@ -6784,11 +6887,11 @@ mod tests {
             input_blank: true,
             ..LoopState::default()
         };
-        for intent in decide::submit(&running, true, 0, "next thing".into()) {
+        for intent in decide::submit(&running, true, "next thing".into()) {
             assert!(!matches!(intent, Intent::StartTurn(_)), "mid-turn submit");
             apply_intent(&mut app, intent, None);
         }
-        assert_eq!(app.queued_messages, vec!["next thing"]);
+        assert_eq!(waiting_texts(&app.queued_messages), vec!["next thing"]);
 
         let idle = LoopState {
             input_blank: true,

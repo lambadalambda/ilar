@@ -351,6 +351,7 @@ pub(crate) fn settle<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::waiting_texts;
     use std::collections::VecDeque;
 
     /// Mirrors the real runtime's shape: `perform` goes through the
@@ -566,7 +567,7 @@ mod tests {
         // The aside borrowed nothing: the turn keeps running, the
         // queue keeps waiting, busy stays whose it was.
         assert!(app.busy);
-        assert_eq!(app.queued_messages, vec!["typed earlier"]);
+        assert_eq!(waiting_texts(&app.queued_messages), vec!["typed earlier"]);
     }
 
     #[test]
@@ -585,7 +586,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(runtime.log, vec!["end_turn"]);
-        assert_eq!(app.queued_messages, vec!["wait for me"]);
+        assert_eq!(waiting_texts(&app.queued_messages), vec!["wait for me"]);
     }
 
     /// The recorded queue-inversion bug, pinned: a turn completes with
@@ -650,7 +651,7 @@ mod tests {
         settle(&mut app, intents, &mut runtime).unwrap();
 
         assert!(runtime.log.is_empty(), "{:?}", runtime.log);
-        assert_eq!(app.queued_messages, vec!["held message"]);
+        assert_eq!(waiting_texts(&app.queued_messages), vec!["held message"]);
         assert_eq!(runtime.pending.len(), 1);
     }
 
@@ -732,7 +733,7 @@ mod tests {
         .unwrap();
         assert_eq!(runtime.log, vec!["end_turn"]);
         assert!(runtime.paused, "an abort must not resume notifications");
-        assert_eq!(app.queued_messages, vec!["held"]);
+        assert_eq!(waiting_texts(&app.queued_messages), vec!["held"]);
         assert_eq!(runtime.pending.len(), 1);
 
         // The next completed turn resumes, and the gate opens in the
@@ -770,7 +771,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(runtime.log, vec!["end_turn"], "nothing starts");
-        assert_eq!(app.queued_messages, vec!["go left"]);
+        assert_eq!(waiting_texts(&app.queued_messages), vec!["go left"]);
         assert!(app.pending_steers.is_empty());
     }
 
@@ -902,7 +903,6 @@ mod tests {
         let carried = crate::decide::submit(
             &FakeRuntime::new().observe(&app),
             false,
-            0,
             "typed while idle".into(),
         );
         let mut runtime = FakeRuntime::new();

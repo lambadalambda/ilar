@@ -443,21 +443,38 @@ fn apply_intent(
             None
         }
         Intent::Steer(text) => {
+            // Whatever is attached rides this message, exactly as it
+            // rides a fresh turn: steering is when a screenshot is most
+            // useful, and holding the images back would deliver words
+            // the model cannot act on.
+            let message = ilar::agent::Steer {
+                text,
+                images: std::mem::take(&mut app.pending_images),
+            };
             // The channel can close between the decision and here — the
             // turn ending is exactly when that happens — and the message
             // must not be lost with it.
             match steer {
-                Some(tx) if tx.send(text.clone()).is_ok() => {
+                Some(tx) if tx.send(message.clone()).is_ok() => {
                     // No notice: the pending strip above the input now
                     // shows the message itself, with its fate.
-                    app.pending_steers.push(text);
+                    app.pending_steers.push(message);
                     None
                 }
-                _ => apply_intent(app, Intent::Queue(text), steer),
+                // Queued directly rather than through `Intent::Queue`:
+                // the images are already off the prompt and travel with
+                // the message they were attached to.
+                _ => {
+                    app.queued_messages.push(message);
+                    None
+                }
             }
         }
         Intent::Queue(text) => {
-            app.queued_messages.push(text);
+            app.queued_messages.push(ilar::agent::Steer {
+                text,
+                images: std::mem::take(&mut app.pending_images),
+            });
             None
         }
         Intent::Aside(question) => {
@@ -570,7 +587,12 @@ fn apply_intent(
         }
         Intent::SendQueued => {
             let next = (!app.queued_messages.is_empty()).then(|| app.queued_messages.remove(0))?;
-            apply_intent(app, Intent::StartTurn(next), steer)
+            // Back onto the prompt's attachments, ahead of anything
+            // attached since: `StartTurn` takes whatever is pending,
+            // which is the one path images reach a turn by, and a
+            // queued message must not be a second one.
+            app.pending_images.splice(0..0, next.images);
+            apply_intent(app, Intent::StartTurn(next.text), steer)
         }
         Intent::ResumeTurn => {
             app.retry_available = false;
@@ -2484,10 +2506,13 @@ async fn run_app(
                             PendingAction::DeleteQueued(index) => {
                                 if index < app.queued_messages.len() {
                                     let removed = app.queued_messages.remove(index);
+                                    // The images go with it: they were
+                                    // attached to this message, not to
+                                    // the prompt it never reached.
                                     app.set_notice(
                                         format!(
                                             "removed queued message: {}",
-                                            removed.lines().next().unwrap_or("")
+                                            crate::transcript::pending_summary(&removed)
                                         ),
                                         NoticeLevel::Info,
                                     );
@@ -2496,7 +2521,12 @@ async fn run_app(
                             PendingAction::EditQueued(index) => {
                                 if index < app.queued_messages.len() {
                                     let message = app.queued_messages.remove(index);
-                                    app.input = InputBuffer::from(message);
+                                    // Pulled back whole: the text into
+                                    // the prompt, the attachments back
+                                    // onto it, so re-sending sends the
+                                    // same message.
+                                    app.input = InputBuffer::from(message.text);
+                                    app.pending_images.splice(0..0, message.images);
                                     app.pending_manager = None;
                                 }
                             }
@@ -3171,8 +3201,10 @@ async fn run_app(
                             app.history.push(&text);
                             // The transcript line for a steer appears
                             // when the loop delivers it, not on submit.
-                            let decided =
-                                decide::submit(&state, app.busy, app.pending_images.len(), text);
+                            // Attached images are not part of the
+                            // decision: `apply_intent` takes them off
+                            // the prompt whichever way the message goes.
+                            let decided = decide::submit(&state, app.busy, text);
                             apply_event_intents(app, decided, &mut intents, steer_tx.as_ref());
                         }
                         PromptAction::Edited => app.clear_transient_notice(),
