@@ -53,4 +53,7 @@
 ## Milestone 13 — Guard rails
 
 - [ ] [Kernel sandbox for tool processes](issues/kernel-sandbox-for-tool-processes.md)
+- [ ] [Service commands are redacted too](issues/service-commands-are-redacted-too.md)
+- [ ] [The replay sweep](issues/the-replay-sweep.md)
+- [ ] [Rows react when clicked](issues/rows-react-when-clicked.md)
 - [ ] [Images ride with steers and queued messages](issues/images-ride-with-steers-and-queued-messages.md)
