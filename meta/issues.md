@@ -53,6 +53,7 @@
 ## Milestone 13 — Guard rails
 
 - [ ] [Kernel sandbox for tool processes](issues/kernel-sandbox-for-tool-processes.md)
+- [ ] [A finished turn that never lets go](issues/a-finished-turn-that-never-lets-go.md)
 - [ ] [Service commands are redacted too](issues/service-commands-are-redacted-too.md)
 - [ ] [The replay sweep](issues/the-replay-sweep.md)
 - [ ] [Rows react when clicked](issues/rows-react-when-clicked.md)
