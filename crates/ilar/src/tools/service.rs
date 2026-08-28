@@ -22,6 +22,10 @@ struct ServiceEntry {
     /// Consumed by `stop`; `None` once the child has been waited on.
     child: Option<tokio::process::Child>,
     /// The child's process group (equals its pid; it starts a new group).
+    /// Kept after the direct child exits: a service that daemonizes
+    /// (`node server.js &`) leaves the shell dead and the server alive in
+    /// that same group, and this id is the only handle on it. Cleared
+    /// only by an actual kill, so the group is never signalled twice.
     group: Option<u32>,
     output: Arc<Mutex<Captured>>,
     started: std::time::Instant,
@@ -39,7 +43,6 @@ impl ServiceEntry {
         {
             self.exited = Some(exit_label(status));
             self.child = None;
-            self.group = None;
         }
     }
 
@@ -222,6 +225,10 @@ impl Tool for ServiceTool {
                                     existing.group
                                 ));
                             }
+                            // The entry is about to be replaced, and with
+                            // it the only handle on whatever the old shell
+                            // left running.
+                            existing.kill_group();
                         }
                     }
                     let mut child = match shell_command(&command, &ctx.cwd).spawn() {
@@ -327,6 +334,9 @@ impl Tool for ServiceTool {
                         };
                         entry.refresh();
                         if !entry.running() {
+                            // The shell may be gone while what it
+                            // backgrounded is not: reap the group anyway.
+                            entry.kill_group();
                             return ToolOutput::text(format!(
                                 "service {name:?} already stopped ({})",
                                 entry.exited.as_deref().unwrap_or("never started")
@@ -353,6 +363,77 @@ impl Tool for ServiceTool {
                 )),
             }
         })
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    fn alive(pid: i32) -> bool {
+        // SAFETY: signal 0 only probes; it never delivers anything.
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    async fn settle<F: Fn() -> bool>(condition: F) -> bool {
+        for _ in 0..200 {
+            if condition() {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        condition()
+    }
+
+    /// The module promises nothing outlives the session, and a service
+    /// that daemonizes is exactly the shape that would: `sh` exits the
+    /// moment it has backgrounded the server, and the process group id
+    /// is then the only handle left on what it started.
+    #[tokio::test]
+    async fn a_daemonized_service_still_dies_with_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("grandchild.pid");
+        let manager = ServiceManager::new();
+        let tool = ServiceTool::new(manager.clone());
+
+        let started = tool
+            .run(
+                serde_json::json!({
+                    "action": "start",
+                    "name": "daemon",
+                    // The shell backgrounds a server and exits, which is
+                    // what `node server.js &` does.
+                    "command": format!("sleep 120 & echo $! > {}", pid_file.display()),
+                }),
+                ToolContext::root(dir.path().to_path_buf()),
+            )
+            .await;
+        assert!(!started.is_error, "{}", started.content);
+
+        let recorded_pid = || {
+            std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|text| text.trim().parse::<i32>().ok())
+        };
+        assert!(
+            settle(|| recorded_pid().is_some()).await,
+            "the grandchild never recorded its pid"
+        );
+        let pid = recorded_pid().unwrap();
+        // The direct child (`sh`) is already gone; the poll that notices
+        // must not throw away the group with it.
+        assert!(
+            settle(|| manager.running_count() == 0).await,
+            "the shell was still running"
+        );
+        assert!(alive(pid), "the grandchild died on its own");
+
+        manager.stop_all();
+
+        assert!(
+            settle(|| !alive(pid)).await,
+            "the grandchild outlived the session"
+        );
     }
 }
 

@@ -87,7 +87,14 @@ pub(crate) fn shell_command(command_text: &str, cwd: &std::path::Path) -> tokio:
             if libc::setsid() == -1 {
                 // Cannot happen after fork (a fresh child leads nothing),
                 // but keep the kill-the-group guarantee if it somehow does.
-                libc::setpgid(0, 0);
+                if libc::setpgid(0, 0) == -1 {
+                    // Both failed: the child would run in ilar's own
+                    // group, where `killpg` on its pid reaps nothing and
+                    // a timeout leaves the process running for good. Fail
+                    // the spawn instead — the caller reports an error the
+                    // model can read.
+                    return Err(std::io::Error::last_os_error());
+                }
             }
             Ok(())
         });
@@ -157,6 +164,25 @@ mod tests {
         assert_eq!(read_buffer_len(1024), 8 * 1024);
         assert_eq!(read_buffer_len(2 * 1024 * 1024), 128 * 1024);
         assert_eq!(read_buffer_len(usize::MAX), 256 * 1024);
+    }
+
+    /// Everything downstream reaps with `killpg(child_pid)`, which only
+    /// finds anything if the child leads a group of its own. Pin that
+    /// here rather than discovering it from a stray `sleep`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_shell_child_leads_its_own_process_group() {
+        let mut child = shell_command("sleep 30", std::path::Path::new("."))
+            .spawn()
+            .expect("pre_exec must not fail on a healthy fork");
+        let pid = i32::try_from(child.id().unwrap()).unwrap();
+
+        // SAFETY: reading the group of a live child of ours.
+        let group = unsafe { libc::getpgid(pid) };
+
+        assert_eq!(group, pid, "the child shares ilar's own process group");
+        kill_process_group(child.id().unwrap());
+        let _ = child.wait().await;
     }
 
     #[test]
