@@ -246,3 +246,5 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Serve writes back](issues/serve-writes-back.md)
 - [x] [Sweep after the write path](issues/sweep-after-the-write-path.md)
 - [x] [Images are not their base64](issues/images-are-not-their-base64.md)
+- [x] [The TUI replays turn errors](issues/the-tui-replays-turn-errors.md)
+- [x] [The stash rides along](issues/the-stash-rides-along.md)

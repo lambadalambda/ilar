@@ -24,3 +24,13 @@ fine; this is about what a resumed session shows.
 ## Milestone
 
 13 — Guard rails
+
+## Outcome
+
+`session_view` renders a `TurnError` diagnostic as a system line on
+replay; `Local` diagnostics stay dropped. That closes the last
+surface with the blindness: the live path always showed the error,
+serve learned it with the projection change, and a resumed session
+now reads as *died* rather than as mysteriously ending. Test pins
+both halves — the error appears, the thinking-as-diagnostic does
+not.

@@ -53,5 +53,3 @@
 ## Milestone 13 — Guard rails
 
 - [ ] [Kernel sandbox for tool processes](issues/kernel-sandbox-for-tool-processes.md)
-- [ ] [The stash rides along](issues/the-stash-rides-along.md)
-- [ ] [The TUI replays turn errors](issues/the-tui-replays-turn-errors.md)

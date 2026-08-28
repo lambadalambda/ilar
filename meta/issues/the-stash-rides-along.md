@@ -27,3 +27,16 @@ rewind already carries its prefill and its notice.
 ## Milestone
 
 13 — Guard rails
+
+## Outcome
+
+`AppExit::SwitchInto` grew a `stash` field and absorbed the plain
+`Switch` variant, so there is one switch path and it carries
+everything that must survive the rebuild: prefill, notice, stash.
+Every producer (resume, fork, rewind, palette) takes the stash on
+the way out; the rebuilt app is handed it before the first frame.
+`switch_blocked` no longer counts the stash — a running turn, live
+background agents and an unsent draft still block — and its test
+was inverted to pin that. Ctrl-D keeps its warning: quitting really
+does lose the stash, and nothing carries it there. Test walks the
+whole handoff, including an image riding with its prompt.
