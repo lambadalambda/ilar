@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     Tool, ToolConcurrency, ToolContext, ToolOutput, ToolStartObserver, WorkspaceAccess,
-    WorkspaceCoverage,
+    WorkspaceCoverage, WorkspaceWaitNotice,
 };
 
 /// One tool call from an assistant turn.
@@ -169,7 +169,19 @@ where
                             tool.run_observed(input, call_ctx, start).await
                         }
                         WorkspaceCoverage::Absent => {
-                            let lease = call_ctx.workspace.acquire_lease(access).await;
+                            // Same wait, same notice as the plain-permit
+                            // branch below: edit/write must not sit on a
+                            // silent row while a mutable task holds the
+                            // checkout.
+                            let lease = match call_ctx.workspace.try_acquire_lease(access) {
+                                Some(lease) => lease,
+                                None => {
+                                    WorkspaceWaitNotice::announce(
+                                        WorkspaceWaitNotice::from_context(&call_ctx).as_ref(),
+                                    );
+                                    call_ctx.workspace.acquire_lease(access).await
+                                }
+                            };
                             call_ctx.workspace_lease = Some(lease);
                             tool.run_observed(input, call_ctx, start).await
                         }
@@ -191,15 +203,9 @@ where
                             let _permit = match call_ctx.workspace.try_acquire(access) {
                                 Some(permit) => permit,
                                 None => {
-                                    if let Some((id, sink)) =
-                                        call_ctx.call_id.as_ref().zip(call_ctx.output_tail.as_ref())
-                                    {
-                                        sink.report(
-                                            id,
-                                            "waiting for the workspace — a mutable task holds it"
-                                                .to_string(),
-                                        );
-                                    }
+                                    WorkspaceWaitNotice::announce(
+                                        WorkspaceWaitNotice::from_context(&call_ctx).as_ref(),
+                                    );
                                     call_ctx.workspace.acquire(access).await
                                 }
                             };
@@ -530,6 +536,97 @@ mod tests {
                 .unwrap()
                 .iter()
                 .all(|outcome| !outcome.output.is_error)
+        );
+    }
+
+    struct PlainMutatingTool;
+
+    impl Tool for PlainMutatingTool {
+        fn name(&self) -> &'static str {
+            "plain"
+        }
+
+        fn description(&self) -> &'static str {
+            "takes a workspace permit from the executor"
+        }
+
+        fn concurrency(&self) -> ToolConcurrency {
+            ToolConcurrency::Barrier
+        }
+
+        fn workspace_access(&self) -> WorkspaceAccess {
+            WorkspaceAccess::Mutating
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn run(&self, _input: serde_json::Value, _ctx: ToolContext) -> super::super::ToolFuture {
+            Box::pin(async { ToolOutput::text("done") })
+        }
+    }
+
+    /// Run one mutating tool while a mutable task holds the checkout, and
+    /// return what its row said while it waited.
+    async fn row_while_waiting(tool: Arc<dyn Tool>) -> Option<String> {
+        let dir = tempfile::tempdir().unwrap();
+        let tails = Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
+            String,
+            String,
+        >::new()));
+        let (wake, _wake_rx) = tokio::sync::mpsc::channel(4);
+        let mut ctx = ToolContext::root(dir.path().to_path_buf());
+        ctx.output_tail = Some(super::super::OutputTailSink::new(tails.clone(), wake));
+        let held = ctx.workspace.acquire_lease(WorkspaceAccess::Mutating).await;
+        let execution = tokio::spawn(execute_calls_observed(
+            vec![ToolCall {
+                id: "waiter-1".into(),
+                name: tool.name().into(),
+                input: serde_json::json!({}),
+            }],
+            move |_| Some(tool.clone()),
+            ctx,
+            CancellationToken::new(),
+            |_, _| {},
+            |_, _| {},
+        ));
+
+        let mut reported = None;
+        for _ in 0..200 {
+            reported = tails.lock().unwrap().get("waiter-1").cloned();
+            if reported.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        drop(held);
+        let outcomes = execution.await.unwrap();
+        assert!(
+            !outcomes[0].output.is_error,
+            "{}",
+            outcomes[0].output.content
+        );
+        reported
+    }
+
+    /// Both waiting branches say the same thing: a silent row reads as a
+    /// hang, and docs/agents-and-skills.md promises the row names itself
+    /// — for the permit branch (bash, service) and for the lease branch
+    /// (edit, write) alike.
+    #[tokio::test]
+    async fn every_workspace_wait_names_itself_in_the_tool_row() {
+        assert_eq!(
+            row_while_waiting(Arc::new(PlainMutatingTool))
+                .await
+                .as_deref(),
+            Some(super::super::WORKSPACE_WAIT_NOTICE)
+        );
+        assert_eq!(
+            row_while_waiting(Arc::new(ManagedLeaseTool))
+                .await
+                .as_deref(),
+            Some(super::super::WORKSPACE_WAIT_NOTICE)
         );
     }
 

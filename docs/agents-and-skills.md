@@ -40,9 +40,11 @@ included), blocks nothing, and accepts that the tree may shift while it looks.
 Reads are advisory — a running explore never delays the parent's own edits or
 builds — while two mutable tasks in one checkout remain impossible, and the
 edit gate catches stale writes on the mutating side. The one wait that can
-still happen (a mutating tool while a same-checkout mutable task runs) names
-itself in the tool row: "waiting for the workspace — a mutable task holds
-it".
+still happen — anything mutating while a same-checkout mutable task runs:
+`bash`, `service`, `edit`/`write`, or another mutable task — names itself in
+the tool row: "waiting for the workspace — a mutable task holds it".
+(A background task has no row; it reports through its completion
+notification instead.)
 
 To have something *looked at*: save the image, then spawn a task with
 `model` set to a vision model and point it at the file — the child's

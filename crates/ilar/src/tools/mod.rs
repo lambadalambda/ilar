@@ -329,6 +329,41 @@ impl OutputTailSink {
     }
 }
 
+/// The one wait a caller can still hit now that reads are advisory: a
+/// mutating tool, or a mutable task, behind a mutable task that holds
+/// the same checkout. Every waiter says so with this sentence, on the
+/// same channel a running tool reports its output tail on — silence
+/// there reads as a hang, and docs/agents-and-skills.md promises the
+/// row names itself.
+pub const WORKSPACE_WAIT_NOTICE: &str = "waiting for the workspace — a mutable task holds it";
+
+/// A bound [`WORKSPACE_WAIT_NOTICE`] reporter: the call id whose row is
+/// waiting, and the sink that row is drawn from. `None` when nothing is
+/// listening (a background job, a context without a UI).
+#[derive(Clone)]
+pub struct WorkspaceWaitNotice {
+    call_id: String,
+    sink: OutputTailSink,
+}
+
+impl WorkspaceWaitNotice {
+    pub fn from_context(ctx: &ToolContext) -> Option<Self> {
+        let (call_id, sink) = ctx.call_id.clone().zip(ctx.output_tail.clone())?;
+        Some(Self { call_id, sink })
+    }
+
+    /// Announce the wait when anyone is listening. Called on the branch
+    /// that is about to block, never speculatively: a notice on a wait
+    /// that never happened is noise the row keeps showing.
+    pub fn announce(notice: Option<&Self>) {
+        if let Some(notice) = notice {
+            notice
+                .sink
+                .report(&notice.call_id, WORKSPACE_WAIT_NOTICE.into());
+        }
+    }
+}
+
 /// Files past this size are never tracked in [`SeenFiles`]: `edit`
 /// refuses to load them at all (same cap), so hashing them would buy
 /// nothing but a second pass over the disk.

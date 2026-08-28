@@ -646,23 +646,6 @@ impl SubagentSpawner {
                  subagent_type and omit workspace."
             ));
         }
-        // A background child never shares the parent's lease: the Arc'd
-        // permit would keep a write lock alive past the parent task's
-        // end. Reads are advisory now, so a detached reader needs no
-        // lease at all; it acquires its own free one.
-        let inherited_lease = if same_workspace && !background {
-            match ctx.workspace_coverage(workspace_access) {
-                crate::tools::WorkspaceCoverage::Covered => ctx.workspace_lease.clone(),
-                crate::tools::WorkspaceCoverage::Absent => None,
-                crate::tools::WorkspaceCoverage::Incompatible => {
-                    return ToolOutput::error(
-                        "mutable task cannot run inside a read-only child workspace",
-                    );
-                }
-            }
-        } else {
-            None
-        };
         let notification_permit = if background {
             match self.notify_tx.clone().try_reserve_owned() {
                 Ok(permit) => Some(permit),
@@ -678,6 +661,28 @@ impl SubagentSpawner {
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                     return ToolOutput::error("background notification receiver is closed");
+                }
+            }
+        } else {
+            None
+        };
+        // Read `background` only once the capacity demotion above has had
+        // its say: a defaulted background task that fell back to the
+        // foreground must inherit the parent's lease like any other
+        // foreground child, not go take one of its own.
+        //
+        // A background child never shares the parent's lease: the Arc'd
+        // permit would keep a write lock alive past the parent task's
+        // end. Reads are advisory now, so a detached reader needs no
+        // lease at all; it acquires its own free one.
+        let inherited_lease = if same_workspace && !background {
+            match ctx.workspace_coverage(workspace_access) {
+                crate::tools::WorkspaceCoverage::Covered => ctx.workspace_lease.clone(),
+                crate::tools::WorkspaceCoverage::Absent => None,
+                crate::tools::WorkspaceCoverage::Incompatible => {
+                    return ToolOutput::error(
+                        "mutable task cannot run inside a read-only child workspace",
+                    );
                 }
             }
         } else {
@@ -994,6 +999,9 @@ impl SubagentSpawner {
                         &parent_location,
                         &leased_location,
                         &task_cancel,
+                        // Nobody is watching a background task's row; its
+                        // wait is reported by the notification it ends in.
+                        None,
                     ) => outcome,
                     () = task_cancel.cancelled() => LeaseOutcome::Cancelled,
                 };
@@ -1147,6 +1155,7 @@ task's scope yourself; continue only clearly disjoint work."
             .with_child_session(returned_session_id);
         }
 
+        let waiting_notice = crate::tools::WorkspaceWaitNotice::from_context(ctx);
         let lease = match acquire_task_lease(
             &child_workspace,
             workspace_access,
@@ -1155,6 +1164,7 @@ task's scope yourself; continue only clearly disjoint work."
             &ctx.location,
             &child_location,
             &ctx.cancel,
+            waiting_notice.as_ref(),
         )
         .await
         {
@@ -1937,7 +1947,9 @@ impl LeaseFailure {
 /// Both task paths funnel through here so the checks stay in step; they
 /// differ only in how they phrase the outcome. `cancel` ends the wait
 /// for the lease; a caller that also wants the revalidation abandoned
-/// races this whole call against its own token.
+/// races this whole call against its own token. `waiting` names the row
+/// to announce a real wait on — background tasks have none.
+#[allow(clippy::too_many_arguments)] // one funnel, one set of checks
 async fn acquire_task_lease(
     workspace: &crate::tools::WorkspaceScheduler,
     access: WorkspaceAccess,
@@ -1946,6 +1958,7 @@ async fn acquire_task_lease(
     parent_location: &crate::tools::WorkspaceLocation,
     location: &crate::tools::WorkspaceLocation,
     cancel: &tokio_util::sync::CancellationToken,
+    waiting: Option<&crate::tools::WorkspaceWaitNotice>,
 ) -> LeaseOutcome {
     let lease = match inherited {
         Some(lease) => lease,
@@ -1953,9 +1966,18 @@ async fn acquire_task_lease(
             Some(lease) => lease,
             None => return LeaseOutcome::Failed(LeaseFailure::Busy),
         },
-        None => tokio::select! {
-            lease = workspace.acquire_lease(access) => lease,
-            () = cancel.cancelled() => return LeaseOutcome::Cancelled,
+        None => match workspace.try_acquire_lease(access) {
+            Some(lease) => lease,
+            // The same wait the tool executor announces, from the task
+            // side: a mutable task queued behind another one must name
+            // itself, not sit on a silent row.
+            None => {
+                crate::tools::WorkspaceWaitNotice::announce(waiting);
+                tokio::select! {
+                    lease = workspace.acquire_lease(access) => lease,
+                    () = cancel.cancelled() => return LeaseOutcome::Cancelled,
+                }
+            }
         },
     };
     match revalidate_after_lease(parent_location, location).await {
@@ -2642,6 +2664,72 @@ mod tests {
         publish_reserved_notification(&mut permit, notification("first"));
         assert_eq!(receiver.recv().await.unwrap().description, "first");
         assert!(receiver.try_recv().is_err());
+    }
+
+    /// A mutable task queued behind another one is the same wait a
+    /// mutating tool hits, and it says the same sentence — silence there
+    /// reads as a hang. A lease that is free is taken without a word.
+    #[tokio::test]
+    async fn a_task_waiting_for_the_workspace_names_itself_in_the_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let location = crate::tools::WorkspaceLocation::shared(dir.path().to_path_buf());
+        let workspace = crate::tools::WorkspaceScheduler::for_location(&location);
+        let tails = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
+            String,
+            String,
+        >::new()));
+        let (wake, _wake_rx) = tokio::sync::mpsc::channel(4);
+        let notice = |call_id: &str| {
+            let mut ctx = crate::tools::ToolContext::root(dir.path().to_path_buf());
+            ctx.call_id = Some(call_id.into());
+            ctx.output_tail = Some(crate::tools::OutputTailSink::new(
+                tails.clone(),
+                wake.clone(),
+            ));
+            crate::tools::WorkspaceWaitNotice::from_context(&ctx)
+        };
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let acquire = |waiting: Option<crate::tools::WorkspaceWaitNotice>| {
+            let workspace = workspace.clone();
+            let location = location.clone();
+            let cancel = cancel.clone();
+            async move {
+                acquire_task_lease(
+                    &workspace,
+                    WorkspaceAccess::Mutating,
+                    None,
+                    false,
+                    &location,
+                    &location,
+                    &cancel,
+                    waiting.as_ref(),
+                )
+                .await
+            }
+        };
+
+        let free = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            acquire(notice("free-1")),
+        )
+        .await
+        .expect("a free workspace should not block");
+        assert!(matches!(free, LeaseOutcome::Acquired(_)));
+        assert!(
+            !tails.lock().unwrap().contains_key("free-1"),
+            "announced a wait that never happened"
+        );
+
+        let blocked = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            acquire(notice("blocked-1")),
+        )
+        .await;
+        assert!(blocked.is_err(), "the held lease did not block a writer");
+        assert_eq!(
+            tails.lock().unwrap().get("blocked-1").map(String::as_str),
+            Some(crate::tools::WORKSPACE_WAIT_NOTICE)
+        );
     }
 
     #[test]
