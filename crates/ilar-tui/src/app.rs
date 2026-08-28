@@ -50,6 +50,16 @@ pub(crate) struct SubtaskRequest {
     pub(crate) variant: Option<String>,
 }
 
+/// A prompt put aside by Ctrl-S, with whatever was attached to it. The
+/// text and its images travel as one unit: stashing only the text would
+/// hand the images to the *next* message and give the popped prompt
+/// back bare.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct StashedPrompt {
+    pub(crate) text: String,
+    pub(crate) images: Vec<ilar::session::ImageContent>,
+}
+
 pub(crate) struct App {
     /// Private on purpose: every mutation has to be paired with a
     /// `touch_transcript` so the render cache learns which rows moved,
@@ -94,7 +104,10 @@ pub(crate) struct App {
     /// Prompts put aside by Ctrl-S and popped back by the same key on a
     /// blank prompt, newest first — for the half-written thought a more
     /// urgent message would otherwise bulldoze.
-    pub(crate) input_stash: Vec<String>,
+    pub(crate) input_stash: Vec<StashedPrompt>,
+    /// Ctrl-D on a blank prompt with a stash waiting has been warned
+    /// about once; the next one quits. Any other key disarms it.
+    pub(crate) quit_armed: bool,
     /// Ctrl-L: clear the backend and repaint everything next frame.
     /// Diff rendering never repaints cells it believes unchanged, so
     /// damage from outside writes to the terminal lingers without this.
@@ -270,6 +283,7 @@ impl App {
             retry_available: false,
             queued_messages: Vec::new(),
             input_stash: Vec::new(),
+            quit_armed: false,
             force_full_redraw: false,
             pending_steers: Vec::new(),
             goal: None,
@@ -1557,20 +1571,27 @@ impl App {
             .context("writing clipboard")
     }
 
-    /// Ctrl-S, both directions: a prompt with text is put aside so a
-    /// quick message can go first; a blank prompt takes the newest
-    /// stash back. The input title shows a count while anything waits.
+    /// Ctrl-S, both directions: a draft — text, attached images or both
+    /// — is put aside so a quick message can go first; an empty prompt
+    /// with nothing attached takes the newest stash back, images
+    /// included. The input title shows a count while anything waits.
     pub(crate) fn stash_or_pop_input(&mut self) {
-        if self.input.is_blank() {
+        if self.input.is_blank() && self.pending_images.is_empty() {
             match self.input_stash.pop() {
-                Some(text) => {
-                    self.input = crate::input::InputBuffer::from(text);
+                Some(stashed) => {
+                    self.input = crate::input::InputBuffer::from(stashed.text);
+                    self.pending_images = stashed.images;
+                    self.end_history_browsing();
                     self.clear_transient_notice();
                 }
                 None => self.set_notice("nothing stashed", NoticeLevel::Info),
             }
         } else {
-            self.input_stash.push(self.input.take());
+            self.input_stash.push(StashedPrompt {
+                text: self.input.take(),
+                images: std::mem::take(&mut self.pending_images),
+            });
+            self.end_history_browsing();
             self.set_notice(
                 format!(
                     "input stashed ({}) · Ctrl-S on a blank prompt pops",
@@ -1579,6 +1600,31 @@ impl App {
                 NoticeLevel::Info,
             );
         }
+    }
+
+    /// Drop any history-recall cursor. Stashing empties the prompt
+    /// without submitting, and popping refills it from somewhere else;
+    /// either way the recall position is stale, and leaving it standing
+    /// makes the next Up overwrite what was typed since. `push` of an
+    /// empty prompt is history's reset — it clears cursor and draft and
+    /// records nothing.
+    fn end_history_browsing(&mut self) {
+        self.history.push("");
+    }
+
+    /// Ctrl-D on a blank prompt is the exit, but a waiting stash is
+    /// exactly what a blank prompt looks like — and it dies with the
+    /// process. Warn once, naming the cost; the repeat quits. `None`
+    /// means quit now.
+    pub(crate) fn quit_stash_warning(&mut self) -> Option<String> {
+        if self.input_stash.is_empty() || std::mem::take(&mut self.quit_armed) {
+            return None;
+        }
+        self.quit_armed = true;
+        Some(format!(
+            "{} stashed prompt(s) would be lost — Ctrl-S pops them, Ctrl-D again quits",
+            self.input_stash.len()
+        ))
     }
 
     pub(crate) fn set_notice(&mut self, text: impl Into<String>, level: NoticeLevel) {
@@ -1897,7 +1943,13 @@ mod tests {
         app.input = crate::input::InputBuffer::from("half-written thought");
         app.stash_or_pop_input();
         assert!(app.input.is_blank());
-        assert_eq!(app.input_stash, vec!["half-written thought".to_string()]);
+        assert_eq!(
+            app.input_stash,
+            vec![StashedPrompt {
+                text: "half-written thought".to_string(),
+                images: Vec::new(),
+            }]
+        );
         assert!(app.notice.is_some(), "stashing says where the text went");
 
         app.input = crate::input::InputBuffer::from("second stash");
@@ -1917,6 +1969,83 @@ mod tests {
         app.stash_or_pop_input();
         assert!(app.input.is_blank());
         assert!(app.notice.is_some());
+    }
+
+    #[test]
+    fn a_stash_carries_its_attached_images_and_gives_them_back() {
+        let mut app = App::new();
+        let attached = ilar::session::ImageContent::png(b"first");
+        app.input = crate::input::InputBuffer::from("look at this");
+        app.pending_images = vec![attached.clone()];
+        app.stash_or_pop_input();
+
+        // The next message must not inherit the stashed prompt's images.
+        assert!(
+            app.pending_images.is_empty(),
+            "images ride with the text they were attached to"
+        );
+        app.input = crate::input::InputBuffer::from("something urgent");
+        app.input.clear();
+
+        app.stash_or_pop_input();
+        assert_eq!(app.input.text(), "look at this");
+        assert_eq!(app.pending_images, vec![attached]);
+    }
+
+    #[test]
+    fn an_image_only_draft_stashes_instead_of_popping() {
+        let mut app = App::new();
+        app.pending_images = vec![ilar::session::ImageContent::png(b"screenshot")];
+        app.input_stash.push(StashedPrompt {
+            text: "older".into(),
+            images: Vec::new(),
+        });
+        app.stash_or_pop_input();
+
+        assert_eq!(app.input_stash.len(), 2, "the attachment was put aside");
+        assert!(app.pending_images.is_empty());
+        assert_eq!(app.input_stash[1].images.len(), 1);
+        assert!(app.input_stash[1].text.is_empty());
+    }
+
+    #[test]
+    fn stashing_ends_history_recall_so_the_next_up_arrow_recalls_afresh() {
+        let mut app = App::new();
+        app.history.push("an old prompt");
+        app.handle_prompt_navigation_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(app.input.text(), "an old prompt");
+
+        app.stash_or_pop_input();
+        assert!(!app.history.browsing(), "a blank prompt is not mid-recall");
+
+        // Freshly typed text after the stash must survive an Up: with a
+        // live cursor, history would replace it instead of stashing a
+        // draft first.
+        app.input = crate::input::InputBuffer::from("typed after stashing");
+        app.handle_prompt_navigation_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(app.input.text(), "typed after stashing");
+    }
+
+    #[test]
+    fn ctrl_d_warns_once_before_quitting_on_a_waiting_stash() {
+        let mut app = App::new();
+        assert_eq!(app.quit_stash_warning(), None, "no stash, no ceremony");
+
+        app.input = crate::input::InputBuffer::from("half-written thought");
+        app.stash_or_pop_input();
+        let warning = app.quit_stash_warning().expect("the first Ctrl-D warns");
+        assert!(warning.contains('1'), "{warning}");
+        assert_eq!(
+            app.quit_stash_warning(),
+            None,
+            "the second Ctrl-D quits anyway"
+        );
+
+        // Consuming the arm resets it: a Ctrl-D much later warns again
+        // (the dispatcher disarms on every other key for the same
+        // reason).
+        assert!(!app.quit_armed);
+        assert!(app.quit_stash_warning().is_some());
     }
 
     #[test]

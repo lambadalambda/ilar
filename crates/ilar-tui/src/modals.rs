@@ -773,6 +773,7 @@ static HELP_SECTIONS: &[HelpSection] = &[
             binding!("Ctrl-Q", "pending manager: queue, goal, jobs, retry"),
             binding!("Ctrl-R", "resume the failed turn from current context"),
             binding!("Ctrl-V", "attach a clipboard image (vision models)"),
+            binding!("Ctrl-S", "stash the draft · pops it back when blank"),
             binding!("Up / Down", "recall prompt history (blank input)"),
             binding!("Ctrl-A / Ctrl-E", "start / end of line"),
             binding!("Ctrl-K / Ctrl-U", "kill to line end / start"),
@@ -786,6 +787,7 @@ static HELP_SECTIONS: &[HelpSection] = &[
             binding!("Ctrl-F", "search transcript"),
             binding!("Ctrl-O", "open a link from the transcript"),
             binding!("Ctrl-T", "show the full todo list"),
+            binding!("Ctrl-L", "repaint the screen (works with an overlay up)"),
             binding!("PgUp / PgDn", "scroll page"),
             binding!("Alt-U / Alt-D", "scroll half page"),
             binding!("Ctrl-Home / Ctrl-End", "jump to top / tail"),
@@ -3616,6 +3618,9 @@ mod tests {
             // The exit moved off Ctrl-C; help is where a user looks for it.
             "Ctrl-D",
             "Ctrl-O",
+            // Undiscoverable otherwise: neither has a menu entry.
+            "Ctrl-S",
+            "Ctrl-L",
             "/rewind",
             "/sessions",
             "history",

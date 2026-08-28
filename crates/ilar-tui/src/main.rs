@@ -1920,18 +1920,25 @@ fn drain_motion_batch(
 }
 
 /// The reasons a session switch (resume, fork, rewind) must wait; the
-/// same triple guards every path that tears the runtime down.
+/// same set guards every path that tears the runtime down. The stash
+/// counts: a switch rebuilds `App` from scratch, so anything put aside
+/// dies with it just as surely as an unsent draft would.
 fn switch_blocked(
     turn_running: bool,
     background_agents: usize,
     has_draft: bool,
-) -> Option<&'static str> {
+    stashed: usize,
+) -> Option<String> {
     if turn_running {
-        Some("finish or abort the current turn before switching sessions")
+        Some("finish or abort the current turn before switching sessions".into())
     } else if background_agents > 0 {
-        Some("background agents are running; wait or abort them first")
+        Some("background agents are running; wait or abort them first".into())
     } else if has_draft {
-        Some("input has an unsent draft; send or clear it first")
+        Some("input has an unsent draft; send or clear it first".into())
+    } else if stashed > 0 {
+        Some(format!(
+            "{stashed} stashed prompt(s) would be lost in the switch; Ctrl-S pops them"
+        ))
     } else {
         None
     }
@@ -2216,6 +2223,7 @@ async fn run_app(
                 turn_handle.is_some(),
                 spawner.running_background(),
                 !app.input.is_blank(),
+                app.input_stash.len(),
             ) {
                 app.set_notice(reason, NoticeLevel::Warning);
             } else if app.goal.is_some() {
@@ -2239,6 +2247,7 @@ async fn run_app(
                 turn_handle.is_some(),
                 spawner.running_background(),
                 !app.input.is_blank(),
+                app.input_stash.len(),
             ) {
                 app.set_notice(reason, NoticeLevel::Warning);
             } else {
@@ -2397,12 +2406,34 @@ async fn run_app(
                     (key, code)
                 };
                 // The exit, EOF-style: a blank prompt with nothing open.
-                if quit_requested(code, control, app.has_modal(), app.input.is_blank()) {
+                let quitting = quit_requested(code, control, app.has_modal(), app.input.is_blank());
+                // Any other key ends a pending quit confirmation, so the
+                // warning always describes the keypress before it.
+                if !quitting {
+                    app.quit_armed = false;
+                }
+                if quitting {
+                    // A stash is invisible from a blank prompt and does
+                    // not survive the process; say what it would cost
+                    // before the second press takes it.
+                    if let Some(warning) = app.quit_stash_warning() {
+                        app.set_notice(warning, NoticeLevel::Warning);
+                        continue;
+                    }
                     if let Some(cancel) = &cancel {
                         cancel.cancel();
                     }
                     spawner.shutdown().await;
                     return Ok(AppExit::Quit);
+                }
+                // A pure repaint, so it runs before the modal dispatch
+                // rather than behind it: outside damage is likeliest
+                // while an overlay is up, and the user should not have
+                // to dismiss the overlay to clear the screen. It touches
+                // nothing but the next frame.
+                if matches!((code, control), (KeyCode::Char('l'), true)) {
+                    app.force_full_redraw = true;
+                    continue;
                 }
                 // One exhaustive match over the active overlay: adding a
                 // `Modal` variant without a dispatch arm is a compile
@@ -2629,6 +2660,7 @@ async fn run_app(
                                         turn_handle.is_some(),
                                         spawner.running_background(),
                                         !app.input.is_blank(),
+                                        app.input_stash.len(),
                                     );
                                     if let Some(reason) = blocked {
                                         app.set_notice(reason, NoticeLevel::Warning);
@@ -2652,6 +2684,7 @@ async fn run_app(
                                         turn_handle.is_some(),
                                         spawner.running_background(),
                                         !app.input.is_blank(),
+                                        app.input_stash.len(),
                                     );
                                     if let Some(reason) = blocked {
                                         app.set_notice(reason, NoticeLevel::Warning);
@@ -2705,6 +2738,7 @@ async fn run_app(
                                         turn_handle.is_some(),
                                         spawner.running_background(),
                                         !app.input.is_blank(),
+                                        app.input_stash.len(),
                                     );
                                     if let Some(reason) = blocked {
                                         app.set_notice(reason, NoticeLevel::Warning);
@@ -2738,6 +2772,7 @@ async fn run_app(
                                         turn_handle.is_some(),
                                         spawner.running_background(),
                                         false,
+                                        app.input_stash.len(),
                                     ) {
                                         app.set_notice(reason, NoticeLevel::Warning);
                                         continue;
@@ -2786,6 +2821,7 @@ async fn run_app(
                                         turn_handle.is_some(),
                                         spawner.running_background(),
                                         false,
+                                        app.input_stash.len(),
                                     ) {
                                         app.set_notice(reason, NoticeLevel::Warning);
                                         continue;
@@ -3085,9 +3121,7 @@ async fn run_app(
                     (KeyCode::Char('s'), true) => {
                         app.stash_or_pop_input();
                     }
-                    (KeyCode::Char('l'), true) => {
-                        app.force_full_redraw = true;
-                    }
+                    // Ctrl-L is claimed above the modal dispatch.
                     (KeyCode::Char('o'), true) => {
                         app.open_link_picker();
                     }
@@ -3278,6 +3312,31 @@ mod tests {
                 "project CLAUDE.md present but skipped (general.project_instructions = false)"
                     .to_string()
             ]
+        );
+    }
+
+    /// A switch rebuilds the app, so the stash has to be spent before
+    /// one can proceed — and the refusal has to say how much is at
+    /// stake, since the prompt itself looks empty.
+    #[test]
+    fn a_waiting_stash_blocks_a_session_switch() {
+        assert_eq!(switch_blocked(false, 0, false, 0), None);
+        let blocked = switch_blocked(false, 0, false, 2).expect("the stash blocks the switch");
+        assert!(blocked.contains('2'), "{blocked}");
+        assert!(blocked.contains("stashed"), "{blocked}");
+
+        // The louder reasons still come first.
+        assert_eq!(
+            switch_blocked(true, 0, false, 2).as_deref(),
+            Some("finish or abort the current turn before switching sessions")
+        );
+        assert_eq!(
+            switch_blocked(false, 1, false, 2).as_deref(),
+            Some("background agents are running; wait or abort them first")
+        );
+        assert_eq!(
+            switch_blocked(false, 0, true, 2).as_deref(),
+            Some("input has an unsent draft; send or clear it first")
         );
     }
 

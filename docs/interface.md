@@ -58,16 +58,23 @@ or clears the input, and never touches the queue or the goal.
 
 Half-written something when a more urgent message comes to mind?
 **Ctrl-S** stashes the prompt — the same key on a blank prompt pops the
-newest stash back, cursor at the end. Stashes stack, the input title
-counts them (`· 2 stashed`) so nothing is forgotten, and unlike the
-queue nothing is ever sent on its own: a stash only comes back when
-you pop it.
+newest stash back, cursor at the end, with whatever images were
+attached to it. Stashes stack, the input title counts them
+(`· 2 stashed`) so nothing is forgotten, and unlike the queue nothing
+is ever sent on its own: a stash only comes back when you pop it.
 
-**Ctrl-L** clears and repaints the whole screen. Tool commands run in
-their own session with no controlling terminal — a `sudo` password
-prompt fails fast with a readable error instead of drawing over the
-UI — but anything that still writes to the terminal from outside
-leaves damage the diff renderer won't touch; Ctrl-L is the eraser.
+Because a stash lives in the running app and nothing else, the things
+that would throw it away say so first: a session switch (resume, fork,
+rewind) is refused while any stash waits, and Ctrl-D on a blank prompt
+warns once, naming the count, before the second press quits.
+
+**Ctrl-L** clears and repaints the whole screen, including while a
+modal or picker is up — which is when outside damage is most likely
+and dismissing to fix it least welcome. Tool commands run in their own
+session with no controlling terminal — a `sudo` password prompt fails
+fast with a readable error instead of drawing over the UI — but
+anything that still writes to the terminal from outside leaves damage
+the diff renderer won't touch; Ctrl-L is the eraser.
 
 ## Images
 
