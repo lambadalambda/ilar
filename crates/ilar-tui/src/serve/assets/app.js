@@ -810,9 +810,19 @@ function useTranscript(id) {
       stream.addEventListener("error", (frame) => {
         if (!alive || source !== stream) return;
         if (frame && typeof frame.data === "string") {
+          const failure = JSON.parse(frame.data);
+          // A turn that failed is news about the session, not about the
+          // stream: the tail is unharmed and the next turn will append
+          // to it, so say what happened and keep listening.
+          if (failure.scope === "turn") {
+            view.error = failure.message;
+            view.retryable = false;
+            paint();
+            return;
+          }
           detach();
           view.status = "stopped";
-          view.error = JSON.parse(frame.data).message;
+          view.error = failure.message;
           view.retryable = true;
           paint();
         } else if (stream.readyState === EventSource.CLOSED) {
@@ -838,6 +848,10 @@ function useTranscript(id) {
       // The running turn's scratch. Ephemeral by design — no id, no
       // replay.
       on("delta", (data) => {
+        // A turn starting is the news that supersedes "the last one
+        // failed"; the stream itself never stopped, so nothing else
+        // would clear that banner.
+        if (data.type === "turn_started" && !view.retryable) view.error = "";
         view.live = liveApply(view.live, data);
         paint();
       });
