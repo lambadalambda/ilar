@@ -314,11 +314,24 @@ button {
 }
 
 .banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   margin: 0;
   padding: 8px 24px;
   background: rgba(247, 118, 142, 0.12);
   color: var(--err);
   font-size: 13px;
+}
+/* Only on an error something can be done about: a stream that gave up,
+   a page that failed to load. Not a deleted session. */
+.banner .retry {
+  flex: none;
+  padding: 2px 10px;
+  color: var(--err);
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 12px;
 }
 
 .stream {
@@ -680,9 +693,6 @@ pre.diff .hunk {
 }
 .input:focus-within {
   border-color: var(--accent);
-}
-.input.locked {
-  opacity: 0.6;
 }
 .prompt {
   flex: 1;

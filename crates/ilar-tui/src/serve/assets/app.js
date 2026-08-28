@@ -248,12 +248,23 @@ function diffKind(line) {
 // pre-wrap otherwise. Never markdown — this is program output.
 // No whitespace inside the tags: this is a <pre>, and a prettier
 // template literal would be indentation on screen.
+//
+// Both answers are memoized on the text itself. `looksLikeDiff` walks
+// the whole body three times and the split walks it again, and an open
+// row is re-rendered on every frame of a streaming turn — an unmemoized
+// row makes a 200 kB result cost four scans per animation frame for an
+// answer that cannot change while the string does not.
 function Preformatted({ text, className }) {
   const body = String(text || "");
-  if (!looksLikeDiff(body)) return html`<pre class=${className || "detail"}>${body}</pre>`;
-  const lines = body
-    .split("\n")
-    .map((line) => html`<span class=${diffKind(line)}>${line + "\n"}</span>`);
+  const diff = useMemo(() => looksLikeDiff(body), [body]);
+  const lines = useMemo(
+    () =>
+      diff
+        ? body.split("\n").map((line) => html`<span class=${diffKind(line)}>${line + "\n"}</span>`)
+        : null,
+    [body, diff],
+  );
+  if (!diff) return html`<pre class=${className || "detail"}>${body}</pre>`;
   return html`<pre class="diff">${lines}</pre>`;
 }
 
@@ -429,7 +440,7 @@ function TaskRow({ call, result, sessionId, cwd }) {
           ${page &&
           html`
             <div class="child">
-              ${eventRows(page.events.slice(compactionCut(page.events, page.cursor)), child, cwd)}
+              ${pageRows(page.events, page.cursor, child, cwd)}
               <a class="link" href=${"#/s/" + encodeURIComponent(child)}>open the child session</a>
             </div>
           `}
@@ -477,15 +488,23 @@ function compactionCut(events, base) {
   return Math.max(0, cut);
 }
 
-function eventRows(events, sessionId, cwd) {
+// `offset` is the canonical index of `events[0]`, and it is what makes
+// the fallback key stable: "load earlier" prepends a page, which shifts
+// every position in the sliced array by the page's length and lowers
+// `base` by exactly the same amount. A key carrying the sliced index
+// would therefore change on every surviving row — preact would unmount
+// the list, collapsing open tool rows and throwing away results already
+// fetched — while the canonical index does not move.
+function eventRows(events, sessionId, cwd, offset) {
   const results = new Map();
   for (const event of events) {
     if (event.type === "tool_result") results.set(event.tool_use_id, event);
   }
   const consumed = new Set();
   const rows = [];
+  const base = Number(offset || 0);
   events.forEach((event, index) => {
-    const key = (event.id || "e") + ":" + index;
+    const key = event.id || "@" + (base + index);
     switch (event.type) {
       case "user_message":
         rows.push(html`
@@ -551,6 +570,13 @@ function eventRows(events, sessionId, cwd) {
     }
   });
   return rows;
+}
+
+// A window onto a log — the centre pane's, or a child invocation's —
+// cut at its compaction and keyed against its own canonical origin.
+function pageRows(events, cursor, sessionId, cwd) {
+  const cut = compactionCut(events, cursor);
+  return eventRows(events.slice(cut), sessionId, cwd, cursor + cut);
 }
 
 // ------------------------------------------------- streaming tail row
@@ -636,11 +662,21 @@ function blankView(id) {
     count: 0,
     status: id ? "loading…" : "",
     error: "",
+    // Whether the error on screen is one a button can do anything
+    // about: a stream that gave up, or a page that failed to load. A
+    // deleted session is not.
+    retryable: false,
+    retry: null,
     loading: Boolean(id),
     pending: false,
     earlier: null,
   };
 }
+
+// How long to wait before each hand-rolled reconnect, and — because the
+// list ends — how many times to try before saying the stream is gone
+// rather than going on claiming it is coming back.
+const RECONNECT_WAITS = [300, 800, 1500, 3000];
 
 // One open session: the canonical folded stream from `base` onward, the
 // physical line the tail stands at (which is what the SSE stream resumes
@@ -671,29 +707,86 @@ function useTranscript(id) {
 
     let alive = true;
     let source = null;
+    let waiting = null;
+    let attempts = 0;
+    // Which fetch of the page the view currently describes. Every load
+    // takes a number and a reply from an older one is dropped, so a
+    // resync's reload cannot be overwritten by the page a "load earlier"
+    // asked for against the window that reload replaced.
+    let generation = 0;
+
     const detach = () => {
       if (source) {
         source.close();
         source = null;
       }
+      if (waiting) {
+        clearTimeout(waiting);
+        waiting = null;
+      }
     };
 
     // The design's fold, over the canonical array, with the one
     // adjustment paging forces: index 0 of what we hold is canonical
-    // index `base`.
+    // index `base`. Returns what it did, because the caller's answer to
+    // "nothing" differs by kind.
     const fold = (kind, data) => {
+      // Idempotence. Every line-bearing frame carries the line it puts
+      // the client on, and ours only moves forward — so a frame at or
+      // below where we stand is one we have already folded, which is
+      // exactly what a resumed stream replays. Appending it again would
+      // duplicate the transcript on every reconnect.
+      if (typeof data.line !== "number" || data.line <= view.line) return "stale";
       if (kind === "rewind") {
-        if (data.to < view.base) return false;
-        view.rewound = view.base + view.events.length - data.to;
-        view.events.length = data.to - view.base;
+        if (data.to < view.base) return "gone";
+        // Clamped: `to` is an index into the whole log and this client
+        // may hold less of it than the rewind cuts to (a short page, a
+        // window that starts later). Assigning a longer length would
+        // extend the array with holes, and the next render would read
+        // `.type` off `undefined`.
+        const kept = Math.min(view.events.length, data.to - view.base);
+        view.rewound = Math.max(0, view.events.length - kept);
+        view.events.length = kept;
       } else {
         view.rewound = null;
         view.events.push(data.event);
       }
       view.line = data.line;
-      return true;
+      return "applied";
     };
 
+    // The stream gave up. Not "reconnecting…", which would be a claim
+    // that something is still trying.
+    const offline = (why) => {
+      detach();
+      view.live = null;
+      view.status = "offline";
+      view.error = why;
+      view.retryable = true;
+      paint();
+    };
+
+    const reconnect = () => {
+      const wait = RECONNECT_WAITS[Math.min(attempts, RECONNECT_WAITS.length - 1)];
+      attempts += 1;
+      detach();
+      // Deltas are not resumed (they carry no id), so the half-message
+      // on screen would silently gain a hole.
+      view.live = null;
+      view.status = "reconnecting…";
+      paint();
+      waiting = setTimeout(() => {
+        waiting = null;
+        if (alive) attach();
+      }, wait);
+    };
+
+    // The reconnect is ours rather than the browser's on purpose. An
+    // EventSource retries the URL it was *constructed* with, so its own
+    // reconnect would ask for `?from=` the line this tab attached at and
+    // be sent everything since — onto a client that already holds it.
+    // Reopening by hand is what makes the query say where we actually
+    // stand; `fold` refuses a replayed line either way.
     const attach = () => {
       detach();
       const stream = new EventSource(withToken(apiPath(id, "/events?from=" + view.line)));
@@ -705,34 +798,40 @@ function useTranscript(id) {
         });
       stream.addEventListener("open", () => {
         if (!alive || source !== stream) return;
+        attempts = 0;
         view.status = "live";
+        view.error = "";
+        view.retryable = false;
         paint();
       });
       // The server's terminal `error` frame and `EventSource`'s own
       // transport failure arrive under the same name; only the server's
-      // carries data. A dropped socket is not a reason to tear the page
-      // down — EventSource reconnects on its own, with `Last-Event-ID`.
+      // carries data.
       stream.addEventListener("error", (frame) => {
         if (!alive || source !== stream) return;
         if (frame && typeof frame.data === "string") {
           detach();
           view.status = "stopped";
           view.error = JSON.parse(frame.data).message;
+          view.retryable = true;
+          paint();
+        } else if (stream.readyState === EventSource.CLOSED) {
+          // Fatal: a non-200 or a wrong content type closes an
+          // EventSource for good. Nothing is coming back on its own.
+          offline("The live stream was refused — reload or retry.");
+        } else if (attempts >= RECONNECT_WAITS.length) {
+          offline("Lost the live stream to this session — the server may be gone.");
         } else {
-          // Deltas are not resumed on reconnect (they carry no id), so
-          // the half-message on screen would silently gain a hole.
-          view.live = null;
-          view.status = "reconnecting…";
+          reconnect();
         }
-        paint();
       });
       on("append", (data) => {
+        if (fold("append", data) !== "applied") return;
         // The committed step supersedes the stand-in for it. Only that
         // one: a tool result lands while the *other* tools of the same
         // step are still streaming, and dropping the row there would
         // lose them.
         if (data.event && data.event.type === "assistant_message") view.live = null;
-        fold("append", data);
         view.count += 1;
         paint();
       });
@@ -744,8 +843,9 @@ function useTranscript(id) {
       });
       on("rewind", (data) => {
         // A rewind below the loaded window leaves nothing to fold onto.
-        if (fold("rewind", data)) paint();
-        else reload();
+        const outcome = fold("rewind", data);
+        if (outcome === "gone") reload();
+        else if (outcome === "applied") paint();
       });
       // The view is stale — a lagging subscriber or a repaired tail.
       // Only a re-fetch is honest.
@@ -754,14 +854,16 @@ function useTranscript(id) {
         detach();
         view.status = "deleted";
         view.error = "This session was deleted.";
+        view.retryable = false;
         paint();
       });
     };
 
     const load = async () => {
+      const mine = (generation += 1);
       try {
         const page = await api(apiPath(id));
-        if (!alive) return;
+        if (!alive || mine !== generation) return;
         view.events = page.events || [];
         view.base = page.cursor;
         view.hasMore = page.has_more;
@@ -771,38 +873,49 @@ function useTranscript(id) {
         view.count = page.count;
         view.loading = false;
         view.error = "";
+        view.retryable = false;
         paint();
         attach();
       } catch (error) {
-        if (!alive) return;
+        if (!alive || mine !== generation) return;
         view.loading = false;
         view.status = "";
         view.error = message(error);
+        view.retryable = true;
         paint();
       }
     };
 
     const reload = () => {
       detach();
+      attempts = 0;
       view.live = null;
       view.rewound = null;
       view.loading = true;
+      view.retryable = false;
       paint();
       load();
     };
 
+    view.retry = reload;
+
     view.earlier = async () => {
       if (view.pending || !view.hasMore) return;
+      const mine = generation;
+      const from = view.base;
       view.pending = true;
       paint();
       try {
-        const page = await api(apiPath(id, "?from=" + view.base));
-        if (!alive) return;
+        const page = await api(apiPath(id, "?from=" + from));
+        // A reload landed while this page was in flight: it holds a
+        // window this head no longer sits above, and prepending would
+        // paste a stale head onto a fresh base.
+        if (!alive || mine !== generation || view.base !== from) return;
         view.events = page.events.concat(view.events);
         view.base = page.cursor;
         view.hasMore = page.has_more;
       } catch (error) {
-        if (alive) view.error = message(error);
+        if (alive && mine === generation) view.error = message(error);
       } finally {
         view.pending = false;
         paint();
@@ -1053,9 +1166,19 @@ function StatusPill({ view, session, onAbort, aborting }) {
 // appears there when the model receives it.
 //
 // A 409 is not a failure to retry: the session belongs to another
-// process, and until that changes this tab is a watcher. The box locks
-// and says so, and the next successful send (after the TUI lets go)
-// clears it.
+// process, and until that changes this tab is a watcher. It says so —
+// but it does not lock, because the lock it used to take had no way out.
+// The lease is transient (a TUI that later exits), the page cannot see
+// it drop, and the only thing that clears the notice was a successful
+// send through a box the notice had already disabled. So the box stays
+// usable, the next success clears the notice, and so does any change in
+// what the listing says the session is doing.
+//
+// This component is keyed on the session id by its parent, which is what
+// makes the awaits below safe: a sidebar switch remounts it, so an
+// in-flight POST resolves into the instance that started it — a dead one
+// whose `setText("")` reaches nobody — rather than clearing the draft
+// someone has just typed into the session they moved to.
 function Composer({ id, session, view }) {
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
@@ -1063,12 +1186,14 @@ function Composer({ id, session, view }) {
   const [fate, setFate] = useState("");
   const [refused, setRefused] = useState(false);
 
+  const driven = session ? session.driven : null;
+  const state = session ? session.state : null;
+  // The lease is invisible from here, but the process holding it cannot
+  // exit without the listing moving: take any change in the session's
+  // liveness as reason to stop asserting a refusal we cannot re-check.
   useEffect(() => {
-    setText("");
-    setFate("");
     setRefused(false);
-    setAborting(false);
-  }, [id]);
+  }, [driven, state]);
 
   // Say it and let it go: a stale "turn started" under a finished turn
   // reads as a claim about now.
@@ -1084,7 +1209,9 @@ function Composer({ id, session, view }) {
     setBusy(true);
     try {
       const result = await post(apiPath(id, "/message"), { text: body });
-      setText("");
+      // Only the words that were sent: a send is not instant, and
+      // whatever was typed on top of them is still a draft.
+      setText((current) => (current.trim() === body ? "" : current));
       setRefused(false);
       setFate(FATE_WORDS[result.fate] || result.fate || "sent");
     } catch (error) {
@@ -1115,25 +1242,20 @@ function Composer({ id, session, view }) {
 
   return html`
     ${refused &&
-    html`<p class="watching">This session is open in another process — watching only.</p>`}
+    html`<p class="watching">
+      This session is open in another process — watching only. Send again to try once it lets go.
+    </p>`}
     <${StatusPill} view=${view} session=${session} onAbort=${abort} aborting=${aborting} />
-    <div class=${"input" + (refused ? " locked" : "")}>
+    <div class="input">
       <textarea
         class="prompt"
         rows="1"
-        placeholder=${refused ? "watching only" : "message this session — Enter sends, Shift-Enter for a new line"}
-        disabled=${refused}
+        placeholder="message this session — Enter sends, Shift-Enter for a new line"
         value=${text}
         onInput=${(event) => setText(event.target.value)}
         onKeyDown=${onKeyDown}
       ></textarea>
-      <button
-        class="send"
-        type="button"
-        disabled=${refused || busy || !text.trim()}
-        onClick=${send}
-        title="send"
-      >
+      <button class="send" type="button" disabled=${busy || !text.trim()} onClick=${send} title="send">
         ${busy ? "…" : "send"}
       </button>
     </div>
@@ -1179,15 +1301,34 @@ function ContextBar({ used, limit }) {
   `;
 }
 
+// Everything this panel reads off the transcript, in one pass instead of
+// three — one of which used to copy the whole array to reverse it, on
+// every frame of a streaming turn.
+function digest(events) {
+  let meta = null;
+  let latest = null;
+  let compactions = 0;
+  for (const event of events) {
+    if (event.type === "assistant_message") latest = event;
+    else if (event.type === "compaction") compactions += 1;
+    else if (event.type === "meta" && !meta) meta = event;
+  }
+  return { meta: meta || {}, latest, compactions };
+}
+
 function DetailPanel({ id, view }) {
   const [children, setChildren] = useState([]);
   useEffect(() => {
+    setChildren([]);
     if (!id) return undefined;
     let alive = true;
     const refresh = () =>
       api(apiPath(id, "/children"))
         .then((page) => alive && setChildren(page.children || []))
-        .catch(() => alive && setChildren([]));
+        // One dropped poll is not "no subagents": keep the last list we
+        // were told about rather than blanking the panel every time a
+        // five-second request loses.
+        .catch(() => {});
     refresh();
     const timer = setInterval(refresh, 5000);
     return () => {
@@ -1196,14 +1337,19 @@ function DetailPanel({ id, view }) {
     };
   }, [id]);
 
-  if (!id) return html`<aside class="panel"></aside>`;
   const session = view.session || {};
-  const meta = view.events.find((event) => event.type === "meta") || {};
+  // The array is mutated in place — appended to, truncated by a rewind —
+  // so its identity alone would not tell a stale digest from a fresh
+  // one; its length moves for both.
+  const { meta, latest, compactions } = useMemo(
+    () => digest(view.events),
+    [view.events, view.events.length, view.count],
+  );
+
+  if (!id) return html`<aside class="panel"></aside>`;
   // The newest turn's own usage, which is what the model was holding —
   // not the session total, which counts every turn's context again.
-  const latest = [...view.events].reverse().find((event) => event.type === "assistant_message");
   const used = contextTokens(latest && latest.usage);
-  const compactions = view.events.filter((event) => event.type === "compaction").length;
   const running = children.filter((child) => child.state !== "idle").length;
 
   return html`
@@ -1269,9 +1415,7 @@ function Center({ id, view, session, onDrawer }) {
 
   const head = view.session || session || {};
   const title = head.title || id || "";
-  const rows = id
-    ? eventRows(view.events.slice(compactionCut(view.events, view.base)), id, head.cwd)
-    : [];
+  const rows = id ? pageRows(view.events, view.base, id, head.cwd) : [];
 
   return html`
     <main class="center">
@@ -1279,7 +1423,15 @@ function Center({ id, view, session, onDrawer }) {
         <button class="drawer-toggle" type="button" onClick=${onDrawer} title="sessions">☰</button>
         <h1>${id ? inline(preview(title, 120)) : "ilar"}</h1>
       </header>
-      ${view.error && html`<p class="banner">${view.error}</p>`}
+      ${view.error &&
+      html`
+        <p class="banner">
+          <span>${view.error}</span>
+          ${view.retryable &&
+          view.retry &&
+          html`<button class="retry" type="button" onClick=${() => view.retry()}>retry</button>`}
+        </p>
+      `}
       <div class="stream" ref=${stream} onScroll=${onScroll}>
         <div class="stream-inner">
           ${!id && html`<p class="empty">Pick a session on the left.</p>`}
@@ -1300,7 +1452,8 @@ function Center({ id, view, session, onDrawer }) {
       </div>
       <footer class="composer">
         ${!tailing && html`<button class="jump" type="button" onClick=${toBottom}>jump to live ↓</button>`}
-        ${id && html`<${Composer} id=${id} view=${view} session=${session} />`}
+        ${id &&
+        html`<${Composer} key=${id} id=${id} view=${view} session=${session} />`}
       </footer>
     </main>
   `;
