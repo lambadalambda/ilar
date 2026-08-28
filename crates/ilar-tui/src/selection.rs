@@ -155,40 +155,51 @@ pub(crate) fn selected_rows_unchanged(
     (start.row..=end.row).all(|row| previous.get(row) == current.get(row))
 }
 
+/// The two cells a fenced block's gutter occupies, read straight off
+/// the buffer. Both the bar and its trailing space must carry the
+/// gutter's style, which is what makes the match unambiguous: an inline
+/// `│` shares the foreground but not the background, and code content
+/// carries syntax colours instead. The scrape runs before
+/// `theme::apply`, while the buffer still holds logical colours.
+fn is_code_gutter_pair(buffer: &Buffer, column: u16, row: u16, area: Rect) -> bool {
+    if column.saturating_add(1) >= area.right() {
+        return false;
+    }
+    let styled_as_gutter = |cell: Option<&ratatui::buffer::Cell>, symbol: &str| {
+        cell.is_some_and(|cell| {
+            cell.symbol() == symbol && crate::text::is_code_gutter_style(&cell.style())
+        })
+    };
+    styled_as_gutter(
+        buffer.cell((column, row)),
+        crate::text::CODE_GUTTER.trim_end(),
+    ) && styled_as_gutter(buffer.cell((column + 1, row)), " ")
+}
+
 pub(crate) fn transcript_cells(buffer: &Buffer, area: Rect) -> Vec<RenderedRow> {
     (area.y..area.bottom())
         .map(|row| {
             let mut rendered = Vec::with_capacity(area.width as usize);
             let mut column = area.x;
-            // The code gutter is recognised structurally — the block's
-            // bar glyph in the code colour, before any content on the
-            // row — so a literal `│` inside code or a table separator
-            // further in is still copied as the character it is. This
-            // scrape runs before `theme::apply`, while the buffer still
-            // holds logical colours.
-            let mut content_started = false;
-            let mut pad_after_gutter = false;
             while column < area.right() {
+                // The gutter is matched as the whole `│ ` pair the
+                // renderer draws, both cells in the gutter's own style
+                // (see `text::is_code_gutter_style`): a bar the user
+                // wrote is content and stays. Position is deliberately
+                // not part of the test — the gutter sits behind the
+                // `ilar ` speaker label on a reply's first row and
+                // behind a subagent's tree bar in a nested block, and
+                // those rows must copy exactly like their neighbours.
+                if is_code_gutter_pair(buffer, column, row, area) {
+                    rendered.push(RenderedCell::Gutter);
+                    rendered.push(RenderedCell::Gutter);
+                    column += 2;
+                    continue;
+                }
                 let cell = buffer.cell((column, row));
                 let symbol = cell.map(|cell| cell.symbol()).unwrap_or(" ");
                 if symbol == " " {
-                    rendered.push(if std::mem::take(&mut pad_after_gutter) {
-                        RenderedCell::Gutter
-                    } else {
-                        RenderedCell::Space
-                    });
-                    column += 1;
-                    continue;
-                }
-                pad_after_gutter = false;
-                let leading = !content_started;
-                content_started = true;
-                if leading
-                    && symbol == crate::text::CODE_GUTTER.trim_end()
-                    && cell.is_some_and(|cell| cell.style().fg == Some(crate::theme::CODE))
-                {
-                    rendered.push(RenderedCell::Gutter);
-                    pad_after_gutter = true;
+                    rendered.push(RenderedCell::Space);
                     column += 1;
                     continue;
                 }
@@ -356,6 +367,59 @@ mod tests {
         assert_eq!(
             selected_transcript_text(&rows, selection).as_deref(),
             Some("a │ b\n    x\nc │ d")
+        );
+    }
+
+    /// Inline code wears the gutter's foreground, so colour alone
+    /// cannot tell them apart: a wrapped line that happens to start
+    /// with `` `│ or` `` must copy every character it shows.
+    #[test]
+    fn a_bar_inside_inline_code_is_copied_verbatim() {
+        let area = Rect::new(0, 0, 12, 1);
+        let mut buffer = Buffer::empty(area);
+        let inline = Style::default()
+            .fg(crate::theme::CODE)
+            .bg(crate::theme::CODE_BG);
+        buffer.set_string(0, 0, "│ or |", inline);
+        let rows = transcript_cells(&buffer, area);
+        let selection = TranscriptSelection {
+            anchor: SelectionPoint { row: 0, column: 0 },
+            focus: SelectionPoint { row: 0, column: 11 },
+        };
+
+        assert_eq!(
+            selected_transcript_text(&rows, selection).as_deref(),
+            Some("│ or |")
+        );
+    }
+
+    /// Every row of one code block has to copy the same way. The first
+    /// row of a reply carries the `ilar ` label and a nested block sits
+    /// behind the subagent tree bar; neither is a reason to keep the
+    /// gutter that follows it.
+    #[test]
+    fn a_code_gutter_is_stripped_behind_a_label_and_behind_a_tree_bar() {
+        let area = Rect::new(0, 0, 20, 3);
+        let mut buffer = Buffer::empty(area);
+        let gutter = Style::default().fg(crate::theme::CODE);
+        let code = Style::default().fg(crate::theme::PRIMARY);
+        buffer.set_string(0, 0, "ilar ", crate::theme::title(crate::theme::ASSISTANT));
+        buffer.set_string(5, 0, "│ ", gutter);
+        buffer.set_string(7, 0, "fn main() {", code);
+        buffer.set_string(5, 1, "│ ", gutter);
+        buffer.set_string(7, 1, "  work();", code);
+        buffer.set_string(0, 2, "│ ", Style::default().fg(crate::theme::BORDER));
+        buffer.set_string(2, 2, "│ ", gutter);
+        buffer.set_string(4, 2, "}", code);
+        let rows = transcript_cells(&buffer, area);
+        let selection = TranscriptSelection {
+            anchor: SelectionPoint { row: 0, column: 0 },
+            focus: SelectionPoint { row: 2, column: 19 },
+        };
+
+        assert_eq!(
+            selected_transcript_text(&rows, selection).as_deref(),
+            Some("ilar fn main() {\n       work();\n│ }")
         );
     }
 

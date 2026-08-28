@@ -53,3 +53,4 @@
 ## Milestone 13 — Guard rails
 
 - [ ] [Kernel sandbox for tool processes](issues/kernel-sandbox-for-tool-processes.md)
+- [ ] [Sweep after the write path](issues/sweep-after-the-write-path.md)

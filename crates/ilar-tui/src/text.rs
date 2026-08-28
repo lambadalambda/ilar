@@ -43,6 +43,16 @@ fn is_code_gutter(span: &Span<'_>) -> bool {
     span.content == CODE_GUTTER && span.style.fg == Some(theme::CODE)
 }
 
+/// Whether a *rendered* cell wears the gutter's own colours — the test
+/// selection.rs runs on the buffer, where spans are gone and only the
+/// style is left. Inline code shares the foreground, so the background
+/// is what separates them: inline code always paints `CODE_BG` behind
+/// itself, the gutter never does. Keeping this next to the span that
+/// draws it is what stops the two ends from drifting apart.
+pub(crate) fn is_code_gutter_style(style: &Style) -> bool {
+    style.fg == Some(theme::CODE) && style.bg != Some(theme::CODE_BG)
+}
+
 pub(crate) fn wrap_markdown_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
     let preformatted = line.spans.first().is_some_and(is_code_gutter);
     if preformatted {
