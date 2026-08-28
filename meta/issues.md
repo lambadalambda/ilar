@@ -53,3 +53,4 @@
 ## Milestone 13 — Guard rails
 
 - [ ] [Kernel sandbox for tool processes](issues/kernel-sandbox-for-tool-processes.md)
+- [ ] [Images ride with steers and queued messages](issues/images-ride-with-steers-and-queued-messages.md)
