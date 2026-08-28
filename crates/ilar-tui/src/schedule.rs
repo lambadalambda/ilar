@@ -15,7 +15,9 @@
 //! exactly what makes a reordering visible.
 
 use crate::app::App;
-use crate::decide::{Intent, LoopState, QueueStep, after_turn, may_route_notification, queue_step};
+use crate::decide::{
+    Intent, LoopState, QueueStep, after_turn, may_start_notification_turn, queue_step,
+};
 use crate::transcript::Line_;
 use crate::{Activity, MAX_GOAL_ROUNDS, NoticeLevel};
 use ilar::agent::TurnOutcome;
@@ -26,7 +28,14 @@ use ilar::subagent::{Notification, RouteOutcome};
 /// awaiting the join, so the pass itself never blocks.
 pub(crate) enum Completion {
     Root(anyhow::Result<TurnOutcome>),
-    Routed(anyhow::Result<RouteOutcome>),
+    /// A detached delivery to another session finished. Carries the
+    /// notification it was delivering, so a failure can still put the
+    /// child's final word in front of the user instead of losing it
+    /// with the plumbing error.
+    Routed {
+        result: anyhow::Result<RouteOutcome>,
+        notification: Notification,
+    },
     Compaction(anyhow::Result<ManualCompactionOutcome>),
     /// The turn task itself died.
     Crashed(String),
@@ -43,14 +52,15 @@ pub(crate) trait Runtime {
     /// chance to open the palette before a notification could claim
     /// the keyboard.
     fn peek_palette(&mut self, app: &mut App) -> anyhow::Result<()>;
-    /// The next notification to act on; `held` means the gate is
-    /// closed and nothing may be consumed.
-    fn next_notification(&mut self, held: bool) -> Option<Notification>;
+    /// The next notification waiting, held-back ones first.
+    fn next_notification(&mut self) -> Option<Notification>;
     /// Start an explicitly requested idle-session compaction.
     fn start_compaction(&mut self, app: &mut App);
     /// Ask a `/btw` question over the session, off the record.
     fn start_aside(&mut self, app: &mut App, question: String);
-    /// A notification for another session: hand it off.
+    /// A notification for another session: spawn its delivery beside
+    /// whatever else is running. It resumes a child, so it takes
+    /// neither the turn slot nor the keyboard, and several may run.
     fn route(&mut self, app: &mut App, notification: Notification);
     /// A notification for this session: start its turn here.
     fn start_notification_turn(&mut self, app: &mut App, notification: Notification);
@@ -65,6 +75,10 @@ pub(crate) trait Runtime {
     /// A requeued notification goes to the front, to be re-offered as
     /// soon as the user resumes.
     fn hold_requeue(&mut self, notification: Notification);
+    /// Same-session notifications the gate could not admit this pass,
+    /// in arrival order: put them back in front so nothing is lost
+    /// and order holds.
+    fn hold_blocked(&mut self, notifications: Vec<Notification>);
     /// Drop the ended turn's channels; a steer sent after this queues.
     fn end_turn(&mut self);
     /// Persist and adopt the pre-override model — the tail end of a
@@ -81,21 +95,9 @@ pub(crate) trait Runtime {
     fn poll_event(&mut self, busy: bool) -> anyhow::Result<Option<crossterm::event::Event>>;
 }
 
-/// What the caller does after a settle pass.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Settled {
-    Proceed,
-    /// A routing turn was spawned; restart the iteration so its
-    /// completion is awaited before anything else happens.
-    Restart,
-}
-
 /// How a tick ended, and what the caller owes the iteration.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Tick {
-    /// A routing turn was spawned; restart without drawing so its
-    /// completion is awaited before anything else happens.
-    Restart,
     /// Nothing arrived within the poll window.
     Idle,
     /// A terminal event for the dispatch half, which stays outside
@@ -111,19 +113,14 @@ pub(crate) enum Tick {
 /// hit map of the frame the user actually saw.
 pub(crate) async fn tick<R: Runtime>(
     app: &mut App,
-    completion: Option<Completion>,
+    completions: Vec<Completion>,
     carried: Vec<Intent>,
     runtime: &mut R,
 ) -> anyhow::Result<Tick> {
-    let settled = pass(app, completion, carried, runtime)?;
-    // After the drain — a queued command may have armed it there —
-    // and before the restart, so a routed notification cannot defer
-    // the spawn.
+    pass(app, completions, carried, runtime)?;
+    // After the drain — a queued command may have armed it there.
     if let Some(request) = app.pending_subtask.take() {
         runtime.start_subtask(app, request).await;
-    }
-    if settled == Settled::Restart {
-        return Ok(Tick::Restart);
     }
     runtime.present(app)?;
     match runtime.poll_event(app.busy)? {
@@ -132,19 +129,20 @@ pub(crate) async fn tick<R: Runtime>(
     }
 }
 
-/// A whole pass: fold the completion that triggered it (if any) into
-/// the intents, then settle. This is the iteration's spine — what a
-/// turn ending sets in motion, in the order it must happen:
-/// completion bookkeeping and `after_turn` decisions first, then the
-/// drain, then the gate on the drain's result.
+/// A whole pass: fold the completions that triggered it (the turn's
+/// and any finished deliveries') into the intents, then settle. This
+/// is the iteration's spine — what a turn ending sets in motion, in
+/// the order it must happen: completion bookkeeping and `after_turn`
+/// decisions first, then the drain, then the gate on the drain's
+/// result.
 pub(crate) fn pass<R: Runtime>(
     app: &mut App,
-    completion: Option<Completion>,
+    completions: Vec<Completion>,
     carried: Vec<Intent>,
     runtime: &mut R,
-) -> anyhow::Result<Settled> {
+) -> anyhow::Result<()> {
     let mut intents = carried;
-    if let Some(completion) = completion {
+    for completion in completions {
         intents.extend(complete(app, completion, runtime));
     }
     settle(app, intents, runtime)
@@ -161,6 +159,19 @@ pub(crate) fn pass<R: Runtime>(
 fn complete<R: Runtime>(app: &mut App, completion: Completion, runtime: &mut R) -> Vec<Intent> {
     let mut intents = Vec::new();
     match completion {
+        // A delivery's completion is bookkeeping for the delivery
+        // alone. It never ran in the turn slot, so none of the turn
+        // teardown below — end_turn, the steer splice, the model
+        // revert — is its to trigger: a root turn may be running
+        // right now, and end_turn would tear that turn's channels
+        // down.
+        Completion::Routed {
+            result,
+            notification,
+        } => {
+            routed_complete(app, result, notification, runtime);
+            return Vec::new();
+        }
         Completion::Root(result) => {
             let aborted = matches!(result, Ok(TurnOutcome::Aborted));
             let completed = matches!(result, Ok(TurnOutcome::Completed));
@@ -250,38 +261,6 @@ fn complete<R: Runtime>(app: &mut App, completion: Completion, runtime: &mut R) 
                 QueueStep::Idle | QueueStep::Hold(_) => Vec::new(),
             };
         }
-        Completion::Routed(Ok(RouteOutcome::Propagate(notification))) => {
-            app.busy = false;
-            app.status = "ready".into();
-            app.clear_transient_notice();
-            app.set_activity(Activity::Ready);
-            runtime.hold_propagate(notification);
-        }
-        Completion::Routed(Ok(RouteOutcome::Requeue(notification))) => {
-            app.busy = false;
-            app.status = "notification paused; send a message to resume".into();
-            app.set_persistent_notice(
-                "notification paused; send a message to resume",
-                NoticeLevel::Warning,
-            );
-            app.set_activity(Activity::Paused);
-            runtime.hold_requeue(notification);
-            runtime.pause_notifications();
-        }
-        Completion::Routed(Ok(RouteOutcome::Complete)) => {
-            app.busy = false;
-            app.status = "ready".into();
-            app.clear_transient_notice();
-            app.set_activity(Activity::Ready);
-        }
-        Completion::Routed(Err(error)) => {
-            app.busy = false;
-            app.status = "error".into();
-            app.set_activity(Activity::Error);
-            let message = format!("notification routing failed: {error}");
-            app.set_notice(&message, NoticeLevel::Error);
-            app.push_transcript_line(Line_::System(message));
-        }
         Completion::Crashed(error) => {
             app.busy = false;
             // A crash delivers no TurnDone and no error event, so this
@@ -315,6 +294,56 @@ fn complete<R: Runtime>(app: &mut App, completion: Completion, runtime: &mut R) 
     intents
 }
 
+/// A delivery to another session finished: file its outcome. Nothing
+/// here touches the turn slot or the root's busy state — the delivery
+/// never owned either.
+fn routed_complete<R: Runtime>(
+    app: &mut App,
+    result: anyhow::Result<RouteOutcome>,
+    notification: Notification,
+    runtime: &mut R,
+) {
+    match result {
+        Ok(RouteOutcome::Propagate(propagated)) => runtime.hold_propagate(propagated),
+        Ok(RouteOutcome::Requeue(requeued)) => {
+            app.set_persistent_notice(
+                "notification paused; send a message to resume",
+                NoticeLevel::Warning,
+            );
+            if !runtime.observe(app).turn_running {
+                app.status = "notification paused; send a message to resume".into();
+                app.set_activity(Activity::Paused);
+            }
+            runtime.hold_requeue(requeued);
+            runtime.pause_notifications();
+        }
+        Ok(RouteOutcome::Complete) => {
+            app.set_notice(
+                format!(
+                    "task result delivered to {}",
+                    notification.parent_session_id
+                ),
+                NoticeLevel::Info,
+            );
+        }
+        Err(error) => {
+            // The delivery failed, but the child's final word is
+            // right here: salvage it into the transcript instead of
+            // losing the work with the plumbing error.
+            let message = format!(
+                "a task result could not be delivered to {}: {error:#}",
+                notification.parent_session_id
+            );
+            app.set_notice(&message, NoticeLevel::Error);
+            app.push_transcript_line(Line_::System(message));
+            app.push_transcript_line(Line_::System(format!(
+                "undelivered result of {}:\n{}",
+                notification.description, notification.text
+            )));
+        }
+    }
+}
+
 /// One settle pass, in the order that defines the schedule. The order
 /// is the point: the gate must observe a turn the drain just started,
 /// or a background notification steals the turn a queued message was
@@ -323,7 +352,7 @@ pub(crate) fn settle<R: Runtime>(
     app: &mut App,
     intents: Vec<Intent>,
     runtime: &mut R,
-) -> anyhow::Result<Settled> {
+) -> anyhow::Result<()> {
     for intent in intents {
         runtime.perform(app, intent)?;
     }
@@ -337,15 +366,33 @@ pub(crate) fn settle<R: Runtime>(
     if let Some(question) = app.aside_requested.take() {
         runtime.start_aside(app, question);
     }
+    // The notification drain. Foreign completions resume other
+    // sessions: they need nothing the root holds — not the turn slot,
+    // not the keyboard — so they route immediately, even mid-turn,
+    // even under a modal. Only a same-session completion wants the
+    // turn slot, and only the first can have it; the rest are held in
+    // arrival order. The requeue pause holds everything: it exists so
+    // a failing delivery is retried when the user is back, not in a
+    // tight loop.
     let state = runtime.observe(app);
-    if let Some(notification) = runtime.next_notification(!may_route_notification(&state)) {
-        if notification.parent_session_id != runtime.session_id() {
-            runtime.route(app, notification);
-            return Ok(Settled::Restart);
+    if !state.notifications_paused {
+        let mut turn_gate = may_start_notification_turn(&state);
+        let mut blocked = Vec::new();
+        while let Some(notification) = runtime.next_notification() {
+            if notification.parent_session_id != runtime.session_id() {
+                runtime.route(app, notification);
+            } else if turn_gate {
+                runtime.start_notification_turn(app, notification);
+                turn_gate = false;
+            } else {
+                blocked.push(notification);
+            }
         }
-        runtime.start_notification_turn(app, notification);
+        if !blocked.is_empty() {
+            runtime.hold_blocked(blocked);
+        }
     }
-    Ok(Settled::Proceed)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -416,10 +463,7 @@ mod tests {
             Ok(())
         }
 
-        fn next_notification(&mut self, held: bool) -> Option<Notification> {
-            if held {
-                return None;
-            }
+        fn next_notification(&mut self) -> Option<Notification> {
             self.pending.pop_front()
         }
 
@@ -435,7 +479,7 @@ mod tests {
         }
 
         fn route(&mut self, _app: &mut App, notification: Notification) {
-            self.turn_running = true;
+            // Detached: the turn slot is not touched.
             self.log
                 .push(format!("route:{}", notification.parent_session_id));
         }
@@ -465,6 +509,13 @@ mod tests {
         fn hold_requeue(&mut self, notification: Notification) {
             self.log.push(format!("requeue:{}", notification.text));
             self.pending.push_front(notification);
+        }
+
+        fn hold_blocked(&mut self, notifications: Vec<Notification>) {
+            // Silent, like the real one: holding is not an event.
+            for notification in notifications.into_iter().rev() {
+                self.pending.push_front(notification);
+            }
         }
 
         fn end_turn(&mut self) {
@@ -532,12 +583,12 @@ mod tests {
 
         pass(
             &mut app,
-            Some(Completion::Compaction(Ok(
+            vec![Completion::Compaction(Ok(
                 ManualCompactionOutcome::Compacted {
                     summary: "handover keeps the migration plan".into(),
                     context_tokens: 42,
                 },
-            ))),
+            ))],
             Vec::new(),
             &mut runtime,
         )
@@ -579,7 +630,7 @@ mod tests {
 
         pass(
             &mut app,
-            Some(Completion::Compaction(Ok(ManualCompactionOutcome::Aborted))),
+            vec![Completion::Compaction(Ok(ManualCompactionOutcome::Aborted))],
             Vec::new(),
             &mut runtime,
         )
@@ -600,9 +651,8 @@ mod tests {
         app.queued_messages = vec!["do the next thing".into()];
         let mut runtime = FakeRuntime::new().with_notification("root", "task finished");
 
-        let outcome = settle(&mut app, vec![Intent::SendQueued], &mut runtime).unwrap();
+        settle(&mut app, vec![Intent::SendQueued], &mut runtime).unwrap();
 
-        assert_eq!(outcome, Settled::Proceed);
         assert_eq!(runtime.log, vec!["start_turn:do the next thing"]);
         assert_eq!(
             runtime.pending.len(),
@@ -667,15 +717,14 @@ mod tests {
         app.queued_messages = vec!["do the next thing".into()];
         let mut runtime = FakeRuntime::new().with_notification("root", "task finished");
 
-        let outcome = pass(
+        pass(
             &mut app,
-            Some(Completion::Root(Ok(TurnOutcome::Completed))),
+            vec![Completion::Root(Ok(TurnOutcome::Completed))],
             Vec::new(),
             &mut runtime,
         )
         .unwrap();
 
-        assert_eq!(outcome, Settled::Proceed);
         assert_eq!(
             runtime.log,
             vec!["end_turn", "start_turn:do the next thing"]
@@ -698,7 +747,7 @@ mod tests {
 
         pass(
             &mut app,
-            Some(Completion::Root(Ok(TurnOutcome::Completed))),
+            vec![Completion::Root(Ok(TurnOutcome::Completed))],
             Vec::new(),
             &mut runtime,
         )
@@ -726,7 +775,7 @@ mod tests {
 
         pass(
             &mut app,
-            Some(Completion::Root(Ok(TurnOutcome::Aborted))),
+            vec![Completion::Root(Ok(TurnOutcome::Aborted))],
             Vec::new(),
             &mut runtime,
         )
@@ -743,7 +792,7 @@ mod tests {
         runtime.log.clear();
         pass(
             &mut app,
-            Some(Completion::Root(Ok(TurnOutcome::Completed))),
+            vec![Completion::Root(Ok(TurnOutcome::Completed))],
             Vec::new(),
             &mut runtime,
         )
@@ -764,7 +813,7 @@ mod tests {
 
         pass(
             &mut app,
-            Some(Completion::Root(Ok(TurnOutcome::Completed))),
+            vec![Completion::Root(Ok(TurnOutcome::Completed))],
             Vec::new(),
             &mut runtime,
         )
@@ -786,7 +835,7 @@ mod tests {
 
         pass(
             &mut app,
-            Some(Completion::Root(Ok(TurnOutcome::Completed))),
+            vec![Completion::Root(Ok(TurnOutcome::Completed))],
             Vec::new(),
             &mut runtime,
         )
@@ -818,16 +867,22 @@ mod tests {
 
         pass(
             &mut app,
-            Some(Completion::Routed(Ok(RouteOutcome::Requeue(notification)))),
+            vec![Completion::Routed {
+                result: Ok(RouteOutcome::Requeue(notification.clone())),
+                notification,
+            }],
             Vec::new(),
             &mut runtime,
         )
         .unwrap();
 
         assert!(runtime.paused);
-        assert_eq!(runtime.log, vec!["requeue:needs the user", "end_turn"]);
+        assert_eq!(
+            runtime.log,
+            vec!["requeue:needs the user"],
+            "a delivery ends no turn"
+        );
         assert_eq!(runtime.pending.len(), 1, "held, not delivered");
-        assert!(!app.busy);
     }
 
     /// The frame is drawn after the drain and before the poll: what
@@ -842,7 +897,7 @@ mod tests {
 
         let outcome = tick(
             &mut app,
-            Some(Completion::Root(Ok(TurnOutcome::Completed))),
+            vec![Completion::Root(Ok(TurnOutcome::Completed))],
             Vec::new(),
             &mut runtime,
         )
@@ -856,20 +911,19 @@ mod tests {
         );
     }
 
-    /// A routed notification restarts the iteration without drawing —
-    /// its completion is awaited first, exactly as the old `continue`
-    /// behaved.
+    /// A foreign notification routes inside the tick and the tick
+    /// still draws: the delivery is detached, so nothing waits on it.
     #[tokio::test]
-    async fn a_restart_skips_the_frame_and_the_poll() {
+    async fn a_foreign_notification_routes_and_the_tick_still_draws() {
         let mut app = App::new();
         let mut runtime = FakeRuntime::new().with_notification("elsewhere", "done");
 
-        let outcome = tick(&mut app, None, Vec::new(), &mut runtime)
+        let outcome = tick(&mut app, Vec::new(), Vec::new(), &mut runtime)
             .await
             .unwrap();
 
-        assert_eq!(outcome, Tick::Restart);
-        assert_eq!(runtime.log, vec!["route:elsewhere"]);
+        assert_eq!(outcome, Tick::Idle);
+        assert_eq!(runtime.log, vec!["route:elsewhere", "present", "poll"]);
     }
 
     /// A subtask armed during the drain spawns in the same tick,
@@ -887,7 +941,7 @@ mod tests {
         });
         let mut runtime = FakeRuntime::new();
 
-        tick(&mut app, None, Vec::new(), &mut runtime)
+        tick(&mut app, Vec::new(), Vec::new(), &mut runtime)
             .await
             .unwrap();
 
@@ -907,7 +961,7 @@ mod tests {
         );
         let mut runtime = FakeRuntime::new();
 
-        tick(&mut app, None, carried, &mut runtime).await.unwrap();
+        tick(&mut app, Vec::new(), carried, &mut runtime).await.unwrap();
 
         assert_eq!(
             runtime.log,
@@ -940,7 +994,7 @@ mod tests {
 
         pass(
             &mut app,
-            Some(Completion::Crashed("turn task panicked".into())),
+            vec![Completion::Crashed("turn task panicked".into())],
             Vec::new(),
             &mut runtime,
         )
@@ -974,19 +1028,188 @@ mod tests {
     }
 
     /// An idle pass lets the notification through: same-session starts
-    /// its turn here, foreign routes and restarts the iteration.
+    /// its turn here, foreign spawns its detached delivery.
     #[test]
     fn an_idle_pass_admits_the_notification() {
         let mut app = App::new();
         let mut runtime = FakeRuntime::new().with_notification("root", "task finished");
-        let outcome = settle(&mut app, Vec::new(), &mut runtime).unwrap();
-        assert_eq!(outcome, Settled::Proceed);
+        settle(&mut app, Vec::new(), &mut runtime).unwrap();
         assert_eq!(runtime.log, vec!["notify_turn:task finished"]);
 
         let mut app = App::new();
         let mut runtime = FakeRuntime::new().with_notification("elsewhere", "done");
-        let outcome = settle(&mut app, Vec::new(), &mut runtime).unwrap();
-        assert_eq!(outcome, Settled::Restart);
+        settle(&mut app, Vec::new(), &mut runtime).unwrap();
         assert_eq!(runtime.log, vec!["route:elsewhere"]);
+    }
+
+    /// The requeue pause holds foreign notifications too — it is the
+    /// only thing standing between a requeued delivery and a tight
+    /// route-fail-requeue loop. Routing foreign past the pause fails
+    /// this.
+    #[test]
+    fn a_paused_gate_holds_foreign_notifications() {
+        let mut app = App::new();
+        let mut runtime = FakeRuntime::new().with_notification("elsewhere", "done");
+        runtime.paused = true;
+
+        settle(&mut app, Vec::new(), &mut runtime).unwrap();
+
+        assert!(runtime.log.is_empty(), "{:?}", runtime.log);
+        assert_eq!(runtime.pending.len(), 1, "held for resume, not consumed");
+    }
+
+    /// The heart of the rework: a foreign completion routes even while
+    /// a root turn runs and a modal owns the keyboard. Its delivery
+    /// needs nothing the root holds, so nothing gates it — the very
+    /// gate that once queued every completion behind a finished turn.
+    #[test]
+    fn a_foreign_completion_routes_while_a_turn_runs_and_a_modal_is_open() {
+        let mut app = App::new();
+        app.busy = true;
+        app.help_visible = true;
+        let mut runtime = FakeRuntime::new().with_notification("elsewhere", "done");
+        runtime.turn_running = true;
+
+        settle(&mut app, Vec::new(), &mut runtime).unwrap();
+
+        assert_eq!(runtime.log, vec!["route:elsewhere"]);
+        assert!(app.busy, "the root turn's state is untouched");
+    }
+
+    /// A same-session completion blocked by a running turn must not
+    /// starve a foreign one behind it: the foreign delivery routes,
+    /// the blocked one is held — in order, not lost.
+    #[test]
+    fn a_blocked_same_session_head_does_not_starve_a_foreign_delivery() {
+        let mut app = App::new();
+        let mut runtime = FakeRuntime::new()
+            .with_notification("root", "for the root")
+            .with_notification("elsewhere", "for a child");
+        runtime.turn_running = true;
+
+        settle(&mut app, Vec::new(), &mut runtime).unwrap();
+
+        assert_eq!(runtime.log, vec!["route:elsewhere"]);
+        assert_eq!(
+            runtime
+                .pending
+                .iter()
+                .map(|n| n.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["for the root"],
+            "the blocked completion is held, not lost"
+        );
+    }
+
+    /// A delivery finishing beside a live root turn files its outcome
+    /// and touches nothing of the turn's: no end_turn, no channels
+    /// torn down, no busy flip. Running Routed through the turn
+    /// teardown fails this.
+    #[test]
+    fn a_delivery_completion_ends_no_turn() {
+        let mut app = App::new();
+        app.busy = true;
+        let mut runtime = FakeRuntime::new();
+        runtime.turn_running = true;
+        let notification = Notification {
+            parent_session_id: "child".into(),
+            description: "background task".into(),
+            text: "done".into(),
+            is_error: false,
+        };
+
+        pass(
+            &mut app,
+            vec![Completion::Routed {
+                result: Ok(RouteOutcome::Complete),
+                notification,
+            }],
+            Vec::new(),
+            &mut runtime,
+        )
+        .unwrap();
+
+        assert!(runtime.log.is_empty(), "{:?}", runtime.log);
+        assert!(app.busy, "the running turn's busy state survives");
+    }
+
+    /// Two deliveries propagating in one pass must both survive. The
+    /// old single-slot hold overwrote the first with the second — a
+    /// completion silently lost.
+    #[test]
+    fn a_second_propagate_does_not_overwrite_the_first() {
+        let mut app = App::new();
+        let mut runtime = FakeRuntime::new();
+        runtime.turn_running = true;
+        let propagated = |text: &str| Notification {
+            parent_session_id: "root".into(),
+            description: "nested task".into(),
+            text: text.into(),
+            is_error: false,
+        };
+
+        pass(
+            &mut app,
+            vec![
+                Completion::Routed {
+                    result: Ok(RouteOutcome::Propagate(propagated("first"))),
+                    notification: propagated("first"),
+                },
+                Completion::Routed {
+                    result: Ok(RouteOutcome::Propagate(propagated("second"))),
+                    notification: propagated("second"),
+                },
+            ],
+            Vec::new(),
+            &mut runtime,
+        )
+        .unwrap();
+
+        assert_eq!(
+            runtime
+                .pending
+                .iter()
+                .map(|n| n.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "second"],
+            "both held, in order"
+        );
+    }
+
+    /// A delivery that fails outright still puts the child's final
+    /// word in the transcript: the plumbing error must not take the
+    /// work down with it.
+    #[test]
+    fn a_failed_delivery_salvages_the_result_into_the_transcript() {
+        let mut app = App::new();
+        let mut runtime = FakeRuntime::new();
+        let notification = Notification {
+            parent_session_id: "child".into(),
+            description: "builder task".into(),
+            text: "the build is green".into(),
+            is_error: false,
+        };
+
+        pass(
+            &mut app,
+            vec![Completion::Routed {
+                result: Err(anyhow::anyhow!("unknown persisted agent")),
+                notification,
+            }],
+            Vec::new(),
+            &mut runtime,
+        )
+        .unwrap();
+
+        assert!(
+            app.lines().iter().any(
+                |line| matches!(line, Line_::System(text) if text.contains("the build is green"))
+            ),
+            "{:?}",
+            app.lines()
+        );
+        assert!(app.lines().iter().any(
+            |line| matches!(line, Line_::System(text) if text.contains("could not be delivered"))
+        ));
     }
 }

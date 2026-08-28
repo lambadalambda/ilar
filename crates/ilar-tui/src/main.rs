@@ -1282,39 +1282,42 @@ fn session_context_tokens(
     Ok((estimated, true))
 }
 
-struct PendingNotification {
-    notification: ilar::subagent::Notification,
-    queued_ahead: usize,
-}
-
+/// Held-back notifications first — they arrived earlier and were only
+/// deferred — then whatever the channel has.
 fn next_notification(
-    blocked: bool,
-    pending: &mut Option<PendingNotification>,
+    held: &mut std::collections::VecDeque<ilar::subagent::Notification>,
     notifications: &mut tokio::sync::mpsc::Receiver<ilar::subagent::Notification>,
 ) -> Option<ilar::subagent::Notification> {
-    if blocked {
-        return None;
+    held.pop_front().or_else(|| notifications.try_recv().ok())
+}
+
+/// A propagated completion goes behind what was already queued when it
+/// landed: the channel is drained into the held queue first, then the
+/// propagated one takes the back seat. A bare push_back would let it
+/// jump the backlog, since held notifications are offered first.
+fn hold_propagate_behind_backlog(
+    held: &mut std::collections::VecDeque<ilar::subagent::Notification>,
+    notifications: &mut tokio::sync::mpsc::Receiver<ilar::subagent::Notification>,
+    notification: ilar::subagent::Notification,
+) {
+    while let Ok(queued) = notifications.try_recv() {
+        held.push_back(queued);
     }
-    if pending
-        .as_ref()
-        .is_some_and(|pending| pending.queued_ahead == 0)
-    {
-        return pending.take().map(|pending| pending.notification);
-    }
-    match notifications.try_recv() {
-        Ok(notification) => {
-            if let Some(pending) = pending {
-                pending.queued_ahead = pending.queued_ahead.saturating_sub(1);
-            }
-            Some(notification)
-        }
-        Err(_) => pending.take().map(|pending| pending.notification),
-    }
+    held.push_back(notification);
+}
+
+/// A completion being delivered to another session, detached from the
+/// turn slot the way an aside is: it resumes a child, so the root's
+/// conversation owes it nothing. The notification rides along so a
+/// failed delivery can still surface the child's final word.
+struct RoutedDelivery {
+    handle: tokio::task::JoinHandle<Result<ilar::subagent::RouteOutcome>>,
+    cancel: CancellationToken,
+    notification: ilar::subagent::Notification,
 }
 
 enum TurnCompletion {
     Root(Result<TurnOutcome>),
-    Routed(Result<ilar::subagent::RouteOutcome>),
     Compaction(Result<ilar::compaction::ManualCompactionOutcome>),
 }
 
@@ -1508,8 +1511,9 @@ struct LoopRuntime<'a> {
     cancel: &'a mut Option<CancellationToken>,
     steer_tx: &'a mut Option<ilar::agent::SteerSender>,
     pending_terminal_event: &'a mut Option<Event>,
-    pending_notification: &'a mut Option<PendingNotification>,
+    held_notifications: &'a mut std::collections::VecDeque<ilar::subagent::Notification>,
     notifications: &'a mut tokio::sync::mpsc::Receiver<ilar::subagent::Notification>,
+    routed: &'a mut Vec<RoutedDelivery>,
     ring_on_turn_completion: &'a mut bool,
     notifications_paused: &'a mut bool,
     resolver: &'a Arc<dyn ProviderResolver>,
@@ -1604,8 +1608,8 @@ impl schedule::Runtime for LoopRuntime<'_> {
         Ok(())
     }
 
-    fn next_notification(&mut self, held: bool) -> Option<ilar::subagent::Notification> {
-        next_notification(held, self.pending_notification, self.notifications)
+    fn next_notification(&mut self) -> Option<ilar::subagent::Notification> {
+        next_notification(self.held_notifications, self.notifications)
     }
 
     fn start_compaction(&mut self, app: &mut App) {
@@ -1669,16 +1673,28 @@ impl schedule::Runtime for LoopRuntime<'_> {
     }
 
     fn route(&mut self, app: &mut App, notification: ilar::subagent::Notification) {
+        // Detached, like an aside: the delivery resumes another
+        // session, so the turn slot, the busy state and the activity
+        // all stay whose they were. Several may run at once; the
+        // session claim serializes deliveries to the same child.
+        app.set_notice(
+            format!(
+                "delivering a task result to {}",
+                notification.parent_session_id
+            ),
+            NoticeLevel::Info,
+        );
         let token = CancellationToken::new();
-        *self.cancel = Some(token.clone());
-        app.busy = true;
-        app.status = format!("routing task to {}", notification.parent_session_id);
-        app.clear_transient_notice();
-        app.set_activity(Activity::Thinking);
         let spawner = self.spawner.clone();
-        *self.turn_handle = Some(tokio::spawn(async move {
-            TurnCompletion::Routed(spawner.route_notification(notification, token).await)
-        }));
+        let delivered = notification.clone();
+        let cancel = token.clone();
+        let handle =
+            tokio::spawn(async move { spawner.route_notification(delivered, cancel).await });
+        self.routed.push(RoutedDelivery {
+            handle,
+            cancel: token,
+            notification,
+        });
     }
 
     fn start_notification_turn(
@@ -1711,17 +1727,17 @@ impl schedule::Runtime for LoopRuntime<'_> {
     }
 
     fn hold_propagate(&mut self, notification: ilar::subagent::Notification) {
-        *self.pending_notification = Some(PendingNotification {
-            notification,
-            queued_ahead: self.notifications.len(),
-        });
+        hold_propagate_behind_backlog(self.held_notifications, self.notifications, notification);
     }
 
     fn hold_requeue(&mut self, notification: ilar::subagent::Notification) {
-        *self.pending_notification = Some(PendingNotification {
-            notification,
-            queued_ahead: 0,
-        });
+        self.held_notifications.push_front(notification);
+    }
+
+    fn hold_blocked(&mut self, notifications: Vec<ilar::subagent::Notification>) {
+        for notification in notifications.into_iter().rev() {
+            self.held_notifications.push_front(notification);
+        }
     }
 
     fn end_turn(&mut self) {
@@ -1803,7 +1819,10 @@ impl schedule::Runtime for LoopRuntime<'_> {
             self.bell_pending,
             self.turn_handle.is_some(),
         );
-        app.background_running = self.spawner.running_background();
+        // Deliveries count as background work: they are jobs the user
+        // may want to wait for or cancel, and the pending manager's
+        // cancel-all takes them too.
+        app.background_running = self.spawner.running_background() + self.routed.len();
         app.agents_view = self
             .spawner
             .running_tasks()
@@ -1952,11 +1971,18 @@ fn drain_motion_batch(
 /// same set guards every path that tears the runtime down. The stash is
 /// not among them: it rides along into the rebuilt app, so there is
 /// nothing to lose by leaving.
-fn switch_blocked(turn_running: bool, background_agents: usize, has_draft: bool) -> Option<String> {
+fn switch_blocked(
+    turn_running: bool,
+    background_agents: usize,
+    deliveries: usize,
+    has_draft: bool,
+) -> Option<String> {
     if turn_running {
         Some("finish or abort the current turn before switching sessions".into())
     } else if background_agents > 0 {
         Some("background agents are running; wait or abort them first".into())
+    } else if deliveries > 0 {
+        Some("a task result is being delivered; wait a moment".into())
     } else if has_draft {
         Some("input has an unsent draft; send or clear it first".into())
     } else {
@@ -2122,8 +2148,10 @@ async fn run_app(
     // generation they answer; the flag abandons a stale walk.
     let mut search_rx: Option<(u64, std::sync::mpsc::Receiver<Vec<SearchRow>>)> = None;
     let mut search_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>> = None;
-    let mut pending_notification = None;
+    let mut held_notifications = std::collections::VecDeque::new();
     let mut notifications_paused = false;
+    // Deliveries to other sessions, running beside the turn slot.
+    let mut routed: Vec<RoutedDelivery> = Vec::new();
     let mut cancel: Option<CancellationToken> = None;
     // Live only while a root turn runs, so a message typed during that
     // turn is steered into it. Cross-session routed turns have no
@@ -2243,6 +2271,7 @@ async fn run_app(
             if let Some(reason) = switch_blocked(
                 turn_handle.is_some(),
                 spawner.running_background(),
+                routed.len(),
                 !app.input.is_blank(),
             ) {
                 app.set_notice(reason, NoticeLevel::Warning);
@@ -2266,6 +2295,7 @@ async fn run_app(
             if let Some(reason) = switch_blocked(
                 turn_handle.is_some(),
                 spawner.running_background(),
+                routed.len(),
                 !app.input.is_blank(),
             ) {
                 app.set_notice(reason, NoticeLevel::Warning);
@@ -2288,7 +2318,7 @@ async fn run_app(
         }
         // Turn finished? Join at the edge; schedule::pass folds the
         // completion into the same pass as the drain and the gate.
-        let mut completion = None;
+        let mut completions = Vec::new();
         if let Some(handle) = turn_handle.as_mut()
             && handle.is_finished()
         {
@@ -2299,9 +2329,8 @@ async fn run_app(
                     app.push_loop_event(&event);
                 }
             }
-            completion = Some(match handle.await {
+            completions.push(match handle.await {
                 Ok(TurnCompletion::Root(result)) => schedule::Completion::Root(result),
-                Ok(TurnCompletion::Routed(result)) => schedule::Completion::Routed(result),
                 Ok(TurnCompletion::Compaction(result)) => schedule::Completion::Compaction(result),
                 Err(error) => schedule::Completion::Crashed(error.to_string()),
             });
@@ -2311,7 +2340,10 @@ async fn run_app(
             // prompt for, and a failure leaves the session as it was.
             if app.topic.is_none()
                 && topic_handle.is_none()
-                && matches!(completion, Some(schedule::Completion::Root(Ok(_))))
+                && matches!(
+                    completions.first(),
+                    Some(schedule::Completion::Root(Ok(_)))
+                )
             {
                 let resolver = resolver.clone();
                 let store = store.clone();
@@ -2350,6 +2382,25 @@ async fn run_app(
                 app.finish_aside(question, result);
             }
         }
+        // Finished deliveries join here; a crashed delivery task is
+        // folded as a failure so the notification it carried is
+        // salvaged rather than lost with the panic.
+        let mut index = 0;
+        while index < routed.len() {
+            if !routed[index].handle.is_finished() {
+                index += 1;
+                continue;
+            }
+            let delivery = routed.remove(index);
+            let result = match delivery.handle.await {
+                Ok(result) => result,
+                Err(error) => Err(anyhow::anyhow!("the delivery task crashed: {error}")),
+            };
+            completions.push(schedule::Completion::Routed {
+                result,
+                notification: delivery.notification,
+            });
+        }
 
         // The whole iteration minus the dispatch — completion
         // bookkeeping and its after_turn decisions, the intent drain,
@@ -2358,7 +2409,7 @@ async fn run_app(
         // can drive the sequence. Only the effects live here.
         let outcome = schedule::tick(
             app,
-            completion,
+            completions,
             std::mem::take(&mut intents),
             &mut LoopRuntime {
                 turn_handle: &mut turn_handle,
@@ -2368,8 +2419,9 @@ async fn run_app(
                 cancel: &mut cancel,
                 steer_tx: &mut steer_tx,
                 pending_terminal_event: &mut pending_terminal_event,
-                pending_notification: &mut pending_notification,
+                held_notifications: &mut held_notifications,
                 notifications: &mut notifications,
+                routed: &mut routed,
                 ring_on_turn_completion: &mut ring_on_turn_completion,
                 notifications_paused: &mut notifications_paused,
                 resolver: &resolver,
@@ -2387,7 +2439,7 @@ async fn run_app(
         )
         .await?;
         let event = match outcome {
-            schedule::Tick::Restart | schedule::Tick::Idle => continue,
+            schedule::Tick::Idle => continue,
             schedule::Tick::Dispatch(event) => event,
         };
         match event {
@@ -2443,6 +2495,13 @@ async fn run_app(
                     if let Some(cancel) = &cancel {
                         cancel.cancel();
                     }
+                    for delivery in &routed {
+                        delivery.cancel.cancel();
+                    }
+                    let _ = futures::future::join_all(
+                        routed.drain(..).map(|delivery| delivery.handle),
+                    )
+                    .await;
                     spawner.shutdown().await;
                     return Ok(AppExit::Quit);
                 }
@@ -2543,6 +2602,12 @@ async fn run_app(
                             }
                             PendingAction::CancelBackground => {
                                 spawner.abort_all();
+                                // Deliveries are background work too: a
+                                // cancelled one requeues its
+                                // notification and waits for resume.
+                                for delivery in &routed {
+                                    delivery.cancel.cancel();
+                                }
                                 notifications_paused = true;
                                 app.background_running = 0;
                                 app.set_persistent_notice(
@@ -2687,6 +2752,7 @@ async fn run_app(
                                     let blocked = switch_blocked(
                                         turn_handle.is_some(),
                                         spawner.running_background(),
+                                        routed.len(),
                                         !app.input.is_blank(),
                                     );
                                     if let Some(reason) = blocked {
@@ -2715,6 +2781,7 @@ async fn run_app(
                                     let blocked = switch_blocked(
                                         turn_handle.is_some(),
                                         spawner.running_background(),
+                                        routed.len(),
                                         !app.input.is_blank(),
                                     );
                                     if let Some(reason) = blocked {
@@ -2773,6 +2840,7 @@ async fn run_app(
                                     let blocked = switch_blocked(
                                         turn_handle.is_some(),
                                         spawner.running_background(),
+                                        routed.len(),
                                         !app.input.is_blank(),
                                     );
                                     if let Some(reason) = blocked {
@@ -2811,6 +2879,7 @@ async fn run_app(
                                     if let Some(reason) = switch_blocked(
                                         turn_handle.is_some(),
                                         spawner.running_background(),
+                                        routed.len(),
                                         false,
                                     ) {
                                         app.set_notice(reason, NoticeLevel::Warning);
@@ -2860,6 +2929,7 @@ async fn run_app(
                                     if let Some(reason) = switch_blocked(
                                         turn_handle.is_some(),
                                         spawner.running_background(),
+                                        routed.len(),
                                         false,
                                     ) {
                                         app.set_notice(reason, NoticeLevel::Warning);
@@ -3362,18 +3432,18 @@ mod tests {
     /// that do block still do, in the same order.
     #[test]
     fn a_waiting_stash_does_not_block_a_session_switch() {
-        assert_eq!(switch_blocked(false, 0, false), None);
+        assert_eq!(switch_blocked(false, 0, 0, false), None);
 
         assert_eq!(
-            switch_blocked(true, 0, false).as_deref(),
+            switch_blocked(true, 0, 0, false).as_deref(),
             Some("finish or abort the current turn before switching sessions")
         );
         assert_eq!(
-            switch_blocked(false, 1, false).as_deref(),
+            switch_blocked(false, 1, 0, false).as_deref(),
             Some("background agents are running; wait or abort them first")
         );
         assert_eq!(
-            switch_blocked(false, 0, true).as_deref(),
+            switch_blocked(false, 0, 0, true).as_deref(),
             Some("input has an unsent draft; send or clear it first")
         );
     }
@@ -3931,68 +4001,52 @@ mod tests {
     }
 
     #[test]
-    fn notification_burst_stays_queued_while_a_turn_is_active() {
+    fn held_notifications_come_back_before_the_channel() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(2);
-        for description in ["first", "second"] {
-            tx.try_send(ilar::subagent::Notification {
-                parent_session_id: "parent".into(),
-                description: description.into(),
-                text: description.into(),
-                is_error: false,
-            })
-            .unwrap();
-        }
+        let note = |description: &str| ilar::subagent::Notification {
+            parent_session_id: "parent".into(),
+            description: description.into(),
+            text: description.into(),
+            is_error: false,
+        };
+        tx.try_send(note("from the channel")).unwrap();
+        let mut held = std::collections::VecDeque::from([note("held earlier")]);
 
-        let mut pending = None;
-        // Blocked for any reason: a running turn, a pause, or an
-        // overlay owning the keyboard. `may_route_notification` decides
-        // which; this only checks the gate is honoured.
-        assert!(next_notification(true, &mut pending, &mut rx).is_none());
-        assert_eq!(rx.len(), 2, "a blocked gate must not consume the backlog");
         assert_eq!(
-            next_notification(false, &mut pending, &mut rx)
-                .unwrap()
-                .description,
-            "first"
+            next_notification(&mut held, &mut rx).unwrap().description,
+            "held earlier",
+            "a held notification arrived first and is offered first"
         );
         assert_eq!(
-            next_notification(false, &mut pending, &mut rx)
-                .unwrap()
-                .description,
-            "second"
+            next_notification(&mut held, &mut rx).unwrap().description,
+            "from the channel"
         );
+        assert!(next_notification(&mut held, &mut rx).is_none());
     }
 
+    /// A propagated completion must not jump the queue: everything the
+    /// channel already held is offered first. A bare push_back fails
+    /// this, because held notifications outrank the channel.
     #[test]
     fn propagated_notification_follows_the_existing_receiver_backlog() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(2);
-        tx.try_send(ilar::subagent::Notification {
+        let note = |description: &str| ilar::subagent::Notification {
             parent_session_id: "parent".into(),
-            description: "queued".into(),
-            text: "queued".into(),
+            description: description.into(),
+            text: description.into(),
             is_error: false,
-        })
-        .unwrap();
-        let mut pending = Some(PendingNotification {
-            notification: ilar::subagent::Notification {
-                parent_session_id: "parent".into(),
-                description: "propagated".into(),
-                text: "propagated".into(),
-                is_error: false,
-            },
-            queued_ahead: rx.len(),
-        });
+        };
+        tx.try_send(note("queued")).unwrap();
+        let mut held = std::collections::VecDeque::new();
+
+        hold_propagate_behind_backlog(&mut held, &mut rx, note("propagated"));
 
         assert_eq!(
-            next_notification(false, &mut pending, &mut rx)
-                .unwrap()
-                .description,
+            next_notification(&mut held, &mut rx).unwrap().description,
             "queued"
         );
         assert_eq!(
-            next_notification(false, &mut pending, &mut rx)
-                .unwrap()
-                .description,
+            next_notification(&mut held, &mut rx).unwrap().description,
             "propagated"
         );
     }

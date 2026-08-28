@@ -354,10 +354,12 @@ pub(crate) fn retry_dismisses_manager(intents: &[Intent]) -> bool {
     intents.iter().any(|i| matches!(i, Intent::ResumeTurn))
 }
 
-/// Whether a background completion may start a turn now. An overlay
-/// owning the keyboard counts: a turn starting underneath a picker or
-/// the search bar moves the transcript out from under the user.
-pub(crate) fn may_route_notification(state: &LoopState) -> bool {
+/// Whether a same-session background completion may start a turn now.
+/// An overlay owning the keyboard counts: a turn starting underneath a
+/// picker or the search bar moves the transcript out from under the
+/// user. Foreign completions are not gated here at all — their
+/// delivery resumes another session and takes nothing of this one's.
+pub(crate) fn may_start_notification_turn(state: &LoopState) -> bool {
     !state.turn_running && !state.notifications_paused && state.modal.is_none()
 }
 
@@ -586,18 +588,18 @@ mod tests {
 
     #[test]
     fn a_notification_waits_for_an_idle_keyboard() {
-        assert!(may_route_notification(&idle()));
-        assert!(!may_route_notification(&LoopState {
+        assert!(may_start_notification_turn(&idle()));
+        assert!(!may_start_notification_turn(&LoopState {
             turn_running: true,
             ..idle()
         }));
-        assert!(!may_route_notification(&LoopState {
+        assert!(!may_start_notification_turn(&LoopState {
             notifications_paused: true,
             ..idle()
         }));
         // The gate that search used to slip through: a turn starting
         // under the search bar rewrites the transcript being read.
-        assert!(!may_route_notification(&LoopState {
+        assert!(!may_start_notification_turn(&LoopState {
             modal: Some(Modal::Search),
             ..idle()
         }));
