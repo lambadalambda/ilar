@@ -104,21 +104,23 @@ impl SpillTarget {
 
     /// Write a body and describe where it went. Never an error the tool
     /// call fails on: the preview is still a result, and a note beats a
-    /// tool result the model cannot use at all.
-    pub(crate) async fn write_note(&self, body: &[u8], advice: &str) -> String {
+    /// tool result the model cannot use at all. `Err` carries the note
+    /// that says so — callers still print it, but must not go on to
+    /// promise anything about a file that is not there.
+    pub(crate) async fn write_note(&self, body: &[u8], advice: &str) -> Result<String, String> {
         let path = self.path();
         if let Err(error) = tokio::fs::create_dir_all(&self.dir).await {
-            return format!("(could not save the full output: {error})");
+            return Err(format!("(could not save the full output: {error})"));
         }
         if let Err(error) = tokio::fs::write(&path, body).await {
-            return format!("(could not save the full output: {error})");
+            return Err(format!("(could not save the full output: {error})"));
         }
-        format!(
+        Ok(format!(
             "full output: {} ({}, {} lines) — {advice}",
             path.display(),
             human_bytes(body.len()),
             line_count(body),
-        )
+        ))
     }
 
     /// `<session>-<call>.txt`: a provider's call id is only unique
@@ -196,10 +198,16 @@ fn human_bytes(bytes: usize) -> String {
     }
 }
 
-/// Write the capture and describe where it went.
-async fn spill_note(target: &SpillTarget, out: &Captured, err: &Captured, advice: &str) -> String {
+/// Write the capture and describe where it went. `Err` is the note for
+/// a spill that never landed.
+async fn spill_note(
+    target: &SpillTarget,
+    out: &Captured,
+    err: &Captured,
+    advice: &str,
+) -> Result<String, String> {
     let body = spill_body(&out.retained, &err.retained);
-    let mut note = target.write_note(&body, advice).await;
+    let mut note = target.write_note(&body, advice).await?;
     // Retention is tail-biased, so a capture that overran says which end
     // of the raw output survived rather than implying all of it did.
     let retained = out.retained.len().saturating_add(err.retained.len());
@@ -211,14 +219,25 @@ async fn spill_note(target: &SpillTarget, out: &Captured, err: &Captured, advice
             human_bytes(retained),
         ));
     }
-    note
+    Ok(note)
 }
+
+/// A shape is a summary of a whole document; past this it is a wall of
+/// keys nobody reads, whatever the preview budget allows.
+const MAX_SHAPE_BYTES: usize = 2048;
+/// Advice for a spilled JSON stdout, in the two forms [`spill_body`]
+/// writes: the document alone, or the document under stream markers.
+const JSON_ADVICE: &str = "stdout is one JSON document; jq the file for what you need";
+const JSON_WITH_STDERR_ADVICE: &str = "stdout is one JSON document, but that file holds both streams: cut the \
+     === stdout === / === stderr === marker lines before jq";
 
 /// The shape of a spilled stdout that is one complete JSON document:
 /// what is in it, not a 30 KiB window into the middle of it. `None`
 /// when the capture lost its front (the tail of a JSON stream parses as
-/// nothing) or when the bytes are not JSON at all.
-fn json_shape(out: &Captured) -> Option<String> {
+/// nothing) or when the bytes are not JSON at all. `budget` is stdout's
+/// share of the preview: the shape replaces that tail, so it costs what
+/// the tail would have.
+fn json_shape(out: &Captured, budget: usize) -> Option<String> {
     if out.error.is_some() || out.total != out.retained.len() {
         return None;
     }
@@ -228,7 +247,7 @@ fn json_shape(out: &Captured) -> Option<String> {
         return None;
     }
     let mut shape = format!("JSON shape: {}", describe_json(&value, true));
-    crate::text::truncate_bytes_ellipsis(&mut shape, 2048);
+    crate::text::truncate_bytes_ellipsis(&mut shape, budget.min(MAX_SHAPE_BYTES));
     Some(shape)
 }
 
@@ -291,29 +310,6 @@ async fn render_output(
     if total <= rendered {
         return content;
     }
-    // A complete JSON stdout gets its shape instead of a tail: a 30 KiB
-    // window into minified JSON teaches nothing, and the next call was
-    // going to be jq on the spilled file anyway.
-    if let Some(target) = spill
-        && let Some(shape) = json_shape(&out)
-    {
-        let note = spill_note(
-            target,
-            &out,
-            &err,
-            "stdout is one JSON document; jq the file for what you need",
-        )
-        .await;
-        let mut preview = format!("{note}\n{shape}");
-        if !stderr_tail.is_empty() {
-            preview.push_str("\n=== stderr (tail) ===\n");
-            preview.push_str(&String::from_utf8_lossy(stderr_tail));
-        }
-        if let Some(error) = &err.error {
-            preview.push_str(&format!("\n(stderr read error: {error})"));
-        }
-        return preview;
-    }
     content.push_str(&format!(
         "\n…(output truncated at {rendered} rendered bytes from {total} raw bytes; \
          kept the tail of each stream)"
@@ -321,12 +317,43 @@ async fn render_output(
     let Some(target) = spill else {
         return content;
     };
+    // A complete JSON stdout gets its shape instead of a tail: a 30 KiB
+    // window into minified JSON teaches nothing, and the next call was
+    // going to be jq on the spilled file anyway. Only when the *stdout*
+    // preview was the thing that had to be cut, though — a 220-byte
+    // token response beside a noisy stderr already fits, and a shape
+    // summary in place of the token is a worse answer than the token.
+    let shape = if stdout_tail.len() < out.retained.len() {
+        json_shape(&out, stdout_keep)
+    } else {
+        None
+    };
+    let advice = match (shape.is_some(), err.retained.is_empty()) {
+        (true, true) => JSON_ADVICE,
+        (true, false) => JSON_WITH_STDERR_ADVICE,
+        (false, _) => "grep or read it for what you need",
+    };
     // The pointer leads. The TUI shows a tool result head-first and cuts
     // it long before the end, so a hint appended after 30 KiB of preview
     // is one only the model would ever see — and the human is the reader
     // who has to decide whether the file is worth opening.
-    let note = spill_note(target, &out, &err, "grep or read it for what you need").await;
-    format!("{note}\n{content}")
+    match (spill_note(target, &out, &err, advice).await, shape) {
+        (Ok(note), Some(shape)) => {
+            let mut preview = format!("{note}\n{shape}");
+            if !stderr_tail.is_empty() {
+                preview.push_str("\n=== stderr (tail) ===\n");
+                preview.push_str(&String::from_utf8_lossy(stderr_tail));
+            }
+            if let Some(error) = &err.error {
+                preview.push_str(&format!("\n(stderr read error: {error})"));
+            }
+            preview
+        }
+        (Ok(note), None) => format!("{note}\n{content}"),
+        // No file to jq: a shape pointing at nothing is worse than the
+        // tail, which is at least output the model can read.
+        (Err(failure), _) => format!("{failure}\n{content}"),
+    }
 }
 
 /// Directory spilled tool output lives in, under the state dir.
@@ -852,7 +879,10 @@ mod tests {
         let rendered = render_output(out, err, Some(&target), MAX_PREVIEW).await;
 
         assert!(rendered.starts_with("full output: "), "{rendered}");
-        assert!(rendered.contains("jq the file"), "{rendered}");
+        // Both streams spoke, so the file is marker-separated and the
+        // advice says how to get at the document inside it.
+        assert!(rendered.contains("=== stdout ==="), "{rendered}");
+        assert!(rendered.contains("before jq"), "{rendered}");
         assert!(rendered.contains("rows: array (20000 items)"), "{rendered}");
         assert!(rendered.contains("title: \"aeon\""), "{rendered}");
         assert!(
@@ -868,6 +898,131 @@ mod tests {
         let file = dir.path().join("session-1-call-json.txt");
         let saved = std::fs::read_to_string(file).unwrap();
         assert!(saved.contains(&body), "the file holds the whole document");
+    }
+
+    /// A stdout that fit its own share of the preview is the answer, and
+    /// the answer is what comes back: the overflow gate counts both
+    /// streams, so a 220-byte token response beside a noisy stderr would
+    /// otherwise be replaced by a shape summary of itself.
+    #[tokio::test]
+    async fn a_stdout_that_fits_is_never_replaced_by_its_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = SpillTarget {
+            dir: dir.path().to_path_buf(),
+            session_id: "session-1".into(),
+            call_id: "call-token".into(),
+        };
+        let body = serde_json::to_string(&serde_json::json!({"access_token": "s3cr3t-value"}))
+            .unwrap()
+            .into_bytes();
+        assert!(body.len() < 1024, "the token response fits on its own");
+        let out = Captured {
+            total: body.len(),
+            retained: body,
+            error: None,
+        };
+        // Loud stderr: enough to push the *combined* rendering past the
+        // budget without touching stdout's share of it.
+        let noise = vec![b'e'; MAX_PREVIEW * 2];
+        let err = Captured {
+            total: noise.len(),
+            retained: noise,
+            error: None,
+        };
+
+        let rendered = render_output(out, err, Some(&target), MAX_PREVIEW).await;
+
+        assert!(rendered.contains("s3cr3t-value"), "the answer was lost");
+        assert!(
+            !rendered.contains("JSON shape"),
+            "{}",
+            rendered.lines().next().unwrap_or_default()
+        );
+        assert!(
+            rendered.contains("full output: "),
+            "{}",
+            rendered.lines().next().unwrap_or_default()
+        );
+    }
+
+    /// A declared preview budget binds the shape too: it stands in for
+    /// stdout's tail, so it costs what that tail would have.
+    #[tokio::test]
+    async fn a_declared_budget_caps_the_json_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = SpillTarget {
+            dir: dir.path().to_path_buf(),
+            session_id: "session-1".into(),
+            call_id: "call-shape-budget".into(),
+        };
+        let wide: serde_json::Map<String, serde_json::Value> = (0..1000)
+            .map(|index| {
+                (
+                    format!("key_number_{index:04}_with_a_long_name"),
+                    serde_json::json!("a value long enough to matter"),
+                )
+            })
+            .collect();
+        let body = serde_json::to_string(&serde_json::Value::Object(wide)).unwrap();
+        assert!(body.len() > MAX_PREVIEW);
+        let out = Captured {
+            total: body.len(),
+            retained: body.into_bytes(),
+            error: None,
+        };
+
+        let declared = render_output(out.clone(), Captured::default(), Some(&target), 1024).await;
+        let full = render_output(out, Captured::default(), Some(&target), MAX_PREVIEW).await;
+
+        assert!(declared.contains("JSON shape"), "{declared}");
+        assert!(
+            declared.len() < 1024 + 512,
+            "declared budget ignored: {} bytes",
+            declared.len()
+        );
+        assert!(
+            full.len() > declared.len(),
+            "the default budget shrank with the declaration"
+        );
+    }
+
+    /// A spill that could not be written leaves no file to jq, so the
+    /// JSON path falls back to the tail the ordinary path would have
+    /// returned — a shape pointing at nothing is worse than output.
+    #[tokio::test]
+    async fn a_json_spill_that_cannot_be_written_falls_back_to_the_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("not-a-directory");
+        std::fs::write(&blocker, b"").unwrap();
+        let target = SpillTarget {
+            dir: blocker.join("tool-output"),
+            session_id: "session-1".into(),
+            call_id: "call-json-blocked".into(),
+        };
+        let rows: Vec<u64> = (0..20_000).collect();
+        let body = serde_json::to_string(&serde_json::json!({"rows": rows})).unwrap();
+        let out = Captured {
+            total: body.len(),
+            retained: body.into_bytes(),
+            error: None,
+        };
+
+        let rendered = render_output(out, Captured::default(), Some(&target), MAX_PREVIEW).await;
+
+        assert!(
+            rendered.starts_with("(could not save the full output:"),
+            "{}",
+            rendered.lines().next().unwrap_or_default()
+        );
+        assert!(
+            rendered.contains("output truncated at"),
+            "the tail was lost"
+        );
+        assert!(!rendered.contains("jq the file"), "advice named no file");
+        assert!(
+            rendered.len() > MAX_PREVIEW / 2,
+            "the preview was discarded"
+        );
     }
 
     /// A JSON stream whose front was dropped by tail-biased retention
