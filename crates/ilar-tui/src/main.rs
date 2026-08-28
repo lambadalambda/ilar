@@ -1222,6 +1222,20 @@ async fn main() -> Result<()> {
         app.keyboard_enhanced = terminal_hold
             .as_ref()
             .is_some_and(|(_, session)| session.keyboard_enhanced);
+        // Completions published by an earlier run of this tree that
+        // never reached their session: the outbox kept them, and they
+        // enter this run as if freshly notified.
+        let recovered_notifications =
+            ilar::outbox::pending(&store, &config.state_dir().join("outbox"), &session_id);
+        if !recovered_notifications.is_empty() {
+            app.set_notice(
+                format!(
+                    "{} task result(s) from a previous run will be delivered",
+                    recovered_notifications.len()
+                ),
+                NoticeLevel::Info,
+            );
+        }
         let terminal = &mut terminal_hold.as_mut().expect("terminal started").0;
         let exit = run_app(
             terminal,
@@ -1234,6 +1248,7 @@ async fn main() -> Result<()> {
             &registry,
             tool_ctx,
             spawner,
+            recovered_notifications,
             notifications,
             subagent_activity,
             question_rx,
@@ -1280,6 +1295,12 @@ fn session_context_tokens(
         &registry.definitions(),
     );
     Ok((estimated, true))
+}
+
+/// The first uuid segment: enough to tell sessions apart in a notice,
+/// short enough to leave room for what actually matters.
+pub(crate) fn short_session_id(id: &str) -> &str {
+    id.split('-').next().unwrap_or(id)
 }
 
 /// Held-back notifications first — they arrived earlier and were only
@@ -1679,8 +1700,9 @@ impl schedule::Runtime for LoopRuntime<'_> {
         // session claim serializes deliveries to the same child.
         app.set_notice(
             format!(
-                "delivering a task result to {}",
-                notification.parent_session_id
+                "delivering \"{}\" to {}",
+                notification.description,
+                short_session_id(&notification.parent_session_id)
             ),
             NoticeLevel::Info,
         );
@@ -1695,6 +1717,30 @@ impl schedule::Runtime for LoopRuntime<'_> {
             cancel: token,
             notification,
         });
+    }
+
+    fn steer_notification(
+        &mut self,
+        app: &mut App,
+        notification: ilar::subagent::Notification,
+    ) -> Option<ilar::subagent::Notification> {
+        // The same rails as a user steer: sent into the live channel,
+        // tracked as pending so a turn that ends without reading it
+        // splices it into the queue instead of losing it.
+        let Some(tx) = self.steer_tx.as_ref() else {
+            return Some(notification);
+        };
+        let message = ilar::agent::Steer {
+            text: notification.text.clone(),
+            images: Vec::new(),
+        };
+        if tx.send(message.clone()).is_err() {
+            // The channel closed under us — the turn is ending; the
+            // notification goes back to be held for the next pass.
+            return Some(notification);
+        }
+        app.pending_steers.push(message);
+        None
     }
 
     fn start_notification_turn(
@@ -1828,9 +1874,13 @@ impl schedule::Runtime for LoopRuntime<'_> {
             .running_tasks()
             .into_iter()
             .map(|task| AgentRow {
+                foreign_parent: (!task.parent_session_id.is_empty()
+                    && task.parent_session_id != *self.session_id)
+                    .then(|| short_session_id(&task.parent_session_id).to_string()),
                 description: task.description,
                 agent: task.agent,
                 background: task.background,
+                delivering: task.delivering,
                 elapsed: task.started.elapsed(),
             })
             .collect();
@@ -2136,6 +2186,7 @@ async fn run_app(
     registry: &ToolRegistry,
     tool_ctx: ToolContext,
     spawner: std::sync::Arc<ilar::subagent::SubagentSpawner>,
+    recovered_notifications: Vec<ilar::subagent::Notification>,
     mut notifications: tokio::sync::mpsc::Receiver<ilar::subagent::Notification>,
     mut subagent_activity: tokio::sync::broadcast::Receiver<ilar::subagent::SubagentActivity>,
     mut question_rx: ilar::question::QuestionReceiver,
@@ -2148,7 +2199,10 @@ async fn run_app(
     // generation they answer; the flag abandons a stale walk.
     let mut search_rx: Option<(u64, std::sync::mpsc::Receiver<Vec<SearchRow>>)> = None;
     let mut search_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>> = None;
-    let mut held_notifications = std::collections::VecDeque::new();
+    // Seeded with what the outbox recovered: they arrived before this
+    // process existed, so they go first.
+    let mut held_notifications: std::collections::VecDeque<ilar::subagent::Notification> =
+        recovered_notifications.into();
     let mut notifications_paused = false;
     // Deliveries to other sessions, running beside the turn slot.
     let mut routed: Vec<RoutedDelivery> = Vec::new();
@@ -2485,10 +2539,14 @@ async fn run_app(
                     app.quit_armed = false;
                 }
                 if quitting {
-                    // A stash is invisible from a blank prompt and does
-                    // not survive the process; say what it would cost
-                    // before the second press takes it.
-                    if let Some(warning) = app.quit_stash_warning() {
+                    // A stash and undelivered task results are both
+                    // invisible from a blank prompt; say what leaving
+                    // costs before the second press takes it. The
+                    // results survive in the outbox — the warning says
+                    // when they arrive, not that they are lost.
+                    let undelivered =
+                        held_notifications.len() + notifications.len() + routed.len();
+                    if let Some(warning) = app.quit_warning(undelivered) {
                         app.set_notice(warning, NoticeLevel::Warning);
                         continue;
                     }

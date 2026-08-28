@@ -64,6 +64,14 @@ pub(crate) trait Runtime {
     fn route(&mut self, app: &mut App, notification: Notification);
     /// A notification for this session: start its turn here.
     fn start_notification_turn(&mut self, app: &mut App, notification: Notification);
+    /// A notification for this session while its turn runs: send it
+    /// into that turn like any other steer. Handed back when there is
+    /// no live channel — the caller holds it instead.
+    fn steer_notification(
+        &mut self,
+        app: &mut App,
+        notification: Notification,
+    ) -> Option<Notification>;
     fn session_id(&self) -> &str;
     /// A turn ended without an abort: notifications flow again.
     fn resume_notifications(&mut self);
@@ -320,8 +328,9 @@ fn routed_complete<R: Runtime>(
         Ok(RouteOutcome::Complete) => {
             app.set_notice(
                 format!(
-                    "task result delivered to {}",
-                    notification.parent_session_id
+                    "\"{}\" delivered to {}",
+                    notification.description,
+                    crate::short_session_id(&notification.parent_session_id)
                 ),
                 NoticeLevel::Info,
             );
@@ -332,7 +341,7 @@ fn routed_complete<R: Runtime>(
             // losing the work with the plumbing error.
             let message = format!(
                 "a task result could not be delivered to {}: {error:#}",
-                notification.parent_session_id
+                crate::short_session_id(&notification.parent_session_id)
             );
             app.set_notice(&message, NoticeLevel::Error);
             app.push_transcript_line(Line_::System(message));
@@ -369,9 +378,11 @@ pub(crate) fn settle<R: Runtime>(
     // The notification drain. Foreign completions resume other
     // sessions: they need nothing the root holds — not the turn slot,
     // not the keyboard — so they route immediately, even mid-turn,
-    // even under a modal. Only a same-session completion wants the
-    // turn slot, and only the first can have it; the rest are held in
-    // arrival order. The requeue pause holds everything: it exists so
+    // even under a modal. A same-session completion starts a turn
+    // when the slot is free, and is steered into the turn that is
+    // running otherwise — results reach every agent, the root
+    // included, as soon as possible. Held only when the turn is
+    // unsteerable. The requeue pause holds everything: it exists so
     // a failing delivery is retried when the user is back, not in a
     // tight loop.
     let state = runtime.observe(app);
@@ -383,9 +394,11 @@ pub(crate) fn settle<R: Runtime>(
                 runtime.route(app, notification);
             } else if turn_gate {
                 runtime.start_notification_turn(app, notification);
+                // The slot is taken — but the turn it now runs is
+                // steerable, so the rest of a burst lands inside it.
                 turn_gate = false;
-            } else {
-                blocked.push(notification);
+            } else if let Some(unsteered) = runtime.steer_notification(app, notification) {
+                blocked.push(unsteered);
             }
         }
         if !blocked.is_empty() {
@@ -408,6 +421,7 @@ mod tests {
     struct FakeRuntime {
         session_id: String,
         turn_running: bool,
+        steerable: bool,
         paused: bool,
         pending: VecDeque<Notification>,
         log: Vec<String>,
@@ -418,6 +432,7 @@ mod tests {
             Self {
                 session_id: "root".into(),
                 turn_running: false,
+                steerable: false,
                 paused: false,
                 pending: VecDeque::new(),
                 log: Vec::new(),
@@ -451,6 +466,8 @@ mod tests {
         fn perform(&mut self, app: &mut App, intent: Intent) -> anyhow::Result<()> {
             if let Some(request) = crate::apply_intent(app, intent, None) {
                 self.turn_running = true;
+                // A real user turn opens a steer channel.
+                self.steerable = true;
                 match request {
                     crate::TurnRequest::New(text, _) => self.log.push(format!("start_turn:{text}")),
                     crate::TurnRequest::Resume => self.log.push("resume_turn".into()),
@@ -486,7 +503,21 @@ mod tests {
 
         fn start_notification_turn(&mut self, _app: &mut App, notification: Notification) {
             self.turn_running = true;
+            // The freshly started turn is steerable, like the real one.
+            self.steerable = true;
             self.log.push(format!("notify_turn:{}", notification.text));
+        }
+
+        fn steer_notification(
+            &mut self,
+            _app: &mut App,
+            notification: Notification,
+        ) -> Option<Notification> {
+            if !self.steerable {
+                return Some(notification);
+            }
+            self.log.push(format!("steer_notify:{}", notification.text));
+            None
         }
 
         fn session_id(&self) -> &str {
@@ -519,6 +550,7 @@ mod tests {
         }
 
         fn end_turn(&mut self) {
+            self.steerable = false;
             self.log.push("end_turn".into());
         }
 
@@ -642,9 +674,9 @@ mod tests {
 
     /// The recorded queue-inversion bug, pinned: a turn completes with
     /// a message queued AND a notification waiting. The queued message
-    /// must get the turn; the notification must stay for later, not be
-    /// consumed and not start a turn of its own. Reordering the gate
-    /// before the drain in `settle` fails this.
+    /// must get the turn — the notification must never start a turn of
+    /// its own ahead of it. It now rides the queued message's turn as
+    /// a steer instead of waiting behind it.
     #[test]
     fn a_dequeued_message_outranks_a_notification_in_the_same_pass() {
         let mut app = App::new();
@@ -653,12 +685,12 @@ mod tests {
 
         settle(&mut app, vec![Intent::SendQueued], &mut runtime).unwrap();
 
-        assert_eq!(runtime.log, vec!["start_turn:do the next thing"]);
         assert_eq!(
-            runtime.pending.len(),
-            1,
-            "the notification must wait, not vanish"
+            runtime.log,
+            vec!["start_turn:do the next thing", "steer_notify:task finished"],
+            "the queued message gets the turn; the result rides it"
         );
+        assert!(runtime.pending.is_empty());
         assert!(app.queued_messages.is_empty());
     }
 
@@ -727,9 +759,13 @@ mod tests {
 
         assert_eq!(
             runtime.log,
-            vec!["end_turn", "start_turn:do the next thing"]
+            vec![
+                "end_turn",
+                "start_turn:do the next thing",
+                "steer_notify:task finished"
+            ]
         );
-        assert_eq!(runtime.pending.len(), 1, "the notification waits");
+        assert!(runtime.pending.is_empty());
         assert!(app.queued_messages.is_empty());
     }
 
@@ -1040,6 +1076,42 @@ mod tests {
         let mut runtime = FakeRuntime::new().with_notification("elsewhere", "done");
         settle(&mut app, Vec::new(), &mut runtime).unwrap();
         assert_eq!(runtime.log, vec!["route:elsewhere"]);
+    }
+
+    /// The root gets its results the way every agent now does: a
+    /// completion arriving mid-turn is steered into the running turn,
+    /// not parked until the conversation pauses. Only an unsteerable
+    /// turn holds it.
+    #[test]
+    fn a_same_session_notification_steers_into_the_live_turn() {
+        let mut app = App::new();
+        let mut runtime = FakeRuntime::new().with_notification("root", "task finished");
+        runtime.turn_running = true;
+        runtime.steerable = true;
+
+        settle(&mut app, Vec::new(), &mut runtime).unwrap();
+
+        assert_eq!(runtime.log, vec!["steer_notify:task finished"]);
+        assert!(runtime.pending.is_empty(), "delivered, not held");
+    }
+
+    /// A burst while idle: the first completion takes the turn slot,
+    /// and the rest steer into the turn it just started instead of
+    /// waiting behind it.
+    #[test]
+    fn a_burst_starts_one_turn_and_steers_the_rest_into_it() {
+        let mut app = App::new();
+        let mut runtime = FakeRuntime::new()
+            .with_notification("root", "first done")
+            .with_notification("root", "second done");
+
+        settle(&mut app, Vec::new(), &mut runtime).unwrap();
+
+        assert_eq!(
+            runtime.log,
+            vec!["notify_turn:first done", "steer_notify:second done"]
+        );
+        assert!(runtime.pending.is_empty());
     }
 
     /// The requeue pause holds foreign notifications too — it is the

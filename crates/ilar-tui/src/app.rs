@@ -1628,19 +1628,32 @@ impl App {
         self.history.push("");
     }
 
-    /// Ctrl-D on a blank prompt is the exit, but a waiting stash is
-    /// exactly what a blank prompt looks like — and it dies with the
-    /// process. Warn once, naming the cost; the repeat quits. `None`
-    /// means quit now.
-    pub(crate) fn quit_stash_warning(&mut self) -> Option<String> {
-        if self.input_stash.is_empty() || std::mem::take(&mut self.quit_armed) {
+    /// Ctrl-D on a blank prompt is the exit, but a blank prompt is
+    /// exactly what a waiting stash — which dies with the process —
+    /// and undelivered task results — which survive it, in the outbox
+    /// — look like. Warn once, naming both costs at once so the
+    /// second press is the answer to everything said; the repeat
+    /// quits. `None` means quit now.
+    pub(crate) fn quit_warning(&mut self, undelivered: usize) -> Option<String> {
+        if (self.input_stash.is_empty() && undelivered == 0)
+            || std::mem::take(&mut self.quit_armed)
+        {
             return None;
         }
         self.quit_armed = true;
-        Some(format!(
-            "{} stashed prompt(s) would be lost — Ctrl-S pops them, Ctrl-D again quits",
-            self.input_stash.len()
-        ))
+        let mut parts = Vec::new();
+        if !self.input_stash.is_empty() {
+            parts.push(format!(
+                "{} stashed prompt(s) would be lost (Ctrl-S pops them)",
+                self.input_stash.len()
+            ));
+        }
+        if undelivered > 0 {
+            parts.push(format!(
+                "{undelivered} task result(s) are undelivered and will arrive next time this session opens"
+            ));
+        }
+        Some(format!("{} — Ctrl-D again quits", parts.join("; ")))
     }
 
     pub(crate) fn set_notice(&mut self, text: impl Into<String>, level: NoticeLevel) {
@@ -2173,23 +2186,36 @@ mod tests {
     #[test]
     fn ctrl_d_warns_once_before_quitting_on_a_waiting_stash() {
         let mut app = App::new();
-        assert_eq!(app.quit_stash_warning(), None, "no stash, no ceremony");
+        assert_eq!(app.quit_warning(0), None, "no stash, no ceremony");
 
         app.input = crate::input::InputBuffer::from("half-written thought");
         app.stash_or_pop_input();
-        let warning = app.quit_stash_warning().expect("the first Ctrl-D warns");
+        let warning = app.quit_warning(0).expect("the first Ctrl-D warns");
         assert!(warning.contains('1'), "{warning}");
-        assert_eq!(
-            app.quit_stash_warning(),
-            None,
-            "the second Ctrl-D quits anyway"
-        );
+        assert_eq!(app.quit_warning(0), None, "the second Ctrl-D quits anyway");
 
         // Consuming the arm resets it: a Ctrl-D much later warns again
         // (the dispatcher disarms on every other key for the same
         // reason).
         assert!(!app.quit_armed);
-        assert!(app.quit_stash_warning().is_some());
+        assert!(app.quit_warning(0).is_some());
+    }
+
+    #[test]
+    fn ctrl_d_names_undelivered_results_and_the_stash_in_one_warning() {
+        let mut app = App::new();
+        let warning = app.quit_warning(2).expect("undelivered results warn");
+        assert!(warning.contains("2 task result(s)"), "{warning}");
+        assert!(warning.contains("next time"), "{warning}");
+        assert_eq!(app.quit_warning(2), None, "the second Ctrl-D quits");
+
+        // Both costs in one message: the second press answers both.
+        app.input = crate::input::InputBuffer::from("half-written thought");
+        app.stash_or_pop_input();
+        let warning = app.quit_warning(1).expect("both warn together");
+        assert!(warning.contains("stashed"), "{warning}");
+        assert!(warning.contains("task result"), "{warning}");
+        assert_eq!(app.quit_warning(1), None);
     }
 
     #[test]
@@ -3217,12 +3243,16 @@ mod tests {
                 description: "survey the picker core".into(),
                 agent: "explore".into(),
                 background: false,
+                delivering: false,
+                foreign_parent: None,
                 elapsed: std::time::Duration::from_secs(72),
             },
             AgentRow {
                 description: "rebuild the index".into(),
                 agent: "build".into(),
                 background: true,
+                delivering: false,
+                foreign_parent: None,
                 elapsed: std::time::Duration::from_secs(5),
             },
         ];

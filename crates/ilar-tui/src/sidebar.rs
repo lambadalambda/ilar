@@ -57,6 +57,14 @@ pub(crate) struct AgentRow {
     pub(crate) description: String,
     pub(crate) agent: String,
     pub(crate) background: bool,
+    /// Mail: a task result being delivered to this agent — waiting
+    /// for its current turn, or resuming it — not work the model
+    /// asked for.
+    pub(crate) delivering: bool,
+    /// Set when the agent belongs to another session than this one:
+    /// the short id of whose child it is, so a grandchild does not
+    /// read as the root's own.
+    pub(crate) foreign_parent: Option<String>,
     pub(crate) elapsed: std::time::Duration,
 }
 
@@ -71,7 +79,13 @@ pub(crate) fn agent_panel_lines(agents: &[AgentRow], width: usize) -> Vec<Line<'
     let mut lines = Vec::new();
     for agent in agents.iter().take(AGENT_PANEL_MAX) {
         // Truncate the marker too: at absurd widths it is the overflow.
-        let marker = truncate_display("▸ ", width, Truncation::Right);
+        // Mail for a delivery: a result on its way to this agent, not
+        // work the model started.
+        let marker = truncate_display(
+            if agent.delivering { "✉ " } else { "▸ " },
+            width,
+            Truncation::Right,
+        );
         let remaining = width.saturating_sub(UnicodeWidthStr::width(marker.as_str()));
         lines.push(Line::from(vec![
             Span::styled(marker, Style::default().fg(TOOL_ACTIVE)),
@@ -80,11 +94,21 @@ pub(crate) fn agent_panel_lines(agents: &[AgentRow], width: usize) -> Vec<Line<'
                 Style::default().fg(theme::PRIMARY),
             ),
         ]));
-        let background = if agent.background { " · bg" } else { "" };
+        let background = if agent.delivering {
+            " · delivering"
+        } else if agent.background {
+            " · bg"
+        } else {
+            ""
+        };
+        let owner = match &agent.foreign_parent {
+            Some(parent) => format!(" · for {}", safe_text(parent)),
+            None => String::new(),
+        };
         lines.push(Line::styled(
             truncate_display(
                 &format!(
-                    "  {}{background} · {}",
+                    "  {}{background}{owner} · {}",
                     safe_text(&agent.agent),
                     format_elapsed(agent.elapsed)
                 ),
@@ -682,6 +706,8 @@ mod tests {
                 description: format!("task number {index} with a long description"),
                 agent: "explore".into(),
                 background: index % 2 == 1,
+                delivering: false,
+                foreign_parent: None,
                 elapsed: std::time::Duration::from_secs(30),
             })
             .collect::<Vec<_>>();
