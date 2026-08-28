@@ -932,6 +932,7 @@ mod tests {
             parent_session_id: "root".into(),
             parent_call_id: "call-1".into(),
             child_session_id: "child".into(),
+            agent: "explore".into(),
             event: ilar::agent::LoopEvent::TurnStarted,
         });
         app.push_loop_event(&ilar::agent::LoopEvent::ThinkingDelta("half a thou".into()));

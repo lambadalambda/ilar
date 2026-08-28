@@ -697,6 +697,20 @@ pub(crate) fn apply_subagent_activity(
         .as_mut_slice()
     };
     let call_index = newest_tool_index(owner, &activity.parent_call_id)?;
+    // A call that has a child IS a subagent call, whatever tool made it.
+    // `task` says so up front through SubagentConfigured; `task_message`
+    // only finds out by resuming one, so the first sign of a child is
+    // what turns the row into an agent — otherwise it renders as a
+    // plain tool and hides the very work it started.
+    if let Some(Line_::Tool { kind, .. }) = owner.get_mut(call_index)
+        && matches!(kind, ToolKind::Tool)
+        && !activity.agent.is_empty()
+    {
+        *kind = ToolKind::Agent {
+            name: activity.agent.clone(),
+            model: None,
+        };
+    }
     let Line_::Tool {
         child_lines,
         child_group,

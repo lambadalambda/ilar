@@ -1971,6 +1971,46 @@ mod tests {
         assert!(app.notice.is_some());
     }
 
+    /// `task_message` resumes a subagent, so its row is a subagent row —
+    /// but it cannot say so up front the way `task` does, because the
+    /// agent's name is behind the task id. The first sign of a child is
+    /// what settles it; before this, the row rendered as a plain tool
+    /// and hid the very work it had started.
+    #[test]
+    fn a_tool_that_turns_out_to_have_a_child_becomes_an_agent_row() {
+        let mut app = App::new();
+        app.session_id = "root".into();
+        app.push_loop_event(&LoopEvent::ToolStarted {
+            id: "msg-1".into(),
+            name: "task_message".into(),
+        });
+
+        app.push_subagent_activity(&ilar::subagent::SubagentActivity {
+            parent_session_id: "root".into(),
+            parent_call_id: "msg-1".into(),
+            child_session_id: "child".into(),
+            agent: "build".into(),
+            event: LoopEvent::ThinkingDelta("re-reading the parser".into()),
+        });
+
+        let row = app
+            .lines
+            .iter()
+            .find_map(|line| match line {
+                Line_::Tool {
+                    kind, child_lines, ..
+                } => Some((kind, child_lines)),
+                _ => None,
+            })
+            .expect("the task_message row");
+        assert!(
+            matches!(row.0, ToolKind::Agent { name, .. } if name == "build"),
+            "{:?}",
+            row.0
+        );
+        assert!(!row.1.is_empty(), "the child's work is shown, not hidden");
+    }
+
     #[test]
     fn a_stash_carries_its_attached_images_and_gives_them_back() {
         let mut app = App::new();
@@ -4609,6 +4649,7 @@ mod tests {
             app.push_subagent_activity(&ilar::subagent::SubagentActivity {
                 parent_session_id: String::new(),
                 parent_call_id: "task-1".into(),
+                agent: "explore".into(),
                 child_session_id: "child-session".into(),
                 event,
             });
@@ -4636,12 +4677,14 @@ mod tests {
         app.push_subagent_activity(&ilar::subagent::SubagentActivity {
             parent_session_id: String::new(),
             parent_call_id: "task-1".into(),
+            agent: "explore".into(),
             child_session_id: "child-session".into(),
             event: LoopEvent::TextDelta("Nested answer".into()),
         });
         app.push_subagent_activity(&ilar::subagent::SubagentActivity {
             parent_session_id: String::new(),
             parent_call_id: "task-1".into(),
+            agent: "explore".into(),
             child_session_id: "child-session".into(),
             event: LoopEvent::TurnDone {
                 outcome: TurnOutcome::Completed,
@@ -4682,6 +4725,7 @@ mod tests {
         app.push_subagent_activity(&ilar::subagent::SubagentActivity {
             parent_session_id: "root-session".into(),
             parent_call_id: "task-early".into(),
+            agent: "explore".into(),
             child_session_id: "child-early".into(),
             event: LoopEvent::ReasoningSummaryDelta("Already working".into()),
         });
@@ -4839,6 +4883,7 @@ mod tests {
             app.push_subagent_activity(&ilar::subagent::SubagentActivity {
                 parent_session_id: "root".into(),
                 parent_call_id: "call-1".into(),
+                agent: "explore".into(),
                 child_session_id: "child".into(),
                 event,
             });
@@ -4903,6 +4948,7 @@ mod tests {
             app.push_subagent_activity(&ilar::subagent::SubagentActivity {
                 parent_session_id: "root".into(),
                 parent_call_id: "call-1".into(),
+                agent: "explore".into(),
                 child_session_id: "child".into(),
                 event,
             });
@@ -5788,6 +5834,7 @@ mod tests {
         let child = |event: LoopEvent| ilar::subagent::SubagentActivity {
             parent_session_id: String::new(),
             parent_call_id: "task-1".into(),
+            agent: "explore".into(),
             child_session_id: "child-session".into(),
             event,
         };
@@ -6353,6 +6400,7 @@ mod tests {
             app.push_subagent_activity(&ilar::subagent::SubagentActivity {
                 parent_session_id: "root".into(),
                 parent_call_id: String::new(),
+                agent: "explore".into(),
                 child_session_id: "child".into(),
                 event: LoopEvent::TextDelta("orphan".into()),
             });
@@ -6367,6 +6415,7 @@ mod tests {
         app.push_subagent_activity(&ilar::subagent::SubagentActivity {
             parent_session_id: "root".into(),
             parent_call_id: "task-9".into(),
+            agent: "explore".into(),
             child_session_id: "child".into(),
             event: LoopEvent::TextDelta("early".into()),
         });

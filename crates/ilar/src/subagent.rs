@@ -61,6 +61,10 @@ pub struct SubagentActivity {
     pub parent_session_id: String,
     pub parent_call_id: String,
     pub child_session_id: String,
+    /// Which agent is doing the work. A surface learns from this that
+    /// the call it is drawing spawned a subagent — true of `task`, and
+    /// equally of a `task_message` that resumed one.
+    pub agent: String,
     pub event: LoopEvent,
 }
 
@@ -964,6 +968,7 @@ impl SubagentSpawner {
             let task_registry = self.background_tasks.clone();
             let activity = ActivityPublisher {
                 tx: self.activity_tx.clone(),
+                agent: agent.name.clone(),
                 steers: self.child_steers.clone(),
                 parent_session_id: parent_session_id.clone(),
                 parent_call_id,
@@ -1182,6 +1187,7 @@ task's scope yourself; continue only clearly disjoint work."
         child_steer.started();
         let activity = ActivityPublisher {
             tx: self.activity_tx.clone(),
+            agent: agent.name.clone(),
             steers: self.child_steers.clone(),
             parent_session_id: ctx.session_id.clone(),
             parent_call_id,
@@ -2027,6 +2033,7 @@ impl TaskOutcome {
 #[derive(Clone)]
 struct ActivityPublisher {
     tx: tokio::sync::broadcast::Sender<SubagentActivity>,
+    agent: String,
     /// The same events say when the child took a message, so this is
     /// where a delivered one stops counting as pending.
     steers: ChildSteers,
@@ -2044,6 +2051,7 @@ impl ActivityPublisher {
             parent_session_id: self.parent_session_id.clone(),
             parent_call_id: self.parent_call_id.clone(),
             child_session_id: self.child_session_id.clone(),
+            agent: self.agent.clone(),
             event,
         });
     }
