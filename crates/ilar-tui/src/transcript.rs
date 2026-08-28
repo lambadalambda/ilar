@@ -141,6 +141,9 @@ struct CachedTranscriptEntry {
     /// Row offsets within `rows` matching the cache's query; `None`
     /// until scanned, which is what keeps search off untouched rows.
     matches: Option<Vec<usize>>,
+    /// Child timelines rendered for this entry's agent rows, so the
+    /// animation pass can put them back rather than build them again.
+    children: ChildRowMemo,
 }
 
 struct CachedGroup {
@@ -196,6 +199,55 @@ pub(crate) enum TranscriptHitTarget {
 pub(crate) struct TranscriptRow {
     pub(crate) line: Line<'static>,
     pub(crate) target: Option<TranscriptHitTarget>,
+}
+
+/// Rendered child timelines, kept per cached entry so an agent row that
+/// only *animates* does not re-render the subagent transcript hanging
+/// off it. An entry re-rendered by the animation pass is, by the cache's
+/// own invariant, unchanged in the model — every change is marked, and a
+/// mark rebuilds the entry outright — so the only thing that moved is
+/// the clock. Rebuilding a live child's whole transcript at 20 fps is
+/// precisely what made watching a subagent expensive.
+#[derive(Default)]
+struct ChildRowMemo {
+    rows: std::collections::HashMap<String, Vec<TranscriptRow>>,
+    /// Set on the animation pass: reuse what is stored instead of
+    /// rendering it again.
+    reuse: bool,
+    /// Child timelines actually rendered, ever.
+    #[cfg(test)]
+    renders: usize,
+}
+
+impl ChildRowMemo {
+    /// The child rows for tool `id`, rendered or remembered. `keep` says
+    /// whether this row can come back through the animation pass at all;
+    /// a row that cannot must drop what it stored, or a group animated
+    /// by one live sibling would redraw its finished siblings from a
+    /// stale copy.
+    fn child_rows(
+        &mut self,
+        id: &str,
+        keep: bool,
+        render: impl FnOnce() -> Vec<TranscriptRow>,
+    ) -> Vec<TranscriptRow> {
+        if self.reuse
+            && let Some(rows) = self.rows.get(id)
+        {
+            return rows.clone();
+        }
+        let rows = render();
+        #[cfg(test)]
+        {
+            self.renders += 1;
+        }
+        if keep {
+            self.rows.insert(id.to_string(), rows.clone());
+        } else {
+            self.rows.remove(id);
+        }
+        rows
+    }
 }
 
 impl TranscriptRenderCache {
@@ -275,8 +327,16 @@ impl TranscriptRenderCache {
         while line < lines.len() {
             let (entry, next) = transcript_entry_at(lines, expanded_groups, line);
             let index = self.entries.len();
-            let rows =
-                spaced_entry_rows(&entry, index, expanded_groups, width, now, activity_started);
+            let mut children = ChildRowMemo::default();
+            let rows = spaced_entry_rows(
+                &entry,
+                index,
+                expanded_groups,
+                width,
+                now,
+                activity_started,
+                &mut children,
+            );
             self.entries.push(CachedTranscriptEntry {
                 range: line..next,
                 group: match &entry {
@@ -295,6 +355,7 @@ impl TranscriptRenderCache {
                 animated: transcript_entry_animated(&entry),
                 rows,
                 matches: None,
+                children,
             });
             #[cfg(test)]
             {
@@ -308,11 +369,24 @@ impl TranscriptRenderCache {
                 continue;
             }
             let entry = self.entries[index].borrow(lines);
-            let rows =
-                spaced_entry_rows(&entry, index, expanded_groups, width, now, activity_started);
+            // Only the clock moved: the child timelines under this entry
+            // are the ones already rendered.
+            let mut children = std::mem::take(&mut self.entries[index].children);
+            children.reuse = true;
+            let rows = spaced_entry_rows(
+                &entry,
+                index,
+                expanded_groups,
+                width,
+                now,
+                activity_started,
+                &mut children,
+            );
+            children.reuse = false;
             let cached = &mut self.entries[index];
             cached.rows = rows;
             cached.matches = None;
+            cached.children = children;
             #[cfg(test)]
             {
                 self.rebuilds += 1;
@@ -320,6 +394,16 @@ impl TranscriptRenderCache {
         }
         self.revision = Some(revision);
         self.dirty_from = usize::MAX;
+    }
+
+    /// Child timelines rendered since the entries holding them were
+    /// last rebuilt — the count an animating agent row must not grow.
+    #[cfg(test)]
+    pub(crate) fn child_renders(&self) -> usize {
+        self.entries
+            .iter()
+            .map(|entry| entry.children.renders)
+            .sum()
     }
 
     pub(crate) fn row_count(&self) -> usize {
@@ -455,6 +539,7 @@ fn matching_row_offsets(rows: &[TranscriptRow], needle: &str) -> Vec<usize> {
 
 /// An entry's rows plus the blank row that spaces it from the entry
 /// above.
+#[allow(clippy::too_many_arguments)]
 fn spaced_entry_rows(
     entry: &TranscriptEntry,
     index: usize,
@@ -462,9 +547,17 @@ fn spaced_entry_rows(
     width: u16,
     now: std::time::Instant,
     activity_started: std::time::Instant,
+    children: &mut ChildRowMemo,
 ) -> Vec<TranscriptRow> {
-    let mut rows =
-        transcript_entry_rows(entry, expanded_groups, width, now, activity_started, false);
+    let mut rows = entry_rows(
+        entry,
+        expanded_groups,
+        width,
+        now,
+        activity_started,
+        false,
+        children,
+    );
     if index > 0 && !entry.is_child() {
         rows.insert(
             0,
@@ -570,8 +663,12 @@ pub(crate) fn underline_content_spans(line: &mut Line<'static>) {
     }
 }
 
-pub(crate) fn toggle_tool_expansion(lines: &mut [Line_], id: &str) -> bool {
-    for line in lines {
+/// Toggle a tool row's expansion. The index returned is the *top-level*
+/// one — a row nested inside an agent's child timeline reports the row
+/// that contains it — because that is what the render cache marks, and
+/// nothing above the toggled row can move.
+pub(crate) fn toggle_tool_expansion(lines: &mut [Line_], id: &str) -> Option<usize> {
+    for (index, line) in lines.iter_mut().enumerate() {
         if let Line_::Tool {
             id: line_id,
             expanded,
@@ -589,14 +686,68 @@ pub(crate) fn toggle_tool_expansion(lines: &mut [Line_], id: &str) -> bool {
                         *full = false;
                     }
                 }
-                return true;
+                return Some(index);
             }
-            if toggle_tool_expansion(child_lines, id) {
-                return true;
+            if toggle_tool_expansion(child_lines, id).is_some() {
+                return Some(index);
             }
         }
     }
-    false
+    None
+}
+
+/// Toggle an expandable note — a thought, a task or a job notification.
+/// Only top-level rows carry ids (nested previews are not expandable),
+/// so this does not recurse. Returns the index, for the same reason
+/// [`toggle_tool_expansion`] does.
+pub(crate) fn toggle_note_expansion(lines: &mut [Line_], id: &str) -> Option<usize> {
+    lines.iter_mut().position(|line| match line {
+        Line_::Thought {
+            id: line_id,
+            expanded,
+            ..
+        }
+        | Line_::Task {
+            id: line_id,
+            expanded,
+            ..
+        }
+        | Line_::Job {
+            id: line_id,
+            expanded,
+            ..
+        } if line_id == id => {
+            *expanded = !*expanded;
+            true
+        }
+        _ => false,
+    })
+}
+
+/// Where the run of tool calls a group hit-target names begins. A group
+/// nested inside an agent's child timeline reports the top-level row
+/// containing it — the entry the render cache has to rebuild.
+pub(crate) fn tool_group_index(lines: &[Line_], group: &str) -> Option<usize> {
+    lines.iter().position(|line| match line {
+        Line_::Tool {
+            id,
+            group_id,
+            kind: ToolKind::Tool,
+            child_lines,
+            ..
+        } => {
+            // The group's id is `{group_id}:{first call id}`, built by
+            // `transcript_entry_at`; only the first call of a run can
+            // spell it, which is exactly the row we want.
+            group
+                .strip_prefix(group_id.as_str())
+                .and_then(|rest| rest.strip_prefix(':'))
+                == Some(id.as_str())
+                || tool_group_index(child_lines, group).is_some()
+        }
+        Line_::Tool { child_lines, .. } => tool_group_index(child_lines, group).is_some(),
+        _ => false,
+    })
 }
 
 fn session_lines_for_call_mut<'a>(
@@ -1147,6 +1298,8 @@ fn tool_is_active(line: &Line_) -> bool {
     )
 }
 
+/// An entry's rows, rendered from scratch. The cached renderer calls
+/// [`entry_rows`] directly so it can hand down what it already drew.
 pub(crate) fn transcript_entry_rows(
     entry: &TranscriptEntry,
     expanded_groups: &std::collections::HashSet<String>,
@@ -1154,6 +1307,27 @@ pub(crate) fn transcript_entry_rows(
     now: std::time::Instant,
     activity_started: std::time::Instant,
     nested: bool,
+) -> Vec<TranscriptRow> {
+    entry_rows(
+        entry,
+        expanded_groups,
+        width,
+        now,
+        activity_started,
+        nested,
+        &mut ChildRowMemo::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn entry_rows(
+    entry: &TranscriptEntry,
+    expanded_groups: &std::collections::HashSet<String>,
+    width: u16,
+    now: std::time::Instant,
+    activity_started: std::time::Instant,
+    nested: bool,
+    children: &mut ChildRowMemo,
 ) -> Vec<TranscriptRow> {
     match entry {
         TranscriptEntry::Item(item) => match *item {
@@ -1166,6 +1340,7 @@ pub(crate) fn transcript_entry_rows(
                 0,
                 None,
                 0,
+                children,
             ),
             item => {
                 // Expandable thoughts get a click target on their header
@@ -1276,6 +1451,7 @@ pub(crate) fn transcript_entry_rows(
                     call_indent,
                     branch,
                     name_column,
+                    children,
                 ));
             }
             rows
@@ -1331,6 +1507,7 @@ fn tool_entry_rows(
     indent: usize,
     branch: Option<&str>,
     name_column: usize,
+    children: &mut ChildRowMemo,
 ) -> Vec<TranscriptRow> {
     let indent = indent.min(width as usize);
     let Line_::Tool {
@@ -1440,34 +1617,38 @@ fn tool_entry_rows(
         } else {
             0
         };
-        let visible = if *expanded {
-            child_lines.clone()
-        } else {
-            agent_live_preview(child_lines)
-        };
-        let entries = transcript_entries(&visible, expanded_groups);
-        let entry_count = entries.len();
-        for (index, child) in entries.into_iter().enumerate() {
-            let last = index + 1 == entry_count;
-            let child_rows = transcript_entry_rows(
-                &child,
-                expanded_groups,
-                width.saturating_sub(nested_indent as u16),
-                now,
-                activity_started,
-                true,
-            );
-            rows.extend(child_rows.into_iter().enumerate().map(|(row_index, row)| {
-                let branch = if row_index == 0 {
-                    if last { "└─" } else { "├─" }
-                } else if last {
-                    "  "
-                } else {
-                    "│ "
-                };
-                indent_transcript_row(row, nested_indent, branch)
-            }));
-        }
+        rows.extend(children.child_rows(id, tool_is_active(entry), || {
+            // The expanded case renders the child lines where they are:
+            // an expanded agent's timeline is the largest thing in the
+            // transcript, and cloning it per frame was pure waste.
+            let preview = (!*expanded).then(|| agent_live_preview(child_lines));
+            let visible: &[Line_] = preview.as_deref().unwrap_or(child_lines);
+            let entries = transcript_entries(visible, expanded_groups);
+            let entry_count = entries.len();
+            let mut child_rows = Vec::new();
+            for (index, child) in entries.into_iter().enumerate() {
+                let last = index + 1 == entry_count;
+                let rendered = transcript_entry_rows(
+                    &child,
+                    expanded_groups,
+                    width.saturating_sub(nested_indent as u16),
+                    now,
+                    activity_started,
+                    true,
+                );
+                child_rows.extend(rendered.into_iter().enumerate().map(|(row_index, row)| {
+                    let branch = if row_index == 0 {
+                        if last { "└─" } else { "├─" }
+                    } else if last {
+                        "  "
+                    } else {
+                        "│ "
+                    };
+                    indent_transcript_row(row, nested_indent, branch)
+                }));
+            }
+            child_rows
+        }));
     }
     rows
 }
@@ -1566,15 +1747,20 @@ fn pad_background(
     line
 }
 
+#[allow(clippy::too_many_arguments)]
 fn labeled_rows(
     label: &str,
     mut content: Vec<Line<'static>>,
     layout: &DetailLayout,
     limit: usize,
+    // Content dropped before wrapping: the rows handed in are all there
+    // are to show, but they are not all there is — so the block still
+    // earns its "… more".
+    cut: bool,
     error: bool,
     more_target: Option<TranscriptHitTarget>,
 ) -> Vec<TranscriptRow> {
-    let truncated = content.len() > limit;
+    let truncated = cut || content.len() > limit;
     content.truncate(limit);
     if truncated && let Some(last) = content.last_mut() {
         *last = Line::styled(
@@ -1636,11 +1822,46 @@ fn tool_detail_rows(
         }];
     }
     let layout = detail_layout(width, indent);
-    let content = safe_lines(text)
+    let (source, cut) = detail_source_lines(text.lines(), limit, layout.content_width);
+    let content = source
         .into_iter()
         .flat_map(|line| wrap_styled_line(Line::raw(line), layout.content_width))
         .collect::<Vec<_>>();
-    labeled_rows(label, content, &layout, limit, error, more_target)
+    labeled_rows(label, content, &layout, limit, cut, error, more_target)
+}
+
+/// The most of a detail that can possibly reach the screen, cut *before*
+/// it is wrapped. A collapsed row keeps four to eight lines; wrapping
+/// all 16 KiB of a tool payload to throw away 99% of the result is the
+/// single most expensive thing such a row did.
+///
+/// A wrapped row is never longer than the content column, so `limit`
+/// source lines of `limit × width` characters can always fill `limit`
+/// rows; one extra line is taken so a block that just fits is not
+/// reported as truncated. The flag says whether anything was left out.
+fn detail_source_lines<'a>(
+    lines: impl Iterator<Item = &'a str>,
+    limit: usize,
+    content_width: usize,
+) -> (Vec<String>, bool) {
+    let mut lines = lines;
+    let mut source: Vec<String> = lines
+        .by_ref()
+        .take(limit.saturating_add(1))
+        .map(safe_text)
+        .collect();
+    let mut cut = lines.next().is_some();
+    let line_chars = limit.saturating_mul(content_width).saturating_add(1);
+    for line in &mut source {
+        if line.chars().count() > line_chars {
+            *line = line.chars().take(line_chars).collect();
+            cut = true;
+        }
+    }
+    if source.is_empty() {
+        source.push(String::new());
+    }
+    (source, cut)
 }
 
 fn tool_diff_rows(
@@ -1658,7 +1879,11 @@ fn tool_diff_rows(
         }];
     }
     let layout = detail_layout(width, indent);
-    let content = diff
+    // Same bargain as `tool_detail_rows`: a diff of a large edit is
+    // hundreds of lines and a collapsed row shows eight of them.
+    let shown = diff.len().min(limit.saturating_add(1));
+    let cut = diff.len() > shown;
+    let content = diff[..shown]
         .iter()
         .flat_map(|line| {
             let (marker, color, background) = match line.kind {
@@ -1682,7 +1907,7 @@ fn tool_diff_rows(
             .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
-    labeled_rows("diff", content, &layout, limit, false, more_target)
+    labeled_rows("diff", content, &layout, limit, cut, false, more_target)
 }
 
 pub(crate) fn transcript_entry_lines(
@@ -1746,8 +1971,12 @@ pub(crate) fn transcript_entry_lines(
                     .map(|line| line.to_string())
                     .unwrap_or_else(|| reasoning_summary_title(text))
             };
+            // ▸/▾ is a promise that a click does something. A row with
+            // no id has no click target — the nested previews under an
+            // agent are like this, and half of them have no body to show
+            // either — so it gets a bullet, not a disclosure that lies.
             let disclosure = match (id.is_empty(), expanded) {
-                (true, _) => "+",
+                (true, _) => "·",
                 (false, true) => "▾",
                 (false, false) => "▸",
             };
@@ -2224,6 +2453,160 @@ mod tests {
             Some(TranscriptHitTarget::Thought("t1".into()))
         );
         assert!(rows[1..].iter().all(|row| row.target.is_none()));
+    }
+
+    /// A tool row with an id, running, with `child_lines` of its own.
+    fn agent_row(id: &str, child_lines: Vec<Line_>, expanded: bool) -> Line_ {
+        Line_::Tool {
+            id: id.into(),
+            group_id: "g".into(),
+            name: "task".into(),
+            kind: ToolKind::Agent {
+                name: "explore".into(),
+                model: None,
+            },
+            arguments: "look around".into(),
+            argument_detail: String::new(),
+            diff: Vec::new(),
+            tail: String::new(),
+            result: None,
+            state: ToolState::Running,
+            progress: ToolProgress::None,
+            expanded,
+            full: false,
+            child_lines,
+            child_group: 0,
+            child_running: true,
+            child_session_id: None,
+        }
+    }
+
+    /// An expanded agent row whose child is still running is `animated`,
+    /// so the cache re-renders it at up to 20 fps — and it used to
+    /// deep-clone and re-render the child's whole transcript each time,
+    /// exactly while the user was watching the subagent work.
+    #[test]
+    fn an_animating_agent_row_does_not_re_render_its_child_transcript() {
+        let child: Vec<Line_> = (0..60)
+            .map(|index| Line_::Assistant(format!("## step {index}\n\nbody *text* here")))
+            .collect();
+        let lines = vec![agent_row("task-1", child, true)];
+        let groups = std::collections::HashSet::new();
+        let start = std::time::Instant::now();
+        let mut cache = TranscriptRenderCache::default();
+        cache.update(&lines, &groups, 1, 80, start, start);
+        let rows = cache.visible_rows(0, 40, &[]);
+        assert_eq!(cache.child_renders(), 1);
+
+        // Ten animation frames, no marks: the clock moved, the model
+        // did not.
+        for frame in 1..=10 {
+            cache.update(
+                &lines,
+                &groups,
+                1,
+                80,
+                start + std::time::Duration::from_millis(50 * frame),
+                start,
+            );
+        }
+        assert_eq!(
+            cache.child_renders(),
+            1,
+            "the child timeline is rendered once, not once per frame"
+        );
+        let after = cache.visible_rows(0, 40, &[]);
+        // The header keeps its spinner — that is what "animated" is
+        // for — and everything below it is the child, unchanged.
+        let child_text = |rows: &[TranscriptRow]| {
+            rows.iter()
+                .skip(1)
+                .map(|row| rendered_text(&row.line))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            child_text(&rows),
+            child_text(&after),
+            "and it still shows the same rows"
+        );
+        assert_ne!(
+            rendered_text(&rows[0].line),
+            rendered_text(&after[0].line),
+            "while the row's own spinner keeps turning"
+        );
+
+        // A change to the child marks the entry, and the rows follow it.
+        let mut grown = lines.clone();
+        if let Some(Line_::Tool { child_lines, .. }) = grown.first_mut() {
+            child_lines.push(Line_::Assistant("the last word".into()));
+        }
+        cache.mark_dirty_from(0, 2);
+        cache.update(&grown, &groups, 2, 80, start, start);
+        assert!(
+            cache
+                .visible_rows(0, 200, &[])
+                .iter()
+                .any(|row| rendered_text(&row.line).contains("the last word"))
+        );
+    }
+
+    /// The whole point of the cut-before-wrap: a collapsed row keeps
+    /// four lines, so wrapping 16 KiB to get them is 99% waste.
+    #[test]
+    fn detail_rows_cut_their_source_before_wrapping_and_still_say_there_is_more() {
+        let long = "x".repeat(16 * 1024);
+        let (source, cut) = detail_source_lines(long.lines(), 4, 20);
+        assert!(cut, "there is more than four rows' worth");
+        assert_eq!(source.len(), 1);
+        assert_eq!(
+            source[0].chars().count(),
+            4 * 20 + 1,
+            "just enough to fill four rows and prove a fifth exists"
+        );
+
+        let many = (0..500)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (source, cut) = detail_source_lines(many.lines(), 4, 20);
+        assert!(cut);
+        assert_eq!(source.len(), 5);
+
+        // Nothing cut when it all fits, and the empty case still has a
+        // line to draw.
+        let (source, cut) = detail_source_lines("a\nb".lines(), 4, 20);
+        assert_eq!(source, vec!["a".to_string(), "b".to_string()]);
+        assert!(!cut);
+        let (source, cut) = detail_source_lines("".lines(), 4, 20);
+        assert_eq!(source, vec![String::new()]);
+        assert!(!cut);
+
+        // And the rendered block is honest about it: four rows, the
+        // last one the affordance that opens the rest.
+        let rows = tool_detail_rows("args", &long, 60, 0, 4, false, None);
+        assert_eq!(rows.len(), 4);
+        assert!(rendered_text(&rows[3].line).contains("… more"));
+    }
+
+    /// A `+` in front of a reasoning row that has no click target is a
+    /// promise the transcript cannot keep — the nested previews under
+    /// an agent carry no id, by design.
+    #[test]
+    fn a_reasoning_row_without_a_click_target_advertises_nothing() {
+        let now = std::time::Instant::now();
+        let nested = Line_::Thought {
+            id: String::new(),
+            text: "reasoning".into(),
+            complete: false,
+            expanded: false,
+        };
+        let groups = std::collections::HashSet::new();
+        let entries = transcript_entries(std::slice::from_ref(&nested), &groups);
+        let rows = transcript_entry_rows(&entries[0], &groups, 80, now, now, true);
+        assert!(rows.iter().all(|row| row.target.is_none()));
+        let text = rendered_text(&rows[0].line);
+        assert!(!text.contains('+'), "{text}");
+        assert!(!text.contains('▸') && !text.contains('▾'), "{text}");
     }
 
     #[test]

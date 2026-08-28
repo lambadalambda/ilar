@@ -879,7 +879,14 @@ impl App {
         frame.render_widget(input, input_chunk);
 
         // Inline slash-completion popup anchored above the input.
-        let candidates = slash_candidates(self.input.text(), &self.slash_inventory());
+        // Building the inventory walks the command and skill lists and
+        // allocates a pair of strings per entry — every frame, for an
+        // input that cannot match anything unless it starts with `/`.
+        let candidates = if self.input.text().starts_with('/') {
+            slash_candidates(self.input.text(), &self.slash_inventory())
+        } else {
+            Vec::new()
+        };
         if !candidates.is_empty() && !self.has_modal() {
             let rows = candidates.len().min(6) as u16;
             let height = rows + 2;

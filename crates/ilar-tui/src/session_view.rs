@@ -409,6 +409,7 @@ fn restore_child_activity(
             id: parent_tool_call_id,
             child_session_id: Some(session_id),
             child_lines,
+            kind,
             ..
         } = line
         else {
@@ -420,6 +421,10 @@ fn restore_child_activity(
         if session.meta().and_then(|meta| meta.parent_id.as_deref()) != Some(owner_session_id) {
             continue;
         }
+        let agent = session
+            .meta()
+            .map(|meta| meta.agent.clone())
+            .unwrap_or_default();
         let mut restored =
             restored_session_invocation_view(&session, Some(parent_tool_call_id)).lines;
         // The agent row already shows the task prompt, so the child's
@@ -430,6 +435,19 @@ fn restore_child_activity(
             restored.remove(prompt);
         }
         restore_child_activity(&mut restored, store, session_id, depth + 1);
+        // The same rule the live path applies (fc625c6): a call that has
+        // a child IS a subagent call, whatever it was named. Only `task`
+        // announces its agent in its input, so a restored `task_message`
+        // stayed a plain tool — and a plain tool row renders "result"
+        // *instead of* its children, hiding the whole second half of a
+        // resumed subagent's conversation. The child session knows which
+        // agent ran it.
+        if matches!(kind, ToolKind::Tool) && !restored.is_empty() && !agent.is_empty() {
+            *kind = ToolKind::Agent {
+                name: agent,
+                model: None,
+            };
+        }
         *child_lines = restored;
     }
 }
@@ -828,6 +846,161 @@ mod tests {
         assert!(rendered.contains("child decisions retained"), "{rendered}");
         assert!(rendered.contains("child current history"), "{rendered}");
         assert!(!rendered.contains("child obsolete history"), "{rendered}");
+    }
+
+    /// The live rule from fc625c6, on the restore path: a call that has
+    /// a child is a subagent call. Only `task` names its agent in its
+    /// input, so a restored `task_message` stayed a plain tool — and a
+    /// plain tool row draws "result" *instead of* its children. Since a
+    /// resumed subagent's `task` slice ends at the resume, the whole
+    /// second half of its conversation was loaded and never drawn.
+    #[test]
+    fn a_restored_task_message_becomes_the_agent_it_resumed_and_draws_its_children() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(directory.path().join("sessions"));
+        let parent_id = new_id();
+        let child_id = new_id();
+        let mut child = store
+            .create(SessionMeta {
+                session_id: child_id.clone(),
+                parent_id: Some(parent_id.clone()),
+                agent: "explore".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+                cwd: None,
+            })
+            .unwrap();
+        let mut turn = |call: &str, prompt: &str, answer: &str| {
+            child
+                .append(ilar::session::SessionEvent::SubagentInvocation {
+                    id: new_id(),
+                    parent_tool_call_id: call.into(),
+                    ts: chrono::Utc::now(),
+                })
+                .unwrap();
+            child
+                .append(ilar::session::SessionEvent::UserMessage {
+                    id: new_id(),
+                    text: prompt.into(),
+                    images: Vec::new(),
+                    ts: chrono::Utc::now(),
+                })
+                .unwrap();
+            child
+                .append(ilar::session::SessionEvent::AssistantMessage {
+                    id: new_id(),
+                    model: "zai/glm-4.7".into(),
+                    content: vec![ilar::session::ContentBlock::Text {
+                        text: answer.into(),
+                    }],
+                    usage: Default::default(),
+                    stop_reason: "end_turn".into(),
+                    ts: chrono::Utc::now(),
+                })
+                .unwrap();
+        };
+        turn("task-1", "Inspect rendering", "the first half");
+        turn("msg-1", "keep going", "the second half");
+        drop(child);
+
+        let mut parent = store
+            .create(SessionMeta {
+                session_id: parent_id.clone(),
+                parent_id: None,
+                agent: "build".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+                cwd: None,
+            })
+            .unwrap();
+        let mut call = |id: &str, name: &str, input: serde_json::Value| {
+            parent
+                .append(ilar::session::SessionEvent::AssistantMessage {
+                    id: new_id(),
+                    model: "zai/glm-4.7".into(),
+                    content: vec![ilar::session::ContentBlock::ToolCall {
+                        id: id.into(),
+                        name: name.into(),
+                        input,
+                        item_id: None,
+                    }],
+                    usage: Default::default(),
+                    stop_reason: "tool_use".into(),
+                    ts: chrono::Utc::now(),
+                })
+                .unwrap();
+            parent
+                .append(ilar::session::SessionEvent::ToolResult {
+                    id: new_id(),
+                    tool_use_id: id.into(),
+                    content: "done".into(),
+                    is_error: false,
+                    images: Vec::new(),
+                    child_session_id: Some(child_id.clone()),
+                    state: None,
+                    ts: chrono::Utc::now(),
+                })
+                .unwrap();
+        };
+        call(
+            "task-1",
+            "task",
+            serde_json::json!({"description": "Inspect rendering", "subagent_type": "explore"}),
+        );
+        call(
+            "msg-1",
+            "task_message",
+            serde_json::json!({"task_id": "task-1", "message": "keep going"}),
+        );
+        drop(parent);
+
+        let restored = restored_session_view_with_store(&store.load(&parent_id).unwrap(), &store);
+        let resumed = restored
+            .lines
+            .iter()
+            .find_map(|line| match line {
+                Line_::Tool {
+                    id,
+                    kind,
+                    child_lines,
+                    ..
+                } if id == "msg-1" => Some((kind, child_lines)),
+                _ => None,
+            })
+            .expect("the task_message row");
+        assert!(
+            matches!(resumed.0, ToolKind::Agent { name, .. } if name == "explore"),
+            "{:?}",
+            resumed.0
+        );
+        assert!(
+            resumed
+                .1
+                .iter()
+                .any(|line| matches!(line, Line_::Assistant(text) if text == "the second half"))
+        );
+
+        // And it reaches the screen once opened: a plain tool row draws
+        // its result in place of all of this, however far it is opened.
+        let mut lines = restored.lines.clone();
+        for line in &mut lines {
+            if let Line_::Tool { expanded, .. } = line {
+                *expanded = true;
+            }
+        }
+        let groups = std::collections::HashSet::new();
+        let now = std::time::Instant::now();
+        let rendered: Vec<String> = crate::transcript::transcript_entries(&lines, &groups)
+            .iter()
+            .flat_map(|entry| {
+                crate::transcript::transcript_entry_rows(entry, &groups, 100, now, now, false)
+            })
+            .map(|row| crate::text::tests::rendered_text(&row.line))
+            .collect();
+        assert!(
+            rendered.iter().any(|line| line.contains("the second half")),
+            "{rendered:?}"
+        );
     }
 
     #[test]

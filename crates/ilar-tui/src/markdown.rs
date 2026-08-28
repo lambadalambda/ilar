@@ -634,10 +634,13 @@ fn render_inline(text: &str, base: Style) -> Vec<Span<'static>> {
             let url_start = label_end + 2;
             let url = &after[url_start..url_start + url_end];
             let label = &after[..label_end];
-            spans.push(Span::styled(
-                label.to_string(),
-                base.add_modifier(Modifier::UNDERLINED),
-            ));
+            // Coloured, not underlined. Underline is this TUI's hover
+            // affordance — "a click here does something" — and a link
+            // is not a click target: rows carry targets, spans do not,
+            // and links are opened from the picker (Ctrl-O). A reply
+            // full of permanently underlined labels made the one signal
+            // that means "clickable" mean nothing.
+            spans.push(Span::styled(label.to_string(), base.fg(theme::MARKUP)));
             // Agents often write [url](url); printing it twice is noise.
             if label != url {
                 spans.push(Span::styled(format!(" <{url}>"), base.fg(theme::MUTED)));
@@ -743,8 +746,12 @@ mod tests {
                 && span.style.bg == Some(theme::CODE_BG)
                 && !span.style.add_modifier.contains(Modifier::REVERSED)
         }));
+        // A link is coloured, never underlined: underline is the hover
+        // affordance for things a click acts on, and a link is not one.
         assert!(spans.iter().any(|span| {
-            span.content == "Ratatui" && span.style.add_modifier.contains(Modifier::UNDERLINED)
+            span.content == "Ratatui"
+                && span.style.fg == Some(theme::MARKUP)
+                && !span.style.add_modifier.contains(Modifier::UNDERLINED)
         }));
         assert!(text(&lines[0]).contains("<https://ratatui.rs>"));
     }
@@ -756,8 +763,7 @@ mod tests {
         assert_eq!(rendered.matches("https://example.com/x").count(), 1);
         assert!(!rendered.contains('<'));
         assert!(lines[0].spans.iter().any(|span| {
-            span.content == "https://example.com/x"
-                && span.style.add_modifier.contains(Modifier::UNDERLINED)
+            span.content == "https://example.com/x" && span.style.fg == Some(theme::MARKUP)
         }));
     }
 
