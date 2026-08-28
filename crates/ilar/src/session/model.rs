@@ -46,6 +46,21 @@ impl ImageContent {
     }
 }
 
+/// What a [`ContentBlock::Diagnostic`] is carrying. Defaulted on load,
+/// so sessions written before the split read as `Local` — which is what
+/// they were treated as, so nothing changes retroactively.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticKind {
+    /// Never leaves the process: raw thinking, kept only so a reader of
+    /// the log can see what the model was doing.
+    #[default]
+    Local,
+    /// Why a turn stopped. A reader who cannot see this is left with a
+    /// transcript that simply ends, so every surface shows it.
+    TurnError,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
@@ -73,8 +88,13 @@ pub enum ContentBlock {
         item: serde_json::Value,
     },
     /// Locally visible provider diagnostics that must never be replayed.
+    /// Two unrelated things arrive here — raw thinking, kept because a
+    /// provider will not take it back, and the reason a turn died — so
+    /// the kind says which, and surfaces show one and not the other.
     Diagnostic {
         text: String,
+        #[serde(default)]
+        kind: DiagnosticKind,
     },
     ToolCall {
         /// The provider's call id, which pairs a call with its result.

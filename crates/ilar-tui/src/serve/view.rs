@@ -39,6 +39,7 @@
 //!  "usage":{"input":1,"output":2,"cache_read":3,"cache_creation":4},
 //!  "content":[{"type":"text","text":"on it"},
 //!             {"type":"reasoning_summary","text":"**Planning**"},
+//!             {"type":"diagnostic","text":"turn error: provider exploded"},
 //!             {"type":"tool_call","id":"read-1","name":"read","summary":"src/lib.rs:10",
 //!              "detail":"{\n  \"path\": \"src/lib.rs\"\n}","agent":null}],"ts":"…"}
 //! {"type":"tool_result","id":"…","tool_use_id":"read-1","is_error":false,
@@ -59,9 +60,11 @@
 //!
 //! A `tool_call` for the `task` tool carries `agent: {name, model}`;
 //! every other tool carries `agent: null`. Assistant content keeps only
-//! what a surface shows: raw thinking, opaque reasoning state,
-//! diagnostics and half-streamed summaries never leave the process *in
-//! a committed event*.
+//! what a surface shows: raw thinking, opaque reasoning state and
+//! half-streamed summaries never leave the process *in a committed
+//! event*. The one diagnostic that does is `{"type":"diagnostic"}`,
+//! carrying why a turn stopped — a reader without it sees a transcript
+//! that simply ends.
 //!
 //! The live scratch is the one exception, and a deliberate one: a turn
 //! streaming its reasoning shows it as it arrives ([`project_live_delta`]),
@@ -367,9 +370,9 @@ fn was_truncated(bounded: &str) -> bool {
 }
 
 /// Assistant content, keeping only what a surface renders. Raw thinking,
-/// opaque reasoning items, provider diagnostics, half-streamed summaries
-/// and the inline blocks that duplicate a `ToolResult` event all stop
-/// here.
+/// opaque reasoning items, thinking kept as a local diagnostic,
+/// half-streamed summaries and the inline blocks that duplicate a
+/// `ToolResult` event all stop here. A turn-error diagnostic passes.
 fn project_block(block: &ContentBlock) -> Option<Value> {
     match block {
         ContentBlock::Text { text } => Some(json!({ "type": "text", "text": text })),
@@ -380,6 +383,13 @@ fn project_block(block: &ContentBlock) -> Option<Value> {
         ContentBlock::ToolCall {
             id, name, input, ..
         } => Some(project_tool_call(id, name, input)),
+        // Why a turn stopped, and only that: without it the transcript
+        // simply ends and the reader is left guessing. Raw thinking
+        // wears the same block and stays local.
+        ContentBlock::Diagnostic {
+            text,
+            kind: ilar::session::DiagnosticKind::TurnError,
+        } => Some(json!({ "type": "diagnostic", "text": text })),
         ContentBlock::ReasoningSummary {
             completed: false, ..
         }
@@ -490,6 +500,42 @@ mod tests {
             cache_creation_input_tokens: cache_creation,
             input_token_accounting: Some(InputTokenAccounting::ExcludesCached),
         }
+    }
+
+    /// Two unrelated things are stored as diagnostics. Why a turn died
+    /// crosses the wire — without it the transcript just stops — while
+    /// raw thinking, kept as a diagnostic because no provider takes it
+    /// back, stays in the process.
+    #[test]
+    fn a_turn_error_reaches_the_page_and_raw_thinking_never_does() {
+        use ilar::session::DiagnosticKind;
+        let event = assistant(
+            "zai/glm-4.7",
+            vec![
+                ContentBlock::Diagnostic {
+                    text: "chain of thought nobody asked for".into(),
+                    kind: DiagnosticKind::Local,
+                },
+                ContentBlock::Diagnostic {
+                    text: "turn error: provider exploded".into(),
+                    kind: DiagnosticKind::TurnError,
+                },
+            ],
+            usage(1, 1, 0, 0),
+        );
+
+        let projected = project_event(&event);
+        let content = projected["content"].as_array().expect("content is a list");
+
+        assert_eq!(content.len(), 1, "{content:?}");
+        assert_eq!(content[0]["type"], "diagnostic");
+        assert_eq!(content[0]["text"], "turn error: provider exploded");
+        assert!(
+            !serde_json::to_string(&projected)
+                .unwrap()
+                .contains("nobody asked for"),
+            "raw thinking left the process: {projected}"
+        );
     }
 
     /// The wire carries the marker text the TUI shows and a descriptor per

@@ -806,7 +806,9 @@ async fn multi_turn_tool_conversation_end_to_end() {
     ));
     let assistant1 = &transcript[1];
     assert_eq!(assistant1.content.len(), 5);
-    assert!(matches!(&assistant1.content[0], ContentBlock::Diagnostic { text } if text == "plan"));
+    assert!(
+        matches!(&assistant1.content[0], ContentBlock::Diagnostic { text, .. } if text == "plan")
+    );
     assert!(matches!(&assistant1.content[1], ContentBlock::Text { text } if text == "checking"));
     assert!(matches!(&assistant1.content[2], ContentBlock::ToolCall { id, .. } if id == "t1"));
     assert!(matches!(&assistant1.content[3], ContentBlock::Text { text } if text == "after first"));
@@ -938,12 +940,12 @@ async fn multiple_thinking_runs_preserve_order() {
     // Thinking is never replayed, so each closed run is persisted as the
     // diagnostic the reader sees — in the order it was streamed.
     assert!(
-        matches!(&content[0], ContentBlock::Diagnostic { text } if text == "first thought"),
+        matches!(&content[0], ContentBlock::Diagnostic { text, .. } if text == "first thought"),
         "{content:?}"
     );
     assert!(matches!(&content[1], ContentBlock::Text { text } if text == "between"));
     assert!(
-        matches!(&content[2], ContentBlock::Diagnostic { text } if text == "second thought"),
+        matches!(&content[2], ContentBlock::Diagnostic { text, .. } if text == "second thought"),
         "{content:?}"
     );
     assert!(matches!(&content[3], ContentBlock::Text { text } if text == "answer"));
@@ -1112,7 +1114,7 @@ async fn interrupted_reasoning_summary_is_not_persisted() {
         transcript[1]
             .content
             .iter()
-            .all(|block| matches!(block, ContentBlock::Diagnostic { text } if text.contains("turn error"))),
+            .all(|block| matches!(block, ContentBlock::Diagnostic { text, .. } if text.contains("turn error"))),
         "{transcript:?}"
     );
 }
@@ -1149,7 +1151,7 @@ async fn unsigned_thinking_is_persisted_as_diagnostic_text() {
     .unwrap();
 
     let content = &store.load(&session_id).unwrap().transcript()[1].content;
-    assert!(matches!(&content[0], ContentBlock::Diagnostic { text }
+    assert!(matches!(&content[0], ContentBlock::Diagnostic { text, .. }
         if text == "unfinished"));
     assert!(matches!(&content[1], ContentBlock::Text { text } if text == "answer"));
 }
@@ -2034,7 +2036,7 @@ async fn provider_error_mid_stream_persists_partial_step() {
         })
         .flatten()
         .find_map(|block| match block {
-            ContentBlock::Diagnostic { text } => Some(text.clone()),
+            ContentBlock::Diagnostic { text, .. } => Some(text.clone()),
             _ => None,
         })
         .expect("error turn records a diagnostic block");

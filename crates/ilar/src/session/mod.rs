@@ -12,7 +12,9 @@ pub use live::{
     LIVE_SUFFIX, LiveDelta, LiveScratch, SCRATCH_HEARTBEAT, live_path, parse_scratch,
     sweep_live_scratches,
 };
-pub use model::{ChatMessage, ContentBlock, ImageContent, InputTokenAccounting, Role, Usage};
+pub use model::{
+    ChatMessage, ContentBlock, DiagnosticKind, ImageContent, InputTokenAccounting, Role, Usage,
+};
 pub use store::{
     ChildSummary, PendingQuestion, RewindOutcome, Session, SessionHead, SessionId, SessionReader,
     SessionStore, SessionSummary, SessionWriter, transcript_of,

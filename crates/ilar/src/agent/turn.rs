@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::agent::event::{LoopEvent, LoopEventSender};
 use crate::provider::{ProviderEvent, ProviderResolver, Request, StopReason};
-use crate::session::{ContentBlock, SessionEvent, SessionStore, Usage, new_id};
+use crate::session::{ContentBlock, DiagnosticKind, SessionEvent, SessionStore, Usage, new_id};
 use crate::tools::ToolRegistry;
 use crate::tools::executor::{CallOutcome, ToolCall, execute_calls_observed};
 use chrono::Utc;
@@ -130,9 +130,10 @@ impl StepAccumulator {
             .filter_map(|block| match block {
                 // Thinking is never replayed to a provider, so it is
                 // persisted as what it is to a reader: a diagnostic.
-                ContentBlock::Thinking { text } => {
-                    Some(ContentBlock::Diagnostic { text: text.clone() })
-                }
+                ContentBlock::Thinking { text } => Some(ContentBlock::Diagnostic {
+                    text: text.clone(),
+                    kind: DiagnosticKind::Local,
+                }),
                 ContentBlock::ReasoningSummary {
                     completed: false, ..
                 } => None,
@@ -379,6 +380,7 @@ async fn persist_failed_step(
     let mut blocks = acc.content_blocks();
     blocks.push(ContentBlock::Diagnostic {
         text: format!("turn error: {message}"),
+        kind: DiagnosticKind::TurnError,
     });
     session.append(SessionEvent::AssistantMessage {
         id: new_id(),

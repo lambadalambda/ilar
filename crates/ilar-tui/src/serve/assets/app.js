@@ -522,6 +522,11 @@ function eventRows(events, sessionId, cwd, offset) {
             rows.push(html`<div class="block assistant" key=${inner}>${richText(block.text)}</div>`);
           } else if (block.type === "reasoning_summary") {
             rows.push(html`<${ThinkingRow} key=${inner} text=${block.text} />`);
+          } else if (block.type === "diagnostic") {
+            // Why the turn stopped. It reads as part of the transcript
+            // because that is where the reader is looking when the
+            // replies stop coming.
+            rows.push(html`<div class="block failed" key=${inner}>${block.text}</div>`);
           } else if (block.type === "tool_call") {
             const result = results.get(block.id);
             if (result) consumed.add(result.id);

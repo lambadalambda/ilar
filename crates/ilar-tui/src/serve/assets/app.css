@@ -395,6 +395,14 @@ button {
 .block.assistant {
   padding: 6px 0 8px;
 }
+/* Why a turn stopped, in the transcript where the replies stopped. */
+.block.failed {
+  color: var(--err);
+  border-left: 2px solid var(--err);
+  padding: 4px 0 4px 10px;
+  margin: 6px 0;
+  white-space: pre-wrap;
+}
 
 .text {
   white-space: pre-wrap;
