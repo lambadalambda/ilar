@@ -15,7 +15,7 @@ use crate::tools::{
     WorkspaceAccess,
 };
 use anyhow::Context;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 const NOTIFICATION_CAPACITY: usize = 64;
 const ACTIVITY_CAPACITY: usize = 256;
@@ -47,13 +47,27 @@ const BACKGROUND_DEMOTED_BY_CAPACITY: &str = "Ran in the foreground: read-only t
      background, but background capacity was full, so this one ran here instead of failing.";
 
 /// A completed background task's notification — the synthetic user
-/// message that re-invokes the parent loop.
-#[derive(Debug, Clone)]
+/// message that re-invokes the parent loop. Serializable because the
+/// durable outbox (`crate::outbox`) persists it as a JSONL line until
+/// its delivery can be proven from the parent's session log.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Notification {
     pub parent_session_id: String,
     pub description: String,
     pub text: String,
     pub is_error: bool,
+}
+
+/// Take a lock whose guarded state cannot be torn by a panic. Every
+/// mutex in this file guards a registry or map mutated with single
+/// push/remove/insert operations, so a thread that panicked while
+/// holding one left the data whole — but the poison flag would still
+/// make every later `.unwrap()` panic, cascading one dead child into a
+/// background runtime where no task can register, notify, or even run
+/// its drop guards (a poisoned lock in a `Drop` during unwind aborts the
+/// process). Ignoring the poison is the correct recovery here.
+fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[derive(Debug, Clone)]
@@ -107,6 +121,11 @@ pub struct SubagentSpawner {
     background_tasks: Arc<Mutex<BackgroundRegistry>>,
     workspace: crate::tools::WorkspaceScheduler,
     background_tool_timeout: std::time::Duration,
+    /// When set, every notification publish is also appended to the
+    /// durable outbox here before it enters the channel, so a process
+    /// that dies with the notification in flight can requeue it at the
+    /// next session open (`crate::outbox`).
+    outbox_dir: Option<std::path::PathBuf>,
     loop_config: LoopConfig,
     /// Root session's service manager, shared with mutable child agents.
     services: Option<std::sync::Arc<crate::tools::service::ServiceManager>>,
@@ -119,25 +138,36 @@ pub struct SubagentSpawner {
 #[derive(Debug, Clone)]
 pub struct RunningTask {
     pub session_id: String,
+    /// Who spawned it — the session whose turn called the task tool,
+    /// or, for a delivery, the resumed session's own parent. Lets a
+    /// panel say whose child a nested agent is instead of flattening
+    /// the tree.
+    pub parent_session_id: String,
     pub description: String,
     pub agent: String,
     pub background: bool,
+    /// A completion being delivered to this session — waiting for its
+    /// current turn to end, or resuming it — rather than a task the
+    /// model asked for. The mail on the panel.
+    pub delivering: bool,
     pub started: std::time::Instant,
+    /// Registry-assigned. Rows are removed by this, not the session
+    /// id: a delivery waiting on a session and the turn it waits for
+    /// are two rows with one session, and one ending must not erase
+    /// the other.
+    row: u64,
 }
 
 /// Removes its task from the running registry however the run ends —
 /// completion, error, abort, or a dropped background future.
 struct RunningTaskGuard {
-    session_id: String,
+    row: u64,
     registry: Arc<Mutex<Vec<RunningTask>>>,
 }
 
 impl Drop for RunningTaskGuard {
     fn drop(&mut self) {
-        self.registry
-            .lock()
-            .unwrap()
-            .retain(|task| task.session_id != self.session_id);
+        lock_unpoisoned(&self.registry).retain(|task| task.row != self.row);
     }
 }
 
@@ -180,7 +210,7 @@ impl ChildSteers {
     /// is starting or into the prompt that turn starts from, and never
     /// falls between the two.
     fn begin(&self, session_id: &str, sender: Option<crate::agent::SteerSender>) -> ChildTurnSteer {
-        let mut steers = self.0.lock().unwrap();
+        let mut steers = lock_unpoisoned(&self.0);
         let entry = steers.entry(session_id.to_string()).or_default();
         entry.sender = sender;
         let queued = std::mem::take(&mut entry.pending);
@@ -196,7 +226,7 @@ impl ChildSteers {
     /// channel took it: the caller then decides between resuming the
     /// task and holding the message for its next resume.
     fn steer(&self, session_id: &str, text: String) -> bool {
-        let mut steers = self.0.lock().unwrap();
+        let mut steers = lock_unpoisoned(&self.0);
         let Some(entry) = steers.get_mut(session_id) else {
             return false;
         };
@@ -214,20 +244,27 @@ impl ChildSteers {
 
     /// Hold a message for a child that cannot be steered right now.
     fn queue(&self, session_id: &str, text: String) {
-        self.0
-            .lock()
-            .unwrap()
+        lock_unpoisoned(&self.0)
             .entry(session_id.to_string())
             .or_default()
             .pending
             .push(text);
     }
 
+    /// Whether this exact text is still waiting for the child. The
+    /// message verb checks it after a resume it delegated declined, to
+    /// say honestly that the message is parked rather than delivered.
+    fn holds(&self, session_id: &str, text: &str) -> bool {
+        lock_unpoisoned(&self.0)
+            .get(session_id)
+            .is_some_and(|entry| entry.pending.iter().any(|held| held == text))
+    }
+
     /// The child took this message at a step boundary, so it is waiting
     /// for nothing — matched by text, the way the root's pending strip
     /// clears itself from the same `Steered` event.
     fn delivered(&self, session_id: &str, text: &str) {
-        let mut steers = self.0.lock().unwrap();
+        let mut steers = lock_unpoisoned(&self.0);
         if let Some(entry) = steers.get_mut(session_id)
             && let Some(index) = entry.pending.iter().position(|held| held == text)
         {
@@ -238,9 +275,7 @@ impl ChildSteers {
 
     /// How many messages this task has not read yet.
     fn pending(&self, session_id: &str) -> usize {
-        self.0
-            .lock()
-            .unwrap()
+        lock_unpoisoned(&self.0)
             .get(session_id)
             .map_or(0, |entry| entry.pending.len())
     }
@@ -249,7 +284,7 @@ impl ChildSteers {
     /// never started goes back to the head of the queue, ahead of
     /// whatever was said while it was running.
     fn end(&self, session_id: &str, restored: Vec<String>) {
-        let mut steers = self.0.lock().unwrap();
+        let mut steers = lock_unpoisoned(&self.0);
         if let Some(entry) = steers.get_mut(session_id) {
             entry.sender = None;
             entry.pending.splice(0..0, restored);
@@ -282,7 +317,10 @@ struct ChildTurnSteer {
 
 impl ChildTurnSteer {
     /// The prompt this run actually starts from: what the task never
-    /// read, then what the parent is asking now.
+    /// read, then what the parent is asking now. An empty ask carries
+    /// nothing of its own — the message verb's resume parks its text in
+    /// the queue and starts the run with nothing else to say — so it
+    /// adds no blank tail to the queue it delivers.
     fn prompt(&self, prompt: &str) -> String {
         if self.queued.is_empty() {
             return prompt.to_string();
@@ -290,7 +328,7 @@ impl ChildTurnSteer {
         self.queued
             .iter()
             .map(String::as_str)
-            .chain(std::iter::once(prompt))
+            .chain((!prompt.is_empty()).then_some(prompt))
             .collect::<Vec<_>>()
             .join("\n\n")
     }
@@ -364,6 +402,7 @@ impl SubagentSpawner {
             background_tasks: Arc::new(Mutex::new(BackgroundRegistry::default())),
             workspace,
             background_tool_timeout: std::time::Duration::from_secs(600),
+            outbox_dir: None,
             loop_config: LoopConfig::default(),
             services: None,
             available_models: Vec::new(),
@@ -383,6 +422,13 @@ impl SubagentSpawner {
 
     pub fn with_background_tool_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.background_tool_timeout = timeout;
+        self
+    }
+
+    /// Persist every published notification to this directory until its
+    /// delivery is provable from the parent session's log.
+    pub fn with_outbox_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.outbox_dir = Some(dir);
         self
     }
 
@@ -429,9 +475,7 @@ impl SubagentSpawner {
     /// Receiver for background-task notifications (single consumer;
     /// second call returns an already-closed receiver).
     pub fn subscribe(&self) -> tokio::sync::mpsc::Receiver<Notification> {
-        self.notify_rx
-            .lock()
-            .unwrap()
+        lock_unpoisoned(&self.notify_rx)
             .take()
             .unwrap_or_else(|| tokio::sync::mpsc::channel::<Notification>(1).1)
     }
@@ -443,7 +487,7 @@ impl SubagentSpawner {
     /// Abort every detached background task (the pending manager's
     /// cancel; quitting goes through `shutdown`).
     pub fn abort_all(&self) {
-        let tasks = self.background_tasks.lock().unwrap();
+        let tasks = lock_unpoisoned(&self.background_tasks);
         for task in &tasks.tasks {
             task.cancel.cancel();
         }
@@ -451,7 +495,7 @@ impl SubagentSpawner {
 
     pub async fn shutdown(&self) {
         let tasks = {
-            let mut registry = self.background_tasks.lock().unwrap();
+            let mut registry = lock_unpoisoned(&self.background_tasks);
             registry.closed = true;
             for task in &registry.tasks {
                 task.cancel.cancel();
@@ -470,7 +514,7 @@ impl SubagentSpawner {
 
     /// Number of live detached background tasks.
     pub fn running_background(&self) -> usize {
-        let mut registry = self.background_tasks.lock().unwrap();
+        let mut registry = lock_unpoisoned(&self.background_tasks);
         registry.tasks.retain(|task| !task.handle.is_finished());
         registry.tasks.len()
     }
@@ -516,6 +560,7 @@ impl SubagentSpawner {
             background_tasks: self.background_tasks.clone(),
             workspace,
             background_tool_timeout: self.background_tool_timeout,
+            outbox_dir: self.outbox_dir.clone(),
             loop_config: self.loop_config.clone(),
             services: self.services.clone(),
             available_models: self.available_models.clone(),
@@ -880,10 +925,13 @@ impl SubagentSpawner {
         // it or moves the guard into the task that will.
         let _running_task = self.register_running(RunningTask {
             session_id: session_id.clone(),
+            parent_session_id: ctx.session_id.clone(),
             description: input.description.clone(),
             agent: agent.name.clone(),
             background,
+            delivering: false,
             started: std::time::Instant::now(),
+            row: 0,
         });
         // The channel and the queue in one step, under the claim taken
         // above: from here a message reaches the turn that is starting,
@@ -941,7 +989,6 @@ impl SubagentSpawner {
         };
 
         if background {
-            let notification_permit = notification_permit.expect("reserved for background task");
             // Detached: run the child on a spawned task with a stall
             // watchdog; completion lands as a notification for the parent
             // loop; the tool call returns immediately.
@@ -958,7 +1005,7 @@ impl SubagentSpawner {
             let workspace = child_workspace.clone();
             let parent_location = ctx.location.clone();
             let leased_location = child_location.clone();
-            let mut background_registry = self.background_tasks.lock().unwrap();
+            let mut background_registry = lock_unpoisoned(&self.background_tasks);
             if background_registry.closed {
                 return ToolOutput::error("background runtime is shutting down");
             }
@@ -978,11 +1025,25 @@ impl SubagentSpawner {
             };
             let returned_session_id = session_id.clone();
             let (registered_tx, registered_rx) = tokio::sync::oneshot::channel();
+            // The reservation becomes a guard here, not at the reserve
+            // above: the early returns between the two report their
+            // errors synchronously, and a guard armed that early would
+            // announce an abnormal death for a task that never existed.
+            let reserved = ReservedNotification::new(
+                notification_permit.expect("reserved for background task"),
+                parent_session_id.clone(),
+                description.clone(),
+                self.outbox_dir.clone(),
+            );
             let handle = tokio::spawn(async move {
-                let mut notification_permit = Some(notification_permit);
                 if registered_rx.await.is_err() {
+                    // Never admitted: the spawner reported the failure
+                    // synchronously, so no notification may claim a task
+                    // died here.
+                    reserved.disarm();
                     return;
                 }
+                let reserved = reserved;
                 let _background_task = BackgroundTaskGuard {
                     id: task_registry_id,
                     registry: task_registry,
@@ -1015,22 +1076,16 @@ impl SubagentSpawner {
                 let lease = match acquired {
                     LeaseOutcome::Acquired(lease) => lease,
                     LeaseOutcome::Cancelled => {
-                        publish_reserved_notification(
-                            &mut notification_permit,
-                            cancelled_task_notification(&parent_session_id, &description),
-                        );
+                        reserved.send(cancelled_task_notification(&parent_session_id, &description));
                         return;
                     }
                     LeaseOutcome::Failed(failure) => {
-                        publish_reserved_notification(
-                            &mut notification_permit,
-                            task_notification(
-                                &parent_session_id,
-                                &description,
-                                &format!("Task \"{description}\" failed: {}", failure.message()),
-                                true,
-                            ),
-                        );
+                        reserved.send(task_notification(
+                            &parent_session_id,
+                            &description,
+                            &format!("Task \"{description}\" failed: {}", failure.message()),
+                            true,
+                        ));
                         return;
                     }
                 };
@@ -1054,21 +1109,18 @@ impl SubagentSpawner {
                 let watcher_activity = activity.clone();
                 let watcher = tokio::spawn(async move {
                     while let Some(event) = rx_evt.recv().await {
-                        *watcher_last.lock().unwrap() = std::time::Instant::now();
+                        *lock_unpoisoned(&watcher_last) = std::time::Instant::now();
                         watcher_activity.publish(event);
                     }
                 });
                 let stall_watch = async {
                     loop {
                         tokio::time::sleep(stall_timeout / 2).await;
-                        if last_activity.lock().unwrap().elapsed() >= stall_timeout {
+                        if lock_unpoisoned(&last_activity).elapsed() >= stall_timeout {
                             return;
                         }
                     }
                 };
-                // Nothing after this point declines to start, so the
-                // queue folded into the prompt is delivered, not waiting.
-                child_steer.started();
                 let mut turn = Box::pin(run_turn(
                     spawner.resolver.as_ref(),
                     &registry,
@@ -1111,6 +1163,15 @@ impl SubagentSpawner {
                     None if was_cancelled => TaskOutcome::Cancelled,
                     None => TaskOutcome::Stalled,
                 };
+                // Only now is "started" decidable: a turn that declined
+                // before appending its prompt destroyed nothing, and the
+                // queue folded into that prompt goes back to waiting
+                // when the steer hold drops. Every other ending appended
+                // the prompt, queue included, so those messages are
+                // delivered rather than waiting.
+                if !outcome.turn_never_started() {
+                    child_steer.started();
+                }
                 activity.turn_done(outcome.activity());
 
                 let failed =
@@ -1143,7 +1204,7 @@ impl SubagentSpawner {
                         stall_timeout.as_secs()
                     )),
                 };
-                publish_reserved_notification(&mut notification_permit, notification);
+                reserved.send(notification);
             });
             background_registry.tasks.push(BackgroundTask {
                 id: registry_id,
@@ -1186,7 +1247,6 @@ task's scope yourself; continue only clearly disjoint work."
             on_start();
         }
         let (tx, mut rx_evt) = loop_event_channel(LOOP_EVENT_CAPACITY);
-        child_steer.started();
         let activity = ActivityPublisher {
             tx: self.activity_tx.clone(),
             agent: agent.name.clone(),
@@ -1227,6 +1287,13 @@ task's scope yourself; continue only clearly disjoint work."
             activity.publish(event);
         }
         let outcome = TaskOutcome::from_turn(outcome);
+        // Started means "the prompt was appended", and only the turn
+        // knows: one that declined before appending marks its error, and
+        // the queue folded into its prompt goes back to waiting instead
+        // of vanishing with the prompt string.
+        if !outcome.turn_never_started() {
+            child_steer.started();
+        }
         activity.turn_done(outcome.activity());
 
         let output = match outcome {
@@ -1361,24 +1428,49 @@ task's scope yourself; continue only clearly disjoint work."
         let workspace = input
             .workspace
             .or_else(|| persisted_worktree(&meta, &ctx.location));
-        self.run_task_observed(
-            TaskInput {
-                description: format!("message: {}", snippet(&text, TASK_MESSAGE_LABEL_CHARS)),
-                prompt: text,
-                subagent_type: meta.agent,
-                task_id: Some(task_id),
-                // Stated, not defaulted: this call promises to return
-                // the task's answer, so it runs in the turn whatever the
-                // agent's own default would have been.
-                background: Some(false),
-                workspace,
-                model: None,
-                reasoning: None,
-            },
-            ctx,
-            on_start,
-        )
-        .await
+        // Parked in the pending queue before the resume is attempted,
+        // exactly like the two branches above: the resume has many ways
+        // to decline — the concurrency limit, the session-already-active
+        // race the queue branch exists for, resume validation — and each
+        // of them must leave the message waiting rather than gone. The
+        // resume folds the queue into the prompt it appends and counts
+        // it delivered only once the turn provably started, so the text
+        // reaches the child exactly once on success and stays queued on
+        // failure.
+        self.child_steers.queue(&task_id, text.clone());
+        let output = self
+            .run_task_observed(
+                TaskInput {
+                    description: format!("message: {}", snippet(&text, TASK_MESSAGE_LABEL_CHARS)),
+                    // Empty on purpose: the message rides the queue and
+                    // heads the resume's prompt; naming it here too
+                    // would deliver it twice.
+                    prompt: String::new(),
+                    subagent_type: meta.agent,
+                    task_id: Some(task_id.clone()),
+                    // Stated, not defaulted: this call promises to return
+                    // the task's answer, so it runs in the turn whatever
+                    // the agent's own default would have been.
+                    background: Some(false),
+                    workspace,
+                    model: None,
+                    reasoning: None,
+                },
+                ctx,
+                on_start,
+            )
+            .await;
+        // A declined resume is not a lost message, and the model must
+        // not read it as one: whatever the refusal says — including the
+        // concurrency limit's "do not retry" — the message itself is
+        // still parked and rides the child's next resume.
+        if output.is_error && self.child_steers.holds(&task_id, &text) {
+            return output.with_appended_text(
+                "\n\n(Your message was not delivered by this call, but it is not lost: it is \
+                 queued and will be delivered when this task is next resumed.)",
+            );
+        }
+        output
     }
 
     pub async fn spawn_background_tool(
@@ -1411,7 +1503,7 @@ task's scope yourself; continue only clearly disjoint work."
         let task_cancel = background_cancel.clone();
         let workspace = self.workspace.clone();
         {
-            let mut background_registry = self.background_tasks.lock().unwrap();
+            let mut background_registry = lock_unpoisoned(&self.background_tasks);
             if background_registry.closed {
                 return ToolOutput::error("background runtime is shutting down");
             }
@@ -1422,11 +1514,21 @@ task's scope yourself; continue only clearly disjoint work."
             let task_registry_id = registry_id.clone();
             let task_registry = self.background_tasks.clone();
             let (registered_tx, registered_rx) = tokio::sync::oneshot::channel();
+            // Same guard as a background task's: a panicking job future
+            // must surface as a failed-job notification, not as silence.
+            let reserved = ReservedNotification::new(
+                notification_permit,
+                parent_session_id.clone(),
+                description.clone(),
+                self.outbox_dir.clone(),
+            );
             let handle = tokio::spawn(async move {
-                let mut notification_permit = Some(notification_permit);
                 if registered_rx.await.is_err() {
+                    // Never admitted; the error was reported synchronously.
+                    reserved.disarm();
                     return;
                 }
+                let reserved = reserved;
                 let _background_task = BackgroundTaskGuard {
                     id: task_registry_id,
                     registry: task_registry,
@@ -1467,15 +1569,12 @@ task's scope yourself; continue only clearly disjoint work."
                         true,
                     ),
                 };
-                publish_reserved_notification(
-                    &mut notification_permit,
-                    Notification {
-                        parent_session_id,
-                        description,
-                        text,
-                        is_error,
-                    },
-                );
+                reserved.send(Notification {
+                    parent_session_id,
+                    description,
+                    text,
+                    is_error,
+                });
             });
             background_registry.tasks.push(BackgroundTask {
                 id: registry_id,
@@ -1500,15 +1599,49 @@ task's scope yourself; continue only clearly disjoint work."
             Ok(parent) => parent,
             Err(_) => return Ok(RouteOutcome::Requeue(notification)),
         };
+        // Already in the log? An outbox-recovered entry can race
+        // another process delivering the same completion; the parent's
+        // own log is the truth, and delivering twice is worse than the
+        // load this check costs.
+        if is_delivered(&parent, &notification.text) {
+            return Ok(RouteOutcome::Complete);
+        }
         let meta = parent
             .meta()
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("notification parent has no metadata"))?;
+        // A live, steerable turn takes the result now — the way the
+        // user's own message lands mid-turn — instead of a whole
+        // resume queueing behind it. ChildSteers keeps the
+        // exactly-once promise: a taken steer is appended by the
+        // turn; an untaken one survives as pending and heads the next
+        // resume's prompt. Whoever drives that turn also reports its
+        // outcome upward, so nothing here owes the grandparent a word.
+        if self
+            .child_steers
+            .steer(&notification.parent_session_id, notification.text.clone())
+        {
+            return Ok(RouteOutcome::Complete);
+        }
         let agent = self
             .agents
             .iter()
             .find(|agent| agent.name == meta.agent)
             .ok_or_else(|| anyhow::anyhow!("unknown persisted agent {:?}", meta.agent))?;
+        // Registered before any waiting starts: the panel and the
+        // tasks tool read this registry, so a delivery queued behind
+        // the session's current turn is visible mail, not an
+        // invisible claim another turn trips over.
+        let _running = self.register_running(RunningTask {
+            session_id: notification.parent_session_id.clone(),
+            parent_session_id: meta.parent_id.clone().unwrap_or_default(),
+            description: notification.description.clone(),
+            agent: meta.agent.clone(),
+            background: true,
+            delivering: true,
+            started: std::time::Instant::now(),
+            row: 0,
+        });
         let (workspace_location, depth) = match session_workspace_location(
             &self.store,
             &notification.parent_session_id,
@@ -1518,7 +1651,7 @@ task's scope yourself; continue only clearly disjoint work."
         {
             Ok(location) => location,
             Err(error) => {
-                return workspace_route_failure(&meta, notification, error);
+                return self.recorded_propagate(workspace_route_failure(&meta, notification, error));
             }
         };
         let workspace = self.workspace.scoped(&workspace_location);
@@ -1536,7 +1669,9 @@ task's scope yourself; continue only clearly disjoint work."
         let registry = runtime.agent_registry(agent)?;
         let system_prompt = match self.agent_system_prompt(agent, workspace_location.cwd()) {
             Ok(prompt) => prompt,
-            Err(error) => return context_route_failure(&meta, notification, error),
+            Err(error) => {
+                return self.recorded_propagate(context_route_failure(&meta, notification, error));
+            }
         };
         let lease = tokio::select! {
             lease = workspace.acquire_lease(workspace_access) => lease,
@@ -1553,14 +1688,16 @@ task's scope yourself; continue only clearly disjoint work."
         .await
         {
             Ok(location) => location,
-            Err(error) => return workspace_route_failure(&meta, notification, error),
+            Err(error) => {
+                return self.recorded_propagate(workspace_route_failure(&meta, notification, error));
+            }
         };
         if leased_location != workspace_location || leased_depth != depth {
-            return workspace_route_failure(
+            return self.recorded_propagate(workspace_route_failure(
                 &meta,
                 notification,
                 anyhow::anyhow!("workspace changed while waiting for its lease"),
-            );
+            ));
         }
         // A routed notification is a turn of this session's own, and it
         // belongs to no call in the parent: nothing up there asked for
@@ -1654,7 +1791,20 @@ task's scope yourself; continue only clearly disjoint work."
                     }
                 }
                 result => {
-                    queued.started();
+                    // Only a turn that appended its prompt delivered the
+                    // queue folded into it; one that declined before the
+                    // append marks its error, and the hold's drop puts
+                    // the messages back — the restore this loop's adopt
+                    // promises. WouldBlock took the arm above, so the
+                    // retry loop never reaches here.
+                    let never_started = matches!(
+                        &result,
+                        Err(error)
+                            if error.downcast_ref::<crate::agent::TurnNeverStarted>().is_some()
+                    );
+                    if !never_started {
+                        queued.started();
+                    }
                     break result;
                 }
             }
@@ -1685,40 +1835,58 @@ task's scope yourself; continue only clearly disjoint work."
             Err(error) => (format!("Nested parent turn failed: {error:#}"), true),
         };
         let status = if is_error { "failed" } else { "completed" };
-        Ok(RouteOutcome::Propagate(Notification {
+        self.recorded_propagate(Ok(RouteOutcome::Propagate(Notification {
             parent_session_id: grandparent_id,
             description: notification.description,
             text: format!(
                 "<task-notification>\nNested task {status}.\n<result>\n{text}\n</result>\n</task-notification>"
             ),
             is_error,
-        }))
+        })))
+    }
+
+    /// A propagated hop is synthesized here and exists nowhere else —
+    /// unlike a task completion, no permit guard recorded it at birth.
+    /// Every `Propagate` leaves through this, so the memory it rides to
+    /// the next hop is never the only copy.
+    fn recorded_propagate(
+        &self,
+        outcome: anyhow::Result<RouteOutcome>,
+    ) -> anyhow::Result<RouteOutcome> {
+        if let (Some(dir), Ok(RouteOutcome::Propagate(notification))) =
+            (self.outbox_dir.as_deref(), &outcome)
+        {
+            crate::outbox::record(dir, notification);
+        }
+        outcome
     }
 
     /// Whether a session is running right now — a claimed session is one
     /// a turn is driving, and the listing says so rather than showing a
     /// stale "last word".
     pub fn session_is_active(&self, session_id: &str) -> bool {
-        self.active_sessions.lock().unwrap().contains(session_id)
+        lock_unpoisoned(&self.active_sessions).contains(session_id)
     }
 
     /// The subagents working right now, oldest first, across every
     /// depth — one shared registry, so a nested task shows up too.
     pub fn running_tasks(&self) -> Vec<RunningTask> {
-        self.running_tasks.lock().unwrap().clone()
+        lock_unpoisoned(&self.running_tasks).clone()
     }
 
-    fn register_running(&self, task: RunningTask) -> RunningTaskGuard {
-        let session_id = task.session_id.clone();
-        self.running_tasks.lock().unwrap().push(task);
+    fn register_running(&self, mut task: RunningTask) -> RunningTaskGuard {
+        static NEXT_ROW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        task.row = NEXT_ROW.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let row = task.row;
+        lock_unpoisoned(&self.running_tasks).push(task);
         RunningTaskGuard {
-            session_id,
+            row,
             registry: self.running_tasks.clone(),
         }
     }
 
     fn claim_session(&self, session_id: &str) -> Option<ActiveSessionGuard> {
-        let mut active = self.active_sessions.lock().unwrap();
+        let mut active = lock_unpoisoned(&self.active_sessions);
         if !active.insert(session_id.to_string()) {
             return None;
         }
@@ -1798,6 +1966,19 @@ async fn session_workspace_location(
         location = restored;
     }
     Ok((location, chain.len().saturating_sub(1)))
+}
+
+/// Whether this notification's text already sits in a `UserMessage` of
+/// the target's log — the same definition of "delivered" the outbox
+/// compaction uses, because the log is the one artifact every process
+/// shares.
+fn is_delivered(parent: &crate::session::SessionReader, text: &str) -> bool {
+    parent.events().iter().any(|event| match event {
+        crate::session::SessionEvent::UserMessage {
+            text: appended, ..
+        } => appended.contains(text),
+        _ => false,
+    })
 }
 
 fn workspace_route_failure(
@@ -2048,6 +2229,18 @@ impl TaskOutcome {
             _ => TurnOutcome::Aborted,
         }
     }
+
+    /// Whether the turn provably appended nothing — the marker `run_turn`
+    /// puts on every failure ahead of its prompt append. The caller's
+    /// steer hold restores its queue on this outcome instead of counting
+    /// the folded-in messages as delivered.
+    fn turn_never_started(&self) -> bool {
+        matches!(
+            self,
+            Self::Failed(error)
+                if error.downcast_ref::<crate::agent::TurnNeverStarted>().is_some()
+        )
+    }
 }
 
 /// Fans a child's loop events out to whoever is watching this
@@ -2119,12 +2312,86 @@ fn rollback_created_session(store: &SessionStore, id: &str) {
     let _ = store.delete(id);
 }
 
-fn publish_reserved_notification(
-    permit: &mut Option<tokio::sync::mpsc::OwnedPermit<Notification>>,
-    notification: Notification,
-) {
-    if let Some(permit) = permit.take() {
-        let _ = permit.send(notification);
+/// A background task's reserved place in the notification channel, as a
+/// guard that enforces the exactly-one invariant the completion pipeline
+/// promises. Every expected ending calls `send` once; but a plain
+/// `OwnedPermit` dropped by a panic quietly returns its capacity and the
+/// parent waits forever for a task that is gone. The guard holds what an
+/// abnormal ending needs to say — the parent and the description — and
+/// its `Drop` says it: dropped without `send`, it publishes a synthesized
+/// "ended abnormally" failure in the same `<task-notification>` envelope
+/// every other failure uses.
+///
+/// The one ending that must stay silent is the registration handshake: a
+/// task that was never admitted already reported its error synchronously
+/// through the tool call, so that path `disarm`s the guard instead.
+struct ReservedNotification {
+    permit: Option<tokio::sync::mpsc::OwnedPermit<Notification>>,
+    parent_session_id: String,
+    description: String,
+    /// The durable copy is written before the channel send, so a
+    /// notification either reaches the channel with a disk record behind
+    /// it or reaches neither.
+    outbox_dir: Option<std::path::PathBuf>,
+}
+
+impl ReservedNotification {
+    fn new(
+        permit: tokio::sync::mpsc::OwnedPermit<Notification>,
+        parent_session_id: String,
+        description: String,
+        outbox_dir: Option<std::path::PathBuf>,
+    ) -> Self {
+        Self {
+            permit: Some(permit),
+            parent_session_id,
+            description,
+            outbox_dir,
+        }
+    }
+
+    /// Publish the task's one notification, consuming the reservation.
+    fn send(mut self, notification: Notification) {
+        self.deliver(notification);
+    }
+
+    /// Give the reservation up without a word — only for a task that was
+    /// never admitted, whose failure the caller reported synchronously.
+    fn disarm(mut self) {
+        self.permit = None;
+    }
+
+    fn deliver(&mut self, notification: Notification) {
+        let Some(permit) = self.permit.take() else {
+            return;
+        };
+        if let Some(dir) = &self.outbox_dir {
+            crate::outbox::record(dir, &notification);
+        }
+        permit.send(notification);
+    }
+}
+
+impl Drop for ReservedNotification {
+    fn drop(&mut self) {
+        if self.permit.is_none() {
+            return;
+        }
+        // Reached only when no explicit ending ran — a panic unwinding
+        // the task body, or a future ending on a path that forgot to
+        // report. Silence here is the parent waiting forever.
+        let notification = task_notification(
+            &self.parent_session_id,
+            &self.description,
+            &format!(
+                "Task \"{}\" ended abnormally without reporting a result — most \
+                 likely a panic in the task. Its session log holds whatever it finished; \
+                 resume it with the task tool to continue, or treat it as failed.",
+                self.description
+            ),
+            true,
+        );
+        self.deliver(notification);
     }
 }
 
@@ -2172,7 +2439,7 @@ struct ActiveSessionGuard {
 
 impl Drop for ActiveSessionGuard {
     fn drop(&mut self) {
-        self.active.lock().unwrap().remove(&self.session_id);
+        lock_unpoisoned(&self.active).remove(&self.session_id);
         self.changed.send_modify(|version| {
             *version = version.wrapping_add(1);
         });
@@ -2186,9 +2453,7 @@ struct BackgroundTaskGuard {
 
 impl Drop for BackgroundTaskGuard {
     fn drop(&mut self) {
-        self.registry
-            .lock()
-            .unwrap()
+        lock_unpoisoned(&self.registry)
             .tasks
             .retain(|task| task.id != self.id);
     }
@@ -2625,7 +2890,19 @@ impl Tool for TasksTool {
                 .take(TASK_LISTING_LIMIT)
                 .map(|child| {
                     let running = spawner.session_is_active(&child.id);
-                    let status = if running { "running" } else { "finished" };
+                    let delivering = spawner
+                        .running_tasks()
+                        .iter()
+                        .any(|task| task.delivering && task.session_id == child.id);
+                    let status = if delivering {
+                        // Active, but not on the model's behalf: a
+                        // background result is being delivered to it.
+                        "running (receiving a task result)"
+                    } else if running {
+                        "running"
+                    } else {
+                        "finished"
+                    };
                     let prompt = child.title.as_deref().unwrap_or("(no prompt)");
                     let last = if running {
                         // Its final text is not final yet.
@@ -2681,18 +2958,63 @@ mod tests {
         }
     }
 
+    fn reserved(
+        sender: &tokio::sync::mpsc::Sender<Notification>,
+        description: &str,
+    ) -> ReservedNotification {
+        ReservedNotification::new(
+            sender.clone().try_reserve_owned().unwrap(),
+            "parent".into(),
+            description.into(),
+            None,
+        )
+    }
+
     #[tokio::test]
     async fn notification_capacity_is_reserved_before_background_admission() {
         let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
-        let permit = sender.clone().try_reserve_owned().unwrap();
+        let guard = reserved(&sender, "first");
         assert!(matches!(
             sender.clone().try_reserve_owned(),
             Err(tokio::sync::mpsc::error::TrySendError::Full(_))
         ));
 
-        let mut permit = Some(permit);
-        publish_reserved_notification(&mut permit, notification("first"));
+        guard.send(notification("first"));
         assert_eq!(receiver.recv().await.unwrap().description, "first");
+        assert!(receiver.try_recv().is_err());
+    }
+
+    /// The exactly-one invariant against abnormal endings: a reservation
+    /// dropped without its explicit send — a panic unwinding the task —
+    /// reports the death instead of returning capacity in silence.
+    #[tokio::test]
+    async fn a_dropped_reservation_reports_an_abnormal_ending() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        drop(reserved(&sender, "survey the retries"));
+
+        let published = receiver.recv().await.unwrap();
+        assert!(published.is_error);
+        assert_eq!(published.parent_session_id, "parent");
+        assert_eq!(published.description, "survey the retries");
+        assert!(
+            published.text.contains("<task-notification>"),
+            "{}",
+            published.text
+        );
+        assert!(
+            published.text.contains("ended abnormally"),
+            "{}",
+            published.text
+        );
+    }
+
+    /// The one silent ending: a task the registry never admitted already
+    /// reported its error synchronously, so the disarmed guard says
+    /// nothing.
+    #[tokio::test]
+    async fn a_disarmed_reservation_stays_silent() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        reserved(&sender, "never admitted").disarm();
         assert!(receiver.try_recv().is_err());
     }
 

@@ -13,6 +13,7 @@ pub mod compaction;
 pub mod config;
 pub mod image;
 pub mod model;
+pub mod outbox;
 pub mod provider;
 pub mod question;
 pub mod recall;

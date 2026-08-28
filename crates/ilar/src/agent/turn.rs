@@ -6,6 +6,39 @@ use anyhow::Result;
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
+/// The turn declined before appending anything to the session.
+///
+/// `run_turn` has fallible steps ahead of the prompt append — the writer
+/// acquire, variant options, provider resolution, the pre-prompt event
+/// appends — and a caller that folded queued steer messages into the
+/// prompt needs to know whether that prompt ever reached the log. An
+/// error carrying this marker provably appended nothing: the caller may
+/// restore its queue instead of counting the messages as delivered.
+/// Attached as anyhow context, so downcasting to the underlying error —
+/// the `io::Error` `WouldBlock` of a held writer lease in particular —
+/// keeps working through it.
+#[derive(Debug)]
+pub struct TurnNeverStarted(String);
+
+impl TurnNeverStarted {
+    /// Mark an error from the pre-append stretch of `run_turn`. The
+    /// marker carries the message it wraps: it exists to be
+    /// downcast-checked, and the outermost display must keep naming
+    /// the actual failure, not the bookkeeping.
+    fn mark(error: anyhow::Error) -> anyhow::Error {
+        let message = error.to_string();
+        error.context(TurnNeverStarted(message))
+    }
+}
+
+impl std::fmt::Display for TurnNeverStarted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for TurnNeverStarted {}
+
 use crate::agent::event::{LoopEvent, LoopEventSender};
 use crate::provider::{ProviderEvent, ProviderResolver, Request, StopReason};
 use crate::session::{ContentBlock, DiagnosticKind, SessionEvent, SessionStore, Usage, new_id};
@@ -1253,24 +1286,36 @@ async fn run_turn_inner(
     mut tool_ctx: crate::tools::ToolContext,
     mut steer: Option<SteerReceiver>,
 ) -> Result<TurnOutcome> {
-    let mut session = store.acquire_writer(session_id)?.load()?;
+    // Everything up to the prompt append is marked `TurnNeverStarted`:
+    // a failure here provably wrote nothing, and the callers that fold
+    // queued steers into the prompt key their restore on that marker.
+    let mut session = store
+        .acquire_writer(session_id)
+        .map_err(|error| TurnNeverStarted::mark(error.into()))?
+        .load()
+        .map_err(|error| TurnNeverStarted::mark(error.into()))?;
     let model = session.effective_model();
     let variant = session.effective_variant();
-    let request_options = crate::model::variant_options(&model, variant.as_deref())?;
-    let provider = resolver.resolve_provider(&model)?;
+    let request_options = crate::model::variant_options(&model, variant.as_deref())
+        .map_err(TurnNeverStarted::mark)?;
+    let provider = resolver
+        .resolve_provider(&model)
+        .map_err(TurnNeverStarted::mark)?;
     match start {
         TurnStart::User(user_input, images) => {
             if session.pending_question().is_some() {
-                anyhow::bail!(
+                return Err(TurnNeverStarted::mark(anyhow::anyhow!(
                     "session has a pending question; use resume_pending_question before starting a new turn"
-                );
+                )));
             }
             if let Some(parent_tool_call_id) = tool_ctx.call_id.as_ref() {
-                session.append(SessionEvent::SubagentInvocation {
-                    id: new_id(),
-                    parent_tool_call_id: parent_tool_call_id.clone(),
-                    ts: Utc::now(),
-                })?;
+                session
+                    .append(SessionEvent::SubagentInvocation {
+                        id: new_id(),
+                        parent_tool_call_id: parent_tool_call_id.clone(),
+                        ts: Utc::now(),
+                    })
+                    .map_err(|error| TurnNeverStarted::mark(error.into()))?;
             } else if tool_ctx.depth == 0
                 && let Ok(Some(snapshot)) =
                     crate::checkpoint::snapshot(&tool_ctx.cwd, session_id).await
@@ -1281,19 +1326,28 @@ async fn run_turn_inner(
                 // notification runs a child session's turn under a
                 // call id of its own making. A failed snapshot (or a
                 // non-git cwd) never blocks the turn.
-                session.append(SessionEvent::Checkpoint {
-                    id: new_id(),
-                    commit: snapshot.commit,
-                    head: snapshot.head,
-                    ts: Utc::now(),
-                })?;
+                session
+                    .append(SessionEvent::Checkpoint {
+                        id: new_id(),
+                        commit: snapshot.commit,
+                        head: snapshot.head,
+                        ts: Utc::now(),
+                    })
+                    .map_err(|error| TurnNeverStarted::mark(error.into()))?;
             }
-            session.append(SessionEvent::UserMessage {
-                id: new_id(),
-                text: user_input.to_string(),
-                images: images.to_vec(),
-                ts: Utc::now(),
-            })?;
+            // The prompt append is the marker's boundary — and a
+            // failure OF the append is on the never-started side: the
+            // line either missed the log or tore, and the reader skips
+            // an uncommitted tail. Marking it means a rare torn write
+            // re-delivers folded-in steers rather than losing them.
+            session
+                .append(SessionEvent::UserMessage {
+                    id: new_id(),
+                    text: user_input.to_string(),
+                    images: images.to_vec(),
+                    ts: Utc::now(),
+                })
+                .map_err(|error| TurnNeverStarted::mark(error.into()))?;
         }
         TurnStart::Continue => {
             if tool_ctx.depth != 0 {

@@ -403,6 +403,10 @@ impl RuntimePlan {
                 self.project_instructions,
             )
             .with_user_config_dir(config.dirs().0.to_path_buf())
+            // Every published notification also lands here until its
+            // delivery is provable from the parent's log, so quitting or
+            // crashing with one in flight delays it instead of losing it.
+            .with_outbox_dir(config.state_dir().join("outbox"))
             .with_background_tool_timeout(std::time::Duration::from_millis(
                 config.subagents.background_tool_timeout_ms,
             ))

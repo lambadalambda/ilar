@@ -8,7 +8,7 @@ use ilar::provider::{
     EventStream, FixedProviderResolver, MockProvider, Provider, ProviderEvent, Request, StopReason,
 };
 use ilar::session::{ContentBlock, SessionEvent, SessionMeta, SessionStore, Usage, new_id};
-use ilar::subagent::SubagentSpawner;
+use ilar::subagent::{Notification, RouteOutcome, SubagentSpawner};
 use ilar::tools::{ToolContext, ToolRegistry};
 
 fn temp_store() -> (SessionStore, String) {
@@ -1507,6 +1507,72 @@ async fn cancelled_background_task_persists_its_partial_answer() {
     );
 }
 
+/// A completion addressed to a session that is mid-turn is steered
+/// into that turn — the way the user's own messages land — instead of
+/// queueing a whole resume behind the claim. The old path would wait
+/// for the turn to end; this must return Complete while the child is
+/// still visibly running.
+#[tokio::test]
+async fn a_result_for_a_busy_child_is_steered_not_queued() {
+    let (store, session_id) = temp_store();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let spawner = patient_spawner(
+        Arc::new(NotifyingPartialText {
+            started: started.clone(),
+        }),
+        &store,
+    );
+    let registry = ToolRegistry::builtin()
+        .with_subagents(spawner.clone())
+        .unwrap();
+    let ctx = background_tool_context(session_id, spawner.clone(), std::env::temp_dir().as_ref());
+
+    let out = registry
+        .get("task")
+        .unwrap()
+        .run(
+            serde_json::json!({
+                "description": "busy child",
+                "prompt": "work",
+                "subagent_type": "explore",
+                "background": true,
+            }),
+            ctx,
+        )
+        .await;
+    assert!(!out.is_error, "{}", out.content);
+    let child_id = out
+        .child_session_id()
+        .expect("background task names its session")
+        .to_string();
+    started.notified().await;
+
+    // The child hangs mid-stream: its turn is live, its claim held.
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(5),
+        spawner.route_notification(
+            Notification {
+                parent_session_id: child_id.clone(),
+                description: "helper".into(),
+                text: "<task-notification>\nthe helper finished\n</task-notification>".into(),
+                is_error: false,
+            },
+            tokio_util::sync::CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("a steered delivery must not wait for the turn to end")
+    .unwrap();
+    assert!(
+        matches!(outcome, RouteOutcome::Complete),
+        "steered, not queued"
+    );
+    assert!(
+        spawner.session_is_active(&child_id),
+        "the child was still running when the result landed"
+    );
+}
+
 #[tokio::test]
 async fn stall_watchdog_fires_on_silent_child() {
     let (store, session_id) = temp_store();
@@ -1776,7 +1842,7 @@ async fn a_routed_notification_marks_nothing_on_a_parentless_session() {
 }
 
 #[tokio::test]
-async fn routed_notification_waits_for_an_active_parent_without_requeueing() {
+async fn routed_notification_steers_into_an_active_parent_without_requeueing() {
     let (store, root_id) = temp_store();
     let dir = tempfile::tempdir().unwrap();
     let location = ilar::tools::WorkspaceLocation::shared(dir.path().to_path_buf());
@@ -1835,9 +1901,13 @@ async fn routed_notification_waits_for_an_active_parent_without_requeueing() {
         )
         .await
         .unwrap();
+    // Steer-first: the active parent's own turn takes the result —
+    // no waiting, no requeue, and whoever drove that turn reports its
+    // outcome upward. An unconsumed steer stays pending for the next
+    // resume, and the outbox carries it across processes.
     assert!(
-        matches!(outcome, ilar::subagent::RouteOutcome::Propagate(_)),
-        "active parent notification was requeued"
+        matches!(outcome, ilar::subagent::RouteOutcome::Complete),
+        "an active parent takes the result as a steer"
     );
     assert!(!active.await.unwrap().is_error);
 }
@@ -3005,6 +3075,319 @@ async fn a_message_the_child_never_saw_lands_in_its_next_resume() {
         "the resume prompt is missing: {last}"
     );
     // Carried once, not forever.
+    let listing = tasks
+        .run(
+            serde_json::json!({}),
+            task_context(&parent_id, spawner.clone()),
+        )
+        .await;
+    assert!(!listing.content.contains("pending"), "{}", listing.content);
+
+    spawner.shutdown().await;
+}
+
+/// Panics inside its stream on the opening prompt "explode" — the
+/// abnormal ending nothing in the pipeline expects — and answers
+/// anything else at once, so one provider serves both the doomed task
+/// and the healthy one after it.
+#[derive(Clone)]
+struct PanicOnExplode;
+
+impl Provider for PanicOnExplode {
+    fn stream(&self, request: Request) -> anyhow::Result<EventStream> {
+        let opening = request
+            .messages
+            .first()
+            .and_then(|message| message.content.first())
+            .and_then(|block| match block {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            });
+        if opening == Some("explode") {
+            panic!("provider exploded (the panic this test injects)");
+        }
+        Ok(Box::pin(stream::iter(vec![
+            ProviderEvent::TextDelta("calm answer".into()),
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            },
+        ])))
+    }
+}
+
+/// The exactly-one invariant against abnormal termination: a background
+/// task whose future panics still produces a notification saying the
+/// task died, and the runtime it panicked in still runs the next task —
+/// no permit vanishes, no poisoned lock cascades. (The panic backtrace
+/// in the test output is the panic under test.)
+#[tokio::test]
+async fn a_panicking_background_task_reports_its_death_and_spares_the_next() {
+    let (store, session_id) = temp_store();
+    let spawner = patient_spawner(Arc::new(PanicOnExplode), &store);
+    let mut notifications = spawner.subscribe();
+    let task = task_tool(spawner.clone());
+
+    let doomed = task
+        .run(
+            serde_json::json!({
+                "description": "doomed survey",
+                "prompt": "explode",
+                "subagent_type": "explore",
+                "background": true,
+            }),
+            task_context(&session_id, spawner.clone()),
+        )
+        .await;
+    assert!(!doomed.is_error, "{}", doomed.content);
+
+    let died = tokio::time::timeout(Duration::from_secs(5), notifications.recv())
+        .await
+        .expect("the death was reported")
+        .expect("channel open");
+    assert!(died.is_error, "{}", died.text);
+    assert_eq!(died.description, "doomed survey");
+    assert_eq!(died.parent_session_id, session_id);
+    assert!(died.text.contains("ended abnormally"), "{}", died.text);
+
+    // The runtime survives its dead child: the next background task
+    // registers, runs and notifies exactly as if nothing had happened.
+    let healthy = task
+        .run(
+            serde_json::json!({
+                "description": "healthy survey",
+                "prompt": "carry on",
+                "subagent_type": "explore",
+                "background": true,
+            }),
+            task_context(&session_id, spawner.clone()),
+        )
+        .await;
+    assert!(!healthy.is_error, "{}", healthy.content);
+    let completed = tokio::time::timeout(Duration::from_secs(5), notifications.recv())
+        .await
+        .expect("the completion arrived")
+        .expect("channel open");
+    assert!(!completed.is_error, "{}", completed.text);
+    assert!(completed.text.contains("calm answer"), "{}", completed.text);
+
+    spawner.shutdown().await;
+}
+
+/// The boundary steer durability rests on: an error ahead of the prompt
+/// append marks itself `TurnNeverStarted`, and the `WouldBlock` it wraps
+/// stays reachable underneath — the notification router's lock-retry
+/// loop downcasts to it through the marker.
+#[tokio::test]
+async fn a_turn_that_cannot_take_the_writer_marks_itself_never_started() {
+    let (store, session_id) = temp_store();
+    let _writer = store.acquire_writer(&session_id).unwrap();
+    let (events, _events_rx) = loop_event_channel(LOOP_EVENT_CAPACITY);
+    let resolver = FixedProviderResolver::new(Arc::new(Silent));
+
+    let error = run_turn(
+        &resolver,
+        &ToolRegistry::read_only(),
+        &store,
+        &session_id,
+        "hello",
+        &[],
+        None,
+        LoopConfig::default(),
+        events,
+        tokio_util::sync::CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+        None,
+    )
+    .await
+    .expect_err("the held writer must decline the turn");
+
+    assert!(
+        error.downcast_ref::<ilar::agent::TurnNeverStarted>().is_some(),
+        "not marked never-started: {error:#}"
+    );
+    let io = error
+        .downcast_ref::<std::io::Error>()
+        .expect("the WouldBlock io error is still downcastable");
+    assert_eq!(io.kind(), std::io::ErrorKind::WouldBlock);
+}
+
+/// Hangs forever on the opening prompt "hang", answers anything else,
+/// and records every request — one provider to occupy the concurrency
+/// slot and to witness what a later resume actually carried.
+#[derive(Clone, Default)]
+struct RecordingPendingOnHang {
+    requests: Arc<std::sync::Mutex<Vec<Request>>>,
+}
+
+impl RecordingPendingOnHang {
+    fn requests(&self) -> Vec<Request> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+impl Provider for RecordingPendingOnHang {
+    fn stream(&self, request: Request) -> anyhow::Result<EventStream> {
+        let opening = request
+            .messages
+            .first()
+            .and_then(|message| message.content.first())
+            .and_then(|block| match block {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .map(str::to_string);
+        self.requests.lock().unwrap().push(request);
+        if opening.as_deref() == Some("hang") {
+            return Ok(Box::pin(stream::pending()));
+        }
+        Ok(Box::pin(stream::iter(vec![
+            ProviderEvent::TextDelta("resumed answer".into()),
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            },
+        ])))
+    }
+}
+
+/// One concurrency slot, so "Concurrent subagent limit reached" is one
+/// hung background task away — the deterministic stand-in for every
+/// early return of the resume path.
+fn single_slot_spawner(provider: Arc<dyn Provider>, store: &SessionStore) -> Arc<SubagentSpawner> {
+    Arc::new(
+        SubagentSpawner::new(
+            Arc::new(FixedProviderResolver::new(provider)),
+            store.clone(),
+            vec![AgentDefinition {
+                name: "explore".into(),
+                description: "explores".into(),
+                model: None,
+                prompt: "".into(),
+                workspace_mode: AgentWorkspaceMode::Mutable,
+                tools: None,
+            }],
+            std::env::temp_dir(),
+            0,
+            1,
+            3,
+            ProjectInstructions::Include,
+        )
+        .with_stall_timeout(Duration::from_secs(60)),
+    )
+}
+
+/// The message half of steer durability: a resume the concurrency limit
+/// refuses leaves the message parked — and says so instead of claiming
+/// finality — and the child's next successful resume delivers it.
+#[tokio::test]
+async fn a_message_refused_by_the_concurrency_limit_waits_for_the_next_resume() {
+    let (store, parent_id) = temp_store();
+    let provider = RecordingPendingOnHang::default();
+    let spawner = single_slot_spawner(Arc::new(provider.clone()), &store);
+    let mut notifications = spawner.subscribe();
+    let registry = ToolRegistry::builtin()
+        .with_subagents(spawner.clone())
+        .unwrap();
+    let task = registry.get("task").unwrap();
+    let tasks = registry.get("tasks").unwrap();
+    let message = registry.get("task_message").unwrap();
+
+    // A finished child to message later.
+    let finished = task
+        .run(
+            serde_json::json!({
+                "description": "original survey",
+                "prompt": "original scope",
+                "subagent_type": "explore",
+            }),
+            task_context(&parent_id, spawner.clone()),
+        )
+        .await;
+    assert!(!finished.is_error, "{}", finished.content);
+    let child_id = finished.child_session_id().unwrap().to_string();
+
+    // Occupy the one slot with a hung background task.
+    let occupant = task
+        .run(
+            serde_json::json!({
+                "description": "occupy the slot",
+                "prompt": "hang",
+                "subagent_type": "explore",
+                "background": true,
+            }),
+            task_context(&parent_id, spawner.clone()),
+        )
+        .await;
+    assert!(!occupant.is_error, "{}", occupant.content);
+
+    let refused = message
+        .run(
+            serde_json::json!({
+                "task_id": child_id,
+                "message": "also check the flag parsing",
+            }),
+            task_context(&parent_id, spawner.clone()),
+        )
+        .await;
+    assert!(refused.is_error, "{}", refused.content);
+    assert!(
+        refused.content.contains("Concurrent subagent limit"),
+        "{}",
+        refused.content
+    );
+    // No claimed finality for a message that is in fact kept.
+    assert!(refused.content.contains("queued"), "{}", refused.content);
+
+    // The listing agrees the message is owed a reading.
+    let listing = tasks
+        .run(
+            serde_json::json!({}),
+            task_context(&parent_id, spawner.clone()),
+        )
+        .await;
+    assert!(
+        listing.content.contains("1 message pending"),
+        "{}",
+        listing.content
+    );
+
+    // Free the slot; the occupant's cancellation notice is not this
+    // test's subject.
+    spawner.abort_all();
+    let _ = tokio::time::timeout(Duration::from_secs(5), notifications.recv()).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while spawner.running_background() != 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the occupant released its slot");
+
+    let resumed = task
+        .run(
+            serde_json::json!({
+                "description": "follow up",
+                "prompt": "continue where you left off",
+                "subagent_type": "explore",
+                "task_id": child_id,
+            }),
+            task_context(&parent_id, spawner.clone()),
+        )
+        .await;
+    assert!(!resumed.is_error, "{}", resumed.content);
+
+    let requests = provider.requests();
+    let last = transcript_text(requests.last().unwrap());
+    assert!(
+        last.contains("also check the flag parsing"),
+        "the refused message vanished: {last}"
+    );
+    assert!(
+        last.contains("continue where you left off"),
+        "the resume prompt is missing: {last}"
+    );
+    // Delivered exactly once: nothing waits after the resume took it.
     let listing = tasks
         .run(
             serde_json::json!({}),
