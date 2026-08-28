@@ -54,7 +54,6 @@
 ## Milestone 13 — Guard rails
 
 - [ ] [Kernel sandbox for tool processes](issues/kernel-sandbox-for-tool-processes.md)
-- [ ] [A finished turn that never lets go](issues/a-finished-turn-that-never-lets-go.md)
 - [ ] [Completions survive the process](issues/completions-survive-the-process.md)
 - [ ] [A panic eats the permit](issues/a-panic-eats-the-permit.md)
 - [ ] [Steers outlive a turn that declines](issues/steers-outlive-a-turn-that-declines.md)

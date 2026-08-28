@@ -98,3 +98,31 @@ seam and covered by the same rework:
 ## Milestone
 
 13 — Guard rails
+
+## Outcome
+
+Routed deliveries are detached tasks now, joined at the loop edge
+like asides: `route` spawns into a `Vec<RoutedDelivery>` with its
+own cancel token, and the completion is folded into the pass as
+`Completion::Routed`, whose handling provably touches nothing of
+the turn's — no end_turn, no busy flip, pinned by
+`a_delivery_completion_ends_no_turn`. Foreign completions route
+immediately, mid-turn and under modals
+(`a_foreign_completion_routes_while_a_turn_runs_and_a_modal_is_open`);
+only the requeue pause holds them, and a test pins that too, since
+the pause is all that stands between a requeued delivery and a
+tight retry loop.
+
+The adjacent losses went with it: held notifications live in an
+ordered deque (`a_second_propagate_does_not_overwrite_the_first`),
+a failed delivery salvages the child's final text into the
+transcript, and switch, quit and cancel-all count deliveries like
+background agents. `Settled::Restart` and the `queued_ahead`
+bookkeeping became unnecessary and were removed.
+
+Deliberate behavior change: two results for the same child may
+resume it in either order — the session claim serializes the
+turns, not their arrival. The routed turn's invisibility from the
+parent's task row remains with the-replay-sweep, and the deeper
+durability gap (completions lost at process death) is filed as
+completions-survive-the-process.
