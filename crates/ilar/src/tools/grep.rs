@@ -264,15 +264,30 @@ fn grep_files(
         out.push('\n');
     }
     if capped_entries.load(Ordering::Acquire) {
-        out.push_str(&format!(
-            "…(truncated: scanned {max_entries} files without finishing; narrow the path)\n"
-        ));
+        close_with(
+            &mut out,
+            &format!(
+                "…(truncated: scanned {max_entries} files without finishing; narrow the path)"
+            ),
+            MAX_OUTPUT_BYTES,
+        );
     } else if truncated {
-        const MARKER: &str = "…(truncated)\n";
-        truncate_bytes_ellipsis(&mut out, MAX_OUTPUT_BYTES.saturating_sub(MARKER.len()));
-        out.push_str(MARKER);
+        close_with(&mut out, "…(truncated)", MAX_OUTPUT_BYTES);
     }
     ToolOutput::text(out)
+}
+
+/// Append a closing notice within `limit`, always on a line of its own.
+/// The byte cut lands mid-line whenever the last hit straddles it, and a
+/// notice glued to half a match is one no reader — and no carry-forward
+/// filter — can find.
+fn close_with(out: &mut String, notice: &str, limit: usize) {
+    truncate_bytes_ellipsis(out, limit.saturating_sub(notice.len() + 1));
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(notice);
+    out.push('\n');
 }
 
 /// Past the bash preview budget the full match list goes to disk and
@@ -290,11 +305,12 @@ async fn spill_over_budget(
         return output;
     }
     let full = output.content;
-    let note = target
+    let saved = target
         .write_note(full.as_bytes(), "grep or read it for what you need")
         .await;
     // The closing notice (match cap, entry budget) must not vanish into
-    // the file: carry it past the cut.
+    // the file: carry it past the cut. `close_with` guarantees it is a
+    // line of its own, so this finds it whatever the byte cut did.
     let closing = full
         .lines()
         .next_back()
@@ -305,11 +321,18 @@ async fn spill_over_budget(
     if let Some(cut) = head.rfind('\n') {
         head.truncate(cut + 1);
     }
-    head.push_str("…(the preview ends here; the file has every match)\n");
+    // "every match in this result", not "every match": what was spilled
+    // is grep's own already-capped output (200 matches, 50 per file,
+    // 256 KiB), and the carried notice below says when that bit.
+    head.push_str(match &saved {
+        Ok(_) => "…(the preview ends here; the file has every match in this result)\n",
+        Err(_) => "…(the preview ends here; the rest could not be saved)\n",
+    });
     if let Some(closing) = closing {
         head.push_str(&closing);
         head.push('\n');
     }
+    let note = saved.unwrap_or_else(|failure| failure);
     ToolOutput::text(format!("{note}\n{head}"))
 }
 
@@ -350,8 +373,11 @@ mod tests {
             "preview stayed near the budget: {} bytes",
             out.content.len()
         );
+        // What was spilled is grep's own capped rendering, not the
+        // repository's every match; the claim says which.
         assert!(
-            out.content.contains("the file has every match"),
+            out.content
+                .contains("the file has every match in this result"),
             "{}",
             out.content
         );
@@ -386,6 +412,70 @@ mod tests {
                 .next()
                 .is_none()
         );
+    }
+
+    /// The byte budget cuts wherever the last hit straddles it — often
+    /// mid-line. A closing notice glued onto half a match is invisible
+    /// to a reader and to the carry-forward filter in
+    /// [`spill_over_budget`] alike, so it always gets its own line.
+    #[test]
+    fn a_closing_notice_survives_a_cut_that_lands_mid_line() {
+        let mut out = "src/a.rs:1:a long match line that the budget cuts through\n".to_string();
+        close_with(&mut out, "…(truncated)", 30);
+
+        assert_eq!(
+            out.lines().next_back(),
+            Some("…(truncated)"),
+            "the notice fused with a partial hit: {out:?}"
+        );
+    }
+
+    /// The carried notice reaches the model: it is the only thing that
+    /// says the *result* was capped, which the spill file cannot.
+    #[tokio::test]
+    async fn a_mid_line_cut_still_carries_its_cap_notice_past_the_spill() {
+        let mut full = "src/a.rs:1:x\n".repeat(super::super::bash::MAX_PREVIEW / 12 + 200);
+        let mid_line = full.len() - 5;
+        close_with(&mut full, "…(truncated)", mid_line);
+        assert_eq!(full.lines().next_back(), Some("…(truncated)"));
+
+        let spill_dir = tempfile::tempdir().unwrap();
+        let ctx = ToolContext::root(std::path::PathBuf::from("."))
+            .with_spill_dir(spill_dir.path().to_path_buf());
+        let target = super::super::bash::SpillTarget::from_context(&ctx);
+        let out = spill_over_budget(ToolOutput::text(full), target.as_ref()).await;
+
+        assert!(
+            out.content.trim_end().ends_with("…(truncated)"),
+            "ended on {:?}",
+            out.content.lines().next_back()
+        );
+    }
+
+    /// No file, no promises: a spill that could not be written must not
+    /// leave the result claiming one holds the rest.
+    #[tokio::test]
+    async fn an_unwritable_spill_does_not_claim_the_file_has_the_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("not-a-directory");
+        std::fs::write(&blocker, b"").unwrap();
+        let ctx = ToolContext::root(std::path::PathBuf::from("."))
+            .with_spill_dir(blocker.join("tool-output"));
+        let target = super::super::bash::SpillTarget::from_context(&ctx);
+        let full = "src/a.rs:1:x\n".repeat(super::super::bash::MAX_PREVIEW / 12 + 200);
+
+        let out = spill_over_budget(ToolOutput::text(full), target.as_ref()).await;
+
+        assert!(
+            out.content.starts_with("(could not save the full output:"),
+            "{}",
+            out.content.lines().next().unwrap_or_default()
+        );
+        assert!(
+            !out.content.contains("every match"),
+            "promised a file that is not there"
+        );
+        assert!(out.content.contains("src/a.rs:1:x"), "the preview was lost");
     }
 
     /// The match cap only short-circuits when matches exist; a rare or
