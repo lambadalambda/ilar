@@ -34,7 +34,8 @@ use crate::transcript::{
     append_thought_delta, apply_subagent_activity, complete_open_thought, complete_tool_execution,
     complete_tool_input, configure_subagent_row, finish_tool_row, note_tool_input_progress,
     prune_incomplete_thoughts, push_tool_row, set_tool_arguments, set_tool_tail,
-    start_tool_execution, toggle_tool_expansion, transcript_markdown,
+    start_tool_execution, toggle_note_expansion, toggle_tool_expansion, tool_group_index,
+    transcript_markdown,
 };
 use crate::{Activity, MAX_GOAL_ROUNDS, NoticeLevel, history, theme};
 
@@ -229,7 +230,6 @@ pub(crate) struct App {
     pub(crate) transcript_cells: Vec<RenderedRow>,
     pub(crate) transcript_selection: Option<TranscriptSelection>,
     selecting_transcript: bool,
-    transcript_dragged: bool,
     clipboard: Option<arboard::Clipboard>,
     next_tool_group: u64,
     next_thought: u64,
@@ -359,7 +359,6 @@ impl App {
             transcript_cells: Vec::new(),
             transcript_selection: None,
             selecting_transcript: false,
-            transcript_dragged: false,
             clipboard: None,
             next_tool_group: 0,
             next_thought: 0,
@@ -747,15 +746,6 @@ impl App {
             now,
             self.activity_started,
         );
-    }
-
-    /// The transcript, for an edit whose extent is not tracked: marking
-    /// happens here, before the edit, so a caller cannot forget it and
-    /// leave the render cache showing stale rows. Marking early only
-    /// ever over-invalidates, which costs work rather than correctness.
-    fn lines_mut(&mut self) -> &mut Vec<Line_> {
-        self.touch_whole_transcript();
-        &mut self.lines
     }
 
     pub(crate) fn push_transcript_line(&mut self, line: Line_) {
@@ -1362,7 +1352,6 @@ impl App {
     pub(crate) fn clear_transcript_selection(&mut self) {
         self.transcript_selection = None;
         self.selecting_transcript = false;
-        self.transcript_dragged = false;
         self.transcript_pressed_target = None;
     }
 
@@ -1413,7 +1402,6 @@ impl App {
     }
 
     pub(crate) fn drag_transcript_selection(&mut self, column: u16, row: u16) {
-        self.transcript_dragged = true;
         self.update_transcript_selection(column, row);
     }
 
@@ -1425,7 +1413,11 @@ impl App {
         self.selecting_transcript = false;
         let pressed = self.transcript_pressed_target.take();
         let selection = self.transcript_selection?;
-        if selection.anchor == selection.focus && !self.transcript_dragged {
+        // What makes a press a click is where it ended, not whether the
+        // pointer ever moved: a trackpad emits drag events for a tap,
+        // and a press that drifted a cell — or drifted and came back —
+        // is still someone clicking a disclosure.
+        if press_was_a_click(selection) {
             self.transcript_selection = None;
             if let Some(target) = pressed {
                 self.toggle_transcript_target(target);
@@ -1440,44 +1432,25 @@ impl App {
     }
 
     fn toggle_transcript_target(&mut self, target: TranscriptHitTarget) {
-        match target {
+        // Every row below the toggled one moves and every row above it
+        // stays exactly where it was, so the cache is marked from the
+        // row itself. Marking from zero — which is what `lines_mut`
+        // does — re-parses the markdown, re-wraps and re-highlights the
+        // entire session for one click, which is what made expanding a
+        // long transcript feel stuck. A row we cannot locate falls back
+        // to the whole transcript: over-invalidating costs work, never
+        // correctness.
+        let toggled = match target {
             TranscriptHitTarget::ToolGroup(id) => {
                 if !self.expanded_tool_groups.remove(&id) {
-                    self.expanded_tool_groups.insert(id);
+                    self.expanded_tool_groups.insert(id.clone());
                 }
-                // The expansion state lives in the entries the cache
-                // holds, and every row below the group moves.
-                self.touch_whole_transcript();
+                tool_group_index(&self.lines, &id)
             }
-            TranscriptHitTarget::Tool(id) => {
-                toggle_tool_expansion(self.lines_mut(), &id);
-            }
-            TranscriptHitTarget::Thought(id) => {
-                for line in self.lines_mut() {
-                    match line {
-                        Line_::Thought {
-                            id: line_id,
-                            expanded,
-                            ..
-                        }
-                        | Line_::Task {
-                            id: line_id,
-                            expanded,
-                            ..
-                        }
-                        | Line_::Job {
-                            id: line_id,
-                            expanded,
-                            ..
-                        } if *line_id == id => {
-                            *expanded = !*expanded;
-                            break;
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
+            TranscriptHitTarget::Tool(id) => toggle_tool_expansion(&mut self.lines, &id),
+            TranscriptHitTarget::Thought(id) => toggle_note_expansion(&mut self.lines, &id),
+        };
+        self.touch_transcript(Some(toggled.unwrap_or(0)));
     }
 
     /// Attach an image to the next fresh turn, or say why not: mid-turn
@@ -1581,7 +1554,29 @@ impl App {
         Ok(Some(ilar::session::ImageContent::png(&png)))
     }
 
+    /// Copy, by whichever route can reach the person's own clipboard.
+    ///
+    /// Over SSH there is no local clipboard to open: the display
+    /// variables are unset and arboard's X11 probe blocks until it times
+    /// out, which is a frozen UI ending in an error. OSC 52 hands the
+    /// text to the terminal emulator instead, so it lands on the
+    /// clipboard of the machine the person is sitting at — which is the
+    /// one they meant, even when ilar is running somewhere else.
     pub(crate) fn copy_to_clipboard(&mut self, text: &str) -> Result<()> {
+        if prefer_terminal_clipboard() {
+            return copy_via_terminal(text);
+        }
+        let native = self.copy_natively(text);
+        match native {
+            Ok(()) => Ok(()),
+            // A clipboard that exists but refuses is still worth a
+            // second try through the terminal; the error that matters
+            // is the one from the route that was actually available.
+            Err(error) => copy_via_terminal(text).map_err(|_| error),
+        }
+    }
+
+    fn copy_natively(&mut self, text: &str) -> Result<()> {
         if self.clipboard.is_none() {
             self.clipboard = Some(arboard::Clipboard::new().context("opening clipboard")?);
         }
@@ -1723,6 +1718,63 @@ impl App {
             Some(share) => format!("cache {share}%"),
             None => "cache —".to_string(),
         }
+    }
+}
+
+/// Whether to skip this host's own clipboard and ask the terminal.
+///
+/// Two cases, and the second is the one that bites. A Linux or BSD
+/// session with no display has nothing to open. But a session that
+/// arrived over SSH usually *does* name a display — forwarded, or a
+/// stale `:0` left in the environment — and reaching for it is worse
+/// than useless: at best the text lands on a clipboard nobody is
+/// looking at, at worst the X11 connect blocks until it times out and
+/// the UI freezes for the duration. Either way the clipboard the person
+/// means is at their end of the connection, which is where OSC 52 puts
+/// it.
+fn prefer_terminal_clipboard() -> bool {
+    let named = |key| std::env::var_os(key).is_some_and(|value| !value.is_empty());
+    if named("SSH_CONNECTION") || named("SSH_TTY") {
+        return true;
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        !named("DISPLAY") && !named("WAYLAND_DISPLAY")
+    }
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    {
+        false
+    }
+}
+
+/// Ask the terminal to put `text` on its own clipboard (OSC 52). The
+/// bytes travel the same connection the session does, so this reaches
+/// the operator's machine rather than the host's.
+///
+/// Not every terminal obeys — some ship it disabled — and there is no
+/// reply to wait for, so a success here means the request was sent, not
+/// that it was honoured. That is the honest limit of the protocol.
+fn copy_via_terminal(text: &str) -> Result<()> {
+    use std::io::Write as _;
+
+    let sequence = osc52_sequence(text, std::env::var_os("TMUX").is_some());
+    let mut out = std::io::stdout().lock();
+    out.write_all(sequence.as_bytes())
+        .and_then(|()| out.flush())
+        .context("asking the terminal to copy")
+}
+
+/// The OSC 52 request itself. Inside tmux it has to be wrapped in tmux's
+/// passthrough with the inner ESC doubled, or tmux swallows an escape it
+/// does not recognise instead of forwarding it.
+fn osc52_sequence(text: &str, inside_tmux: bool) -> String {
+    use base64::Engine as _;
+
+    let payload = base64::engine::general_purpose::STANDARD.encode(text);
+    if inside_tmux {
+        format!("\x1bPtmux;\x1b\x1b]52;c;{payload}\x07\x1b\\")
+    } else {
+        format!("\x1b]52;c;{payload}\x07")
     }
 }
 
@@ -1945,6 +1997,19 @@ fn close_running_tools(lines: &mut [Line_]) {
     }
 }
 
+/// How far a press may drift between button-down and button-up and
+/// still count as a click. A real selection is a word or a line; a
+/// single cell either way is nobody's intent, and a trackpad reports
+/// exactly that for a firm tap. Deciding on the distance rather than on
+/// whether a drag event ever arrived is what makes expanding a row
+/// reliable: the old rule made every tap a coin flip.
+const CLICK_SLOP_CELLS: usize = 1;
+
+fn press_was_a_click(selection: TranscriptSelection) -> bool {
+    selection.anchor.row.abs_diff(selection.focus.row) <= CLICK_SLOP_CELLS
+        && selection.anchor.column.abs_diff(selection.focus.column) <= CLICK_SLOP_CELLS
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1954,7 +2019,7 @@ mod tests {
 
     use crate::ERROR;
     use crate::input::input_accepts_keys;
-    use crate::selection::{highlight_transcript_selection, transcript_cells};
+    use crate::selection::{RenderedCell, highlight_transcript_selection, transcript_cells};
     use crate::text::wrap_styled_line;
     use crate::view::{activity_line, stream_liveness};
 
@@ -2030,6 +2095,24 @@ mod tests {
             row.0
         );
         assert!(!row.1.is_empty(), "the child's work is shown, not hidden");
+    }
+
+    /// Running over SSH there is no clipboard on this machine worth
+    /// reaching; OSC 52 asks the terminal to use the one in front of
+    /// the person instead.
+    #[test]
+    fn a_terminal_copy_carries_the_text_to_whoever_is_watching() {
+        let plain = super::osc52_sequence("hello", false);
+        assert_eq!(plain, "\x1b]52;c;aGVsbG8=\x07");
+
+        // tmux forwards a foreign escape only through its passthrough.
+        let wrapped = super::osc52_sequence("hello", true);
+        assert!(
+            wrapped.starts_with("\x1bPtmux;\x1b\x1b]52;c;"),
+            "{wrapped:?}"
+        );
+        assert!(wrapped.ends_with("\x07\x1b\\"), "{wrapped:?}");
+        assert!(wrapped.contains("aGVsbG8="), "{wrapped:?}");
     }
 
     #[test]
@@ -4507,7 +4590,7 @@ mod tests {
             [
                 "you  Question",
                 "",
-                "+ Thought: Answering",
+                "· Thought: Answering",
                 "",
                 "ilar Response"
             ]
@@ -4649,6 +4732,64 @@ mod tests {
                 "width {width}"
             );
         }
+    }
+
+    /// The live row and the restored one must show the same diff for
+    /// the same edit. They did not: the live path was handed a copy
+    /// bounded at 16 KiB, which past the cap is not JSON at all, so the
+    /// diff came out empty and the row showed a wall of raw arguments
+    /// — while replay, which reads the input from the log, drew the
+    /// diff. The publisher now sends the input whole and the row bounds
+    /// it for display, which is exactly what replay does.
+    #[test]
+    fn a_large_edit_diffs_the_same_live_as_on_replay() {
+        // Past the 16 KiB display bound, and still inside what the
+        // differ will look at: the gap the live path fell into.
+        let filler = (0..300)
+            .map(|index| format!("line {index} {}", "x".repeat(50)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let input = serde_json::json!({
+            "path": "src/lib.rs",
+            "old_string": format!("{filler}\nbefore"),
+            "new_string": format!("{filler}\nafter"),
+        });
+        assert!(
+            ilar::agent::tool_argument_detail("edit", &input).contains("truncated"),
+            "the fixture has to be past the display bound to be the case at issue"
+        );
+
+        let mut app = App::new();
+        app.lines.clear();
+        app.push_loop_event(&LoopEvent::ToolStarted {
+            id: "edit-1".into(),
+            name: "edit".into(),
+        });
+        app.push_loop_event(&LoopEvent::ToolInputComplete {
+            id: "edit-1".into(),
+            // What the agent loop now publishes: the whole redacted
+            // input, unbounded, for the row to bound itself.
+            arguments: serde_json::to_string_pretty(&input).unwrap(),
+        });
+
+        let Some(Line_::Tool {
+            diff,
+            argument_detail,
+            ..
+        }) = app.lines.last()
+        else {
+            panic!("the edit row");
+        };
+        assert_eq!(
+            *diff,
+            crate::diff::tool_diff_value("edit", &input),
+            "live and replay draw the same diff"
+        );
+        assert!(!diff.is_empty(), "and it is not the empty one");
+        assert!(
+            argument_detail.contains("truncated"),
+            "the text kept for display is still bounded"
+        );
     }
 
     #[test]
@@ -4830,6 +4971,40 @@ mod tests {
         terminal.draw(|frame| app.render(frame)).unwrap();
         assert!(!row_underlined(&terminal, area, area.y + plain));
         assert!(!row_underlined(&terminal, area, area.y + clickable));
+    }
+
+    /// A trackpad reports a drag for a firm tap, and the old rule —
+    /// "no drag event ever arrived" — turned every expand into a coin
+    /// flip: press, drift a cell, release, and the row did nothing at
+    /// all (or copied a character instead of opening).
+    #[test]
+    fn a_press_that_drifts_a_cell_is_still_a_click() {
+        let drifted = |to_column: u16, to_row: u16| {
+            let mut app = App::new();
+            app.transcript_text_area = Rect::new(4, 2, 40, 3);
+            app.transcript_hit_targets =
+                vec![Some(TranscriptHitTarget::ToolGroup("group-1".into())); 3];
+            app.transcript_cells = vec![
+                vec![RenderedCell::Character('a'); 40],
+                vec![RenderedCell::Character('b'); 40],
+                vec![RenderedCell::Character('c'); 40],
+            ];
+            app.begin_transcript_selection(10, 3);
+            app.drag_transcript_selection(to_column, to_row);
+            let copied = app.finish_transcript_selection(to_column, to_row);
+            (app.expanded_tool_groups.contains("group-1"), copied)
+        };
+
+        // One cell right, one cell down, and a round trip back to the
+        // press: all of them are somebody clicking a disclosure.
+        assert_eq!(drifted(11, 3), (true, None));
+        assert_eq!(drifted(10, 4), (true, None));
+        assert_eq!(drifted(10, 3), (true, None));
+
+        // A real selection still selects and toggles nothing.
+        let (toggled, copied) = drifted(30, 4);
+        assert!(!toggled);
+        assert!(copied.is_some(), "a drag across rows copies");
     }
 
     #[test]
@@ -6093,6 +6268,54 @@ mod tests {
 
         assert_eq!(visible.len(), 7);
         assert_eq!(app.transcript_cache.rebuilds, rebuilds);
+    }
+
+    /// Expanding a row moves everything below it and nothing above it.
+    /// Marking from zero instead re-parsed the markdown, re-wrapped and
+    /// re-highlighted the whole session for one click — which is what
+    /// made a long transcript take a visible moment to unfold.
+    #[test]
+    fn toggling_a_row_rebuilds_only_that_row_and_what_follows_it() {
+        let toggles = [
+            TranscriptHitTarget::Thought("thought:1".into()),
+            TranscriptHitTarget::Tool("call-1".into()),
+            TranscriptHitTarget::ToolGroup("live:0:call-1".into()),
+        ];
+        for target in toggles {
+            let mut app = App::new();
+            app.lines = (0..500)
+                .map(|index| Line_::Assistant(format!("## reply {index}\n\nwith *body* text")))
+                .collect();
+            app.lines.push(Line_::Thought {
+                id: "thought:1".into(),
+                text: "considering".into(),
+                complete: true,
+                expanded: false,
+            });
+            push_tool_row(&mut app.lines, "call-1", "live:0".into(), "read");
+            let now = std::time::Instant::now();
+            let refresh = |app: &mut App| {
+                app.transcript_cache.update(
+                    &app.lines,
+                    &app.expanded_tool_groups,
+                    app.transcript_revision,
+                    60,
+                    now,
+                    app.activity_started,
+                );
+            };
+            refresh(&mut app);
+            let rebuilds = app.transcript_cache.rebuilds;
+
+            app.toggle_transcript_target(target.clone());
+            refresh(&mut app);
+
+            let rebuilt = app.transcript_cache.rebuilds - rebuilds;
+            assert!(
+                rebuilt <= 3,
+                "{target:?} rebuilt {rebuilt} entries; only the toggled one and its neighbours can move"
+            );
+        }
     }
 
     #[test]
