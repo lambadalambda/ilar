@@ -300,6 +300,13 @@ fn restored_session_invocation_view(
                                 child_session_id: None,
                             });
                         }
+                        // Why the turn stopped. Without it a resumed
+                        // session that died mid-turn just ends, and the
+                        // reader is left guessing at the silence.
+                        ilar::session::ContentBlock::Diagnostic {
+                            text,
+                            kind: ilar::session::DiagnosticKind::TurnError,
+                        } => lines.push(Line_::System(text.clone())),
                         ilar::session::ContentBlock::Thinking { .. }
                         | ilar::session::ContentBlock::Reasoning { .. }
                         | ilar::session::ContentBlock::Diagnostic { .. }
@@ -567,6 +574,63 @@ mod tests {
         ));
         let rendered = format!("{:?}", view.lines);
         assert!(!rendered.contains("hidden thought"), "{rendered}");
+    }
+
+    /// A session that died mid-turn must say so when it is resumed.
+    /// Raw thinking wears the same block — kept because no provider
+    /// takes it back — and stays out of the transcript.
+    #[test]
+    fn a_resumed_session_shows_why_its_turn_died() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf());
+        let session_id = new_id();
+        let mut session = store
+            .create(SessionMeta {
+                session_id: session_id.clone(),
+                parent_id: None,
+                agent: "build".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+                cwd: None,
+            })
+            .unwrap();
+        session
+            .append(ilar::session::SessionEvent::AssistantMessage {
+                id: new_id(),
+                model: "zai/glm-4.7".into(),
+                content: vec![
+                    ilar::session::ContentBlock::Diagnostic {
+                        text: "a thought nobody needs to reread".into(),
+                        kind: ilar::session::DiagnosticKind::Local,
+                    },
+                    ilar::session::ContentBlock::Diagnostic {
+                        text: "turn error: provider exploded".into(),
+                        kind: ilar::session::DiagnosticKind::TurnError,
+                    },
+                ],
+                usage: ilar::session::Usage::default(),
+                stop_reason: "error".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        drop(session);
+
+        let view = restored_session_view(&store.load(&session_id).unwrap());
+        let systems: Vec<&String> = view
+            .lines
+            .iter()
+            .filter_map(|line| match line {
+                Line_::System(text) => Some(text),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            systems,
+            vec!["turn error: provider exploded"],
+            "{:?}",
+            view.lines
+        );
     }
 
     #[test]
