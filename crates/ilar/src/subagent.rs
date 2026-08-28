@@ -1562,6 +1562,23 @@ task's scope yourself; continue only clearly disjoint work."
                 anyhow::anyhow!("workspace changed while waiting for its lease"),
             );
         }
+        // A routed notification is a turn of this session's own, and it
+        // belongs to no call in the parent: nothing up there asked for
+        // it, this session's background task did. Without a boundary of
+        // its own, replay reads the whole turn — tools, edits and all —
+        // as a continuation of whichever invocation happened to be
+        // last, and draws it under a task row that never ran it. The
+        // id is deliberately one no tool call can have, so a surface
+        // that slices by invocation stops here instead of attributing.
+        //
+        // Only for a session with a parent: a parentless one is never
+        // sliced by invocation, and marking it would cost it the
+        // checkpoint a root turn takes (`agent::turn`).
+        let notification_call_id = || {
+            meta.parent_id
+                .as_ref()
+                .map(|_| format!("notification:{}", new_id()))
+        };
         let mut lock_attempts = 0;
         let outcome = loop {
             if cancel.is_cancelled() {
@@ -1588,7 +1605,10 @@ task's scope yourself; continue only clearly disjoint work."
                 ToolContext {
                     cwd: workspace_location.cwd().to_path_buf(),
                     session_id: notification.parent_session_id.clone(),
-                    call_id: None,
+                    // Minted per attempt: two attempts that both got
+                    // as far as appending would otherwise write one id
+                    // twice, and a slicer keys on the first of those.
+                    call_id: notification_call_id(),
                     depth,
                     subagent: Some(runtime.clone()),
                     workspace: workspace.clone(),
