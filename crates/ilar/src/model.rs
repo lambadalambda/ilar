@@ -71,7 +71,8 @@ macro_rules! pricing {
 }
 
 /// API list prices keyed by (provider, model id). Coding-plan-only models
-/// (subscription-billed: glm-5.2-highspeed, glm-5.3) are intentionally
+/// (subscription-billed: glm-5.2-highspeed, glm-5.3, glm-5.3-flash)
+/// are intentionally
 /// absent — their effective token price depends on the plan, so the UI
 /// shows tokens without dollars.
 static PRICING: &[(&str, &str, ModelPricing)] = &[
@@ -450,6 +451,9 @@ macro_rules! model {
 // gone rather than listed and unusable. They are `ZaiBoth` rather than
 // `ZaiCodingPlan` because they have published per-token prices: the
 // pair says whether a price exists, not which route serves the model.
+// glm-5.3-flash was probed the same way on 2026-08-28 and answered.
+// It is `ZaiCodingPlan` by that same rule — no published price — and
+// it is the first z.ai row outside the V-series to see.
 static CATALOG: &[ModelInfo] = &[
     model!(
         "openai",
@@ -671,6 +675,16 @@ static CATALOG: &[ModelInfo] = &[
         ZaiCodingPlan
     )
     .effort(ZAI_EFFORT_VARIANTS),
+    model!(
+        "zai",
+        "glm-5.3-flash",
+        "GLM-5.3-Flash",
+        1_000_000,
+        131_072,
+        ZaiCodingPlan
+    )
+    .effort(ZAI_EFFORT_VARIANTS)
+    .vision(),
     model!(
         "zai",
         "glm-5.2-highspeed",
@@ -1002,14 +1016,17 @@ mod tests {
                 model.full_id()
             );
         }
-        // Vision is a row flag, so the z.ai V-series is exactly the set
-        // that carries it.
+        // Vision is a row flag. It was the V-series alone until
+        // glm-5.3-flash, which sees without saying so in its name.
         let seeing = CATALOG
             .iter()
             .filter(|model| model.provider == "zai" && model.supports_vision())
             .map(|model| model.id)
             .collect::<Vec<_>>();
-        assert_eq!(seeing, ["glm-5v-turbo", "glm-4.6v", "glm-4.5v"]);
+        assert_eq!(
+            seeing,
+            ["glm-5.3-flash", "glm-5v-turbo", "glm-4.6v", "glm-4.5v"]
+        );
     }
 
     #[test]
