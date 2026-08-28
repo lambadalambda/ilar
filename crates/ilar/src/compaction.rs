@@ -7,7 +7,7 @@ use crate::provider::{
     Provider, ProviderEvent, ProviderResolver, Request, StopReason, ToolDefinition,
 };
 use crate::session::{
-    ChatMessage, ContentBlock, Session, SessionEvent, SessionReader, SessionStore, new_id,
+    ChatMessage, ContentBlock, Role, Session, SessionEvent, SessionReader, SessionStore, new_id,
 };
 use chrono::Utc;
 use tokio_util::sync::CancellationToken;
@@ -225,6 +225,16 @@ pub fn estimate_reader_tokens_with_request(
     )
 }
 
+/// What the next request will cost, in tokens.
+///
+/// The provider already priced everything up to its last reply — system
+/// prompt and tool schemas included — and said so exactly. Only what has
+/// been appended since is unpriced: the tool results that reply asked
+/// for, and any message typed after it. So the exact number carries the
+/// weight and the guess is confined to that tail, instead of a
+/// whole-transcript heuristic competing with a number we were handed.
+/// Before the first reply there is nothing to build on and the whole
+/// request is estimated.
 fn estimate_tokens_from(
     events: &[SessionEvent],
     transcript: &[ChatMessage],
@@ -240,55 +250,32 @@ fn estimate_tokens_from(
         })
         .unwrap_or(0)
         .min(events.len());
-    let reported = events[active_from..]
+    // The *last* reply, and only if it priced itself: an older number
+    // would leave the replies in between uncounted, which is the one
+    // way this can undercount rather than overcount.
+    let reported = match events[active_from..]
         .iter()
-        .filter_map(|event| match event {
-            SessionEvent::AssistantMessage { usage, .. }
-                if usage.input_token_accounting.is_some() =>
-            {
-                Some(usage.context_tokens())
-            }
-            _ => None,
-        })
-        .next_back()
-        .unwrap_or(0);
-    let chars: usize = transcript
-        .iter()
-        .map(|m| {
-            m.content
-                .iter()
-                .map(|block| match block {
-                    crate::session::ContentBlock::Text { text } => text.chars().count(),
-                    // This sum is characters, divided by four below; an
-                    // image's cost is already tokens, so it enters
-                    // multiplied. Its base64 length says nothing about
-                    // what a vision model bills.
-                    crate::session::ContentBlock::Image { image } => {
-                        crate::image::estimated_tokens(image) as usize * 4
-                    }
-                    crate::session::ContentBlock::Thinking { text, .. } => text.chars().count(),
-                    crate::session::ContentBlock::ReasoningSummary { .. } => 0,
-                    crate::session::ContentBlock::Reasoning { item } => {
-                        item.to_string().chars().count()
-                    }
-                    crate::session::ContentBlock::Diagnostic { .. } => 0,
-                    crate::session::ContentBlock::ToolCall { input, .. } => {
-                        input.to_string().chars().count()
-                    }
-                    crate::session::ContentBlock::ToolResult {
-                        content, images, ..
-                    } => {
-                        content.chars().count()
-                            + images
-                                .iter()
-                                .map(|image| crate::image::estimated_tokens(image) as usize * 4)
-                                .sum::<usize>()
-                    }
-                })
-                .sum::<usize>()
-                + 8
-        })
-        .sum::<usize>()
+        .rev()
+        .find(|event| matches!(event, SessionEvent::AssistantMessage { .. }))
+    {
+        Some(SessionEvent::AssistantMessage { usage, .. })
+            if usage.input_token_accounting.is_some() =>
+        {
+            Some(usage.context_tokens())
+        }
+        _ => None,
+    };
+
+    if let Some(reported) = reported
+        && let Some(last_reply) = transcript
+            .iter()
+            .rposition(|message| message.role == Role::Assistant)
+    {
+        let untold: usize = transcript[last_reply + 1..].iter().map(message_chars).sum();
+        return reported.saturating_add(untold as u64 / 4);
+    }
+
+    let chars: usize = transcript.iter().map(message_chars).sum::<usize>()
         + system_prompt
             .map(str::chars)
             .map(Iterator::count)
@@ -296,8 +283,42 @@ fn estimate_tokens_from(
         + serde_json::to_string(tools)
             .map(|tools| tools.chars().count())
             .unwrap_or(0);
-    let estimated = chars as u64 / 4;
-    estimated.max(reported)
+    chars as u64 / 4
+}
+
+/// One rendered message in characters, plus a small allowance for the
+/// envelope every provider wraps it in.
+fn message_chars(message: &ChatMessage) -> usize {
+    message
+        .content
+        .iter()
+        .map(|block| match block {
+            crate::session::ContentBlock::Text { text } => text.chars().count(),
+            // This sum is characters, divided by four by the caller; an
+            // image's cost is already tokens, so it enters multiplied.
+            // Its base64 length says nothing about what a model bills.
+            crate::session::ContentBlock::Image { image } => {
+                crate::image::estimated_tokens(image) as usize * 4
+            }
+            crate::session::ContentBlock::Thinking { text, .. } => text.chars().count(),
+            crate::session::ContentBlock::ReasoningSummary { .. } => 0,
+            crate::session::ContentBlock::Reasoning { item } => item.to_string().chars().count(),
+            crate::session::ContentBlock::Diagnostic { .. } => 0,
+            crate::session::ContentBlock::ToolCall { input, .. } => {
+                input.to_string().chars().count()
+            }
+            crate::session::ContentBlock::ToolResult {
+                content, images, ..
+            } => {
+                content.chars().count()
+                    + images
+                        .iter()
+                        .map(|image| crate::image::estimated_tokens(image) as usize * 4)
+                        .sum::<usize>()
+            }
+        })
+        .sum::<usize>()
+        + 8
 }
 
 /// Immediately replace the complete active provider transcript with one
@@ -504,6 +525,54 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// The provider prices each request exactly. Everything up to its
+    /// last reply is therefore known, and only what came after — the
+    /// tool results it asked for — has to be guessed at. A long, already
+    /// priced history must not be re-estimated on top of the number that
+    /// already covers it.
+    #[test]
+    fn priced_history_is_taken_from_the_provider_not_guessed_again() {
+        let huge = "x".repeat(400_000);
+        let events = vec![SessionEvent::AssistantMessage {
+            id: "a1".into(),
+            model: "zai/glm-4.7".into(),
+            content: vec![ContentBlock::Text { text: huge.clone() }],
+            usage: crate::session::Usage {
+                input_tokens: 20_000,
+                output_tokens: 500,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                input_token_accounting: Some(crate::session::InputTokenAccounting::ExcludesCached),
+            },
+            stop_reason: "tool_use".into(),
+            ts: Utc::now(),
+        }];
+        let transcript = vec![
+            ChatMessage {
+                role: Role::User,
+                content: vec![ContentBlock::Text { text: huge.clone() }],
+            },
+            ChatMessage {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text { text: huge }],
+            },
+            ChatMessage {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "t".repeat(4_000),
+                }],
+            },
+        ];
+
+        let estimated = estimate_tokens_from(&events, &transcript, Some("system"), &[]);
+
+        // 20,500 priced + about 1,000 for the unpriced tool result.
+        assert!(
+            (21_000..22_000).contains(&estimated),
+            "the priced history was guessed at again: {estimated}"
+        );
     }
 
     /// A session one exchange old must not compact just because the
