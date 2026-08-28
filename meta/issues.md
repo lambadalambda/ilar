@@ -45,6 +45,7 @@
 ## Milestone 11 — Beyond the terminal
 
 - [ ] [A web frontend](issues/web-frontend.md)
+- [ ] [Serve kills the background children](issues/serve-kills-the-background-children.md)
 
 ## Milestone 12 — Health sweep
 
@@ -54,6 +55,9 @@
 
 - [ ] [Kernel sandbox for tool processes](issues/kernel-sandbox-for-tool-processes.md)
 - [ ] [A finished turn that never lets go](issues/a-finished-turn-that-never-lets-go.md)
+- [ ] [Completions survive the process](issues/completions-survive-the-process.md)
+- [ ] [A panic eats the permit](issues/a-panic-eats-the-permit.md)
+- [ ] [Steers outlive a turn that declines](issues/steers-outlive-a-turn-that-declines.md)
 - [ ] [Service commands are redacted too](issues/service-commands-are-redacted-too.md)
 - [ ] [The replay sweep](issues/the-replay-sweep.md)
 - [ ] [Rows react when clicked](issues/rows-react-when-clicked.md)
