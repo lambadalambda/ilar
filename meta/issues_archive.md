@@ -244,3 +244,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Serve wears the workspace layout](issues/serve-wears-the-workspace-layout.md)
 - [x] [Advisory read leases](issues/advisory-read-leases.md)
 - [x] [Serve writes back](issues/serve-writes-back.md)
+- [x] [Sweep after the write path](issues/sweep-after-the-write-path.md)

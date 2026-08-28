@@ -79,3 +79,49 @@ in the review transcripts, not here.
 ## Milestone
 
 13 — Guard rails
+
+## Outcome
+
+Three reviewers found it, four fixers closed it, eight commits.
+Everything above landed with tests except where noted.
+
+The one that mattered most was not on anyone's list before the
+review: `ilar serve` was remotely exploitable. Loopback is
+tokenless because a local process could already run ilar — but a
+browser is a local process a *remote page* steers, and nothing
+checked which name a request arrived under, so DNS rebinding turned
+`POST /api/sessions` into arbitrary execution. Requests now have to
+name this server (IP literal, which cannot be rebound, or
+localhost, on the bound port), Origin held to the same rule,
+missing Host tolerated only on a loopback bind, checked outermost
+because a loopback bind has no token check to piggyback on. Cost,
+documented: a non-loopback bind reached by hostname is now 403 —
+use the IP `ilar serve` prints, or a tunnel.
+
+Two findings changed shape under tracing, and the corrections are
+the useful part. (1) A failed turn *is* persisted —
+`persist_failed_step` writes a Diagnostic block — but `view.rs`
+drops Diagnostic on the wire, so the page never saw it; the fix
+added a broadcast error frame rather than quietly widening the
+projection contract. Un-dropping Diagnostic would also put the text
+in the transcript, and is left as a decision. (2) The
+`inherited_lease` ordering bug is real but untestable today: the
+demotion only fires for defaulted-background tasks, which are
+exactly the read-only agents, for whom both branches are
+observationally identical. Fixed as an invariant, honestly unpinned.
+
+Cross-agent integration bug caught in review of the reviewers: the
+new non-terminal `scope:"turn"` error frame would have been treated
+as terminal by the client the other agent had just rewritten,
+detaching the stream after every failed turn. Fixed here, with the
+banner clearing when the next turn starts.
+
+Not fixed, deliberately: no cap on concurrently driven sessions
+(stated in docs instead); the posix_spawn→fork regression from
+setsid and the pid-reuse window on bash's success path
+(pre-existing, both reported); palette entries for Ctrl-S/Ctrl-L;
+Esc leaves history recall running the way Ctrl-S used to. Residual
+trade taken knowingly: service keeps its process-group id after the
+shell exits, so a session-end kill has a longer pid-reuse window
+than bash's — the alternative was letting daemonized services
+outlive the session, which is worse.
