@@ -270,20 +270,27 @@ async fn every_provider_step_uses_the_stable_session_cache_key() {
     );
 }
 
-struct PartialWriteProvider;
+/// A provider that announces one tool call and streams a partial
+/// argument delta, then hangs — the shape of a large generation whose
+/// path is known long before its body finishes.
+struct PartialToolCallProvider {
+    id: &'static str,
+    name: &'static str,
+    delta: &'static str,
+}
 
-impl Provider for PartialWriteProvider {
+impl Provider for PartialToolCallProvider {
     fn stream(&self, _req: Request) -> anyhow::Result<EventStream> {
         Ok(Box::pin(
             futures::stream::iter(vec![
                 ProviderEvent::ToolCallStarted {
-                    id: "write-1".into(),
-                    name: "write".into(),
+                    id: self.id.into(),
+                    name: self.name.into(),
                     item_id: None,
                 },
                 ProviderEvent::ToolCallInputDelta {
-                    id: "write-1".into(),
-                    delta: r#"{"path":"src/generated.html","content":""#.into(),
+                    id: self.id.into(),
+                    delta: self.delta.into(),
                 },
             ])
             .chain(futures::stream::pending()),
@@ -291,14 +298,21 @@ impl Provider for PartialWriteProvider {
     }
 }
 
-#[tokio::test]
-async fn streamed_write_path_is_published_before_arguments_complete() {
+/// Drive a turn against [`PartialToolCallProvider`] until the streamed
+/// path preview lands, returning the published summary and the byte
+/// count that accompanied it.
+async fn streamed_path_preview(
+    id: &'static str,
+    name: &'static str,
+    delta: &'static str,
+) -> (String, u64) {
     let (store, session_id) = temp_session("build");
     let (tx, mut rx) = events_channel();
     let cancel = CancellationToken::new();
     let registry = ToolRegistry::builtin();
+    let provider = PartialToolCallProvider { id, name, delta };
     let turn = run_turn(
-        &PartialWriteProvider,
+        &provider,
         &registry,
         &store,
         &session_id,
@@ -313,16 +327,16 @@ async fn streamed_write_path_is_published_before_arguments_complete() {
     );
     tokio::pin!(turn);
 
-    let (arguments, received_bytes) = tokio::time::timeout(Duration::from_secs(1), async {
+    let preview = tokio::time::timeout(Duration::from_secs(1), async {
         let mut arguments = None;
         let mut received_bytes = None;
         loop {
             tokio::select! {
                 event = rx.recv() => {
                     match event {
-                        Some(LoopEvent::ToolInputProgress { id, received_bytes: bytes, .. })
-                            if id == "write-1" => received_bytes = Some(bytes),
-                        Some(LoopEvent::ToolArguments { id, arguments: summary }) if id == "write-1" => {
+                        Some(LoopEvent::ToolInputProgress { id: seen, received_bytes: bytes, .. })
+                            if seen == id => received_bytes = Some(bytes),
+                        Some(LoopEvent::ToolArguments { id: seen, arguments: summary }) if seen == id => {
                             arguments = Some(summary);
                         }
                         _ => {}
@@ -338,15 +352,32 @@ async fn streamed_write_path_is_published_before_arguments_complete() {
         }
     })
     .await
-    .expect("write path was not published while arguments were streaming");
+    .unwrap_or_else(|_| panic!("{name} path was not published while arguments were streaming"));
 
-    assert_eq!(arguments, "src/generated.html");
-    assert_eq!(
-        received_bytes,
-        r#"{"path":"src/generated.html","content":""#.len() as u64
-    );
     cancel.cancel();
     assert_eq!(turn.await.unwrap(), TurnOutcome::Aborted);
+    preview
+}
+
+#[tokio::test]
+async fn streamed_write_path_is_published_before_arguments_complete() {
+    let delta = r#"{"path":"src/generated.html","content":""#;
+    let (arguments, received_bytes) = streamed_path_preview("write-1", "write", delta).await;
+
+    assert_eq!(arguments, "src/generated.html");
+    assert_eq!(received_bytes, delta.len() as u64);
+}
+
+/// The preview scanner looks for a streamed `path`, which `edit` sends
+/// exactly as `write` does — but the gate named `write` literally, so a
+/// large streaming edit showed an empty argument column throughout.
+#[tokio::test]
+async fn streamed_edit_path_is_published_before_arguments_complete() {
+    let delta = r#"{"path":"src/lib.rs","old_string":"fn main"#;
+    let (arguments, received_bytes) = streamed_path_preview("edit-1", "edit", delta).await;
+
+    assert_eq!(arguments, "src/lib.rs");
+    assert_eq!(received_bytes, delta.len() as u64);
 }
 
 #[tokio::test]
@@ -3366,6 +3397,249 @@ async fn a_service_command_is_redacted_everywhere_a_bash_one_is() {
         !ilar::agent::tool_argument_detail(&persisted.0, &persisted.1).contains(secret),
         "replayed detail leaked the secret"
     );
+}
+
+/// A tool that echoes its command back republishes what the argument
+/// display just redacted: `service`'s start confirmation quotes the
+/// command, secret and all. The *published* result is redacted; the
+/// *persisted* one keeps the raw text — display-only, exactly like the
+/// argument scheme this extends.
+#[tokio::test]
+async fn a_secret_a_result_echoes_is_redacted_in_display_but_persisted_raw() {
+    let (store, session_id) = temp_session("build");
+    let manager = ilar::tools::service::ServiceManager::new();
+    let registry = ToolRegistry::builtin()
+        .with_tool(Arc::new(ilar::tools::service::ServiceTool::new(
+            manager.clone(),
+        )))
+        .unwrap();
+    let secret = "opaque-echoed-token";
+    let input = serde_json::json!({
+        "action": "start",
+        "name": "deploy",
+        // Harmless to run, and its confirmation echoes the command.
+        "command": format!("true --api-key={secret}"),
+    });
+    let provider = MockProvider::new(vec![
+        vec![
+            ProviderEvent::ToolCallStarted {
+                id: "service-1".into(),
+                name: "service".into(),
+                item_id: None,
+            },
+            ProviderEvent::ToolCallCompleted {
+                id: "service-1".into(),
+                name: "service".into(),
+                input,
+            },
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+                usage: Default::default(),
+            },
+        ],
+        vec![
+            ProviderEvent::TextDelta("started".into()),
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+                usage: Default::default(),
+            },
+        ],
+    ]);
+    let (tx, mut rx) = events_channel();
+
+    let outcome = run_turn(
+        &provider,
+        &registry,
+        &store,
+        &session_id,
+        "start the deploy service",
+        &[],
+        None,
+        LoopConfig::default(),
+        tx,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome, TurnOutcome::Completed);
+
+    let mut published = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        published.push(event);
+    }
+    let (result, is_error) = published
+        .iter()
+        .find_map(|event| match event {
+            LoopEvent::ToolFinished {
+                id,
+                result,
+                is_error,
+                ..
+            } if id == "service-1" => Some((result.clone(), *is_error)),
+            _ => None,
+        })
+        .expect("the published result");
+    assert!(!is_error, "{result}");
+    // Still the confirmation it was, minus the secret it echoed.
+    assert!(result.contains("started service"), "{result}");
+    assert!(!result.contains(secret), "{result}");
+    assert!(result.contains("<redacted>"), "{result}");
+
+    // The session log keeps the raw echo: redaction is display-only,
+    // and the provider reads its results from here.
+    let persisted = store
+        .load(&session_id)
+        .unwrap()
+        .events()
+        .iter()
+        .find_map(|event| match event {
+            SessionEvent::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } if tool_use_id == "service-1" => Some(content.clone()),
+            _ => None,
+        })
+        .expect("the persisted result");
+    assert!(
+        persisted.contains(secret),
+        "the raw result must stay in the session log: {persisted}"
+    );
+}
+
+/// A URL credential is not command-shaped and not a sensitive key, so
+/// it used to pass every predicate. It is display-redacted in the
+/// argument summary, the expanded detail and the published result — and
+/// only there: the persisted call and result keep the raw URL. Plain
+/// URLs and emails are left alone.
+#[tokio::test]
+async fn a_url_credential_is_redacted_in_display_only() {
+    let (store, session_id) = temp_session("build");
+    let registry = registry_with(EchoTool {
+        calls: Arc::new(Mutex::new(Vec::new())),
+    });
+    let secret = "hunter2-url-token";
+    let msg = format!(
+        "clone https://alice:{secret}@git.example.com/repo.git \
+         then read https://example.com/docs and mail ops@example.com"
+    );
+    let provider = MockProvider::new(vec![
+        vec![
+            ProviderEvent::ToolCallStarted {
+                id: "echo-1".into(),
+                name: "echo".into(),
+                item_id: None,
+            },
+            ProviderEvent::ToolCallCompleted {
+                id: "echo-1".into(),
+                name: "echo".into(),
+                input: serde_json::json!({"msg": msg}),
+            },
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+                usage: Default::default(),
+            },
+        ],
+        vec![
+            ProviderEvent::TextDelta("done".into()),
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+                usage: Default::default(),
+            },
+        ],
+    ]);
+    let (tx, mut rx) = events_channel();
+
+    let outcome = run_turn(
+        &provider,
+        &registry,
+        &store,
+        &session_id,
+        "clone the repo",
+        &[],
+        None,
+        LoopConfig::default(),
+        tx,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome, TurnOutcome::Completed);
+
+    let mut published = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        published.push(event);
+    }
+    let summary = published
+        .iter()
+        .find_map(|event| match event {
+            LoopEvent::ToolArguments { id, arguments } if id == "echo-1" => Some(arguments),
+            _ => None,
+        })
+        .expect("the summary the row shows");
+    let detail = published
+        .iter()
+        .find_map(|event| match event {
+            LoopEvent::ToolInputComplete { id, arguments } if id == "echo-1" => Some(arguments),
+            _ => None,
+        })
+        .expect("the expanded arguments");
+    let result = published
+        .iter()
+        .find_map(|event| match event {
+            LoopEvent::ToolFinished { id, result, .. } if id == "echo-1" => Some(result),
+            _ => None,
+        })
+        .expect("the published result");
+    for (label, text) in [("summary", summary), ("detail", detail), ("result", result)] {
+        assert!(!text.contains(secret), "{label}: {text}");
+        assert!(!text.contains("alice"), "{label} kept the user: {text}");
+        assert!(
+            text.contains("https://<redacted>@git.example.com"),
+            "{label}: {text}"
+        );
+        // Only the credential goes: a plain URL and an email are not
+        // this redaction's to rewrite.
+        assert!(text.contains("https://example.com/docs"), "{label}: {text}");
+        assert!(text.contains("ops@example.com"), "{label}: {text}");
+    }
+
+    // Display-only: the model said the raw URL and the log keeps it,
+    // in the call and in the result alike.
+    let session = store.load(&session_id).unwrap();
+    let raw_call = session
+        .events()
+        .iter()
+        .find_map(|event| match event {
+            SessionEvent::AssistantMessage { content, .. } => {
+                content.iter().find_map(|block| match block {
+                    ContentBlock::ToolCall { name, input, .. } if name == "echo" => {
+                        Some(input.to_string())
+                    }
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .expect("the persisted call");
+    assert!(raw_call.contains(secret), "{raw_call}");
+    let raw_result = session
+        .events()
+        .iter()
+        .find_map(|event| match event {
+            SessionEvent::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } if tool_use_id == "echo-1" => Some(content.clone()),
+            _ => None,
+        })
+        .expect("the persisted result");
+    assert!(raw_result.contains(secret), "{raw_result}");
 }
 
 /// Successive thoughts are separate thoughts, and the scratch has to

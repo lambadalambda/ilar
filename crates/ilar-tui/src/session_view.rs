@@ -191,6 +191,10 @@ fn restored_session_invocation_view(
     let mut lines = summary
         .map(|summary| vec![Line_::System(format!("transcript compacted\n{summary}"))])
         .unwrap_or_default();
+    // Each call's raw arguments, kept until its result arrives: the
+    // result redaction needs to know which values the arguments hid.
+    let mut call_inputs: std::collections::HashMap<String, serde_json::Value> =
+        std::collections::HashMap::new();
     for event in &events[cut..] {
         match event {
             ilar::session::SessionEvent::Meta { .. } => {}
@@ -261,6 +265,7 @@ fn restored_session_invocation_view(
                         ilar::session::ContentBlock::ToolCall {
                             id, name, input, ..
                         } => {
+                            call_inputs.insert(id.clone(), input.clone());
                             let (kind, arguments) = if name == "task" {
                                 match ilar::agent::summarize_task_input(input) {
                                     Some((description, agent, model)) => {
@@ -339,6 +344,16 @@ fn restored_session_invocation_view(
                     } else {
                         ToolState::Succeeded
                     };
+                    // Redacted like the live row: replay is a display
+                    // too, and the persisted body keeps raw values by
+                    // design — showing them here would undo the live
+                    // redaction at the first reopen.
+                    let content = ilar::agent::redact_tool_result(
+                        call_inputs
+                            .get(tool_use_id)
+                            .unwrap_or(&serde_json::Value::Null),
+                        content,
+                    );
                     // The same markers the live ToolFinished row appended,
                     // from the same helper — and bounded the way that row
                     // bounds them: the live path hands the whole
@@ -456,6 +471,76 @@ fn restore_child_activity(
 mod tests {
     use super::*;
     use ilar::session::{SessionMeta, new_id};
+
+    /// Replay is a display too: a secret the arguments hid must not
+    /// resurface in the restored result row, though the persisted
+    /// event keeps it raw by design.
+    #[test]
+    fn a_restored_result_is_redacted_like_the_live_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf());
+        let session_id = new_id();
+        let mut session = store
+            .create(SessionMeta {
+                session_id: session_id.clone(),
+                parent_id: None,
+                agent: "build".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+                cwd: None,
+            })
+            .unwrap();
+        session
+            .append(ilar::session::SessionEvent::AssistantMessage {
+                id: new_id(),
+                model: "zai/glm-4.7".into(),
+                content: vec![ilar::session::ContentBlock::ToolCall {
+                    id: "svc-1".into(),
+                    name: "service".into(),
+                    input: serde_json::json!({
+                        "name": "api",
+                        "command": "run --api-key=sk-verysecretvalue serve"
+                    }),
+                    item_id: None,
+                }],
+                usage: ilar::session::Usage::default(),
+                stop_reason: "tool_use".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        session
+            .append(ilar::session::SessionEvent::ToolResult {
+                id: new_id(),
+                tool_use_id: "svc-1".into(),
+                content: "started: run --api-key=sk-verysecretvalue serve".into(),
+                is_error: false,
+                images: Vec::new(),
+                child_session_id: None,
+                state: None,
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        drop(session);
+
+        let restored =
+            restored_session_view_with_store(&store.load(&session_id).unwrap(), &store);
+        let result = restored
+            .lines
+            .iter()
+            .find_map(|line| match line {
+                Line_::Tool {
+                    result: Some(result),
+                    ..
+                } => Some(result.clone()),
+                _ => None,
+            })
+            .expect("the restored result row");
+        assert!(
+            !result.contains("sk-verysecretvalue"),
+            "the secret resurfaced on replay: {result}"
+        );
+        assert!(result.contains("<redacted>"), "{result}");
+    }
 
     #[test]
     fn resumed_session_restores_visible_events_and_latest_usage() {

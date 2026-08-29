@@ -739,6 +739,26 @@ async fn result_text(
             _ => None,
         })
         .ok_or_else(|| ApiError::not_found(format!("no tool result for {tool_use_id}")))?;
+    // A display surface like any other: the persisted body keeps raw
+    // values by design, and the full-text route must not undo what
+    // the bounded displays redacted.
+    let input = events
+        .iter()
+        .find_map(|event| match event {
+            SessionEvent::AssistantMessage { content, .. } => {
+                content.iter().find_map(|block| match block {
+                    ilar::session::ContentBlock::ToolCall { id, input, .. }
+                        if *id == tool_use_id =>
+                    {
+                        Some(input.clone())
+                    }
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .unwrap_or(serde_json::Value::Null);
+    let text = ilar::agent::redact_tool_result(&input, &text);
     Ok(([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], text).into_response())
 }
 
@@ -851,6 +871,7 @@ async fn events(
         pending,
         last_line,
         done: ended,
+        call_inputs: std::collections::HashMap::new(),
     };
     Ok(Sse::new(futures::stream::unfold(feed, Feed::next))
         .keep_alive(KeepAlive::new().interval(KEEP_ALIVE)))
@@ -877,8 +898,9 @@ async fn catch_up(
         Ok((updates, line)) => {
             let mut frames = VecDeque::with_capacity(updates.len());
             let mut last = from;
+            let mut call_inputs = std::collections::HashMap::new();
             for update in updates {
-                let frame = frame(TailMessage::Update(update), last);
+                let frame = frame(TailMessage::Update(update), last, &mut call_inputs);
                 last = frame.line;
                 frames.push_back(frame.event);
             }
@@ -916,6 +938,11 @@ struct Feed {
     pending: VecDeque<Event>,
     last_line: usize,
     done: bool,
+    /// Tool-call arguments seen on this stream, for redacting the
+    /// results that answer them. A result whose call predates the
+    /// stream falls back to the URL-only pass — the page the client
+    /// loaded first was redacted with the full view.
+    call_inputs: std::collections::HashMap<String, serde_json::Value>,
 }
 
 /// Where the next frame came from.
@@ -965,7 +992,7 @@ impl Feed {
             {
                 continue;
             }
-            let frame = frame(message, self.last_line);
+            let frame = frame(message, self.last_line, &mut self.call_inputs);
             self.last_line = frame.line;
             self.done = frame.terminal;
             return Some((Ok(frame.event), self));
@@ -1012,26 +1039,36 @@ struct Frame {
     terminal: bool,
 }
 
-fn frame(message: TailMessage, last_line: usize) -> Frame {
+fn frame(
+    message: TailMessage,
+    last_line: usize,
+    call_inputs: &mut std::collections::HashMap<String, serde_json::Value>,
+) -> Frame {
     match message {
-        TailMessage::Update(TailUpdate::Appended { line, event }) => Frame {
-            event: named(
-                "append",
-                &json!({ "line": line, "event": project_event(&event) }),
-            )
-            .id(line.to_string()),
-            line,
-            terminal: false,
-        },
-        TailMessage::Update(TailUpdate::Rewound { line, to, event }) => Frame {
-            event: named(
-                "rewind",
-                &json!({ "line": line, "to": to, "event": project_event(&event) }),
-            )
-            .id(line.to_string()),
-            line,
-            terminal: false,
-        },
+        TailMessage::Update(TailUpdate::Appended { line, event }) => {
+            super::view::harvest_call_inputs(std::slice::from_ref(&event), call_inputs);
+            Frame {
+                event: named(
+                    "append",
+                    &json!({ "line": line, "event": super::view::project_event_with(&event, Some(call_inputs)) }),
+                )
+                .id(line.to_string()),
+                line,
+                terminal: false,
+            }
+        }
+        TailMessage::Update(TailUpdate::Rewound { line, to, event }) => {
+            super::view::harvest_call_inputs(std::slice::from_ref(&event), call_inputs);
+            Frame {
+                event: named(
+                    "rewind",
+                    &json!({ "line": line, "to": to, "event": super::view::project_event_with(&event, Some(call_inputs)) }),
+                )
+                .id(line.to_string()),
+                line,
+                terminal: false,
+            }
+        }
         // The view is stale and the client must re-fetch it; until it
         // does, nothing about its old position can be trusted — so the
         // duplicate filter is disarmed rather than left pointing at a
@@ -1361,30 +1398,25 @@ mod tests {
             text: "serve".into(),
             ts: chrono::Utc::now(),
         };
-        let appended = frame(
-            TailMessage::Update(TailUpdate::Appended {
+        let mut call_inputs = std::collections::HashMap::new();
+        let appended = frame(TailMessage::Update(TailUpdate::Appended {
                 line: 42,
                 event: event.clone(),
-            }),
-            7,
-        );
+            }), 7, &mut call_inputs);
         assert_eq!(appended.line, 42);
         assert!(!appended.terminal);
 
-        let rewound = frame(
-            TailMessage::Update(TailUpdate::Rewound {
+        let rewound = frame(TailMessage::Update(TailUpdate::Rewound {
                 line: 43,
                 to: 7,
                 event,
-            }),
-            42,
-        );
+            }), 42, &mut call_inputs);
         assert_eq!(rewound.line, 43);
 
-        assert_eq!(frame(TailMessage::Update(TailUpdate::Resync), 43).line, 0);
-        let deleted = frame(TailMessage::Update(TailUpdate::Deleted), 43);
+        assert_eq!(frame(TailMessage::Update(TailUpdate::Resync), 43, &mut call_inputs).line, 0);
+        let deleted = frame(TailMessage::Update(TailUpdate::Deleted), 43, &mut call_inputs);
         assert_eq!(deleted.line, 43);
         assert!(deleted.terminal);
-        assert!(frame(TailMessage::Failed("newer ilar?".into()), 43).terminal);
+        assert!(frame(TailMessage::Failed("newer ilar?".into()), 43, &mut call_inputs).terminal);
     }
 }

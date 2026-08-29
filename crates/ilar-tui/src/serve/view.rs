@@ -119,6 +119,30 @@ use crate::diff::{DiffKind, DiffLine};
 /// One canonical event as the wire sees it. Total: every event projects,
 /// so the result array indexes the same way `Rewind.to` does.
 pub(crate) fn project_event(event: &SessionEvent) -> Value {
+    project_event_with(event, None)
+}
+
+/// Harvest every tool call's raw arguments from `events` into `inputs`
+/// — what the result redaction needs to know which values to hide.
+pub(crate) fn harvest_call_inputs(
+    events: &[SessionEvent],
+    inputs: &mut std::collections::HashMap<String, Value>,
+) {
+    for event in events {
+        if let SessionEvent::AssistantMessage { content, .. } = event {
+            for block in content {
+                if let ContentBlock::ToolCall { id, input, .. } = block {
+                    inputs.insert(id.clone(), input.clone());
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn project_event_with(
+    event: &SessionEvent,
+    inputs: Option<&std::collections::HashMap<String, Value>>,
+) -> Value {
     let ts = event.ts().to_rfc3339();
     match event {
         SessionEvent::Meta { meta, .. } => json!({
@@ -176,6 +200,17 @@ pub(crate) fn project_event(event: &SessionEvent) -> Value {
             child_session_id,
             ..
         } => {
+            // A display surface like the TUI rows and the /results
+            // route: the persisted body keeps raw values by design, and
+            // this projection must not undo their redaction. With no
+            // inputs map (a stream frame whose call predates the
+            // stream) the URL pass still runs.
+            let content = ilar::agent::redact_tool_result(
+                inputs
+                    .and_then(|inputs| inputs.get(tool_use_id))
+                    .unwrap_or(&Value::Null),
+                content,
+            );
             // The markers ride on the string the cap applies to, exactly
             // as the restored TUI row builds it: bounding only the text
             // would keep markers a truncated row drops.
@@ -253,9 +288,11 @@ pub(crate) fn project_page(view: &[SessionEvent], page: &[SessionEvent], live: b
     let unanswered = unanswered_calls(view);
     // The one call an idle session may still be legitimately holding.
     let waiting = sole_pending_question(view, &unanswered);
+    let mut inputs = std::collections::HashMap::new();
+    harvest_call_inputs(view, &mut inputs);
     page.iter()
         .map(|event| {
-            let mut projected = project_event(event);
+            let mut projected = project_event_with(event, Some(&inputs));
             settle_tool_states(&mut projected, &unanswered, waiting, live);
             projected
         })
@@ -696,6 +733,36 @@ mod tests {
             images,
             ts: ts(),
         }
+    }
+
+    /// The projection is a display like the TUI rows and /results: a
+    /// secret the call's arguments hid must not surface in the
+    /// transcript page.
+    #[test]
+    fn a_projected_result_is_redacted_like_every_other_display() {
+        let call = assistant(
+            "zai/glm-4.7",
+            vec![ContentBlock::ToolCall {
+                id: "svc-1".into(),
+                name: "service".into(),
+                input: serde_json::json!({
+                    "name": "api",
+                    "command": "run --api-key=sk-verysecretvalue serve"
+                }),
+                item_id: None,
+            }],
+            Usage::default(),
+        );
+        let result = tool_result(
+            "svc-1",
+            "started: run --api-key=sk-verysecretvalue serve",
+            Vec::new(),
+        );
+        let view = vec![call, result];
+        let page = project_page(&view, &view, false);
+        let text = page[1]["text"].as_str().unwrap();
+        assert!(!text.contains("sk-verysecretvalue"), "{text}");
+        assert!(text.contains("<redacted>"), "{text}");
     }
 
     fn tool_result(tool_use_id: &str, content: &str, images: Vec<ImageContent>) -> SessionEvent {
