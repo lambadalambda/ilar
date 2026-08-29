@@ -47,3 +47,28 @@ stream we already have.
   means "close".
 - Steering the focused agent is deliberately out: see
   [[steer-the-agent-you-are-looking-at]].
+
+## Outcome
+
+Clicking an agent row opens its transcript over the transcript
+area — seeded by `restored_session_view_with_store` (grandchild
+history included), then followed live from the `SubagentActivity`
+broadcast: the focused id folds flat, everything deeper nests via
+`apply_subagent_activity` with the focused session as root, and a
+sibling's stream provably cannot leak in. The view owns its own
+render cache, so it draws exactly like the main transcript. Esc
+closes it and structurally cannot reach the turn-abort arm; a
+question modal still renders above and takes keys first; Ctrl-C
+rides the Esc path; the root transcript is test-proven
+byte-identical through a round trip.
+
+Design calls: the sidebar stays visible (it is the map — "main"
+and other agents stay clickable, so focus can hop directly), and
+input is visibly inert with the footer saying read-only. A
+finished agent keeps the view up with an honest footer, and a
+`task_message` resume flips it back to live.
+
+Accepted gap, filed as [[focus-seeds-the-step-in-flight]]: the
+store commits step by step, so focusing a mid-step agent misses
+the step in flight — a seam line says so, and a never-seen tool
+that finishes gets a row synthesized rather than vanishing.

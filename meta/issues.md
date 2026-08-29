@@ -58,7 +58,6 @@
 
 ## Milestone 14 — Agents are places
 
-- [ ] [The agent panel is a tree](issues/the-agent-panel-is-a-tree.md)
-- [ ] [A clicked agent takes the screen](issues/a-clicked-agent-takes-the-screen.md)
 - [ ] [Steer the agent you are looking at](issues/steer-the-agent-you-are-looking-at.md)
+- [ ] [Focus seeds the step in flight](issues/focus-seeds-the-step-in-flight.md)
 

@@ -266,3 +266,5 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Worktrees anchor to the repo beneath](issues/worktrees-anchor-to-the-repo-beneath.md)
 - [x] [The root turn gets a watchdog](issues/the-root-turn-gets-a-watchdog.md)
 - [x] [The agents "more" row takes clicks](issues/the-agents-more-row-takes-clicks.md)
+- [x] [The agent panel is a tree](issues/the-agent-panel-is-a-tree.md)
+- [x] [A clicked agent takes the screen](issues/a-clicked-agent-takes-the-screen.md)

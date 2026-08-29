@@ -32,3 +32,16 @@ started from.
 - Clicking an agent row is observable (hit recorded); actual
   navigation is the next issue's business.
 - Panel math tests cover indent + main-row + disclosure together.
+
+## Outcome
+
+The panel leads with a "● main" row and indents every agent under
+its listed parent — depths from a pure `tree_depths` over the
+registry's parent edges (cycle-guarded, first-occurrence keyed,
+order preserved). Indentation sits after the marker so ✉/▸ keep
+column 0; the budget math counts the main row; an indented row
+drops the "for {id}" note, since position now names the parent.
+Every line of every row records where a click navigates
+(`AgentTarget::{Main, Focus}`), hover underlines through the same
+gate as the disclosures, and the hit plumbing is the disclosure
+row's, shared.
