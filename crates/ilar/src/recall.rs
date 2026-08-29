@@ -324,42 +324,6 @@ pub fn search_sessions<F: FnMut(&[Entry], SessionHits) -> bool>(
     }
 }
 
-/// Walk every root session newest-first with no query at all: one
-/// pseudo-hit per session, anchored at its last entry and excerpting
-/// that entry's tail — the session shown by its last words. This is
-/// the search modal's empty-query listing; an empty query matches
-/// everything, fzf-style.
-pub fn tail_sessions<F: FnMut(&[Entry], SessionHits) -> bool>(store: &SessionStore, mut emit: F) {
-    for summary in store.list() {
-        let Ok(entries) = session_entries(store, &summary.id) else {
-            continue;
-        };
-        let Some(last) = entries.last() else {
-            continue;
-        };
-        let (excerpt, elided_before, _) = excerpt(&last.text, last.text.len(), 0);
-        let hit = Match {
-            event: last.event,
-            speaker: last.speaker,
-            excerpt,
-            elided_before,
-            elided_after: false,
-        };
-        let keep_going = emit(
-            &entries,
-            SessionHits {
-                session_id: summary.id,
-                title: summary.title,
-                modified: summary.modified,
-                hits: vec![hit],
-            },
-        );
-        if !keep_going {
-            return;
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -2085,75 +2085,152 @@ fn start_session_scan(
     tokio::task::spawn_blocking(move || {
         let now = std::time::SystemTime::now();
         let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-        // The scan reads sessions one at a time and the listing carries
-        // each session's launch directory, so it is looked up once here
-        // rather than re-read per hit.
+        // Symlinked launch paths must still count as "here".
+        let cwd = cwd.canonicalize().unwrap_or(cwd);
+        if query.trim().is_empty() {
+            // The resume listing: head scans only, one batch, already
+            // newest-first — the modal partitions this directory's
+            // sessions to the top and the preview loads lazily. This is
+            // what makes the modal open instantly: nothing here reads a
+            // session past its head.
+            let rows: Vec<SearchRow> = store
+                .list()
+                .into_iter()
+                // Resuming into yourself is not a switch.
+                .filter(|summary| summary.id != current_session)
+                .take(MAX_SEARCH_ROWS)
+                .map(|summary| {
+                    let launched = summary.cwd.as_ref().map(|path| {
+                        path.canonicalize().unwrap_or_else(|_| path.clone())
+                    });
+                    SearchRow {
+                        title: summary
+                            .title
+                            .clone()
+                            .unwrap_or_else(|| summary.id.clone()),
+                        session_id: summary.id,
+                        event: 0,
+                        age: crate::modals::last_used(summary.modified, now),
+                        origin: crate::modals::row_origin(
+                            launched.as_deref(),
+                            Some(&cwd),
+                            home.as_deref(),
+                        ),
+                        match_count: 0,
+                        title_match: false,
+                        context: Vec::new(),
+                    }
+                })
+                .collect();
+            let _ = tx.send(rows);
+            return;
+        }
+        // Query mode: one row per matching session, its best hit
+        // centered in the preview context. Sessions are read one at a
+        // time and stream in newest-first; the modal ranks title
+        // matches ahead as they arrive.
         let launched_in: std::collections::HashMap<String, Option<std::path::PathBuf>> = store
             .list()
             .into_iter()
             .map(|session| (session.id, session.cwd))
             .collect();
+        let needle = query.to_lowercase();
         let mut sent = 0usize;
-        let mut emit = |entries: &[ilar::recall::Entry], hits: ilar::recall::SessionHits| {
-            if flag.load(Ordering::Relaxed) {
-                return false;
-            }
-            let title = hits
-                .title
-                .clone()
-                .unwrap_or_else(|| hits.session_id.clone());
-            let age = crate::modals::last_used(hits.modified, now);
-            let origin = crate::modals::row_origin(
-                launched_in
+        ilar::recall::search_sessions(
+            &store,
+            &query,
+            SEARCH_HITS_PER_SESSION,
+            |entries, hits| {
+                if flag.load(Ordering::Relaxed) {
+                    return false;
+                }
+                let Some(best) = hits.hits.first() else {
+                    return true;
+                };
+                let title = hits
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| hits.session_id.clone());
+                let launched = launched_in
                     .get(&hits.session_id)
-                    .and_then(|launched_in| launched_in.as_deref()),
-                Some(&cwd),
-                home.as_deref(),
-            );
-            let rows: Vec<SearchRow> = hits
-                .hits
-                .iter()
-                .map(|hit| SearchRow {
-                    session_id: hits.session_id.clone(),
-                    title: title.clone(),
-                    event: hit.event,
-                    excerpt: hit.excerpt.clone(),
-                    age: age.clone(),
-                    origin: origin.clone(),
-                    context: ilar::recall::around(
-                        entries,
-                        hit.event,
-                        SEARCH_CONTEXT_RADIUS,
-                        SEARCH_CONTEXT_CHARS,
-                    )
-                    .into_iter()
-                    .map(|entry| {
-                        (
-                            entry.speaker.label().to_string(),
-                            entry.text,
-                            entry.event == hit.event,
-                        )
-                    })
-                    .collect(),
+                    .and_then(|launched_in| launched_in.as_ref())
+                    .map(|path| path.canonicalize().unwrap_or_else(|_| path.clone()));
+                let context = ilar::recall::around(
+                    entries,
+                    best.event,
+                    SEARCH_CONTEXT_RADIUS,
+                    SEARCH_CONTEXT_CHARS,
+                )
+                .into_iter()
+                .map(|entry| {
+                    let is_hit = entry.event == best.event;
+                    let text = if is_hit {
+                        // The slice `around` took runs from the front;
+                        // the match may live past it. Re-center the hit
+                        // entry on the match so the reason this row
+                        // exists is always on screen.
+                        entries
+                            .iter()
+                            .find(|original| original.event == best.event)
+                            .map(|original| {
+                                center_on_match(
+                                    &original.text,
+                                    &needle,
+                                    SEARCH_CONTEXT_CHARS,
+                                )
+                            })
+                            .unwrap_or(entry.text)
+                    } else {
+                        entry.text
+                    };
+                    (entry.speaker.label().to_string(), text, is_hit)
                 })
                 .collect();
-            sent += rows.len();
-            tx.send(rows).is_ok() && sent < MAX_SEARCH_ROWS
-        };
-        if query.trim().is_empty() {
-            // The listing excludes the session being viewed, like the
-            // picker: resuming into yourself is not a switch.
-            ilar::recall::tail_sessions(&store, |entries, hits| {
-                if hits.session_id == current_session {
-                    return !flag.load(Ordering::Relaxed);
-                }
-                emit(entries, hits)
-            });
-        } else {
-            ilar::recall::search_sessions(&store, &query, SEARCH_HITS_PER_SESSION, emit);
-        }
+                let row = SearchRow {
+                    session_id: hits.session_id.clone(),
+                    title_match: title.to_lowercase().contains(&needle),
+                    title,
+                    event: best.event,
+                    age: crate::modals::last_used(hits.modified, now),
+                    origin: crate::modals::row_origin(
+                        launched.as_deref(),
+                        Some(&cwd),
+                        home.as_deref(),
+                    ),
+                    match_count: hits.hits.len(),
+                    context,
+                };
+                sent += 1;
+                tx.send(vec![row]).is_ok() && sent < MAX_SEARCH_ROWS
+            },
+        );
     });
     (rx, cancel)
+}
+
+/// A window of `max_chars` centered on the first case-insensitive
+/// occurrence of `needle` (already lowercased) in `text`, elision
+/// marked on the cut ends. Lowercasing can shift byte offsets on some
+/// scripts, so the mapping is by char count and the window clamps —
+/// worst case the match sits off-center, never off-screen.
+fn center_on_match(text: &str, needle: &str, max_chars: usize) -> String {
+    let lowered = text.to_lowercase();
+    let Some(byte) = lowered.find(needle) else {
+        return text.chars().take(max_chars).collect();
+    };
+    let match_chars = lowered[..byte].chars().count();
+    let total = text.chars().count();
+    let start = match_chars
+        .saturating_sub(max_chars / 2)
+        .min(total.saturating_sub(max_chars));
+    let mut window: String = text.chars().skip(start).take(max_chars).collect();
+    if start > 0 {
+        window.insert(0, '…');
+    }
+    if start + max_chars < total {
+        window.push('…');
+    }
+    window
 }
 
 /// The terminal window's title: the session's topic once it has one.
@@ -2198,6 +2275,14 @@ async fn run_app(
     // The content-search scan: rows stream in stamped with the query
     // generation they answer; the flag abandons a stale walk.
     let mut search_rx: Option<(u64, std::sync::mpsc::Receiver<Vec<SearchRow>>)> = None;
+    // The lazy preview load for the search modal's listing rows:
+    // (generation, session id, the loader's channel). One in flight;
+    // the newest selection wins.
+    let mut preview_rx: Option<(
+        u64,
+        String,
+        std::sync::mpsc::Receiver<Vec<(String, String, bool)>>,
+    )> = None;
     let mut search_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>> = None;
     // Seeded with what the outbox recovered: they arrived before this
     // process existed, so they go first.
@@ -2282,6 +2367,74 @@ async fn run_app(
         }
         if scan_done {
             search_rx = None;
+        }
+        // The listing carries no context — load the selected session's
+        // tail the first time it is looked at, in the background, and
+        // fill the row when it lands. A stale load (selection moved on,
+        // query changed) fills nothing and is simply replaced.
+        if let Some(search) = app.session_search.as_ref()
+            && let Some(row) = search.selected()
+            && row.context.is_empty()
+        {
+            let wanted = (search.generation, row.session_id.clone());
+            let in_flight = preview_rx
+                .as_ref()
+                .is_some_and(|(generation, sid, _)| {
+                    *generation == wanted.0 && *sid == wanted.1
+                });
+            if !in_flight {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let store = store.clone();
+                let sid = wanted.1.clone();
+                tokio::task::spawn_blocking(move || {
+                    // Always answer — a load that sent nothing would
+                    // leave the row empty and this loop re-spawning a
+                    // loader every pass.
+                    let context = ilar::recall::session_entries(&store, &sid)
+                        .ok()
+                        .and_then(|entries| {
+                            let last = entries.last()?;
+                            Some(
+                                ilar::recall::around(
+                                    &entries,
+                                    last.event,
+                                    SEARCH_CONTEXT_RADIUS,
+                                    SEARCH_CONTEXT_CHARS,
+                                )
+                                .into_iter()
+                                .map(|entry| {
+                                    (entry.speaker.label().to_string(), entry.text, false)
+                                })
+                                .collect::<Vec<_>>(),
+                            )
+                        })
+                        .unwrap_or_else(|| {
+                            vec![(String::new(), "preview unavailable".into(), false)]
+                        });
+                    let _ = tx.send(context);
+                });
+                preview_rx = Some((wanted.0, wanted.1, rx));
+            }
+        }
+        if let Some((generation, sid, rx)) = preview_rx.as_ref() {
+            match rx.try_recv() {
+                Ok(context) => {
+                    if let Some(search) = app.session_search.as_mut()
+                        && search.generation == *generation
+                    {
+                        for row in search
+                            .rows
+                            .iter_mut()
+                            .filter(|row| row.session_id == *sid && row.context.is_empty())
+                        {
+                            row.context = context.clone();
+                        }
+                    }
+                    preview_rx = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => preview_rx = None,
+            }
         }
         // A search modal that wants a scan and has none running gets
         // one — this serves both the just-opened modal (whoever opened
@@ -4056,6 +4209,20 @@ mod tests {
         assert_eq!(restored.items.len(), 1);
         assert_eq!(restored.items[0].content, "restored");
         assert_eq!(restored.items[0].status, ilar::todo::Status::InProgress);
+    }
+
+    /// The preview must show why a row matched: the window centers on
+    /// the match even when it sits deep inside a long entry, with the
+    /// cut ends marked.
+    #[test]
+    fn the_hit_window_centers_on_the_match() {
+        let text = format!("{}NEEDLE{}", "a".repeat(2000), "b".repeat(2000));
+        let window = center_on_match(&text, "needle", 100);
+        assert!(window.contains("NEEDLE"), "{window}");
+        assert!(window.starts_with('…') && window.ends_with('…'), "{window}");
+
+        let early = center_on_match("needle right at the front", "needle", 100);
+        assert_eq!(early, "needle right at the front");
     }
 
     #[test]

@@ -1345,15 +1345,22 @@ pub(crate) struct SearchRow {
     /// Topic, or opening message, or the id when the session has
     /// neither — whatever the listing would call it.
     pub(crate) title: String,
-    /// Event index of the hit inside its session, shown as an anchor.
+    /// Event index of the best hit inside its session, shown as an
+    /// anchor in query mode.
     pub(crate) event: usize,
-    pub(crate) excerpt: String,
     /// When the session was last used, stamped by [`last_used`].
     pub(crate) age: String,
     /// Whether the session belongs to the directory ilar runs in, and
     /// which directory it belongs to otherwise.
     pub(crate) origin: RowOrigin,
+    /// Query mode: how many places matched in this session, bounded by
+    /// the scan's per-session cap. Zero on the plain listing.
+    pub(crate) match_count: usize,
+    /// The query matched the session's title; ranked ahead of
+    /// content-only matches.
+    pub(crate) title_match: bool,
     /// (speaker label, text, is-the-hit) around the match, in order.
+    /// Empty on a listing row until the lazy preview loads it.
     pub(crate) context: Vec<(String, String, bool)>,
 }
 
@@ -1445,6 +1452,11 @@ impl SessionSearch {
         self.rows.extend(rows.into_iter().take(room));
         if self.query.trim().is_empty() {
             self.rows = here_first(std::mem::take(&mut self.rows), |row| row.origin.here());
+        } else {
+            // Search order: a session named for the query beats one
+            // that merely mentions it. Stable, so each group keeps the
+            // scan's recency order.
+            self.rows = here_first(std::mem::take(&mut self.rows), |row| row.title_match);
         }
         if let Some((session_id, event)) = anchor
             && let Some(index) = self
@@ -2157,13 +2169,25 @@ pub(crate) fn render_session_search(frame: &mut Frame, search: &SessionSearch) -
             })
             .unwrap_or_else(|| " preview ".into());
         let footer = row
-            .map(|row| format!(" event {} · {} ", row.event, row.age))
+            .map(|row| {
+                if row.match_count > 0 {
+                    format!(" event {} · {} ", row.event, row.age)
+                } else {
+                    format!(" {} ", row.age)
+                }
+            })
             .unwrap_or_default();
         if let Some(preview_inner) =
             modal_frame(frame, preview_area, &title, theme::PRIMARY, &footer)
             && let Some(row) = row
         {
             let mut lines: Vec<Line> = Vec::new();
+            if row.context.is_empty() {
+                lines.push(Line::styled(
+                    "loading preview…",
+                    Style::default().fg(MUTED),
+                ));
+            }
             for (speaker, text, is_hit) in &row.context {
                 lines.push(Line::styled(
                     format!("· {speaker}"),
@@ -2229,50 +2253,60 @@ pub(crate) fn render_session_search(frame: &mut Frame, search: &SessionSearch) -
         return body.finish_unmapped(frame, inner);
     }
 
-    let row_count = (inner.height as usize)
+    // Two lines per session: the title owns the first, everything
+    // else sits dim on the second. The excerpt is gone — the preview
+    // pane is what an excerpt was pretending to be.
+    let row_count = ((inner.height as usize)
         .saturating_sub(body.line_count())
-        .max(1);
+        .max(2))
+        / 2;
     let width = inner.width as usize;
-    // Not `push_rows`: an unselected row is a run of spans, because the
-    // matched substring is highlighted inside the excerpt.
     for index in visible_rows(selected, search.rows.len(), row_count) {
         let row = &search.rows[index];
         let marker = if index == selected { "> " } else { "  " };
-        // The title gets a bounded column so the excerpt always shows;
-        // the stamp — behind the directory, for rows from elsewhere —
-        // keeps the right edge.
-        let title_width = (width / 3).clamp(8, 28);
-        let title = truncate_display(&row.title, title_width, Truncation::Right);
-        let lead = format!("{marker}{title}: ");
-        let age = resume_column(&row.origin, &row.age, width);
-        let age_width = UnicodeWidthStr::width(age.as_str());
-        let excerpt_budget = width
-            .saturating_sub(UnicodeWidthStr::width(lead.as_str()))
-            .saturating_sub(age_width + 1);
-        let excerpt = truncate_display(&row.excerpt, excerpt_budget, Truncation::Right);
-        let pad = excerpt_budget.saturating_sub(UnicodeWidthStr::width(excerpt.as_str())) + 1;
-        let line = if index == selected {
-            // The bar owns the row; per-span colours would fight it.
-            Line::styled(
-                format!("{lead}{excerpt}{}{age}", " ".repeat(pad)),
-                theme::selected(),
-            )
+        let title = truncate_display(&row.title, width.saturating_sub(2), Truncation::Right);
+        let mut details = String::new();
+        if let Some(directory) = row.origin.directory() {
+            details.push_str(&truncate_display(
+                directory,
+                (width / 2).max(8),
+                Truncation::Middle,
+            ));
+            details.push_str(" · ");
+        }
+        details.push_str(&row.age);
+        if row.match_count == 1 {
+            details.push_str(" · 1 match");
+        } else if row.match_count > 1 {
+            details.push_str(&format!(" · {} matches", row.match_count));
+        }
+        let details = truncate_display(&details, width.saturating_sub(4), Truncation::Right);
+        if index == selected {
+            // The bar owns both rows; per-span colours would fight it.
+            let pad = width.saturating_sub(2 + UnicodeWidthStr::width(title.as_str()));
+            body.push(
+                Line::styled(format!("{marker}{title}{}", " ".repeat(pad)), theme::selected()),
+                Some(index),
+            );
+            let pad = width.saturating_sub(4 + UnicodeWidthStr::width(details.as_str()));
+            body.push(
+                Line::styled(format!("    {details}{}", " ".repeat(pad)), theme::selected()),
+                Some(index),
+            );
         } else {
-            let mut spans = vec![
-                Span::raw(marker.to_string()),
-                Span::styled(format!("{title}: "), Style::default().fg(theme::MARKUP)),
-            ];
+            let mut spans = vec![Span::raw(marker.to_string())];
             spans.extend(highlighted_spans(
-                &excerpt,
+                &title,
                 &search.query,
                 Style::default().fg(theme::PRIMARY),
                 theme::title(theme::MARKUP),
             ));
-            spans.push(Span::raw(" ".repeat(pad)));
-            spans.push(Span::styled(age, Style::default().fg(MUTED)));
-            Line::from(spans)
-        };
-        body.push(line, Some(index));
+            body.push(Line::from(spans), Some(index));
+            body.push(
+                Line::styled(format!("    {details}"), Style::default().fg(MUTED)),
+                Some(index),
+            );
+        }
     }
     body.finish(frame, inner)
 }
@@ -3387,7 +3421,7 @@ mod tests {
         let mut search = SessionSearch::new();
         search.handle_key(KeyCode::Char('a'), false);
         let generation = search.generation;
-        search.push_rows(generation, vec![search_row("s1", "one", "a match", "ctx")]);
+        search.push_rows(generation, vec![search_row("s1", "one", "ctx")]);
 
         assert_eq!(search.insert_query("uth"), SessionSearchAction::Rescan);
         assert_eq!(search.query, "auth");
@@ -3396,7 +3430,7 @@ mod tests {
         assert!(search.scanning);
 
         // Nothing to add is not an edit: no rescan, no cleared rows.
-        search.push_rows(search.generation, vec![search_row("s1", "one", "hit", "c")]);
+        search.push_rows(search.generation, vec![search_row("s1", "one", "c")]);
         assert_eq!(search.insert_query("\n\t"), SessionSearchAction::Stay);
         assert_eq!(search.query, "auth");
         assert_eq!(search.rows.len(), 1);
@@ -4254,14 +4288,15 @@ mod tests {
         assert_eq!(hit.rows, vec![None, Some(0), Some(1)]);
     }
 
-    fn search_row(session: &str, title: &str, excerpt: &str, context_line: &str) -> SearchRow {
+    fn search_row(session: &str, title: &str, context_line: &str) -> SearchRow {
         SearchRow {
             session_id: session.into(),
             title: title.into(),
             event: 7,
-            excerpt: excerpt.into(),
             age: "3d".into(),
             origin: RowOrigin::default(),
+            match_count: 1,
+            title_match: false,
             context: vec![
                 ("user".into(), "before the hit".into(), false),
                 ("assistant".into(), context_line.into(), true),
@@ -4277,12 +4312,12 @@ mod tests {
         let elsewhere = SearchRow {
             age: "10m ago".into(),
             origin: RowOrigin::Elsewhere(Some("~/repos/other".into())),
-            ..search_row("newer", "other project", "last thing said", "ctx")
+            ..search_row("newer", "other project", "ctx")
         };
         let here = SearchRow {
             age: "2h ago".into(),
             origin: RowOrigin::Here,
-            ..search_row("older", "this repo", "where we left off", "ctx")
+            ..search_row("older", "this repo", "ctx")
         };
 
         let mut listing = SessionSearch::new();
@@ -4320,7 +4355,7 @@ mod tests {
     fn a_batch_arriving_mid_scan_keeps_the_cursor_on_its_row() {
         let elsewhere = |id: &str| SearchRow {
             origin: RowOrigin::Elsewhere(Some("~/repos/other".into())),
-            ..search_row(id, "other project", "last thing said", "ctx")
+            ..search_row(id, "other project", "ctx")
         };
         let mut search = SessionSearch::new();
         search.push_rows(0, vec![elsewhere("first"), elsewhere("second")]);
@@ -4336,7 +4371,7 @@ mod tests {
             0,
             vec![SearchRow {
                 origin: RowOrigin::Here,
-                ..search_row("here", "this repo", "where we left off", "ctx")
+                ..search_row("here", "this repo", "ctx")
             }],
         );
         assert_eq!(
@@ -4356,7 +4391,7 @@ mod tests {
             0,
             vec![SearchRow {
                 origin: RowOrigin::Here,
-                ..search_row("here", "this repo", "where we left off", "ctx")
+                ..search_row("here", "this repo", "ctx")
             }],
         );
         assert_eq!(
@@ -4377,7 +4412,7 @@ mod tests {
         assert!(search.scanning);
         search.push_rows(
             first_generation,
-            vec![search_row("s1", "one", "a match", "ctx")],
+            vec![search_row("s1", "one", "ctx")],
         );
         assert_eq!(search.rows.len(), 1);
 
@@ -4390,7 +4425,7 @@ mod tests {
         assert!(search.rows.is_empty());
         search.push_rows(
             first_generation,
-            vec![search_row("s1", "one", "stale", "ctx")],
+            vec![search_row("s1", "one", "ctx")],
         );
         assert!(search.rows.is_empty(), "stale rows accepted");
         search.finish_scan(first_generation);
@@ -4418,8 +4453,8 @@ mod tests {
         search.push_rows(
             0,
             vec![
-                search_row("s1", "one", "first match", "ctx"),
-                search_row("s2", "two", "second match", "ctx"),
+                search_row("s1", "one", "ctx"),
+                search_row("s2", "two", "ctx"),
             ],
         );
         search.move_selection(1);
@@ -4442,7 +4477,7 @@ mod tests {
     fn the_row_cap_holds_whatever_the_scanner_sends() {
         let mut search = SessionSearch::new();
         let rows = (0..MAX_SEARCH_ROWS + 50)
-            .map(|index| search_row("s", "t", &format!("hit {index}"), "ctx"))
+            .map(|index| search_row("s", "t", "ctx"))
             .collect();
         search.push_rows(0, rows);
         assert_eq!(search.rows.len(), MAX_SEARCH_ROWS);
@@ -4455,13 +4490,8 @@ mod tests {
         search.push_rows(
             0,
             vec![
-                search_row("s1", "auth session", "needle in auth", "the auth context"),
-                search_row(
-                    "s2",
-                    "parser session",
-                    "needle in parser",
-                    "the parser context",
-                ),
+                search_row("s1", "auth session", "the auth context"),
+                search_row("s2", "parser session", "the parser context"),
             ],
         );
 
@@ -4490,11 +4520,37 @@ mod tests {
         assert!(screen.contains(" preview "), "{screen}");
     }
 
+    /// A session named for the query beats one that merely mentions
+    /// it, however late its row streams in — stable within each group.
+    #[test]
+    fn a_title_match_outranks_a_content_match() {
+        let mut search = SessionSearch::new();
+        search.query = "parser".into();
+        search.push_rows(
+            0,
+            vec![
+                search_row("content-only", "auth work", "ctx"),
+                SearchRow {
+                    title_match: true,
+                    ..search_row("named", "the parser rewrite", "ctx")
+                },
+            ],
+        );
+        assert_eq!(
+            search
+                .rows
+                .iter()
+                .map(|row| row.session_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["named", "content-only"]
+        );
+    }
+
     #[test]
     fn search_rows_carry_their_session_age() {
         let mut search = SessionSearch::new();
         search.query = "needle".into();
-        search.push_rows(0, vec![search_row("s1", "auth work", "needle here", "ctx")]);
+        search.push_rows(0, vec![search_row("s1", "auth work", "ctx")]);
 
         let (screen, _) = draw_modal(120, 24, |frame| render_session_search(frame, &search));
         assert!(screen.contains("3d"), "{screen}");
@@ -4506,11 +4562,11 @@ mod tests {
         search.query = "needle".into();
         search.push_rows(
             0,
-            vec![search_row("s1", "one", "needle here", "context text")],
+            vec![search_row("s1", "one", "context text")],
         );
 
         let (screen, _) = draw_modal(60, 20, |frame| render_session_search(frame, &search));
-        assert!(screen.contains("needle here"), "{screen}");
+        assert!(screen.contains("one"), "{screen}");
         assert!(
             !screen.contains("context text"),
             "two unusable panes on a narrow terminal: {screen}"
