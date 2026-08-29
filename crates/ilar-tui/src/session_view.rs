@@ -7,8 +7,7 @@
 use ilar::session::SessionStore;
 
 use crate::diff;
-use crate::text::bounded_detail;
-use crate::transcript::{Line_, ToolKind, ToolProgress, ToolState};
+use crate::transcript::{Line_, ToolKind, ToolProgress, ToolState, kept_result_detail};
 
 pub(crate) struct RestoredSessionView {
     pub(crate) lines: Vec<Line_>,
@@ -355,13 +354,16 @@ fn restored_session_invocation_view(
                         content,
                     );
                     // The same markers the live ToolFinished row appended,
-                    // from the same helper — and bounded the way that row
-                    // bounds them: the live path hands the whole
-                    // description, markers included, to `bounded_detail`,
-                    // so a restored transcript that bounded only the text
-                    // would keep a trailing blank line the live row folds
-                    // away (and keep markers a truncated live row drops).
-                    *result = Some(bounded_detail(&format!(
+                    // from the same helper — and kept the way that row
+                    // keeps them: the live path hands the whole
+                    // description, markers included, to
+                    // `kept_result_detail`, so a restored transcript that
+                    // bounded only the text would keep a trailing blank
+                    // line the live row folds away. The stored content is
+                    // the full result, so this is where anything past the
+                    // publish site's 16 KiB streaming cut becomes
+                    // readable again (up to the 256 KiB keep-cap).
+                    *result = Some(kept_result_detail(&format!(
                         "{content}{}",
                         ilar::image::markers(images)
                     )));
@@ -1217,30 +1219,44 @@ mod tests {
         }));
     }
 
-    /// A tab-heavy result over the cap must read the same whether it
-    /// arrived as a live `ToolFinished` or was reloaded from the log: the
-    /// live row is handed text the agent loop already bounded and bounds
-    /// it again for display, the restored row bounds the stored text
-    /// once, and both cut the raw representation before expanding tabs.
+    /// Over 16 KiB the publish site has already cut what the live row
+    /// gets, but restore reads the whole redacted result from the log
+    /// and must stop destroying it: the restored row keeps everything
+    /// (up to the 256 KiB keep-cap) behind the full toggle, agreeing
+    /// with the live row on every character live was allowed to keep —
+    /// both still cut the raw representation before expanding tabs.
     #[test]
-    fn an_over_long_tab_heavy_detail_cuts_the_same_live_and_restored() {
+    fn an_over_long_result_survives_restore_where_live_was_cut() {
         let raw = "\tname\tvalue\n".repeat(4_000);
         assert!(raw.chars().count() > ilar::text::MAX_DETAIL_CHARS);
         let (live, restored) = live_and_restored(&raw, &[]);
-        assert_eq!(live, restored);
+        // The live row still ends at the publish-site cut…
         assert!(live.ends_with("… output truncated"), "{live:?}");
         assert!(!live.contains('\t'), "tabs are expanded for display");
+        // …while the restored row keeps the whole result…
+        assert!(!restored.contains("output truncated"), "{restored:?}");
+        assert_eq!(restored.lines().count(), 4_000);
+        assert!(!restored.contains('\t'), "tabs are expanded for display");
+        // …and the two agree on everything the live row kept.
+        let shared = live
+            .strip_suffix("… output truncated")
+            .unwrap()
+            .trim_end_matches('\n');
+        assert!(restored.starts_with(shared), "{live:?} vs {restored:?}");
 
-        // Images ride along on the same string, so they have to be
-        // bounded on the same side of the cut in both paths.
+        // Images ride along on the same string; over the cut, both
+        // paths now keep their markers past the truncated text.
         let image = ilar::session::ImageContent::png(&[0u8; 128]);
+        let markers = ilar::image::markers(std::slice::from_ref(&image));
         let (live, restored) = live_and_restored(&raw, std::slice::from_ref(&image));
-        assert_eq!(live, restored);
-        // A description that ends in a newline is the common case, and
-        // it is where the two used to differ by a blank line.
+        assert!(live.ends_with(&markers), "{live:?}");
+        assert!(restored.ends_with(&markers), "{restored:?}");
+        // Under the cut, parity is exact. A description that ends in a
+        // newline is the common case, and it is where the two used to
+        // differ by a blank line.
         let (live, restored) = live_and_restored("one\ttwo\n", std::slice::from_ref(&image));
         assert_eq!(live, restored);
-        assert!(live.ends_with(&ilar::image::markers(std::slice::from_ref(&image))));
+        assert!(live.ends_with(&markers));
     }
 
     /// The same tool result down both paths: the live row settles what

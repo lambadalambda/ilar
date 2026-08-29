@@ -1131,6 +1131,38 @@ pub(crate) fn set_tool_tail(lines: &mut [Line_], id: &str, tail: &str) -> Option
     Some(index)
 }
 
+/// The most of a tool result a row keeps, in chars of the raw (tabs
+/// unexpanded) representation, marker included. `bounded_detail`'s
+/// 16 KiB stays the *streaming* bound — the publish site in
+/// `ilar::agent::turn` still cuts there before the event goes out —
+/// but the row itself keeps whatever it is handed up to this memory
+/// cap, so a restored result read whole from the log stays readable
+/// behind the full toggle instead of being destroyed on arrival.
+/// Rendering stays bounded regardless: collapsed views cut source
+/// lines before wrapping, and the full view is an explicit toggle.
+pub(crate) const MAX_KEPT_RESULT_CHARS: usize = 256 * 1024;
+
+/// [`crate::text::bounded_detail`], at the keep-cap instead of the
+/// 16 KiB display cut: the same control-character filter and the same
+/// marker, cut on the raw representation first and tabs expanded per
+/// line after, so text under the old cap comes out byte-identical to
+/// what `bounded_detail` produced. The input must already be redacted
+/// — this keeps *more* of it, never something the smaller bound hid.
+pub(crate) fn kept_result_detail(text: &str) -> String {
+    let mut kept: String = text
+        .chars()
+        .filter(|character| matches!(character, '\n' | '\t') || !character.is_control())
+        .take(MAX_KEPT_RESULT_CHARS + 1)
+        .collect();
+    if kept.chars().count() > MAX_KEPT_RESULT_CHARS {
+        let marker = ilar::text::DETAIL_TRUNCATED;
+        let cut = MAX_KEPT_RESULT_CHARS.saturating_sub(marker.chars().count());
+        kept = kept.chars().take(cut).collect();
+        kept.push_str(marker);
+    }
+    kept.lines().map(safe_text).collect::<Vec<_>>().join("\n")
+}
+
 /// Settle the newest still-open row for this call. `None` means the
 /// result belongs to no row we have.
 pub(crate) fn finish_tool_row(
@@ -1159,7 +1191,7 @@ pub(crate) fn finish_tool_row(
         ToolState::Succeeded
     };
     *progress = ToolProgress::None;
-    *current = Some(bounded_detail(result));
+    *current = Some(kept_result_detail(result));
     *current_child = child_session_id.clone();
     Some(index)
 }
@@ -1260,7 +1292,13 @@ fn apply_child_loop_event(lines: &mut Vec<Line_>, group: &mut u64, scope: &str, 
                 mark_running_tools_failed(lines);
             }
         }
-        LoopEvent::TurnStarted | LoopEvent::ProviderRetry { .. } | LoopEvent::Compacted { .. } => {}
+        // The same row the root's live path pushes and replay leads
+        // with; dropping it left a mid-run child compaction invisible
+        // until the session was reopened.
+        LoopEvent::Compacted { summary, .. } => {
+            lines.push(Line_::System(format!("transcript compacted\n{summary}")));
+        }
+        LoopEvent::TurnStarted | LoopEvent::ProviderRetry { .. } => {}
     }
 }
 
@@ -2781,6 +2819,79 @@ mod tests {
             child_running: false,
             child_session_id: None,
         }
+    }
+
+    /// The publish site bounds a live result at 16 KiB before the row
+    /// ever sees it (crates/ilar/src/agent/turn.rs); the row must not
+    /// cut further. A restored row is handed the whole redacted result,
+    /// and cutting it here again made anything past 16 KiB permanently
+    /// unreadable in the TUI while the web served it whole.
+    #[test]
+    fn a_finished_row_keeps_a_result_past_the_16_kib_detail_cut() {
+        let mut lines = vec![finished_tool("call-1", "bash", "")];
+        if let Line_::Tool { state, .. } = &mut lines[0] {
+            *state = ToolState::Running;
+        }
+        let long = "0123456789abcde\n".repeat(4_096); // 64 KiB of result
+        assert!(long.chars().count() > ilar::text::MAX_DETAIL_CHARS);
+        finish_tool_row(&mut lines, "call-1", false, &long, &None);
+
+        let Line_::Tool {
+            result: Some(result),
+            ..
+        } = &lines[0]
+        else {
+            panic!("the row must have settled: {lines:?}");
+        };
+        assert!(!result.contains("output truncated"), "{result:?}");
+        assert_eq!(result.lines().count(), 4_096);
+    }
+
+    /// The keep is a memory cap, not unbounded: past 256 KiB the row
+    /// cuts with the same marker every other bound uses.
+    #[test]
+    fn a_kept_result_is_still_bounded_in_memory() {
+        let mut lines = vec![finished_tool("call-1", "bash", "")];
+        if let Line_::Tool { state, .. } = &mut lines[0] {
+            *state = ToolState::Running;
+        }
+        let oversized = "x".repeat(MAX_KEPT_RESULT_CHARS + 10_000);
+        finish_tool_row(&mut lines, "call-1", false, &oversized, &None);
+
+        let Line_::Tool {
+            result: Some(result),
+            ..
+        } = &lines[0]
+        else {
+            panic!("the row must have settled: {lines:?}");
+        };
+        assert_eq!(result.chars().count(), MAX_KEPT_RESULT_CHARS);
+        assert!(result.ends_with("… output truncated"), "{result:?}");
+    }
+
+    /// Replay draws a child's compaction; live dropped the event, so a
+    /// child that compacted mid-run showed nothing. The row is the same
+    /// one the root's own live path pushes (app.rs, `Compacted`).
+    #[test]
+    fn a_child_compaction_shows_live_like_it_does_on_replay() {
+        let mut lines = Vec::new();
+        let mut group = 0u64;
+        apply_child_loop_event(
+            &mut lines,
+            &mut group,
+            "scope",
+            &LoopEvent::Compacted {
+                context_tokens: 9_000,
+                summary: "child decisions retained".into(),
+            },
+        );
+
+        assert_eq!(
+            lines,
+            vec![Line_::System(
+                "transcript compacted\nchild decisions retained".into()
+            )]
+        );
     }
 
     /// Sibling rows in a group pad their names to the widest among
