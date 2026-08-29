@@ -58,6 +58,12 @@ pub(crate) trait Runtime {
     fn start_compaction(&mut self, app: &mut App);
     /// Ask a `/btw` question over the session, off the record.
     fn start_aside(&mut self, app: &mut App, question: String);
+    /// A delivery failed terminally and its text was just salvaged
+    /// into the transcript — the delivery of last resort. Record that
+    /// with the durable outbox so the next session open does not
+    /// announce and re-attempt the same entry forever. Never called
+    /// for transient (Requeue) outcomes: those hold and retry.
+    fn retire_notification(&mut self, notification: &Notification);
     /// A notification for another session: spawn its delivery beside
     /// whatever else is running. It resumes a child, so it takes
     /// neither the turn slot nor the keyboard, and several may run.
@@ -349,6 +355,10 @@ fn routed_complete<R: Runtime>(
                 "undelivered result of {}:\n{}",
                 notification.description, notification.text
             )));
+            // The salvage above IS the delivery of last resort: retire
+            // the outbox entry so the next open does not announce,
+            // re-attempt and re-fail it forever.
+            runtime.retire_notification(&notification);
         }
     }
 }
@@ -493,6 +503,10 @@ mod tests {
         fn start_aside(&mut self, _app: &mut App, question: String) {
             // Detached: neither the turn slot nor busy is touched.
             self.log.push(format!("start_aside:{question}"));
+        }
+
+        fn retire_notification(&mut self, notification: &Notification) {
+            self.log.push(format!("retire:{}", notification.text));
         }
 
         fn route(&mut self, _app: &mut App, notification: Notification) {
@@ -1250,7 +1264,9 @@ mod tests {
 
     /// A delivery that fails outright still puts the child's final
     /// word in the transcript: the plumbing error must not take the
-    /// work down with it.
+    /// work down with it. And the salvage is the delivery of last
+    /// resort — the outbox entry is retired, so the next session open
+    /// does not announce and re-fail it forever.
     #[test]
     fn a_failed_delivery_salvages_the_result_into_the_transcript() {
         let mut app = App::new();
@@ -1283,5 +1299,42 @@ mod tests {
         assert!(app.lines().iter().any(
             |line| matches!(line, Line_::System(text) if text.contains("could not be delivered"))
         ));
+        assert_eq!(
+            runtime.log,
+            vec!["retire:the build is green"],
+            "the salvaged entry must be retired from the outbox"
+        );
+    }
+
+    /// The transient counterpart: a Requeue outcome holds and retries —
+    /// it must never retire the outbox entry, or a delivery that only
+    /// needed the user's return would be written off as undeliverable.
+    #[test]
+    fn a_requeued_routing_retires_nothing() {
+        let mut app = App::new();
+        let mut runtime = FakeRuntime::new();
+        let notification = Notification {
+            parent_session_id: "child".into(),
+            description: "background task".into(),
+            text: "needs the user".into(),
+            is_error: false,
+        };
+
+        pass(
+            &mut app,
+            vec![Completion::Routed {
+                result: Ok(RouteOutcome::Requeue(notification.clone())),
+                notification,
+            }],
+            Vec::new(),
+            &mut runtime,
+        )
+        .unwrap();
+
+        assert!(
+            runtime.log.iter().all(|entry| !entry.starts_with("retire:")),
+            "{:?}",
+            runtime.log
+        );
     }
 }

@@ -48,6 +48,54 @@ fn entry_path(dir: &Path, parent_session_id: &str) -> PathBuf {
     dir.join(format!("{parent_session_id}.jsonl"))
 }
 
+/// The tombstone sidecar beside a parent's outbox file. Not `.jsonl`,
+/// deliberately: the [`pending`] scan iterates `.jsonl` files and would
+/// otherwise mistake a sidecar for an outbox file whose stem names no
+/// session — and sweep it.
+fn retired_path(dir: &Path, parent_session_id: &str) -> PathBuf {
+    dir.join(format!("{parent_session_id}.retired"))
+}
+
+/// Retire an entry that failed delivery terminally: its text was
+/// salvaged into a transcript, which is the delivery of last resort, so
+/// the next open must not announce and re-attempt it. Recorded as an
+/// appended tombstone rather than a rewrite of the outbox file — the
+/// publish path appends concurrently, and a read-filter-rewrite here
+/// could silently drop an entry recorded between the read and the
+/// rename. [`pending`] honors the tombstone and compacts both files.
+/// Best-effort, like [`record`]: transient failures merely re-announce
+/// one entry at the next open.
+pub fn retire(dir: &Path, notification: &Notification) {
+    let _ = try_retire(dir, notification);
+}
+
+fn try_retire(dir: &Path, notification: &Notification) -> std::io::Result<()> {
+    if !entry_path(dir, &notification.parent_session_id).exists() {
+        // Never recorded (or already compacted away): a tombstone would
+        // only sit orphaned where no scan visits.
+        return Ok(());
+    }
+    let line = serde_json::to_string(notification).map_err(std::io::Error::other)?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(retired_path(dir, &notification.parent_session_id))?;
+    writeln!(file, "{line}")
+}
+
+/// The texts retired for one parent. Matching is by text, the same key
+/// — and the same byte-identical-duplicates limitation — as the
+/// delivered-check in [`pending`].
+fn retired_texts(dir: &Path, parent_session_id: &str) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(retired_path(dir, parent_session_id)) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<Notification>(line).ok())
+        .map(|notification| notification.text)
+        .collect()
+}
+
 /// Everything published but never delivered, for the session tree rooted
 /// at `root_session_id`: entries whose parent session still exists,
 /// whose ancestry (via `meta.parent_id`) reaches that root, and whose
@@ -94,6 +142,7 @@ pub fn pending(store: &SessionStore, dir: &Path, root_session_id: &str) -> Vec<N
                 ) =>
             {
                 let _ = std::fs::remove_file(&path);
+                let _ = std::fs::remove_file(retired_path(dir, &parent_id));
                 continue;
             }
             // Any other failure is a bad moment, not a dead session:
@@ -113,6 +162,7 @@ pub fn pending(store: &SessionStore, dir: &Path, root_session_id: &str) -> Vec<N
             .filter_map(|line| serde_json::from_str(line).ok())
             .collect();
         let recorded_len = recorded.len();
+        let retired = retired_texts(dir, &parent_id);
         // Delivery check: the routing paths may prepend queued steer
         // messages to the prompt they append, so the notification text
         // is a substring of the delivering `UserMessage`, not equal to
@@ -120,21 +170,28 @@ pub fn pending(store: &SessionStore, dir: &Path, root_session_id: &str) -> Vec<N
         // rewrites), so scanning the full event list is sound. Accepted
         // limitation: two byte-identical notification texts for the same
         // parent dedupe as one — the second reads as delivered by the
-        // first's prompt.
+        // first's prompt. A retired entry counts as delivered too: its
+        // salvage into a transcript was the delivery of last resort.
         let kept: Vec<Notification> = recorded
             .into_iter()
             .filter(|notification| {
-                !parent.events().iter().any(|event| match event {
-                    SessionEvent::UserMessage { text, .. } => text.contains(&notification.text),
-                    _ => false,
-                })
+                !retired.contains(&notification.text)
+                    && !parent.events().iter().any(|event| match event {
+                        SessionEvent::UserMessage { text, .. } => text.contains(&notification.text),
+                        _ => false,
+                    })
             })
             .collect();
         if kept.is_empty() {
             let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_file(retired_path(dir, &parent_id));
         } else {
-            if kept.len() != recorded_len {
-                let _ = rewrite(&path, &kept);
+            // The rewrite consumes the tombstones: the retired entries
+            // are gone from the compacted file, so the sidecar is only
+            // removed once the rewrite provably succeeded — a failed
+            // rewrite keeps both, and the next scan retries.
+            if kept.len() != recorded_len && rewrite(&path, &kept).is_ok() {
+                let _ = std::fs::remove_file(retired_path(dir, &parent_id));
             }
             undelivered.extend(kept);
         }

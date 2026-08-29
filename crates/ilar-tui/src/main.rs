@@ -1225,8 +1225,8 @@ async fn main() -> Result<()> {
         // Completions published by an earlier run of this tree that
         // never reached their session: the outbox kept them, and they
         // enter this run as if freshly notified.
-        let recovered_notifications =
-            ilar::outbox::pending(&store, &config.state_dir().join("outbox"), &session_id);
+        let outbox_dir = config.state_dir().join("outbox");
+        let recovered_notifications = ilar::outbox::pending(&store, &outbox_dir, &session_id);
         if !recovered_notifications.is_empty() {
             app.set_notice(
                 format!(
@@ -1255,6 +1255,7 @@ async fn main() -> Result<()> {
             loop_config,
             model_choices,
             services,
+            outbox_dir,
         )
         .await?;
         active_theme = app.theme;
@@ -1546,6 +1547,9 @@ struct LoopRuntime<'a> {
     loop_config: &'a LoopConfig,
     spawner: &'a std::sync::Arc<ilar::subagent::SubagentSpawner>,
     services: &'a std::sync::Arc<ilar::tools::service::ServiceManager>,
+    /// Where the durable outbox lives, for retiring an entry whose
+    /// delivery failed terminally and was salvaged into the transcript.
+    outbox_dir: &'a std::path::Path,
     terminal: &'a mut ratatui::DefaultTerminal,
     bell_pending: &'a mut bool,
 }
@@ -1691,6 +1695,10 @@ impl schedule::Runtime for LoopRuntime<'_> {
             .await;
             (question, result)
         }));
+    }
+
+    fn retire_notification(&mut self, notification: &ilar::subagent::Notification) {
+        ilar::outbox::retire(self.outbox_dir, notification);
     }
 
     fn route(&mut self, app: &mut App, notification: ilar::subagent::Notification) {
@@ -2270,6 +2278,7 @@ async fn run_app(
     loop_config: LoopConfig,
     model_choices: Vec<&'static ilar::model::ModelInfo>,
     services: std::sync::Arc<ilar::tools::service::ServiceManager>,
+    outbox_dir: std::path::PathBuf,
 ) -> Result<AppExit> {
     let mut events_rx: Option<LoopEventReceiver> = None;
     // The content-search scan: rows stream in stamped with the query
@@ -2640,6 +2649,7 @@ async fn run_app(
                 loop_config: &loop_config,
                 spawner: &spawner,
                 services: &services,
+                outbox_dir: &outbox_dir,
                 terminal: &mut *terminal,
                 bell_pending: &mut bell_pending,
             },
@@ -2696,9 +2706,15 @@ async fn run_app(
                     // invisible from a blank prompt; say what leaving
                     // costs before the second press takes it. The
                     // results survive in the outbox — the warning says
-                    // when they arrive, not that they are lost.
-                    let undelivered =
-                        held_notifications.len() + notifications.len() + routed.len();
+                    // when they arrive, not that they are lost. Counted
+                    // alongside the held and in-flight ones: results
+                    // that left the notification machinery and now sit
+                    // in the message queue or among unread steers as
+                    // envelope texts.
+                    let undelivered = held_notifications.len()
+                        + notifications.len()
+                        + routed.len()
+                        + app.undelivered_queued_results();
                     if let Some(warning) = app.quit_warning(undelivered) {
                         app.set_notice(warning, NoticeLevel::Warning);
                         continue;

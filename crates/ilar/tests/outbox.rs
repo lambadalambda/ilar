@@ -110,6 +110,64 @@ fn a_delivered_notification_compacts_away() {
     );
 }
 
+/// A retired entry — one whose text was salvaged into a transcript
+/// after a terminal delivery failure — stops pending: the salvage was
+/// the delivery of last resort, and the next open must not repeat it.
+/// Entries that were never retired (a transient failure holds and
+/// retries) keep pending exactly as before.
+#[test]
+fn a_retired_notification_stops_pending_and_the_rest_persist() {
+    let store = temp_store();
+    let dir = tempfile::tempdir().unwrap();
+    let root = create_session(&store, None);
+    let doomed = notification(
+        &root,
+        "<task-notification>\nTask \"bg survey\" failed: its agent is gone\n</task-notification>",
+    );
+    let transient = notification(
+        &root,
+        "<task-notification>\nTask \"bg survey\" completed.\n</task-notification>",
+    );
+    outbox::record(dir.path(), &doomed);
+    outbox::record(dir.path(), &transient);
+
+    outbox::retire(dir.path(), &doomed);
+
+    let left = outbox::pending(&store, dir.path(), &root);
+    assert_eq!(left.len(), 1, "the retired entry still reads as pending");
+    assert_eq!(left[0].text, transient.text);
+    // The transient one persists across scans; the retired one stays gone.
+    let left = outbox::pending(&store, dir.path(), &root);
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].text, transient.text);
+}
+
+/// Retiring the last entry sweeps the whole outbox file and its
+/// tombstones: nothing is left to announce at the next open.
+#[test]
+fn retiring_the_last_entry_leaves_no_files_behind() {
+    let store = temp_store();
+    let dir = tempfile::tempdir().unwrap();
+    let root = create_session(&store, None);
+    let doomed = notification(
+        &root,
+        "<task-notification>\nTask \"bg survey\" failed: its agent is gone\n</task-notification>",
+    );
+    outbox::record(dir.path(), &doomed);
+
+    outbox::retire(dir.path(), &doomed);
+
+    assert!(outbox::pending(&store, dir.path(), &root).is_empty());
+    assert!(
+        !dir.path().join(format!("{root}.jsonl")).exists(),
+        "an empty outbox file was left behind"
+    );
+    assert!(
+        !dir.path().join(format!("{root}.retired")).exists(),
+        "a consumed tombstone file was left behind"
+    );
+}
+
 /// A file for a session that no longer exists can never be delivered
 /// and is removed for whoever scans past it.
 #[test]

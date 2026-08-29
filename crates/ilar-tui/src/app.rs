@@ -61,6 +61,23 @@ pub(crate) struct StashedPrompt {
     pub(crate) images: Vec<ilar::session::ImageContent>,
 }
 
+/// Whether a queued or steered text is a task/tool notification
+/// envelope — a result that left the notification machinery and became
+/// an ordinary message. The tag prefix is the cheap screen; the display
+/// formatters do the actual parsing where a headline is needed.
+fn is_notification_envelope(text: &str) -> bool {
+    text.starts_with("<task-notification>") || text.starts_with("<tool-notification>")
+}
+
+/// The collapsed headline a queued task/tool result wears in the
+/// pending manager — the same first line its transcript row would
+/// show. `None` for an ordinary message.
+fn queued_result_headline(message: &ilar::agent::Steer) -> Option<String> {
+    task_notification_display(&message.text)
+        .or_else(|| tool_notification_display(&message.text))
+        .map(|display| display.lines().next().unwrap_or_default().to_string())
+}
+
 /// The words of every waiting message, for the tests that care about
 /// which message is where rather than what is attached to it.
 #[cfg(test)]
@@ -1122,6 +1139,19 @@ impl App {
         Some(message)
     }
 
+    /// Task/tool results that left the notification machinery and now
+    /// wait as ordinary texts — spliced into the queue at turn end or
+    /// steered but never read. They are still undelivered in the
+    /// outbox's eyes, so the quit warning must count them: durable, not
+    /// lost, but silent until the next open.
+    pub(crate) fn undelivered_queued_results(&self) -> usize {
+        self.queued_messages
+            .iter()
+            .chain(self.pending_steers.iter())
+            .filter(|message| is_notification_envelope(&message.text))
+            .count()
+    }
+
     pub(crate) fn pending_items(&self) -> Vec<PendingItem> {
         let mut items: Vec<PendingItem> = (0..self.queued_messages.len())
             .map(PendingItem::Queued)
@@ -1155,14 +1185,30 @@ impl App {
                 let is_armed = manager.armed == Some(*item) && index == selected;
                 armed |= is_armed;
                 match item {
-                    PendingItem::Queued(queue_index) => format!(
-                        "message {}: {}",
-                        queue_index + 1,
-                        self.queued_messages
-                            .get(*queue_index)
-                            .map(crate::transcript::pending_summary)
-                            .unwrap_or_default()
-                    ),
+                    PendingItem::Queued(queue_index) => {
+                        let message = self.queued_messages.get(*queue_index);
+                        // A queued task/tool result is not a message the
+                        // user wrote: label it for what it is, and let
+                        // its delete confirmation say what deleting
+                        // costs — nothing lost, only deferred, because
+                        // the outbox redelivers at the next open.
+                        match message.and_then(queued_result_headline) {
+                            Some(_) if is_armed => format!(
+                                "task result {}: press d again to delete — the outbox redelivers it when this session next opens",
+                                queue_index + 1
+                            ),
+                            Some(headline) => {
+                                format!("task result {}: {}", queue_index + 1, headline)
+                            }
+                            None => format!(
+                                "message {}: {}",
+                                queue_index + 1,
+                                message
+                                    .map(crate::transcript::pending_summary)
+                                    .unwrap_or_default()
+                            ),
+                        }
+                    }
                     PendingItem::Goal => {
                         let (goal, round) = self.goal.as_ref().expect("goal item implies goal");
                         if is_armed {
@@ -1206,6 +1252,14 @@ impl App {
 
     pub(crate) fn pending_manager_key(&mut self, code: KeyCode, control: bool) -> PendingAction {
         let items = self.pending_items();
+        // Computed before the manager borrow: which queued entries are
+        // task/tool results, whose deletion needs the armed
+        // confirmation below.
+        let queued_results: Vec<bool> = self
+            .queued_messages
+            .iter()
+            .map(|message| is_notification_envelope(&message.text))
+            .collect();
         let Some(manager) = self.pending_manager.as_mut() else {
             return PendingAction::Stay;
         };
@@ -1225,15 +1279,24 @@ impl App {
             (KeyCode::Esc, _) | (KeyCode::Char('q'), true | false) => PendingAction::Close,
             (KeyCode::Delete | KeyCode::Backspace | KeyCode::Char('d'), _) => {
                 match selected {
-                    // Removing one queued message is targeted enough to
-                    // fire immediately.
-                    PendingItem::Queued(index) => PendingAction::DeleteQueued(index),
+                    // Removing one queued message the user wrote is
+                    // targeted enough to fire immediately. A queued
+                    // task result is not one: it falls through to the
+                    // armed confirmation, whose label says deletion
+                    // only defers redelivery to the next session open.
+                    PendingItem::Queued(index)
+                        if !queued_results.get(index).copied().unwrap_or(false) =>
+                    {
+                        PendingAction::DeleteQueued(index)
+                    }
                     PendingItem::Retry => PendingAction::DismissRetry,
-                    // Goal and background jobs are investments: confirm.
+                    // Goal, background jobs and task results are
+                    // investments: confirm.
                     armed_item => {
                         if manager.armed == Some(armed_item) {
                             manager.armed = None;
                             match armed_item {
+                                PendingItem::Queued(index) => PendingAction::DeleteQueued(index),
                                 PendingItem::Goal => PendingAction::AbortGoal,
                                 PendingItem::BackgroundJobs => PendingAction::CancelBackground,
                                 PendingItem::Services => PendingAction::StopServices,
@@ -3049,6 +3112,88 @@ mod tests {
 
         app.pending_manager = None;
         assert!(app.pending_snapshot().is_none());
+    }
+
+    /// A queued task result is not a message the user wrote: the
+    /// manager names it for what it is, headline and all — never its
+    /// raw envelope — and deleting it takes a confirmation that says
+    /// deletion only defers redelivery to the next session open.
+    #[test]
+    fn a_queued_task_result_is_labeled_and_its_deletion_deferred_with_confirmation() {
+        let mut app = App::new();
+        app.queued_messages = vec![
+            "<task-notification>\nTask \"bg survey\" completed.\n<result>\nfound it\n</result>\n</task-notification>".into(),
+            "ordinary follow-up".into(),
+        ];
+        app.pending_manager = Some(PendingManager::default());
+
+        let snapshot = app.pending_snapshot().expect("manager is open");
+        assert_eq!(snapshot.rows[0], "task result 1: bg survey completed.");
+        assert!(!snapshot.rows[0].contains("<task-notification>"));
+        assert_eq!(snapshot.rows[1], "message 2: ordinary follow-up");
+
+        // First d arms; the label becomes the deferred-not-lost
+        // confirmation; the second d fires.
+        assert_eq!(
+            app.pending_manager_key(KeyCode::Char('d'), false),
+            PendingAction::Stay
+        );
+        let snapshot = app.pending_snapshot().expect("manager is open");
+        assert!(snapshot.armed);
+        assert!(
+            snapshot.rows[0].contains("press d again")
+                && snapshot.rows[0].contains("redelivers it when this session next opens"),
+            "{}",
+            snapshot.rows[0]
+        );
+        assert_eq!(
+            app.pending_manager_key(KeyCode::Char('d'), false),
+            PendingAction::DeleteQueued(0)
+        );
+
+        // The ordinary message keeps its immediate, targeted delete.
+        app.queued_messages.remove(0);
+        assert_eq!(
+            app.pending_manager_key(KeyCode::Char('d'), false),
+            PendingAction::DeleteQueued(0)
+        );
+    }
+
+    /// A tool-notification envelope wears the same treatment: the job
+    /// headline, not the raw tag.
+    #[test]
+    fn a_queued_job_result_is_labeled_by_its_headline() {
+        let mut app = App::new();
+        app.queued_messages = vec![
+            "<tool-notification>\nBackground job job-1 (\"Run checks\") completed.\n<result>\nchecks passed\n</result>\n</tool-notification>".into(),
+        ];
+        app.pending_manager = Some(PendingManager::default());
+
+        let snapshot = app.pending_snapshot().expect("manager is open");
+        assert_eq!(
+            snapshot.rows[0],
+            "task result 1: job-1 (\"Run checks\") completed."
+        );
+    }
+
+    /// The quit warning's undelivered count reaches results that left
+    /// the notification machinery: envelope texts spliced into the
+    /// message queue or steered but never read. Ordinary messages and
+    /// steers stay out of it.
+    #[test]
+    fn queued_and_steered_task_results_count_as_undelivered() {
+        let mut app = App::new();
+        assert_eq!(app.undelivered_queued_results(), 0);
+        app.queued_messages = vec![
+            "ordinary follow-up".into(),
+            "<task-notification>\nTask \"bg survey\" completed.\n</task-notification>".into(),
+        ];
+        app.pending_steers = vec![
+            "go left".into(),
+            "<tool-notification>\nBackground job job-1 (\"Run checks\") completed.\n</tool-notification>".into(),
+        ];
+
+        assert_eq!(app.undelivered_queued_results(), 2);
     }
 
     #[test]
