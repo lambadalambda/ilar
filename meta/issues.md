@@ -53,6 +53,5 @@
 ## Milestone 13 — Guard rails
 
 - [ ] [Kernel sandbox for tool processes](issues/kernel-sandbox-for-tool-processes.md)
-- [ ] [Worktrees anchor to the repo beneath](issues/worktrees-anchor-to-the-repo-beneath.md)
-- [ ] [The root turn gets a watchdog](issues/the-root-turn-gets-a-watchdog.md)
 - [ ] [The replay sweep](issues/the-replay-sweep.md)
+- [ ] [The agents "more" row takes clicks](issues/the-agents-more-row-takes-clicks.md)

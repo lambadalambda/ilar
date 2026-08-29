@@ -262,3 +262,6 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Queued task results say what they are](issues/queued-task-results-say-what-they-are.md)
 - [x] [Redaction covers what tools echo](issues/redaction-covers-what-tools-echo.md)
 - [x] [Rows react when clicked](issues/rows-react-when-clicked.md)
+- [x] [A compacted child still reports](issues/a-compacted-child-still-reports.md)
+- [x] [Worktrees anchor to the repo beneath](issues/worktrees-anchor-to-the-repo-beneath.md)
+- [x] [The root turn gets a watchdog](issues/the-root-turn-gets-a-watchdog.md)

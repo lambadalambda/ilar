@@ -119,3 +119,14 @@ the routed delivery's discarded event sender, the TUI's 16 KiB
 result cap, the web glyph map and per-tool progress labels, and
 the three cosmetic-drift items.
 
+## Progress update (2026-08-29, wave 2)
+
+The TUI keeps tool results to 256 KiB behind the full toggle
+(redacted copy; live rows still bound at the 16 KiB publish cap —
+lifting that in turn.rs is the one remaining piece of this item),
+a child's mid-run compaction shows live, and the web glyph map
+matches the real tool set. Remaining: the routed delivery's
+discarded event sender, the live publish bound, "reverted
+to"/"switched to" wording, and the UI-spawned subtask's started
+line.
+

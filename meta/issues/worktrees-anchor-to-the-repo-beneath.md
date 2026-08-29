@@ -23,3 +23,22 @@ before it gave up and serialized.
 ## Milestone
 
 13 — Guard rails
+
+## Outcome
+
+The anchor is the repository containing the requested path.
+`validated_git_worktree` resolves the request first; a session cwd
+inside a repo keeps the old same-repository rule, and a
+repositoryless session cwd accepts any repository whose common dir
+sits beneath it — the issue's exact case. Every refusal names the
+path actually examined and what was expected there, ending the
+wrong-path blame that cost an orchestrator four attempts. The
+registration check anchors on the requested worktree's root, child
+locations key their own locks (two repos under one session run
+concurrently — pinned by a barrier provider that deadlocks if they
+serialize), and lease revalidation and notification routing funnel
+through the same validator.
+
+Deliberate non-change, for a follow-up decision: a session whose
+cwd is itself a repo still cannot anchor a different repository
+nested beneath that checkout.
