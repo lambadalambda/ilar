@@ -664,9 +664,10 @@ impl SubagentSpawner {
                     Err(error) => {
                         return ToolOutput::error(format!(
                             "invalid task workspace {:?}: {error:#}. workspace.cwd must already be \
-                             a registered Git worktree of this repository: {WORKTREE_CORRECTION}. \
-                             Outside a Git repository no workspace is valid: omit workspace to run \
-                             in the current checkout.",
+                             a registered Git worktree — of the session's repository, or of a \
+                             repository beneath the session cwd: {WORKTREE_CORRECTION}. A path in \
+                             no Git repository can never be a workspace: omit workspace to run in \
+                             the current checkout.",
                             workspace.cwd
                         ));
                     }

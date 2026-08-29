@@ -98,19 +98,65 @@ impl WorkspaceLocation {
     ) -> anyhow::Result<Self> {
         let requested_cwd = std::fs::canonicalize(&requested_cwd)
             .map_err(|error| anyhow::anyhow!("workspace cwd {:?}: {error}", requested_cwd))?;
-        let (parent_root, parent_common) = git_paths(parent.cwd()).await?;
-        let (root, common_dir) = git_paths(&requested_cwd).await?;
-        if root == parent_root {
-            anyhow::bail!("isolated workspace must use a different Git worktree");
-        }
-        if common_dir != parent_common {
-            anyhow::bail!("isolated workspace must belong to the parent Git repository");
+        let (root, common_dir) = git_paths(&requested_cwd).await.map_err(|error| {
+            anyhow::anyhow!(
+                "workspace cwd {requested_cwd:?} is not inside a Git repository (expected the \
+                 cwd of a registered Git worktree): {error:#}"
+            )
+        })?;
+        // The anchor is the repository containing the requested path. A
+        // session whose cwd sits inside a repository pins that repository:
+        // the worktree must belong to it and be a different checkout. A
+        // session whose cwd sits *above* its repositories pins none, so
+        // any repository beneath its cwd anchors the request — cwd
+        // `~/repos`, task path `~/repos/project` → worktree of `project`.
+        match git_paths(parent.cwd()).await {
+            Ok((parent_root, parent_common)) => {
+                if root == parent_root {
+                    anyhow::bail!(
+                        "isolated workspace must use a different Git worktree: \
+                         {requested_cwd:?} resolves to the parent's own checkout {parent_root:?}"
+                    );
+                }
+                if common_dir != parent_common {
+                    anyhow::bail!(
+                        "isolated workspace must belong to the parent Git repository: \
+                         {requested_cwd:?} belongs to {common_dir:?}, but the session's \
+                         checkout {:?} belongs to {parent_common:?}",
+                        parent.cwd(),
+                    );
+                }
+            }
+            Err(probe_error) => {
+                // Only a genuine "no repository here" answer relaxes the
+                // same-repository rules. A timeout, a killed git, or an
+                // unreadable session cwd must not silently downgrade
+                // validation to containment-only — that path could admit
+                // the parent's own checkout under the parent's lock.
+                if !format!("{probe_error:#}").contains("not a git repository") {
+                    return Err(probe_error.context(format!(
+                        "could not determine whether the session cwd {:?} is inside a Git \
+                         repository",
+                        parent.cwd(),
+                    )));
+                }
+                if !common_dir.starts_with(parent.cwd()) {
+                    anyhow::bail!(
+                        "workspace cwd {requested_cwd:?} belongs to repository {common_dir:?}, \
+                         which is outside the session cwd {:?} — the session cwd is in no Git \
+                         repository, so only repositories beneath it can anchor a worktree",
+                        parent.cwd(),
+                    );
+                }
+            }
         }
         if !requested_cwd.starts_with(&root) {
-            anyhow::bail!("workspace cwd is outside its Git worktree root");
+            anyhow::bail!(
+                "workspace cwd {requested_cwd:?} is outside its Git worktree root {root:?}"
+            );
         }
 
-        let output = git_output(parent.root(), &["worktree", "list", "--porcelain", "-z"]).await?;
+        let output = git_output(&root, &["worktree", "list", "--porcelain", "-z"]).await?;
         let listed = output.split(|byte| *byte == 0).any(|field| {
             field
                 .strip_prefix(b"worktree ")
@@ -119,7 +165,10 @@ impl WorkspaceLocation {
                 .is_some_and(|path| path == root)
         });
         if !listed {
-            anyhow::bail!("workspace is not a registered Git worktree");
+            anyhow::bail!(
+                "workspace {root:?} is not a registered Git worktree of the repository at \
+                 {common_dir:?}"
+            );
         }
 
         Ok(Self {

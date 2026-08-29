@@ -670,23 +670,22 @@ async fn a_leased_parent_detaches_a_defaulted_read_only_task() {
     spawner.shutdown().await;
 }
 
-fn repository_with_worktree() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
-    fn git(cwd: &std::path::Path, args: &[&str]) {
-        let output = std::process::Command::new("git")
-            .arg("-C")
-            .arg(cwd)
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "git {args:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+fn git(cwd: &std::path::Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
 
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().join("root");
+fn repository_beneath(parent: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let root = parent.join(name);
     std::fs::create_dir(&root).unwrap();
     git(&root, &["init", "-q"]);
     git(&root, &["config", "user.name", "ilar tests"]);
@@ -694,6 +693,12 @@ fn repository_with_worktree() -> (tempfile::TempDir, std::path::PathBuf, std::pa
     std::fs::write(root.join("README.md"), "test\n").unwrap();
     git(&root, &["add", "README.md"]);
     git(&root, &["commit", "-qm", "initial"]);
+    root
+}
+
+fn repository_with_worktree() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let temp = tempfile::tempdir().unwrap();
+    let root = repository_beneath(temp.path(), "root");
     let worktree = temp.path().join("isolated-worktree");
     git(
         &root,
@@ -706,6 +711,169 @@ fn repository_with_worktree() -> (tempfile::TempDir, std::path::PathBuf, std::pa
         ],
     );
     (temp, root, worktree)
+}
+
+/// Streams its text only once every barrier participant is streaming at
+/// the same time — the provider-side proof that tasks ran concurrently.
+#[derive(Clone)]
+struct RendezvousText {
+    barrier: Arc<tokio::sync::Barrier>,
+}
+
+impl Provider for RendezvousText {
+    fn stream(&self, _req: Request) -> anyhow::Result<EventStream> {
+        let barrier = self.barrier.clone();
+        Ok(Box::pin(
+            stream::once(async move {
+                barrier.wait().await;
+                ProviderEvent::TextDelta("met in the middle".into())
+            })
+            .chain(stream::once(async {
+                ProviderEvent::TurnComplete {
+                    stop_reason: StopReason::EndTurn,
+                    usage: Usage::default(),
+                }
+            })),
+        ))
+    }
+}
+
+/// The issue's wave-orchestration shape: a session whose cwd sits above
+/// its repositories runs mutable tasks in worktrees of two different
+/// repositories beneath it, concurrently. Each request anchors to the
+/// repository containing its requested path — the session cwd is in no
+/// repository — and the two checkouts key distinct locks, so neither
+/// task waits on the other. The rendezvous provider only completes when
+/// both children stream at once; serialization deadlocks it into the
+/// timeout.
+#[tokio::test]
+async fn a_session_above_two_repositories_runs_mutable_worktree_tasks_concurrently() {
+    let (store, session_id) = temp_store();
+    let temp = tempfile::tempdir().unwrap();
+    let alpha = repository_beneath(temp.path(), "alpha");
+    let beta = repository_beneath(temp.path(), "beta");
+    let alpha_task = temp.path().join("alpha-task");
+    let beta_task = temp.path().join("beta-task");
+    git(
+        &alpha,
+        &[
+            "worktree",
+            "add",
+            "-qb",
+            "wave-alpha",
+            alpha_task.to_str().unwrap(),
+        ],
+    );
+    git(
+        &beta,
+        &[
+            "worktree",
+            "add",
+            "-qb",
+            "wave-beta",
+            beta_task.to_str().unwrap(),
+        ],
+    );
+    let spawner = Arc::new(
+        unwatched_spawner(
+            Arc::new(RendezvousText {
+                barrier: Arc::new(tokio::sync::Barrier::new(2)),
+            }),
+            &store,
+            AgentWorkspaceMode::Mutable,
+            temp.path().to_path_buf(),
+        )
+        // The children idle at the barrier until both arrive; a short
+        // watchdog would read that as a stall and break the rendezvous.
+        .with_stall_timeout(Duration::from_secs(60)),
+    );
+    let task = task_tool(spawner.clone());
+    let ctx = background_tool_context(session_id, spawner.clone(), temp.path());
+
+    let first = task.run(
+        serde_json::json!({
+            "description": "mutate alpha",
+            "prompt": "edit alpha",
+            "subagent_type": "explore",
+            "workspace": {"cwd": alpha_task.clone(), "isolation": "git_worktree"},
+        }),
+        ctx.clone(),
+    );
+    let second = task.run(
+        serde_json::json!({
+            "description": "mutate beta",
+            "prompt": "edit beta",
+            "subagent_type": "explore",
+            "workspace": {"cwd": beta_task.clone(), "isolation": "git_worktree"},
+        }),
+        ctx,
+    );
+    let (first, second) = tokio::time::timeout(
+        Duration::from_secs(10),
+        futures::future::join(first, second),
+    )
+    .await
+    .expect("tasks serialized: the rendezvous never completed");
+
+    assert!(!first.is_error, "{}", first.content);
+    assert!(!second.is_error, "{}", second.content);
+    assert!(
+        first.content.contains("met in the middle"),
+        "{}",
+        first.content
+    );
+    assert!(
+        second.content.contains("met in the middle"),
+        "{}",
+        second.content
+    );
+}
+
+/// The task tool's refusal names the path it examined: a requested
+/// workspace in no Git repository is blamed itself — not the session
+/// cwd, which misled an orchestrator through four failed attempts.
+#[tokio::test]
+async fn a_workspace_in_no_repository_is_blamed_itself() {
+    let (store, session_id) = temp_store();
+    let temp = tempfile::tempdir().unwrap();
+    let plain = temp.path().join("plain-directory");
+    std::fs::create_dir(&plain).unwrap();
+    let spawner = spawner_for_workspace(
+        Arc::new(DelayedText {
+            text: "never reached",
+            delay_ms: 1,
+        }),
+        &store,
+        AgentWorkspaceMode::Mutable,
+        temp.path().to_path_buf(),
+    );
+    let task = task_tool(spawner.clone());
+    let ctx = background_tool_context(session_id, spawner, temp.path());
+
+    let output = task
+        .run(
+            serde_json::json!({
+                "description": "doomed",
+                "prompt": "work",
+                "subagent_type": "explore",
+                "workspace": {"cwd": plain.clone(), "isolation": "git_worktree"},
+            }),
+            ctx,
+        )
+        .await;
+
+    assert!(output.is_error, "{}", output.content);
+    let examined = std::fs::canonicalize(&plain).unwrap();
+    assert!(
+        output.content.contains(&format!("{examined:?}")),
+        "{}",
+        output.content
+    );
+    assert!(
+        output.content.contains("not inside a Git repository"),
+        "{}",
+        output.content
+    );
 }
 
 fn remove_worktree(root: &std::path::Path, worktree: &std::path::Path) {

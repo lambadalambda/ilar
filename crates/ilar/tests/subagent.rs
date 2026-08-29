@@ -1451,9 +1451,10 @@ async fn an_unvalidatable_workspace_names_the_worktree_input_to_pass() {
         output.content
     );
     assert!(
-        output
-            .content
-            .contains("must already be a registered Git worktree of this repository"),
+        output.content.contains(
+            "must already be a registered Git worktree — of the session's repository, or of a \
+             repository beneath the session cwd"
+        ),
         "{}",
         output.content
     );
