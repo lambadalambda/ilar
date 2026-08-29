@@ -26,7 +26,8 @@ use crate::modals::{
 };
 use crate::selection::{highlight_transcript_selection, selected_rows_unchanged, transcript_cells};
 use crate::sidebar::{
-    ServicePanel, agent_panel_lines, carve_panel, content_areas, exited_disclosure_hit,
+    AgentPanel, ServicePanel, agent_panel, carve_panel, carve_panel_capped, content_areas,
+    disclosure_hit,
     render_todo_sidebar_snapshot, service_panel, todo_render_snapshot, todo_summary, underline_row,
 };
 use crate::text::{
@@ -489,9 +490,10 @@ impl App {
     }
 
     pub(crate) fn render(&mut self, frame: &mut Frame) {
-        // Refreshed below only if the services panel actually draws;
-        // a stale rect would take phantom clicks.
+        // Refreshed below only if their panels actually draw; a stale
+        // rect would take phantom clicks.
         self.services_exited_hit = None;
+        self.agents_more_hit = None;
         let input_width = frame.area().width.saturating_sub(2);
         let desired_input_height = self
             .input
@@ -733,13 +735,47 @@ impl App {
                     frame.render_widget(Paragraph::new(lines).block(goal_block), goal_area);
                 }
             }
-            if !self.agents_view.is_empty() {
+            if self.agents_view.is_empty() {
+                // An expansion is a decision about a roster; it does
+                // not outlive it to pre-expand some future batch.
+                self.agents_show_all = false;
+            } else {
                 let text_width = todo_area
                     .width
                     .saturating_sub(2 + CONTENT_HORIZONTAL_PADDING * 2)
                     .max(1) as usize;
-                let lines = agent_panel_lines(&self.agents_view, text_width);
-                if let Some(agent_area) = carve_panel(&mut todo_area, lines.len()) {
+                // Expansion drops the half-height cap: the click was an
+                // explicit decision to spend the todo list's space. It
+                // also un-sticks itself the moment everyone fits the
+                // ordinary cap again.
+                let collapsed_budget = (todo_area.height / 2).saturating_sub(2) as usize;
+                if self.agents_show_all && self.agents_view.len() * 2 <= collapsed_budget {
+                    self.agents_show_all = false;
+                }
+                let cap = if self.agents_show_all {
+                    todo_area.height
+                } else {
+                    todo_area.height / 2
+                };
+                let AgentPanel { mut lines, more_toggle } = agent_panel(
+                    &self.agents_view,
+                    self.agents_show_all,
+                    text_width,
+                    cap.saturating_sub(2) as usize,
+                );
+                if let Some(agent_area) = carve_panel_capped(&mut todo_area, lines.len(), cap) {
+                    if let Some((index, rect)) = more_toggle
+                        .and_then(|index| Some((index, disclosure_hit(agent_area, index)?)))
+                    {
+                        self.agents_more_hit = Some(rect);
+                        if self.mouse_reaches_content()
+                            && self.hover_screen.is_some_and(|(column, hover_row)| {
+                                rect.contains(ratatui::layout::Position::new(column, hover_row))
+                            })
+                        {
+                            underline_row(&mut lines[index]);
+                        }
+                    }
                     let agent_block = Block::default()
                         .borders(Borders::ALL)
                         .border_type(BorderType::Rounded)
@@ -769,9 +805,9 @@ impl App {
                 if let Some(service_area) = carve_panel(&mut todo_area, lines.len()) {
                     // The disclosure line's screen row, for the mouse —
                     // and the hover underline, like every clickable.
-                    if let Some((index, rect)) = exited_toggle.and_then(|index| {
-                        Some((index, exited_disclosure_hit(service_area, index)?))
-                    }) {
+                    if let Some((index, rect)) = exited_toggle
+                        .and_then(|index| Some((index, disclosure_hit(service_area, index)?)))
+                    {
                         self.services_exited_hit = Some(rect);
                         if self.mouse_reaches_content()
                             && self.hover_screen.is_some_and(|(column, hover_row)| {

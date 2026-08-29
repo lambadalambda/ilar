@@ -3670,10 +3670,11 @@ async fn run_app(
                 // expanding must keep working underneath it.
                 match mouse.kind {
                     MouseEventKind::Down(MouseButton::Left) => {
-                        // Sidebar chrome first: the exited-services
-                        // disclosure is the one clickable outside the
-                        // transcript.
-                        if !app.click_exited_services(mouse.column, mouse.row) {
+                        // Sidebar chrome first: the two disclosure rows
+                        // are the clickables outside the transcript.
+                        if !app.click_exited_services(mouse.column, mouse.row)
+                            && !app.click_agents_more(mouse.column, mouse.row)
+                        {
                             app.begin_transcript_selection(mouse.column, mouse.row);
                         }
                     }

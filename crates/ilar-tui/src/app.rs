@@ -241,6 +241,10 @@ pub(crate) struct App {
     /// line landed on screen last frame (None when not drawn).
     pub(crate) services_show_exited: bool,
     pub(crate) services_exited_hit: Option<Rect>,
+    /// The agents panel's "+N more" disclosure: expanded past the
+    /// half-height cap?, and where its row landed last frame.
+    pub(crate) agents_show_all: bool,
+    pub(crate) agents_more_hit: Option<Rect>,
     /// Raw pointer position for chrome outside the transcript (the
     /// sidebar toggle); the transcript keeps its own relative hover.
     pub(crate) hover_screen: Option<(u16, u16)>,
@@ -372,6 +376,8 @@ impl App {
             pending_images: Vec::new(),
             services_show_exited: false,
             services_exited_hit: None,
+            agents_show_all: false,
+            agents_more_hit: None,
             hover_screen: None,
             transcript_cells: Vec::new(),
             transcript_selection: None,
@@ -1461,6 +1467,18 @@ impl App {
             .is_some_and(|rect| rect.contains(ratatui::layout::Position::new(column, row)));
         if hit {
             self.services_show_exited = !self.services_show_exited;
+        }
+        hit
+    }
+
+    /// A click on the agents panel's "+N more" disclosure; false when
+    /// it missed (the transcript gets the click instead).
+    pub(crate) fn click_agents_more(&mut self, column: u16, row: u16) -> bool {
+        let hit = self
+            .agents_more_hit
+            .is_some_and(|rect| rect.contains(ratatui::layout::Position::new(column, row)));
+        if hit {
+            self.agents_show_all = !self.agents_show_all;
         }
         hit
     }
@@ -3538,6 +3556,78 @@ mod tests {
         let idle = screen(&mut app);
         assert!(!idle.contains("agents ("), "{idle}");
         assert!(idle.contains("todos"), "{idle}");
+    }
+
+    /// The agents panel hides nothing until space runs out — and when
+    /// it must, the "+N more" row is a real disclosure: click to spend
+    /// the todo list's space on the full roster, click to fold it
+    /// back, and the expansion lets go by itself once everyone fits
+    /// the ordinary cap again.
+    #[test]
+    fn the_agents_more_row_expands_the_panel_and_folds_it_back() {
+        let mut app = App::new();
+        app.agents_view = (0..8)
+            .map(|index| AgentRow {
+                description: format!("hunt bug number {index}"),
+                agent: "explore".into(),
+                background: false,
+                delivering: false,
+                foreign_parent: None,
+                elapsed: std::time::Duration::from_secs(30),
+            })
+            .collect();
+        let screen = |app: &mut App| {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
+            terminal.draw(|frame| app.render(frame)).unwrap();
+            (0..30)
+                .map(|row| {
+                    (0..140)
+                        .map(|column| terminal.backend().buffer()[(column, row)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        // Overflow: the head shows, the tail is counted, the count is
+        // a row of its own that recorded where it landed.
+        let collapsed = screen(&mut app);
+        assert!(collapsed.contains("hunt bug number 0"), "{collapsed}");
+        assert!(!collapsed.contains("hunt bug number 7"), "{collapsed}");
+        assert!(collapsed.contains("▸ +"), "{collapsed}");
+        let hit = app.agents_more_hit.expect("more rect recorded");
+
+        // Click: the whole roster, at the todo list's expense, with
+        // the way back in its place.
+        assert!(app.click_agents_more(hit.x, hit.y));
+        let expanded = screen(&mut app);
+        assert!(expanded.contains("hunt bug number 7"), "{expanded}");
+        assert!(expanded.contains("▾ show less"), "{expanded}");
+
+        // A second click folds it back.
+        let hit = app.agents_more_hit.expect("less rect recorded");
+        assert!(app.click_agents_more(hit.x, hit.y));
+        let refolded = screen(&mut app);
+        assert!(!refolded.contains("hunt bug number 7"), "{refolded}");
+        assert!(refolded.contains("▸ +"), "{refolded}");
+
+        // A miss is not consumed. And once the roster fits the cap,
+        // a stale expansion releases itself: no disclosure at all.
+        assert!(!app.click_agents_more(0, 0));
+        app.agents_show_all = true;
+        app.agents_view.truncate(2);
+        let fits = screen(&mut app);
+        assert!(!fits.contains("show less"), "{fits}");
+        assert!(!app.agents_show_all, "expansion released");
+        assert!(app.agents_more_hit.is_none());
+
+        // An expansion does not outlive its roster: everyone finishing
+        // must not leave the next batch pre-expanded.
+        app.agents_show_all = true;
+        app.agents_view.clear();
+        let _ = screen(&mut app);
+        assert!(!app.agents_show_all, "expansion died with the roster");
     }
 
     #[test]

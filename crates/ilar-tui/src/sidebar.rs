@@ -42,7 +42,14 @@ pub(crate) fn content_areas(area: Rect) -> ContentAreas {
 /// todos below. Returns `None` — leaving `area` untouched — when the
 /// cap leaves no room for any content.
 pub(crate) fn carve_panel(area: &mut Rect, content_rows: usize) -> Option<Rect> {
-    let height = (content_rows as u16 + 2).min(area.height / 2);
+    carve_panel_capped(area, content_rows, area.height / 2)
+}
+
+/// Like `carve_panel`, but with the caller's own height cap — for the
+/// expanded agents panel, whose click is an explicit decision to spend
+/// the todo list's space.
+pub(crate) fn carve_panel_capped(area: &mut Rect, content_rows: usize, cap: u16) -> Option<Rect> {
+    let height = (content_rows as u16 + 2).min(cap).min(area.height);
     if height <= 2 {
         return None;
     }
@@ -68,16 +75,46 @@ pub(crate) struct AgentRow {
     pub(crate) elapsed: std::time::Duration,
 }
 
-/// How many agents the panel lists before counting the rest.
-const AGENT_PANEL_MAX: usize = 3;
+/// The running-agents panel's rows, plus where its disclosure row
+/// landed among them — the one row that takes clicks.
+pub(crate) struct AgentPanel {
+    pub(crate) lines: Vec<Line<'static>>,
+    pub(crate) more_toggle: Option<usize>,
+}
 
 /// The running-agents panel: what was delegated, to whom, and for how
 /// long. Two lines each — the description earns a full line, since it
 /// is the only thing that says what the agent is actually doing.
-pub(crate) fn agent_panel_lines(agents: &[AgentRow], width: usize) -> Vec<Line<'static>> {
+/// Nothing is hidden until `budget_rows` runs out; only then does the
+/// tail collapse into a clickable "+N more" disclosure, and an
+/// expanded panel carries the way back the same way. An expanded
+/// panel that still cannot show everyone says so.
+pub(crate) fn agent_panel(
+    agents: &[AgentRow],
+    show_all: bool,
+    width: usize,
+    budget_rows: usize,
+) -> AgentPanel {
+    let full = agents.len() * 2;
+    let (count, toggle_text) = if !show_all && full <= budget_rows {
+        (agents.len(), None)
+    } else {
+        let count = if show_all && full + 1 <= budget_rows {
+            agents.len()
+        } else {
+            budget_rows.saturating_sub(1) / 2
+        };
+        let hidden = agents.len() - count;
+        let text = match (show_all, hidden) {
+            (false, hidden) => format!("▸ +{hidden} more"),
+            (true, 0) => "▾ show less".to_string(),
+            (true, hidden) => format!("▾ show less · {hidden} hidden"),
+        };
+        (count, Some(text))
+    };
     let width = width.max(1);
     let mut lines = Vec::new();
-    for agent in agents.iter().take(AGENT_PANEL_MAX) {
+    for agent in agents.iter().take(count) {
         // Truncate the marker too: at absurd widths it is the overflow.
         // Mail for a delivery: a result on its way to this agent, not
         // work the model started.
@@ -118,17 +155,14 @@ pub(crate) fn agent_panel_lines(agents: &[AgentRow], width: usize) -> Vec<Line<'
             Style::default().fg(MUTED),
         ));
     }
-    if agents.len() > AGENT_PANEL_MAX {
+    let more_toggle = toggle_text.map(|text| {
         lines.push(Line::styled(
-            truncate_display(
-                &format!("  +{} more", agents.len() - AGENT_PANEL_MAX),
-                width,
-                Truncation::Right,
-            ),
+            truncate_display(&text, width, Truncation::Right),
             Style::default().fg(MUTED),
         ));
-    }
-    lines
+        lines.len() - 1
+    });
+    AgentPanel { lines, more_toggle }
 }
 
 /// The services panel's rows, plus where its exited-services
@@ -191,9 +225,10 @@ pub(crate) fn service_panel(
     }
 }
 
-/// Where the disclosure row landed on screen inside its carved panel —
-/// `None` when the panel had no room to draw it.
-pub(crate) fn exited_disclosure_hit(panel: Rect, index: usize) -> Option<Rect> {
+/// Where a disclosure row landed on screen inside its carved panel —
+/// `None` when the panel had no room to draw it. Shared by the
+/// services' exited toggle and the agents' "+N more".
+pub(crate) fn disclosure_hit(panel: Rect, index: usize) -> Option<Rect> {
     let row = panel.y + 1 + index as u16;
     (row < panel.bottom().saturating_sub(1))
         .then(|| Rect::new(panel.x + 1, row, panel.width.saturating_sub(2), 1))
@@ -700,7 +735,7 @@ mod tests {
     }
 
     #[test]
-    fn the_agent_panel_caps_its_rows_and_counts_the_rest() {
+    fn the_agent_panel_hides_nothing_until_space_runs_out() {
         let agents = (0..5)
             .map(|index| AgentRow {
                 description: format!("task number {index} with a long description"),
@@ -712,21 +747,43 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let lines = agent_panel_lines(&agents, 24);
-        let text = lines.iter().map(rendered_text).collect::<Vec<_>>();
-
-        // Three agents, two lines each, then the tally.
-        assert_eq!(text.len(), 7, "{text:?}");
+        // Room for all ten rows: every agent shows, nothing to click.
+        let panel = agent_panel(&agents, false, 24, 10);
+        let text = panel.lines.iter().map(rendered_text).collect::<Vec<_>>();
+        assert_eq!(text.len(), 10, "{text:?}");
+        assert!(panel.more_toggle.is_none());
         assert!(text[0].starts_with("▸ task number 0"), "{text:?}");
         assert_eq!(text[1], "  explore · 30s");
         assert_eq!(text[3], "  explore · bg · 30s");
-        assert_eq!(text[6], "  +2 more");
-        assert!(lines.iter().all(|line| line.width() <= 24), "{text:?}");
 
-        // A single agent needs no tally, and zero width does not panic.
-        assert_eq!(agent_panel_lines(&agents[..1], 24).len(), 2);
+        // Seven rows: three whole agents beside the disclosure, and
+        // the disclosure is a row of its own that the mouse can find.
+        let panel = agent_panel(&agents, false, 24, 7);
+        let text = panel.lines.iter().map(rendered_text).collect::<Vec<_>>();
+        assert_eq!(text.len(), 7, "{text:?}");
+        assert_eq!(panel.more_toggle, Some(6));
+        assert_eq!(text[6], "▸ +2 more");
+        assert!(panel.lines.iter().all(|line| line.width() <= 24), "{text:?}");
+
+        // Expanded with room for everything: all five, plus the way
+        // back.
+        let panel = agent_panel(&agents, true, 24, 16);
+        let text = panel.lines.iter().map(rendered_text).collect::<Vec<_>>();
+        assert_eq!(text.len(), 11, "{text:?}");
+        assert_eq!(panel.more_toggle, Some(10));
+        assert_eq!(text[10], "▾ show less");
+
+        // Expanded but the screen is still too short: honest about it.
+        let panel = agent_panel(&agents, true, 24, 9);
+        let text = panel.lines.iter().map(rendered_text).collect::<Vec<_>>();
+        assert_eq!(text.len(), 9, "{text:?}");
+        assert_eq!(text[8], "▾ show less · 1 hidden");
+
+        // A zero budget or zero width does not panic.
+        assert!(agent_panel(&agents, false, 24, 0).lines.len() <= 1);
         assert!(
-            agent_panel_lines(&agents, 0)
+            agent_panel(&agents, false, 0, 10)
+                .lines
                 .iter()
                 .all(|line| line.width() <= 1)
         );
