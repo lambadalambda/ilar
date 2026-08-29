@@ -1,5 +1,21 @@
 # ilar serve
 
+> **Stood down.** `ilar serve` is not in the default build. The web
+> view was the largest subsystem in the TUI crate and the least used,
+> and a second consumer of the store — with its own delivery rules and
+> its own transcript fold — taxed every change to the core. It lives
+> on behind a Cargo feature:
+>
+> ```sh
+> cargo build --release --features serve
+> cargo test --features serve
+> ```
+>
+> Everything below describes the feature as built. The defects the
+> health sweep found in it are still filed under `meta/issues/`; they
+> are due the day the feature comes back, along with the decision of
+> whether it comes back at all.
+
 ```sh
 ilar serve                          # http://127.0.0.1:4527/ (or an ephemeral port when taken)
 ilar serve --open                   # and open a browser

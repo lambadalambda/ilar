@@ -10,6 +10,15 @@ authors.workspace = true
 name = "ilar"
 path = "src/main.rs"
 
+[features]
+default = []
+# `ilar serve`, the read-only web view, stood down: the terminal agent
+# is the product, and a second consumer of the store — with its own
+# delivery rules and its own fold — was taxing every change to the
+# core. Build it with `--features serve` to wake it up; see
+# meta/issues/serve-steps-out-of-the-default-build.md for the bargain.
+serve = ["dep:axum", "dep:getrandom"]
+
 [dependencies]
 ilar = { workspace = true }
 tokio = { workspace = true }
@@ -25,11 +34,12 @@ unicode-segmentation = { workspace = true }
 arboard = { version = "3.6", default-features = false, features = ["wayland-data-control", "image-data"] }
 serde_json.workspace = true
 serde.workspace = true
-# `ilar serve`, the read-only web view. Minimal axum: no http2, no
-# form/multipart/ws, no tracing — the router is GET-only by design.
-axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "query"] }
+# `ilar serve` only. Minimal axum: no http2, no form/multipart/ws, no
+# tracing — the router is GET-only by design.
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "query"], optional = true }
+getrandom = { version = "0.4", optional = true }
+# Not serve's: the clipboard escape writes base64.
 base64 = "0.23"
-getrandom = "0.4"
 
 [dev-dependencies]
 tempfile = "3"

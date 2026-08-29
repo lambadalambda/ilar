@@ -55,10 +55,10 @@ mechanisms, not security boundaries.
 - **Headless when you need it.** `ilar exec "…"` prints the answer on
   stdout and everything else on stderr; `--json` streams NDJSON events.
   Same sessions, same runtime as the TUI.
-- **Watch it from a browser.** `ilar serve` is a separate read-only
-  process that tails the store — every session on the machine, live, in
-  a page with no build step. It cannot run a turn.
-  [Details](docs/serve.md).
+- **Watch it from a browser** *(stood down)*. `ilar serve` tails the
+  store into a page with no build step, but it is not in the default
+  build while the terminal agent gets its house in order: build with
+  `--features serve` to wake it. [Details](docs/serve.md).
 - **Frugal by construction.** Compaction, asides, and topic naming all
   reuse the turn's own request prefix, so the provider's prompt cache
   pays for them. The status line shows the cache rate live.
@@ -97,7 +97,7 @@ ilar exec "what broke in CI?"    # headless one-shot, answer on stdout
 | --- | --- |
 | [The interface](docs/interface.md) | Status line, steering, `/btw`, `/sessions`, goal mode, topics, themes. |
 | [Sessions](docs/sessions.md) | The on-disk model, compaction as handover, rewind and fork, `ilar exec`. |
-| [ilar serve](docs/serve.md) | The read-only web view: routes, the SSE envelope, tokens and what they are not. |
+| [ilar serve](docs/serve.md) | The web view — *stood down, behind `--features serve`*: routes, the SSE envelope, tokens and what they are not. |
 | [Configuration](docs/configuration.md) | `ilar.toml`, environment, web search, ChatGPT OAuth, project instructions. |
 | [Agents, skills, commands](docs/agents-and-skills.md) | Custom agents, subagent tasks, services, MCP. |
 | [Checkpoints and recovery](docs/checkpoints.md) | Inspecting the shadow ref, undoing a rewind, limitations. |

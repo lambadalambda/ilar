@@ -13,6 +13,7 @@ mod modals;
 mod questions;
 mod schedule;
 mod selection;
+#[cfg(feature = "serve")]
 mod serve;
 mod session_view;
 mod sidebar;
@@ -104,9 +105,11 @@ enum Command {
     /// Run one turn without a terminal and print the answer
     Exec(ExecArgs),
     /// Read the session store over HTTP (read-only, no turns run)
+    #[cfg(feature = "serve")]
     Serve(ServeArgs),
 }
 
+#[cfg(feature = "serve")]
 #[derive(clap::Args, Debug)]
 struct ServeArgs {
     /// Address to bind (default 127.0.0.1:4527, falling back to an
@@ -1040,6 +1043,7 @@ async fn main() -> Result<()> {
     // beyond the state directory, so a machine with no provider
     // configured still browses what it already recorded — the write path
     // resolves its runtime per turn and fails there if it must.
+    #[cfg(feature = "serve")]
     if let Some(Command::Serve(serve_args)) = args.command {
         return serve::run(
             &config,

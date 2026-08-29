@@ -27,6 +27,10 @@
 //! provider in `serve::drive`, which can inject a resolver because it
 //! runs in-process.
 
+// Serve is stood down: these run under `--features serve`, with the
+// subsystem they test.
+#![cfg(feature = "serve")]
+
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
