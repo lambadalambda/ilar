@@ -226,12 +226,24 @@ fn is_git_environment_variable(key: &std::ffi::OsStr) -> bool {
     key.to_string_lossy().starts_with("GIT_")
 }
 
-async fn git_output(cwd: &std::path::Path, args: &[&str]) -> anyhow::Result<Vec<u8>> {
+/// The probe command: git with the caller's Git environment stripped
+/// and its language pinned to C. The pin is not cosmetic — a failed
+/// probe's stderr is *read* ("not a git repository" is what lets a
+/// worktree relax to containment), and on a German machine git says
+/// "kein Git-Repository", so an unpinned locale turns every
+/// repositoryless session into the wrong refusal.
+fn git_command(cwd: &std::path::Path, args: &[&str]) -> tokio::process::Command {
     let mut command = tokio::process::Command::new("git");
     command.arg("-C").arg(cwd).args(args).kill_on_drop(true);
     for (key, _) in std::env::vars_os().filter(|(key, _)| is_git_environment_variable(key)) {
         command.env_remove(key);
     }
+    command.env("LC_ALL", "C").env("LANG", "C");
+    command
+}
+
+async fn git_output(cwd: &std::path::Path, args: &[&str]) -> anyhow::Result<Vec<u8>> {
+    let mut command = git_command(cwd, args);
     let output = tokio::time::timeout(std::time::Duration::from_secs(10), command.output())
         .await
         .map_err(|_| anyhow::anyhow!("Git workspace validation timed out"))??;
@@ -1113,12 +1125,35 @@ where
 mod tests {
     use super::{
         ChildTool, MAX_RESULT_IMAGE_BYTES, ToolOutput, ToolRegistry, child_tool_names,
-        child_tool_names_from,
+        child_tool_names_from, git_command,
     };
     use crate::session::ImageContent;
 
     fn image(bytes: usize) -> ImageContent {
         ImageContent::new("image/png", &vec![0u8; bytes])
+    }
+
+    /// The validator reads git's stderr to decide, so it must be git's
+    /// English, not the operator's language.
+    #[test]
+    fn the_git_probe_speaks_c() {
+        let command = git_command(std::path::Path::new("/tmp"), &["rev-parse"]);
+        let pinned: Vec<_> = command
+            .as_std()
+            .get_envs()
+            .filter(|(key, _)| *key == "LC_ALL" || *key == "LANG")
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        assert!(
+            pinned.contains(&("LC_ALL".to_string(), Some("C".to_string())))
+                && pinned.contains(&("LANG".to_string(), Some("C".to_string()))),
+            "the probe ran in the caller's locale: {pinned:?}"
+        );
     }
 
     /// The one-sentence rule: mutable work excludes mutable work;

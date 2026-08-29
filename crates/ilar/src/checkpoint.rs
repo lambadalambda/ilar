@@ -209,6 +209,9 @@ where
             command.env_remove(key);
         }
     }
+    // Pinned like `tools::git_command`: a shadow-ref failure is read by
+    // whoever debugs it, and it should read the same on every machine.
+    command.env("LC_ALL", "C").env("LANG", "C");
     for (key, value) in extra_env {
         command.env(key, value);
     }
