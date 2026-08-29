@@ -755,6 +755,18 @@ impl App {
 
     pub(crate) fn push_notification(&mut self, description: &str, text: &str) {
         let from = self.lines.len();
+        if !self.push_notification_row(text) {
+            self.lines
+                .push(Line_::System(format!("task notification: {description}")));
+            self.lines.push(Line_::User(text.to_string()));
+        }
+        self.touch_transcript(Some(from));
+    }
+
+    /// The collapsed row a task or tool notification wears, wherever it
+    /// arrives — a fresh turn's prompt or a steer into a running one.
+    /// False when the text is no notification at all.
+    fn push_notification_row(&mut self, text: &str) -> bool {
         if let Some(text) = task_notification_display(text) {
             let id = self.allocate_thought_id();
             self.lines.push(Line_::Task {
@@ -762,6 +774,7 @@ impl App {
                 text,
                 expanded: false,
             });
+            true
         } else if let Some(text) = tool_notification_display(text) {
             let id = self.allocate_thought_id();
             self.lines.push(Line_::Job {
@@ -769,12 +782,10 @@ impl App {
                 text,
                 expanded: false,
             });
+            true
         } else {
-            self.lines
-                .push(Line_::System(format!("task notification: {description}")));
-            self.lines.push(Line_::User(text.to_string()));
+            false
         }
-        self.touch_transcript(Some(from));
     }
 
     /// A `/btw` came back. `Ok(None)` is an abandoned aside — cancelled
@@ -831,14 +842,19 @@ impl App {
                 {
                     self.pending_steers.remove(index);
                 }
-                // The same row a fresh turn's message gets: the words,
-                // then a marker per image.
-                self.lines
-                    .push(Line_::User(crate::transcript::user_text_with_images(
-                        text, images,
-                    )));
+                let from = self.lines.len();
+                // A steered task result wears the same collapsed row it
+                // gets on a fresh turn — never its raw envelope. Only a
+                // human steer is a user row: the words, then a marker
+                // per image.
+                if !(images.is_empty() && self.push_notification_row(text)) {
+                    self.lines
+                        .push(Line_::User(crate::transcript::user_text_with_images(
+                            text, images,
+                        )));
+                }
                 self.follow_tail = true;
-                Some(self.lines.len() - 1)
+                Some(from)
             }
             LoopEvent::TurnStarted => {
                 self.turn_committed = true;
@@ -7086,6 +7102,28 @@ mod tests {
             row,
             crate::transcript::user_text_with_images("look at this", &[screenshot])
         );
+    }
+
+    /// A task result steered into a running turn wears the same
+    /// collapsed task row it gets on a fresh turn — never its raw
+    /// envelope in a user row.
+    #[test]
+    fn a_steered_task_notification_wears_the_task_row() {
+        let mut app = App::new();
+        app.push_loop_event(&LoopEvent::Steered {
+            text: "<task-notification>\nTask \"Close installer blockers\" completed (task_id: abc).\n<result>\n(finished with no text)\n</result>\n</task-notification>".into(),
+            images: Vec::new(),
+        });
+
+        assert!(
+            app.lines
+                .iter()
+                .any(|line| matches!(line, Line_::Task { .. })),
+            "{:?}",
+            app.lines
+        );
+        let rendered = format!("{:?}", app.lines);
+        assert!(!rendered.contains("<task-notification>"), "{rendered}");
     }
 
     /// Paste intents land in the surface the decision named.
