@@ -43,6 +43,16 @@ const CONTENT_HORIZONTAL_PADDING: u16 = 2;
 const STREAM_STALL_AFTER: std::time::Duration = std::time::Duration::from_secs(3);
 
 impl App {
+    /// One truth for whether the mouse reaches the content behind the
+    /// chrome: no modal in front, or Search — a transcript-reading mode
+    /// whose clicks keep working underneath (main.rs routes mouse
+    /// events by the same rule). Every hover underline outside a modal
+    /// derives from this so the affordance cannot promise a click a
+    /// modal would eat — or hide one it would not.
+    fn mouse_reaches_content(&self) -> bool {
+        matches!(self.active_modal(), None | Some(Modal::Search))
+    }
+
     #[cfg(test)]
     pub(crate) fn transcript_lines(
         &self,
@@ -615,9 +625,10 @@ impl App {
         self.transcript_hit_targets = visible.iter().map(|row| row.target.clone()).collect();
         // Hover marks what a click would hit right now — positional,
         // and off when a modal in front owns the mouse.
-        let hover_row = match self.active_modal() {
-            None | Some(Modal::Search) => self.hover.map(|point| point.row),
-            Some(_) => None,
+        let hover_row = if self.mouse_reaches_content() {
+            self.hover.map(|point| point.row)
+        } else {
+            None
         };
         let text = visible
             .into_iter()
@@ -762,7 +773,7 @@ impl App {
                         Some((index, exited_disclosure_hit(service_area, index)?))
                     }) {
                         self.services_exited_hit = Some(rect);
-                        if self.active_modal().is_none()
+                        if self.mouse_reaches_content()
                             && self.hover_screen.is_some_and(|(column, hover_row)| {
                                 rect.contains(ratatui::layout::Position::new(column, hover_row))
                             })
@@ -1033,6 +1044,14 @@ impl App {
             )),
             None => None,
         };
+        // Hover marks what a click would select, exactly like the
+        // transcript: the hit map *is* the clickability, so the
+        // underline cannot lie about it.
+        if let Some(hit) = &self.modal_hit
+            && let Some((column, row)) = self.hover_screen
+        {
+            crate::modals::underline_hovered_item(hit, frame.buffer_mut(), column, row);
+        }
         theme::apply(frame.buffer_mut(), self.theme);
     }
 }

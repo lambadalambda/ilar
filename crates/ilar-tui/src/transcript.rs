@@ -1349,11 +1349,19 @@ fn entry_rows(
                 // eye (and the pointer) lands. Expanded, the body stays
                 // bare so a stray click cannot collapse a wall of text.
                 let (thought_target, whole_preview) = match item {
-                    Line_::Thought { id, expanded, .. }
-                    | Line_::Task { id, expanded, .. }
-                    | Line_::Job { id, expanded, .. }
-                        if !id.is_empty() =>
-                    {
+                    Line_::Thought { id, expanded, .. } if !id.is_empty() => {
+                        (Some(TranscriptHitTarget::Thought(id.clone())), !*expanded)
+                    }
+                    // A one-line Task/Job draws no disclosure — there
+                    // is no body behind the headline — so it takes no
+                    // click target either: an underline whose toggle
+                    // does nothing is a hover lie.
+                    Line_::Task {
+                        id, text, expanded, ..
+                    }
+                    | Line_::Job {
+                        id, text, expanded, ..
+                    } if !id.is_empty() && safe_lines(text).len() > 1 => {
                         (Some(TranscriptHitTarget::Thought(id.clone())), !*expanded)
                     }
                     _ => (None, false),
@@ -2453,6 +2461,50 @@ mod tests {
             Some(TranscriptHitTarget::Thought("t1".into()))
         );
         assert!(rows[1..].iter().all(|row| row.target.is_none()));
+    }
+
+    /// A one-line Task/Job draws no disclosure glyph (there is no body
+    /// behind the headline), so it must not take a click target either:
+    /// it would underline on hover and toggle nothing.
+    #[test]
+    fn a_single_line_notification_row_advertises_no_click() {
+        let now = std::time::Instant::now();
+        let expanded_groups = std::collections::HashSet::new();
+        for line in [
+            Line_::Task {
+                id: "t1".into(),
+                text: "task abc finished".into(),
+                expanded: false,
+            },
+            Line_::Job {
+                id: "j1".into(),
+                text: "job done".into(),
+                expanded: false,
+            },
+        ] {
+            let entries = transcript_entries(std::slice::from_ref(&line), &expanded_groups);
+            let rows = transcript_entry_rows(&entries[0], &expanded_groups, 100, now, now, false);
+            assert!(
+                rows.iter().all(|row| row.target.is_none()),
+                "nothing to expand, nothing to click"
+            );
+        }
+    }
+
+    /// `write` diffs like `edit` does — same `diff` field, so the
+    /// expanded row takes the shared `tool_diff_rows` path instead of
+    /// the escaped-JSON argument detail.
+    #[test]
+    fn a_completed_write_call_carries_a_diff() {
+        let mut lines = Vec::new();
+        push_tool_row(&mut lines, "w1", "g".into(), "write");
+        let arguments = serde_json::json!({"path": "f.rs", "content": "a\nb"}).to_string();
+        complete_tool_input(&mut lines, "w1", &arguments);
+        let Line_::Tool { diff, .. } = &lines[0] else {
+            panic!("tool row")
+        };
+        assert_eq!(diff.len(), 2);
+        assert!(diff.iter().all(|line| line.kind == diff::DiffKind::Added));
     }
 
     /// A tool row with an id, running, with `child_lines` of its own.

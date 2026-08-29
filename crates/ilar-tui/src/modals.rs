@@ -50,6 +50,37 @@ impl ModalHit {
     }
 }
 
+/// The hover affordance modal rows owe, exactly like the transcript's:
+/// when the pointer rests on a row the hit map would give a click, its
+/// content gets an underline. Applied to the drawn buffer after the
+/// render pass — the hit map already knows which screen rows are
+/// clickable, so the individual renderers stay hover-agnostic. Leading
+/// and trailing blank cells stay bare, mirroring
+/// [`crate::transcript::underline_content_spans`]. Returns whether it
+/// underlined, for tests.
+pub(crate) fn underline_hovered_item(
+    hit: &ModalHit,
+    buffer: &mut ratatui::buffer::Buffer,
+    column: u16,
+    row: u16,
+) -> bool {
+    if hit.item_at(column, row).is_none() {
+        return false;
+    }
+    let mut content =
+        (hit.area.x..hit.area.right()).filter(|&x| !buffer[(x, row)].symbol().trim().is_empty());
+    let Some(first) = content.next() else {
+        return false;
+    };
+    let last = content.last().unwrap_or(first);
+    for x in first..=last {
+        buffer[(x, row)]
+            .modifier
+            .insert(ratatui::style::Modifier::UNDERLINED);
+    }
+    true
+}
+
 /// The chrome every picker modal shares: clear the backdrop, draw the
 /// double border in the focus style with the title and the
 /// right-aligned muted footer, and hand back the inner area — or
@@ -2183,10 +2214,7 @@ pub(crate) fn render_session_search(frame: &mut Frame, search: &SessionSearch) -
         {
             let mut lines: Vec<Line> = Vec::new();
             if row.context.is_empty() {
-                lines.push(Line::styled(
-                    "loading preview…",
-                    Style::default().fg(MUTED),
-                ));
+                lines.push(Line::styled("loading preview…", Style::default().fg(MUTED)));
             }
             for (speaker, text, is_hit) in &row.context {
                 lines.push(Line::styled(
@@ -2285,12 +2313,18 @@ pub(crate) fn render_session_search(frame: &mut Frame, search: &SessionSearch) -
             // The bar owns both rows; per-span colours would fight it.
             let pad = width.saturating_sub(2 + UnicodeWidthStr::width(title.as_str()));
             body.push(
-                Line::styled(format!("{marker}{title}{}", " ".repeat(pad)), theme::selected()),
+                Line::styled(
+                    format!("{marker}{title}{}", " ".repeat(pad)),
+                    theme::selected(),
+                ),
                 Some(index),
             );
             let pad = width.saturating_sub(4 + UnicodeWidthStr::width(details.as_str()));
             body.push(
-                Line::styled(format!("    {details}{}", " ".repeat(pad)), theme::selected()),
+                Line::styled(
+                    format!("    {details}{}", " ".repeat(pad)),
+                    theme::selected(),
+                ),
                 Some(index),
             );
         } else {
@@ -3266,6 +3300,44 @@ mod tests {
         assert_eq!(hit.item_at(10, 8), None, "a drawn-short row");
         assert_eq!(hit.item_at(10, 4), None, "above");
         assert_eq!(ModalHit::default().item_at(0, 0), None);
+    }
+
+    /// Hovering a mapped modal row underlines its content — and only
+    /// its content: the indent stays bare, headers and rows outside the
+    /// area take nothing. The underline derives from the same hit map
+    /// a click resolves through, so it cannot lie.
+    #[test]
+    fn hovering_a_mapped_modal_row_underlines_its_content() {
+        use ratatui::buffer::Buffer;
+        use ratatui::style::Modifier;
+
+        let area = Rect::new(2, 1, 10, 3);
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 14, 5));
+        buffer.set_string(2, 2, "  item one", Style::default());
+        let hit = ModalHit {
+            area,
+            rows: vec![None, Some(0), None],
+        };
+        assert!(
+            !underline_hovered_item(&hit, &mut buffer, 3, 1),
+            "a header row is not clickable, so it must not underline"
+        );
+        assert!(
+            !underline_hovered_item(&hit, &mut buffer, 1, 2),
+            "left of the area"
+        );
+        assert!(underline_hovered_item(&hit, &mut buffer, 3, 2));
+        let underlined = |x: u16, y: u16| buffer[(x, y)].modifier.contains(Modifier::UNDERLINED);
+        assert!(!underlined(2, 2), "leading blank stays bare");
+        assert!(!underlined(3, 2), "leading blank stays bare");
+        assert!(underlined(4, 2), "first content cell");
+        assert!(underlined(8, 2), "an inner space underlines with the words");
+        assert!(underlined(11, 2), "last content cell");
+        assert!(!underlined(12, 2), "outside the area");
+        assert!(
+            !(2..12).any(|x| underlined(x, 1)),
+            "the miss left the header row untouched"
+        );
     }
 
     /// Crossterm maps CR to Enter before the control-character branch, so
@@ -4410,10 +4482,7 @@ mod tests {
         );
         let first_generation = search.generation;
         assert!(search.scanning);
-        search.push_rows(
-            first_generation,
-            vec![search_row("s1", "one", "ctx")],
-        );
+        search.push_rows(first_generation, vec![search_row("s1", "one", "ctx")]);
         assert_eq!(search.rows.len(), 1);
 
         // Another keystroke: rows clear, and the old scan's late
@@ -4423,10 +4492,7 @@ mod tests {
             SessionSearchAction::Rescan
         );
         assert!(search.rows.is_empty());
-        search.push_rows(
-            first_generation,
-            vec![search_row("s1", "one", "ctx")],
-        );
+        search.push_rows(first_generation, vec![search_row("s1", "one", "ctx")]);
         assert!(search.rows.is_empty(), "stale rows accepted");
         search.finish_scan(first_generation);
         assert!(search.scanning, "a stale scan finishing ended the new one");
@@ -4477,7 +4543,7 @@ mod tests {
     fn the_row_cap_holds_whatever_the_scanner_sends() {
         let mut search = SessionSearch::new();
         let rows = (0..MAX_SEARCH_ROWS + 50)
-            .map(|index| search_row("s", "t", "ctx"))
+            .map(|_| search_row("s", "t", "ctx"))
             .collect();
         search.push_rows(0, rows);
         assert_eq!(search.rows.len(), MAX_SEARCH_ROWS);
@@ -4560,10 +4626,7 @@ mod tests {
     fn a_narrow_terminal_gets_the_list_alone() {
         let mut search = SessionSearch::new();
         search.query = "needle".into();
-        search.push_rows(
-            0,
-            vec![search_row("s1", "one", "context text")],
-        );
+        search.push_rows(0, vec![search_row("s1", "one", "context text")]);
 
         let (screen, _) = draw_modal(60, 20, |frame| render_session_search(frame, &search));
         assert!(screen.contains("one"), "{screen}");
