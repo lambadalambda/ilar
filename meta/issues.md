@@ -44,6 +44,10 @@
 
 ## Milestone 11 — Beyond the terminal
 
+*Stood down: `ilar serve` is behind an off-by-default Cargo feature
+until the terminal agent is in shape. The serve issues below and in
+milestones 15–17 stay filed — they come back when the feature does.*
+
 - [ ] [A web frontend](issues/web-frontend.md)
 
 ## Milestone 12 — Health sweep
@@ -63,26 +67,20 @@
 
 ## Milestone 15 — Sweep: correctness
 
-- [ ] [The focus view settles what it saw running](issues/the-focus-view-settles-what-it-saw-running.md)
-- [ ] [SSE redacts the calls it never saw](issues/sse-redacts-the-calls-it-never-saw.md)
-- [ ] [Serve retires what it cannot route](issues/serve-retires-what-it-cannot-route.md)
-- [ ] [Git is probed in plain C](issues/git-is-probed-in-plain-c.md)
-- [ ] [A queued notification stays collapsed](issues/a-queued-notification-stays-collapsed.md)
-- [ ] [Asides do not outlive the switch](issues/asides-do-not-outlive-the-switch.md)
-- [ ] [A steer confirms exactly once](issues/a-steer-confirms-exactly-once.md)
-- [ ] [TurnDone is the last word](issues/turndone-is-the-last-word.md)
+- [ ] [SSE redacts the calls it never saw](issues/sse-redacts-the-calls-it-never-saw.md) — *parked with serve*
+- [ ] [Serve retires what it cannot route](issues/serve-retires-what-it-cannot-route.md) — *parked with serve*
 - [ ] [A torn index still persists the step](issues/a-torn-index-still-persists-the-step.md)
 - [ ] [The lock is its inode](issues/the-lock-is-its-inode.md)
 - [ ] [A dead group is left in peace](issues/a-dead-group-is-left-in-peace.md)
 - [ ] [Delete takes the scratch along](issues/delete-takes-the-scratch-along.md)
 - [ ] [A vanished cwd is an error, not a panic](issues/a-vanished-cwd-is-an-error-not-a-panic.md)
 - [ ] [The outbox compacts by its own rules](issues/the-outbox-compacts-by-its-own-rules.md)
-- [ ] [Serve joins the turns it started](issues/serve-joins-the-turns-it-started.md)
+- [ ] [Serve joins the turns it started](issues/serve-joins-the-turns-it-started.md) — *parked with serve*
 - [ ] [A turn failure waits to be read](issues/a-turn-failure-waits-to-be-read.md)
 - [ ] [The activity broadcast does not drown](issues/the-activity-broadcast-does-not-drown.md)
 - [ ] [Search survives a resize](issues/search-survives-a-resize.md)
 - [ ] [A job death does not invent a task](issues/a-job-death-does-not-invent-a-task.md)
-- [ ] [The outbox is reread while serve lives](issues/the-outbox-is-reread-while-serve-lives.md)
+- [ ] [The outbox is reread while serve lives](issues/the-outbox-is-reread-while-serve-lives.md) — *parked with serve*
 
 ## Milestone 16 — Sweep: texture
 
@@ -106,7 +104,7 @@
 - [ ] [The loop top joins the spine](issues/the-loop-top-joins-the-spine.md)
 - [ ] [The big files find their seams](issues/the-big-files-find-their-seams.md)
 - [ ] [Engines retire when idle](issues/engines-retire-when-idle.md)
-- [ ] [Serve folds once and caches](issues/serve-folds-once-and-caches.md)
+- [ ] [Serve folds once and caches](issues/serve-folds-once-and-caches.md) — *parked with serve*
 - [ ] [Limits are not optional](issues/limits-are-not-optional.md)
 - [ ] [A turn continues after a hiccup](issues/a-turn-continues-after-a-hiccup.md)
 

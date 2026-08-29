@@ -1600,3 +1600,72 @@ goes. The test that pinned the old refusal is inverted rather than
 deleted. The other producers are words-only and stay that way: the
 web drive layer posts text, and a parent's `task_message` to a child
 has nothing to attach.
+
+## 2026-08-29 — Serve stands down, and the sweep's first seven
+
+The web view is the largest thing in the TUI crate and the least used
+part of the product: six and a half thousand lines across
+`watch`/`view`/`drive`/`http`, plus a Preact frontend, plus — as the
+second health sweep found — a second set of delivery semantics that had
+quietly drifted from the terminal's (no retire, no salvage, adoption
+once per process, three hand-rolled delivered-predicates, no watchdog).
+Every change to the core paid rent to a consumer nobody was using.
+
+So `ilar serve` moved behind a Cargo feature that is off by default.
+Not deleted: `cargo test --features serve` still builds it and passes
+all 24 wire tests. The bargain is written down in the issue — code
+nothing builds by default rots, and the day the flag is flipped back
+on, whatever broke gets fixed or the module gets deleted. That decision
+belongs with the web frontend's, and it is not today's.
+
+What the standing-down is *for* is the rest of the agent, and the sweep
+had a list. Seven of them landed with it:
+
+**The focus view was lying about live work.** Restoring a session ends
+by marking every still-open tool row failed — true for a session nobody
+is driving, false for the one you just clicked into mid-`cargo test`.
+Worse than false: `finish_tool_row` refuses to settle a Failed row, so
+the real result was dropped when it arrived and the row kept lying
+until you refocused. The restore path now takes a `Liveness`, and the
+focus view asks for `Running` — but only when the agent's events will
+actually arrive. A roster row marked *delivering* is a routed
+completion running with a discarded event sender: it publishes nothing,
+so leaving its rows open would have traded a wrong ✗ for an eternal
+spinner. What the seed leaves open, the focused session's `TurnDone`
+closes.
+
+**A steer could be delivered twice.** `publish` checks the cancel token
+first, so a cancellation landing between the steer's `UserMessage`
+append and its `Steered` publish ate the confirmation — and the reader,
+which treats a steer without `Steered` as undelivered, sent it again.
+The fix is an ordering: `publish` now reports whether the reader heard
+it, and the confirmation goes *before* the append. Nothing is recorded
+for a steer nobody was told about, so it comes back exactly once. The
+window shrank from an await to a synchronous statement, and inverted: a
+failing append now loses a steer loudly instead of duplicating one
+silently.
+
+**`TurnDone` is the last word.** Staged progress and output tails
+outlived the turn they belonged to, so a slow consumer could animate a
+row that had already settled. `publish_terminal` clears both maps, and
+the receiver refuses progress after handing out the terminal event —
+in `settle`, which both `recv` and `try_recv` route through, because
+putting it in only one of them is how this comes back.
+
+**Three smaller ones.** The worktree validator reads git's stderr to
+decide whether a session may relax its rules, and matched the English
+sentence: on a German machine every repositoryless session got the
+wrong refusal. `git_command` pins `LC_ALL=C`, and `checkpoint::git`
+got the same pin so its failures read the same everywhere. A completion
+that could not be steered into a dying turn is requeued and auto-sent
+as a fresh turn — through a path that pushed it raw, so the live
+transcript showed XML where replay showed a collapsed row; both go
+through one `push_user_message` now. And every session switch shut the
+spawner down but left the aside and the topic-naming turns streaming
+answers into a transcript that was no longer theirs: `leave_session` is
+the whole ritual, one call at all six exits, so the halves cannot drift.
+
+The review of this batch is worth keeping: it caught the delivering-row
+spinner, the half-armed `finished` flag, and the fact that fixing the
+duplicated aside ritual by adding a *second* duplicated call beside
+`spawner.shutdown()` was the wrong seam.
