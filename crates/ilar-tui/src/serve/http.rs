@@ -110,8 +110,7 @@ use tokio::sync::broadcast;
 
 use super::drive::{Drive, DriveError, Fate, NewSession, TurnFailure};
 use super::view::{
-    has_invocation, invocation_slice, live_reset, project_event, project_live_delta, project_page,
-    usage_totals,
+    has_invocation, invocation_slice, live_reset, project_live_delta, project_page, usage_totals,
 };
 use super::watch::{
     LiveMessage, LiveState, SessionEntry, TailEnd, TailMessage, Watcher, next_message,

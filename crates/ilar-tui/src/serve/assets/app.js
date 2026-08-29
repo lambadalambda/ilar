@@ -198,18 +198,110 @@ function inline(text) {
   return out;
 }
 
-// The two block shapes a structured reply is actually made of. Both
-// demand the space after the marker and at most three columns of indent
-// — markdown's own rule, and the thing that keeps this from guessing:
-// `#include`, `-42` and `*ptr` are not markdown, a four-space indented
-// code block is not a list, and a `# comment` inside a fence never
-// reaches here because the fence is consumed first. Tables are
-// deliberately left as source — the parser they need is bigger than
-// everything above. Nested lists flatten into one level, which is the
-// price of not writing that parser either.
+// The block shapes a structured reply is actually made of. Markers
+// demand the space after them, and a marker *opening* a list gets at
+// most three columns of indent — markdown's own rule, and the thing
+// that keeps this from guessing: `#include`, `-42` and `*ptr` are not
+// markdown, a four-space indented code block is not a list, and a
+// `# comment` inside a fence never reaches here because the fence is
+// consumed first. Inside an open list the indent cap comes off, which
+// is what nests: a deeper marker is a child of the item above it.
 const HEADING = /^(#{1,6})[ \t]+(\S.*)$/;
-const BULLET = /^ {0,3}[-*+][ \t]+(\S.*)$/;
-const ORDERED = /^ {0,3}(\d{1,9})[.)][ \t]+(\S.*)$/;
+const BULLET = /^([ \t]*)[-*+][ \t]+(\S.*)$/;
+const ORDERED = /^([ \t]*)(\d{1,9})[.)][ \t]+(\S.*)$/;
+
+// Indent in columns, which is the only way tabs and spaces compare.
+const indentColumns = (prefix) => prefix.replace(/\t/g, "    ").length;
+
+// A pipe table, GFM's shape and nothing looser: every row starts and
+// ends with `|` after at most three columns of indent, and the line
+// under the header is all dashes with optional alignment colons. What
+// does not parse to exactly that never becomes a table and stays the
+// source text it was — the fallback a parser this small leans on.
+// (Escaped `\|` is not understood; a cell that needs one falls back
+// with the rest of its table.)
+const TABLE_ROW = /^ {0,3}\|.*\|[ \t]*$/;
+
+const tableCells = (line) =>
+  line
+    .trim()
+    .slice(1, -1)
+    .split("|")
+    .map((cell) => cell.trim());
+
+// The separator's verdict: null when the line is not one, otherwise one
+// alignment per column — "" left, "c" centred, "r" right.
+function tableAligns(line) {
+  if (!TABLE_ROW.test(line)) return null;
+  const aligns = [];
+  for (const cell of tableCells(line)) {
+    const dashes = /^(:?)-+(:?)$/.exec(cell);
+    if (!dashes) return null;
+    aligns.push(dashes[1] && dashes[2] ? "c" : dashes[2] ? "r" : "");
+  }
+  return aligns;
+}
+
+// GFM's width rule: a data row is exactly as wide as its header — short
+// rows pad, long rows drop the overflow — so one stray pipe cannot skew
+// every column after it.
+function sizedRow(cells, width) {
+  const row = cells.slice(0, width);
+  while (row.length < width) row.push("");
+  return row;
+}
+
+// A parsed pipe table. Cells go through `inline`, so a code span or a
+// link in a cell is still one, and every value stays a text node.
+function TableBlock({ header, aligns, rows }) {
+  const at = (index) => (aligns[index] ? "al-" + aligns[index] : "");
+  return html`
+    <table class="md-table">
+      <thead>
+        <tr>
+          ${header.map((cell, index) => html`<th key=${index} class=${at(index)}>${inline(cell)}</th>`)}
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.map(
+          (row, line) => html`
+            <tr key=${line}>
+              ${row.map((cell, index) => html`<td key=${index} class=${at(index)}>${inline(cell)}</td>`)}
+            </tr>
+          `,
+        )}
+      </tbody>
+    </table>
+  `;
+}
+
+// A run of marker lines into one <ul>/<ol> tree. Depth is relative, not
+// a tab stop: an item owns everything after it that is indented past
+// it, so two-space and four-space writers nest the same. Each group's
+// kind and start number are its first item's.
+function listTree(items) {
+  const nodes = [];
+  let at = 0;
+  while (at < items.length) {
+    const item = items[at];
+    const children = [];
+    at += 1;
+    while (at < items.length && items[at].indent > item.indent) {
+      children.push(items[at]);
+      at += 1;
+    }
+    nodes.push(
+      html`<li key=${nodes.length}>${inline(item.text)}${children.length ? listTree(children) : null}</li>`,
+    );
+  }
+  return items[0].ordered
+    ? html`<ol class="md-list" start=${items[0].start}>
+        ${nodes}
+      </ol>`
+    : html`<ul class="md-list">
+        ${nodes}
+      </ul>`;
+}
 
 function richText(text) {
   const lines = String(text === null || text === undefined ? "" : text).split("\n");
@@ -232,27 +324,19 @@ function richText(text) {
     if (body.trim()) out.push(html`<div class="text">${inline(body)}</div>`);
     buffer = [];
   };
-  // One <ul>/<ol> per run of items, so a list is one block on screen
-  // rather than a stack of orphaned lines.
+  // One tree per run of marker lines, so a list — nested or not — is
+  // one block on screen rather than a stack of orphaned lines.
   const flushList = () => {
     if (!list) return;
-    const items = list.items.map((item, index) => html`<li key=${index}>${inline(item)}</li>`);
-    out.push(
-      list.ordered
-        ? html`<ol class="md-list" start=${list.start}>
-            ${items}
-          </ol>`
-        : html`<ul class="md-list">
-            ${items}
-          </ul>`,
-    );
+    out.push(listTree(list.items));
     list = null;
   };
   const close = () => {
     flushList();
     flush();
   };
-  for (const line of lines) {
+  for (let at = 0; at < lines.length; at += 1) {
+    const line = lines[at];
     const fence = /^\s*```/.test(line);
     if (fenced !== null) {
       if (fence) {
@@ -268,6 +352,25 @@ function richText(text) {
       fenced = [];
       continue;
     }
+    // The one shape here that takes lookahead: a row is only a header
+    // once the line under it is the all-dashes separator with the same
+    // column count. Anything less is prose and falls through untouched.
+    if (TABLE_ROW.test(line)) {
+      const aligns = tableAligns(lines[at + 1] || "");
+      const header = tableCells(line);
+      if (aligns && aligns.length === header.length) {
+        close();
+        const rows = [];
+        let next = at + 2;
+        while (next < lines.length && TABLE_ROW.test(lines[next])) {
+          rows.push(sizedRow(tableCells(lines[next]), header.length));
+          next += 1;
+        }
+        out.push(html`<${TableBlock} header=${header} aligns=${aligns} rows=${rows} />`);
+        at = next - 1;
+        continue;
+      }
+    }
     const heading = HEADING.exec(line);
     if (heading) {
       close();
@@ -281,21 +384,35 @@ function richText(text) {
     const bullet = BULLET.exec(line);
     const ordered = bullet ? null : ORDERED.exec(line);
     if (bullet || ordered) {
-      const wanted = Boolean(ordered);
-      if (list && list.ordered !== wanted) flushList();
-      // Only ever the prose that came *before* the list: the invariant
-      // says nothing was buffered while one was open.
-      flush();
-      if (!list) list = { ordered: wanted, start: ordered ? Number(ordered[1]) : 1, items: [] };
-      list.items.push(bullet ? bullet[1] : ordered[2]);
-      continue;
+      const indent = indentColumns(bullet ? bullet[1] : ordered[1]);
+      // Four columns of indent with nothing open is markdown's indented
+      // code block, not a first bullet; under an open list it nests.
+      if (list || indent <= 3) {
+        const wanted = Boolean(ordered);
+        // A marker of the other kind at the run's own level starts a
+        // fresh list; deeper in, it is a nested list and stays.
+        if (list && list.items[0].ordered !== wanted && indent <= list.items[0].indent) {
+          flushList();
+        }
+        // Only ever the prose that came *before* the list: the invariant
+        // says nothing was buffered while one was open.
+        flush();
+        if (!list) list = { items: [] };
+        list.items.push({
+          text: bullet ? bullet[2] : ordered[3],
+          indent,
+          ordered: wanted,
+          start: ordered ? Number(ordered[2]) : 1,
+        });
+        continue;
+      }
     }
     if (list) {
       // An indented line under an item is the item, wrapped — which is
       // how every model writes a long bullet. A blank line or a line
       // starting in column zero ends the list instead.
       if (/^[ \t]/.test(line) && line.trim()) {
-        list.items[list.items.length - 1] += " " + line.trim();
+        list.items[list.items.length - 1].text += " " + line.trim();
         continue;
       }
       flushList();
@@ -432,24 +549,27 @@ function unpaired(cut) {
 
 // ------------------------------------------------------------- glyphs
 
-// One glyph per tool family. Text, not an icon font: the page has no
-// webfont and must work on a plane.
+// One glyph per tool this binary actually ships — the builtins plus
+// `ChildTool::ALL` — text, not an icon font: the page has no webfont and
+// must work on a plane. `task_message` needs no row of its own: the
+// underscore fallback below hands it `task`'s diamond, which is right,
+// because it is the same conversation continued.
 const GLYPHS = {
   read: "▤",
   write: "✎",
   edit: "✎",
-  patch: "✎",
-  apply_patch: "✎",
   bash: "▸",
-  shell: "▸",
   grep: "⌕",
-  search: "⌕",
   glob: "⌕",
-  list: "☰",
   todo: "☑",
   task: "◆",
-  web: "◍",
-  fetch: "◍",
+  tasks: "❖",
+  service: "⚙",
+  history: "↺",
+  models: "⇄",
+  question: "?",
+  webfetch: "◍",
+  websearch: "⌕",
 };
 
 function glyph(name) {

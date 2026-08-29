@@ -448,6 +448,35 @@ code.inline {
   margin: 1px 0;
   overflow-wrap: anywhere;
 }
+/* A nested list keeps the parent's rhythm, one indent step deeper. */
+.md-list .md-list {
+  margin: 1px 0;
+}
+/* A pipe table, sized like the transcript it sits in. */
+table.md-table {
+  border-collapse: collapse;
+  margin: 8px 0;
+  max-width: 100%;
+  font-size: 0.95em;
+}
+.md-table th,
+.md-table td {
+  border: 1px solid var(--line);
+  padding: 3px 10px;
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+.md-table th {
+  background: var(--surface);
+  font-weight: 650;
+}
+.md-table .al-c {
+  text-align: center;
+}
+.md-table .al-r {
+  text-align: right;
+}
 
 pre.code,
 pre.detail,
