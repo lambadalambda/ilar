@@ -3206,10 +3206,23 @@ async fn a_turn_that_cannot_take_the_writer_marks_itself_never_started() {
         error.downcast_ref::<ilar::agent::TurnNeverStarted>().is_some(),
         "not marked never-started: {error:#}"
     );
-    let io = error
-        .downcast_ref::<std::io::Error>()
-        .expect("the WouldBlock io error is still downcastable");
-    assert_eq!(io.kind(), std::io::ErrorKind::WouldBlock);
+    assert!(
+        error
+            .downcast_ref::<ilar::agent::TurnNeverStarted>()
+            .expect("marked")
+            .causes()
+            .any(|cause| {
+                cause
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::WouldBlock)
+            }),
+        "the WouldBlock io error is still reachable through the marker: {error:#}"
+    );
+    assert_eq!(
+        error.to_string(),
+        format!("{error:#}"),
+        "the marker adds no display layer of its own"
+    );
 }
 
 /// Hangs forever on the opening prompt "hang", answers anything else,

@@ -1772,10 +1772,7 @@ task's scope yourself; continue only clearly disjoint work."
             )
             .await;
             match result {
-                Err(error)
-                    if error
-                        .downcast_ref::<std::io::Error>()
-                        .is_some_and(|error| error.kind() == std::io::ErrorKind::WouldBlock) =>
+                Err(error) if never_started_would_block(&error) =>
                 {
                     // The lease belongs to another turn and nothing was
                     // appended: wait for it briefly, then hand the
@@ -1979,6 +1976,22 @@ fn is_delivered(parent: &crate::session::SessionReader, text: &str) -> bool {
         } => appended.contains(text),
         _ => false,
     })
+}
+
+/// Whether a turn declined before its prompt append because the
+/// session's writer was held elsewhere — the router's retry case. The
+/// marker hides its wrapped display layer from the outer chain, so
+/// the io::Error is only reachable through the marker's own causes.
+fn never_started_would_block(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<crate::agent::TurnNeverStarted>()
+        .is_some_and(|marker| {
+            marker.causes().any(|cause| {
+                cause
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::WouldBlock)
+            })
+        })
 }
 
 fn workspace_route_failure(

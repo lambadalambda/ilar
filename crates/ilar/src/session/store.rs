@@ -283,7 +283,9 @@ impl SessionStore {
                 {
                     std::io::Error::new(
                         std::io::ErrorKind::WouldBlock,
-                        format!("session {id} already active in another turn"),
+                        format!(
+                            "session {id} already active in another turn (its driver may be another ilar process)"
+                        ),
                     )
                 } else {
                     error

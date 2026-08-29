@@ -18,26 +18,42 @@ use tokio_util::sync::CancellationToken;
 /// the `io::Error` `WouldBlock` of a held writer lease in particular —
 /// keeps working through it.
 #[derive(Debug)]
-pub struct TurnNeverStarted(String);
+pub struct TurnNeverStarted(anyhow::Error);
 
 impl TurnNeverStarted {
-    /// Mark an error from the pre-append stretch of `run_turn`. The
-    /// marker carries the message it wraps: it exists to be
-    /// downcast-checked, and the outermost display must keep naming
-    /// the actual failure, not the bookkeeping.
+    /// Mark an error from the pre-append stretch of `run_turn`. A
+    /// transparent wrapper, not a context layer: it displays as the
+    /// error it wraps and its `source` skips that error's own display
+    /// layer, so neither `{error}` nor `{error:#}` ever shows the
+    /// bookkeeping — or the same message twice. The skipped layer may
+    /// BE the typed root (a bare io::Error), so cause classification
+    /// goes through [`TurnNeverStarted::causes`], never the outer
+    /// chain.
     fn mark(error: anyhow::Error) -> anyhow::Error {
-        let message = error.to_string();
-        error.context(TurnNeverStarted(message))
+        anyhow::Error::new(TurnNeverStarted(error))
+    }
+
+    /// The wrapped error's full cause chain, for callers that
+    /// classify what declined the turn (the router's WouldBlock
+    /// retry).
+    pub fn causes(&self) -> impl Iterator<Item = &(dyn std::error::Error + 'static)> {
+        self.0.chain()
     }
 }
 
 impl std::fmt::Display for TurnNeverStarted {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        write!(f, "{}", self.0)
     }
 }
 
-impl std::error::Error for TurnNeverStarted {}
+impl std::error::Error for TurnNeverStarted {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        // Skip the wrapped error's own display layer — this wrapper
+        // already showed it — and continue with its causes.
+        self.0.chain().nth(1)
+    }
+}
 
 use crate::agent::event::{LoopEvent, LoopEventSender};
 use crate::provider::{ProviderEvent, ProviderResolver, Request, StopReason};
