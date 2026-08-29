@@ -29,3 +29,24 @@ displays:
 ## Milestone
 
 13 — Guard rails
+
+## Outcome
+
+`redact_command` grew a collecting variant that records every
+value it hides; `redact_tool_result` replaces those secrets
+(longest-first, bounded) in the displayed result copy before
+bounding, and a URL-credential pass redacts `scheme://user:secret@`
+in arguments and results — with the authority scan stopping at
+every character an authority cannot contain, after review caught
+the first version inventing credentials inside minified JSON.
+Applied at every display: the live ToolFinished publish, the
+restored TUI row (call inputs tracked through the replay walk),
+the web transcript projection (inputs harvested from the view;
+SSE frames keep a running map per stream), and the full-text
+/results route. Persisted events and provider requests stay raw
+by design, pinned on both sides.
+
+Known residue, accepted: the live output tail streams raw while a
+tool runs (hidden at finish); a bare secret under four characters
+or beyond the sixteen-secret cap survives; a result whose call
+was compacted away falls back to the URL-only pass.

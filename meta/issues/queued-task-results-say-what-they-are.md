@@ -26,3 +26,13 @@ that left the notification machinery and became ordinary messages:
 ## Milestone
 
 13 — Guard rails
+
+## Outcome
+
+The quit warning's undelivered count now includes queued messages
+and pending steers whose text is a notification envelope, via
+`App::undelivered_queued_results`. The pending manager labels such
+entries "task result N: <headline>" through the shared display
+formatters, and deleting one is armed like the other destructive
+rows — with the confirmation saying the outbox redelivers it at
+the next open, so the deletion defers rather than destroys.

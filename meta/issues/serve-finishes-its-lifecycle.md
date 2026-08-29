@@ -35,3 +35,23 @@ outcome and the review that gated it:
 ## Milestone
 
 11 — Beyond the terminal
+
+## Outcome
+
+SIGTERM joins Ctrl-C in one shutdown_signal (unix-gated, degrades
+loudly). Engine adoption runs `outbox::pending` once at consumer
+start and feeds recovered completions through the live dispatch.
+The serial consumer became a dispatcher: parcels go to per-target
+workers (serial per session, concurrent across them), propagations
+re-enter with a bounded hop budget, teardown joins workers under
+the shutdown grace. A real service started in one driven turn
+answers `status`/`logs` in the next, pinned.
+
+Review hardening after the fact: `follow_up` now runs the same
+delivered-check `route_notification` performs — an adopted entry
+racing another process cannot append twice — re-checked after
+every backoff; and the hop budget counts routes remaining, not one
+extra. Known narrow races left in the outbox files themselves
+(retire-vs-pending sidecar sweep, record-vs-compaction rewrite):
+cross-process only, self-healing or bounded to one re-announce,
+documented in outbox.rs.

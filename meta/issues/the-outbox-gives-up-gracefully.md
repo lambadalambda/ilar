@@ -25,3 +25,19 @@ reached the log.
 ## Milestone
 
 13 — Guard rails
+
+## Outcome
+
+`outbox::retire` appends the notification as a tombstone to a
+`.retired` sidecar (not `.jsonl`, so the pending scan cannot
+mistake it for an outbox file and sweep it); append-only on both
+sides, since a rewrite in retire could lose a concurrent record.
+`pending()` treats retired texts as delivered, compacts them out,
+and consumes the sidecar only after the rewrite provably
+succeeded. The TUI calls it from the one place terminal failure is
+known — the routed-completion Err arm, right after the salvage
+into the transcript, which is the delivery of last resort. Requeue
+outcomes never retire; the review traced what reaches Err (missing
+metadata, unknown agent, registry failure — all pre-append,
+nothing transient) and the classification stands as a decision:
+an unknown agent retires because its salvage was shown.

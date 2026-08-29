@@ -108,3 +108,14 @@ Still open, in rough order of value:
 - Cosmetic drift: child compaction invisible live, "reverted
   to"/"switched to" wording, UI-spawned subtask's missing started
   line.
+
+## Progress update (2026-08-29, wave 1)
+
+Also landed since the first verification: TUI `write` diffs (pure
+additions, real diff with old content — parity with the web), the
+streaming argument preview covers `edit`, and replayed/projected
+tool results are redacted like live ones everywhere. Remaining:
+the routed delivery's discarded event sender, the TUI's 16 KiB
+result cap, the web glyph map and per-tool progress labels, and
+the three cosmetic-drift items.
+

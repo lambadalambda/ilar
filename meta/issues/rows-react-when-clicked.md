@@ -68,3 +68,16 @@ Remaining, one small cleanup pass:
   Search.
 - complete_open_thought still reverse-scans per text delta
   (O(1) in the common case now; residue only).
+
+## Outcome
+
+The remainder landed: a single-line Task/Job row attaches no
+toggle target (the same condition that suppresses its glyph), the
+services disclosure underline follows one shared
+`mouse_reaches_content` predicate that matches the mouse-routing
+rule exactly, and modal rows hover-underline through the same
+ModalHit lookup a click resolves through — underline equals
+clickable by construction, every hit-mapped modal covered. With
+the four headline causes fixed earlier (slop-tolerant clicks,
+toggled-index cache marks, memoized child transcripts,
+cut-before-wrap details), the issue closes.

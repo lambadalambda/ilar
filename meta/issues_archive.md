@@ -257,3 +257,8 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [The picker answers instantly](issues/the-picker-answers-instantly.md)
 - [x] [Images ride with steers and queued messages](issues/images-ride-with-steers-and-queued-messages.md)
 - [x] [Service commands are redacted too](issues/service-commands-are-redacted-too.md)
+- [x] [Serve finishes its lifecycle](issues/serve-finishes-its-lifecycle.md)
+- [x] [The outbox gives up gracefully](issues/the-outbox-gives-up-gracefully.md)
+- [x] [Queued task results say what they are](issues/queued-task-results-say-what-they-are.md)
+- [x] [Redaction covers what tools echo](issues/redaction-covers-what-tools-echo.md)
+- [x] [Rows react when clicked](issues/rows-react-when-clicked.md)
