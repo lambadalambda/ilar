@@ -413,9 +413,10 @@ async fn completed_write_arguments_transition_from_receiving_to_execution() {
     ]);
     let (tx, mut rx) = events_channel();
 
-    let outcome = run_turn(
+    let registry = ToolRegistry::builtin();
+    let turn = run_turn(
         &provider,
-        &ToolRegistry::builtin(),
+        &registry,
         &store,
         &session_id,
         "write it",
@@ -426,19 +427,25 @@ async fn completed_write_arguments_transition_from_receiving_to_execution() {
         CancellationToken::new(),
         ToolContext::root(dir.path().to_path_buf()),
         None,
-    )
-    .await
-    .unwrap();
+    );
+    // Watched while it happens, not swept up afterwards: progress is
+    // staged and lossy, and `TurnDone` is the last word — whatever was
+    // staged for a row that is now settled dies with the turn.
+    let drain = async {
+        let mut published = Vec::new();
+        while let Some(event) = rx.recv().await {
+            published.push(event);
+        }
+        published
+    };
+    let (outcome, published) = tokio::join!(turn, drain);
+    let outcome = outcome.unwrap();
 
     assert_eq!(outcome, TurnOutcome::Completed);
     assert_eq!(
         std::fs::read_to_string(dir.path().join("generated.txt")).unwrap(),
         "hello"
     );
-    let mut published = Vec::new();
-    while let Ok(event) = rx.try_recv() {
-        published.push(event);
-    }
     let position = |predicate: &dyn Fn(&LoopEvent) -> bool| {
         published
             .iter()

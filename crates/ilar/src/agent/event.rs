@@ -98,6 +98,9 @@ pub struct LoopEventReceiver {
     tails: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
     progress_wake: tokio::sync::mpsc::Receiver<()>,
     ready_progress: std::collections::VecDeque<LoopEvent>,
+    /// Set when the terminal event has been handed out. Progress is
+    /// lossy by design, so after the last word it is simply dropped.
+    finished: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -131,6 +134,7 @@ pub fn loop_event_channel(capacity: usize) -> (LoopEventSender, LoopEventReceive
             tails,
             progress_wake: progress_receiver,
             ready_progress: std::collections::VecDeque::new(),
+            finished: false,
         },
     )
 }
@@ -163,11 +167,16 @@ impl LoopEventSender {
         crate::tools::OutputTailSink::new(self.tails.clone(), self.progress_wake.clone())
     }
 
-    /// Publish the single terminal event through capacity reserved at construction.
+    /// Publish the single terminal event through capacity reserved at
+    /// construction. Staged progress dies with it: a tail written while
+    /// the last tool was running has no row left to animate once the
+    /// turn is done, and serving it afterwards re-opens a settled one.
     pub fn publish_terminal(&mut self, event: LoopEvent) {
         if let Some(permit) = self.terminal.take() {
             let _ = permit.send(event);
         }
+        self.progress.lock().unwrap().clear();
+        self.tails.lock().unwrap().clear();
     }
 }
 
@@ -182,7 +191,8 @@ impl LoopEventReceiver {
             tokio::select! {
                 biased;
                 event = self.receiver.recv() => {
-                    return event.map(|event| self.coalesce_available(event));
+                    let event = self.coalesce_available(event?);
+                    return Some(self.settle(event));
                 }
                 wake = self.progress_wake.recv() => {
                     wake?;
@@ -211,7 +221,19 @@ impl LoopEventReceiver {
                 }
             },
         };
-        Ok(self.coalesce_available(reliable))
+        let event = self.coalesce_available(reliable);
+        Ok(self.settle(event))
+    }
+
+    /// The bookkeeping every delivered event passes through, on both
+    /// receive paths: `TurnDone` is the last word, so whatever was
+    /// staged before it must not follow it out.
+    fn settle(&mut self, event: LoopEvent) -> LoopEvent {
+        if matches!(event, LoopEvent::TurnDone { .. }) {
+            self.finished = true;
+            self.ready_progress.clear();
+        }
+        event
     }
 
     #[cfg(test)]
@@ -258,6 +280,9 @@ impl LoopEventReceiver {
     }
 
     fn next_progress(&mut self) -> Option<LoopEvent> {
+        if self.finished {
+            return None;
+        }
         if let Some(progress) = self.ready_progress.pop_front() {
             return Some(progress);
         }
@@ -335,6 +360,31 @@ mod tests {
             })
         ));
         assert!(rx.try_recv().is_err());
+    }
+
+    /// A tail staged while the last tool ran must not arrive after the
+    /// turn reported done: the row it would animate is settled, and the
+    /// reader has already been told the turn is over.
+    #[tokio::test]
+    async fn no_progress_survives_the_turn_it_belonged_to() {
+        let (mut tx, mut rx) = loop_event_channel(8);
+        tx.publish_tool_input_progress("call-1", 512);
+        tx.output_tail_sink()
+            .report("call-1", "still writing".into());
+        tx.publish_terminal(LoopEvent::TurnDone {
+            outcome: TurnOutcome::Completed,
+        });
+
+        assert!(matches!(
+            rx.recv().await,
+            Some(LoopEvent::TurnDone {
+                outcome: TurnOutcome::Completed
+            })
+        ));
+        assert!(
+            rx.try_recv().is_err(),
+            "progress staged before the last word was served after it"
+        );
     }
 
     #[tokio::test]
