@@ -61,3 +61,52 @@
 - [ ] [Steer the agent you are looking at](issues/steer-the-agent-you-are-looking-at.md)
 - [ ] [Focus seeds the step in flight](issues/focus-seeds-the-step-in-flight.md)
 
+## Milestone 15 — Sweep: correctness
+
+- [ ] [The focus view settles what it saw running](issues/the-focus-view-settles-what-it-saw-running.md)
+- [ ] [SSE redacts the calls it never saw](issues/sse-redacts-the-calls-it-never-saw.md)
+- [ ] [Serve retires what it cannot route](issues/serve-retires-what-it-cannot-route.md)
+- [ ] [Git is probed in plain C](issues/git-is-probed-in-plain-c.md)
+- [ ] [A queued notification stays collapsed](issues/a-queued-notification-stays-collapsed.md)
+- [ ] [Asides do not outlive the switch](issues/asides-do-not-outlive-the-switch.md)
+- [ ] [A steer confirms exactly once](issues/a-steer-confirms-exactly-once.md)
+- [ ] [TurnDone is the last word](issues/turndone-is-the-last-word.md)
+- [ ] [A torn index still persists the step](issues/a-torn-index-still-persists-the-step.md)
+- [ ] [The lock is its inode](issues/the-lock-is-its-inode.md)
+- [ ] [A dead group is left in peace](issues/a-dead-group-is-left-in-peace.md)
+- [ ] [Delete takes the scratch along](issues/delete-takes-the-scratch-along.md)
+- [ ] [A vanished cwd is an error, not a panic](issues/a-vanished-cwd-is-an-error-not-a-panic.md)
+- [ ] [The outbox compacts by its own rules](issues/the-outbox-compacts-by-its-own-rules.md)
+- [ ] [Serve joins the turns it started](issues/serve-joins-the-turns-it-started.md)
+- [ ] [A turn failure waits to be read](issues/a-turn-failure-waits-to-be-read.md)
+- [ ] [The activity broadcast does not drown](issues/the-activity-broadcast-does-not-drown.md)
+- [ ] [Search survives a resize](issues/search-survives-a-resize.md)
+- [ ] [A job death does not invent a task](issues/a-job-death-does-not-invent-a-task.md)
+- [ ] [The outbox is reread while serve lives](issues/the-outbox-is-reread-while-serve-lives.md)
+
+## Milestone 16 — Sweep: texture
+
+- [ ] [Help catches up with the surfaces](issues/help-catches-up-with-the-surfaces.md)
+- [ ] [Notices take turns](issues/notices-take-turns.md)
+- [ ] [The focus view earns its chrome](issues/the-focus-view-earns-its-chrome.md)
+- [ ] [The agents panel reaches its tail](issues/the-agents-panel-reaches-its-tail.md)
+- [ ] [Hover claims the whole row](issues/hover-claims-the-whole-row.md)
+- [ ] [Words a model acts on](issues/words-a-model-acts-on.md)
+- [ ] [The picker finds the late topic](issues/the-picker-finds-the-late-topic.md)
+- [ ] [The lock names its holder](issues/the-lock-names-its-holder.md)
+- [ ] [Tasks lists without stalling](issues/tasks-lists-without-stalling.md)
+- [ ] [Parked steers survive the process](issues/parked-steers-survive-the-process.md)
+
+## Milestone 17 — Sweep: structure
+
+- [ ] [One redaction engine](issues/one-redaction-engine.md)
+- [ ] [One fold for live and restored](issues/one-fold-for-live-and-restored.md)
+- [ ] [One delivery engine](issues/one-delivery-engine.md)
+- [ ] [One hit map for the sidebar](issues/one-hit-map-for-the-sidebar.md)
+- [ ] [The loop top joins the spine](issues/the-loop-top-joins-the-spine.md)
+- [ ] [The big files find their seams](issues/the-big-files-find-their-seams.md)
+- [ ] [Engines retire when idle](issues/engines-retire-when-idle.md)
+- [ ] [Serve folds once and caches](issues/serve-folds-once-and-caches.md)
+- [ ] [Limits are not optional](issues/limits-are-not-optional.md)
+- [ ] [A turn continues after a hiccup](issues/a-turn-continues-after-a-hiccup.md)
+

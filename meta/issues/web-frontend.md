@@ -80,3 +80,15 @@ gets there, not a commitment to that feature list.
 ## Milestone
 
 11 — Beyond the terminal
+
+## Parity gaps (sweep 2026-08-29)
+
+- No todo panel: the web shows raw `todo` tool rows where the TUI
+  renders the current list.
+- The Subagents card is a flat list of direct children; the TUI
+  panel is a tree — grandchildren are invisible without navigating
+  into each child.
+- A pending `question` in a TUI-driven session renders as an
+  eternal spinner with nothing saying the session waits on a human
+  elsewhere.
+
