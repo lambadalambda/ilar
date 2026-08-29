@@ -254,3 +254,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Steers outlive a turn that declines](issues/steers-outlive-a-turn-that-declines.md)
 - [x] [Completions survive the process](issues/completions-survive-the-process.md)
 - [x] [Results arrive like steers](issues/results-arrive-like-steers.md)
+- [x] [The picker answers instantly](issues/the-picker-answers-instantly.md)
