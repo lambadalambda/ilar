@@ -634,9 +634,12 @@ fn apply_intent(
             app.retry_available = false;
             app.turn_committed = false;
             app.clear_notice();
-            app.push_transcript_line(Line_::User(crate::transcript::user_text_with_images(
-                &text, &images,
-            )));
+            // A completion steered into a dying turn comes back through
+            // here, and it is a notification envelope, not something the
+            // user typed: the same fold the steer path uses, or the live
+            // transcript shows raw XML where the replay shows a
+            // collapsed row.
+            app.push_user_message(&text, &images);
             app.follow_tail = true;
             app.busy = true;
             app.status = "thinking".into();
@@ -3918,6 +3921,22 @@ mod tests {
         assert_eq!(cli_project_instructions(false, true), Some(false));
         // Clap refuses the pair; if it ever stopped, the file stays out.
         assert_eq!(cli_project_instructions(true, true), Some(false));
+    }
+
+    /// A completion that could not be steered into a dying turn is
+    /// requeued and auto-sent as a fresh one — through `StartTurn`,
+    /// which used to push it raw. The reader must not be able to tell
+    /// which door a notification came in by.
+    #[test]
+    fn a_requeued_completion_wears_its_collapsed_row_like_a_steered_one() {
+        let envelope = "<task-notification>\nTask \"audit\" completed.\n<result>\ndone\n</result>\n</task-notification>";
+        let mut app = App::new();
+        apply_intent(&mut app, Intent::StartTurn(envelope.into()), None);
+        assert!(
+            matches!(app.lines().last(), Some(Line_::Task { text, .. }) if text.contains("audit")),
+            "a requeued completion showed as something the user typed: {:?}",
+            app.lines().last()
+        );
     }
 
     /// Every modal `decide` routes a query paste to must reach its own

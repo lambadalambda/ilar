@@ -887,6 +887,29 @@ impl App {
         self.touch_transcript(Some(from));
     }
 
+    /// A message from the user's side of the conversation, however it
+    /// got here: typed, queued and auto-sent, or steered into a running
+    /// turn. A notification envelope wears its collapsed row; anything
+    /// else is a user row with a marker per image. One fold, so the
+    /// three arrival paths cannot disagree about what a completion
+    /// looks like — including a *typed* envelope, which replay would
+    /// collapse too. Returns the first line index it touched.
+    pub(crate) fn push_user_message(
+        &mut self,
+        text: &str,
+        images: &[ilar::session::ImageContent],
+    ) -> usize {
+        let from = self.lines.len();
+        if !(images.is_empty() && self.push_notification_row(text)) {
+            self.lines
+                .push(Line_::User(crate::transcript::user_text_with_images(
+                    text, images,
+                )));
+        }
+        self.touch_transcript(Some(from));
+        from
+    }
+
     /// The collapsed row a task or tool notification wears, wherever it
     /// arrives — a fresh turn's prompt or a steer into a running one.
     /// False when the text is no notification at all.
@@ -980,17 +1003,11 @@ impl App {
                 {
                     self.pending_steers.remove(index);
                 }
-                let from = self.lines.len();
                 // A steered task result wears the same collapsed row it
                 // gets on a fresh turn — never its raw envelope. Only a
                 // human steer is a user row: the words, then a marker
                 // per image.
-                if !(images.is_empty() && self.push_notification_row(text)) {
-                    self.lines
-                        .push(Line_::User(crate::transcript::user_text_with_images(
-                            text, images,
-                        )));
-                }
+                let from = self.push_user_message(text, images);
                 self.follow_tail = true;
                 Some(from)
             }

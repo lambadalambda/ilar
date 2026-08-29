@@ -15,3 +15,10 @@ Guard StartTurn with the same
 `images.is_empty() && push_notification_row(text)` fold.
 
 Size: S. Source: sweep 2026-08-29, event loop.
+
+## Outcome
+
+`App::push_user_message` is the one fold for a message from the user's
+side — typed, requeued, or steered — and both `Intent::StartTurn` and
+the `Steered` arm go through it. A typed envelope collapses too, which
+is what replay does with it anyway.
