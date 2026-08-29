@@ -28,11 +28,21 @@ to choose. Today it silently pays the cold re-read every time.
 - Config-gated, off by default: this fires unattended provider
   requests and reshapes context without a human present, so the
   user opts in — something like `[cache_compact]` with `enabled`,
-  per-provider `ttl` (none of the providers contract their TTLs;
-  OpenAI and GLM prefix caches live minutes, so default ~5m),
-  a safety `margin` (default ~60s), and a `context_floor` (default
-  ~150k tokens) below which a miss is pennies and summary fidelity
-  is not worth spending.
+  per-provider `ttl`, a safety `margin` (default ~60s), and a
+  `context_floor` (default ~150k tokens) below which a miss is
+  pennies and summary fidelity is not worth spending.
+- TTL defaults per what providers actually document (verified
+  2026-08-29): OpenAI ~30m — GPT-5.6+ has
+  `prompt_cache_options.ttl: "30m"` as the only value and default,
+  earlier models offer `prompt_cache_retention: 24h` (orgs without
+  Zero Data Retention even default to it); zai/GLM ~5m — caching is
+  implicit, no TTL documented, drops observed within minutes in the
+  wild. Reads cost ~0.1× (OpenAI) / ~0.19× (GLM) of fresh input.
+- Before compacting on the OpenAI path, request the retention:
+  send `prompt_cache_retention: 24h` (or the 30m TTL knob) where
+  supported — zero unattended requests, and absences under a day
+  stop being a problem there at all. Autocompaction then earns its
+  keep on zai/GLM and for longer gaps.
 - Trigger: `last_provider_request + ttl - margin`, only when the
   session is idle (a running turn refreshes its own cache), context
   is above the floor, and no delivery/steer/question is pending.
