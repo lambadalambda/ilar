@@ -1220,7 +1220,12 @@ pub(crate) fn prune_incomplete_thoughts(lines: &mut Vec<Line_>) -> Option<usize>
     Some(first)
 }
 
-fn apply_child_loop_event(lines: &mut Vec<Line_>, group: &mut u64, scope: &str, event: &LoopEvent) {
+pub(crate) fn apply_child_loop_event(
+    lines: &mut Vec<Line_>,
+    group: &mut u64,
+    scope: &str,
+    event: &LoopEvent,
+) {
     match event {
         // A parent's task_message, delivered — shown when the child
         // actually saw it, like the root's own steers.
@@ -1278,11 +1283,18 @@ fn apply_child_loop_event(lines: &mut Vec<Line_>, group: &mut u64, scope: &str, 
         }
         LoopEvent::ToolFinished {
             id,
+            name,
             is_error,
             result,
             child_session_id,
-            ..
         } => {
+            // A finish for a call this timeline never saw: the view
+            // opened mid-step, after the start had already streamed
+            // past it. A row born finished beats a result that never
+            // appears.
+            if newest_tool_index(lines, id).is_none() {
+                push_tool_row(lines, id, format!("{scope}:{group}"), name);
+            }
             finish_tool_row(lines, id, *is_error, result, child_session_id);
         }
         LoopEvent::StepComplete { .. } => *group = group.saturating_add(1),

@@ -61,6 +61,12 @@ pub(crate) fn carve_panel_capped(area: &mut Rect, content_rows: usize, cap: u16)
 /// One subagent working right now, as the sidebar shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AgentRow {
+    /// The child session behind the row — what a click focuses.
+    pub(crate) session_id: String,
+    /// Levels under the shallowest listed ancestor: a child of a
+    /// listed agent indents one step past its parent; a root's child
+    /// or a foreign tree's root sits at 0.
+    pub(crate) depth: usize,
     pub(crate) description: String,
     pub(crate) agent: String,
     pub(crate) background: bool,
@@ -75,34 +81,47 @@ pub(crate) struct AgentRow {
     pub(crate) elapsed: std::time::Duration,
 }
 
-/// The running-agents panel's rows, plus where its disclosure row
-/// landed among them — the one row that takes clicks.
+/// Where a click on an agent-panel row navigates: home to the root
+/// transcript, or into a child session's focus view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AgentTarget {
+    Main,
+    Focus(String),
+}
+
+/// The running-agents panel's rows, where its disclosure row landed
+/// among them, and which line indices navigate where — every line of
+/// an agent row is a click on that agent, exactly as drawn.
 pub(crate) struct AgentPanel {
     pub(crate) lines: Vec<Line<'static>>,
     pub(crate) more_toggle: Option<usize>,
+    pub(crate) row_hits: Vec<(usize, AgentTarget)>,
 }
 
-/// The running-agents panel: what was delegated, to whom, and for how
-/// long. Two lines each — the description earns a full line, since it
-/// is the only thing that says what the agent is actually doing.
-/// Nothing is hidden until `budget_rows` runs out; only then does the
-/// tail collapse into a clickable "+N more" disclosure, and an
-/// expanded panel carries the way back the same way. An expanded
-/// panel that still cannot show everyone says so.
+/// The running-agents panel: the places you can go, led by "main" —
+/// the root session — then what was delegated, to whom, and for how
+/// long, indented under the agent that delegated it. Two lines each —
+/// the description earns a full line, since it is the only thing that
+/// says what the agent is actually doing. Nothing is hidden until
+/// `budget_rows` runs out; only then does the tail collapse into a
+/// clickable "+N more" disclosure, and an expanded panel carries the
+/// way back the same way. An expanded panel that still cannot show
+/// everyone says so.
 pub(crate) fn agent_panel(
     agents: &[AgentRow],
     show_all: bool,
     width: usize,
     budget_rows: usize,
 ) -> AgentPanel {
-    let full = agents.len() * 2;
+    // The main row is content like any other: the budget pays for it.
+    let full = agents.len() * 2 + 1;
     let (count, toggle_text) = if !show_all && full <= budget_rows {
         (agents.len(), None)
     } else {
         let count = if show_all && full + 1 <= budget_rows {
             agents.len()
         } else {
-            budget_rows.saturating_sub(1) / 2
+            budget_rows.saturating_sub(2) / 2
         };
         let hidden = agents.len() - count;
         let text = match (show_all, hidden) {
@@ -114,7 +133,22 @@ pub(crate) fn agent_panel(
     };
     let width = width.max(1);
     let mut lines = Vec::new();
+    let mut row_hits = Vec::new();
+    // The place you came from leads the map whenever the panel shows.
+    let marker = truncate_display("● ", width, Truncation::Right);
+    let remaining = width.saturating_sub(UnicodeWidthStr::width(marker.as_str()));
+    row_hits.push((lines.len(), AgentTarget::Main));
+    lines.push(Line::from(vec![
+        Span::styled(marker, Style::default().fg(theme::PRIMARY)),
+        Span::styled(
+            truncate_display("main", remaining, Truncation::Right),
+            Style::default().fg(theme::PRIMARY),
+        ),
+    ]));
     for agent in agents.iter().take(count) {
+        // The indent goes after the marker, which keeps column 0: a
+        // deep grandchild must not push ✉/▸ off the left edge.
+        let indent = "  ".repeat(agent.depth);
         // Truncate the marker too: at absurd widths it is the overflow.
         // Mail for a delivery: a result on its way to this agent, not
         // work the model started.
@@ -124,10 +158,15 @@ pub(crate) fn agent_panel(
             Truncation::Right,
         );
         let remaining = width.saturating_sub(UnicodeWidthStr::width(marker.as_str()));
+        row_hits.push((lines.len(), AgentTarget::Focus(agent.session_id.clone())));
         lines.push(Line::from(vec![
             Span::styled(marker, Style::default().fg(TOOL_ACTIVE)),
             Span::styled(
-                truncate_display(&safe_text(&agent.description), remaining, Truncation::Right),
+                truncate_display(
+                    &format!("{indent}{}", safe_text(&agent.description)),
+                    remaining,
+                    Truncation::Right,
+                ),
                 Style::default().fg(theme::PRIMARY),
             ),
         ]));
@@ -142,10 +181,11 @@ pub(crate) fn agent_panel(
             Some(parent) => format!(" · for {}", safe_text(parent)),
             None => String::new(),
         };
+        row_hits.push((lines.len(), AgentTarget::Focus(agent.session_id.clone())));
         lines.push(Line::styled(
             truncate_display(
                 &format!(
-                    "  {}{background}{owner} · {}",
+                    "  {indent}{}{background}{owner} · {}",
                     safe_text(&agent.agent),
                     format_elapsed(agent.elapsed)
                 ),
@@ -162,7 +202,11 @@ pub(crate) fn agent_panel(
         ));
         lines.len() - 1
     });
-    AgentPanel { lines, more_toggle }
+    AgentPanel {
+        lines,
+        more_toggle,
+        row_hits,
+    }
 }
 
 /// The services panel's rows, plus where its exited-services
@@ -734,10 +778,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_agent_panel_hides_nothing_until_space_runs_out() {
-        let agents = (0..5)
+    fn plain_agent_rows(count: usize) -> Vec<AgentRow> {
+        (0..count)
             .map(|index| AgentRow {
+                session_id: format!("session-{index}"),
+                depth: 0,
                 description: format!("task number {index} with a long description"),
                 agent: "explore".into(),
                 background: index % 2 == 1,
@@ -745,47 +790,100 @@ mod tests {
                 foreign_parent: None,
                 elapsed: std::time::Duration::from_secs(30),
             })
-            .collect::<Vec<_>>();
+            .collect()
+    }
 
-        // Room for all ten rows: every agent shows, nothing to click.
-        let panel = agent_panel(&agents, false, 24, 10);
-        let text = panel.lines.iter().map(rendered_text).collect::<Vec<_>>();
-        assert_eq!(text.len(), 10, "{text:?}");
-        assert!(panel.more_toggle.is_none());
-        assert!(text[0].starts_with("▸ task number 0"), "{text:?}");
-        assert_eq!(text[1], "  explore · 30s");
-        assert_eq!(text[3], "  explore · bg · 30s");
+    #[test]
+    fn the_agent_panel_hides_nothing_until_space_runs_out() {
+        let agents = plain_agent_rows(5);
 
-        // Seven rows: three whole agents beside the disclosure, and
-        // the disclosure is a row of its own that the mouse can find.
-        let panel = agent_panel(&agents, false, 24, 7);
-        let text = panel.lines.iter().map(rendered_text).collect::<Vec<_>>();
-        assert_eq!(text.len(), 7, "{text:?}");
-        assert_eq!(panel.more_toggle, Some(6));
-        assert_eq!(text[6], "▸ +2 more");
-        assert!(panel.lines.iter().all(|line| line.width() <= 24), "{text:?}");
-
-        // Expanded with room for everything: all five, plus the way
-        // back.
-        let panel = agent_panel(&agents, true, 24, 16);
+        // Room for the main row and all ten agent rows: every agent
+        // shows, nothing to click but the rows themselves.
+        let panel = agent_panel(&agents, false, 24, 11);
         let text = panel.lines.iter().map(rendered_text).collect::<Vec<_>>();
         assert_eq!(text.len(), 11, "{text:?}");
-        assert_eq!(panel.more_toggle, Some(10));
-        assert_eq!(text[10], "▾ show less");
+        assert!(panel.more_toggle.is_none());
+        assert_eq!(text[0], "● main");
+        assert!(text[1].starts_with("▸ task number 0"), "{text:?}");
+        assert_eq!(text[2], "  explore · 30s");
+        assert_eq!(text[4], "  explore · bg · 30s");
+
+        // Seven rows: main, two whole agents, and the disclosure — a
+        // row of its own that the mouse can find.
+        let panel = agent_panel(&agents, false, 24, 7);
+        let text = panel.lines.iter().map(rendered_text).collect::<Vec<_>>();
+        assert_eq!(text.len(), 6, "{text:?}");
+        assert_eq!(panel.more_toggle, Some(5));
+        assert_eq!(text[5], "▸ +3 more");
+        assert!(panel.lines.iter().all(|line| line.width() <= 24), "{text:?}");
+
+        // Expanded with room for everything: main, all five, plus the
+        // way back.
+        let panel = agent_panel(&agents, true, 24, 16);
+        let text = panel.lines.iter().map(rendered_text).collect::<Vec<_>>();
+        assert_eq!(text.len(), 12, "{text:?}");
+        assert_eq!(panel.more_toggle, Some(11));
+        assert_eq!(text[11], "▾ show less");
 
         // Expanded but the screen is still too short: honest about it.
         let panel = agent_panel(&agents, true, 24, 9);
         let text = panel.lines.iter().map(rendered_text).collect::<Vec<_>>();
-        assert_eq!(text.len(), 9, "{text:?}");
-        assert_eq!(text[8], "▾ show less · 1 hidden");
+        assert_eq!(text.len(), 8, "{text:?}");
+        assert_eq!(text[7], "▾ show less · 2 hidden");
 
         // A zero budget or zero width does not panic.
-        assert!(agent_panel(&agents, false, 24, 0).lines.len() <= 1);
+        assert!(agent_panel(&agents, false, 24, 0).lines.len() <= 2);
         assert!(
-            agent_panel(&agents, false, 0, 10)
+            agent_panel(&agents, false, 0, 11)
                 .lines
                 .iter()
                 .all(|line| line.width() <= 1)
+        );
+    }
+
+    /// The panel is a map: "main" leads it, children indent under
+    /// their parent after the marker column, and every drawn line of
+    /// an agent — both of them — names where a click goes. The toggle
+    /// row belongs to the disclosure, not the map.
+    #[test]
+    fn the_agent_panel_leads_with_main_and_indents_the_tree() {
+        let mut agents = plain_agent_rows(3);
+        agents[1].depth = 1;
+        agents[1].delivering = true;
+        agents[2].depth = 2;
+
+        let panel = agent_panel(&agents, false, 30, 12);
+        let text = panel.lines.iter().map(rendered_text).collect::<Vec<_>>();
+        assert_eq!(text[0], "● main");
+        assert!(text[1].starts_with("▸ task number 0"), "{text:?}");
+        // The marker keeps column 0; the description carries the indent.
+        assert!(text[3].starts_with("✉   task number 1"), "{text:?}");
+        assert_eq!(text[4], "    explore · delivering · 30s");
+        assert!(text[5].starts_with("▸     task number 2"), "{text:?}");
+        assert!(panel.lines.iter().all(|line| line.width() <= 30), "{text:?}");
+
+        // Both lines of a row are the same click; main is one line.
+        let focus = |index: usize| AgentTarget::Focus(format!("session-{index}"));
+        assert_eq!(
+            panel.row_hits,
+            vec![
+                (0, AgentTarget::Main),
+                (1, focus(0)),
+                (2, focus(0)),
+                (3, focus(1)),
+                (4, focus(1)),
+                (5, focus(2)),
+                (6, focus(2)),
+            ]
+        );
+
+        // A collapsed tail keeps its hits honest: only drawn rows map,
+        // and the toggle line is not among them.
+        let panel = agent_panel(&agents, false, 30, 5);
+        assert_eq!(panel.more_toggle, Some(3));
+        assert_eq!(
+            panel.row_hits,
+            vec![(0, AgentTarget::Main), (1, focus(0)), (2, focus(0))]
         );
     }
 

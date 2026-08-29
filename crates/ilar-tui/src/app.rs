@@ -27,11 +27,12 @@ use crate::session_view::{
     accrue_usage, restored_session_view_with_store, task_notification_display,
     tool_notification_display,
 };
-use crate::sidebar::AgentRow;
+use crate::sidebar::{AgentRow, AgentTarget};
 use crate::text::{cache_share, format_cost, safe_text};
 use crate::transcript::{
     Line_, ToolState, TranscriptHitTarget, TranscriptRenderCache, append_text_delta,
-    append_thought_delta, apply_subagent_activity, complete_open_thought, complete_tool_execution,
+    append_thought_delta, apply_child_loop_event, apply_subagent_activity, complete_open_thought,
+    complete_tool_execution,
     complete_tool_input, configure_subagent_row, finish_tool_row, note_tool_input_progress,
     prune_incomplete_thoughts, push_tool_row, set_tool_arguments, set_tool_tail,
     start_tool_execution, toggle_note_expansion, toggle_tool_expansion, tool_group_index,
@@ -49,6 +50,96 @@ pub(crate) struct SubtaskRequest {
     pub(crate) agent: String,
     pub(crate) model: Option<String>,
     pub(crate) variant: Option<String>,
+}
+
+/// A child session's transcript taken over the screen: seeded by store
+/// replay, then followed live off the `SubagentActivity` feed filtered
+/// by session id. A view, not a transfer — the root transcript keeps
+/// flowing untouched underneath, and everything stateful (watchdog,
+/// notices, deliveries, steers) stays with the root.
+pub(crate) struct FocusView {
+    pub(crate) session_id: String,
+    /// "{agent} · {description}", the view's title.
+    pub(crate) title: String,
+    pub(crate) lines: Vec<Line_>,
+    /// Tool-group counter for the live fold, exactly as a nested
+    /// timeline keeps one.
+    pub(crate) group: u64,
+    /// Cleared by the focused session's own TurnDone; only changes the
+    /// footer — a finished agent says so in place, the view stays.
+    pub(crate) running: bool,
+    pub(crate) scroll_top: usize,
+    pub(crate) follow_tail: bool,
+    /// Set by the render, like the root transcript's scroll metrics.
+    pub(crate) content_rows: usize,
+    pub(crate) viewport_rows: usize,
+    /// Its own render cache: same machinery as the main transcript,
+    /// separate lines. Tool groups stay collapsed — expansion clicks
+    /// belong to the root transcript.
+    pub(crate) cache: TranscriptRenderCache,
+    pub(crate) revision: u64,
+    pub(crate) opened: std::time::Instant,
+}
+
+impl FocusView {
+    pub(crate) fn new(
+        session_id: String,
+        title: String,
+        lines: Vec<Line_>,
+        running: bool,
+    ) -> Self {
+        Self {
+            session_id,
+            title,
+            lines,
+            group: 0,
+            running,
+            scroll_top: 0,
+            follow_tail: true,
+            content_rows: 0,
+            viewport_rows: 0,
+            cache: TranscriptRenderCache::default(),
+            revision: 0,
+            opened: std::time::Instant::now(),
+        }
+    }
+
+    pub(crate) fn max_scroll(&self) -> usize {
+        self.content_rows.saturating_sub(self.viewport_rows)
+    }
+
+    pub(crate) fn page_size(&self) -> usize {
+        self.viewport_rows.saturating_sub(2).max(1)
+    }
+
+    pub(crate) fn scroll_by(&mut self, rows: isize) {
+        if rows < 0 {
+            self.scroll_top = self.scroll_top.saturating_sub(rows.unsigned_abs());
+            self.follow_tail = false;
+        } else if rows > 0 {
+            let max_scroll = self.max_scroll();
+            self.scroll_top = self.scroll_top.saturating_add(rows as usize).min(max_scroll);
+            self.follow_tail = self.scroll_top == max_scroll;
+        }
+    }
+
+    pub(crate) fn scroll_to_top(&mut self) {
+        self.scroll_top = 0;
+        self.follow_tail = self.max_scroll() == 0;
+    }
+
+    pub(crate) fn scroll_to_tail(&mut self) {
+        self.scroll_top = self.max_scroll();
+        self.follow_tail = true;
+    }
+
+    /// A change to the lines: full-rebuild mark, correctness over
+    /// narrowness — a focused transcript is one child's, not the
+    /// root's whole history.
+    fn touch(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+        self.cache.mark_dirty_from(0, self.revision);
+    }
 }
 
 /// A prompt put aside by Ctrl-S, with whatever was attached to it. The
@@ -245,6 +336,12 @@ pub(crate) struct App {
     /// half-height cap?, and where its row landed last frame.
     pub(crate) agents_show_all: bool,
     pub(crate) agents_more_hit: Option<Rect>,
+    /// Where each agent-panel row line landed last frame and where a
+    /// click on it navigates. Rebuilt by every render, like the
+    /// disclosure rects beside it.
+    pub(crate) agents_row_hits: Vec<(Rect, AgentTarget)>,
+    /// A child session's transcript taken over the screen, if any.
+    pub(crate) focus: Option<FocusView>,
     /// Raw pointer position for chrome outside the transcript (the
     /// sidebar toggle); the transcript keeps its own relative hover.
     pub(crate) hover_screen: Option<(u16, u16)>,
@@ -378,6 +475,8 @@ impl App {
             services_exited_hit: None,
             agents_show_all: false,
             agents_more_hit: None,
+            agents_row_hits: Vec::new(),
+            focus: None,
             hover_screen: None,
             transcript_cells: Vec::new(),
             transcript_selection: None,
@@ -1103,6 +1202,38 @@ impl App {
         self.retry_subagent_activity();
     }
 
+    /// Route a subagent event into the focus view, when one is open —
+    /// beside `push_subagent_activity`, never instead of it: the root
+    /// transcript's nested previews keep folding regardless. The
+    /// focused session's own events fold flat, exactly as its nested
+    /// timeline would; anything deeper nests through the same fold the
+    /// root uses, with the focused session as root.
+    pub(crate) fn push_focus_activity(&mut self, activity: &ilar::subagent::SubagentActivity) {
+        let Some(focus) = self.focus.as_mut() else {
+            return;
+        };
+        if activity.child_session_id == focus.session_id {
+            apply_child_loop_event(
+                &mut focus.lines,
+                &mut focus.group,
+                &activity.parent_call_id,
+                &activity.event,
+            );
+            // Follows every event, both ways: a `task_message` can
+            // resume a finished session, and a footer still saying
+            // "finished" over a streaming transcript would lie. The
+            // view itself never vanishes under the reader.
+            focus.running = !matches!(activity.event, LoopEvent::TurnDone { .. });
+            focus.touch();
+        } else if apply_subagent_activity(&mut focus.lines, &focus.session_id, activity).is_some() {
+            focus.touch();
+        }
+    }
+
+    pub(crate) fn close_focus(&mut self) {
+        self.focus = None;
+    }
+
     pub(crate) fn retry_subagent_activity(&mut self) {
         let pending = self.pending_subagent_activity.len();
         for _ in 0..pending {
@@ -1415,6 +1546,11 @@ impl App {
     }
 
     pub(crate) fn scroll_wheel(&mut self, rows: isize) {
+        // A focus view in front is what the wheel is pointed at.
+        if let Some(focus) = self.focus.as_mut() {
+            focus.scroll_by(rows);
+            return;
+        }
         self.clear_transcript_selection();
         if rows < 0 {
             self.scroll_up(rows.unsigned_abs());
@@ -1481,6 +1617,17 @@ impl App {
             self.agents_show_all = !self.agents_show_all;
         }
         hit
+    }
+
+    /// Where a click on the agents panel navigates; `None` when it
+    /// missed every row (the transcript gets the click instead). The
+    /// caller acts — this only reads the map the render left.
+    pub(crate) fn click_agent_row(&self, column: u16, row: u16) -> Option<AgentTarget> {
+        let position = ratatui::layout::Position::new(column, row);
+        self.agents_row_hits
+            .iter()
+            .find(|(rect, _)| rect.contains(position))
+            .map(|(_, target)| target.clone())
     }
 
     pub(crate) fn begin_transcript_selection(&mut self, column: u16, row: u16) {
@@ -3502,6 +3649,8 @@ mod tests {
         let mut app = App::new();
         app.agents_view = vec![
             AgentRow {
+                session_id: "child-survey".into(),
+                depth: 0,
                 description: "survey the picker core".into(),
                 agent: "explore".into(),
                 background: false,
@@ -3510,6 +3659,8 @@ mod tests {
                 elapsed: std::time::Duration::from_secs(72),
             },
             AgentRow {
+                session_id: "child-index".into(),
+                depth: 1,
                 description: "rebuild the index".into(),
                 agent: "build".into(),
                 background: true,
@@ -3534,8 +3685,12 @@ mod tests {
 
         let running = screen(&mut app);
         assert!(running.contains("agents (2)"), "{running}");
+        // The map leads with the place you came from…
+        assert!(running.contains("● main"), "{running}");
         assert!(running.contains("survey the picker core"), "{running}");
         assert!(running.contains("explore · 1m 12s"), "{running}");
+        // …and a child of a child indents under its parent.
+        assert!(running.contains("▸   rebuild the index"), "{running}");
         // Background work is marked; foreground is the default.
         assert!(running.contains("build · bg · 5s"), "{running}");
         // The panel never crowds out what it sits above.
@@ -3568,6 +3723,8 @@ mod tests {
         let mut app = App::new();
         app.agents_view = (0..8)
             .map(|index| AgentRow {
+                session_id: format!("child-{index}"),
+                depth: 0,
                 description: format!("hunt bug number {index}"),
                 agent: "explore".into(),
                 background: false,
@@ -3628,6 +3785,232 @@ mod tests {
         app.agents_view.clear();
         let _ = screen(&mut app);
         assert!(!app.agents_show_all, "expansion died with the roster");
+    }
+
+    /// The panel rows are a click map: every drawn line of an agent
+    /// names its session, "main" names the way home, and a miss stays
+    /// a miss so the transcript keeps its clicks.
+    #[test]
+    fn clicking_an_agent_row_names_where_it_navigates() {
+        let mut app = App::new();
+        app.agents_view = vec![
+            AgentRow {
+                session_id: "child-a".into(),
+                depth: 0,
+                description: "survey the picker core".into(),
+                agent: "explore".into(),
+                background: false,
+                delivering: false,
+                foreign_parent: None,
+                elapsed: std::time::Duration::from_secs(10),
+            },
+            AgentRow {
+                session_id: "child-b".into(),
+                depth: 1,
+                description: "rebuild the index".into(),
+                agent: "build".into(),
+                background: false,
+                delivering: false,
+                foreign_parent: None,
+                elapsed: std::time::Duration::from_secs(5),
+            },
+        ];
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        // Main leads, then two lines per agent, all recorded.
+        assert_eq!(app.agents_row_hits.len(), 5);
+        assert_eq!(app.agents_row_hits[0].1, AgentTarget::Main);
+        let main_rect = app.agents_row_hits[0].0;
+        assert_eq!(
+            app.click_agent_row(main_rect.x, main_rect.y),
+            Some(AgentTarget::Main)
+        );
+        // Both lines of a row are the same click.
+        for index in [1, 2] {
+            let rect = app.agents_row_hits[index].0;
+            assert_eq!(
+                app.click_agent_row(rect.x + 1, rect.y),
+                Some(AgentTarget::Focus("child-a".into()))
+            );
+        }
+        let rect = app.agents_row_hits[3].0;
+        assert_eq!(
+            app.click_agent_row(rect.x, rect.y),
+            Some(AgentTarget::Focus("child-b".into()))
+        );
+        assert_eq!(app.click_agent_row(0, 0), None);
+
+        // No panel, no map: the rects die with the roster.
+        app.agents_view.clear();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert!(app.agents_row_hits.is_empty());
+    }
+
+    fn focus_activity(
+        child: &str,
+        parent: &str,
+        call: &str,
+        event: LoopEvent,
+    ) -> ilar::subagent::SubagentActivity {
+        ilar::subagent::SubagentActivity {
+            parent_session_id: parent.into(),
+            parent_call_id: call.into(),
+            child_session_id: child.into(),
+            agent: "explore".into(),
+            event,
+        }
+    }
+
+    /// Focus is a filter over the stream we already have: the focused
+    /// session's events fold flat, a grandchild nests under its tool
+    /// row, TurnDone marks the ending in place without closing the
+    /// view — and the root transcript is byte-identical through the
+    /// whole round trip.
+    #[test]
+    fn a_focus_view_follows_its_session_and_leaves_the_root_untouched() {
+        let mut app = App::new();
+        app.session_id = "root".into();
+        app.push_transcript_line(Line_::System("root business".into()));
+        let root_before = app.lines().to_vec();
+
+        app.focus = Some(FocusView::new(
+            "child-a".into(),
+            "explore · survey the picker core".into(),
+            vec![Line_::System("replayed history".into())],
+            true,
+        ));
+
+        // The focused child's own stream folds flat…
+        app.push_focus_activity(&focus_activity(
+            "child-a",
+            "root",
+            "call-1",
+            LoopEvent::TextDelta("fresh words".into()),
+        ));
+        // …a grandchild nests under the tool row that started it…
+        app.push_focus_activity(&focus_activity(
+            "child-a",
+            "root",
+            "call-1",
+            LoopEvent::ToolStarted {
+                id: "tool-9".into(),
+                name: "task".into(),
+            },
+        ));
+        app.push_focus_activity(&focus_activity(
+            "grandchild",
+            "child-a",
+            "tool-9",
+            LoopEvent::TextDelta("deeper words".into()),
+        ));
+        // …and an unrelated sibling's stream is not its business.
+        app.push_focus_activity(&focus_activity(
+            "child-b",
+            "root",
+            "call-2",
+            LoopEvent::TextDelta("someone else".into()),
+        ));
+
+        let focus = app.focus.as_ref().expect("focus open");
+        assert_eq!(focus.lines[0], Line_::System("replayed history".into()));
+        assert_eq!(focus.lines[1], Line_::Assistant("fresh words".into()));
+        assert!(
+            matches!(
+                &focus.lines[2],
+                Line_::Tool { id, child_lines, .. }
+                    if id == "tool-9"
+                        && child_lines
+                            .iter()
+                            .any(|line| matches!(line, Line_::Assistant(text) if text == "deeper words"))
+            ),
+            "{:?}",
+            focus.lines
+        );
+        assert!(focus.running);
+        assert!(
+            !format!("{:?}", focus.lines).contains("someone else"),
+            "a sibling leaked into the focus view"
+        );
+
+        // The ending is said in place; the view does not vanish.
+        app.push_focus_activity(&focus_activity(
+            "child-a",
+            "root",
+            "call-1",
+            LoopEvent::TurnDone {
+                outcome: TurnOutcome::Completed,
+            },
+        ));
+        assert!(app.focus.as_ref().is_some_and(|focus| !focus.running));
+
+        // The way back, and the root never moved: focus was a view,
+        // not a transfer.
+        app.close_focus();
+        assert!(app.focus.is_none());
+        assert_eq!(app.lines(), &root_before[..]);
+    }
+
+    /// The focus view takes the transcript area — title, footer and
+    /// seeded rows — while the sidebar stays: the agents panel is how
+    /// you got here and how you leave. A finished agent changes the
+    /// footer, not the screen.
+    #[test]
+    fn the_focus_view_renders_over_the_transcript_with_an_honest_footer() {
+        let mut app = App::new();
+        app.push_transcript_line(Line_::Assistant("root prose".into()));
+        app.agents_view = vec![AgentRow {
+            session_id: "child-a".into(),
+            depth: 0,
+            description: "survey the picker core".into(),
+            agent: "explore".into(),
+            background: false,
+            delivering: false,
+            foreign_parent: None,
+            elapsed: std::time::Duration::from_secs(10),
+        }];
+        app.focus = Some(FocusView::new(
+            "child-a".into(),
+            "explore · survey the picker core".into(),
+            vec![Line_::Assistant("seeded child reply".into())],
+            true,
+        ));
+        let screen = |app: &mut App| {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
+            terminal.draw(|frame| app.render(frame)).unwrap();
+            (0..30)
+                .map(|row| {
+                    (0..140)
+                        .map(|column| terminal.backend().buffer()[(column, row)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let focused = screen(&mut app);
+        assert!(
+            focused.contains("explore · survey the picker core"),
+            "{focused}"
+        );
+        assert!(focused.contains("seeded child reply"), "{focused}");
+        assert!(focused.contains("read-only"), "{focused}");
+        assert!(!focused.contains("root prose"), "{focused}");
+        // The map stays on screen: main is still a click away.
+        assert!(focused.contains("● main"), "{focused}");
+        assert!(!app.agents_row_hits.is_empty());
+
+        app.focus.as_mut().unwrap().running = false;
+        let finished = screen(&mut app);
+        assert!(finished.contains("agent finished · Esc returns"), "{finished}");
+        assert!(finished.contains("seeded child reply"), "{finished}");
+
+        // Esc's path: the root transcript comes back as it was.
+        app.close_focus();
+        let returned = screen(&mut app);
+        assert!(returned.contains("root prose"), "{returned}");
     }
 
     #[test]

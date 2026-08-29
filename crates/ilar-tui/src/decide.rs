@@ -408,6 +408,40 @@ pub(crate) fn may_start_notification_turn(state: &LoopState) -> bool {
     !state.turn_running && !state.notifications_paused && state.modal.is_none()
 }
 
+/// Nesting depth for each `(session_id, parent_session_id)` row, in
+/// registry order: a row whose parent is also listed sits one level
+/// under it, walked transitively; anyone else — a root's child, a
+/// foreign tree's root — sits at 0. The registry can list one session
+/// twice (a delivery row beside its turn row); the first occurrence
+/// speaks for both. A cycle in the pairs would mean the registry lied
+/// about ancestry; the walk refuses to revisit a session rather than
+/// hang on the lie.
+pub(crate) fn tree_depths(edges: &[(String, String)]) -> Vec<usize> {
+    let mut first_occurrence = std::collections::HashMap::new();
+    for (index, (session_id, _)) in edges.iter().enumerate() {
+        first_occurrence
+            .entry(session_id.as_str())
+            .or_insert(index);
+    }
+    edges
+        .iter()
+        .map(|(session_id, _)| {
+            let mut depth = 0;
+            let mut visited = std::collections::HashSet::new();
+            let mut current = session_id.as_str();
+            while visited.insert(current) {
+                let parent = edges[first_occurrence[current]].1.as_str();
+                if !first_occurrence.contains_key(parent) || visited.contains(parent) {
+                    break;
+                }
+                depth += 1;
+                current = parent;
+            }
+            depth
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -914,5 +948,51 @@ mod tests {
             ..idle()
         };
         assert!(!retry_dismisses_manager(&retry(&drafting)));
+    }
+
+    fn edges(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(id, parent)| (id.to_string(), parent.to_string()))
+            .collect()
+    }
+
+    /// A chain nests one level per listed ancestor; a fork keeps
+    /// siblings level with each other.
+    #[test]
+    fn tree_depths_nest_chains_and_keep_siblings_level() {
+        // root's children (parent unlisted) → 0; the chain climbs.
+        let chain = edges(&[("a", "root"), ("b", "a"), ("c", "b")]);
+        assert_eq!(tree_depths(&chain), vec![0, 1, 2]);
+
+        let fork = edges(&[("a", "root"), ("b", "a"), ("c", "a"), ("d", "root")]);
+        assert_eq!(tree_depths(&fork), vec![0, 1, 1, 0]);
+    }
+
+    /// A parent nobody listed — a foreign tree's root — anchors at 0,
+    /// and its own descendants still nest under it.
+    #[test]
+    fn tree_depths_anchor_foreign_roots_at_zero() {
+        let foreign = edges(&[("x", "elsewhere"), ("y", "x")]);
+        assert_eq!(tree_depths(&foreign), vec![0, 1]);
+    }
+
+    /// Ancestry that loops — self-references included — must terminate,
+    /// not hang the render loop that asked.
+    #[test]
+    fn tree_depths_refuse_to_walk_a_cycle_forever() {
+        assert_eq!(tree_depths(&edges(&[("a", "a")])), vec![0]);
+        // a→b→a: each stops when the walk comes back around.
+        let cycle = edges(&[("a", "b"), ("b", "a"), ("c", "a")]);
+        assert_eq!(tree_depths(&cycle), vec![1, 1, 2]);
+    }
+
+    /// A session listed twice (its delivery row beside its turn row)
+    /// keys by the first occurrence: both rows get one depth, and a
+    /// child of that session nests under it once.
+    #[test]
+    fn tree_depths_key_a_duplicated_session_by_first_occurrence() {
+        let doubled = edges(&[("a", "root"), ("a", "ghost"), ("b", "a")]);
+        assert_eq!(tree_depths(&doubled), vec![0, 0, 1]);
     }
 }

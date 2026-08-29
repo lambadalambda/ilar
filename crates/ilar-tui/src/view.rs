@@ -489,11 +489,64 @@ impl App {
         lines
     }
 
+    /// The focused child's transcript, drawn over the transcript area
+    /// like the picker preview draws over the screen: read-only comes
+    /// free, and the root transcript keeps rendering (and caching)
+    /// underneath, ready for Esc.
+    fn render_focus(&mut self, frame: &mut Frame, area: Rect) {
+        let Some(focus) = self.focus.as_mut() else {
+            return;
+        };
+        let footer = if focus.running {
+            " read-only · ↑↓ scroll · Esc returns "
+        } else {
+            " agent finished · Esc returns "
+        };
+        let title = format!(
+            " {} ",
+            truncate_display(
+                &focus.title,
+                (area.width as usize).saturating_sub(4),
+                Truncation::Right
+            )
+        );
+        let Some(inner) =
+            crate::modals::modal_frame(frame, area, &title, TOOL_ACTIVE, footer)
+        else {
+            return;
+        };
+        // Same cache machinery as the main transcript, owned by the
+        // view: rows arrive wrapped to the inner width. No expanded
+        // groups — expansion clicks stay with the root transcript.
+        focus.cache.update(
+            &focus.lines,
+            &std::collections::HashSet::new(),
+            focus.revision,
+            inner.width,
+            std::time::Instant::now(),
+            focus.opened,
+        );
+        focus.content_rows = focus.cache.row_count();
+        focus.viewport_rows = inner.height as usize;
+        let max_scroll = focus.max_scroll();
+        if focus.follow_tail {
+            focus.scroll_top = max_scroll;
+        } else {
+            focus.scroll_top = focus.scroll_top.min(max_scroll);
+        }
+        let rows = focus
+            .cache
+            .visible_rows(focus.scroll_top, focus.viewport_rows, &[]);
+        let lines = rows.into_iter().map(|row| row.line).collect::<Vec<_>>();
+        frame.render_widget(Paragraph::new(lines), inner);
+    }
+
     pub(crate) fn render(&mut self, frame: &mut Frame) {
         // Refreshed below only if their panels actually draw; a stale
         // rect would take phantom clicks.
         self.services_exited_hit = None;
         self.agents_more_hit = None;
+        self.agents_row_hits.clear();
         let input_width = frame.area().width.saturating_sub(2);
         let desired_input_height = self
             .input
@@ -691,6 +744,11 @@ impl App {
             frame.render_stateful_widget(scrollbar, area, &mut state);
         }
 
+        // The focus view covers the transcript, not the sidebar: the
+        // agents panel is the map of places you can go, and clicking
+        // "main" on it is one of the ways back.
+        self.render_focus(frame, transcript_area);
+
         if let Some(todo_area) = content_areas.todos {
             let mut todo_area = todo_area;
             if let Some((goal, round)) = &self.goal {
@@ -749,7 +807,7 @@ impl App {
                 // also un-sticks itself the moment everyone fits the
                 // ordinary cap again.
                 let collapsed_budget = (todo_area.height / 2).saturating_sub(2) as usize;
-                if self.agents_show_all && self.agents_view.len() * 2 <= collapsed_budget {
+                if self.agents_show_all && self.agents_view.len() * 2 + 1 <= collapsed_budget {
                     self.agents_show_all = false;
                 }
                 let cap = if self.agents_show_all {
@@ -757,7 +815,11 @@ impl App {
                 } else {
                     todo_area.height / 2
                 };
-                let AgentPanel { mut lines, more_toggle } = agent_panel(
+                let AgentPanel {
+                    mut lines,
+                    more_toggle,
+                    row_hits,
+                } = agent_panel(
                     &self.agents_view,
                     self.agents_show_all,
                     text_width,
@@ -775,6 +837,22 @@ impl App {
                         {
                             underline_row(&mut lines[index]);
                         }
+                    }
+                    // Each drawn row line becomes a screen rect the
+                    // dispatcher can hit — the navigation surface the
+                    // focus view opens from.
+                    for (index, target) in row_hits {
+                        let Some(rect) = disclosure_hit(agent_area, index) else {
+                            continue;
+                        };
+                        if self.mouse_reaches_content()
+                            && self.hover_screen.is_some_and(|(column, hover_row)| {
+                                rect.contains(ratatui::layout::Position::new(column, hover_row))
+                            })
+                        {
+                            underline_row(&mut lines[index]);
+                        }
+                        self.agents_row_hits.push((rect, target));
                     }
                     let agent_block = Block::default()
                         .borders(Borders::ALL)
@@ -859,7 +937,10 @@ impl App {
 
         frame.render_widget(Paragraph::new(self.status_line(chunks[1].width)), chunks[1]);
 
-        let input_focused = input_accepts_keys(self.busy, self.has_modal());
+        // A focus view routes keys nowhere near the prompt: the input
+        // stays visible but must not look like it is listening.
+        let input_focused =
+            input_accepts_keys(self.busy, self.has_modal() || self.focus.is_some());
         let input_block = Block::default()
             .borders(Borders::ALL)
             .border_type(if input_focused {
@@ -1002,7 +1083,7 @@ impl App {
             );
         }
 
-        if input_accepts_keys(self.busy, self.has_modal())
+        if input_accepts_keys(self.busy, self.has_modal() || self.focus.is_some())
             && input_area.width > 0
             && input_area.height > 0
         {

@@ -24,7 +24,7 @@ mod view;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use app::{App, activate_palette_command, apply_theme_picker_action};
+use app::{App, FocusView, activate_palette_command, apply_theme_picker_action};
 use clap::Parser;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
@@ -45,7 +45,7 @@ use modals::{
 };
 use questions::QuestionAction;
 use ratatui::style::Color;
-use sidebar::AgentRow;
+use sidebar::{AgentRow, AgentTarget};
 use tokio_util::sync::CancellationToken;
 use transcript::Line_;
 
@@ -1897,14 +1897,28 @@ impl schedule::Runtime for LoopRuntime<'_> {
         // may want to wait for or cancel, and the pending manager's
         // cancel-all takes them too.
         app.background_running = self.spawner.running_background() + self.routed.len();
-        app.agents_view = self
-            .spawner
-            .running_tasks()
+        let tasks = self.spawner.running_tasks();
+        // Depths from the registry's own ancestry, in registry order:
+        // children stay after their parent, roots keep their place.
+        let depths = decide::tree_depths(
+            &tasks
+                .iter()
+                .map(|task| (task.session_id.clone(), task.parent_session_id.clone()))
+                .collect::<Vec<_>>(),
+        );
+        app.agents_view = tasks
             .into_iter()
-            .map(|task| AgentRow {
-                foreign_parent: (!task.parent_session_id.is_empty()
+            .zip(depths)
+            .map(|(task, depth)| AgentRow {
+                // An indented row already names its parent by position;
+                // the "for {id}" note is for foreign roots the panel
+                // cannot indent under anyone.
+                foreign_parent: (depth == 0
+                    && !task.parent_session_id.is_empty()
                     && task.parent_session_id != *self.session_id)
                     .then(|| short_session_id(&task.parent_session_id).to_string()),
+                session_id: task.session_id,
+                depth,
                 description: task.description,
                 agent: task.agent,
                 background: task.background,
@@ -1954,6 +1968,55 @@ fn ring_terminal_bell_if_idle(
     writer.write_all(b"\x07")?;
     writer.flush()?;
     Ok(true)
+}
+
+/// Open the focus view on a child session: seeded by store replay —
+/// reading is safe while the child's turn holds the writer lock, the
+/// picker preview does the same — then followed live off the activity
+/// drain. A session that will not load is a notice, never a blank
+/// screen; the roster row, when still listed, lends the title and says
+/// the agent is running.
+fn open_agent_focus(app: &mut App, store: &SessionStore, session_id: &str) {
+    let roster = app
+        .agents_view
+        .iter()
+        .find(|row| row.session_id == session_id);
+    let title = match roster {
+        Some(row) => format!("{} · {}", row.agent, row.description),
+        None => format!("agent · {}", short_session_id(session_id)),
+    };
+    let running = roster.is_some();
+    match store.load(session_id) {
+        Ok(reader) => {
+            // A live search would keep the keyboard and make the focus
+            // footer lie; the click is a navigation, so the search is
+            // over.
+            app.close_search(false);
+            // With-store, so a child's own subagents bring their
+            // history along instead of empty nested timelines.
+            let mut restored = session_view::restored_session_view_with_store(&reader, store);
+            if running {
+                // The store commits step by step: whatever the session
+                // has streamed since its last step boundary is not in
+                // the seed. Say so — and end the seed on a non-text
+                // line, so the next delta starts fresh instead of
+                // welding onto an older paragraph.
+                restored.lines.push(crate::transcript::Line_::System(
+                    "focused mid-turn — the step in flight joins live from here".into(),
+                ));
+            }
+            app.focus = Some(FocusView::new(
+                session_id.to_string(),
+                title,
+                restored.lines,
+                running,
+            ));
+        }
+        Err(error) => app.set_notice(
+            format!("cannot open agent transcript: {error:#}"),
+            NoticeLevel::Error,
+        ),
+    }
 }
 
 struct WheelBatch {
@@ -2546,6 +2609,9 @@ async fn run_app(
                 break;
             };
             app.push_subagent_activity(&activity);
+            // The focus view reads the same feed, beside the root's
+            // nested previews, never instead of them.
+            app.push_focus_activity(&activity);
         }
         // Questions use their own typed reply path and intentionally wait
         // outside the ordinary tool executor. Apply them after loop events so
@@ -2754,7 +2820,10 @@ async fn run_app(
                 // keeps exactly one set of dismiss/abort/clear paths.
                 let (key, code) = if matches!((code, control), (KeyCode::Char('c'), true)) {
                     match interrupt(
-                        app.has_modal() || app.model_key_pending,
+                        // Focus counts as something open: Ctrl-C rides
+                        // the Esc path and closes the view instead of
+                        // shrugging "nothing to interrupt".
+                        app.has_modal() || app.model_key_pending || app.focus.is_some(),
                         app.busy,
                         app.input.is_blank(),
                     ) {
@@ -2773,8 +2842,14 @@ async fn run_app(
                 } else {
                     (key, code)
                 };
-                // The exit, EOF-style: a blank prompt with nothing open.
-                let quitting = quit_requested(code, control, app.has_modal(), app.input.is_blank());
+                // The exit, EOF-style: a blank prompt with nothing open
+                // — and a focus view is something open.
+                let quitting = quit_requested(
+                    code,
+                    control,
+                    app.has_modal() || app.focus.is_some(),
+                    app.input.is_blank(),
+                );
                 // Any other key ends a pending quit confirmation, so the
                 // warning always describes the keypress before it.
                 if !quitting {
@@ -3421,6 +3496,28 @@ async fn run_app(
                     }
                     continue;
                 }
+                // A focus view in front owns the keyboard the way a
+                // modal does: scroll keys move it, Esc closes it — and
+                // must not fall through to the turn-abort arm below,
+                // because closing a view is not aborting the root's
+                // work. Everything else routes nowhere, which the
+                // view's footer says out loud.
+                if app.focus.is_some() {
+                    if code == KeyCode::Esc {
+                        app.close_focus();
+                    } else if let Some(focus) = app.focus.as_mut() {
+                        match code {
+                            KeyCode::Up => focus.scroll_by(-1),
+                            KeyCode::Down => focus.scroll_by(1),
+                            KeyCode::PageUp => focus.scroll_by(-(focus.page_size() as isize)),
+                            KeyCode::PageDown => focus.scroll_by(focus.page_size() as isize),
+                            KeyCode::Home => focus.scroll_to_top(),
+                            KeyCode::End => focus.scroll_to_tail(),
+                            _ => {}
+                        }
+                    }
+                    continue;
+                }
                 if matches!((code, control), (KeyCode::Char('p'), true)) {
                     app.model_key_pending = false;
                     app.open_command_palette();
@@ -3670,12 +3767,24 @@ async fn run_app(
                 // expanding must keep working underneath it.
                 match mouse.kind {
                     MouseEventKind::Down(MouseButton::Left) => {
-                        // Sidebar chrome first: the two disclosure rows
-                        // are the clickables outside the transcript.
+                        // Sidebar chrome first: the disclosure rows and
+                        // the agents map are the clickables outside the
+                        // transcript. While a focus view is up the
+                        // transcript under it must not take selection
+                        // clicks meant for rows it is not showing.
                         if !app.click_exited_services(mouse.column, mouse.row)
                             && !app.click_agents_more(mouse.column, mouse.row)
                         {
-                            app.begin_transcript_selection(mouse.column, mouse.row);
+                            match app.click_agent_row(mouse.column, mouse.row) {
+                                Some(AgentTarget::Main) => app.close_focus(),
+                                Some(AgentTarget::Focus(id)) => {
+                                    open_agent_focus(app, store, &id);
+                                }
+                                None if app.focus.is_none() => {
+                                    app.begin_transcript_selection(mouse.column, mouse.row);
+                                }
+                                None => {}
+                            }
                         }
                     }
                     MouseEventKind::Drag(MouseButton::Left) => {
@@ -4305,6 +4414,78 @@ mod tests {
         assert_eq!(restored.items.len(), 1);
         assert_eq!(restored.items[0].content, "restored");
         assert_eq!(restored.items[0].status, ilar::todo::Status::InProgress);
+    }
+
+    /// Focus opens on the store's replay of the child session — the
+    /// same seed the picker preview trusts — and a session that will
+    /// not load is an honest notice, never a blank screen.
+    #[test]
+    fn focus_opens_from_the_store_and_refuses_a_missing_session_honestly() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf());
+        let session_id = new_id();
+        let mut session = store
+            .create(SessionMeta {
+                session_id: session_id.clone(),
+                parent_id: None,
+                agent: "explore".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+                cwd: None,
+            })
+            .unwrap();
+        session
+            .append(ilar::session::SessionEvent::AssistantMessage {
+                id: new_id(),
+                model: "zai/glm-4.7".into(),
+                content: vec![ilar::session::ContentBlock::Text {
+                    text: "replayed child reply".into(),
+                }],
+                usage: ilar::session::Usage::default(),
+                stop_reason: "end_turn".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        drop(session);
+
+        // Listed in the roster: the row lends its title and running.
+        let mut app = App::new();
+        app.agents_view = vec![AgentRow {
+            session_id: session_id.clone(),
+            depth: 0,
+            description: "survey the picker core".into(),
+            agent: "explore".into(),
+            background: false,
+            delivering: false,
+            foreign_parent: None,
+            elapsed: std::time::Duration::from_secs(1),
+        }];
+        open_agent_focus(&mut app, &store, &session_id);
+        let focus = app.focus.as_ref().expect("focus opened");
+        assert_eq!(focus.title, "explore · survey the picker core");
+        assert!(focus.running);
+        assert!(
+            focus
+                .lines
+                .iter()
+                .any(|line| matches!(line, Line_::Assistant(text) if text.contains("replayed child reply"))),
+            "{:?}",
+            focus.lines
+        );
+
+        // Off the roster — finished, or a foreign tree pruned away —
+        // the replay still opens, marked not running.
+        app.agents_view.clear();
+        app.close_focus();
+        open_agent_focus(&mut app, &store, &session_id);
+        assert!(app.focus.as_ref().is_some_and(|focus| !focus.running));
+
+        // A session the store cannot load: a notice, no focus.
+        app.close_focus();
+        open_agent_focus(&mut app, &store, "no-such-session");
+        assert!(app.focus.is_none(), "a blank screen is not an answer");
+        let (notice, _) = app.operational_notice().expect("an honest notice");
+        assert!(notice.contains("cannot open agent transcript"), "{notice}");
     }
 
     /// The preview must show why a row matched: the window centers on
