@@ -2409,12 +2409,31 @@ impl Drop for ReservedNotification {
     }
 }
 
+/// Test seam for [`final_assistant_text`]: the compaction-anchor rule
+/// is a load-bearing detail of every completion notification, and the
+/// integration path to exercise it (a full routed resume) costs far
+/// more than it proves.
+#[doc(hidden)]
+pub fn final_assistant_text_for_test(store: &SessionStore, session_id: &str) -> Option<String> {
+    final_assistant_text(store, session_id)
+}
+
 fn final_assistant_text(store: &SessionStore, session_id: &str) -> Option<String> {
     store.load(session_id).ok().and_then(|session| {
-        let boundary = session
-            .events()
-            .iter()
-            .rposition(|event| matches!(event, crate::session::SessionEvent::UserMessage { .. }))?;
+        // The anchor is the last user message OR the last compaction
+        // cut, whichever is later. A long child that compacted mid-turn
+        // loads a window whose task prompt is gone — the compaction
+        // summary stands in for it, and the assistant text after the
+        // cut is the turn's answer. Anchoring on user messages alone
+        // reported a finished 13KB research report as "(finished with
+        // no text)".
+        let boundary = session.events().iter().rposition(|event| {
+            matches!(
+                event,
+                crate::session::SessionEvent::UserMessage { .. }
+                    | crate::session::SessionEvent::Compaction { .. }
+            )
+        })?;
         session
             .events()
             .iter()

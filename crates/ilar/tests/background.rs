@@ -1675,6 +1675,64 @@ async fn cancelled_background_task_persists_its_partial_answer() {
     );
 }
 
+/// A long child that compacted mid-turn loads a window whose task
+/// prompt is gone. Its final report sits after the cut, and the
+/// completion must carry it — anchoring on user messages alone
+/// reported a finished 13KB report as "(finished with no text)".
+#[tokio::test]
+async fn a_compacted_child_still_reports_its_final_text() {
+    let (store, _root) = temp_store();
+    let child_id = new_id();
+    let mut session = store
+        .create(SessionMeta {
+            session_id: child_id.clone(),
+            parent_id: Some(new_id()),
+            agent: "explore".into(),
+            model: "zai/glm-4.7".into(),
+            workspace: None,
+            cwd: None,
+        })
+        .unwrap();
+    session
+        .append(SessionEvent::UserMessage {
+            id: new_id(),
+            text: "research the thing".into(),
+            images: Vec::new(),
+            ts: chrono::Utc::now(),
+        })
+        .unwrap();
+    // Mid-turn compaction: the cut hides the prompt from the loaded
+    // window. `kept_from` indexes the whole list — the compaction
+    // event itself is index 2 (meta, user, compaction).
+    session
+        .append(SessionEvent::Compaction {
+            id: new_id(),
+            summary: "## Objective\n- research the thing".into(),
+            kept_from: 2,
+            ts: chrono::Utc::now(),
+        })
+        .unwrap();
+    session
+        .append(SessionEvent::AssistantMessage {
+            id: new_id(),
+            model: "zai/glm-4.7".into(),
+            content: vec![ContentBlock::Text {
+                text: "the final research report".into(),
+            }],
+            usage: Usage::default(),
+            stop_reason: "end_turn".into(),
+            ts: chrono::Utc::now(),
+        })
+        .unwrap();
+    drop(session);
+
+    assert_eq!(
+        ilar::subagent::final_assistant_text_for_test(&store, &child_id).as_deref(),
+        Some("the final research report"),
+        "the report after the compaction cut is the turn's answer"
+    );
+}
+
 /// A completion addressed to a session that is mid-turn is steered
 /// into that turn — the way the user's own messages land — instead of
 /// queueing a whole resume behind the claim. The old path would wait
