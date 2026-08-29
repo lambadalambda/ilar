@@ -1655,18 +1655,34 @@ async fn run_turn_inner(
         pending_steers.extend(drain_steers(steer.as_mut()));
         if !pending_steers.is_empty() {
             for Steer { text, images } in pending_steers.drain(..) {
+                // The confirmation goes first, because it is what the
+                // reader keys "delivered" on: a cancellation landing in
+                // this window used to eat the `Steered` after the append
+                // had happened, and the reader — hearing nothing — sent
+                // the same message again. Publishing first makes the two
+                // agree. Nothing is appended for a steer the reader was
+                // never told about, so it comes back, once.
+                if !events
+                    .publish(
+                        LoopEvent::Steered {
+                            text: text.clone(),
+                            images: images.clone(),
+                        },
+                        &cancel,
+                    )
+                    .await
+                {
+                    break;
+                }
                 // Whatever was attached rides along: the model sees the
                 // picture on its next step, exactly as it would on a
                 // fresh turn.
                 session.append(SessionEvent::UserMessage {
                     id: new_id(),
-                    text: text.clone(),
-                    images: images.clone(),
+                    text,
+                    images,
                     ts: Utc::now(),
                 })?;
-                events
-                    .publish(LoopEvent::Steered { text, images }, &cancel)
-                    .await;
             }
             // New instructions get a fresh step budget rather than
             // inheriting whatever the interrupted work had left.

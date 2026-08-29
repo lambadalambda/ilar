@@ -140,12 +140,19 @@ pub fn loop_event_channel(capacity: usize) -> (LoopEventSender, LoopEventReceive
 }
 
 impl LoopEventSender {
-    /// Publish in FIFO order, abandoning a capacity wait when the turn is cancelled.
-    pub async fn publish(&self, event: LoopEvent, cancel: &tokio_util::sync::CancellationToken) {
+    /// Publish in FIFO order, abandoning a capacity wait when the turn
+    /// is cancelled. Returns whether the event reached the reader —
+    /// callers whose *record* depends on the reader having heard them
+    /// (a steer's confirmation) must check it.
+    pub async fn publish(
+        &self,
+        event: LoopEvent,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> bool {
         tokio::select! {
             biased;
-            () = cancel.cancelled() => {}
-            _ = self.sender.send(event) => {}
+            () = cancel.cancelled() => false,
+            result = self.sender.send(event) => result.is_ok(),
         }
     }
 
