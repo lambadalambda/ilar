@@ -50,3 +50,21 @@ plus two places where the underline lies.
 ## Milestone
 
 13 — Guard rails
+
+## Progress (verified 2026-08-29)
+
+All four headline causes are fixed with tests: click-slop
+tolerance, cache marked from the toggled index, memoized child
+transcripts for animated rows, cut-before-wrap details — plus the
+cheap items (activity-retry bounds, slash_inventory gating) and
+both hover lies in the main list (reasoning rows without targets
+advertise nothing; markdown links no longer underline).
+
+Remaining, one small cleanup pass:
+- The "Lower" bullet in full: modal rows are clickable but never
+  underline; a single-line Task/Job row still attaches a toggle
+  target that does nothing; the services disclosure underlines
+  only when no modal is open although it is clickable under
+  Search.
+- complete_open_thought still reverse-scans per text delta
+  (O(1) in the common case now; residue only).

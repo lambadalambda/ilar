@@ -29,3 +29,17 @@ when it rides `service`.
 ## Milestone
 
 13 — Guard rails
+
+## Outcome
+
+Landed as 1fab64e: both display sites key on
+`shell_command_argument` — one predicate over command-shaped keys
+(command, cmd, commandline, shellcommand) instead of two `bash`
+literals — so `service` and anything else that runs a shell string
+redacts wherever `bash` does. Pinned by
+`a_service_command_is_redacted_everywhere_a_bash_one_is`, which
+asserts the summary, the argument detail, the persisted event and
+the live scratch. Verified closed during the 2026-08-29 backlog
+sweep. What this issue never covered — the command echoed back in
+a tool *result* body, and credentials embedded in URLs — is filed
+as redaction-covers-what-tools-echo.

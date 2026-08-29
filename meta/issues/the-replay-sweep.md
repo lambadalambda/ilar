@@ -85,3 +85,26 @@ live/replay and TUI/web. Ordered by whether information is hidden.
 ## Milestone
 
 13 — Guard rails
+
+## Progress (verified 2026-08-29)
+
+Fixed, with evidence: restored task_message children (promotion in
+session_view + test), large-edit diffs (unbounded ToolInputComplete
+arguments), killed-process state on the web, running subagent
+reachable via the invocations route, notification envelopes and
+child paging on the web, summarize_tool_input's explicit arms and
+IDENTIFYING_KEYS, web write/edit diffs, web markdown (tables
+deliberately excepted), and the routed notification's call_id.
+
+Still open, in rough order of value:
+- The routed delivery still runs with a discarded event sender —
+  visibility now comes from the registry row, not the stream.
+- A tool result over 16 KiB is permanently unreadable in the TUI
+  while the web serves it whole.
+- TUI write diffs (web has them; diff.rs is still edit-only) and
+  the streaming-preview write-gate.
+- Web glyph map lists seven tools this repo never had and misses
+  seven it has; no per-tool progress labels.
+- Cosmetic drift: child compaction invisible live, "reverted
+  to"/"switched to" wording, UI-spawned subtask's missing started
+  line.

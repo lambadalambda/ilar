@@ -255,3 +255,5 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Completions survive the process](issues/completions-survive-the-process.md)
 - [x] [Results arrive like steers](issues/results-arrive-like-steers.md)
 - [x] [The picker answers instantly](issues/the-picker-answers-instantly.md)
+- [x] [Images ride with steers and queued messages](issues/images-ride-with-steers-and-queued-messages.md)
+- [x] [Service commands are redacted too](issues/service-commands-are-redacted-too.md)

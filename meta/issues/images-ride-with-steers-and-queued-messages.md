@@ -41,3 +41,14 @@ this" — so the fix is to carry them, not to explain why we won't.
 ## Milestone
 
 13 — Guard rails
+
+## Outcome
+
+Landed as 7ff3e8b: `Steer { text, images }` carries attachments
+through the steer channel and the queued path, `turn.rs` appends
+them to the steered `UserMessage`, the pending strip and the
+transcript row show the marker, and `decide::submit` stopped
+refusing — the old PasteInput-and-warn path survives only as a
+comment explaining why it is gone. Verified closed during the
+2026-08-29 backlog sweep; the steered-row rendering fix (578d1b4)
+kept the same rows honest for notification steers.
