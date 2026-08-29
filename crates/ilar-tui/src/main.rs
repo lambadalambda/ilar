@@ -844,6 +844,39 @@ fn stop_session_scan(
     *rx = None;
 }
 
+/// Everything a session switch must let go of: the background spawner,
+/// and the turns that run beside the conversation — the aside and the
+/// topic naming. All three are about the session being left, all three
+/// keep a provider stream open, and none has anywhere to land once the
+/// switch happens: their answers would arrive into a transcript that is
+/// no longer theirs. One call, so the ritual cannot be half-performed
+/// at the seventh exit.
+async fn leave_session(
+    spawner: &ilar::subagent::SubagentSpawner,
+    aside_cancel: &mut Option<CancellationToken>,
+    aside_handle: &mut Option<AsideHandle>,
+    topic_handle: &mut Option<tokio::task::JoinHandle<Option<String>>>,
+) {
+    spawner.shutdown().await;
+    if let Some(token) = aside_cancel.take() {
+        token.cancel();
+    }
+    if let Some(handle) = aside_handle.take() {
+        // Cancelled first, so this is the clean stop; aborted too, so a
+        // provider that will not close cannot hold the switch. Aborts
+        // land on await points, and the session appends between them are
+        // synchronous.
+        handle.abort();
+        let _ = handle.await;
+    }
+    // Titling has no token — it is one short request — so the abort is
+    // the whole stop.
+    if let Some(handle) = topic_handle.take() {
+        handle.abort();
+        let _ = handle.await;
+    }
+}
+
 fn close_skill_matches(inventory: &[(String, String)], name: &str) -> Vec<String> {
     let lowered = name.to_lowercase();
     let mut matches: Vec<String> = inventory
@@ -2686,7 +2719,13 @@ async fn run_app(
             } else {
                 match store.fork(session_id) {
                     Ok(fork_id) => {
-                        spawner.shutdown().await;
+                        leave_session(
+                            &spawner,
+                            &mut aside_cancel,
+                            &mut aside_handle,
+                            &mut topic_handle,
+                        )
+                        .await;
                         return Ok(AppExit::SwitchInto {
                             id: fork_id,
                             prefill: None,
@@ -3165,7 +3204,13 @@ async fn run_app(
                                     }
                                     match store.fork(&id) {
                                         Ok(fork_id) => {
-                                            spawner.shutdown().await;
+                                            leave_session(
+                                                &spawner,
+                                                &mut aside_cancel,
+                                                &mut aside_handle,
+                                                &mut topic_handle,
+                                            )
+                                            .await;
                                             return Ok(AppExit::SwitchInto {
                                                 id: fork_id,
                                                 prefill: None,
@@ -3195,7 +3240,13 @@ async fn run_app(
                                     match direct_resume_blocked(store, &new_session) {
                                         Some(reason) => app.set_notice(reason, NoticeLevel::Error),
                                         None => {
-                                            spawner.shutdown().await;
+                                            leave_session(
+                                                &spawner,
+                                                &mut aside_cancel,
+                                                &mut aside_handle,
+                                                &mut topic_handle,
+                                            )
+                                            .await;
                                             return Ok(AppExit::SwitchInto {
                                                 id: new_session,
                                                 prefill: None,
@@ -3255,7 +3306,13 @@ async fn run_app(
                                         Some(reason) => app.set_notice(reason, NoticeLevel::Error),
                                         None => {
                                             stop_session_scan(&mut search_cancel, &mut search_rx);
-                                            spawner.shutdown().await;
+                                            leave_session(
+                                                &spawner,
+                                                &mut aside_cancel,
+                                                &mut aside_handle,
+                                                &mut topic_handle,
+                                            )
+                                            .await;
                                             return Ok(AppExit::SwitchInto {
                                                 id: new_session,
                                                 prefill: None,
@@ -3300,7 +3357,13 @@ async fn run_app(
                                     .await
                                     {
                                         Ok(report) => {
-                                            spawner.shutdown().await;
+                                            leave_session(
+                                                &spawner,
+                                                &mut aside_cancel,
+                                                &mut aside_handle,
+                                                &mut topic_handle,
+                                            )
+                                            .await;
                                             let mut notice = if report.tree_restored {
                                                 format!(
                                                     "rewound {discarded} turn(s) · tree restored"
@@ -3366,7 +3429,13 @@ async fn run_app(
                                     app.turn_picker = None;
                                     match store.fork_at(session_id, cut) {
                                         Ok(fork_id) => {
-                                            spawner.shutdown().await;
+                                            leave_session(
+                                                &spawner,
+                                                &mut aside_cancel,
+                                                &mut aside_handle,
+                                                &mut topic_handle,
+                                            )
+                                            .await;
                                             return Ok(AppExit::SwitchInto {
                                                 id: fork_id,
                                                 prefill: unsent,
