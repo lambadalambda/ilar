@@ -1990,6 +1990,11 @@ fn open_agent_focus(app: &mut App, store: &SessionStore, session_id: &str) {
         None => format!("agent · {}", short_session_id(session_id)),
     };
     let running = roster.is_some();
+    // A delivering row is a routed completion being handed to a
+    // session, not a turn streaming into this process: it publishes no
+    // activity at all, so a row the seed left open would spin forever.
+    // Only an agent whose events will actually arrive gets that.
+    let streaming = roster.is_some_and(|row| !row.delivering);
     match store.load(session_id) {
         Ok(reader) => {
             // A live search would keep the keyboard and make the focus
@@ -1998,8 +2003,19 @@ fn open_agent_focus(app: &mut App, store: &SessionStore, session_id: &str) {
             app.close_search(false);
             // With-store, so a child's own subagents bring their
             // history along instead of empty nested timelines.
-            let mut restored = session_view::restored_session_view_with_store(&reader, store);
-            if running {
+            // A working agent's open tool rows are open, not failed:
+            // marking them ✗ here also made the real result
+            // unsettleable, so the row lied until the next refocus.
+            let mut restored = session_view::restored_session_view_with_store(
+                &reader,
+                store,
+                if streaming {
+                    session_view::Liveness::Running
+                } else {
+                    session_view::Liveness::Settled
+                },
+            );
+            if streaming {
                 // The store commits step by step: whatever the session
                 // has streamed since its last step boundary is not in
                 // the seed. Say so — and end the seed on a non-text

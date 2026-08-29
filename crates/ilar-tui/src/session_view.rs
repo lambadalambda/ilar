@@ -93,8 +93,28 @@ fn notification_display(
     }
 }
 
+/// Whether the session being restored is finished or still working.
+///
+/// It changes exactly one thing, and it matters: a restore's last act
+/// is to mark every still-open tool row failed, which is the truth for
+/// a session nobody is driving and a lie for one mid-`cargo test`.
+/// Worse than a lie — `finish_tool_row` refuses to settle a Failed row,
+/// so the result that finally arrives is dropped and the row keeps
+/// lying until the view is opened again.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Liveness {
+    /// Nothing is driving this session: what was running died.
+    Settled,
+    /// A turn is in flight: open rows stay open and settle from the
+    /// live stream.
+    Running,
+}
+
+/// A store-less replay of a session nobody is driving. Every caller
+/// outside the tests wants the store too, for its children's history.
+#[cfg(test)]
 pub(crate) fn restored_session_view(session: &ilar::session::SessionReader) -> RestoredSessionView {
-    restored_session_invocation_view(session, None)
+    restored_session_invocation_view(session, None, Liveness::Settled)
 }
 
 /// Click-target id for a restored thought or note. Nested subagent lines
@@ -112,6 +132,7 @@ fn restored_line_id(nested: bool, prefix: &str, index: usize) -> String {
 fn restored_session_invocation_view(
     session: &ilar::session::SessionReader,
     parent_tool_call_id: Option<&str>,
+    liveness: Liveness,
 ) -> RestoredSessionView {
     let nested = parent_tool_call_id.is_some();
     let all_events = session.events();
@@ -383,12 +404,14 @@ fn restored_session_invocation_view(
     let pending_question_id = session
         .pending_question()
         .map(|pending| pending.tool_call_id.as_str());
-    for line in &mut lines {
-        if let Line_::Tool { id, state, .. } = line
-            && *state == ToolState::Running
-            && pending_question_id != Some(id.as_str())
-        {
-            *state = ToolState::Failed;
+    if liveness == Liveness::Settled {
+        for line in &mut lines {
+            if let Line_::Tool { id, state, .. } = line
+                && *state == ToolState::Running
+                && pending_question_id != Some(id.as_str())
+            {
+                *state = ToolState::Failed;
+            }
         }
     }
     RestoredSessionView {
@@ -402,13 +425,18 @@ fn restored_session_invocation_view(
 pub(crate) fn restored_session_view_with_store(
     session: &ilar::session::SessionReader,
     store: &SessionStore,
+    liveness: Liveness,
 ) -> RestoredSessionView {
-    let mut view = restored_session_view(session);
+    let mut view = restored_session_invocation_view(session, None, liveness);
     let owner_session_id = session
         .meta()
         .map(|meta| meta.session_id.as_str())
         .unwrap_or_default();
-    restore_child_activity(&mut view.lines, store, owner_session_id, 0);
+    // A child of a working session is working too, near enough: its
+    // parent is blocked on the call. If it is not, an open row is a
+    // spinner that settles on the next result — cheaper than a ✗ that
+    // nothing can take back.
+    restore_child_activity(&mut view.lines, store, owner_session_id, 0, liveness);
     view
 }
 
@@ -417,6 +445,7 @@ fn restore_child_activity(
     store: &SessionStore,
     owner_session_id: &str,
     depth: usize,
+    liveness: Liveness,
 ) {
     if depth >= 8 {
         return;
@@ -443,7 +472,7 @@ fn restore_child_activity(
             .map(|meta| meta.agent.clone())
             .unwrap_or_default();
         let mut restored =
-            restored_session_invocation_view(&session, Some(parent_tool_call_id)).lines;
+            restored_session_invocation_view(&session, Some(parent_tool_call_id), liveness).lines;
         // The agent row already shows the task prompt, so the child's
         // copy of it is dropped. A compacted child leads with its
         // handover summary instead, and the prompt sits behind it.
@@ -451,7 +480,7 @@ fn restore_child_activity(
         if matches!(restored.get(prompt), Some(Line_::User(_))) {
             restored.remove(prompt);
         }
-        restore_child_activity(&mut restored, store, session_id, depth + 1);
+        restore_child_activity(&mut restored, store, session_id, depth + 1, liveness);
         // The same rule the live path applies (fc625c6): a call that has
         // a child IS a subagent call, whatever it was named. Only `task`
         // announces its agent in its input, so a restored `task_message`
@@ -473,6 +502,57 @@ fn restore_child_activity(
 mod tests {
     use super::*;
     use ilar::session::{SessionMeta, new_id};
+
+    /// The same log, read two ways: what a dead session left running
+    /// failed with it, and what a working one left running is still
+    /// running. The second is the focus view's case, and marking it ✗
+    /// also cost the real result — `finish_tool_row` will not settle a
+    /// Failed row.
+    #[test]
+    fn a_restore_only_fails_open_rows_when_nothing_is_driving_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf());
+        let session_id = new_id();
+        let mut session = store
+            .create(SessionMeta {
+                session_id: session_id.clone(),
+                parent_id: None,
+                agent: "build".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+                cwd: None,
+            })
+            .unwrap();
+        session
+            .append(ilar::session::SessionEvent::AssistantMessage {
+                id: new_id(),
+                model: "zai/glm-4.7".into(),
+                content: vec![ilar::session::ContentBlock::ToolCall {
+                    id: "bash-1".into(),
+                    name: "bash".into(),
+                    input: serde_json::json!({ "command": "cargo test" }),
+                    item_id: None,
+                }],
+                usage: ilar::session::Usage::default(),
+                stop_reason: "tool_use".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        drop(session);
+
+        let state = |liveness| {
+            restored_session_view_with_store(&store.load(&session_id).unwrap(), &store, liveness)
+                .lines
+                .iter()
+                .find_map(|line| match line {
+                    Line_::Tool { id, state, .. } if id == "bash-1" => Some(*state),
+                    _ => None,
+                })
+                .expect("the tool row is restored")
+        };
+        assert_eq!(state(Liveness::Settled), ToolState::Failed);
+        assert_eq!(state(Liveness::Running), ToolState::Running);
+    }
 
     /// Replay is a display too: a secret the arguments hid must not
     /// resurface in the restored result row, though the persisted
@@ -525,7 +605,11 @@ mod tests {
         drop(session);
 
         let restored =
-            restored_session_view_with_store(&store.load(&session_id).unwrap(), &store);
+            restored_session_view_with_store(
+            &store.load(&session_id).unwrap(),
+            &store,
+            Liveness::Settled,
+        );
         let result = restored
             .lines
             .iter()
@@ -927,8 +1011,11 @@ mod tests {
             .unwrap();
         drop(child);
 
-        let view =
-            restored_session_invocation_view(&store.load(&child_id).unwrap(), Some("task-restore"));
+        let view = restored_session_invocation_view(
+            &store.load(&child_id).unwrap(),
+            Some("task-restore"),
+            Liveness::Settled,
+        );
         let rendered = format!("{:?}", view.lines);
         assert!(rendered.contains("child decisions retained"), "{rendered}");
         assert!(rendered.contains("child current history"), "{rendered}");
@@ -1041,7 +1128,11 @@ mod tests {
         );
         drop(parent);
 
-        let restored = restored_session_view_with_store(&store.load(&parent_id).unwrap(), &store);
+        let restored = restored_session_view_with_store(
+            &store.load(&parent_id).unwrap(),
+            &store,
+            Liveness::Settled,
+        );
         let resumed = restored
             .lines
             .iter()
@@ -1204,7 +1295,11 @@ mod tests {
             .unwrap();
         drop(parent);
 
-        let restored = restored_session_view_with_store(&store.load(&parent_id).unwrap(), &store);
+        let restored = restored_session_view_with_store(
+            &store.load(&parent_id).unwrap(),
+            &store,
+            Liveness::Settled,
+        );
         let child_lines = restored.lines.iter().find_map(|line| match line {
             Line_::Tool { child_lines, .. } => Some(child_lines),
             _ => None,
@@ -1537,7 +1632,11 @@ mod tests {
             .unwrap();
         drop(parent);
 
-        let restored = restored_session_view_with_store(&store.load(&parent_id).unwrap(), &store);
+        let restored = restored_session_view_with_store(
+            &store.load(&parent_id).unwrap(),
+            &store,
+            Liveness::Settled,
+        );
         let Some(Line_::Tool { child_lines, .. }) = restored
             .lines
             .iter()

@@ -24,7 +24,7 @@ use crate::selection::{
     RenderedRow, TranscriptSelection, selected_transcript_text, selection_point,
 };
 use crate::session_view::{
-    accrue_usage, restored_session_view_with_store, task_notification_display,
+    Liveness, accrue_usage, restored_session_view_with_store, task_notification_display,
     tool_notification_display,
 };
 use crate::sidebar::{AgentRow, AgentTarget};
@@ -800,7 +800,9 @@ impl App {
         session: &ilar::session::SessionReader,
         store: &SessionStore,
     ) {
-        let restored = restored_session_view_with_store(session, store);
+        // A session is switched into when nothing is driving it, so
+        // whatever it left running died with the process that ran it.
+        let restored = restored_session_view_with_store(session, store, Liveness::Settled);
         let from = self.lines.len();
         self.lines.extend(restored.lines);
         self.latest_usage = restored.latest_usage;
@@ -1224,6 +1226,13 @@ impl App {
             // "finished" over a streaming transcript would lie. The
             // view itself never vanishes under the reader.
             focus.running = !matches!(activity.event, LoopEvent::TurnDone { .. });
+            if !focus.running {
+                // The turn is over, so whatever it left open is over
+                // too. The seed keeps a live agent's rows open on
+                // purpose — this is what closes them when the agent
+                // stops without settling them itself.
+                close_running_tools(&mut focus.lines);
+            }
             focus.touch();
         } else if apply_subagent_activity(&mut focus.lines, &focus.session_id, activity).is_some() {
             focus.touch();

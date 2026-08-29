@@ -18,3 +18,13 @@ let the focus fold settle Failed rows. Defeats an acceptance
 criterion of [[focus-seeds-the-step-in-flight]]; fix together.
 
 Size: S-M. Source: sweep 2026-08-29, rendering.
+
+## Outcome
+
+The restore path takes a `Liveness`: `Settled` still marks every open
+tool row failed, `Running` leaves them open, and the focus view asks
+for `Running` only when the agent's events will actually arrive — a
+roster row marked *delivering* is a routed completion that publishes no
+activity, so it seeds settled. What the seed leaves open, the focused
+session's `TurnDone` closes (`close_running_tools` over the focus
+lines), so a row can neither lie nor spin forever.
