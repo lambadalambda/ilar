@@ -354,6 +354,51 @@ pub(crate) fn retry_dismisses_manager(intents: &[Intent]) -> bool {
     intents.iter().any(|i| matches!(i, Intent::ResumeTurn))
 }
 
+/// The root turn's stall watchdog verdict: what the loop should do
+/// about the provider's silence. Pure — the caller measures, this only
+/// judges — so every boundary is testable without a half-hour hang.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StallVerdict {
+    /// Data is flowing, a tool is running, or nothing is being watched.
+    Quiet,
+    /// Silent past the warn threshold: surface it and ring once, but
+    /// keep the turn running — the user may know the model is deep in
+    /// something worth the wait.
+    Warn { silent_secs: u64 },
+    /// Silent past the abort threshold: cancel through the ordinary
+    /// abort path, so the transcript and the resume machinery see a
+    /// normal abort.
+    Abort { silent_secs: u64 },
+}
+
+/// Judge the root turn's liveness.
+///
+/// `silence` is how long the turn has produced literally nothing —
+/// `None` when no clock is running (no root turn, or one already
+/// aborting or paused on a question). `tool_in_flight` holds the
+/// verdict at `Quiet` however old the clock is: a long silent tool is
+/// the tool's business, not the provider's — the child watchdog's
+/// known false positive on silent tools, deliberately not copied.
+pub(crate) fn stall_verdict(
+    silence: Option<std::time::Duration>,
+    tool_in_flight: bool,
+    warn_after: std::time::Duration,
+    abort_after: std::time::Duration,
+) -> StallVerdict {
+    let Some(silence) = silence else {
+        return StallVerdict::Quiet;
+    };
+    if tool_in_flight || silence < warn_after {
+        return StallVerdict::Quiet;
+    }
+    let silent_secs = silence.as_secs();
+    if silence < abort_after {
+        StallVerdict::Warn { silent_secs }
+    } else {
+        StallVerdict::Abort { silent_secs }
+    }
+}
+
 /// Whether a same-session background completion may start a turn now.
 /// An overlay owning the keyboard counts: a turn starting underneath a
 /// picker or the search bar moves the transcript out from under the
@@ -788,6 +833,73 @@ mod tests {
             [Intent::Notice(text, NoticeLevel::Warning)] if text.contains("draft")
         ));
         assert_eq!(retry(&idle()), vec![Intent::ResumeTurn]);
+    }
+
+    /// The watchdog with no clock — no turn, or one aborting/paused —
+    /// or with fresh data, decides nothing.
+    #[test]
+    fn the_stall_verdict_stays_quiet_without_a_clock_or_with_fresh_data() {
+        use std::time::Duration;
+        let (warn, abort) = (Duration::from_secs(300), Duration::from_secs(600));
+        assert_eq!(stall_verdict(None, false, warn, abort), StallVerdict::Quiet);
+        assert_eq!(
+            stall_verdict(Some(Duration::from_secs(299)), false, warn, abort),
+            StallVerdict::Quiet
+        );
+        assert_eq!(
+            stall_verdict(Some(Duration::ZERO), false, warn, abort),
+            StallVerdict::Quiet
+        );
+    }
+
+    /// A tool call in flight holds the clock entirely: a silent tool is
+    /// not a stalled provider, however long it runs. The child
+    /// watchdog's false positive, not copied.
+    #[test]
+    fn a_tool_in_flight_holds_the_stall_clock() {
+        use std::time::Duration;
+        let (warn, abort) = (Duration::from_secs(300), Duration::from_secs(600));
+        for silent in [300, 600, 6000] {
+            assert_eq!(
+                stall_verdict(Some(Duration::from_secs(silent)), true, warn, abort),
+                StallVerdict::Quiet,
+                "{silent}s with a tool running"
+            );
+        }
+    }
+
+    /// The two thresholds, edge-exact: warn at `warn_after`, abort at
+    /// `abort_after`, warn in between.
+    #[test]
+    fn stall_silence_warns_then_aborts_at_the_thresholds() {
+        use std::time::Duration;
+        let (warn, abort) = (Duration::from_secs(300), Duration::from_secs(600));
+        assert_eq!(
+            stall_verdict(Some(Duration::from_secs(300)), false, warn, abort),
+            StallVerdict::Warn { silent_secs: 300 }
+        );
+        assert_eq!(
+            stall_verdict(Some(Duration::from_secs(599)), false, warn, abort),
+            StallVerdict::Warn { silent_secs: 599 }
+        );
+        assert_eq!(
+            stall_verdict(Some(Duration::from_secs(600)), false, warn, abort),
+            StallVerdict::Abort { silent_secs: 600 }
+        );
+        assert_eq!(
+            stall_verdict(Some(Duration::from_secs(6000)), false, warn, abort),
+            StallVerdict::Abort { silent_secs: 6000 }
+        );
+    }
+
+    /// The wired constants: generous (minutes, not seconds — the issue's
+    /// word), and the abort strictly behind the warning so the user is
+    /// always told before anything is done for them.
+    #[test]
+    fn the_stall_thresholds_are_generous_and_ordered() {
+        use std::time::Duration;
+        assert!(crate::ROOT_STALL_WARN_AFTER >= Duration::from_secs(120));
+        assert!(crate::ROOT_STALL_ABORT_AFTER >= crate::ROOT_STALL_WARN_AFTER * 2);
     }
 
     /// The pending manager must not linger over a resumed turn: it owns

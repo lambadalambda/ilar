@@ -82,6 +82,21 @@ const MUTED: Color = theme::MUTED;
 const ERROR: Color = theme::ERROR;
 const MAX_WHEEL_EVENTS_PER_BATCH: usize = 1024;
 
+/// The root turn's stall watchdog, warning half. Children get 600s and
+/// a summary cancellation (`ilar::subagent`); the root warns instead —
+/// a persistent notice with the climbing silence and one bell — because
+/// the person it would interrupt is sitting right here. The clock
+/// measures literal nothing: no stream bytes, no tool input progress.
+/// A tool call in flight holds it entirely (`decide::stall_verdict`),
+/// and a tool finishing restarts it (`App::set_activity` re-seeds
+/// `stream_last_data` on re-entering a streaming state).
+const ROOT_STALL_WARN_AFTER: std::time::Duration = std::time::Duration::from_secs(300);
+/// The abort half: after twice the warning threshold of literal
+/// nothing, cancel through the same token Esc uses, so the turn ends as
+/// an ordinary abort — transcript closed honestly, committed chain kept
+/// for resume — never a silent disappearance.
+const ROOT_STALL_ABORT_AFTER: std::time::Duration = std::time::Duration::from_secs(600);
+
 #[derive(clap::Subcommand, Debug)]
 enum Command {
     /// Log in to OpenAI with your ChatGPT account (OAuth in the browser)
@@ -1444,6 +1459,11 @@ fn spawn_root_turn(
         "starting a turn while one is already running"
     );
     adopt_pending_model_override(app, &entry, &deps);
+    // Seed the liveness clock at the spawn, not the first event: the
+    // stall watchdog reads it on the very next pass, and an instant
+    // left over from the previous turn must not count as this turn's
+    // silence. `TurnStarted` re-seeds it moments later.
+    app.stream_last_data = Some(std::time::Instant::now());
     let (tx, rx) = loop_event_channel(LOOP_EVENT_CAPACITY);
     *slots.events_rx = Some(rx);
     let token = CancellationToken::new();
@@ -2312,6 +2332,9 @@ async fn run_app(
     let mut aside_cancel: Option<CancellationToken> = None;
     let mut ring_on_turn_completion = false;
     let mut bell_pending = false;
+    // The stall watchdog's bell fires once per silence episode; data
+    // arriving (or the clock stopping) re-arms it.
+    let mut stall_bell_rung = false;
     let mut pending_terminal_event = None;
     let mut question_reply: Option<tokio::sync::oneshot::Sender<ilar::question::QuestionResponse>> =
         None;
@@ -2350,6 +2373,62 @@ async fn run_app(
         if let Some(rx) = events_rx.as_mut() {
             while let Ok(event) = rx.try_recv() {
                 app.push_loop_event(&event);
+            }
+        }
+        // The root turn's stall watchdog, judged on the freshly drained
+        // clock. Only a root turn is watched — compaction and routed
+        // deliveries own no events_rx — and only while it should be
+        // streaming: a question pause and an abort already in flight
+        // stop the clock, a running tool holds it (the verdict's
+        // business). Warn generously, ring once, and only abort — via
+        // the same token as Esc — after ROOT_STALL_ABORT_AFTER of
+        // literal nothing.
+        let watched = turn_handle.is_some()
+            && events_rx.is_some()
+            && !matches!(app.activity, Activity::Paused | Activity::Aborting);
+        let silence = if watched {
+            app.stream_last_data.map(|last| last.elapsed())
+        } else {
+            None
+        };
+        match decide::stall_verdict(
+            silence,
+            app.activity == Activity::Tools,
+            ROOT_STALL_WARN_AFTER,
+            ROOT_STALL_ABORT_AFTER,
+        ) {
+            decide::StallVerdict::Quiet => stall_bell_rung = false,
+            decide::StallVerdict::Warn { silent_secs } => {
+                // Persistent, so the stream of passes can keep the count
+                // climbing; any loop event — data at last — clears it
+                // (`App::push_loop_event`). Guarded: it may not bury a
+                // standing persistent reminder that data would then
+                // destroy along with it.
+                app.set_stall_notice(format!(
+                    "provider silent for {silent_secs}s — Esc aborts, the turn will retry-resume"
+                ));
+                if !std::mem::replace(&mut stall_bell_rung, true) {
+                    use std::io::Write as _;
+                    // Directly, not via bell_pending: that one waits for
+                    // an idle turn, and the point here is mid-turn.
+                    let mut out = std::io::stdout();
+                    let _ = out.write_all(b"\x07").and_then(|()| out.flush());
+                }
+            }
+            decide::StallVerdict::Abort { silent_secs } => {
+                if let Some(cancel) = &cancel {
+                    let message = format!(
+                        "stall watchdog: provider silent for {silent_secs}s — aborting the turn"
+                    );
+                    // The transcript keeps the why; the TurnDone the
+                    // cancellation produces closes the rows and posts
+                    // the ordinary "turn aborted".
+                    app.push_transcript_line(crate::transcript::Line_::System(message.clone()));
+                    app.set_stall_notice(message);
+                    cancel.cancel();
+                    app.status = "aborting…".into();
+                    app.set_activity(Activity::Aborting);
+                }
             }
         }
         // Stream in content-search rows; a closed channel means the

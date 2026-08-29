@@ -830,12 +830,26 @@ impl App {
     }
 
     pub(crate) fn push_loop_event(&mut self, event: &LoopEvent) {
+        // Any loop event is life: it ends a provider-retry notice and a
+        // stall-watchdog one alike (except the retry event that sets
+        // the former). The watchdog's notices are persistent — nothing
+        // transient may bury them — so data arriving is the one thing
+        // that takes them down.
         if !matches!(event, LoopEvent::ProviderRetry { .. })
             && self.notice.as_ref().is_some_and(|notice| {
-                !notice.persistent && notice.text.starts_with("provider retry:")
+                (!notice.persistent && notice.text.starts_with("provider retry:"))
+                    || notice.text.starts_with("provider silent for")
+                    || notice.text.starts_with("stall watchdog:")
             })
         {
             self.notice = None;
+        }
+        // Life also feeds the stall clock itself: a retry cycle or a
+        // finishing tool is not provider silence, even though neither
+        // streams content bytes. Only re-seed a running clock — the
+        // spawn seeds it, and an unwatched pass must stay unwatched.
+        if self.stream_last_data.is_some() {
+            self.stream_last_data = Some(std::time::Instant::now());
         }
         let touched = self.apply_loop_event(event);
         self.touch_transcript(touched);
@@ -1743,6 +1757,22 @@ impl App {
         self.set_notice_with_lifetime(text, level, true);
     }
 
+    /// The stall watchdog's notice claims the line only from nothing,
+    /// from transients, or from an earlier notice of its own. A standing
+    /// persistent reminder — paused notifications, an error — outranks
+    /// it: the watchdog would first bury the reminder and then destroy
+    /// it, since any loop event clears stall notices outright.
+    pub(crate) fn set_stall_notice(&mut self, text: impl Into<String>) {
+        let may_claim = self.notice.as_ref().is_none_or(|notice| {
+            !notice.persistent
+                || notice.text.starts_with("provider silent for")
+                || notice.text.starts_with("stall watchdog:")
+        });
+        if may_claim {
+            self.set_notice_with_lifetime(text, NoticeLevel::Warning, true);
+        }
+    }
+
     fn set_notice_with_lifetime(
         &mut self,
         text: impl Into<String>,
@@ -2147,6 +2177,59 @@ mod tests {
         app.stash_or_pop_input();
         assert!(app.input.is_blank());
         assert!(app.notice.is_some());
+    }
+
+    /// The stall warning claims the notice line only from nothing, from
+    /// transients, or from itself. Burying a standing persistent
+    /// reminder would destroy it: any loop event clears stall notices
+    /// outright, taking whatever they replaced down with them.
+    #[test]
+    fn the_stall_warning_does_not_bury_a_standing_persistent_notice() {
+        let mut app = App::new();
+        app.set_persistent_notice(
+            "notifications paused; send a message to resume",
+            NoticeLevel::Info,
+        );
+        app.set_stall_notice("provider silent for 300s — Esc aborts, the turn will retry-resume");
+        assert_eq!(
+            app.notice.as_ref().unwrap().text,
+            "notifications paused; send a message to resume"
+        );
+
+        // A transient yields, and the warning then climbs over itself.
+        app.clear_notice();
+        app.set_notice("copied to clipboard", NoticeLevel::Info);
+        app.set_stall_notice("provider silent for 300s — Esc aborts, the turn will retry-resume");
+        assert!(
+            app.notice
+                .as_ref()
+                .unwrap()
+                .text
+                .starts_with("provider silent for 300s"),
+        );
+        app.set_stall_notice("provider silent for 310s — Esc aborts, the turn will retry-resume");
+        assert!(app.notice.as_ref().unwrap().text.contains("310"));
+        app.set_stall_notice("stall watchdog: provider silent for 600s — aborting the turn");
+        assert!(app.notice.as_ref().unwrap().text.starts_with("stall watchdog:"));
+    }
+
+    /// A retry cycle or a finishing tool is not provider silence: any
+    /// drained loop event re-seeds a running stall clock. A clock that
+    /// never started stays stopped — an unwatched pass is unwatched.
+    #[test]
+    fn any_loop_event_re_seeds_a_running_stall_clock() {
+        let mut app = App::new();
+        let long_ago = std::time::Instant::now() - std::time::Duration::from_secs(400);
+        app.stream_last_data = Some(long_ago);
+        app.push_loop_event(&LoopEvent::ReasoningSummaryCompleted);
+        assert!(
+            app.stream_last_data.unwrap().elapsed() < std::time::Duration::from_secs(1),
+            "a loop event is life"
+        );
+
+        app.stream_last_data = None;
+        app.push_loop_event(&LoopEvent::ReasoningSummaryCompleted);
+        assert!(app.stream_last_data.is_none());
     }
 
     /// `task_message` resumes a subagent, so its row is a subagent row —
@@ -3588,6 +3671,39 @@ mod tests {
 
         app.push_loop_event(&LoopEvent::TextDelta("recovered".into()));
         assert!(app.operational_notice().is_none());
+    }
+
+    /// The stall watchdog's notices are persistent so nothing transient
+    /// buries them — which makes arriving data the one thing that may
+    /// take them down.
+    #[test]
+    fn stream_data_clears_a_stall_watchdog_notice() {
+        let mut app = App::new();
+        app.push_loop_event(&LoopEvent::TurnStarted);
+        app.set_persistent_notice(
+            "provider silent for 300s — Esc aborts, the turn will retry-resume",
+            NoticeLevel::Warning,
+        );
+        // Persistent: an ordinary transient notice cannot replace it.
+        app.set_notice("something routine", NoticeLevel::Info);
+        let (notice, _) = app.operational_notice().expect("stall notice");
+        assert!(notice.starts_with("provider silent for"), "{notice}");
+
+        // Data at last — the stall is over, and so is the notice.
+        app.push_loop_event(&LoopEvent::TextDelta("data".into()));
+        assert!(app.operational_notice().is_none());
+
+        // The abort flavour goes the same way: the TurnDone that the
+        // cancellation produces clears it and posts its own word.
+        app.set_persistent_notice(
+            "stall watchdog: provider silent for 600s — aborting the turn",
+            NoticeLevel::Warning,
+        );
+        app.push_loop_event(&LoopEvent::TurnDone {
+            outcome: TurnOutcome::Aborted,
+        });
+        let (notice, _) = app.operational_notice().expect("abort notice");
+        assert_eq!(notice, "turn aborted");
     }
 
     #[test]
