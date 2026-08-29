@@ -54,4 +54,3 @@
 
 - [ ] [Kernel sandbox for tool processes](issues/kernel-sandbox-for-tool-processes.md)
 - [ ] [The replay sweep](issues/the-replay-sweep.md)
-- [ ] [The agents "more" row takes clicks](issues/the-agents-more-row-takes-clicks.md)

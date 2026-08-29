@@ -265,3 +265,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [A compacted child still reports](issues/a-compacted-child-still-reports.md)
 - [x] [Worktrees anchor to the repo beneath](issues/worktrees-anchor-to-the-repo-beneath.md)
 - [x] [The root turn gets a watchdog](issues/the-root-turn-gets-a-watchdog.md)
+- [x] [The agents "more" row takes clicks](issues/the-agents-more-row-takes-clicks.md)

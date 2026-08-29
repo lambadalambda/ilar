@@ -44,3 +44,20 @@ more information is the one row that gives none.
 - Surfaced twice by the user; the second report ("still can't
   click") landed after the rows-react sweep, which covered
   transcript rows but never reached this sidebar row.
+
+## Outcome
+
+The fixed three-agent cap is gone: the panel shows every agent that
+fits its height budget, and only real space pressure collapses the
+tail into a disclosure. That row now takes clicks — expanding drops
+the half-height cap and spends the todo column, "show less" folds
+it back, and an expanded panel that still cannot show everyone says
+how many stay hidden. The expansion releases itself when the roster
+fits the ordinary cap again, and dies with the roster instead of
+pre-expanding the next batch. Hover underlines the row through the
+same `mouse_reaches_content` gate as the services disclosure, whose
+hit plumbing (`disclosure_hit`) both rows now share.
+
+Accepted edge (review): a six-to-nine-row todo column can render a
+panel that is only the disclosure row — honest, clickable chrome.
+
