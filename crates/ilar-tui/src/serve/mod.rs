@@ -123,21 +123,50 @@ pub(crate) async fn run(config: &Config, options: ServeOptions) -> Result<()> {
         // name is the one actually listening.
         bind: address,
     };
-    // Interrupt is a teardown, not merely an exit: the sessions driven
-    // here keep their background subagents and services alive *between*
-    // turns, so the drive's shutdown — cancel the children with the
-    // spawner's grace, kill the service process groups — has to run
-    // before the process goes. A plain select rather than axum's
+    // Interruption is a teardown, not merely an exit: the sessions
+    // driven here keep their background subagents and services alive
+    // *between* turns, so the drive's shutdown — cancel the children
+    // with the spawner's grace, kill the service process groups — has to
+    // run before the process goes. A plain select rather than axum's
     // graceful shutdown, deliberately: the SSE streams never end, and a
     // shutdown that waits for open connections would wait forever.
     tokio::select! {
         result = async { axum::serve(listener, http::router(state)).await } => {
             result.context("serving")
         }
-        _ = tokio::signal::ctrl_c() => {
+        () = shutdown_signal() => {
             drive.shutdown().await;
             Ok(())
         }
+    }
+}
+
+/// Resolves when the process is told to stop. Ctrl-C everywhere; on
+/// unix, SIGTERM too — a systemd stop or a plain `kill` means the same
+/// thing an interactive interrupt does, and deserves the same teardown
+/// instead of children cancelled by process death.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut sigterm) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = sigterm.recv() => {}
+                }
+            }
+            // A SIGTERM listener that cannot install is no reason not
+            // to serve; Ctrl-C still tears down.
+            Err(error) => {
+                eprintln!("warning: no SIGTERM listener ({error}); only Ctrl-C tears down");
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
     }
 }
 
@@ -161,5 +190,36 @@ mod tests {
         let message = format!("{error:#}");
         assert!(message.contains("--bind 127.0.0.1:0"), "{message}");
         assert!(message.contains(&taken.to_string()), "{message}");
+    }
+
+    /// SIGTERM is what a service manager sends, and it must resolve the
+    /// same select Ctrl-C does. The guard listener is installed — and
+    /// with it the process-wide handler — *before* anything is raised,
+    /// so a raise can never terminate the test binary by winning a race
+    /// against the listener under test; the raise is then repeated until
+    /// that listener, which installs on its first poll, has heard one.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sigterm_resolves_the_shutdown_signal() {
+        use tokio::signal::unix::{SignalKind, signal};
+        let _guard = signal(SignalKind::terminate()).expect("the guard listener installs");
+        let waiter = tokio::spawn(shutdown_signal());
+        let pid = std::process::id().to_string();
+        for _ in 0..100 {
+            // Our own process, whose SIGTERM disposition the guard above
+            // has already replaced with "notify the listeners".
+            let delivered = std::process::Command::new("kill")
+                .args(["-TERM", &pid])
+                .status()
+                .expect("kill runs")
+                .success();
+            assert!(delivered, "kill -TERM {pid} failed");
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if waiter.is_finished() {
+                waiter.await.expect("the signal future resolved cleanly");
+                return;
+            }
+        }
+        panic!("shutdown_signal never resolved on SIGTERM");
     }
 }

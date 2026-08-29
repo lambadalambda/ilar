@@ -17,9 +17,13 @@
 //! background-notification channel ([`Consumer`]): a completion for the
 //! driven session becomes a follow-up turn through the same slot and
 //! lease a web message takes, and a completion for a child's child is
-//! routed with `route_notification`. Teardown moved with the lifetime:
-//! [`Drive::shutdown`], at process exit, is where children are cancelled
-//! and services stopped.
+//! routed with `route_notification` — each target session in its own
+//! serial lane, so a delivery that can only wait does not hold the
+//! others' mail. The consumer also starts by adopting the durable
+//! outbox: completions an earlier process recorded for this tree and
+//! never delivered re-enter here as if freshly notified. Teardown moved
+//! with the lifetime: [`Drive::shutdown`], at process exit, is where
+//! children are cancelled and services stopped.
 //!
 //! Three invariants hold this together:
 //!
@@ -606,6 +610,11 @@ impl Drive {
             turn: self.turn_context(&runtime),
             epochs: self.epochs.clone(),
             cancel: cancel.clone(),
+            // The same directory the spawner records into
+            // (`RuntimePlan` wires `with_outbox_dir` from this exact
+            // path): adoption reads back what an earlier process
+            // published for this tree and never delivered.
+            outbox_dir: self.config.state_dir().join("outbox"),
         };
         let handle = tokio::spawn(consumer.run(notifications));
         engines.insert(
@@ -811,51 +820,200 @@ async fn acquire_writer(store: SessionStore, id: String) -> std::io::Result<Sess
         .map_err(|error| std::io::Error::other(format!("writer task failed: {error}")))?
 }
 
-/// The single reader of one session's background-completion channel.
-/// Deliveries are strictly one at a time — a delivery is a whole
-/// follow-up turn, and two must never interleave on one session.
+/// The single reader of one session's background-completion channel,
+/// and the dispatcher of its deliveries. A delivery is a whole turn —
+/// a follow-up on the driven session, or a routed resume of a child —
+/// so two must never interleave on one *target* session; but a delivery
+/// that is merely waiting (a busy child's claim, a lease another
+/// process holds) must not hold every other target's mail behind it.
+/// Hence one worker per target session, each strictly serial, all torn
+/// down with the engine.
 struct Consumer {
     session_id: String,
     turn: TurnContext,
     epochs: Arc<AtomicU64>,
     /// The engine's token: teardown, not any turn's cancellation.
     cancel: CancellationToken,
+    /// Where the spawner's durable copies of published notifications
+    /// live; read once, at adoption.
+    outbox_dir: PathBuf,
+}
+
+/// One notification in flight, with the climb budget it has left: a
+/// `Propagate` outcome re-enters the dispatcher as a new parcel one hop
+/// poorer, so a corrupted parent chain rotates out instead of climbing
+/// forever.
+struct Parcel {
+    notification: Notification,
+    hops: usize,
+}
+
+impl Parcel {
+    fn fresh(notification: Notification) -> Self {
+        Self {
+            notification,
+            hops: PROPAGATION_HOPS,
+        }
+    }
+}
+
+/// Hand a parcel to its target's worker, creating the worker on first
+/// mail. Keyed by the notification's parent session — the session a
+/// delivery occupies — so serialization per key is exactly "no two
+/// concurrent delivery turns on one session" and nothing broader.
+fn dispatch(
+    consumer: &Arc<Consumer>,
+    queues: &mut HashMap<String, tokio::sync::mpsc::UnboundedSender<Parcel>>,
+    workers: &mut Vec<tokio::task::JoinHandle<()>>,
+    redispatch: &tokio::sync::mpsc::UnboundedSender<Parcel>,
+    parcel: Parcel,
+) {
+    let queue = queues
+        .entry(parcel.notification.parent_session_id.clone())
+        .or_insert_with(|| {
+            let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+            workers.push(tokio::spawn(
+                consumer.clone().work(receiver, redispatch.clone()),
+            ));
+            sender
+        });
+    // A worker exits only at teardown, when losing this mail is the
+    // point; the outbox keeps the durable copy either way.
+    let _ = queue.send(parcel);
 }
 
 impl Consumer {
     async fn run(self, mut notifications: tokio::sync::mpsc::Receiver<Notification>) {
+        let consumer = Arc::new(self);
+        // Where a propagated notification re-enters: the climb changed
+        // its target session, so it changes queues too.
+        let (redispatch, mut propagated) = tokio::sync::mpsc::unbounded_channel::<Parcel>();
+        let mut queues = HashMap::new();
+        let mut workers = Vec::new();
+        // Adoption: everything some process — this one or an earlier
+        // life — published for this tree and never delivered. `pending`
+        // proves delivery against the parents' own logs, so anything
+        // that already landed is not here to deliver twice.
+        for notification in consumer.recovered().await {
+            dispatch(
+                &consumer,
+                &mut queues,
+                &mut workers,
+                &redispatch,
+                Parcel::fresh(notification),
+            );
+        }
         loop {
-            let notification = tokio::select! {
-                () = self.cancel.cancelled() => return,
+            let parcel = tokio::select! {
+                () = consumer.cancel.cancelled() => break,
+                Some(parcel) = propagated.recv() => parcel,
                 notification = notifications.recv() => match notification {
-                    Some(notification) => notification,
+                    Some(notification) => Parcel::fresh(notification),
                     // The spawner is gone; so is anything to deliver.
+                    None => break,
+                },
+            };
+            dispatch(&consumer, &mut queues, &mut workers, &redispatch, parcel);
+        }
+        // Closing the queues lets an undisturbed worker drain and end;
+        // on teardown the token stops each mid-wait instead, and the
+        // shutdown grace bounds this await either way.
+        drop(queues);
+        drop(redispatch);
+        for worker in workers {
+            let _ = worker.await;
+        }
+    }
+
+    /// One target session's strictly serial delivery loop.
+    async fn work(
+        self: Arc<Self>,
+        mut queue: tokio::sync::mpsc::UnboundedReceiver<Parcel>,
+        redispatch: tokio::sync::mpsc::UnboundedSender<Parcel>,
+    ) {
+        loop {
+            let parcel = tokio::select! {
+                () = self.cancel.cancelled() => return,
+                parcel = queue.recv() => match parcel {
+                    Some(parcel) => parcel,
                     None => return,
                 },
             };
-            self.deliver(notification).await;
+            self.deliver(parcel, &redispatch).await;
         }
     }
 
     /// One completion, to whichever session it belongs: the driven
-    /// session's own become follow-up turns here; a child's child's are
-    /// routed downward, and what `Propagate` hands back climbs one hop
-    /// at a time until it is ours or the hop budget says the tree is
-    /// deeper than the spawner allows.
-    async fn deliver(&self, mut notification: Notification) {
-        for _ in 0..PROPAGATION_HOPS {
-            if self.cancel.is_cancelled() {
-                return;
-            }
-            if notification.parent_session_id == self.session_id {
-                self.follow_up(notification).await;
-                return;
-            }
-            match self.route(notification).await {
-                Some(propagated) => notification = propagated,
-                None => return,
-            }
+    /// session's own becomes a follow-up turn here; a child's child's
+    /// is routed downward, and what `Propagate` hands back goes to the
+    /// dispatcher to climb one hop at a time until it is ours or the
+    /// hop budget says the tree is deeper than the spawner allows.
+    async fn deliver(&self, parcel: Parcel, redispatch: &tokio::sync::mpsc::UnboundedSender<Parcel>) {
+        if self.cancel.is_cancelled() {
+            return;
         }
+        if parcel.notification.parent_session_id == self.session_id {
+            self.follow_up(parcel.notification).await;
+            return;
+        }
+        if let Some(propagated) = self.route(parcel.notification).await {
+            // `hops` counts routes still allowed: a fresh parcel has
+            // routed once by here, so `1` remaining means the hop it
+            // just took was its last.
+            if parcel.hops <= 1 {
+                eprintln!(
+                    "serve: dropping a task completion for {} after {PROPAGATION_HOPS} hops",
+                    propagated.parent_session_id
+                );
+                return;
+            }
+            let _ = redispatch.send(Parcel {
+                notification: propagated,
+                hops: parcel.hops - 1,
+            });
+        }
+    }
+
+    /// Whether the notification's text already sits in a UserMessage of
+    /// the target's log — the same definition of delivered the outbox
+    /// and route_notification use. Blocking read, so off-thread.
+    async fn already_delivered(&self, notification: &Notification) -> bool {
+        let store = self.turn.runtime.store.clone();
+        let id = self.session_id.clone();
+        let text = notification.text.clone();
+        tokio::task::spawn_blocking(move || {
+            let Ok(session) = store.load(&id) else {
+                return false;
+            };
+            session.events().iter().any(|event| match event {
+                ilar::session::SessionEvent::UserMessage { text: appended, .. } => {
+                    appended.contains(&text)
+                }
+                _ => false,
+            })
+        })
+        .await
+        .unwrap_or(false)
+    }
+
+    /// What the outbox holds for this session's tree. Blocking work —
+    /// directory scans and log reads — so it runs off the async thread.
+    async fn recovered(&self) -> Vec<Notification> {
+        let store = self.turn.runtime.store.clone();
+        let dir = self.outbox_dir.clone();
+        let root = self.session_id.clone();
+        let recovered =
+            tokio::task::spawn_blocking(move || ilar::outbox::pending(&store, &dir, &root))
+                .await
+                .unwrap_or_default();
+        if !recovered.is_empty() {
+            eprintln!(
+                "serve: requeueing {} recorded task result(s) for {}",
+                recovered.len(),
+                self.session_id
+            );
+        }
+        recovered
     }
 
     /// Deliver a completion to the driven session as a follow-up turn,
@@ -864,9 +1022,17 @@ impl Consumer {
     /// envelope the parent loop unwraps, exactly what the TUI feeds its
     /// notification turns.
     async fn follow_up(&self, notification: Notification) {
+        // The same guard route_notification takes: an adopted outbox
+        // entry can race another process delivering the same
+        // completion, and the session's own log is the truth. Checked
+        // once up front and again after every backoff, since the race
+        // is exactly "someone else delivered while we waited".
         let mut lease_attempts = 0_u32;
         let mut delay = RETRY_BASE;
         loop {
+            if self.already_delivered(&notification).await {
+                return;
+            }
             let Some(slot) = try_reserve(&self.turn.running, &self.epochs, &self.session_id)
             else {
                 // A turn is running or starting; its slot always
@@ -890,9 +1056,9 @@ impl Consumer {
                     drop(slot);
                     lease_attempts += 1;
                     if lease_attempts > LEASE_RETRY_LIMIT {
-                        // Dropped. Durability for completions nobody
-                        // could take is the notification outbox being
-                        // added in core, not this loop.
+                        // Dropped from this queue only: the outbox
+                        // still holds the durable copy, and the next
+                        // adoption of this tree requeues it.
                         eprintln!(
                             "serve: dropping a task completion for {}: the session is held by another process",
                             self.session_id
@@ -916,9 +1082,9 @@ impl Consumer {
     }
 
     /// Route a completion that belongs to a deeper session. `Propagate`
-    /// comes back to `deliver`; `Requeue` is retried with backoff and
-    /// then dropped — durability past that is the notification outbox
-    /// being added in core, not this loop.
+    /// comes back to the caller; `Requeue` is retried with backoff and
+    /// then dropped from this queue — durability past that is the
+    /// outbox, whose copy the next adoption of this tree requeues.
     async fn route(&self, mut notification: Notification) -> Option<Notification> {
         let mut delay = RETRY_BASE;
         for _ in 0..ROUTE_RETRY_LIMIT {
@@ -1792,6 +1958,239 @@ context = 200000
         .await;
         let text = serde_json::to_string(&page["events"]).unwrap();
         assert!(text.contains("<task-notification>"), "{text}");
+    }
+
+    /// A session put into the store by "another process" — the seed is
+    /// the real writer, so resuming it drives the same path a session
+    /// from an earlier server life takes.
+    fn seed_session(store: &SessionStore, cwd: &std::path::Path) -> String {
+        let id = ilar::session::new_id();
+        store
+            .create(ilar::session::SessionMeta {
+                session_id: id.clone(),
+                parent_id: None,
+                agent: "build".into(),
+                // The configured custom model, so a resume resolves a
+                // provider without a key in the environment.
+                model: "custom/mock".into(),
+                workspace: None,
+                cwd: Some(cwd.to_path_buf()),
+            })
+            .unwrap();
+        id
+    }
+
+    fn seed_child(store: &SessionStore, parent: &str) -> String {
+        let id = ilar::session::new_id();
+        store
+            .create(ilar::session::SessionMeta {
+                session_id: id.clone(),
+                parent_id: Some(parent.to_string()),
+                agent: "explore".into(),
+                model: "custom/mock".into(),
+                workspace: None,
+                cwd: None,
+            })
+            .unwrap();
+        id
+    }
+
+    fn notification(parent: &str, text: &str) -> Notification {
+        Notification {
+            parent_session_id: parent.to_string(),
+            description: "recorded probe".into(),
+            text: text.to_string(),
+            is_error: false,
+        }
+    }
+
+    /// Residue the outbox kept: a completion recorded for this tree
+    /// before this engine existed is adopted when the engine starts and
+    /// becomes a follow-up turn, with no web request asking for it.
+    #[tokio::test]
+    async fn adoption_requeues_outbox_completions_as_follow_up_turns() {
+        let harness = Harness::start(vec![
+            answer("resumed"),
+            answer("noted the recovered result"),
+        ])
+        .await;
+        let project = tempfile::tempdir().unwrap();
+        let id = seed_session(&harness.store, project.path());
+        ilar::outbox::record(
+            &harness._dir.path().join("state").join("outbox"),
+            &notification(
+                &id,
+                "<task-notification>\nrecovered probe result\n</task-notification>",
+            ),
+        );
+
+        // The message is what wakes the engine; the recovered
+        // completion rides in on its adoption.
+        let (status, body) = harness
+            .post(
+                &format!("/api/sessions/{id}/message"),
+                json!({"text": "hello again"}),
+            )
+            .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["fate"], "started");
+
+        let page = transcript_patiently(&harness, &id, |page| {
+            assistant_text(page).contains("noted the recovered result")
+        })
+        .await;
+        let events = serde_json::to_string(&page["events"]).unwrap();
+        assert!(events.contains("recovered probe result"), "{events}");
+        assert!(events.contains("<task-notification>"), "{events}");
+    }
+
+    /// The head-of-line fix: a recovered completion for a child whose
+    /// writer another process holds can only wait — minutes of lock
+    /// retries and requeue backoff — and under the old serial consumer
+    /// that wait held the engine's whole queue, own-session completions
+    /// included. Here the driven session's own background completion
+    /// must still land as a follow-up turn, inside this test's
+    /// patience, while the child's delivery waits in its own lane.
+    #[tokio::test]
+    async fn a_stuck_foreign_delivery_does_not_stall_the_sessions_own_mail() {
+        let harness = Harness::start(vec![
+            background_task_call("task-1"),
+            answer("kicked off"),
+            answer("noted the task result"),
+        ])
+        .await;
+        let project = tempfile::tempdir().unwrap();
+        let id = seed_session(&harness.store, project.path());
+        let child = seed_child(&harness.store, &id);
+        ilar::outbox::record(
+            &harness._dir.path().join("state").join("outbox"),
+            &notification(
+                &child,
+                "<task-notification>\nstuck child result\n</task-notification>",
+            ),
+        );
+        let held = harness
+            .store
+            .acquire_writer(&child)
+            .expect("the child's writer lease");
+
+        let (status, body) = harness
+            .post(
+                &format!("/api/sessions/{id}/message"),
+                json!({"text": "delegate the probe"}),
+            )
+            .await;
+        assert_eq!(status, 200, "{body}");
+
+        let page = transcript_patiently(&harness, &id, |page| {
+            assistant_text(page).contains("noted the task result")
+        })
+        .await;
+        let text = serde_json::to_string(&page["events"]).unwrap();
+        assert!(text.contains("<task-notification>"), "{text}");
+        drop(held);
+    }
+
+    /// A scripted service tool call, as the events one provider turn
+    /// carries for it (without the `TurnComplete` — a turn may chain
+    /// several).
+    fn service_call(id: &str, input: Value) -> Vec<ProviderEvent> {
+        vec![
+            ProviderEvent::ToolCallStarted {
+                id: id.into(),
+                name: "service".into(),
+                item_id: None,
+            },
+            ProviderEvent::ToolCallCompleted {
+                id: id.into(),
+                name: "service".into(),
+                input,
+            },
+        ]
+    }
+
+    /// The engine's lifetime, pinned at the service manager: a service
+    /// one driven turn starts is still running when the next driven
+    /// turn asks — the OS process probed alive by `status`, its output
+    /// readable by `logs` — and stopping it is that later turn's
+    /// decision, not the first turn's teardown.
+    #[tokio::test]
+    async fn a_service_started_in_one_turn_still_answers_in_the_next() {
+        let start_turn = [
+            service_call(
+                "svc-1",
+                json!({"action": "start", "name": "probe", "command": "echo ready; sleep 120"}),
+            ),
+            vec![ProviderEvent::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+                usage: Usage::default(),
+            }],
+        ]
+        .concat();
+        let ask_turn = [
+            service_call("svc-2", json!({"action": "status", "name": "probe"})),
+            service_call("svc-3", json!({"action": "logs", "name": "probe"})),
+            service_call("svc-4", json!({"action": "stop", "name": "probe"})),
+            vec![ProviderEvent::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+                usage: Usage::default(),
+            }],
+        ]
+        .concat();
+        let harness = Harness::start(vec![
+            start_turn,
+            answer("service is up"),
+            ask_turn,
+            answer("probe answered"),
+        ])
+        .await;
+
+        let (status, body) = harness
+            .post("/api/sessions", json!({"prompt": "start the probe"}))
+            .await;
+        assert_eq!(status, 200, "{body}");
+        let id = body["id"].as_str().unwrap().to_string();
+        harness
+            .transcript_once(&id, |page| assistant_text(page).contains("service is up"))
+            .await;
+        harness.until_idle(&id).await;
+
+        let (status, body) = harness
+            .post(
+                &format!("/api/sessions/{id}/message"),
+                json!({"text": "is the probe still alive?"}),
+            )
+            .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["fate"], "started");
+
+        let page = transcript_patiently(&harness, &id, |page| {
+            assistant_text(page).contains("probe answered")
+        })
+        .await;
+        let results: Vec<String> = page["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|event| event["type"] == "tool_result")
+            .map(ToString::to_string)
+            .collect();
+        // The second turn's `status` probed the first turn's process
+        // and found it alive — the survival this test exists to pin.
+        assert!(
+            results.iter().any(|r| r.contains("probe: running (pid")),
+            "no status said running: {results:?}"
+        );
+        // Its `logs` answered with the output the service produced.
+        assert!(
+            results.iter().any(|r| r.contains("ready")),
+            "no logs carried output: {results:?}"
+        );
+        // And the stop was the later turn's own doing.
+        assert!(
+            results.iter().any(|r| r.contains("stopped service")),
+            "the probe was never stopped: {results:?}"
+        );
     }
 
     /// The abort rule, at the registry: steerable before, refused after,
