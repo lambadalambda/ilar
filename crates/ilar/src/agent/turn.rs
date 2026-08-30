@@ -1804,11 +1804,33 @@ async fn run_turn_inner(
                         acc.push_reasoning(item);
                     }
                     ProviderEvent::ToolCallStarted { id, name, item_id } => {
-                        if seen_tool_call_ids.contains(&id) || session.contains_tool_call_id(&id)? {
-                            errored = Some(format!(
-                                "duplicate tool call id {id:?} already exists in this session"
-                            ));
-                            break;
+                        // The duplicate check reads the log, and a read
+                        // that fails is a failure of *this step*, not of
+                        // the process: raised with `?` it skipped
+                        // `persist_failed_step`, so the text the user had
+                        // already watched stream was never written, the
+                        // announced tools never closed, and no `TurnDone`
+                        // was published. Every sibling failure goes
+                        // through `errored`; so does this one.
+                        let duplicate = if seen_tool_call_ids.contains(&id) {
+                            Ok(true)
+                        } else {
+                            session.contains_tool_call_id(&id)
+                        };
+                        match duplicate {
+                            Ok(true) => {
+                                errored = Some(format!(
+                                    "duplicate tool call id {id:?} already exists in this session"
+                                ));
+                                break;
+                            }
+                            Ok(false) => {}
+                            Err(error) => {
+                                errored = Some(format!(
+                                    "could not check tool call id {id:?} against the session: {error:#}"
+                                ));
+                                break;
+                            }
                         }
                         if let Err(error) = acc.start_tool_call(id.clone(), name.clone(), item_id) {
                             errored = Some(error);
