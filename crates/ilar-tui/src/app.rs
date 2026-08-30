@@ -1218,7 +1218,6 @@ impl App {
             self.pending_subagent_activity.push_back(activity.clone());
         }
         self.touch_transcript(touched);
-        self.retry_subagent_activity();
     }
 
     /// Route a subagent event into the focus view, when one is open —

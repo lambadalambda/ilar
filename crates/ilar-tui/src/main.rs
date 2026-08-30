@@ -2659,16 +2659,29 @@ async fn run_app(
             search_rx = Some((search.generation, rx));
             search_cancel = Some(flag);
         }
-        app.retry_subagent_activity();
-        for _ in 0..256 {
-            let Ok(activity) = subagent_activity.try_recv() else {
-                break;
-            };
-            app.push_subagent_activity(&activity);
-            // The focus view reads the same feed, beside the root's
-            // nested previews, never instead of them.
-            app.push_focus_activity(&activity);
+        for _ in 0..ilar::subagent::ACTIVITY_CAPACITY {
+            match subagent_activity.try_recv() {
+                Ok(activity) => {
+                    app.push_subagent_activity(&activity);
+                    // The focus view reads the same feed, beside the
+                    // root's nested previews, never instead of them.
+                    app.push_focus_activity(&activity);
+                }
+                // A lag is a gap, not an end: the feed dropped older
+                // events, and everything after them is still waiting.
+                // Breaking here stalled the tape for a whole frame each
+                // time several children streamed at once — precisely
+                // when it had the most to show.
+                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            }
         }
+        // Once per frame, after the drain: an activity whose parent tool
+        // row had not appeared yet is held, and the row it was waiting
+        // for may have arrived in this very batch. Retrying inside the
+        // fold instead — once per event, over a queue of up to 256 —
+        // made a busy frame quadratic in the transcript's length.
+        app.retry_subagent_activity();
         // Questions use their own typed reply path and intentionally wait
         // outside the ordinary tool executor. Apply them after loop events so
         // the waiting state wins over the preceding StepComplete update.
@@ -3990,6 +4003,25 @@ mod tests {
         assert_eq!(cli_project_instructions(false, true), Some(false));
         // Clap refuses the pair; if it ever stopped, the file stays out.
         assert_eq!(cli_project_instructions(true, true), Some(false));
+    }
+
+    /// The activity drain treats a lag as a gap and keeps going. That
+    /// is only right if a lagged broadcast receiver still yields what
+    /// came after the drop — pinned here, because the alternative
+    /// (breaking out) is what stalled the tape for a frame every time
+    /// several children streamed at once.
+    #[tokio::test]
+    async fn a_lagged_broadcast_yields_the_events_after_the_gap() {
+        let (sender, mut receiver) = tokio::sync::broadcast::channel::<u8>(2);
+        for value in 0..4 {
+            let _ = sender.send(value);
+        }
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_))
+        ));
+        assert_eq!(receiver.try_recv().unwrap(), 2);
+        assert_eq!(receiver.try_recv().unwrap(), 3);
     }
 
     /// A completion that could not be steered into a dying turn is

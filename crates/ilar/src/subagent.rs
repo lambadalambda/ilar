@@ -18,7 +18,19 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 const NOTIFICATION_CAPACITY: usize = 64;
-const ACTIVITY_CAPACITY: usize = 256;
+/// Slots on the child-activity broadcast. It carries *every* event of
+/// every child at every depth — per-token deltas included — so it is
+/// sized for a burst of several streaming children between two frames
+/// of a reader that drains at 60Hz, not for a steady state. Lag is
+/// survivable (the feed is display-only; delivery and the registry have
+/// their own paths), but a gap shows, and it shows exactly when the
+/// most is happening.
+///
+/// Four times the old size and no more: tokio allocates the ring
+/// eagerly, a slot holds a whole `LoopEvent` (a coalesced delta reaches
+/// 16 KiB, a tool result as much again), and every runtime builds one
+/// whether or not anything ever subscribes.
+pub const ACTIVITY_CAPACITY: usize = 1024;
 /// How long a cancelled or stalled background child may take to finish
 /// its graceful abort. That path only appends a partial step to the
 /// session log and publishes the terminal event, so seconds are already
