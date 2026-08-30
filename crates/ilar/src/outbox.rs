@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 use fs2::FileExt as _;
 
-use crate::session::{SessionEvent, SessionStore};
+use crate::session::SessionStore;
 use crate::subagent::Notification;
 
 /// Cap on the parent-chain walk in the ancestry filter. Session metas
@@ -212,23 +212,18 @@ pub fn pending(store: &SessionStore, dir: &Path, root_session_id: &str) -> Vec<N
             .collect();
         let recorded_len = recorded.len();
         let retired = retired_texts(dir, &parent_id);
-        // Delivery check: the routing paths may prepend queued steer
-        // messages to the prompt they append, so the notification text
-        // is a substring of the delivering `UserMessage`, not equal to
-        // it. Session logs are append-only (compaction appends, never
-        // rewrites), so scanning the full event list is sound. Accepted
-        // limitation: two byte-identical notification texts for the same
-        // parent dedupe as one — the second reads as delivered by the
-        // first's prompt. A retired entry counts as delivered too: its
-        // salvage into a transcript was the delivery of last resort.
+        // Delivery check: `crate::delivery::is_delivered`, the one
+        // definition every driver shares — substring, because a
+        // delivering prompt can carry queued steers ahead of the
+        // notification. Session logs are append-only (compaction
+        // appends, never rewrites), so scanning the full event list is
+        // sound. A retired entry counts as delivered too: its salvage
+        // into a transcript was the delivery of last resort.
         let kept: Vec<Notification> = recorded
             .into_iter()
             .filter(|notification| {
                 !retired.contains(&notification.text)
-                    && !parent.events().iter().any(|event| match event {
-                        SessionEvent::UserMessage { text, .. } => text.contains(&notification.text),
-                        _ => false,
-                    })
+                    && !crate::delivery::is_delivered(&parent, &notification.text)
             })
             .collect();
         if kept.is_empty() {

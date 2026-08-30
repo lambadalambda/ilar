@@ -11,6 +11,7 @@ pub mod checkpoint;
 pub mod command;
 pub mod compaction;
 pub mod config;
+pub mod delivery;
 pub mod image;
 pub mod model;
 pub mod outbox;

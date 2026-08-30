@@ -62,7 +62,7 @@ const BACKGROUND_DEMOTED_BY_CAPACITY: &str = "Ran in the foreground: read-only t
 /// message that re-invokes the parent loop. Serializable because the
 /// durable outbox (`crate::outbox`) persists it as a JSONL line until
 /// its delivery can be proven from the parent's session log.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Notification {
     pub parent_session_id: String,
     pub description: String,
@@ -1647,7 +1647,7 @@ task's scope yourself; continue only clearly disjoint work."
         // another process delivering the same completion; the parent's
         // own log is the truth, and delivering twice is worse than the
         // load this check costs.
-        if is_delivered(&parent, &notification.text) {
+        if crate::delivery::is_delivered(&parent, &notification.text) {
             return Ok(RouteOutcome::Complete);
         }
         let meta = parent
@@ -2007,19 +2007,6 @@ async fn session_workspace_location(
         location = restored;
     }
     Ok((location, chain.len().saturating_sub(1)))
-}
-
-/// Whether this notification's text already sits in a `UserMessage` of
-/// the target's log — the same definition of "delivered" the outbox
-/// compaction uses, because the log is the one artifact every process
-/// shares.
-fn is_delivered(parent: &crate::session::SessionReader, text: &str) -> bool {
-    parent.events().iter().any(|event| match event {
-        crate::session::SessionEvent::UserMessage {
-            text: appended, ..
-        } => appended.contains(text),
-        _ => false,
-    })
 }
 
 /// Whether a turn declined before its prompt append because the
