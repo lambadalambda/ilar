@@ -14,3 +14,10 @@ Parameterize the guard's drop message: tool-notification envelope
 and no resume advice for jobs.
 
 Size: S. Source: sweep 2026-08-29, subagent.
+
+## Outcome
+
+The guard carries what it is standing over: a task keeps the
+`<task-notification>` envelope and its resume advice, a job gets the
+`<tool-notification>` its siblings wear, names its job id, and is
+offered nothing to resume.

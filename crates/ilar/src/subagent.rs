@@ -1552,7 +1552,8 @@ task's scope yourself; continue only clearly disjoint work."
                 parent_session_id.clone(),
                 description.clone(),
                 self.outbox_dir.clone(),
-            );
+            )
+            .for_job(notification_id.clone());
             let handle = tokio::spawn(async move {
                 if registered_rx.await.is_err() {
                     // Never admitted; the error was reported synchronously.
@@ -2356,6 +2357,14 @@ fn rollback_created_session(store: &SessionStore, id: &str) {
     let _ = store.delete(id);
 }
 
+/// What the abnormal-death guard is standing over. The two endings
+/// differ in more than wording: a task can be resumed by id, a job
+/// cannot be resumed at all.
+enum AbnormalWork {
+    Task,
+    Job { job_id: String },
+}
+
 /// A background task's reserved place in the notification channel, as a
 /// guard that enforces the exactly-one invariant the completion pipeline
 /// promises. Every expected ending calls `send` once; but a plain
@@ -2373,6 +2382,11 @@ struct ReservedNotification {
     permit: Option<tokio::sync::mpsc::OwnedPermit<Notification>>,
     parent_session_id: String,
     description: String,
+    /// What died, when the guard has to say so itself. A task has a
+    /// session to resume; a job is a tool call with neither a session
+    /// nor a task id, and telling the model to resume it invites an
+    /// invented one.
+    work: AbnormalWork,
     /// The durable copy is written before the channel send, so a
     /// notification either reaches the channel with a disk record behind
     /// it or reaches neither.
@@ -2391,7 +2405,15 @@ impl ReservedNotification {
             parent_session_id,
             description,
             outbox_dir,
+            work: AbnormalWork::Task,
         }
+    }
+
+    /// The same reservation, guarding a background *job*: a tool call
+    /// running detached, named by its job id.
+    fn for_job(mut self, job_id: String) -> Self {
+        self.work = AbnormalWork::Job { job_id };
+        self
     }
 
     /// Publish the task's one notification, consuming the reservation.
@@ -2424,17 +2446,34 @@ impl Drop for ReservedNotification {
         // Reached only when no explicit ending ran — a panic unwinding
         // the task body, or a future ending on a path that forgot to
         // report. Silence here is the parent waiting forever.
-        let notification = task_notification(
-            &self.parent_session_id,
-            &self.description,
-            &format!(
-                "Task \"{}\" ended abnormally without reporting a result — most \
-                 likely a panic in the task. Its session log holds whatever it finished; \
-                 resume it with the task tool to continue, or treat it as failed.",
-                self.description
+        let notification = match &self.work {
+            AbnormalWork::Task => task_notification(
+                &self.parent_session_id,
+                &self.description,
+                &format!(
+                    "Task \"{}\" ended abnormally without reporting a result — most \
+                     likely a panic in the task. Its session log holds whatever it finished; \
+                     resume it with the task tool to continue, or treat it as failed.",
+                    self.description
+                ),
+                true,
             ),
-            true,
-        );
+            // A job has no session and no task id, so it wears the
+            // envelope its siblings wear and is offered nothing to
+            // resume — the advice would be an invitation to make an id
+            // up.
+            AbnormalWork::Job { job_id } => Notification {
+                parent_session_id: self.parent_session_id.clone(),
+                description: self.description.clone(),
+                text: format!(
+                    "<tool-notification>\nBackground job {job_id} (\"{}\") ended abnormally \
+                     without reporting a result — most likely a panic in the job. Treat it \
+                     as failed; run it again if you still need it.\n</tool-notification>",
+                    self.description
+                ),
+                is_error: true,
+            },
+        };
         self.deliver(notification);
     }
 }
@@ -3031,6 +3070,28 @@ mod tests {
             description.into(),
             None,
         )
+    }
+
+    /// A background job is a tool call, not a task: no child session,
+    /// no task id. The guard that speaks for it when it dies must not
+    /// offer the model something to resume — the id it would need does
+    /// not exist, and the schemas warn about exactly that invention.
+    #[tokio::test]
+    async fn a_dead_job_is_reported_as_a_job_with_nothing_to_resume() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        let guard = reserved(&sender, "compile the world").for_job("job-7".into());
+
+        drop(guard);
+
+        let died = receiver.recv().await.expect("the death was reported");
+        assert!(died.is_error, "{}", died.text);
+        assert!(died.text.starts_with("<tool-notification>"), "{}", died.text);
+        assert!(died.text.contains("Background job job-7"), "{}", died.text);
+        assert!(
+            !died.text.contains("task tool"),
+            "a job was offered a resume it cannot have: {}",
+            died.text
+        );
     }
 
     #[tokio::test]
