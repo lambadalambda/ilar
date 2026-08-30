@@ -1362,10 +1362,15 @@ pub(crate) fn short_session_id(id: &str) -> &str {
 /// Held-back notifications first — they arrived earlier and were only
 /// deferred — then whatever the channel has.
 fn next_notification(
-    held: &mut std::collections::VecDeque<ilar::subagent::Notification>,
+    held: &mut std::collections::VecDeque<ilar::delivery::Parcel>,
     notifications: &mut tokio::sync::mpsc::Receiver<ilar::subagent::Notification>,
-) -> Option<ilar::subagent::Notification> {
-    held.pop_front().or_else(|| notifications.try_recv().ok())
+) -> Option<ilar::delivery::Parcel> {
+    held.pop_front().or_else(|| {
+        notifications
+            .try_recv()
+            .ok()
+            .map(ilar::delivery::Parcel::fresh)
+    })
 }
 
 /// A propagated completion goes behind what was already queued when it
@@ -1373,14 +1378,14 @@ fn next_notification(
 /// propagated one takes the back seat. A bare push_back would let it
 /// jump the backlog, since held notifications are offered first.
 fn hold_propagate_behind_backlog(
-    held: &mut std::collections::VecDeque<ilar::subagent::Notification>,
+    held: &mut std::collections::VecDeque<ilar::delivery::Parcel>,
     notifications: &mut tokio::sync::mpsc::Receiver<ilar::subagent::Notification>,
-    notification: ilar::subagent::Notification,
+    parcel: ilar::delivery::Parcel,
 ) {
     while let Ok(queued) = notifications.try_recv() {
-        held.push_back(queued);
+        held.push_back(ilar::delivery::Parcel::fresh(queued));
     }
-    held.push_back(notification);
+    held.push_back(parcel);
 }
 
 /// A completion being delivered to another session, detached from the
@@ -1390,7 +1395,7 @@ fn hold_propagate_behind_backlog(
 struct RoutedDelivery {
     handle: tokio::task::JoinHandle<Result<ilar::subagent::RouteOutcome>>,
     cancel: CancellationToken,
-    notification: ilar::subagent::Notification,
+    parcel: ilar::delivery::Parcel,
 }
 
 enum TurnCompletion {
@@ -1593,7 +1598,7 @@ struct LoopRuntime<'a> {
     cancel: &'a mut Option<CancellationToken>,
     steer_tx: &'a mut Option<ilar::agent::SteerSender>,
     pending_terminal_event: &'a mut Option<Event>,
-    held_notifications: &'a mut std::collections::VecDeque<ilar::subagent::Notification>,
+    held_notifications: &'a mut std::collections::VecDeque<ilar::delivery::Parcel>,
     notifications: &'a mut tokio::sync::mpsc::Receiver<ilar::subagent::Notification>,
     routed: &'a mut Vec<RoutedDelivery>,
     ring_on_turn_completion: &'a mut bool,
@@ -1693,7 +1698,7 @@ impl schedule::Runtime for LoopRuntime<'_> {
         Ok(())
     }
 
-    fn next_notification(&mut self) -> Option<ilar::subagent::Notification> {
+    fn next_notification(&mut self) -> Option<ilar::delivery::Parcel> {
         next_notification(self.held_notifications, self.notifications)
     }
 
@@ -1761,7 +1766,7 @@ impl schedule::Runtime for LoopRuntime<'_> {
         ilar::outbox::retire(self.outbox_dir, notification);
     }
 
-    fn route(&mut self, app: &mut App, notification: ilar::subagent::Notification) {
+    fn route(&mut self, app: &mut App, parcel: ilar::delivery::Parcel) {
         // Detached, like an aside: the delivery resumes another
         // session, so the turn slot, the busy state and the activity
         // all stay whose they were. Several may run at once; the
@@ -1769,43 +1774,43 @@ impl schedule::Runtime for LoopRuntime<'_> {
         app.set_notice(
             format!(
                 "delivering \"{}\" to {}",
-                notification.description,
-                short_session_id(&notification.parent_session_id)
+                parcel.notification().description,
+                short_session_id(&parcel.notification().parent_session_id)
             ),
             NoticeLevel::Info,
         );
         let token = CancellationToken::new();
         let spawner = self.spawner.clone();
-        let delivered = notification.clone();
+        let delivered = parcel.notification().clone();
         let cancel = token.clone();
         let handle =
             tokio::spawn(async move { spawner.route_notification(delivered, cancel).await });
         self.routed.push(RoutedDelivery {
             handle,
             cancel: token,
-            notification,
+            parcel,
         });
     }
 
     fn steer_notification(
         &mut self,
         app: &mut App,
-        notification: ilar::subagent::Notification,
-    ) -> Option<ilar::subagent::Notification> {
+        parcel: ilar::delivery::Parcel,
+    ) -> Option<ilar::delivery::Parcel> {
         // The same rails as a user steer: sent into the live channel,
         // tracked as pending so a turn that ends without reading it
         // splices it into the queue instead of losing it.
         let Some(tx) = self.steer_tx.as_ref() else {
-            return Some(notification);
+            return Some(parcel);
         };
         let message = ilar::agent::Steer {
-            text: notification.text.clone(),
+            text: parcel.notification().text.clone(),
             images: Vec::new(),
         };
         if tx.send(message.clone()).is_err() {
             // The channel closed under us — the turn is ending; the
             // notification goes back to be held for the next pass.
-            return Some(notification);
+            return Some(parcel);
         }
         app.pending_steers.push(message);
         None
@@ -1840,17 +1845,17 @@ impl schedule::Runtime for LoopRuntime<'_> {
         *self.notifications_paused = true;
     }
 
-    fn hold_propagate(&mut self, notification: ilar::subagent::Notification) {
-        hold_propagate_behind_backlog(self.held_notifications, self.notifications, notification);
+    fn hold_propagate(&mut self, parcel: ilar::delivery::Parcel) {
+        hold_propagate_behind_backlog(self.held_notifications, self.notifications, parcel);
     }
 
-    fn hold_requeue(&mut self, notification: ilar::subagent::Notification) {
-        self.held_notifications.push_front(notification);
+    fn hold_requeue(&mut self, parcel: ilar::delivery::Parcel) {
+        self.held_notifications.push_front(parcel);
     }
 
-    fn hold_blocked(&mut self, notifications: Vec<ilar::subagent::Notification>) {
-        for notification in notifications.into_iter().rev() {
-            self.held_notifications.push_front(notification);
+    fn hold_blocked(&mut self, parcels: Vec<ilar::delivery::Parcel>) {
+        for parcel in parcels.into_iter().rev() {
+            self.held_notifications.push_front(parcel);
         }
     }
 
@@ -2434,8 +2439,11 @@ async fn run_app(
     let mut search_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>> = None;
     // Seeded with what the outbox recovered: they arrived before this
     // process existed, so they go first.
-    let mut held_notifications: std::collections::VecDeque<ilar::subagent::Notification> =
-        recovered_notifications.into();
+    let mut held_notifications: std::collections::VecDeque<ilar::delivery::Parcel> =
+        recovered_notifications
+            .into_iter()
+            .map(ilar::delivery::Parcel::fresh)
+            .collect();
     let mut notifications_paused = false;
     // Deliveries to other sessions, running beside the turn slot.
     let mut routed: Vec<RoutedDelivery> = Vec::new();
@@ -2834,7 +2842,7 @@ async fn run_app(
             };
             completions.push(schedule::Completion::Routed {
                 result,
-                notification: delivery.notification,
+                parcel: delivery.parcel,
             });
         }
 
@@ -4652,15 +4660,22 @@ mod tests {
             is_error: false,
         };
         tx.try_send(note("from the channel")).unwrap();
-        let mut held = std::collections::VecDeque::from([note("held earlier")]);
+        let mut held =
+            std::collections::VecDeque::from([ilar::delivery::Parcel::fresh(note("held earlier"))]);
 
         assert_eq!(
-            next_notification(&mut held, &mut rx).unwrap().description,
+            next_notification(&mut held, &mut rx)
+                .unwrap()
+                .notification()
+                .description,
             "held earlier",
             "a held notification arrived first and is offered first"
         );
         assert_eq!(
-            next_notification(&mut held, &mut rx).unwrap().description,
+            next_notification(&mut held, &mut rx)
+                .unwrap()
+                .notification()
+                .description,
             "from the channel"
         );
         assert!(next_notification(&mut held, &mut rx).is_none());
@@ -4681,14 +4696,24 @@ mod tests {
         tx.try_send(note("queued")).unwrap();
         let mut held = std::collections::VecDeque::new();
 
-        hold_propagate_behind_backlog(&mut held, &mut rx, note("propagated"));
+        hold_propagate_behind_backlog(
+            &mut held,
+            &mut rx,
+            ilar::delivery::Parcel::fresh(note("propagated")),
+        );
 
         assert_eq!(
-            next_notification(&mut held, &mut rx).unwrap().description,
+            next_notification(&mut held, &mut rx)
+                .unwrap()
+                .notification()
+                .description,
             "queued"
         );
         assert_eq!(
-            next_notification(&mut held, &mut rx).unwrap().description,
+            next_notification(&mut held, &mut rx)
+                .unwrap()
+                .notification()
+                .description,
             "propagated"
         );
     }

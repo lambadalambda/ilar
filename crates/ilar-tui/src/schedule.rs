@@ -22,6 +22,7 @@ use crate::transcript::Line_;
 use crate::{Activity, MAX_GOAL_ROUNDS, NoticeLevel};
 use ilar::agent::TurnOutcome;
 use ilar::compaction::ManualCompactionOutcome;
+use ilar::delivery::{Disposition, Parcel};
 use ilar::subagent::{Notification, RouteOutcome};
 
 /// How the operation that was running ended — the edge hands this in after
@@ -29,12 +30,13 @@ use ilar::subagent::{Notification, RouteOutcome};
 pub(crate) enum Completion {
     Root(anyhow::Result<TurnOutcome>),
     /// A detached delivery to another session finished. Carries the
-    /// notification it was delivering, so a failure can still put the
-    /// child's final word in front of the user instead of losing it
-    /// with the plumbing error.
+    /// parcel it was delivering — the notification, so a failure can
+    /// still put the child's final word in front of the user instead of
+    /// losing it with the plumbing error, and the climb budget it had
+    /// left.
     Routed {
         result: anyhow::Result<RouteOutcome>,
-        notification: Notification,
+        parcel: Parcel,
     },
     Compaction(anyhow::Result<ManualCompactionOutcome>),
     /// The turn task itself died.
@@ -53,7 +55,7 @@ pub(crate) trait Runtime {
     /// the keyboard.
     fn peek_palette(&mut self, app: &mut App) -> anyhow::Result<()>;
     /// The next notification waiting, held-back ones first.
-    fn next_notification(&mut self) -> Option<Notification>;
+    fn next_notification(&mut self) -> Option<Parcel>;
     /// Start an explicitly requested idle-session compaction.
     fn start_compaction(&mut self, app: &mut App);
     /// Ask a `/btw` question over the session, off the record.
@@ -67,17 +69,13 @@ pub(crate) trait Runtime {
     /// A notification for another session: spawn its delivery beside
     /// whatever else is running. It resumes a child, so it takes
     /// neither the turn slot nor the keyboard, and several may run.
-    fn route(&mut self, app: &mut App, notification: Notification);
+    fn route(&mut self, app: &mut App, parcel: Parcel);
     /// A notification for this session: start its turn here.
     fn start_notification_turn(&mut self, app: &mut App, notification: Notification);
     /// A notification for this session while its turn runs: send it
     /// into that turn like any other steer. Handed back when there is
     /// no live channel — the caller holds it instead.
-    fn steer_notification(
-        &mut self,
-        app: &mut App,
-        notification: Notification,
-    ) -> Option<Notification>;
+    fn steer_notification(&mut self, app: &mut App, parcel: Parcel) -> Option<Parcel>;
     fn session_id(&self) -> &str;
     /// A turn ended without an abort: notifications flow again.
     fn resume_notifications(&mut self);
@@ -85,14 +83,14 @@ pub(crate) trait Runtime {
     fn pause_notifications(&mut self);
     /// A routed notification came back for this session: hold it
     /// behind whatever was already queued ahead of it.
-    fn hold_propagate(&mut self, notification: Notification);
+    fn hold_propagate(&mut self, parcel: Parcel);
     /// A requeued notification goes to the front, to be re-offered as
     /// soon as the user resumes.
-    fn hold_requeue(&mut self, notification: Notification);
+    fn hold_requeue(&mut self, parcel: Parcel);
     /// Same-session notifications the gate could not admit this pass,
     /// in arrival order: put them back in front so nothing is lost
     /// and order holds.
-    fn hold_blocked(&mut self, notifications: Vec<Notification>);
+    fn hold_blocked(&mut self, parcels: Vec<Parcel>);
     /// Drop the ended turn's channels; a steer sent after this queues.
     fn end_turn(&mut self);
     /// Persist and adopt the pre-override model — the tail end of a
@@ -179,11 +177,8 @@ fn complete<R: Runtime>(app: &mut App, completion: Completion, runtime: &mut R) 
         // revert — is its to trigger: a root turn may be running
         // right now, and end_turn would tear that turn's channels
         // down.
-        Completion::Routed {
-            result,
-            notification,
-        } => {
-            routed_complete(app, result, notification, runtime);
+        Completion::Routed { result, parcel } => {
+            routed_complete(app, result, parcel, runtime);
             return Vec::new();
         }
         Completion::Root(result) => {
@@ -314,12 +309,31 @@ fn complete<R: Runtime>(app: &mut App, completion: Completion, runtime: &mut R) 
 fn routed_complete<R: Runtime>(
     app: &mut App,
     result: anyhow::Result<RouteOutcome>,
-    notification: Notification,
+    parcel: Parcel,
     runtime: &mut R,
 ) {
-    match result {
-        Ok(RouteOutcome::Propagate(propagated)) => runtime.hold_propagate(propagated),
-        Ok(RouteOutcome::Requeue(requeued)) => {
+    // Kept for the success notice, which names what arrived where; the
+    // disposition takes ownership of the parcel because the endings
+    // that still owe something have to hold on to it.
+    let delivered = parcel.notification().clone();
+    // What each ending owes is `ilar::delivery`'s to say; this function
+    // only knows how to say it on a terminal. The match is exhaustive
+    // by construction, which is the point — the other driver of this
+    // store grew a shorter list of obligations than this one by writing
+    // its own.
+    match ilar::delivery::disposition(result, parcel) {
+        Disposition::Delivered => {
+            app.set_notice(
+                format!(
+                    "\"{}\" delivered to {}",
+                    delivered.description,
+                    crate::short_session_id(&delivered.parent_session_id)
+                ),
+                NoticeLevel::Info,
+            );
+        }
+        Disposition::Propagate(propagated) => runtime.hold_propagate(propagated),
+        Disposition::Hold(requeued) => {
             app.set_persistent_notice(
                 "notification paused; send a message to resume",
                 NoticeLevel::Warning,
@@ -331,22 +345,33 @@ fn routed_complete<R: Runtime>(
             runtime.hold_requeue(requeued);
             runtime.pause_notifications();
         }
-        Ok(RouteOutcome::Complete) => {
-            app.set_notice(
-                format!(
-                    "\"{}\" delivered to {}",
-                    notification.description,
-                    crate::short_session_id(&notification.parent_session_id)
-                ),
-                NoticeLevel::Info,
+        Disposition::Exhausted(notification) => {
+            // A parent chain that loops. Nothing can deliver this, so
+            // it ends where a terminal failure ends: in front of the
+            // user, and retired so the next open does not start the
+            // same climb.
+            let message = format!(
+                "a task result could not find a session to land in after \
+                 {} hops — its parent chain loops",
+                ilar::delivery::PROPAGATION_HOPS
             );
+            app.set_notice(&message, NoticeLevel::Error);
+            app.push_transcript_line(Line_::System(message));
+            app.push_transcript_line(Line_::System(format!(
+                "undelivered result of {}:\n{}",
+                notification.description, notification.text
+            )));
+            runtime.retire_notification(&notification);
         }
-        Err(error) => {
+        Disposition::Salvage {
+            notification,
+            error,
+        } => {
             // The delivery failed, but the child's final word is
             // right here: salvage it into the transcript instead of
             // losing the work with the plumbing error.
             let message = format!(
-                "a task result could not be delivered to {}: {error:#}",
+                "a task result could not be delivered to {}: {error}",
                 crate::short_session_id(&notification.parent_session_id)
             );
             app.set_notice(&message, NoticeLevel::Error);
@@ -399,15 +424,17 @@ pub(crate) fn settle<R: Runtime>(
     if !state.notifications_paused {
         let mut turn_gate = may_start_notification_turn(&state);
         let mut blocked = Vec::new();
-        while let Some(notification) = runtime.next_notification() {
-            if notification.parent_session_id != runtime.session_id() {
-                runtime.route(app, notification);
+        while let Some(parcel) = runtime.next_notification() {
+            if parcel.notification().parent_session_id != runtime.session_id() {
+                runtime.route(app, parcel);
             } else if turn_gate {
-                runtime.start_notification_turn(app, notification);
+                // A turn here ends the climb: the completion arrived
+                // where it was addressed.
+                runtime.start_notification_turn(app, parcel.into_notification());
                 // The slot is taken — but the turn it now runs is
                 // steerable, so the rest of a burst lands inside it.
                 turn_gate = false;
-            } else if let Some(unsteered) = runtime.steer_notification(app, notification) {
+            } else if let Some(unsteered) = runtime.steer_notification(app, parcel) {
                 blocked.push(unsteered);
             }
         }
@@ -433,7 +460,7 @@ mod tests {
         turn_running: bool,
         steerable: bool,
         paused: bool,
-        pending: VecDeque<Notification>,
+        pending: VecDeque<Parcel>,
         log: Vec<String>,
     }
 
@@ -450,12 +477,12 @@ mod tests {
         }
 
         fn with_notification(mut self, parent: &str, text: &str) -> Self {
-            self.pending.push_back(Notification {
+            self.pending.push_back(Parcel::fresh(Notification {
                 parent_session_id: parent.into(),
                 description: "background task".into(),
                 text: text.into(),
                 is_error: false,
-            });
+            }));
             self
         }
     }
@@ -490,7 +517,7 @@ mod tests {
             Ok(())
         }
 
-        fn next_notification(&mut self) -> Option<Notification> {
+        fn next_notification(&mut self) -> Option<Parcel> {
             self.pending.pop_front()
         }
 
@@ -509,10 +536,12 @@ mod tests {
             self.log.push(format!("retire:{}", notification.text));
         }
 
-        fn route(&mut self, _app: &mut App, notification: Notification) {
+        fn route(&mut self, _app: &mut App, parcel: Parcel) {
             // Detached: the turn slot is not touched.
-            self.log
-                .push(format!("route:{}", notification.parent_session_id));
+            self.log.push(format!(
+                "route:{}",
+                parcel.notification().parent_session_id
+            ));
         }
 
         fn start_notification_turn(&mut self, _app: &mut App, notification: Notification) {
@@ -522,15 +551,12 @@ mod tests {
             self.log.push(format!("notify_turn:{}", notification.text));
         }
 
-        fn steer_notification(
-            &mut self,
-            _app: &mut App,
-            notification: Notification,
-        ) -> Option<Notification> {
+        fn steer_notification(&mut self, _app: &mut App, parcel: Parcel) -> Option<Parcel> {
             if !self.steerable {
-                return Some(notification);
+                return Some(parcel);
             }
-            self.log.push(format!("steer_notify:{}", notification.text));
+            self.log
+                .push(format!("steer_notify:{}", parcel.notification().text));
             None
         }
 
@@ -546,20 +572,22 @@ mod tests {
             self.paused = true;
         }
 
-        fn hold_propagate(&mut self, notification: Notification) {
-            self.log.push(format!("hold:{}", notification.text));
-            self.pending.push_back(notification);
+        fn hold_propagate(&mut self, parcel: Parcel) {
+            self.log
+                .push(format!("hold:{}", parcel.notification().text));
+            self.pending.push_back(parcel);
         }
 
-        fn hold_requeue(&mut self, notification: Notification) {
-            self.log.push(format!("requeue:{}", notification.text));
-            self.pending.push_front(notification);
+        fn hold_requeue(&mut self, parcel: Parcel) {
+            self.log
+                .push(format!("requeue:{}", parcel.notification().text));
+            self.pending.push_front(parcel);
         }
 
-        fn hold_blocked(&mut self, notifications: Vec<Notification>) {
+        fn hold_blocked(&mut self, parcels: Vec<Parcel>) {
             // Silent, like the real one: holding is not an event.
-            for notification in notifications.into_iter().rev() {
-                self.pending.push_front(notification);
+            for parcel in parcels.into_iter().rev() {
+                self.pending.push_front(parcel);
             }
         }
 
@@ -919,7 +947,7 @@ mod tests {
             &mut app,
             vec![Completion::Routed {
                 result: Ok(RouteOutcome::Requeue(notification.clone())),
-                notification,
+                parcel: Parcel::fresh(notification),
             }],
             Vec::new(),
             &mut runtime,
@@ -1180,7 +1208,7 @@ mod tests {
             runtime
                 .pending
                 .iter()
-                .map(|n| n.text.as_str())
+                .map(|parcel| parcel.notification().text.as_str())
                 .collect::<Vec<_>>(),
             vec!["for the root"],
             "the blocked completion is held, not lost"
@@ -1208,7 +1236,7 @@ mod tests {
             &mut app,
             vec![Completion::Routed {
                 result: Ok(RouteOutcome::Complete),
-                notification,
+                parcel: Parcel::fresh(notification),
             }],
             Vec::new(),
             &mut runtime,
@@ -1239,11 +1267,11 @@ mod tests {
             vec![
                 Completion::Routed {
                     result: Ok(RouteOutcome::Propagate(propagated("first"))),
-                    notification: propagated("first"),
+                    parcel: Parcel::fresh(propagated("first")),
                 },
                 Completion::Routed {
                     result: Ok(RouteOutcome::Propagate(propagated("second"))),
-                    notification: propagated("second"),
+                    parcel: Parcel::fresh(propagated("second")),
                 },
             ],
             Vec::new(),
@@ -1255,7 +1283,7 @@ mod tests {
             runtime
                 .pending
                 .iter()
-                .map(|n| n.text.as_str())
+                .map(|parcel| parcel.notification().text.as_str())
                 .collect::<Vec<_>>(),
             vec!["first", "second"],
             "both held, in order"
@@ -1282,7 +1310,7 @@ mod tests {
             &mut app,
             vec![Completion::Routed {
                 result: Err(anyhow::anyhow!("unknown persisted agent")),
-                notification,
+                parcel: Parcel::fresh(notification),
             }],
             Vec::new(),
             &mut runtime,
@@ -1306,6 +1334,60 @@ mod tests {
         );
     }
 
+    /// A propagation that never arrives runs out of climb, and what it
+    /// was carrying is a finished child's only word: it ends where a
+    /// terminal failure ends — in the transcript, and retired — rather
+    /// than being dropped for the queue to re-announce forever. Only a
+    /// parent chain that loops gets here, which is exactly the case
+    /// nothing else guards.
+    #[test]
+    fn a_completion_that_climbs_forever_is_salvaged_at_the_last_hop() {
+        let mut app = App::new();
+        let mut runtime = FakeRuntime::new();
+        let notification = |text: &str| Notification {
+            parent_session_id: "a-loop".into(),
+            description: "builder task".into(),
+            text: text.into(),
+            is_error: false,
+        };
+        // Spent by construction: the hop-by-hop drain is `delivery`'s
+        // own test, and a pass here would re-route the held parcel
+        // before this test could reach for it.
+        let mut parcel = Parcel::fresh(notification("an earlier hop"));
+        for _ in 0..ilar::delivery::PROPAGATION_HOPS {
+            parcel = parcel
+                .climbing(notification("an earlier hop"))
+                .expect("the budget covers its own length");
+        }
+
+        pass(
+            &mut app,
+            vec![Completion::Routed {
+                // The notification that has nowhere left to go is the
+                // one this last attempt produced, not the one the
+                // parcel arrived carrying.
+                result: Ok(RouteOutcome::Propagate(notification("the build is green"))),
+                parcel,
+            }],
+            Vec::new(),
+            &mut runtime,
+        )
+        .unwrap();
+
+        assert!(
+            app.lines().iter().any(
+                |line| matches!(line, Line_::System(text) if text.contains("the build is green"))
+            ),
+            "the child's word was dropped with the climb: {:?}",
+            app.lines()
+        );
+        assert!(
+            runtime.log.contains(&"retire:the build is green".to_string()),
+            "{:?}",
+            runtime.log
+        );
+    }
+
     /// The transient counterpart: a Requeue outcome holds and retries —
     /// it must never retire the outbox entry, or a delivery that only
     /// needed the user's return would be written off as undeliverable.
@@ -1324,7 +1406,7 @@ mod tests {
             &mut app,
             vec![Completion::Routed {
                 result: Ok(RouteOutcome::Requeue(notification.clone())),
-                notification,
+                parcel: Parcel::fresh(notification),
             }],
             Vec::new(),
             &mut runtime,
