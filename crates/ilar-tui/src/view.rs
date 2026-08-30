@@ -580,12 +580,13 @@ impl App {
         self.refresh_transcript_cache(text_width, now);
         // Streaming shifts row indices; keep search matches in sync with
         // the rows actually on screen.
-        if self.search_active && self.search_computed_revision != Some(self.transcript_revision) {
+        if self.search_active && self.search_computed_at != Some((self.transcript_revision, text_width))
+        {
             self.search_matches = self.transcript_cache.matching_rows(&self.search_query);
             self.search_current = self
                 .search_current
                 .min(self.search_matches.len().saturating_sub(1));
-            self.search_computed_revision = Some(self.transcript_revision);
+            self.search_computed_at = Some((self.transcript_revision, text_width));
         }
         let mut activity_rows = activity_line(
             self.busy,

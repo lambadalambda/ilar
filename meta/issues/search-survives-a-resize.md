@@ -13,3 +13,9 @@ Key the recompute on (revision, width), or expose a cache
 generation that resize bumps.
 
 Size: S. Source: sweep 2026-08-29, rendering.
+
+## Outcome
+
+Matches are keyed on `(transcript_revision, width)`. Expand/collapse
+already bumped the revision; a resize reflows the cache without
+touching it, which is the hole this closes.

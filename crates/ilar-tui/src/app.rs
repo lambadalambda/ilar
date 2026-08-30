@@ -278,7 +278,11 @@ pub(crate) struct App {
     pub(crate) search_current: usize,
     /// (scroll_top, follow_tail) before the search opened; Esc restores.
     search_saved: Option<(usize, bool)>,
-    pub(crate) search_computed_revision: Option<u64>,
+    /// The (revision, width) the current matches were scanned at. A
+    /// resize reflows every row without touching the transcript, so
+    /// revision alone would leave the highlights on the rows the text
+    /// used to occupy.
+    pub(crate) search_computed_at: Option<(u64, u16)>,
     pub(crate) scroll_top: usize,
     content_rows: usize,
     pub(crate) viewport_rows: usize,
@@ -437,7 +441,7 @@ impl App {
             search_matches: Vec::new(),
             search_current: 0,
             search_saved: None,
-            search_computed_revision: None,
+            search_computed_at: None,
             scroll_top: 0,
             content_rows: 0,
             viewport_rows: 0,
@@ -1509,7 +1513,7 @@ impl App {
     /// against rows the same frame just rebuilt.
     pub(crate) fn search_refresh(&mut self) {
         self.search_matches = self.transcript_cache.matching_rows(&self.search_query);
-        self.search_computed_revision = None;
+        self.search_computed_at = None;
         self.search_current = 0;
         if !self.search_matches.is_empty() {
             self.search_scroll_to_current();
@@ -3171,6 +3175,45 @@ mod tests {
         app.search_refresh();
         assert!(app.search_matches.is_empty());
         assert!(rendered_text(&app.status_line(120)).contains("no matches"));
+    }
+
+    /// A resize reflows every row without touching the transcript, so
+    /// matches keyed on the revision alone kept pointing at the rows the
+    /// text used to occupy — highlights on the wrong lines, jumps
+    /// landing beside the hit.
+    #[test]
+    fn a_resize_recomputes_the_search_matches() {
+        let mut app = App::new();
+        app.lines = (0..6)
+            .map(|index| {
+                Line_::User(format!(
+                    "filler line {index} carrying enough words to wrap several times once the \
+                     terminal is made narrow"
+                ))
+            })
+            .chain(std::iter::once(Line_::Assistant(
+                "the special needle answer".into(),
+            )))
+            .collect();
+
+        let mut wide =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 40)).unwrap();
+        wide.draw(|frame| app.render(frame)).unwrap();
+        app.open_search();
+        app.search_query = "needle".into();
+        app.search_refresh();
+        wide.draw(|frame| app.render(frame)).unwrap();
+        let wide_matches = app.search_matches.clone();
+        assert_eq!(wide_matches.len(), 1, "{wide_matches:?}");
+
+        let mut narrow =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 40)).unwrap();
+        narrow.draw(|frame| app.render(frame)).unwrap();
+
+        assert_ne!(
+            app.search_matches, wide_matches,
+            "the resize left the match on the row it used to be on"
+        );
     }
 
     #[test]
