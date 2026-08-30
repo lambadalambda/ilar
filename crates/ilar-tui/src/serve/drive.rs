@@ -67,6 +67,7 @@ use ilar::config::Config;
 use ilar::provider::ProviderResolver;
 use ilar::runtime::{RuntimeOptions, RuntimePlan, SessionRuntime};
 use ilar::session::{SessionStore, SessionWriter};
+use ilar::delivery::Parcel;
 use ilar::subagent::{Notification, RouteOutcome};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -228,9 +229,6 @@ const ROUTE_RETRY_LIMIT: usize = 8;
 /// Lease attempts before a same-session delivery is dropped: another
 /// process (a TUI, say) has held the session for minutes.
 const LEASE_RETRY_LIMIT: u32 = 30;
-/// Hops a propagated notification may climb before the loop gives up —
-/// nesting deeper than this cannot exist under the spawner's depth cap.
-const PROPAGATION_HOPS: usize = 8;
 /// How long teardown waits for a consumer mid-delivery after cancelling
 /// its turn. A backstop, not the plan.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
@@ -839,24 +837,6 @@ struct Consumer {
     outbox_dir: PathBuf,
 }
 
-/// One notification in flight, with the climb budget it has left: a
-/// `Propagate` outcome re-enters the dispatcher as a new parcel one hop
-/// poorer, so a corrupted parent chain rotates out instead of climbing
-/// forever.
-struct Parcel {
-    notification: Notification,
-    hops: usize,
-}
-
-impl Parcel {
-    fn fresh(notification: Notification) -> Self {
-        Self {
-            notification,
-            hops: PROPAGATION_HOPS,
-        }
-    }
-}
-
 /// Hand a parcel to its target's worker, creating the worker on first
 /// mail. Keyed by the notification's parent session — the session a
 /// delivery occupies — so serialization per key is exactly "no two
@@ -869,7 +849,7 @@ fn dispatch(
     parcel: Parcel,
 ) {
     let queue = queues
-        .entry(parcel.notification.parent_session_id.clone())
+        .entry(parcel.notification().parent_session_id.clone())
         .or_insert_with(|| {
             let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
             workers.push(tokio::spawn(
@@ -952,31 +932,34 @@ impl Consumer {
         if self.cancel.is_cancelled() {
             return;
         }
-        if parcel.notification.parent_session_id == self.session_id {
-            self.follow_up(parcel.notification).await;
+        if parcel.notification().parent_session_id == self.session_id {
+            self.follow_up(parcel.into_notification()).await;
             return;
         }
-        if let Some(propagated) = self.route(parcel.notification).await {
-            // `hops` counts routes still allowed: a fresh parcel has
-            // routed once by here, so `1` remaining means the hop it
-            // just took was its last.
-            if parcel.hops <= 1 {
-                eprintln!(
-                    "serve: dropping a task completion for {} after {PROPAGATION_HOPS} hops",
-                    propagated.parent_session_id
-                );
-                return;
-            }
-            let _ = redispatch.send(Parcel {
-                notification: propagated,
-                hops: parcel.hops - 1,
-            });
+        let climbed = parcel.notification().clone();
+        if let Some(propagated) = self.route(climbed).await {
+            // `ilar::delivery::Parcel` counts the climb: `None` means
+            // the hop it just took was its last, which only a parent
+            // chain that loops ever reaches.
+            let next = match parcel.climbing(propagated) {
+                Ok(next) => next,
+                Err(stranded) => {
+                    eprintln!(
+                        "serve: dropping a task completion for {} after {} hops",
+                        stranded.parent_session_id,
+                        ilar::delivery::PROPAGATION_HOPS
+                    );
+                    return;
+                }
+            };
+            let _ = redispatch.send(next);
         }
     }
 
     /// Whether the notification's text already sits in a UserMessage of
-    /// the target's log — the same definition of delivered the outbox
-    /// and route_notification use. Blocking read, so off-thread.
+    /// the target's log. `ilar::delivery` owns the definition — this
+    /// only supplies the log and a thread to read it on, since the read
+    /// blocks.
     async fn already_delivered(&self, notification: &Notification) -> bool {
         let store = self.turn.runtime.store.clone();
         let id = self.session_id.clone();
@@ -985,12 +968,7 @@ impl Consumer {
             let Ok(session) = store.load(&id) else {
                 return false;
             };
-            session.events().iter().any(|event| match event {
-                ilar::session::SessionEvent::UserMessage { text: appended, .. } => {
-                    appended.contains(&text)
-                }
-                _ => false,
-            })
+            ilar::delivery::is_delivered(&session, &text)
         })
         .await
         .unwrap_or(false)
