@@ -72,7 +72,7 @@ milestones 15–17 stay filed — they come back when the feature does.*
 - [ ] [Serve joins the turns it started](issues/serve-joins-the-turns-it-started.md) — *parked with serve*
 - [ ] [A turn failure waits to be read](issues/a-turn-failure-waits-to-be-read.md) — *parked with serve*
 - [ ] [The outbox is reread while serve lives](issues/the-outbox-is-reread-while-serve-lives.md) — *parked with serve*
-- [ ] [An adoption test hangs once in ten](issues/an-adoption-test-hangs-once-in-ten.md) — *parked with serve*
+- [ ] [Two serve tests flake](issues/an-adoption-test-hangs-once-in-ten.md) — *parked with serve*
 
 ## Milestone 16 — Sweep: texture
 

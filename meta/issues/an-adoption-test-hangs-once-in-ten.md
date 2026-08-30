@@ -1,4 +1,4 @@
-# An adoption test hangs once in ten
+# Two serve tests flake
 
 ## Summary
 
@@ -28,18 +28,34 @@ semantically identical to what it replaced. So this reads as a timing
 race whose probability moves with codegen, not as a regression either
 change introduced. It is recorded rather than attributed.
 
+## A second one, same class
+
+`serve.rs::the_listing_carries_a_row_per_root_session` fails its
+`children.len() == 1` assertion — the children listing comes back empty
+— at roughly 1 run in 19 (1 failure in 19 at the delivery-engine
+commit, 0 in 6 at the commit before it). Same shape as the first: a
+read that races whatever populates it, on a machine that has been
+compiling for hours.
+
+Neither flake is attributable to the delivery-engine batch, and neither
+has a plausible mechanism in it: the batch touches the delivery rules,
+not the listing cache and not the adoption pump. Both are recorded so
+the next person to see one has the numbers rather than a shrug.
+
 ## Requirements
 
 - Find where the follow-up turn is lost: the adoption's `pending`
   read, the requeue into the engine's queue, or the gate that decides a
   recovered completion may start a turn.
+- Find what the listing reads before it is populated, and make the test
+  wait for it rather than assume it.
 - A failing run must fail *loudly* — an assertion about what did not
   happen — rather than by exhausting a poll loop, so the next
   occurrence names its own cause.
 
 ## Acceptance Criteria
 
-- 100 consecutive single-threaded runs pass.
+- 100 consecutive single-threaded runs of both tests pass.
 - The patience loop reports what it last saw when it gives up.
 
 ## Notes
