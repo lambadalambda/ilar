@@ -1669,3 +1669,63 @@ The review of this batch is worth keeping: it caught the delivering-row
 spinner, the half-armed `finished` flag, and the fact that fixing the
 duplicated aside ritual by adding a *second* duplicated call beside
 `spawner.shutdown()` was the wrong seam.
+
+## 2026-08-30 — The rest of the correctness sweep
+
+Nine of the sweep's correctness findings, minus the five that parked
+with `ilar serve`. What ties them together is that none is a bug in
+what the code does — every one is a bug in what it does *when
+something else happens at the same time*.
+
+**Two of them were the same mistake about identity.** A flock holds an
+inode, not a path, and `delete()` unlinks the session lock while
+holding it: a waiter could win the lock on a file with no name while a
+third process locked a fresh one at the same path, and both would
+believe they owned the session. `acquire_writer_id` re-stats after
+locking now and starts over on a mismatch. The same shape one directory
+over: a process group id outlives its group, and a service that
+daemonizes keeps that id for the whole session — long enough for the
+kernel to hand it to a stranger, whom `stop` would then SIGKILL. Every
+kill is probed with signal 0 first, and a group that stops answering
+loses its id at the next status read.
+
+**The outbox was breaking its own rule.** `retire` exists as an
+appended tombstone precisely because a read-filter-rewrite would erase
+a publish that landed between the read and the rename — and `pending`'s
+compaction was a read-filter-rewrite. It takes a directory-wide lock
+now. The interesting part was where *not* to hold it: the first version
+wrapped the whole scan, which meant a completing child blocked behind
+every session replay and ancestry walk an adoption performs. The lock
+covers one file's read-filter-rewrite and nothing else. A publish that
+lands between the delivery check and the lock is kept as undelivered —
+the double-delivery the module already admits to, rather than the
+silent loss it refuses.
+
+**The activity feed drowned and then stopped listening.** One 256-slot
+broadcast carries every event of every child at every depth, deltas
+included, and the TUI treated `Lagged` as end-of-drain: several
+streaming children, and the live tape stalled for the rest of the frame
+— exactly when it had the most to show. The ring is four times bigger
+(a bound, not a number to keep raising: tokio allocates it eagerly and
+a slot can hold a 16 KiB delta) and a lag is now a gap to step over.
+The review found a bonus: the fold retried its held-activity queue once
+per event, so a busy frame was quadratic in the transcript's length.
+Once per frame now.
+
+**And four small ones.** A store IO error inside the duplicate-tool-id
+check propagated raw, skipping `persist_failed_step` — so text the user
+had watched stream was never written and no `TurnDone` was published;
+it goes through `errored` like its siblings. `delete()` leaves no
+scratch behind. Launching or resuming with a cwd that is gone is an
+error rather than a panic that takes the process with it
+(`try_root`/`try_new`; the panicking names stay for the hundred-odd
+tests that own their paths). A background job that dies abnormally no
+longer wears a task's envelope and invite to "resume it with the task
+tool" — it has no session and no task id, and the advice was an
+invitation to invent one.
+
+The review of this batch was worth more than the code: besides the
+lock-duration problem and the quadratic retry, it caught an enum I had
+inserted into the middle of somebody else's doc comment, and pointed
+out that the outbox race test only exercised a single compaction
+window — a regression would have sailed through it.

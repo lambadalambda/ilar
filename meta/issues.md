@@ -69,17 +69,8 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 - [ ] [SSE redacts the calls it never saw](issues/sse-redacts-the-calls-it-never-saw.md) — *parked with serve*
 - [ ] [Serve retires what it cannot route](issues/serve-retires-what-it-cannot-route.md) — *parked with serve*
-- [ ] [A torn index still persists the step](issues/a-torn-index-still-persists-the-step.md)
-- [ ] [The lock is its inode](issues/the-lock-is-its-inode.md)
-- [ ] [A dead group is left in peace](issues/a-dead-group-is-left-in-peace.md)
-- [ ] [Delete takes the scratch along](issues/delete-takes-the-scratch-along.md)
-- [ ] [A vanished cwd is an error, not a panic](issues/a-vanished-cwd-is-an-error-not-a-panic.md)
-- [ ] [The outbox compacts by its own rules](issues/the-outbox-compacts-by-its-own-rules.md)
 - [ ] [Serve joins the turns it started](issues/serve-joins-the-turns-it-started.md) — *parked with serve*
-- [ ] [A turn failure waits to be read](issues/a-turn-failure-waits-to-be-read.md)
-- [ ] [The activity broadcast does not drown](issues/the-activity-broadcast-does-not-drown.md)
-- [ ] [Search survives a resize](issues/search-survives-a-resize.md)
-- [ ] [A job death does not invent a task](issues/a-job-death-does-not-invent-a-task.md)
+- [ ] [A turn failure waits to be read](issues/a-turn-failure-waits-to-be-read.md) — *parked with serve*
 - [ ] [The outbox is reread while serve lives](issues/the-outbox-is-reread-while-serve-lives.md) — *parked with serve*
 
 ## Milestone 16 — Sweep: texture
