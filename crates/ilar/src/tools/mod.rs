@@ -556,10 +556,20 @@ pub struct ToolContext {
 }
 
 impl ToolContext {
-    /// Context for a root (non-subagent) session.
+    /// Context for a root (non-subagent) session. Panics on a cwd that
+    /// cannot be resolved — for tests and callers that own the path.
+    /// Anything built from a *stored* cwd (a resumed session's, a
+    /// worktree that may since have been deleted) wants
+    /// [`ToolContext::try_root`], which refuses instead of aborting the
+    /// process.
     pub fn root(cwd: std::path::PathBuf) -> Self {
-        let location = WorkspaceLocation::shared(cwd);
-        Self {
+        Self::try_root(cwd).unwrap_or_else(|error| panic!("{error:#}"))
+    }
+
+    /// Context for a root session, refusing a cwd that is not there.
+    pub fn try_root(cwd: std::path::PathBuf) -> anyhow::Result<Self> {
+        let location = WorkspaceLocation::try_shared(cwd)?;
+        Ok(Self {
             cwd: location.cwd.clone(),
             session_id: String::new(),
             call_id: None,
@@ -574,7 +584,7 @@ impl ToolContext {
             vision: false,
             seen_files: SeenFiles::default(),
             spill_dir: None,
-        }
+        })
     }
 
     /// Context that may spill oversized tool output into `dir`.

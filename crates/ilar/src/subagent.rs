@@ -364,6 +364,11 @@ impl SubagentSpawner {
     /// project file must stay refused for the agents a session delegates
     /// to, and a constructor default would let a new call site silently
     /// hand back exactly what the launch declined.
+    ///
+    /// Panics on a cwd that cannot be resolved — for tests and callers
+    /// that own the path. A launch or resume whose cwd comes off disk
+    /// wants [`SubagentSpawner::try_new`], which refuses instead of
+    /// taking the process down with it.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         resolver: Arc<dyn ProviderResolver>,
@@ -375,12 +380,37 @@ impl SubagentSpawner {
         max_depth: usize,
         project_instructions: ProjectInstructions,
     ) -> Self {
+        Self::try_new(
+            resolver,
+            store,
+            agents,
+            cwd,
+            depth,
+            max_concurrent,
+            max_depth,
+            project_instructions,
+        )
+        .unwrap_or_else(|error| panic!("{error:#}"))
+    }
+
+    /// The spawner, refusing a cwd that is not there.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new(
+        resolver: Arc<dyn ProviderResolver>,
+        store: SessionStore,
+        agents: Vec<AgentDefinition>,
+        cwd: std::path::PathBuf,
+        depth: usize,
+        max_concurrent: usize,
+        max_depth: usize,
+        project_instructions: ProjectInstructions,
+    ) -> anyhow::Result<Self> {
         let (notify_tx, notify_rx) = tokio::sync::mpsc::channel(NOTIFICATION_CAPACITY);
         let (activity_tx, _) = tokio::sync::broadcast::channel(ACTIVITY_CAPACITY);
-        let workspace_location = crate::tools::WorkspaceLocation::shared(cwd);
+        let workspace_location = crate::tools::WorkspaceLocation::try_shared(cwd)?;
         let workspace = crate::tools::WorkspaceScheduler::for_location(&workspace_location);
         let (active_sessions_changed, _) = tokio::sync::watch::channel(0);
-        Self {
+        Ok(Self {
             notify_rx: Arc::new(Mutex::new(Some(notify_rx))),
             resolver,
             store,
@@ -406,7 +436,7 @@ impl SubagentSpawner {
             loop_config: LoopConfig::default(),
             services: None,
             available_models: Vec::new(),
-        }
+        })
     }
 
     /// Override the background stall watchdog timeout (tests).

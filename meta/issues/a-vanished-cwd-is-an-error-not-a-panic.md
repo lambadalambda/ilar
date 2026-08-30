@@ -12,3 +12,9 @@ aborts the whole process. `try_shared` already exists.
 Runtime constructors use `try_shared` and propagate.
 
 Size: S. Source: sweep 2026-08-29, store/workspace.
+
+## Outcome
+
+`ToolContext::try_root` and `SubagentSpawner::try_new` refuse instead of
+panicking, and the runtime uses both. The panicking names stay for the
+hundred-odd tests that own their paths, documented as exactly that.

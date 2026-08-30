@@ -184,6 +184,25 @@ async fn a_failing_parent_probe_refuses_rather_than_relaxing_the_rules() {
     );
 }
 
+/// A cwd that is not there is a refusal, not an abort. Both runtime
+/// constructors take a cwd off disk — a resumed session's, a worktree
+/// somebody deleted — and the panicking convenience they wrap would
+/// have taken the whole process down with it.
+#[test]
+fn the_runtime_constructors_refuse_a_vanished_cwd() {
+    let temp = tempfile::tempdir().unwrap();
+    let vanished = temp.path().join("deleted between launch and resume");
+    std::fs::create_dir(&vanished).unwrap();
+    std::fs::remove_dir(&vanished).unwrap();
+
+    let error = match ilar::tools::ToolContext::try_root(vanished.clone()) {
+        Ok(_) => panic!("a context was built on a directory that is not there"),
+        Err(error) => format!("{error:#}"),
+    };
+    assert!(error.contains("cannot be resolved"), "{error}");
+    assert!(WorkspaceLocation::try_shared(vanished).is_err());
+}
+
 /// A repositoryless session cwd anchors only repositories beneath it:
 /// a worktree of some unrelated repository elsewhere is refused, and
 /// the refusal names both paths it compared.

@@ -392,7 +392,7 @@ impl RuntimePlan {
         };
         let services = ServiceManager::new();
         let spawner = Arc::new(
-            SubagentSpawner::new(
+            SubagentSpawner::try_new(
                 resolver.clone(),
                 store.clone(),
                 self.agents,
@@ -401,7 +401,7 @@ impl RuntimePlan {
                 config.subagents.max_concurrent,
                 config.subagents.max_depth,
                 self.project_instructions,
-            )
+            )?
             .with_user_config_dir(config.dirs().0.to_path_buf())
             // Every published notification also lands here until its
             // delivery is provable from the parent's log, so quitting or
@@ -439,7 +439,10 @@ impl RuntimePlan {
         // Same errand, same indifference to failure: live-turn scratches
         // whose process died before its drop guard ran.
         crate::session::sweep_live_scratches(&sessions_dir(config));
-        let tool_ctx = ToolContext::root(self.cwd)
+        // A resumed session's cwd comes off disk and may be gone —
+        // deleted worktree, unmounted volume. That is an error to
+        // report, not a reason to abort the process.
+        let tool_ctx = ToolContext::try_root(self.cwd)?
             .with_subagents(spawner.clone())
             .with_spill_dir(spill_dir);
 
