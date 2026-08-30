@@ -13,3 +13,8 @@ exists.
 One `remove_file(live_path(..))` inside the held lease.
 
 Size: S. Source: sweep 2026-08-29, store.
+
+## Outcome
+
+One `remove_file(live_path(..))` inside the held lease. A crash-leftover
+scratch dies with its session instead of waiting a day for the sweeper.

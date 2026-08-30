@@ -1913,6 +1913,25 @@ fn delete_removes_session_files_and_refuses_active_sessions() {
     assert!(leftovers.is_empty(), "{leftovers:?}");
 }
 
+/// A crash leaves the scratch behind, and the sweeper only clears it
+/// after a day. Deleting the session takes it now: a reader that
+/// watches scratches would otherwise show an active turn for a session
+/// that no longer exists.
+#[test]
+fn delete_takes_a_leftover_scratch_along() {
+    let (store, dir) = temp_store();
+    let meta = sample_meta();
+    drop(store.create(meta.clone()).unwrap());
+    let scratch = dir
+        .path()
+        .join(format!("{}{}", meta.session_id, ilar::session::LIVE_SUFFIX));
+    std::fs::write(&scratch, "{}\n").unwrap();
+
+    store.delete(&meta.session_id).unwrap();
+
+    assert!(!scratch.exists(), "the scratch outlived its session");
+}
+
 #[test]
 fn delete_removes_replay_id_indexes_of_every_generation() {
     let (store, dir) = temp_store();

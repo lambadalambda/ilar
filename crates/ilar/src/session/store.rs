@@ -23,6 +23,34 @@ pub struct SessionStore {
     root: PathBuf,
 }
 
+/// How many times a writer will re-open a lock whose file was replaced
+/// under it. Two deletions racing one acquisition is already a stretch;
+/// four is a bound, not a wait.
+const LOCK_IDENTITY_ATTEMPTS: usize = 4;
+
+/// Does this handle still hold the file the path names? The check the
+/// flock cannot make for us: an unlinked inode locks just as happily as
+/// a live one.
+#[cfg(unix)]
+fn locked_the_named_file(file: &File, path: &std::path::Path) -> std::io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let held = file.metadata()?;
+    match std::fs::metadata(path) {
+        Ok(named) => Ok(held.dev() == named.dev() && held.ino() == named.ino()),
+        // The path is gone: whatever we hold, it is not the session's
+        // lock any more.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(not(unix))]
+fn locked_the_named_file(_file: &File, _path: &std::path::Path) -> std::io::Result<bool> {
+    // Windows keeps an open file's name from being reused, so the
+    // question does not arise.
+    Ok(true)
+}
+
 /// Canonical UUID used for all session and lock path derivation.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SessionId(String);
@@ -268,36 +296,56 @@ impl SessionStore {
 
     fn acquire_writer_id(&self, id: SessionId) -> std::io::Result<SessionWriter> {
         std::fs::create_dir_all(&self.root)?;
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(self.root.join(format!("{id}.lock")))?;
-        if let Err(error) = FileExt::try_lock_exclusive(&file) {
-            let contended = fs2::lock_contended_error();
-            return Err(
-                if error.kind() == std::io::ErrorKind::WouldBlock
-                    || contended.raw_os_error().is_some()
-                        && error.raw_os_error() == contended.raw_os_error()
-                {
-                    std::io::Error::new(
-                        std::io::ErrorKind::WouldBlock,
-                        format!(
-                            "session {id} already active in another turn (its driver may be another ilar process)"
-                        ),
-                    )
-                } else {
-                    error
-                },
-            );
+        let lock_path = self.root.join(format!("{id}.lock"));
+        // A lock is an inode, not a path. `delete()` unlinks the lock
+        // while holding it, so a waiter can win the lock on an inode
+        // that no longer has a name while a third process locks a fresh
+        // file at the same path — and both believe they own the
+        // session. Re-stat after locking, and start over if the fd is
+        // not what the path names now. The loop is bounded because
+        // repeated deletion of the same session is a pathology, not a
+        // state to wait out.
+        for _ in 0..LOCK_IDENTITY_ATTEMPTS {
+            let file = OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(&lock_path)?;
+            if let Err(error) = FileExt::try_lock_exclusive(&file) {
+                let contended = fs2::lock_contended_error();
+                return Err(
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        || contended.raw_os_error().is_some()
+                            && error.raw_os_error() == contended.raw_os_error()
+                    {
+                        std::io::Error::new(
+                            std::io::ErrorKind::WouldBlock,
+                            format!(
+                                "session {id} already active in another turn (its driver may be another ilar process)"
+                            ),
+                        )
+                    } else {
+                        error
+                    },
+                );
+            }
+            if !locked_the_named_file(&file, &lock_path)? {
+                // Dropping the handle releases the lock on the orphan.
+                drop(file);
+                continue;
+            }
+            return Ok(SessionWriter {
+                _file: file,
+                session_path: self.session_path_for(&id),
+                replay_index_path: self.replay_index_path_for(&id),
+                id,
+            });
         }
-        Ok(SessionWriter {
-            _file: file,
-            session_path: self.session_path_for(&id),
-            replay_index_path: self.replay_index_path_for(&id),
-            id,
-        })
+        Err(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            format!("session {id} is being deleted out from under its lock"),
+        ))
     }
 
     /// Create a new session; writes the Meta event as the first line.
@@ -419,6 +467,10 @@ impl SessionStore {
         for path in self.replay_ids_paths_for(&parsed) {
             let _ = std::fs::remove_file(path);
         }
+        // The scratch too, or a crash-leftover outlives the session it
+        // described — and a reader that watches scratches would show an
+        // active turn for a session that is gone.
+        let _ = std::fs::remove_file(super::live::live_path(&self.session_path_for(&parsed)));
         std::fs::remove_file(self.session_path_for(&parsed))?;
         let _ = std::fs::remove_file(lock_path);
         Ok(())
@@ -1666,6 +1718,39 @@ mod tests {
             stop_reason: "end_turn".into(),
             ts: chrono::Utc::now(),
         }
+    }
+
+    /// A flock holds an inode, and an inode outlives its name. This is
+    /// the check that tells the two apart — without it, a waiter that
+    /// wins the lock on a file `delete()` has already unlinked believes
+    /// it owns a session a third process is locking freshly at the same
+    /// path.
+    #[cfg(unix)]
+    #[test]
+    fn a_lock_knows_whether_it_still_holds_the_path_it_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.lock");
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        assert!(locked_the_named_file(&file, &path).unwrap());
+
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            !locked_the_named_file(&file, &path).unwrap(),
+            "an unlinked lock still claimed its path"
+        );
+
+        // A third process opening the same path gets a different inode.
+        std::fs::write(&path, b"").unwrap();
+        assert!(
+            !locked_the_named_file(&file, &path).unwrap(),
+            "the orphan claimed the file that replaced it"
+        );
     }
 
     /// The store scans for `.jsonl` and nothing else. Pinned because the
