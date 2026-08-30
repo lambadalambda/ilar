@@ -72,6 +72,7 @@ milestones 15–17 stay filed — they come back when the feature does.*
 - [ ] [Serve joins the turns it started](issues/serve-joins-the-turns-it-started.md) — *parked with serve*
 - [ ] [A turn failure waits to be read](issues/a-turn-failure-waits-to-be-read.md) — *parked with serve*
 - [ ] [The outbox is reread while serve lives](issues/the-outbox-is-reread-while-serve-lives.md) — *parked with serve*
+- [ ] [An adoption test hangs once in ten](issues/an-adoption-test-hangs-once-in-ten.md) — *parked with serve*
 
 ## Milestone 16 — Sweep: texture
 
@@ -90,7 +91,7 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 - [ ] [One redaction engine](issues/one-redaction-engine.md)
 - [ ] [One fold for live and restored](issues/one-fold-for-live-and-restored.md)
-- [ ] [One delivery engine](issues/one-delivery-engine.md)
+- [ ] [One delivery engine](issues/one-delivery-engine.md) — *core engine landed; the serve-side fold is parked with serve*
 - [ ] [One hit map for the sidebar](issues/one-hit-map-for-the-sidebar.md)
 - [ ] [The loop top joins the spine](issues/the-loop-top-joins-the-spine.md)
 - [ ] [The big files find their seams](issues/the-big-files-find-their-seams.md)

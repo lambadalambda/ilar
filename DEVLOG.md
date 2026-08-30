@@ -1729,3 +1729,47 @@ lock-duration problem and the quadratic retry, it caught an enum I had
 inserted into the middle of somebody else's doc comment, and pointed
 out that the outbox race test only exercised a single compaction
 window — a regression would have sailed through it.
+
+## 2026-08-30 — One delivery engine
+
+A background child's completion has to reach the session that spawned
+it, and every surface that can drive a session had its own opinion
+about what that means. The sweep found the delivered-check written out
+three times and a second driver that had quietly grown a shorter list
+of obligations than the first. Now that serve is stood down, the point
+of extracting an engine changed — it is not about reconciling two live
+drivers, it is about there being one place the rules live *before* the
+second driver comes back and invents them again.
+
+`ilar::delivery` holds two things.
+
+**What "delivered" means.** One predicate over the target's log —
+substring, because a delivering prompt can carry queued steers ahead of
+the notification text — with its one accepted limitation (two
+byte-identical texts for one parent dedupe as one) written down once
+instead of three times.
+
+**What an ending obliges you to do.** `Disposition` is an enum a driver
+must match exhaustively: `Delivered`, `Propagate`, `Exhausted`, `Hold`,
+`Salvage`. That exhaustiveness is the whole design. serve's missing
+retire and missing salvage were not subtle reasoning failures; they
+were arms nobody wrote, in a match nobody was forced to complete. Now
+the compiler names them.
+
+Threading it turned up a real asymmetry nobody had filed: serve bounded
+propagation at eight hops, and the TUI did not bound it at all. The
+budget exists for a parent chain that names itself as its own ancestor
+— the same corruption `outbox::pending`'s ancestry cap already refuses
+to walk forever — and in the terminal that completion would have
+climbed until the process ended. So the hop budget moved into the
+engine as `Parcel`, which the TUI's held queue now carries, and a spent
+budget became an ending in its own right: `Exhausted`, which is
+salvaged into the transcript and retired rather than dropped. serve's
+old behaviour there was a silent drop with a log line — this is
+strictly more honest, and it is now the same behaviour in both.
+
+What did not happen: serve's `Consumer` still owns its own
+follow-up-vs-route decision, its own backoff, its adoption-once, and
+its missing watchdog. Rewriting a dormant driver is exactly the tax
+standing it down was meant to stop paying. The issue stays open,
+marked, with the remainder parked beside the feature.
