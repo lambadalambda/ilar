@@ -102,10 +102,40 @@ pub(crate) fn shell_command(command_text: &str, cwd: &std::path::Path) -> tokio:
     command
 }
 
+/// Is this process group still ours to signal? Signal 0 asks the kernel
+/// and delivers nothing. `ESRCH` means the group is empty — its id is
+/// back in the pool and belongs to nobody; `EPERM` means it exists and
+/// is somebody else's, which is an even better reason to leave it
+/// alone. Either way the answer is no.
+#[cfg(unix)]
+pub(crate) fn process_group_signalable(pid: u32) -> bool {
+    let Ok(group) = i32::try_from(pid) else {
+        return false;
+    };
+    // SAFETY: signal 0 performs permission and existence checks only.
+    unsafe { libc::killpg(group, 0) == 0 }
+}
+
+/// No process groups to reason about: keep every holder's id exactly as
+/// it was, since the kill below is a no-op anyway.
+#[cfg(not(unix))]
+pub(crate) fn process_group_signalable(_pid: u32) -> bool {
+    true
+}
+
 /// SIGKILL the group led by a [`shell_command`] child: it starts a fresh
 /// process group whose id equals its pid.
+///
+/// Probed first, because a group id outlives its group. Once the last
+/// member exits the kernel may hand the id to an unrelated group, and
+/// a session that held onto it would SIGKILL a stranger. The probe
+/// closes the common case (the group is simply gone); holders narrow
+/// the rest by dropping the id as soon as it stops answering.
 #[cfg(unix)]
 pub(crate) fn kill_process_group(pid: u32) {
+    if !process_group_signalable(pid) {
+        return;
+    }
     if let Ok(group) = i32::try_from(pid) {
         // SAFETY: `group` is a checked positive child pid and callers
         // issue this only while that child still owns its group.
@@ -183,6 +213,28 @@ mod tests {
         assert_eq!(group, pid, "the child shares ilar's own process group");
         kill_process_group(child.id().unwrap());
         let _ = child.wait().await;
+    }
+
+    /// A group id outlives its group, and the kernel hands it out
+    /// again. Whoever holds one must be able to ask whether it is still
+    /// theirs before signalling it — a service that daemonizes keeps
+    /// its group id for the whole session, long enough for that to
+    /// matter.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_group_that_has_exited_is_not_signalable() {
+        let mut child = shell_command("exit 0", std::path::Path::new("."))
+            .spawn()
+            .expect("pre_exec must not fail on a healthy fork");
+        let pid = child.id().unwrap();
+        assert!(process_group_signalable(pid), "a live group answers");
+
+        let _ = child.wait().await;
+
+        assert!(
+            !process_group_signalable(pid),
+            "a reaped group still claimed its id"
+        );
     }
 
     #[test]

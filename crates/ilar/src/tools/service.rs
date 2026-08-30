@@ -8,7 +8,9 @@ use std::sync::{Arc, Mutex};
 
 use serde::Deserialize;
 
-use super::process::{Captured, drain, kill_process_group, shell_command};
+use super::process::{
+    Captured, drain, kill_process_group, process_group_signalable, shell_command,
+};
 use super::{Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, WorkspaceAccess};
 
 /// Combined stdout+stderr retained per service.
@@ -25,7 +27,9 @@ struct ServiceEntry {
     /// Kept after the direct child exits: a service that daemonizes
     /// (`node server.js &`) leaves the shell dead and the server alive in
     /// that same group, and this id is the only handle on it. Cleared
-    /// only by an actual kill, so the group is never signalled twice.
+    /// by a kill, so the group is never signalled twice — and by
+    /// `refresh` once the group answers nothing, so a recycled id is
+    /// never signalled at all.
     group: Option<u32>,
     output: Arc<Mutex<Captured>>,
     started: std::time::Instant,
@@ -35,14 +39,24 @@ struct ServiceEntry {
 impl ServiceEntry {
     /// Poll liveness, recording the exit status when the child is done.
     fn refresh(&mut self) {
-        if self.exited.is_some() {
-            return;
-        }
-        if let Some(child) = self.child.as_mut()
+        if self.exited.is_none()
+            && let Some(child) = self.child.as_mut()
             && let Ok(Some(status)) = child.try_wait()
         {
             self.exited = Some(exit_label(status));
             self.child = None;
+        }
+        // The group is kept past the shell's death on purpose — a
+        // daemonized grandchild lives in it, and this id is the only
+        // handle on it. But once the group answers nothing, its id is
+        // back in the kernel's pool, and a stop hours later would
+        // SIGKILL whoever holds it now. Refresh runs on every status
+        // read, so the id is dropped long before a pid could wrap.
+        if self.child.is_none()
+            && let Some(pid) = self.group
+            && !process_group_signalable(pid)
+        {
+            self.group = None;
         }
     }
 
