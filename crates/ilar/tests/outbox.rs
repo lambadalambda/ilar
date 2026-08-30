@@ -267,3 +267,64 @@ async fn a_background_completion_rides_the_outbox_until_delivered() {
 
     spawner.shutdown().await;
 }
+
+/// The compaction inside `pending` is a read-filter-rewrite, and a
+/// publish landing between the read and the rename used to be erased —
+/// silent loss of a finished child's only durable record, and strictly
+/// worse than the double-delivery the design does admit to. Both sides
+/// take the directory lock now, so the interleaving cannot happen; this
+/// drives them at each other to say so.
+#[test]
+fn a_publish_during_compaction_is_not_erased() {
+    let store = temp_store();
+    let parent = create_session(&store, None);
+    let dir = std::env::temp_dir().join(format!("ilar-outbox-race-{}", new_id()));
+
+    // Something to compact away on every pass: without a delivered
+    // entry, `pending` has no reason to rewrite anything.
+    append_user_message(&store, &parent, "delivered already");
+    outbox::record(&dir, &notification(&parent, "delivered already"));
+
+    let published: Vec<String> = (0..200).map(|index| format!("live entry {index}")).collect();
+    let writer = {
+        let dir = dir.clone();
+        let parent = parent.clone();
+        let published = published.clone();
+        std::thread::spawn(move || {
+            for text in &published {
+                outbox::record(&dir, &notification(&parent, text));
+            }
+        })
+    };
+
+    let mut adopted: Vec<String> = Vec::new();
+    let mut round = 0;
+    while !writer.is_finished() {
+        // A pass only rewrites when it has something to drop, so every
+        // pass gets its own delivered entry: otherwise the writer races
+        // one compaction at the start and nothing after it.
+        let delivered = format!("delivered in round {round}");
+        append_user_message(&store, &parent, &delivered);
+        outbox::record(&dir, &notification(&parent, &delivered));
+        round += 1;
+        adopted.extend(
+            outbox::pending(&store, &dir, &parent)
+                .into_iter()
+                .map(|notification| notification.text),
+        );
+    }
+    writer.join().unwrap();
+    adopted.extend(
+        outbox::pending(&store, &dir, &parent)
+            .into_iter()
+            .map(|notification| notification.text),
+    );
+
+    for text in &published {
+        assert!(
+            adopted.contains(text),
+            "a publish was erased by a concurrent compaction: {text}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

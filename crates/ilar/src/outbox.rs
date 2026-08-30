@@ -15,6 +15,8 @@
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
+use fs2::FileExt as _;
+
 use crate::session::{SessionEvent, SessionStore};
 use crate::subagent::Notification;
 
@@ -24,6 +26,36 @@ use crate::subagent::Notification;
 /// my tree" instead of a hang. Deeper-than-cap nesting is impossible —
 /// spawners stop at a single-digit depth limit.
 const ANCESTRY_CAP: usize = 64;
+
+/// The one lock the outbox has, for the whole directory.
+///
+/// [`pending`]'s compaction is a read-filter-rewrite, and an append
+/// landing between the read and the rename is erased — the exact silent
+/// loss [`retire`]'s tombstone comment refuses, and strictly worse than
+/// the double-delivery window the design accepts. Writers and the
+/// compaction take this first, so the two cannot overlap.
+///
+/// One file for the directory, never deleted, and never a `.jsonl`: a
+/// per-parent lock would have to be cleaned up, and cleaning up a lock
+/// is how two processes end up holding different inodes for one name.
+/// Contention is a non-issue — a notification is a rare event and the
+/// section is a few file operations long.
+const LOCK_NAME: &str = ".lock";
+
+/// Take the outbox lock, or proceed without it: a filesystem that
+/// cannot flock is no reason to stop recording completions, and going
+/// unlocked is exactly the behaviour that came before.
+fn lock(dir: &Path) -> Option<std::fs::File> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(dir.join(LOCK_NAME))
+        .ok()?;
+    file.lock_exclusive().ok()?;
+    Some(file)
+}
 
 /// Append a published notification to the outbox: one JSONL line in
 /// `<dir>/<parent_session_id>.jsonl`. Best-effort: an IO failure must
@@ -36,6 +68,7 @@ pub fn record(dir: &Path, notification: &Notification) {
 
 fn try_record(dir: &Path, notification: &Notification) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
+    let _guard = lock(dir);
     let line = serde_json::to_string(notification).map_err(std::io::Error::other)?;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
@@ -70,6 +103,7 @@ pub fn retire(dir: &Path, notification: &Notification) {
 }
 
 fn try_retire(dir: &Path, notification: &Notification) -> std::io::Result<()> {
+    let _guard = lock(dir);
     if !entry_path(dir, &notification.parent_session_id).exists() {
         // Never recorded (or already compacted away): a tombstone would
         // only sit orphaned where no scan visits.
@@ -101,8 +135,17 @@ fn retired_texts(dir: &Path, parent_session_id: &str) -> Vec<String> {
 /// whose ancestry (via `meta.parent_id`) reaches that root, and whose
 /// text does not yet appear in any `UserMessage` of the parent session's
 /// log (delivery == the text was appended as a prompt). Compacts as it
-/// goes: rewrites each touched file dropping delivered entries and
-/// entries for dead sessions; removes empty files.
+/// goes, under the directory lock: rewrites each touched file dropping
+/// delivered entries and entries for dead sessions; removes empty
+/// files.
+///
+/// The compaction of each file — read, filter, rewrite — happens under
+/// the directory lock; the session-log reads that decide *what* is
+/// delivered do not, so an adoption never parks a publishing child for
+/// longer than one file's rewrite. A publish that lands between the
+/// delivery check and the lock is simply judged undelivered and kept,
+/// which is the double-delivery this module already accepts — not the
+/// silent loss it refuses.
 ///
 /// The ancestry filter exists because several ilar processes can run
 /// different root sessions against the same store: a process must only
@@ -154,6 +197,12 @@ pub fn pending(store: &SessionStore, dir: &Path, root_session_id: &str) -> Vec<N
             // Another process's tree: not ours to adopt or to compact.
             continue;
         }
+        // The lock starts here, not at the top of the scan: everything
+        // above is reading session logs — replays, ancestry walks —
+        // and holding an exclusive lock through that would park every
+        // publishing child for the length of an adoption. What must not
+        // interleave is the read-filter-rewrite below, and only that.
+        let _guard = lock(dir);
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
