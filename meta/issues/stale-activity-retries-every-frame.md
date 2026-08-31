@@ -16,3 +16,12 @@ Fix shape: age entries out — drop them on the owning child's
 `TurnDone`, or after N frames without a match.
 
 Size: S. Source: sweep 2026-08-31, responsiveness & memory.
+
+## Outcome (2026-08-31)
+
+Each buffered entry carries `ACTIVITY_RETRY_FRAMES` = 240 retries
+(~12 s busy, a minute idle) and leaves the queue when they run out —
+the parent row appears within a frame or two when it appears at all.
+Chosen over TurnDone-based dropping for robustness: the TurnDone
+itself can be the orphan. Pinned by a test that spends the whole
+budget.

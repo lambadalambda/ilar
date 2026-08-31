@@ -19,3 +19,21 @@ the header/spinner row of an animated entry unless its content
 changed; split a streaming entry at the last completed block.
 
 Size: M. Source: sweep 2026-08-31, responsiveness & memory.
+
+## Status (2026-08-31)
+
+Partly stale on arrival, partly done since, remainder scoped:
+
+- Already fixed before this sweep: memoized child timelines render
+  once, not per frame (`ChildRowMemo`, pinned by
+  `an_animating_agent_row_does_not_re_render_its_child_transcript`).
+- Landed with the focus work: the focus view's per-event full
+  re-render (apply_child_loop_event reports its touched line).
+- Remaining, in order: (1) the memo's reuse path still hands rows
+  back by deep clone per frame — callers mutate what they get
+  (indentation), so the fix is an `Arc`-ified row pipeline or a
+  header-only animation pass, M-sized surgery in transcript.rs;
+  (2) a streaming assistant message re-runs markdown + wrap over the
+  whole message per delta batch (split at the last completed block);
+  (3) offscreen animated entries re-render at the busy rate —
+  `update()` has no viewport knowledge today.

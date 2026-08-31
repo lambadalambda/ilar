@@ -292,3 +292,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [A big draft rewraps per frame](issues/a-big-draft-rewraps-per-frame.md)
 - [x] [Search rescans per keystroke](issues/search-rescans-per-keystroke.md)
 - [x] [The focus view pays full price](issues/the-focus-view-pays-full-price.md)
+- [x] [Stale activity retries every frame](issues/stale-activity-retries-every-frame.md)
