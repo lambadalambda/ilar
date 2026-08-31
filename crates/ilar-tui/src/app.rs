@@ -189,6 +189,12 @@ fn queued_result_headline(message: &ilar::agent::Steer) -> Option<String> {
         .map(|display| display.lines().next().unwrap_or_default().to_string())
 }
 
+/// Retry frames a buffered subagent activity gets before it is
+/// dropped: ~12 s at the busy frame rate, a minute idle. The parent
+/// row it waits for appears within a frame or two when it appears at
+/// all.
+const ACTIVITY_RETRY_FRAMES: u16 = 240;
+
 /// The words of every waiting message, for the tests that care about
 /// which message is where rather than what is attached to it.
 #[cfg(test)]
@@ -381,7 +387,13 @@ pub(crate) struct App {
     next_thought: u64,
     pub(crate) expanded_tool_groups: std::collections::HashSet<String>,
     pub(crate) transcript_revision: u64,
-    pending_subagent_activity: std::collections::VecDeque<ilar::subagent::SubagentActivity>,
+    /// Activity whose parent row was not in the transcript yet, waiting
+    /// to attach — each with the retry frames it has left. Without the
+    /// budget, an activity whose row never appears (a parent this
+    /// transcript does not host) walked the whole transcript every
+    /// frame for the rest of the session and crowded the cap.
+    pending_subagent_activity:
+        std::collections::VecDeque<(u16, ilar::subagent::SubagentActivity)>,
     pub(crate) todos: std::sync::Arc<std::sync::Mutex<ilar::todo::TodoList>>,
 }
 
@@ -1274,7 +1286,8 @@ impl App {
             && !activity.parent_call_id.is_empty()
             && self.pending_subagent_activity.len() < 256
         {
-            self.pending_subagent_activity.push_back(activity.clone());
+            self.pending_subagent_activity
+                .push_back((ACTIVITY_RETRY_FRAMES, activity.clone()));
         }
         self.touch_transcript(touched);
     }
@@ -1326,12 +1339,18 @@ impl App {
     pub(crate) fn retry_subagent_activity(&mut self) {
         let pending = self.pending_subagent_activity.len();
         for _ in 0..pending {
-            let Some(activity) = self.pending_subagent_activity.pop_front() else {
+            let Some((frames, activity)) = self.pending_subagent_activity.pop_front() else {
                 break;
             };
             match apply_subagent_activity(&mut self.lines, &self.session_id, &activity) {
                 Some(index) => self.touch_transcript(Some(index)),
-                None => self.pending_subagent_activity.push_back(activity),
+                // The row usually appears within a frame or two; one
+                // that has not after the whole budget is not coming,
+                // and its activity was never displayable here.
+                None if frames > 1 => self
+                    .pending_subagent_activity
+                    .push_back((frames - 1, activity)),
+                None => {}
             }
         }
     }
@@ -5937,6 +5956,36 @@ mod tests {
             expanded
                 .iter()
                 .any(|line| line.contains("Tracing transcript"))
+        );
+    }
+
+    /// An activity whose parent row never appears must not walk the
+    /// transcript every frame for the rest of the session: its retry
+    /// budget runs out and it leaves the queue.
+    #[test]
+    fn stale_activity_ages_out_of_the_retry_queue() {
+        let mut app = App::new();
+        app.push_subagent_activity(&ilar::subagent::SubagentActivity {
+            parent_session_id: "root".into(),
+            parent_call_id: "never-a-row".into(),
+            child_session_id: "child".into(),
+            agent: "build".into(),
+            event: LoopEvent::TextDelta("orphan".into()),
+        });
+        assert_eq!(app.pending_subagent_activity.len(), 1);
+
+        for _ in 0..ACTIVITY_RETRY_FRAMES - 1 {
+            app.retry_subagent_activity();
+        }
+        assert_eq!(
+            app.pending_subagent_activity.len(),
+            1,
+            "the budget is spent retrying, not up front"
+        );
+        app.retry_subagent_activity();
+        assert!(
+            app.pending_subagent_activity.is_empty(),
+            "the budget ran out and the orphan left the queue"
         );
     }
 
