@@ -18,3 +18,19 @@ preview (or a capped tail), and rebuild from the store on demand if
 the user expands — the log is the durable copy, not the Vec.
 
 Size: M. Source: sweep 2026-08-31, responsiveness & memory.
+
+## Outcome (2026-08-31)
+
+A child's TurnDone squashes its folded timeline to
+`SQUASHED_CHILD_HEAD` + marker + `SQUASHED_CHILD_TAIL` (8/24),
+folding *around* live anchor rows — a background grandchild's row is
+where its future events attach, and review caught that cutting one
+strands its events in the retry queue forever. Restore applies the
+same digest before recursing, so grandchildren of discarded rows are
+never loaded. Chosen scope: inline expansion of an old delegation
+shows the digest with a pointer to the focus view (which replays the
+full timeline from the store) rather than rebuilding in place — the
+store round-trip on expand can come later if the digest feels thin.
+Deferred, narrow: a late ToolFinished whose row was folded while a
+stale same-id row survives in the head is dropped silently; marker
+counts drift cosmetically on re-squash.

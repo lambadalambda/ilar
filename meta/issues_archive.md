@@ -287,3 +287,5 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Adoption waits for the user](issues/adoption-waits-for-the-user.md)
 - [x] [A session switch replays the world](issues/a-session-switch-replays-the-world.md)
 - [x] [A turn ends with a reread](issues/a-turn-ends-with-a-reread.md)
+- [x] [The transcript never forgets](issues/the-transcript-never-forgets.md)
+- [x] [Finished children keep their transcripts](issues/finished-children-keep-their-transcripts.md)

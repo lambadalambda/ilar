@@ -104,8 +104,6 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 - [ ] [The focus view pays full price](issues/the-focus-view-pays-full-price.md)
 - [ ] [Slow actions freeze without a frame](issues/slow-actions-freeze-without-a-frame.md)
-- [ ] [The transcript never forgets](issues/the-transcript-never-forgets.md)
-- [ ] [Finished children keep their transcripts](issues/finished-children-keep-their-transcripts.md)
 - [ ] [Live rows rerender every frame](issues/live-rows-rerender-every-frame.md)
 - [ ] [Search rescans per keystroke](issues/search-rescans-per-keystroke.md)
 - [ ] [A big draft rewraps per frame](issues/a-big-draft-rewraps-per-frame.md)

@@ -21,3 +21,17 @@ shed `result`/`argument_detail`/`diff` payloads from rows older than
 it; the render cache follows the model for free.
 
 Size: M. Source: sweep 2026-08-31, responsiveness & memory.
+
+## Outcome (2026-08-31)
+
+Compaction sheds what it cut: on `Compacted`, rows behind
+`App.turn_boundary` (seeded at TurnStarted, re-seated after TurnDone
+pruning, shifted by a landing restore) lose argument detail, diffs,
+tails, and results beyond `SHED_RESULT_CHARS` = 2 KiB; finished
+children squash recursively. Review verified the error direction is
+structurally safe — every boundary mismatch under-sheds; the model
+always forgot at least what the TUI sheds. The render cache follows
+the model (the arm returns `Some(0)`, one full rebuild per
+compaction). Not done, deliberately: entries wholly *removed* from
+the model — the rows stay as cheap skeletons; dropping them is a
+scroll-history decision, not a memory one.
