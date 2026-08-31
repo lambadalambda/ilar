@@ -12,25 +12,56 @@ use unicode_width::UnicodeWidthStr;
 #[cfg(test)]
 use crate::text::text_field_view_at;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct InputBuffer {
     text: String,
     cursor: usize,
+    /// Bumped on every text mutation; the wrap cache's freshness key.
+    generation: u64,
+    /// The draw path wraps the whole draft twice per frame (row count,
+    /// then the view). For a large pasted draft that is tens of
+    /// thousands of grapheme-width computations per keystroke — cached
+    /// here per (generation, width) as byte ranges, since the rows
+    /// themselves borrow `text`.
+    wrap_cache: std::cell::RefCell<Option<WrapCache>>,
+    #[cfg(test)]
+    wrap_computes: std::cell::Cell<u32>,
 }
+
+#[derive(Debug, Clone)]
+struct WrapCache {
+    generation: u64,
+    width: u16,
+    rows: Vec<(usize, usize)>,
+}
+
+/// The cache is a projection, not state: two buffers are equal when
+/// their text and cursor are.
+impl PartialEq for InputBuffer {
+    fn eq(&self, other: &Self) -> bool {
+        self.text == other.text && self.cursor == other.cursor
+    }
+}
+
+impl Eq for InputBuffer {}
 
 impl From<&str> for InputBuffer {
     fn from(text: &str) -> Self {
         Self {
-            text: text.to_string(),
             cursor: text.len(),
+            text: text.to_string(),
+            ..Self::default()
         }
     }
 }
 
 impl From<String> for InputBuffer {
     fn from(text: String) -> Self {
-        let cursor = text.len();
-        Self { text, cursor }
+        Self {
+            cursor: text.len(),
+            text,
+            ..Self::default()
+        }
     }
 }
 
@@ -47,13 +78,21 @@ impl InputBuffer {
         self.text.trim().is_empty()
     }
 
+    /// Every text mutation goes through here: the wrap cache keys on
+    /// the generation, and a stale hit would draw the previous draft.
+    fn edited(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+    }
+
     pub(crate) fn clear(&mut self) {
         self.text.clear();
         self.cursor = 0;
+        self.edited();
     }
 
     pub(crate) fn take(&mut self) -> String {
         self.cursor = 0;
+        self.edited();
         std::mem::take(&mut self.text)
     }
 
@@ -67,13 +106,21 @@ impl InputBuffer {
             .collect::<String>();
         let nominal_cursor = self.cursor.saturating_add(text.len());
         self.text.insert_str(self.cursor, &text);
-        self.cursor = self
-            .text
+        // Snap to the next grapheme boundary at or after the nominal
+        // position. Graphemes never span '\n' (the normalization above
+        // leaves no CRLF), so the scan starts at the cursor's line, not
+        // at byte 0 — O(line) per keystroke, not O(draft).
+        let line_start = self.text[..nominal_cursor.min(self.text.len())]
+            .rfind('\n')
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        self.cursor = self.text[line_start..]
             .grapheme_indices(true)
-            .map(|(index, _)| index)
+            .map(|(index, _)| line_start + index)
             .chain(std::iter::once(self.text.len()))
             .find(|boundary| *boundary >= nominal_cursor)
             .unwrap_or(self.text.len());
+        self.edited();
     }
 
     fn move_left(&mut self) {
@@ -162,6 +209,7 @@ impl InputBuffer {
         let end = self.cursor;
         self.move_left();
         self.text.replace_range(self.cursor..end, "");
+        self.edited();
     }
 
     fn delete(&mut self) {
@@ -170,6 +218,7 @@ impl InputBuffer {
         };
         self.text
             .replace_range(self.cursor..self.cursor + grapheme.len(), "");
+        self.edited();
     }
 
     /// Kill from the cursor to the end of the visual line; at the line
@@ -186,6 +235,7 @@ impl InputBuffer {
         } else {
             self.text.replace_range(self.cursor..line_end, "");
         }
+        self.edited();
     }
 
     /// Kill from the start of the visual line to the cursor (Ctrl-U).
@@ -196,6 +246,7 @@ impl InputBuffer {
             .unwrap_or(0);
         self.text.replace_range(line_start..self.cursor, "");
         self.cursor = line_start;
+        self.edited();
     }
 
     /// Delete the whitespace-delimited word before the cursor (Ctrl-W).
@@ -208,6 +259,7 @@ impl InputBuffer {
             .unwrap_or(0);
         self.text.replace_range(start..self.cursor, "");
         self.cursor = start;
+        self.edited();
     }
 
     fn word_char(character: char) -> bool {
@@ -261,7 +313,33 @@ impl InputBuffer {
     }
 
     fn wrapped_rows(&self, width: u16) -> Vec<WrappedInputRow<'_>> {
-        let width = width.max(1) as usize;
+        let width = width.max(1);
+        if let Some(cache) = self.wrap_cache.borrow().as_ref()
+            && cache.generation == self.generation
+            && cache.width == width
+        {
+            return cache
+                .rows
+                .iter()
+                .map(|&(start, end)| WrappedInputRow {
+                    text: &self.text[start..end],
+                    start,
+                    end,
+                })
+                .collect();
+        }
+        let rows = self.compute_wrapped_rows(width as usize);
+        *self.wrap_cache.borrow_mut() = Some(WrapCache {
+            generation: self.generation,
+            width,
+            rows: rows.iter().map(|row| (row.start, row.end)).collect(),
+        });
+        rows
+    }
+
+    fn compute_wrapped_rows(&self, width: usize) -> Vec<WrappedInputRow<'_>> {
+        #[cfg(test)]
+        self.wrap_computes.set(self.wrap_computes.get() + 1);
         let mut rows = Vec::new();
         let mut line_start = 0;
         for line in self.text.split('\n') {
@@ -579,6 +657,59 @@ pub(crate) fn slash_candidates(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The draw path asks for the wrap twice per frame; an unchanged
+    /// draft answers from cache, and an edit or a resize recomputes
+    /// exactly once.
+    #[test]
+    fn the_wrap_computes_once_per_edit_and_width() {
+        let mut input = InputBuffer::from("a draft\nwith a few lines of text");
+        let ranges =
+            |rows: &[WrappedInputRow<'_>]| rows.iter().map(|row| (row.start, row.end)).collect::<Vec<_>>();
+
+        let first = ranges(&input.wrapped_rows(10));
+        let again = ranges(&input.wrapped_rows(10));
+        assert_eq!(first, again, "the cache answers with the same rows");
+        assert_eq!(input.wrap_computes.get(), 1, "the second ask hits the cache");
+
+        input.wrapped_rows(20);
+        assert_eq!(input.wrap_computes.get(), 2, "a new width recomputes");
+
+        input.insert("x");
+        input.wrapped_rows(20);
+        assert_eq!(input.wrap_computes.get(), 3, "an edit recomputes");
+    }
+
+    /// A stale wrap draws the previous draft, so every text mutation
+    /// must reach the generation the cache keys on. Enumerated: a new
+    /// editing method that forgets `edited()` should fail here.
+    #[test]
+    fn every_text_mutation_invalidates_the_wrap() {
+        let mutations: Vec<(&str, fn(&mut InputBuffer))> = vec![
+            ("insert", |input| input.insert("x")),
+            ("clear", |input| input.clear()),
+            ("take", |input| {
+                input.take();
+            }),
+            ("backspace", |input| input.backspace()),
+            ("delete", |input| input.delete()),
+            ("kill_to_line_end", |input| input.kill_to_line_end()),
+            ("kill_to_line_start", |input| input.kill_to_line_start()),
+            ("delete_word_back", |input| input.delete_word_back()),
+        ];
+        for (name, mutate) in mutations {
+            let mut input = InputBuffer::from("one two\nthree four");
+            input.cursor = 4;
+            let _ = input.wrapped_rows(10);
+            let computed = input.wrap_computes.get();
+            mutate(&mut input);
+            let _ = input.wrapped_rows(10);
+            assert!(
+                input.wrap_computes.get() > computed,
+                "{name} left the wrap cache stale"
+            );
+        }
+    }
 
     /// Ranking only: what exists (and which duplicate wins) is
     /// `App::slash_inventory`'s business, and this must not add to it.
