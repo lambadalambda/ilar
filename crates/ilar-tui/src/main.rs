@@ -1472,8 +1472,28 @@ struct RoutedDelivery {
 }
 
 enum TurnCompletion {
-    Root(Result<TurnOutcome>),
-    Compaction(Result<ilar::compaction::ManualCompactionOutcome>),
+    /// The outcome, and any question the turn left unanswered in the
+    /// log — read on the turn's own task, where the writer just kept
+    /// the replay checkpoint warm, so the loop never pays a parse to
+    /// learn it.
+    Root(Result<TurnOutcome>, Option<ilar::session::PendingQuestion>),
+    Compaction(
+        Result<ilar::compaction::ManualCompactionOutcome>,
+        Option<ilar::session::PendingQuestion>,
+    ),
+}
+
+/// Whether the log holds a question awaiting an interactive answer.
+/// Best-effort: a load failure reads as "none", and the crash path in
+/// the loop still rechecks for itself.
+fn stranded_question(
+    store: &SessionStore,
+    session_id: &str,
+) -> Option<ilar::session::PendingQuestion> {
+    store
+        .load(session_id)
+        .ok()
+        .and_then(|reader| reader.pending_question().cloned())
 }
 
 /// Where a root turn picks up: the one thing the start sites disagree
@@ -1649,7 +1669,8 @@ fn spawn_root_turn(
                 .await
             }
         };
-        TurnCompletion::Root(result)
+        let stranded = stranded_question(&store, &session_id);
+        TurnCompletion::Root(result, stranded)
     }));
 }
 
@@ -1800,7 +1821,8 @@ impl schedule::Runtime for LoopRuntime<'_> {
                 &token,
             )
             .await;
-            TurnCompletion::Compaction(result)
+            let stranded = stranded_question(&store, &session_id);
+            TurnCompletion::Compaction(result, stranded)
         }));
     }
 
@@ -2551,10 +2573,10 @@ async fn run_app(
     // Decisions accumulate here and are performed in one place below,
     // rather than each arm doing its own effects inline.
     let mut intents: Vec<Intent> = Vec::new();
-    // The stranded-question check costs a full session parse, so it
-    // runs only when it can change anything: after a turn completes —
-    // never at startup (the open already read the log and seeded the
-    // modal) and never on the idle path between keystrokes.
+    // What the last completed turn said about an unanswered question
+    // in the log. Turns read this on their own task; the loop only
+    // pays a parse on the crash path below, which reported nothing.
+    let mut stranded_question_report: Option<ilar::session::PendingQuestion> = None;
     let mut recheck_pending_question = false;
 
     // Name the window like the transcript header: the topic when the
@@ -2564,14 +2586,16 @@ async fn run_app(
     loop {
         // A failed/cancelled resume may leave the persisted question pending.
         // Reopen it instead of stranding the session behind a rejected new turn.
+        if std::mem::take(&mut recheck_pending_question) {
+            stranded_question_report = stranded_question(store, session_id);
+        }
         if turn_handle.is_none()
             && app.question_modal.is_none()
-            && std::mem::take(&mut recheck_pending_question)
-            && let Some(pending) = store.load(session_id)?.pending_question()
+            && let Some(pending) = stranded_question_report.take()
         {
             pending_question_id = Some(pending.tool_call_id.clone());
             question_reply = None;
-            app.question_modal = Some(questions::QuestionModal::new(pending.request.clone()));
+            app.question_modal = Some(questions::QuestionModal::new(pending.request));
             app.busy = true;
             app.status = "waiting for your answer".into();
             app.set_activity(Activity::Paused);
@@ -2854,11 +2878,24 @@ async fn run_app(
                 }
             }
             completions.push(match handle.await {
-                Ok(TurnCompletion::Root(result)) => schedule::Completion::Root(result),
-                Ok(TurnCompletion::Compaction(result)) => schedule::Completion::Compaction(result),
-                Err(error) => schedule::Completion::Crashed(error.to_string()),
+                Ok(TurnCompletion::Root(result, stranded)) => {
+                    // Latest truth wins: an answer turn that consumed
+                    // the question overwrites the report that opened
+                    // it.
+                    stranded_question_report = stranded;
+                    schedule::Completion::Root(result)
+                }
+                Ok(TurnCompletion::Compaction(result, stranded)) => {
+                    stranded_question_report = stranded;
+                    schedule::Completion::Compaction(result)
+                }
+                Err(error) => {
+                    // A panicked task reported nothing; only this
+                    // path still pays a load at the loop top.
+                    recheck_pending_question = true;
+                    schedule::Completion::Crashed(error.to_string())
+                }
             });
-            recheck_pending_question = true;
             // Name the session once it has something to be named after.
             // Detached and unawaited: a title is never worth delaying a
             // prompt for, and a failure leaves the session as it was.
