@@ -284,3 +284,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [The activity broadcast does not drown](issues/the-activity-broadcast-does-not-drown.md)
 - [x] [Search survives a resize](issues/search-survives-a-resize.md)
 - [x] [A job death does not invent a task](issues/a-job-death-does-not-invent-a-task.md)
+- [x] [Adoption waits for the user](issues/adoption-waits-for-the-user.md)

@@ -38,3 +38,20 @@ your next message".
 
 Size: S. Source: user report 2026-08-31, old transcripts flooding
 "task finished" on load.
+
+## Outcome (2026-08-31)
+
+`adopt_recovered` (main.rs) seeds the recovered backlog and starts
+`notifications_paused = true` iff it is non-empty; the user's first
+non-aborted turn completion resumes delivery through the path that
+already existed (schedule.rs `complete`). The open notice is
+persistent and cleared by the same `StartTurn` that begins the
+resuming turn. All three hold notices were reworded to name what is
+held ("task results") and what delivers it ("send a message"),
+instead of the pause mechanism. Review confirmed no wedge: user
+turns are never gated by the pause, and `Err` completions unpause
+too. Known gap, folded into [[notices-take-turns]]: message-then-
+abort clears the notice while the pause stands. Deliberately
+unchanged: serve's driver still adopts and delivers immediately —
+a headless consumer has no "user is reading" state; decide again if
+serve wakes.
