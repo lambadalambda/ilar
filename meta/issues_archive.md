@@ -285,3 +285,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Search survives a resize](issues/search-survives-a-resize.md)
 - [x] [A job death does not invent a task](issues/a-job-death-does-not-invent-a-task.md)
 - [x] [Adoption waits for the user](issues/adoption-waits-for-the-user.md)
+- [x] [A session switch replays the world](issues/a-session-switch-replays-the-world.md)
