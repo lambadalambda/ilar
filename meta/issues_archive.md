@@ -293,3 +293,7 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Search rescans per keystroke](issues/search-rescans-per-keystroke.md)
 - [x] [The focus view pays full price](issues/the-focus-view-pays-full-price.md)
 - [x] [Stale activity retries every frame](issues/stale-activity-retries-every-frame.md)
+
+## Review requests
+
+- [x] [Current codebase review](issues/current-codebase-review.md)

@@ -106,3 +106,17 @@ milestones 15–17 stay filed — they come back when the feature does.*
 - [ ] [Live rows rerender every frame](issues/live-rows-rerender-every-frame.md)
 - [ ] [Small frictions of a long session](issues/small-frictions-of-a-long-session.md)
 
+## Review follow-ups
+
+- [ ] [Images are bounded before decoding](issues/images-are-bounded-before-decoding.md)
+- [ ] [Every started turn publishes its ending](issues/every-started-turn-publishes-its-ending.md)
+- [ ] [A delivering child is already settled](issues/a-delivering-child-is-already-settled.md)
+- [ ] [Obsolete replays stop working](issues/obsolete-replays-stop-working.md)
+- [ ] [Ignored routing tables cannot refuse startup](issues/ignored-routing-tables-cannot-refuse-startup.md)
+- [ ] [History searches without blocking or flooding](issues/history-searches-without-blocking-or-flooding.md)
+- [ ] [Skills load one body once](issues/skills-load-one-body-once.md)
+- [ ] [Damaged rewinds fail closed](issues/damaged-rewinds-fail-closed.md)
+- [ ] [Test repositories never sign](issues/test-repositories-never-sign.md)
+- [ ] [The quality gates are green](issues/the-quality-gates-are-green.md)
+- [ ] [Provider URLs are structural](issues/provider-urls-are-structural.md)
+
