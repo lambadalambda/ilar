@@ -102,7 +102,6 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 ## Milestone 18 — Sweep: responsiveness & memory
 
-- [ ] [A turn ends with a reread](issues/a-turn-ends-with-a-reread.md)
 - [ ] [The focus view pays full price](issues/the-focus-view-pays-full-price.md)
 - [ ] [Slow actions freeze without a frame](issues/slow-actions-freeze-without-a-frame.md)
 - [ ] [The transcript never forgets](issues/the-transcript-never-forgets.md)
