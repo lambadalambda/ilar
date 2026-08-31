@@ -335,11 +335,11 @@ fn routed_complete<R: Runtime>(
         Disposition::Propagate(propagated) => runtime.hold_propagate(propagated),
         Disposition::Hold(requeued) => {
             app.set_persistent_notice(
-                "notification paused; send a message to resume",
+                "a task result cannot reach its busy session — held; send a message to retry",
                 NoticeLevel::Warning,
             );
             if !runtime.observe(app).turn_running {
-                app.status = "notification paused; send a message to resume".into();
+                app.status = "task result held — send a message to retry".into();
                 app.set_activity(Activity::Paused);
             }
             runtime.hold_requeue(requeued);

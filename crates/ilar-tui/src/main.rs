@@ -1283,9 +1283,12 @@ async fn main() -> Result<()> {
         let outbox_dir = config.state_dir().join("outbox");
         let recovered_notifications = ilar::outbox::pending(&store, &outbox_dir, &session_id);
         if !recovered_notifications.is_empty() {
-            app.set_notice(
+            // Persistent on purpose: it stands while the user reads,
+            // and the first turn's StartTurn clears it — the same
+            // gesture that resumes delivery.
+            app.set_persistent_notice(
                 format!(
-                    "{} task result(s) from a previous run will be delivered",
+                    "{} task result(s) from a previous run held — send a message to deliver",
                     recovered_notifications.len()
                 ),
                 NoticeLevel::Info,
@@ -1357,6 +1360,26 @@ fn session_context_tokens(
 /// short enough to leave room for what actually matters.
 pub(crate) fn short_session_id(id: &str) -> &str {
     id.split('-').next().unwrap_or(id)
+}
+
+/// Outbox-recovered completions enter as held parcels — and their
+/// presence pauses delivery until the user's first completed turn.
+/// Opening a session is reading, not summoning: a backlog from a
+/// previous run must not spend tokens, mutate logs, or run tools
+/// before the user has said anything. An empty recovery starts
+/// unpaused, exactly as before.
+fn adopt_recovered(
+    recovered: Vec<ilar::subagent::Notification>,
+) -> (
+    std::collections::VecDeque<ilar::delivery::Parcel>,
+    bool,
+) {
+    let held: std::collections::VecDeque<ilar::delivery::Parcel> = recovered
+        .into_iter()
+        .map(ilar::delivery::Parcel::fresh)
+        .collect();
+    let paused = !held.is_empty();
+    (held, paused)
 }
 
 /// Held-back notifications first — they arrived earlier and were only
@@ -2438,13 +2461,9 @@ async fn run_app(
     )> = None;
     let mut search_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>> = None;
     // Seeded with what the outbox recovered: they arrived before this
-    // process existed, so they go first.
-    let mut held_notifications: std::collections::VecDeque<ilar::delivery::Parcel> =
-        recovered_notifications
-            .into_iter()
-            .map(ilar::delivery::Parcel::fresh)
-            .collect();
-    let mut notifications_paused = false;
+    // process existed, so they go first — but not before the user.
+    let (mut held_notifications, mut notifications_paused) =
+        adopt_recovered(recovered_notifications);
     // Deliveries to other sessions, running beside the turn slot.
     let mut routed: Vec<RoutedDelivery> = Vec::new();
     let mut cancel: Option<CancellationToken> = None;
@@ -3075,7 +3094,7 @@ async fn run_app(
                                 notifications_paused = true;
                                 app.background_running = 0;
                                 app.set_persistent_notice(
-                                "background jobs cancelled; notifications paused; send a message to resume",
+                                "background jobs cancelled; task results held — send a message to deliver",
                                 NoticeLevel::Warning,
                             );
                             }
@@ -4679,6 +4698,34 @@ mod tests {
             "from the channel"
         );
         assert!(next_notification(&mut held, &mut rx).is_none());
+    }
+
+    /// Opening a session is reading, not summoning: a recovered
+    /// backlog is adopted in order but paused, so nothing starts a
+    /// turn before the user's first message. No backlog, no pause —
+    /// a fresh open behaves exactly as before.
+    #[test]
+    fn a_recovered_backlog_is_adopted_but_held_for_the_user() {
+        let note = |description: &str| ilar::subagent::Notification {
+            parent_session_id: "parent".into(),
+            description: description.into(),
+            text: description.into(),
+            is_error: false,
+        };
+
+        let (held, paused) = adopt_recovered(vec![note("first"), note("second")]);
+        assert!(paused, "a backlog must wait for the user");
+        assert_eq!(
+            held.iter()
+                .map(|parcel| parcel.notification().description.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "second"],
+            "adoption preserves the recorded order"
+        );
+
+        let (held, paused) = adopt_recovered(Vec::new());
+        assert!(!paused, "an empty recovery opens the gate as before");
+        assert!(held.is_empty());
     }
 
     /// A propagated completion must not jump the queue: everything the
