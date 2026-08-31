@@ -6961,6 +6961,76 @@ mod tests {
         );
     }
 
+    /// Typing extends the query one character at a time, and each
+    /// keystroke used to void every entry's matches and rescan the
+    /// whole transcript. An extension filters the previous match sets
+    /// instead; a shrink (backspace) rescans and recovers.
+    #[test]
+    fn an_extended_query_filters_matches_instead_of_rescanning() {
+        let mut app = App::new();
+        app.lines = (0..1_000)
+            .map(|index| Line_::System(format!("row {index}")))
+            .collect();
+        app.lines.push(Line_::System("a needle in the hay".into()));
+        let now = std::time::Instant::now();
+        app.transcript_cache.update(
+            &app.lines,
+            &app.expanded_tool_groups,
+            app.transcript_revision,
+            40,
+            now,
+            app.activity_started,
+        );
+
+        assert_eq!(app.transcript_cache.matching_rows("needle").len(), 1);
+        let searched = app.transcript_cache.searched_rows;
+
+        assert_eq!(app.transcript_cache.matching_rows("needle i").len(), 1);
+        assert_eq!(
+            app.transcript_cache.searched_rows, searched,
+            "an extension re-checks prior matches, not the transcript"
+        );
+        assert_eq!(app.transcript_cache.matching_rows("needle in x").len(), 0);
+        assert_eq!(app.transcript_cache.searched_rows, searched);
+
+        assert_eq!(
+            app.transcript_cache.matching_rows("needle i").len(),
+            1,
+            "a shrink must not inherit the emptied match set"
+        );
+        assert!(app.transcript_cache.searched_rows > searched);
+    }
+
+    /// The extension shortcut is judged on lowered needles, not raw
+    /// queries: Greek Σ lowers to final ς at a word's end but medial σ
+    /// mid-word, so "ΑΣ" → "ΑΣΤ" extends the raw query while the
+    /// needles disagree — filtering would lose the match for good.
+    #[test]
+    fn a_final_sigma_extension_rescans_instead_of_filtering() {
+        let mut app = App::new();
+        app.lines = vec![Line_::System("καταστροφή".into())];
+        let now = std::time::Instant::now();
+        app.transcript_cache.update(
+            &app.lines,
+            &app.expanded_tool_groups,
+            app.transcript_revision,
+            40,
+            now,
+            app.activity_started,
+        );
+
+        assert_eq!(
+            app.transcript_cache.matching_rows("ΑΣ").len(),
+            0,
+            "the final-sigma needle ας does not appear mid-word"
+        );
+        assert_eq!(
+            app.transcript_cache.matching_rows("ΑΣΤ").len(),
+            1,
+            "the medial-sigma needle αστ does — the extension must rescan"
+        );
+    }
+
     /// One appended token must cost one entry, whatever is behind it.
     /// The cache used to clone and deep-compare the whole model per
     /// delta; now the mutation says where it happened and everything

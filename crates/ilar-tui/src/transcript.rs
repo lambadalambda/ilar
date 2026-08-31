@@ -423,19 +423,37 @@ impl TranscriptRenderCache {
 
     /// Absolute indices of rows whose text contains `query`
     /// (case-insensitive), in row order. Per-entry results are kept, so
-    /// a streaming delta only rescans the entry it re-rendered.
+    /// a streaming delta only rescans the entry it re-rendered — and a
+    /// query that *extends* the previous one (each keystroke while
+    /// typing) filters the previous match sets instead of rescanning
+    /// the transcript.
     pub(crate) fn matching_rows(&mut self, query: &str) -> Vec<usize> {
         if query.trim().is_empty() {
             self.query = None;
             return Vec::new();
         }
+        let needle = query.to_lowercase();
         if self.query.as_deref() != Some(query) {
+            // Prefix-of-the-*needle*, not of the raw query: Unicode
+            // lowercasing is not concatenative (a Greek final sigma
+            // un-finalizes when a letter follows), and the subset
+            // argument — rows matching the long needle all matched the
+            // short one — only holds when the old needle literally
+            // prefixes the new.
+            let extends = self
+                .query
+                .as_deref()
+                .is_some_and(|old| !old.is_empty() && needle.starts_with(&old.to_lowercase()));
             self.query = Some(query.to_string());
             for entry in &mut self.entries {
-                entry.matches = None;
+                match (&mut entry.matches, extends) {
+                    (Some(kept), true) => {
+                        kept.retain(|&offset| row_contains(&entry.rows[offset], &needle));
+                    }
+                    (slot, _) => *slot = None,
+                }
             }
         }
-        let needle = query.to_lowercase();
         let mut matches = Vec::new();
         let mut base = 0usize;
         for entry in &mut self.entries {
@@ -520,19 +538,22 @@ pub(crate) fn reasoning_summary_title(summary: &str) -> String {
     }
 }
 
+/// Whether one row's text contains an already-lowercased `needle`.
+fn row_contains(row: &TranscriptRow, needle: &str) -> bool {
+    let text: String = row
+        .line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
+    text.to_lowercase().contains(needle)
+}
+
 /// Row offsets whose text contains an already-lowercased `needle`.
 fn matching_row_offsets(rows: &[TranscriptRow], needle: &str) -> Vec<usize> {
     rows.iter()
         .enumerate()
-        .filter(|(_, row)| {
-            let text: String = row
-                .line
-                .spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect();
-            text.to_lowercase().contains(needle)
-        })
+        .filter(|(_, row)| row_contains(row, needle))
         .map(|(offset, _)| offset)
         .collect()
 }
