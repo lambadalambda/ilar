@@ -131,12 +131,34 @@ impl FocusView {
         self.follow_tail = true;
     }
 
-    /// A change to the lines: full-rebuild mark, correctness over
-    /// narrowness — a focused transcript is one child's, not the
-    /// root's whole history.
-    fn touch(&mut self) {
+    /// A change to the lines from `from` down. The full-rebuild mark
+    /// (`from = 0`) is for edits whose extent nobody tracked; the live
+    /// event fold reports its touched line, so a streaming child costs
+    /// one entry per event, not its whole transcript.
+    fn touch_from(&mut self, from: usize) {
         self.revision = self.revision.wrapping_add(1);
-        self.cache.mark_dirty_from(0, self.revision);
+        self.cache.mark_dirty_from(from, self.revision);
+    }
+
+    fn touch(&mut self) {
+        self.touch_from(0);
+    }
+
+    /// The seed landing over the placeholder (or over whatever
+    /// streamed in while the worker replayed). A snapshot replace:
+    /// the mid-turn marker in the seed says the step in flight joins
+    /// live from here.
+    pub(crate) fn replace_lines(&mut self, lines: Vec<Line_>) {
+        self.lines = lines;
+        self.group = 0;
+        if !self.running {
+            // A TurnDone consumed while the seed replayed already
+            // closed the placeholder's rows and will not come again;
+            // the seed's open rows arrived after that closer and would
+            // spin forever under a footer that says finished.
+            close_running_tools(&mut self.lines);
+        }
+        self.touch();
     }
 }
 
@@ -1268,7 +1290,7 @@ impl App {
             return;
         };
         if activity.child_session_id == focus.session_id {
-            apply_child_loop_event(
+            let touched = apply_child_loop_event(
                 &mut focus.lines,
                 &mut focus.group,
                 &activity.parent_call_id,
@@ -1283,12 +1305,17 @@ impl App {
                 // The turn is over, so whatever it left open is over
                 // too. The seed keeps a live agent's rows open on
                 // purpose — this is what closes them when the agent
-                // stops without settling them itself.
+                // stops without settling them itself. Closing reaches
+                // arbitrary rows, so this path rebuilds in full.
                 close_running_tools(&mut focus.lines);
+                focus.touch();
+            } else if let Some(from) = touched {
+                focus.touch_from(from);
             }
-            focus.touch();
-        } else if apply_subagent_activity(&mut focus.lines, &focus.session_id, activity).is_some() {
-            focus.touch();
+        } else if let Some(index) =
+            apply_subagent_activity(&mut focus.lines, &focus.session_id, activity)
+        {
+            focus.touch_from(index);
         }
     }
 
@@ -6958,6 +6985,43 @@ mod tests {
             app.content_rows,
             bare + 2,
             "the new row and, now that there is one, its spacer"
+        );
+    }
+
+    /// A streaming child in focus used to re-render its whole
+    /// transcript per event: `FocusView::touch` marked dirty from 0
+    /// because the fold reported nothing. It reports its line now.
+    #[test]
+    fn a_focused_delta_touches_one_entry_of_a_thousand() {
+        let mut app = App::new();
+        let lines: Vec<Line_> = (0..1_000)
+            .map(|index| Line_::System(format!("row {index}")))
+            .collect();
+        app.focus = Some(FocusView::new("child".into(), "t".into(), lines, true));
+        let now = std::time::Instant::now();
+        let expanded = std::collections::HashSet::new();
+        let render = |app: &mut App| {
+            let focus = app.focus.as_mut().unwrap();
+            focus
+                .cache
+                .update(&focus.lines, &expanded, focus.revision, 40, now, now);
+        };
+        render(&mut app);
+        let rendered = app.focus.as_ref().unwrap().cache.rebuilds;
+
+        app.push_focus_activity(&ilar::subagent::SubagentActivity {
+            parent_session_id: "root".into(),
+            parent_call_id: "call-1".into(),
+            child_session_id: "child".into(),
+            agent: "build".into(),
+            event: LoopEvent::TextDelta("streamed".into()),
+        });
+        render(&mut app);
+
+        let rebuilt = app.focus.as_ref().unwrap().cache.rebuilds - rendered;
+        assert!(
+            rebuilt <= 2,
+            "one delta re-rendered {rebuilt} entries of a focused thousand"
         );
     }
 

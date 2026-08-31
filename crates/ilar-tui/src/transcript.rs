@@ -910,7 +910,9 @@ pub(crate) fn apply_subagent_activity(
     };
     *child_session_id = Some(activity.child_session_id.clone());
     *child_running = !matches!(activity.event, LoopEvent::TurnDone { .. });
-    apply_child_loop_event(
+    // The inner index is the focus view's concern; here the owner
+    // row's own index (returned below) is the dirty extent.
+    let _ = apply_child_loop_event(
         child_lines,
         child_group,
         &activity.parent_call_id,
@@ -1246,67 +1248,54 @@ pub(crate) fn prune_incomplete_thoughts(lines: &mut Vec<Line_>) -> Option<usize>
     Some(first)
 }
 
+/// Returns the lowest line index whose content may have changed, or
+/// `None` when nothing did — every helper already knows its row, and
+/// the focus view's cache re-rendered the whole child transcript per
+/// event for want of this answer.
 pub(crate) fn apply_child_loop_event(
     lines: &mut Vec<Line_>,
     group: &mut u64,
     scope: &str,
     event: &LoopEvent,
-) {
+) -> Option<usize> {
     match event {
         // A parent's task_message, delivered — shown when the child
         // actually saw it, like the root's own steers.
         LoopEvent::Steered { text, images } => {
             lines.push(Line_::User(user_text_with_images(text, images)));
+            Some(lines.len() - 1)
         }
-        LoopEvent::TextDelta(text) => {
-            append_text_delta(lines, text);
-        }
-        LoopEvent::ThinkingDelta(_) => {
-            open_placeholder_thought(lines, "reasoning");
-        }
+        LoopEvent::TextDelta(text) => Some(append_text_delta(lines, text)),
+        LoopEvent::ThinkingDelta(_) => Some(open_placeholder_thought(lines, "reasoning")),
         LoopEvent::ReasoningSummaryDelta(summary) => {
-            append_thought_delta(lines, summary, String::new);
+            Some(append_thought_delta(lines, summary, String::new))
         }
-        LoopEvent::ReasoningSummaryCompleted => {
-            complete_open_thought(lines);
-        }
+        LoopEvent::ReasoningSummaryCompleted => complete_open_thought(lines),
         LoopEvent::ToolStarted { id, name } => {
-            push_tool_row(lines, id, format!("{scope}:{group}"), name);
+            Some(push_tool_row(lines, id, format!("{scope}:{group}"), name))
         }
-        LoopEvent::ToolArguments { id, arguments } => {
-            set_tool_arguments(lines, id, arguments);
-        }
+        LoopEvent::ToolArguments { id, arguments } => set_tool_arguments(lines, id, arguments),
         LoopEvent::ToolInputProgress {
             id,
             received_bytes,
             last_data,
-        } => {
-            note_tool_input_progress(lines, id, *received_bytes, *last_data);
-        }
+        } => note_tool_input_progress(lines, id, *received_bytes, *last_data),
         LoopEvent::ToolInputComplete { id, arguments } => {
-            complete_tool_input(lines, id, arguments);
+            complete_tool_input(lines, id, arguments)
         }
         LoopEvent::SubagentConfigured {
             id,
             description,
             agent,
             model,
-        } => {
-            configure_subagent_row(lines, id, agent, model, description);
-        }
+        } => configure_subagent_row(lines, id, agent, model, description),
         LoopEvent::ToolExecutionStarted {
             id,
             received_bytes,
             started,
-        } => {
-            start_tool_execution(lines, id, *received_bytes, *started);
-        }
-        LoopEvent::ToolExecutionCompleted { id } => {
-            complete_tool_execution(lines, id);
-        }
-        LoopEvent::ToolOutputTail { id, tail } => {
-            set_tool_tail(lines, id, tail);
-        }
+        } => start_tool_execution(lines, id, *received_bytes, *started),
+        LoopEvent::ToolExecutionCompleted { id } => complete_tool_execution(lines, id),
+        LoopEvent::ToolOutputTail { id, tail } => set_tool_tail(lines, id, tail),
         LoopEvent::ToolFinished {
             id,
             name,
@@ -1318,25 +1307,37 @@ pub(crate) fn apply_child_loop_event(
             // opened mid-step, after the start had already streamed
             // past it. A row born finished beats a result that never
             // appears.
-            if newest_tool_index(lines, id).is_none() {
-                push_tool_row(lines, id, format!("{scope}:{group}"), name);
+            let born = if newest_tool_index(lines, id).is_none() {
+                Some(push_tool_row(lines, id, format!("{scope}:{group}"), name))
+            } else {
+                None
+            };
+            let finished = finish_tool_row(lines, id, *is_error, result, child_session_id);
+            match (born, finished) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (touched, None) | (None, touched) => touched,
             }
-            finish_tool_row(lines, id, *is_error, result, child_session_id);
         }
-        LoopEvent::StepComplete { .. } => *group = group.saturating_add(1),
+        LoopEvent::StepComplete { .. } => {
+            *group = group.saturating_add(1);
+            None
+        }
         LoopEvent::TurnDone { outcome } => {
             prune_incomplete_thoughts(lines);
             if *outcome != TurnOutcome::Completed {
                 mark_running_tools_failed(lines);
             }
+            // Both walk the whole list; the extent is unknown.
+            Some(0)
         }
         // The same row the root's live path pushes and replay leads
         // with; dropping it left a mid-run child compaction invisible
         // until the session was reopened.
         LoopEvent::Compacted { summary, .. } => {
             lines.push(Line_::System(format!("transcript compacted\n{summary}")));
+            Some(lines.len() - 1)
         }
-        LoopEvent::TurnStarted | LoopEvent::ProviderRetry { .. } => {}
+        LoopEvent::TurnStarted | LoopEvent::ProviderRetry { .. } => None,
     }
 }
 
@@ -1782,7 +1783,7 @@ pub(crate) fn squash_finished_child(lines: &mut Vec<Line_>) {
     // this Vec), and folding it would strand those events in the
     // retry queue forever.
     let (live, folded): (Vec<Line_>, Vec<Line_>) =
-        middle.into_iter().partition(row_is_live_anchor);
+        middle.into_iter().partition(|line| tool_is_active(line));
     if !folded.is_empty() {
         lines.push(Line_::System(format!(
             "… {} line(s) folded — the focus view has the full timeline",
@@ -1794,20 +1795,6 @@ pub(crate) fn squash_finished_child(lines: &mut Vec<Line_>) {
     lines.shrink_to_fit();
 }
 
-/// Whether a row may still receive events: a running or result-less
-/// tool, or an agent row whose child still streams.
-fn row_is_live_anchor(line: &Line_) -> bool {
-    matches!(
-        line,
-        Line_::Tool {
-            state: ToolState::Running | ToolState::Complete,
-            ..
-        } | Line_::Tool {
-            child_running: true,
-            ..
-        }
-    )
-}
 
 /// What a result keeps once its row sits behind a compaction cut.
 /// The head, not the tail: the first lines of a result say what the
@@ -3139,7 +3126,7 @@ mod tests {
     fn a_child_compaction_shows_live_like_it_does_on_replay() {
         let mut lines = Vec::new();
         let mut group = 0u64;
-        apply_child_loop_event(
+        let _ = apply_child_loop_event(
             &mut lines,
             &mut group,
             "scope",
@@ -3396,7 +3383,7 @@ mod tests {
         let mut lines = Vec::new();
         let mut group = 0u64;
         for _ in 0..4 {
-            apply_child_loop_event(
+            let _ = apply_child_loop_event(
                 &mut lines,
                 &mut group,
                 "call-1",
@@ -3420,7 +3407,7 @@ mod tests {
     fn child_tool_events_land_on_the_newest_row_with_that_id() {
         let mut lines = vec![finished_tool("call-1", "read", "stale")];
         let mut group = 0u64;
-        apply_child_loop_event(
+        let _ = apply_child_loop_event(
             &mut lines,
             &mut group,
             "scope",
@@ -3429,7 +3416,7 @@ mod tests {
                 name: "read".into(),
             },
         );
-        apply_child_loop_event(
+        let _ = apply_child_loop_event(
             &mut lines,
             &mut group,
             "scope",

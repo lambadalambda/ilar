@@ -2110,13 +2110,12 @@ fn ring_terminal_bell_if_idle(
     Ok(true)
 }
 
-/// Open the focus view on a child session: seeded by store replay —
-/// reading is safe while the child's turn holds the writer lock, the
-/// picker preview does the same — then followed live off the activity
-/// drain. A session that will not load is a notice, never a blank
-/// screen; the roster row, when still listed, lends the title and says
-/// the agent is running.
-fn open_agent_focus(app: &mut App, store: &SessionStore, session_id: &str) {
+/// Open the focus view on a child session: a placeholder immediately —
+/// the roster row lends the title and says the agent is running — and
+/// the seed follows from a blocking worker, because a large child's
+/// replay used to freeze the UI for the length of its log. Returns
+/// whether the child is streaming, which the seed needs.
+fn open_agent_focus(app: &mut App, session_id: &str) -> bool {
     let roster = app
         .agents_view
         .iter()
@@ -2131,47 +2130,81 @@ fn open_agent_focus(app: &mut App, store: &SessionStore, session_id: &str) {
     // activity at all, so a row the seed left open would spin forever.
     // Only an agent whose events will actually arrive gets that.
     let streaming = roster.is_some_and(|row| !row.delivering);
-    match store.load(session_id) {
-        Ok(reader) => {
-            // A live search would keep the keyboard and make the focus
-            // footer lie; the click is a navigation, so the search is
-            // over.
-            app.close_search(false);
-            // With-store, so a child's own subagents bring their
-            // history along instead of empty nested timelines.
-            // A working agent's open tool rows are open, not failed:
-            // marking them ✗ here also made the real result
-            // unsettleable, so the row lied until the next refocus.
-            let mut restored = session_view::restored_session_view_with_store(
-                &reader,
-                store,
-                if streaming {
-                    session_view::Liveness::Running
-                } else {
-                    session_view::Liveness::Settled
-                },
-            );
-            if streaming {
-                // The store commits step by step: whatever the session
-                // has streamed since its last step boundary is not in
-                // the seed. Say so — and end the seed on a non-text
-                // line, so the next delta starts fresh instead of
-                // welding onto an older paragraph.
-                restored.lines.push(crate::transcript::Line_::System(
-                    "focused mid-turn — the step in flight joins live from here".into(),
-                ));
-            }
-            app.focus = Some(FocusView::new(
-                session_id.to_string(),
-                title,
-                restored.lines,
-                running,
-            ));
+    // A live search would keep the keyboard and make the focus
+    // footer lie; the click is a navigation, so the search is over.
+    app.close_search(false);
+    app.focus = Some(FocusView::new(
+        session_id.to_string(),
+        title,
+        vec![crate::transcript::Line_::System(
+            "loading transcript…".into(),
+        )],
+        running,
+    ));
+    streaming
+}
+
+/// The focus seed, built off the UI task: the store replay — reading
+/// is safe while the child's turn holds the writer lock, the picker
+/// preview does the same. With-store, so a child's own subagents
+/// bring their history along instead of empty nested timelines.
+fn seed_agent_focus(
+    store: &SessionStore,
+    session_id: &str,
+    streaming: bool,
+) -> Result<Vec<crate::transcript::Line_>, String> {
+    let reader = store
+        .load(session_id)
+        .map_err(|error| format!("cannot open agent transcript: {error:#}"))?;
+    // A working agent's open tool rows are open, not failed: marking
+    // them ✗ here also made the real result unsettleable, so the row
+    // lied until the next refocus.
+    let mut restored = session_view::restored_session_view_with_store(
+        &reader,
+        store,
+        if streaming {
+            session_view::Liveness::Running
+        } else {
+            session_view::Liveness::Settled
+        },
+    );
+    if streaming {
+        // The store commits step by step: whatever the session has
+        // streamed since its last step boundary is not in the seed.
+        // Say so — and end the seed on a non-text line, so the next
+        // delta starts fresh instead of welding onto an older
+        // paragraph.
+        restored.lines.push(crate::transcript::Line_::System(
+            "focused mid-turn — the step in flight joins live from here".into(),
+        ));
+    }
+    Ok(restored.lines)
+}
+
+/// Land a finished seed on the focus that asked for it. A focus
+/// closed or retargeted while the worker ran drops the seed; a session
+/// that would not load is a notice, never a blank screen.
+fn land_agent_focus(
+    app: &mut App,
+    for_session: &str,
+    seeded: Result<Vec<crate::transcript::Line_>, String>,
+) {
+    if !app
+        .focus
+        .as_ref()
+        .is_some_and(|focus| focus.session_id == for_session)
+    {
+        return;
+    }
+    match seeded {
+        Ok(lines) => {
+            let focus = app.focus.as_mut().expect("checked above");
+            focus.replace_lines(lines);
         }
-        Err(error) => app.set_notice(
-            format!("cannot open agent transcript: {error:#}"),
-            NoticeLevel::Error,
-        ),
+        Err(message) => {
+            app.close_focus();
+            app.set_notice(message, NoticeLevel::Error);
+        }
     }
 }
 
@@ -2549,6 +2582,22 @@ async fn run_app(
     // doing — and a backlog landing after that point belongs to
     // someone who is present, not to someone reading.
     let mut engaged = false;
+    // A focus seed replaying on a worker: which child it is for, and
+    // the handle carrying its lines.
+    let mut focus_seed: Option<(
+        String,
+        tokio::task::JoinHandle<Result<Vec<crate::transcript::Line_>, String>>,
+    )> = None;
+    // A rewind in flight: the discarded-turn count for its notice, the
+    // pause state to restore on failure (the hold may predate the
+    // rewind), and the handle. The loop keeps drawing while git
+    // restores the tree; notifications are paused for the duration so
+    // nothing writes the log mid-rewrite.
+    let mut rewind_task: Option<(
+        usize,
+        bool,
+        tokio::task::JoinHandle<Result<ilar::rewind::RewindReport>>,
+    )> = None;
     // Deliveries to other sessions, running beside the turn slot.
     let mut routed: Vec<RoutedDelivery> = Vec::new();
     let mut cancel: Option<CancellationToken> = None;
@@ -2997,6 +3046,68 @@ async fn run_app(
                 }
             }
         }
+        if let Some((_, handle)) = focus_seed.as_mut()
+            && handle.is_finished()
+        {
+            let (for_session, handle) = focus_seed.take().unwrap();
+            let seeded = handle.await.unwrap_or_else(|join_error| {
+                Err(format!("cannot open agent transcript: {join_error}"))
+            });
+            land_agent_focus(app, &for_session, seeded);
+        }
+        if let Some((_, _, handle)) = rewind_task.as_mut()
+            && handle.is_finished()
+        {
+            let (discarded, paused_before, handle) = rewind_task.take().unwrap();
+            let outcome = match handle.await {
+                Ok(result) => result,
+                Err(join_error) => Err(anyhow::anyhow!("rewind task died: {join_error}")),
+            };
+            match outcome {
+                Ok(report) => {
+                    leave_session(
+                        &spawner,
+                        &mut aside_cancel,
+                        &mut aside_handle,
+                        &mut topic_handle,
+                    )
+                    .await;
+                    let mut notice = if report.tree_restored {
+                        format!("rewound {discarded} turn(s) · tree restored")
+                    } else {
+                        format!("rewound {discarded} turn(s) · no tree snapshot")
+                    };
+                    if report.head_moved {
+                        notice.push_str(" · HEAD moved since (commits kept)");
+                    }
+                    // A message typed mid-rewind queued behind `busy`;
+                    // the reopened session has no queue to inherit, so
+                    // it rides the prefill instead of dying with the
+                    // app. (Images attached to one do not survive the
+                    // trip — a rewind lasts seconds; acceptable.)
+                    let mut prefill = report.unsent;
+                    for queued in app.queued_messages.drain(..) {
+                        if !prefill.is_empty() {
+                            prefill.push_str("\n\n");
+                        }
+                        prefill.push_str(&queued.text);
+                    }
+                    return Ok(AppExit::SwitchInto {
+                        id: session_id.to_string(),
+                        prefill: Some(prefill),
+                        notice: Some(notice),
+                        stash: std::mem::take(&mut app.input_stash),
+                    });
+                }
+                Err(error) => {
+                    notifications_paused = paused_before;
+                    app.busy = false;
+                    app.status = "ready".into();
+                    app.set_activity(Activity::Ready);
+                    app.set_notice(format!("rewind failed: {error}"), NoticeLevel::Error);
+                }
+            }
+        }
         if let Some(handle) = topic_handle.as_mut()
             && handle.is_finished()
             && let Ok(topic) = topic_handle.take().unwrap().await
@@ -3125,6 +3236,16 @@ async fn run_app(
                     app.quit_armed = false;
                 }
                 if quitting {
+                    // Quitting under a running rewind would kill git
+                    // mid-restore and leave half a working tree. It
+                    // finishes in seconds; the quit can wait for it.
+                    if rewind_task.is_some() {
+                        app.set_notice(
+                            "rewinding — quit after it finishes",
+                            NoticeLevel::Warning,
+                        );
+                        continue;
+                    }
                     // A stash and undelivered task results are both
                     // invisible from a blank prompt; say what leaving
                     // costs before the second press takes it. The
@@ -3554,50 +3675,33 @@ async fn run_app(
                                         continue;
                                     }
                                     app.turn_picker = None;
-                                    match ilar::rewind::rewind_session(
-                                        store,
-                                        session_id,
-                                        cut,
-                                        &target,
-                                        &tool_ctx.cwd,
-                                    )
-                                    .await
-                                    {
-                                        Ok(report) => {
-                                            leave_session(
-                                                &spawner,
-                                                &mut aside_cancel,
-                                                &mut aside_handle,
-                                                &mut topic_handle,
+                                    // Held: a notification turn starting
+                                    // mid-rewind would write the log the
+                                    // rewind is rewriting. The prior pause
+                                    // state comes back on failure; success
+                                    // reopens the session.
+                                    let paused_before = notifications_paused;
+                                    notifications_paused = true;
+                                    app.busy = true;
+                                    app.status = "rewinding…".into();
+                                    app.set_activity(Activity::Thinking);
+                                    let store = store.clone();
+                                    let rewind_session_id = session_id.to_string();
+                                    let cwd = tool_ctx.cwd.clone();
+                                    rewind_task = Some((
+                                        discarded,
+                                        paused_before,
+                                        tokio::spawn(async move {
+                                            ilar::rewind::rewind_session(
+                                                &store,
+                                                &rewind_session_id,
+                                                cut,
+                                                &target,
+                                                &cwd,
                                             )
-                                            .await;
-                                            let mut notice = if report.tree_restored {
-                                                format!(
-                                                    "rewound {discarded} turn(s) · tree restored"
-                                                )
-                                            } else {
-                                                format!(
-                                                    "rewound {discarded} turn(s) · no tree snapshot"
-                                                )
-                                            };
-                                            if report.head_moved {
-                                                notice
-                                                    .push_str(" · HEAD moved since (commits kept)");
-                                            }
-                                            return Ok(AppExit::SwitchInto {
-                                                id: session_id.to_string(),
-                                                prefill: Some(report.unsent),
-                                                notice: Some(notice),
-                                                stash: std::mem::take(&mut app.input_stash),
-                                            });
-                                        }
-                                        Err(error) => {
-                                            app.set_notice(
-                                                format!("rewind failed: {error}"),
-                                                NoticeLevel::Error,
-                                            );
-                                        }
-                                    }
+                                            .await
+                                        }),
+                                    ));
                                 }
                                 TurnPickerAction::Fork { cut, target } => {
                                     if let Some(reason) = switch_blocked(
@@ -4077,7 +4181,15 @@ async fn run_app(
                             match app.click_agent_row(mouse.column, mouse.row) {
                                 Some(AgentTarget::Main) => app.close_focus(),
                                 Some(AgentTarget::Focus(id)) => {
-                                    open_agent_focus(app, store, &id);
+                                    let streaming = open_agent_focus(app, &id);
+                                    let store = store.clone();
+                                    let seed_id = id.clone();
+                                    focus_seed = Some((
+                                        id,
+                                        tokio::task::spawn_blocking(move || {
+                                            seed_agent_focus(&store, &seed_id, streaming)
+                                        }),
+                                    ));
                                 }
                                 None if app.focus.is_none() => {
                                     app.begin_transcript_selection(mouse.column, mouse.row);
@@ -4794,7 +4906,12 @@ mod tests {
             foreign_parent: None,
             elapsed: std::time::Duration::from_secs(1),
         }];
-        open_agent_focus(&mut app, &store, &session_id);
+        let streaming = open_agent_focus(&mut app, &session_id);
+        land_agent_focus(
+            &mut app,
+            &session_id,
+            seed_agent_focus(&store, &session_id, streaming),
+        );
         let focus = app.focus.as_ref().expect("focus opened");
         assert_eq!(focus.title, "explore · survey the picker core");
         assert!(focus.running);
@@ -4811,12 +4928,22 @@ mod tests {
         // the replay still opens, marked not running.
         app.agents_view.clear();
         app.close_focus();
-        open_agent_focus(&mut app, &store, &session_id);
+        let streaming = open_agent_focus(&mut app, &session_id);
+        land_agent_focus(
+            &mut app,
+            &session_id,
+            seed_agent_focus(&store, &session_id, streaming),
+        );
         assert!(app.focus.as_ref().is_some_and(|focus| !focus.running));
 
         // A session the store cannot load: a notice, no focus.
         app.close_focus();
-        open_agent_focus(&mut app, &store, "no-such-session");
+        let streaming = open_agent_focus(&mut app, "no-such-session");
+        land_agent_focus(
+            &mut app,
+            "no-such-session",
+            seed_agent_focus(&store, "no-such-session", streaming),
+        );
         assert!(app.focus.is_none(), "a blank screen is not an answer");
         let (notice, _) = app.operational_notice().expect("an honest notice");
         assert!(notice.contains("cannot open agent transcript"), "{notice}");
