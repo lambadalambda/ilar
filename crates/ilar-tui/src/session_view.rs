@@ -485,6 +485,13 @@ fn restore_child_activity(
         if matches!(restored.get(prompt), Some(Line_::User(_))) {
             restored.remove(prompt);
         }
+        // A settled child is a finished child: the same digest the
+        // live path applies at its TurnDone — and squashing *before*
+        // the recursion means grandchildren of discarded rows are
+        // never loaded at all.
+        if liveness == Liveness::Settled {
+            crate::transcript::squash_finished_child(&mut restored);
+        }
         restore_child_activity(&mut restored, store, session_id, depth + 1, liveness);
         // The same rule the live path applies (fc625c6): a call that has
         // a child IS a subagent call, whatever it was named. Only `task`

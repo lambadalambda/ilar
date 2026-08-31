@@ -895,6 +895,11 @@ pub(crate) fn apply_subagent_activity(
         &activity.parent_call_id,
         &activity.event,
     );
+    if !*child_running {
+        // The child is done; its row keeps a digest, its log keeps
+        // the rest.
+        squash_finished_child(child_lines);
+    }
     Some(index)
 }
 
@@ -1728,6 +1733,104 @@ fn preview_tail(text: &str) -> String {
         format!("… {tail}")
     } else {
         tail.to_string()
+    }
+}
+
+/// How much of a finished child's timeline the row keeps inline:
+/// enough head to say what was asked, enough tail for the collapsed
+/// preview and the ending. The full history lives in the child's log,
+/// one click away in the focus view — without this bound every
+/// delegation retains its whole nested transcript in RAM for the
+/// session's life.
+pub(crate) const SQUASHED_CHILD_HEAD: usize = 8;
+pub(crate) const SQUASHED_CHILD_TAIL: usize = 24;
+
+/// Squash a finished child's folded timeline to a bounded digest.
+/// A child resumed later simply accrues new lines behind the digest
+/// until its next `TurnDone` squashes again.
+pub(crate) fn squash_finished_child(lines: &mut Vec<Line_>) {
+    let cap = SQUASHED_CHILD_HEAD + SQUASHED_CHILD_TAIL;
+    // `+ 1`: replacing lines with a marker must shrink, not pad.
+    if lines.len() <= cap + 1 {
+        return;
+    }
+    let tail = lines.split_off(lines.len() - SQUASHED_CHILD_TAIL);
+    let middle = lines.split_off(SQUASHED_CHILD_HEAD);
+    // Live anchors survive the fold: a background grandchild's row is
+    // where its future events attach (the lookup is by call id within
+    // this Vec), and folding it would strand those events in the
+    // retry queue forever.
+    let (live, folded): (Vec<Line_>, Vec<Line_>) =
+        middle.into_iter().partition(row_is_live_anchor);
+    if !folded.is_empty() {
+        lines.push(Line_::System(format!(
+            "… {} line(s) folded — the focus view has the full timeline",
+            folded.len()
+        )));
+    }
+    lines.extend(live);
+    lines.extend(tail);
+    lines.shrink_to_fit();
+}
+
+/// Whether a row may still receive events: a running or result-less
+/// tool, or an agent row whose child still streams.
+fn row_is_live_anchor(line: &Line_) -> bool {
+    matches!(
+        line,
+        Line_::Tool {
+            state: ToolState::Running | ToolState::Complete,
+            ..
+        } | Line_::Tool {
+            child_running: true,
+            ..
+        }
+    )
+}
+
+/// What a result keeps once its row sits behind a compaction cut.
+/// The head, not the tail: the first lines of a result say what the
+/// tool found; the diagnosis-at-the-end rule is for live failures,
+/// which compaction never touches.
+pub(crate) const SHED_RESULT_CHARS: usize = 2 * 1024;
+
+/// Strip the heavy payloads — kept results, diffs, tails, argument
+/// detail, child timelines — from rows the model itself no longer
+/// remembers. The rows stay: the shape of the history is cheap, its
+/// payloads are what grow without bound.
+pub(crate) fn shed_payloads(lines: &mut [Line_]) {
+    for line in lines {
+        let Line_::Tool {
+            argument_detail,
+            diff,
+            tail,
+            result,
+            child_lines,
+            child_running,
+            ..
+        } = line
+        else {
+            continue;
+        };
+        *argument_detail = String::new();
+        *diff = Vec::new();
+        *tail = String::new();
+        if let Some(kept) = result
+            && kept.chars().count() > SHED_RESULT_CHARS
+        {
+            let marker = "\n… [trimmed after compaction]";
+            *kept = kept
+                .chars()
+                .take(SHED_RESULT_CHARS)
+                .chain(marker.chars())
+                .collect();
+        }
+        // A child still streaming keeps its timeline whole; its own
+        // TurnDone squashes it.
+        if !*child_running {
+            squash_finished_child(child_lines);
+            shed_payloads(child_lines);
+        }
     }
 }
 
@@ -2581,6 +2684,133 @@ mod tests {
             child_running: true,
             child_session_id: None,
         }
+    }
+
+    /// A finished delegation keeps a digest, not a transcript: head,
+    /// marker, tail. The child's log has the rest, one click away in
+    /// the focus view.
+    #[test]
+    fn a_finished_child_squashes_to_a_bounded_digest() {
+        let mut lines: Vec<Line_> = (0..100)
+            .map(|i| Line_::System(format!("line {i}")))
+            .collect();
+        squash_finished_child(&mut lines);
+
+        assert_eq!(
+            lines.len(),
+            SQUASHED_CHILD_HEAD + 1 + SQUASHED_CHILD_TAIL
+        );
+        assert!(matches!(&lines[0], Line_::System(text) if text == "line 0"));
+        assert!(
+            matches!(&lines[SQUASHED_CHILD_HEAD], Line_::System(text) if text.contains("68 line(s) folded")),
+            "the marker names what it replaced"
+        );
+        assert!(matches!(lines.last(), Some(Line_::System(text)) if text == "line 99"));
+
+        // Idempotent: the next TurnDone of a resumed child squashes
+        // again without eating the digest.
+        let digest = lines.clone();
+        squash_finished_child(&mut lines);
+        assert_eq!(lines, digest);
+
+        // Short timelines are kept whole — a marker that replaces one
+        // line pads instead of shrinking.
+        let mut short: Vec<Line_> = (0..SQUASHED_CHILD_HEAD + SQUASHED_CHILD_TAIL)
+            .map(|i| Line_::System(format!("s{i}")))
+            .collect();
+        let kept = short.clone();
+        squash_finished_child(&mut short);
+        assert_eq!(short, kept);
+    }
+
+    /// A background grandchild's row is where its future events
+    /// attach — the lookup is by call id within this Vec — so the
+    /// fold goes around live anchors, never through them. Cutting one
+    /// would strand its events in the retry queue forever.
+    #[test]
+    fn a_squash_folds_around_live_anchor_rows() {
+        let mut lines: Vec<Line_> = (0..40)
+            .map(|i| Line_::System(format!("line {i}")))
+            .collect();
+        // A running grandchild anchor deep in the would-be cut.
+        lines.insert(
+            12,
+            agent_row("grandchild", vec![Line_::System("working".into())], false),
+        );
+        squash_finished_child(&mut lines);
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| matches!(line, Line_::Tool { id, .. } if id == "grandchild")),
+            "the live anchor survives the fold"
+        );
+        assert!(
+            lines.len() <= SQUASHED_CHILD_HEAD + 2 + SQUASHED_CHILD_TAIL,
+            "the digest stays bounded around it"
+        );
+    }
+
+    /// Compaction keeps the rows and sheds what they carry: the model
+    /// no longer remembers these payloads, so RAM stops holding them.
+    #[test]
+    fn shedding_strips_payloads_but_keeps_the_rows() {
+        let child: Vec<Line_> = (0..100)
+            .map(|i| Line_::System(format!("c{i}")))
+            .collect();
+        let mut row = agent_row("a", child, false);
+        let Line_::Tool {
+            argument_detail,
+            tail,
+            result,
+            state,
+            child_running,
+            ..
+        } = &mut row
+        else {
+            unreachable!()
+        };
+        *argument_detail = "x".repeat(50_000);
+        *tail = "y".repeat(50_000);
+        *result = Some("z".repeat(50_000));
+        *state = ToolState::Succeeded;
+        *child_running = false;
+
+        let mut lines = vec![Line_::Assistant("kept prose".into()), row];
+        shed_payloads(&mut lines);
+
+        assert!(matches!(&lines[0], Line_::Assistant(text) if text == "kept prose"));
+        let Line_::Tool {
+            argument_detail,
+            tail,
+            result,
+            child_lines,
+            ..
+        } = &lines[1]
+        else {
+            panic!("the row itself must survive the shed");
+        };
+        assert!(argument_detail.is_empty());
+        assert!(tail.is_empty());
+        let kept = result.as_ref().unwrap();
+        assert!(kept.chars().count() <= SHED_RESULT_CHARS + 40);
+        assert!(kept.ends_with("[trimmed after compaction]"));
+        assert!(child_lines.len() <= SQUASHED_CHILD_HEAD + 1 + SQUASHED_CHILD_TAIL);
+    }
+
+    /// A child still streaming is not shed: its timeline is live
+    /// surface, and its own TurnDone squashes it.
+    #[test]
+    fn a_running_child_is_not_shed() {
+        let child: Vec<Line_> = (0..100)
+            .map(|i| Line_::System(format!("c{i}")))
+            .collect();
+        let mut lines = vec![agent_row("a", child, true)];
+        shed_payloads(&mut lines);
+        let Line_::Tool { child_lines, .. } = &lines[0] else {
+            unreachable!()
+        };
+        assert_eq!(child_lines.len(), 100);
     }
 
     /// An expanded agent row whose child is still running is `animated`,

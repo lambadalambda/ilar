@@ -207,6 +207,10 @@ pub(crate) struct App {
     /// Bytes already attributed to completed steps; the live output
     /// estimate uses only the current step's bytes.
     pub(crate) stream_step_base: u64,
+    /// Line index where the in-flight turn began (or the last one
+    /// ended): what a compaction may shed payloads behind without
+    /// touching rows a running turn still owns.
+    turn_boundary: usize,
     /// Windowed transfer rate: anchor of the current >=1s window and the
     /// last completed window's bytes/sec.
     stream_rate_anchor: Option<(std::time::Instant, u64)>,
@@ -409,6 +413,7 @@ impl App {
             stream_received: 0,
             stream_last_data: None,
             stream_step_base: 0,
+            turn_boundary: 0,
             stream_rate_anchor: None,
             stream_rate: None,
             turn_committed: false,
@@ -808,6 +813,12 @@ impl App {
         at: usize,
     ) {
         let at = at.min(self.lines.len());
+        // The boundary marks live-turn territory by index. Landed
+        // history is pre-turn by definition, so the boundary moves
+        // past it — shifting any running turn's territory up, and
+        // making a restored heavy session sheddable by an idle
+        // /compact before any turn has run.
+        self.turn_boundary = self.turn_boundary.max(at) + restored.lines.len();
         self.lines.splice(at..at, restored.lines);
         // Turns may have accrued while the worker ran — a question
         // answered under the modal, a queued prompt. The restored
@@ -1027,6 +1038,7 @@ impl App {
             }
             LoopEvent::TurnStarted => {
                 self.turn_committed = true;
+                self.turn_boundary = self.lines.len();
                 self.clear_transient_notice();
                 self.status = "thinking…".into();
                 self.stream_received = 0;
@@ -1186,9 +1198,15 @@ impl App {
             } => {
                 self.context_used = *context_tokens;
                 self.context_estimated = true;
+                // The model no longer remembers what these rows carry,
+                // so the transcript stops carrying it whole: payloads
+                // behind the turn boundary shed to previews, and the
+                // rows a running turn still owns stay untouched.
+                let boundary = self.turn_boundary.min(self.lines.len());
+                crate::transcript::shed_payloads(&mut self.lines[..boundary]);
                 self.lines
                     .push(Line_::System(format!("transcript compacted\n{summary}")));
-                Some(self.lines.len() - 1)
+                Some(0)
             }
             LoopEvent::TurnDone { outcome } => {
                 let touched = if *outcome == TurnOutcome::Aborted {
@@ -1197,6 +1215,11 @@ impl App {
                 } else {
                     prune_incomplete_thoughts(&mut self.lines)
                 };
+                // A manual /compact runs between turns; everything the
+                // finished turn wrote is now behind the boundary. Set
+                // after the pruning above, so the boundary can never
+                // point past a line the cleanup just removed.
+                self.turn_boundary = self.lines.len();
                 self.status = match outcome {
                     TurnOutcome::Completed => "ready".into(),
                     TurnOutcome::Aborted => "aborted".into(),
@@ -4171,6 +4194,69 @@ mod tests {
         app.retry_available = false;
         app.finish_turn(Ok(TurnOutcome::Completed));
         assert!(!app.retry_available);
+    }
+
+    /// Compaction sheds heavy payloads behind the turn boundary — the
+    /// model no longer remembers them — and leaves whatever the
+    /// in-flight turn wrote untouched.
+    #[test]
+    fn compaction_sheds_payloads_behind_the_turn_boundary() {
+        let heavy_row = |id: &str| Line_::Tool {
+            id: id.into(),
+            group_id: "g".into(),
+            name: "bash".into(),
+            kind: ToolKind::Tool,
+            arguments: "make".into(),
+            argument_detail: String::new(),
+            diff: Vec::new(),
+            tail: String::new(),
+            result: Some("z".repeat(100_000)),
+            state: crate::transcript::ToolState::Succeeded,
+            progress: crate::transcript::ToolProgress::None,
+            expanded: false,
+            full: false,
+            child_lines: Vec::new(),
+            child_group: 0,
+            child_running: false,
+            child_session_id: None,
+        };
+        let result_len = |app: &App, id: &str| {
+            app.lines
+                .iter()
+                .find_map(|line| match line {
+                    Line_::Tool { id: row, result, .. } if row == id => {
+                        result.as_ref().map(|kept| kept.chars().count())
+                    }
+                    _ => None,
+                })
+                .unwrap()
+        };
+
+        let mut app = App::new();
+        app.push_transcript_line(heavy_row("old"));
+        app.push_loop_event(&LoopEvent::TurnDone {
+            outcome: TurnOutcome::Completed,
+        });
+        app.push_loop_event(&LoopEvent::TurnStarted);
+        app.push_transcript_line(heavy_row("live"));
+        app.push_loop_event(&LoopEvent::Compacted {
+            context_tokens: 10,
+            summary: "carry on".into(),
+        });
+
+        assert!(
+            result_len(&app, "old") <= crate::transcript::SHED_RESULT_CHARS + 40,
+            "the finished turn's payload sheds"
+        );
+        assert_eq!(
+            result_len(&app, "live"),
+            100_000,
+            "the in-flight turn's rows are not the compaction's to touch"
+        );
+        assert!(matches!(
+            app.lines.last(),
+            Some(Line_::System(text)) if text.contains("transcript compacted")
+        ));
     }
 
     #[test]
