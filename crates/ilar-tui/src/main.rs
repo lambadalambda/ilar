@@ -1216,8 +1216,6 @@ async fn main() -> Result<()> {
 
         let user_config_path = config.dirs().0.join("ilar.toml");
 
-        let (context_used, context_estimated) =
-            session_context_tokens(&store, &session_id, &system_prompt, &registry)?;
         let context_limit = display_context_limit(resolver.as_ref(), &model_for_session);
         let mut app = App::new();
         app.theme = active_theme;
@@ -1227,16 +1225,58 @@ async fn main() -> Result<()> {
         app.available_models = model_choices.iter().map(|model| model.full_id()).collect();
         app.session_id = session_id.clone();
         app.todos = todos;
-        if let Some(resumed) = &resumed {
+        // The reader in hand answers the pending-question check;
+        // run_app takes the answer instead of re-reading the log for
+        // it. A fresh session cannot have one.
+        let mut initial_pending_question_id = None;
+        // A resumed session's restore — the whole-log fold plus a
+        // store load per child, recursively — runs on a blocking
+        // worker so the terminal comes up drawing instead of frozen
+        // for the length of the replay. The reader's cheap answers
+        // (topic, pending question) are taken here; the reader itself
+        // moves to the worker, which also prices the context while it
+        // holds the events. A prompt typed while it runs queues, and
+        // the landing sends the queue. Fresh sessions price inline:
+        // the request is all there is.
+        let restore_handle = if let Some(resumed) = resumed {
             app.topic = resumed.topic().map(str::to_string);
-            app.restore_session(resumed, &store);
             if let Some(pending) = resumed.pending_question() {
+                initial_pending_question_id = Some(pending.tool_call_id.clone());
                 app.question_modal = Some(questions::QuestionModal::new(pending.request.clone()));
-                app.busy = true;
-                app.status = "waiting for your answer".into();
-                app.set_activity(Activity::Paused);
             }
-        }
+            // Where the history belongs: after what the app already
+            // holds (the banner), ahead of everything pushed while
+            // the worker runs.
+            let restore_at = app.lines().len();
+            let store = store.clone();
+            let system_prompt = system_prompt.clone();
+            let definitions = registry.definitions();
+            Some((restore_at, tokio::task::spawn_blocking(move || {
+                // Settled: a session is switched into when nothing is
+                // driving it, so whatever it left running died with
+                // the process that ran it.
+                let view = session_view::restored_session_view_with_store(
+                    &resumed,
+                    &store,
+                    session_view::Liveness::Settled,
+                );
+                let priced = ilar::compaction::estimate_reader_tokens_with_request(
+                    &resumed,
+                    Some(&system_prompt),
+                    &definitions,
+                );
+                (view, priced)
+            })))
+        } else {
+            None
+        };
+        let (context_used, context_estimated) = if restore_handle.is_some() {
+            // Zero until the landing prices it — a muted "0%", not a
+            // wrong exact number.
+            (0, true)
+        } else {
+            session_context_tokens(&store, &session_id, &system_prompt, &registry)?
+        };
         app.configure_runtime(
             model_for_session.clone(),
             reasoning_for_session,
@@ -1245,8 +1285,17 @@ async fn main() -> Result<()> {
             context_limit,
             context_estimated,
         );
+        if restore_handle.is_some() {
+            app.busy = true;
+            app.status = "restoring session".into();
+            app.set_activity(Activity::Thinking);
+        }
         if app.question_modal.is_some() {
+            // The question outranks the restore: the user can answer
+            // while history loads underneath the modal.
+            app.busy = true;
             app.status = "waiting for your answer".into();
+            app.set_activity(Activity::Paused);
         }
         // The config warnings are drained: they are a property of the
         // configuration and are said once. The skipped project file is
@@ -1279,21 +1328,19 @@ async fn main() -> Result<()> {
             .is_some_and(|(_, session)| session.keyboard_enhanced);
         // Completions published by an earlier run of this tree that
         // never reached their session: the outbox kept them, and they
-        // enter this run as if freshly notified.
+        // enter this run as if freshly notified — held for the user.
+        // The scan loads a parent log per outbox file and walks
+        // ancestry, so it joins the restore off the UI task; its
+        // results land in the loop.
         let outbox_dir = config.state_dir().join("outbox");
-        let recovered_notifications = ilar::outbox::pending(&store, &outbox_dir, &session_id);
-        if !recovered_notifications.is_empty() {
-            // Persistent on purpose: it stands while the user reads,
-            // and the first turn's StartTurn clears it — the same
-            // gesture that resumes delivery.
-            app.set_persistent_notice(
-                format!(
-                    "{} task result(s) from a previous run held — send a message to deliver",
-                    recovered_notifications.len()
-                ),
-                NoticeLevel::Info,
-            );
-        }
+        let adoption_handle = {
+            let store = store.clone();
+            let outbox_dir = outbox_dir.clone();
+            let session_id = session_id.clone();
+            tokio::task::spawn_blocking(move || {
+                ilar::outbox::pending(&store, &outbox_dir, &session_id)
+            })
+        };
         let terminal = &mut terminal_hold.as_mut().expect("terminal started").0;
         let exit = run_app(
             terminal,
@@ -1306,7 +1353,7 @@ async fn main() -> Result<()> {
             &registry,
             tool_ctx,
             spawner,
-            recovered_notifications,
+            adoption_handle,
             notifications,
             subagent_activity,
             question_rx,
@@ -1314,6 +1361,8 @@ async fn main() -> Result<()> {
             model_choices,
             services,
             outbox_dir,
+            initial_pending_question_id,
+            restore_handle,
         )
         .await?;
         active_theme = app.theme;
@@ -1363,11 +1412,12 @@ pub(crate) fn short_session_id(id: &str) -> &str {
 }
 
 /// Outbox-recovered completions enter as held parcels — and their
-/// presence pauses delivery until the user's first completed turn.
-/// Opening a session is reading, not summoning: a backlog from a
-/// previous run must not spend tokens, mutate logs, or run tools
-/// before the user has said anything. An empty recovery starts
-/// unpaused, exactly as before.
+/// presence asks for a delivery pause until the user's first
+/// completed turn. Opening a session is reading, not summoning: a
+/// backlog from a previous run must not spend tokens, mutate logs,
+/// or run tools before the user has said anything. The caller waives
+/// the pause when the user has already engaged by the time the scan
+/// lands. An empty recovery asks for nothing.
 fn adopt_recovered(
     recovered: Vec<ilar::subagent::Notification>,
 ) -> (
@@ -2438,7 +2488,7 @@ async fn run_app(
     registry: &ToolRegistry,
     tool_ctx: ToolContext,
     spawner: std::sync::Arc<ilar::subagent::SubagentSpawner>,
-    recovered_notifications: Vec<ilar::subagent::Notification>,
+    adoption_handle: tokio::task::JoinHandle<Vec<ilar::subagent::Notification>>,
     mut notifications: tokio::sync::mpsc::Receiver<ilar::subagent::Notification>,
     mut subagent_activity: tokio::sync::broadcast::Receiver<ilar::subagent::SubagentActivity>,
     mut question_rx: ilar::question::QuestionReceiver,
@@ -2446,6 +2496,11 @@ async fn run_app(
     model_choices: Vec<&'static ilar::model::ModelInfo>,
     services: std::sync::Arc<ilar::tools::service::ServiceManager>,
     outbox_dir: std::path::PathBuf,
+    initial_pending_question_id: Option<String>,
+    mut restore_handle: Option<(
+        usize,
+        tokio::task::JoinHandle<(session_view::RestoredSessionView, u64)>,
+    )>,
 ) -> Result<AppExit> {
     let mut events_rx: Option<LoopEventReceiver> = None;
     // The content-search scan: rows stream in stamped with the query
@@ -2460,10 +2515,18 @@ async fn run_app(
         std::sync::mpsc::Receiver<Vec<(String, String, bool)>>,
     )> = None;
     let mut search_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>> = None;
-    // Seeded with what the outbox recovered: they arrived before this
-    // process existed, so they go first — but not before the user.
-    let (mut held_notifications, mut notifications_paused) =
-        adopt_recovered(recovered_notifications);
+    // Seeded empty: the outbox scan is still running on its worker.
+    // What it recovers lands mid-loop through `adoption_handle` —
+    // held, and paused unless the user has engaged by then.
+    let mut held_notifications: std::collections::VecDeque<ilar::delivery::Parcel> =
+        std::collections::VecDeque::new();
+    let mut notifications_paused = false;
+    let mut adoption_handle = Some(adoption_handle);
+    // Whether the user has started a turn this run. Before the first
+    // turn no children exist, so any running turn is the user's own
+    // doing — and a backlog landing after that point belongs to
+    // someone who is present, not to someone reading.
+    let mut engaged = false;
     // Deliveries to other sessions, running beside the turn slot.
     let mut routed: Vec<RoutedDelivery> = Vec::new();
     let mut cancel: Option<CancellationToken> = None;
@@ -2484,17 +2547,15 @@ async fn run_app(
     let mut pending_terminal_event = None;
     let mut question_reply: Option<tokio::sync::oneshot::Sender<ilar::question::QuestionResponse>> =
         None;
-    let mut pending_question_id = store
-        .load(session_id)?
-        .pending_question()
-        .map(|pending| pending.tool_call_id.clone());
+    let mut pending_question_id = initial_pending_question_id;
     // Decisions accumulate here and are performed in one place below,
     // rather than each arm doing its own effects inline.
     let mut intents: Vec<Intent> = Vec::new();
     // The stranded-question check costs a full session parse, so it
-    // runs only when it can change anything: at startup and after a
-    // turn completes — never on the idle path between keystrokes.
-    let mut recheck_pending_question = true;
+    // runs only when it can change anything: after a turn completes —
+    // never at startup (the open already read the log and seeded the
+    // modal) and never on the idle path between keystrokes.
+    let mut recheck_pending_question = false;
 
     // Name the window like the transcript header: the topic when the
     // session has one, updated again if titling lands mid-run.
@@ -2828,6 +2889,75 @@ async fn run_app(
                     .ok()
                     .flatten()
                 }));
+            }
+        }
+        engaged |= turn_handle.is_some();
+        if let Some(handle) = adoption_handle.as_mut()
+            && handle.is_finished()
+        {
+            match adoption_handle.take().unwrap().await {
+                Ok(recovered) if !recovered.is_empty() => {
+                    let count = recovered.len();
+                    let (parcels, pause) = adopt_recovered(recovered);
+                    held_notifications.extend(parcels);
+                    if pause && !engaged {
+                        notifications_paused = true;
+                        // Persistent on purpose: it stands while the
+                        // user reads, and the first turn's StartTurn
+                        // clears it — the same gesture that resumes
+                        // delivery.
+                        app.set_persistent_notice(
+                            format!(
+                                "{count} task result(s) from a previous run held — send a message to deliver"
+                            ),
+                            NoticeLevel::Info,
+                        );
+                    }
+                }
+                Ok(_) => {}
+                Err(join_error) => {
+                    // The entries stay on disk for the next open;
+                    // saying so beats silence.
+                    app.set_notice(
+                        format!("outbox adoption failed: {join_error}"),
+                        NoticeLevel::Warning,
+                    );
+                }
+            }
+        }
+        if let Some((_, handle)) = restore_handle.as_mut()
+            && handle.is_finished()
+        {
+            let (restore_at, handle) = restore_handle.take().unwrap();
+            match handle.await {
+                Ok((view, priced)) => {
+                    // History goes where the open stood: after the
+                    // banner, ahead of startup notices and anything
+                    // else pushed while the worker ran.
+                    app.land_restored_view(view, restore_at);
+                    // A turn that ran meanwhile may have reported the
+                    // exact context; the estimate must not regress it.
+                    if app.context_estimated {
+                        app.context_used = app.context_used.max(priced);
+                    }
+                }
+                Err(join_error) => {
+                    // The transcript stays whatever was drawn; saying
+                    // so beats a spinner that never resolves.
+                    let message = format!("session restore failed: {join_error}");
+                    app.push_transcript_line(Line_::System(message.clone()));
+                    app.set_notice(message, NoticeLevel::Error);
+                }
+            }
+            // The restore held `busy` only for itself; a turn or a
+            // question that started meanwhile keeps its own claim.
+            if turn_handle.is_none() && app.question_modal.is_none() {
+                app.busy = false;
+                app.status = "ready".into();
+                app.set_activity(Activity::Ready);
+                if !app.queued_messages.is_empty() {
+                    intents.push(Intent::SendQueued);
+                }
             }
         }
         if let Some(handle) = topic_handle.as_mut()

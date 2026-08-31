@@ -11,6 +11,7 @@ use ratatui::layout::Rect;
 use ratatui::style::Color;
 
 use ilar::agent::{LoopEvent, TurnOutcome};
+#[cfg(test)]
 use ilar::session::SessionStore;
 
 use crate::input::{InputBuffer, slash_candidates};
@@ -23,10 +24,7 @@ use crate::questions::QuestionModal;
 use crate::selection::{
     RenderedRow, TranscriptSelection, selected_transcript_text, selection_point,
 };
-use crate::session_view::{
-    Liveness, accrue_usage, restored_session_view_with_store, task_notification_display,
-    tool_notification_display,
-};
+use crate::session_view::{accrue_usage, task_notification_display, tool_notification_display};
 use crate::sidebar::{AgentRow, AgentTarget};
 use crate::text::{cache_share, format_cost, safe_text};
 use crate::transcript::{
@@ -799,20 +797,32 @@ impl App {
         self.notice = None;
     }
 
-    pub(crate) fn restore_session(
+    /// Land a restored view built elsewhere — a blocking worker,
+    /// usually, finishing after the loop has already drawn frames and
+    /// pushed lines. The history splices in at `at`, ahead of whatever
+    /// arrived while it was being built, so the transcript reads in
+    /// log order no matter when the build finished.
+    pub(crate) fn land_restored_view(
         &mut self,
-        session: &ilar::session::SessionReader,
-        store: &SessionStore,
+        restored: crate::session_view::RestoredSessionView,
+        at: usize,
     ) {
-        // A session is switched into when nothing is driving it, so
-        // whatever it left running died with the process that ran it.
-        let restored = restored_session_view_with_store(session, store, Liveness::Settled);
-        let from = self.lines.len();
-        self.lines.extend(restored.lines);
-        self.latest_usage = restored.latest_usage;
-        self.session_usage = restored.total_usage;
-        self.session_cost = restored.total_cost;
-        self.touch_transcript(Some(from));
+        let at = at.min(self.lines.len());
+        self.lines.splice(at..at, restored.lines);
+        // Turns may have accrued while the worker ran — a question
+        // answered under the modal, a queued prompt. The restored
+        // totals are the history up to the open, so what accrued
+        // since adds on top — and a live turn's latest_usage is newer
+        // than any restored one.
+        let mut total = restored.total_usage;
+        crate::session_view::add_usage(&mut total, &self.session_usage);
+        self.session_usage = total;
+        self.session_cost = match (restored.total_cost, self.session_cost) {
+            (Some(history), Some(live)) => Some(history + live),
+            _ => None,
+        };
+        self.latest_usage = self.latest_usage.take().or(restored.latest_usage);
+        self.touch_transcript(Some(at));
     }
 
     /// Record a transcript change: bump the revision, and tell the
@@ -4492,6 +4502,89 @@ mod tests {
         assert_eq!(
             app.notice.as_ref().map(|notice| notice.text.as_str()),
             Some("notification paused; send a message to resume")
+        );
+    }
+
+    /// A restored view built on a worker lands *ahead* of whatever
+    /// the live loop pushed while it was being built — the transcript
+    /// reads in log order, not arrival order.
+    #[test]
+    fn a_restored_view_lands_ahead_of_lines_pushed_while_loading() {
+        let mut app = App::new();
+        // The splice point is captured when the worker is spawned —
+        // after the banner App::new seeds — and lines pushed while it
+        // runs (startup notices, a live turn) stay behind the landing.
+        let at = app.lines().len();
+        app.push_transcript_line(Line_::System("startup notice".into()));
+
+        app.land_restored_view(
+            crate::session_view::RestoredSessionView {
+                lines: vec![
+                    Line_::System("restored first".into()),
+                    Line_::System("restored second".into()),
+                ],
+                latest_usage: None,
+                total_usage: ilar::session::Usage::default(),
+                total_cost: None,
+            },
+            at,
+        );
+
+        let texts: Vec<String> = app
+            .lines()
+            .iter()
+            .skip(at)
+            .map(|line| match line {
+                Line_::System(text) => text.clone(),
+                _ => String::new(),
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            vec!["restored first", "restored second", "startup notice"]
+        );
+    }
+
+    /// A turn can run while the restore worker does — a question
+    /// answered under the modal. The landing's totals are history up
+    /// to the open, so they add *under* what accrued live instead of
+    /// resetting it, and the live turn's latest_usage wins.
+    #[test]
+    fn a_landing_adds_history_under_live_accrual() {
+        let mut app = App::new();
+        let live = ilar::session::Usage {
+            input_tokens: 10,
+            output_tokens: 5,
+            ..Default::default()
+        };
+        app.session_usage = live;
+        app.session_cost = Some(0.25);
+        app.latest_usage = Some(live);
+
+        app.land_restored_view(
+            crate::session_view::RestoredSessionView {
+                lines: Vec::new(),
+                latest_usage: Some(ilar::session::Usage {
+                    input_tokens: 999,
+                    ..Default::default()
+                }),
+                total_usage: ilar::session::Usage {
+                    input_tokens: 100,
+                    output_tokens: 50,
+                    ..Default::default()
+                },
+                total_cost: Some(1.0),
+            },
+            0,
+        );
+
+        assert_eq!(app.session_usage.input_tokens, 110);
+        assert_eq!(app.session_usage.output_tokens, 55);
+        assert_eq!(app.session_cost, Some(1.25));
+        assert_eq!(
+            app.latest_usage.map(|usage| usage.input_tokens),
+            Some(10),
+            "the live turn's usage is newer than any restored one"
         );
     }
 

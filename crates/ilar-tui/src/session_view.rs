@@ -19,12 +19,8 @@ pub(crate) struct RestoredSessionView {
 
 /// Fold one step's usage into session totals; unknown pricing poisons the
 /// dollar total (tokens keep accumulating).
-pub(crate) fn accrue_usage(
-    total: &mut ilar::session::Usage,
-    cost: &mut Option<f64>,
-    model: &str,
-    usage: &ilar::session::Usage,
-) {
+/// Field-wise saturating add of one usage into a total.
+pub(crate) fn add_usage(total: &mut ilar::session::Usage, usage: &ilar::session::Usage) {
     total.input_tokens = total.input_tokens.saturating_add(usage.input_tokens);
     total.output_tokens = total.output_tokens.saturating_add(usage.output_tokens);
     total.cache_read_input_tokens = total
@@ -33,6 +29,15 @@ pub(crate) fn accrue_usage(
     total.cache_creation_input_tokens = total
         .cache_creation_input_tokens
         .saturating_add(usage.cache_creation_input_tokens);
+}
+
+pub(crate) fn accrue_usage(
+    total: &mut ilar::session::Usage,
+    cost: &mut Option<f64>,
+    model: &str,
+    usage: &ilar::session::Usage,
+) {
+    add_usage(total, usage);
     if let Some(current) = cost.as_mut() {
         match ilar::model::pricing_for(model) {
             Some(pricing) => *current += pricing.cost(usage),
