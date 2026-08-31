@@ -21,3 +21,17 @@ Related: [[the-focus-view-earns-its-chrome]],
 [[focus-seeds-the-step-in-flight]].
 
 Size: M. Source: sweep 2026-08-31, responsiveness & memory.
+
+## Outcome (2026-08-31)
+
+The click opens a placeholder immediately; `seed_agent_focus` replays
+on a blocking worker and `land_agent_focus` lands only on the focus
+that asked (retarget, close, and error all drop it — an error closes
+the placeholder and notices). Review caught the seam: a TurnDone
+consumed while the seed replayed had already fired the row-closer, so
+`replace_lines` re-closes when `running` is false. The per-event full
+re-render is gone — `apply_child_loop_event` returns the lowest
+changed line, `FocusView::touch_from` marks narrowly, pinned by a
+thousand-line test. Not done: the seed/live tail memory cap — a
+focused child's own timeline is bounded by its actual work and
+released on close; cap it if a pathological child ever matters.

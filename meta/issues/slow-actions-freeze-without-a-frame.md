@@ -26,3 +26,29 @@ joined task like a turn; share one reader across a model adoption;
 show a frame before anything that can take a second.
 
 Size: M. Source: sweep 2026-08-31, responsiveness & memory.
+
+## What landed (2026-08-31)
+
+Rewind — the seconds-long one — runs as a joined task: the loop keeps
+drawing, notifications pause for the duration (a notification turn
+mid-rewind would write the log being rewritten; the writer-exclusion
+story was adversarially traced and holds), quit refuses until it
+lands, a message typed meanwhile rides the prefill into the reopened
+session, and failure restores the pause it found.
+
+## What remains
+
+- The model switch's second load re-measured cheaper than filed: the
+  first load leaves a warm replay checkpoint, so the reread is a tail
+  read and the estimate walk is CPU-bound. Still two walks where one
+  would do; fold the estimate into `persist_model_change`'s loaded
+  session when touching that seam anyway.
+- Fork, the turn picker, and `direct_resume_blocked` still full-load
+  their targets inline — one O(log) stall each, user-invoked.
+- The list-mode session picker's `store.list()` is inline but
+  head-reads only; visible only with hundreds of sessions on a slow
+  disk.
+- Structural: `switch_blocked`/`observe` do not model a rewind in
+  flight — safety rests on layered busy gates; an explicit term would
+  make it structural. Esc mid-rewind silently does nothing; a "rewind
+  cannot be aborted" notice would be kinder.
