@@ -290,3 +290,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [The transcript never forgets](issues/the-transcript-never-forgets.md)
 - [x] [Finished children keep their transcripts](issues/finished-children-keep-their-transcripts.md)
 - [x] [A big draft rewraps per frame](issues/a-big-draft-rewraps-per-frame.md)
+- [x] [Search rescans per keystroke](issues/search-rescans-per-keystroke.md)

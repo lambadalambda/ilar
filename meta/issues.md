@@ -105,7 +105,6 @@ milestones 15–17 stay filed — they come back when the feature does.*
 - [ ] [The focus view pays full price](issues/the-focus-view-pays-full-price.md)
 - [ ] [Slow actions freeze without a frame](issues/slow-actions-freeze-without-a-frame.md)
 - [ ] [Live rows rerender every frame](issues/live-rows-rerender-every-frame.md)
-- [ ] [Search rescans per keystroke](issues/search-rescans-per-keystroke.md)
 - [ ] [Stale activity retries every frame](issues/stale-activity-retries-every-frame.md)
 - [ ] [Small frictions of a long session](issues/small-frictions-of-a-long-session.md)
 

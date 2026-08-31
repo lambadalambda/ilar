@@ -18,3 +18,15 @@ substring search), filter the previous match set instead of
 rescanning.
 
 Size: S. Source: sweep 2026-08-31, responsiveness & memory.
+
+## Outcome (2026-08-31)
+
+An extending query filters the previous per-entry match sets — only
+rows that already matched can still match — and a shrink rescans.
+The extension test is judged on lowered needles, not raw queries:
+Rust's `to_lowercase` applies the Greek final-sigma rule, so "ΑΣ" →
+"ΑΣΤ" extends the raw query while the needles ("ας" → "αστ")
+disagree; a raw-prefix shortcut would lose those matches for good.
+Both pinned in tests via the existing `searched_rows` counter. Not
+taken: caching lowercased row text per entry — it would have added
+~1× visible-text RAM in the same milestone that removed it.
