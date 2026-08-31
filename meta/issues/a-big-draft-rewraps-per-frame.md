@@ -18,3 +18,15 @@ and share it between the two callers; compute the insert cursor from
 the local boundary instead of scanning from 0.
 
 Size: S. Source: sweep 2026-08-31, responsiveness & memory.
+
+## Outcome (2026-08-31)
+
+The wrap is cached on `InputBuffer` per (generation, width) as byte
+ranges — the rows borrow `text`, so ranges are what a cache can own —
+and both per-frame callers now share one computation. Every text
+mutation bumps the generation through `edited()`, enumerated in a
+test so a future editing method that forgets it fails. The insert
+cursor snaps from the cursor's own line instead of byte zero:
+normalization leaves no CRLF, so graphemes never span a newline and
+O(line) is exact, not approximate. `PartialEq` became manual — the
+cache is a projection, not state.
