@@ -67,6 +67,11 @@ pub enum LoopEvent {
     StepComplete {
         stop_reason: String,
         usage: crate::session::Usage,
+        /// The model that priced this step. On the event rather than
+        /// guessed from surrounding state: a mid-turn model change
+        /// would misprice the step, and a subagent's steps reach a
+        /// surface that never knew the child's model at all.
+        model: String,
     },
     /// The transcript was compacted before this turn's provider call.
     Compacted {

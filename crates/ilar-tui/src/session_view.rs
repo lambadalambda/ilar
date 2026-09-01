@@ -9,12 +9,27 @@ use ilar::session::SessionStore;
 use crate::diff;
 use crate::transcript::{Line_, ToolKind, ToolProgress, ToolState, kept_result_detail};
 
+#[derive(Default)]
 pub(crate) struct RestoredSessionView {
     pub(crate) lines: Vec<Line_>,
     pub(crate) latest_usage: Option<ilar::session::Usage>,
     pub(crate) total_usage: ilar::session::Usage,
     /// `None` once any step lacked pricing (custom or plan-only model).
     pub(crate) total_cost: Option<f64>,
+    /// What this session's subagents spent, summed by the with-store
+    /// restore. Zero from the plain invocation view, which reads one
+    /// log.
+    pub(crate) task_usage: ilar::session::Usage,
+    pub(crate) task_cost: Option<f64>,
+}
+
+/// Two cost totals into one; a `None` on either side (an unpriced
+/// step somewhere) poisons the sum, the same rule as [`accrue_usage`].
+pub(crate) fn add_costs(a: Option<f64>, b: Option<f64>) -> Option<f64> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a + b),
+        _ => None,
+    }
 }
 
 /// Fold one step's usage into session totals; unknown pricing poisons the
@@ -158,10 +173,9 @@ fn restored_session_invocation_view(
             });
             let Some(start) = start else {
                 return RestoredSessionView {
-                    lines: Vec::new(),
-                    latest_usage: None,
-                    total_usage: ilar::session::Usage::default(),
                     total_cost: Some(0.0),
+                    task_cost: Some(0.0),
+                    ..RestoredSessionView::default()
                 };
             };
             let end = all_events[start + 1..]
@@ -424,6 +438,8 @@ fn restored_session_invocation_view(
         latest_usage,
         total_usage,
         total_cost,
+        task_usage: ilar::session::Usage::default(),
+        task_cost: Some(0.0),
     }
 }
 
@@ -441,19 +457,60 @@ pub(crate) fn restored_session_view_with_store(
     // parent is blocked on the call. If it is not, an open row is a
     // spinner that settles on the next result — cheaper than a ✗ that
     // nothing can take back.
-    restore_child_activity(&mut view.lines, store, owner_session_id, 0, liveness);
+    let mut counted = std::collections::HashSet::new();
+    let (task_usage, task_cost) = restore_child_activity(
+        &mut view.lines,
+        store,
+        owner_session_id,
+        0,
+        liveness,
+        &mut counted,
+    );
+    view.task_usage = task_usage;
+    view.task_cost = task_cost;
     view
 }
 
+/// A session's spend across its whole log — every turn, however it
+/// was driven. The anchored slices cannot answer this: a turn resumed
+/// by a routed notification carries a synthetic call id that anchors
+/// to no row, and its spend would be counted by nobody.
+fn session_own_spend(
+    session: &ilar::session::SessionReader,
+) -> (ilar::session::Usage, Option<f64>) {
+    let mut usage = ilar::session::Usage::default();
+    let mut cost = Some(0.0);
+    for event in session.events() {
+        if let ilar::session::SessionEvent::AssistantMessage {
+            model,
+            usage: step,
+            ..
+        } = event
+        {
+            accrue_usage(&mut usage, &mut cost, model, step);
+        }
+    }
+    (usage, cost)
+}
+
+/// Returns the spend of every child it loaded: whole-log totals,
+/// counted once per child session however many rows anchor it (`task`
+/// plus `task_message` resumes) and whatever the digest keeps of its
+/// lines. Known undercounts, deliberate: descendants whose anchor
+/// rows sat in a folded digest middle, or beyond the depth cap, are
+/// never loaded — for lines or for spend.
 fn restore_child_activity(
     lines: &mut [Line_],
     store: &SessionStore,
     owner_session_id: &str,
     depth: usize,
     liveness: Liveness,
-) {
+    counted: &mut std::collections::HashSet<String>,
+) -> (ilar::session::Usage, Option<f64>) {
+    let mut task_usage = ilar::session::Usage::default();
+    let mut task_cost = Some(0.0);
     if depth >= 8 {
-        return;
+        return (task_usage, task_cost);
     }
     for line in lines {
         let Line_::Tool {
@@ -476,6 +533,11 @@ fn restore_child_activity(
             .meta()
             .map(|meta| meta.agent.clone())
             .unwrap_or_default();
+        if counted.insert(session_id.clone()) {
+            let (spend, cost) = session_own_spend(&session);
+            add_usage(&mut task_usage, &spend);
+            task_cost = add_costs(task_cost, cost);
+        }
         let mut restored =
             restored_session_invocation_view(&session, Some(parent_tool_call_id), liveness).lines;
         // The agent row already shows the task prompt, so the child's
@@ -492,7 +554,10 @@ fn restore_child_activity(
         if liveness == Liveness::Settled {
             crate::transcript::squash_finished_child(&mut restored);
         }
-        restore_child_activity(&mut restored, store, session_id, depth + 1, liveness);
+        let (grand_usage, grand_cost) =
+            restore_child_activity(&mut restored, store, session_id, depth + 1, liveness, counted);
+        add_usage(&mut task_usage, &grand_usage);
+        task_cost = add_costs(task_cost, grand_cost);
         // The same rule the live path applies (fc625c6): a call that has
         // a child IS a subagent call, whatever it was named. Only `task`
         // announces its agent in its input, so a restored `task_message`
@@ -508,6 +573,7 @@ fn restore_child_activity(
         }
         *child_lines = restored;
     }
+    (task_usage, task_cost)
 }
 
 #[cfg(test)]

@@ -339,19 +339,37 @@ impl App {
         let state_width = UnicodeWidthStr::width(state) + 3;
         let separators = 7;
         let session_total = {
-            let total = self.session_usage;
-            let tokens = total.input_tokens
-                + total.output_tokens
-                + total.cache_read_input_tokens
-                + total.cache_creation_input_tokens;
-            (tokens > 0).then(|| match self.session_cost {
-                Some(cost) => {
-                    format!("Σ {} {}", format_tokens_compact(tokens), format_cost(cost))
+            // The whole bill: this session's own steps plus what its
+            // subagents spent — the meter counts the children. The
+            // tasks' share is named when it exists, so the number is
+            // never mistaken for the root's own context spend.
+            let all_tokens = |usage: &ilar::session::Usage| {
+                usage.input_tokens
+                    + usage.output_tokens
+                    + usage.cache_read_input_tokens
+                    + usage.cache_creation_input_tokens
+            };
+            let own = all_tokens(&self.session_usage);
+            let tasks = all_tokens(&self.task_usage);
+            let tokens = own + tasks;
+            let cost = crate::session_view::add_costs(self.session_cost, self.task_cost);
+            (tokens > 0).then(|| {
+                let mut total = match cost {
+                    Some(cost) => {
+                        format!("Σ {} {}", format_tokens_compact(tokens), format_cost(cost))
+                    }
+                    None if ilar::model::plan_billed(&self.current_model) => {
+                        format!("Σ {} plan", format_tokens_compact(tokens))
+                    }
+                    None => format!("Σ {}", format_tokens_compact(tokens)),
+                };
+                if tasks > 0 {
+                    total.push_str(&format!(
+                        " (tasks {})",
+                        format_tokens_compact(tasks)
+                    ));
                 }
-                None if ilar::model::plan_billed(&self.current_model) => {
-                    format!("Σ {} plan", format_tokens_compact(tokens))
-                }
-                None => format!("Σ {}", format_tokens_compact(tokens)),
+                total
             })
         };
         let detailed_usage = self.latest_usage.map(|latest| {

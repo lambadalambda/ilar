@@ -2082,6 +2082,7 @@ async fn run_turn_inner(
                 LoopEvent::StepComplete {
                     stop_reason: stop_reason.clone(),
                     usage: step_usage,
+                    model: model.clone(),
                 },
                 &cancel,
             )

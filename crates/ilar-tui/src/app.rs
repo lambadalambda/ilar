@@ -24,7 +24,9 @@ use crate::questions::QuestionModal;
 use crate::selection::{
     RenderedRow, TranscriptSelection, selected_transcript_text, selection_point,
 };
-use crate::session_view::{accrue_usage, task_notification_display, tool_notification_display};
+use crate::session_view::{
+    accrue_usage, add_costs, task_notification_display, tool_notification_display,
+};
 use crate::sidebar::{AgentRow, AgentTarget};
 use crate::text::{cache_share, format_cost, safe_text};
 use crate::transcript::{
@@ -228,6 +230,11 @@ pub(crate) struct App {
     pub(crate) latest_usage: Option<ilar::session::Usage>,
     pub(crate) session_usage: ilar::session::Usage,
     pub(crate) session_cost: Option<f64>,
+    /// What this session's subagents spent, live and restored — the
+    /// meter counts the children, or a delegation-heavy day shows a
+    /// fraction of its real spend.
+    pub(crate) task_usage: ilar::session::Usage,
+    pub(crate) task_cost: Option<f64>,
     /// Bytes of streamed text/thinking received this turn, plus the last
     /// arrival instant — the status line's stream-liveness indicator.
     pub(crate) stream_received: u64,
@@ -444,6 +451,8 @@ impl App {
             latest_usage: None,
             session_usage: ilar::session::Usage::default(),
             session_cost: Some(0.0),
+            task_usage: ilar::session::Usage::default(),
+            task_cost: Some(0.0),
             stream_received: 0,
             stream_last_data: None,
             stream_step_base: 0,
@@ -862,10 +871,11 @@ impl App {
         let mut total = restored.total_usage;
         crate::session_view::add_usage(&mut total, &self.session_usage);
         self.session_usage = total;
-        self.session_cost = match (restored.total_cost, self.session_cost) {
-            (Some(history), Some(live)) => Some(history + live),
-            _ => None,
-        };
+        self.session_cost = add_costs(restored.total_cost, self.session_cost);
+        let mut tasks = restored.task_usage;
+        crate::session_view::add_usage(&mut tasks, &self.task_usage);
+        self.task_usage = tasks;
+        self.task_cost = add_costs(restored.task_cost, self.task_cost);
         self.latest_usage = self.latest_usage.take().or(restored.latest_usage);
         self.touch_transcript(Some(at));
     }
@@ -1200,15 +1210,20 @@ impl App {
                 );
                 None
             }
-            LoopEvent::StepComplete { stop_reason, usage } => {
+            LoopEvent::StepComplete {
+                stop_reason,
+                usage,
+                model,
+            } => {
                 self.stream_step_base = self.stream_received;
                 self.next_tool_group = self.next_tool_group.saturating_add(1);
                 self.latest_usage = Some(*usage);
-                let model = self.current_model.clone();
+                // The event's model, not `current_model`: a mid-turn
+                // model change would misprice the step.
                 accrue_usage(
                     &mut self.session_usage,
                     &mut self.session_cost,
-                    &model,
+                    model,
                     usage,
                 );
                 let reported = usage.context_tokens();
@@ -1277,6 +1292,12 @@ impl App {
     }
 
     pub(crate) fn push_subagent_activity(&mut self, activity: &ilar::subagent::SubagentActivity) {
+        // Spend accrues here and only here: this is called exactly once
+        // per activity, while the transcript fold below and the focus
+        // view both may apply the same event.
+        if let LoopEvent::StepComplete { usage, model, .. } = &activity.event {
+            accrue_usage(&mut self.task_usage, &mut self.task_cost, model, usage);
+        }
         let touched = apply_subagent_activity(&mut self.lines, &self.session_id, activity);
         if touched.is_none()
             // A UI-spawned subtask has no parent tool call, so its
@@ -3169,6 +3190,7 @@ mod tests {
             app.push_loop_event(&LoopEvent::StepComplete {
                 stop_reason: "end_turn".into(),
                 usage: step,
+                model: "zai/glm-4.7".into(),
             });
         }
         assert_eq!(app.session_usage.input_tokens, 2_000_000);
@@ -3176,10 +3198,10 @@ mod tests {
         assert!((cost - 1.2).abs() < 1e-9, "{cost}");
 
         // A step on an unpriced model keeps tokens but drops the dollars.
-        app.current_model = "custom/self-hosted".into();
         app.push_loop_event(&LoopEvent::StepComplete {
             stop_reason: "end_turn".into(),
             usage: step,
+            model: "custom/self-hosted".into(),
         });
         assert_eq!(app.session_usage.input_tokens, 3_000_000);
         assert_eq!(app.session_cost, None);
@@ -4448,6 +4470,7 @@ mod tests {
                 cache_creation_input_tokens: 20,
                 input_token_accounting: Some(ilar::session::InputTokenAccounting::ExcludesCached),
             },
+            model: "openai/gpt-5.6-sol".into(),
         });
         app.push_loop_event(&LoopEvent::TurnDone {
             outcome: TurnOutcome::Completed,
@@ -4655,9 +4678,8 @@ mod tests {
                     Line_::System("restored first".into()),
                     Line_::System("restored second".into()),
                 ],
-                latest_usage: None,
-                total_usage: ilar::session::Usage::default(),
                 total_cost: None,
+                ..Default::default()
             },
             at,
         );
@@ -4706,6 +4728,11 @@ mod tests {
                     ..Default::default()
                 },
                 total_cost: Some(1.0),
+                task_usage: ilar::session::Usage {
+                    input_tokens: 40,
+                    ..Default::default()
+                },
+                task_cost: Some(0.5),
             },
             0,
         );
@@ -4713,6 +4740,11 @@ mod tests {
         assert_eq!(app.session_usage.input_tokens, 110);
         assert_eq!(app.session_usage.output_tokens, 55);
         assert_eq!(app.session_cost, Some(1.25));
+        assert_eq!(
+            app.task_usage.input_tokens, 40,
+            "the children's landed spend joins the meter"
+        );
+        assert_eq!(app.task_cost, Some(0.5));
         assert_eq!(
             app.latest_usage.map(|usage| usage.input_tokens),
             Some(10),
@@ -5470,6 +5502,7 @@ mod tests {
                 app.push_loop_event(&LoopEvent::StepComplete {
                     stop_reason: "tool_use".into(),
                     usage: Default::default(),
+                    model: "test/model".into(),
                 });
             }
         }
@@ -5956,6 +5989,39 @@ mod tests {
             expanded
                 .iter()
                 .any(|line| line.contains("Tracing transcript"))
+        );
+    }
+
+    /// A child's step joins the task meter — priced by the model on
+    /// the event, since the surface never knew the child's model —
+    /// and leaves the root's own meter alone.
+    #[test]
+    fn a_childs_step_joins_the_task_meter() {
+        let mut app = App::new();
+        app.push_subagent_activity(&ilar::subagent::SubagentActivity {
+            parent_session_id: "root".into(),
+            parent_call_id: "call-1".into(),
+            child_session_id: "child".into(),
+            agent: "build".into(),
+            event: LoopEvent::StepComplete {
+                stop_reason: "end_turn".into(),
+                usage: ilar::session::Usage {
+                    input_tokens: 1_000_000,
+                    ..Default::default()
+                },
+                model: "zai/glm-4.7".into(),
+            },
+        });
+
+        assert_eq!(app.task_usage.input_tokens, 1_000_000);
+        assert!(
+            (app.task_cost.unwrap() - 0.6).abs() < 1e-9,
+            "{:?}",
+            app.task_cost
+        );
+        assert_eq!(
+            app.session_usage.input_tokens, 0,
+            "the root's own meter is untouched"
         );
     }
 
@@ -6602,6 +6668,7 @@ mod tests {
                 cache_creation_input_tokens: 0,
                 input_token_accounting: Some(ilar::session::InputTokenAccounting::ExcludesCached),
             },
+            model: "test/model".into(),
         });
         assert_eq!(app.context_used, 1_850);
         assert!(!app.context_estimated);
@@ -7289,6 +7356,7 @@ mod tests {
             Step::Loop(LoopEvent::StepComplete {
                 stop_reason: "tool_use".into(),
                 usage: Default::default(),
+                model: "test/model".into(),
             }),
             // In-place growth, repeatedly: the row is edited rather than
             // pushed, so nothing but the mark can reveal it.
