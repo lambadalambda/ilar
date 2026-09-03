@@ -21,6 +21,10 @@ key — is sent, which is never a cloned repository's call to make.
 | `providers.openai.auth` | `api_key` | `api_key` or `chatgpt`; see [OpenAI ChatGPT OAuth](#openai-chatgpt-oauth). |
 | `providers.zai.base_url` | `https://api.z.ai/api/coding/paas/v4` | Override the z.ai OpenAI-compatible base URL. |
 | `providers.zai.api_key` | `ILAR_ZAI_API_KEY` | z.ai API key. |
+| `providers.opencode.base_url` | `https://opencode.ai/zen/v1` | Override the OpenCode Zen base URL. |
+| `providers.opencode.api_key` | `ILAR_OPENCODE_API_KEY` | OpenCode API key, used as `opencode/<model>`. See [OpenCode Zen and Go](#opencode-zen-and-go). |
+| `providers.opencode-go.base_url` | `https://opencode.ai/zen/go/v1` | Override the OpenCode Go base URL. |
+| `providers.opencode-go.api_key` | `ILAR_OPENCODE_API_KEY` | The same key, used as `opencode-go/<model>`. |
 | `models.<name>.*` | — | Your own OpenAI-compatible endpoint, used as `custom/<name>`. See [Bring your own model](#bring-your-own-model). |
 | `agent.max_iterations` | `1000` | Max provider calls per user turn (runaway-loop backstop). |
 | `compaction.threshold` | `0.85` | Context fraction at which history is handed over; must be between 0 and 1. |
@@ -36,6 +40,7 @@ Environment variables:
 | `ILAR_STATE_DIR` | Replaces the default `~/.local/state/ilar` session, authentication and spilled-tool-output directory. |
 | `ILAR_OPENAI_API_KEY` | Fallback OpenAI API key. |
 | `ILAR_ZAI_API_KEY` | Fallback z.ai API key. |
+| `ILAR_OPENCODE_API_KEY` | Fallback OpenCode key, for both Zen and Go. |
 | `ILAR_TAVILY_API_KEY` | Switches web search to the Tavily API (recommended). |
 | `ILAR_EXA_API_KEY` | Authenticates the default Exa web search backend. |
 
@@ -77,8 +82,8 @@ and a config that names one is refused at startup rather than mid-turn:
 ```
 
 Names are validated too: no slashes (the id already has one), not empty, and not
-`openai`, `zai` or `custom` — a section named after a provider would produce an
-id nothing could resolve.
+`openai`, `zai`, `opencode`, `opencode-go` or `custom` — a section named after a
+provider would produce an id nothing could resolve.
 
 ### Context and compaction
 
@@ -139,6 +144,37 @@ is warned about at startup and ignored wholesale, because a repository must
 not be able to route the conversation to an endpoint it chose. The same rule
 covers `[providers]` — a project `base_url` would send requests carrying
 *your* key wherever it pointed.
+
+## OpenCode Zen and Go
+
+[OpenCode Zen](https://opencode.ai/docs/zen/) is a pay-as-you-go gateway to
+many vendors' models; [OpenCode Go](https://opencode.ai/docs/go/) is a monthly
+subscription to a smaller lineup with usage caps. One API key from the OpenCode
+console serves both. Set `ILAR_OPENCODE_API_KEY` (or `api_key` in either
+section) and the models appear in the picker as `opencode/<id>` and
+`opencode-go/<id>`, spelled exactly as opencode itself spells them:
+
+```toml
+[general]
+model = "opencode-go/glm-5.3"
+
+[providers.opencode-go]
+# api_key from ILAR_OPENCODE_API_KEY by default; can be set here.
+```
+
+The gateway fronts each model on exactly one wire: the GPT, Grok and Muse Spark
+families on the OpenAI Responses API, everything else on chat-completions. The
+catalog records which and ilar routes accordingly, so a model id is all you
+choose. Models the docs place on the Anthropic Messages or Gemini wires
+(Claude, Gemini, and Qwen; MiniMax on Go) are not offered — ilar does not speak
+those wires.
+
+What carries over from the `openai/` rows: the GPT models keep their windows
+and `reasoning` ladders, and `general.reasoning = "high"` reaches the wire as
+`reasoning.effort`. The other rows have no ladder. Prices are the ones the docs
+publish (the lower tier where a model has two, off-peak for DeepSeek); on Go
+that figure is what the usage caps count, so the meter's dollars are the
+subscription's dollars.
 
 ## OpenAI ChatGPT OAuth
 

@@ -67,8 +67,9 @@ mechanisms, not security boundaries.
   unchanged. MCP is driven through a skill and an external CLI, not a
   built-in client.
 
-Providers: OpenAI (Responses API, with API key or ChatGPT OAuth) and
-z.ai GLM. Sessions are plain files; nothing phones home.
+Providers: OpenAI (Responses API, with API key or ChatGPT OAuth), z.ai
+GLM, and OpenCode Zen and Go (every model they serve on an OpenAI wire).
+Sessions are plain files; nothing phones home.
 
 ## Install
 
@@ -85,7 +86,7 @@ installed binary still refuses to run.
 ## Quick start
 
 ```sh
-ilar login                       # ChatGPT OAuth, or set ILAR_ZAI_API_KEY / ILAR_OPENAI_API_KEY
+ilar login                       # ChatGPT OAuth, or set ILAR_ZAI_API_KEY / ILAR_OPENAI_API_KEY / ILAR_OPENCODE_API_KEY
 ilar                             # the TUI; F1 shows every keybinding
 ilar --continue                  # resume the latest session
 ilar exec "what broke in CI?"    # headless one-shot, answer on stdout

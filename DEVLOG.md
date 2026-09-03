@@ -1,5 +1,47 @@
 # DEVLOG
 
+## 2026-09-03 — OpenCode Zen and Go
+
+### Findings from live probes (one-token requests, every listed model)
+
+- **One wire per model, and the other one is a bare 500.** The gateway
+  fronts GPT, Grok and Muse Spark on `/responses` and everything else on
+  `/chat/completions`; posting to the wrong endpoint returns
+  `{"type":"error","error":{"type":"error","message":"Internal server
+  error"}}` rather than a routing hint. So the wire has to be known per
+  row, which is what `ModelAccess::OpenCodeChat | OpenCodeResponses` is,
+  and unknown ids default to chat-completions.
+- The docs' "Anthropic Messages" rows (MiniMax and Qwen on Go, Qwen on
+  Zen) also answer on chat-completions — that column is opencode's SDK
+  choice, not the gateway's only route. Not cataloged for now: the ask
+  was the OpenAI-shaped lineup.
+- A Go subscription key answered on Zen for every model probed. Whether
+  that is billed as Zen pay-as-you-go is the console's business, not
+  ours; the docs say one key serves both.
+- `gpt-5.3-codex-spark` is listed on Zen but the upstream replies
+  `model_not_found` (`gpt-5.3-codex-spark-preview`); left out.
+- ilar's Responses body — `reasoning: {effort, summary: "auto"}`,
+  `prompt_cache_key`, tools, `stream` — is accepted as-is by GPT, Grok and
+  Muse on both gateways. `prompt_cache_key` is still not sent (a
+  `base_url` is always set, which switches it off); cache reads showed
+  up on Grok and GLM regardless.
+- **Kimi K3 behind Zen** streams thinking as `reasoning` (with a parallel
+  `reasoning_details` array), not `reasoning_content`, and sends its
+  usage in a trailer that *repeats* `finish_reason: "tool_calls"` with an
+  empty delta. The mapper now reads both spellings and lets a
+  content-free trailer through; a trailer carrying content or a call is
+  still the violation it was.
+- GLM-5.3 on Go accepts z.ai's `thinking`/`reasoning_effort` fields
+  (200) but a one-token reply cannot tell whether they are honoured, so
+  the OpenCode GLM rows carry no effort ladder yet.
+
+### Live smoke
+
+`tests/smoke_opencode.rs` (ignored, needs `ILAR_OPENCODE_API_KEY`)
+drives one tool-calling turn per wire per gateway through ilar's own
+mappers: Go glm-5.3 and gpt-5.6-luna, Zen kimi-k3 and grok-4.6 — all
+four complete with `StopReason::ToolUse`.
+
 ## 2026-08-14 — Project genesis
 
 ### Research: how Claude Code and opencode actually work

@@ -36,6 +36,14 @@ theme = "carbon"
 #   base_url = "https://api.z.ai/api/coding/paas/v4"
 # api_key from ILAR_ZAI_API_KEY (env).
 
+# OpenCode Zen (pay-as-you-go) and Go (subscription): one key, two
+# gateways, models as opencode/<id> and opencode-go/<id>. api_key from
+# ILAR_OPENCODE_API_KEY (env) for both; set it here to key one only.
+[providers.opencode]
+# base_url = "https://opencode.ai/zen/v1"
+[providers.opencode-go]
+# base_url = "https://opencode.ai/zen/go/v1"
+
 # Your own OpenAI-compatible endpoint (llama.cpp, ollama, vLLM, a
 # gateway...). Each section is one model, reachable as custom/<name>.
 # Required: base_url and context. Everything else is optional.
