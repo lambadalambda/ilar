@@ -435,6 +435,46 @@ static PRICING: &[(&str, &str, ModelPricing)] = &[
         "muse-spark-1.2-contributor",
         pricing!(0.1, 0.2, Some(0.002), None),
     ),
+    (
+        "opencode",
+        "qwen3.6-plus",
+        pricing!(0.5, 3.0, Some(0.05), Some(0.625)),
+    ),
+    (
+        "opencode",
+        "qwen3.5-plus",
+        pricing!(0.2, 1.2, Some(0.02), Some(0.25)),
+    ),
+    (
+        "opencode-go",
+        "minimax-m3",
+        pricing!(0.3, 1.2, Some(0.06), None),
+    ),
+    (
+        "opencode-go",
+        "qwen3.8-max",
+        pricing!(2.0, 6.0, Some(0.25), Some(2.5)),
+    ),
+    (
+        "opencode-go",
+        "qwen3.8-flash",
+        pricing!(0.15, 0.47, Some(0.016), Some(0.2)),
+    ),
+    (
+        "opencode-go",
+        "qwen3.7-max",
+        pricing!(2.5, 7.5, Some(0.5), Some(3.125)),
+    ),
+    (
+        "opencode-go",
+        "qwen3.7-plus",
+        pricing!(0.4, 1.6, Some(0.04), Some(0.5)),
+    ),
+    (
+        "opencode-go",
+        "qwen3.6-plus",
+        pricing!(0.5, 3.0, Some(0.05), Some(0.625)),
+    ),
 ];
 
 /// Models billed by subscription (coding plan) rather than per token.
@@ -703,7 +743,9 @@ macro_rules! model {
 // rows repeat their openai twins' windows (Codex-derived) rather than
 // models.dev's maxima, and Grok's "output = context" is cut to a working
 // reply budget. gpt-5.3-codex-spark is listed on Zen but the upstream
-// answers model_not_found, so it is left out.
+// answers model_not_found, so it is left out. The Qwen and MiniMax rows
+// the docs file under the Messages wire answer on chat-completions and
+// are cataloged there; the Claude and Gemini families do not.
 static CATALOG: &[ModelInfo] = &[
     model!(
         "openai",
@@ -1309,6 +1351,26 @@ static CATALOG: &[ModelInfo] = &[
         65_536,
         OpenCodeChat
     ),
+    // Qwen answers on the chat wire although the docs file it under
+    // Messages (probed 2026-09-03); the 3.7 pair is "not supported" on Zen.
+    model!(
+        "opencode",
+        "qwen3.6-plus",
+        "Qwen3.6 Plus",
+        262_144,
+        65_536,
+        OpenCodeChat
+    )
+    .vision(),
+    model!(
+        "opencode",
+        "qwen3.5-plus",
+        "Qwen3.5 Plus",
+        262_144,
+        65_536,
+        OpenCodeChat
+    )
+    .vision(),
     // OpenCode Go, the same way.
     model!(
         "opencode-go",
@@ -1467,6 +1529,61 @@ static CATALOG: &[ModelInfo] = &[
         OpenCodeChat
     ),
     model!("opencode-go", "hy3", "Hy3", 256_000, 128_000, OpenCodeChat),
+    // MiniMax and Qwen likewise; minimax-m2.7 is a persistent 500 on
+    // both wires and minimax-m2.5 is past its deprecation date.
+    model!(
+        "opencode-go",
+        "minimax-m3",
+        "MiniMax-M3",
+        1_000_000,
+        131_072,
+        OpenCodeChat
+    )
+    .vision(),
+    model!(
+        "opencode-go",
+        "qwen3.8-max",
+        "Qwen3.8 Max",
+        1_000_000,
+        131_072,
+        OpenCodeChat
+    )
+    .vision(),
+    model!(
+        "opencode-go",
+        "qwen3.8-flash",
+        "Qwen3.8 Flash",
+        1_000_000,
+        131_072,
+        OpenCodeChat
+    )
+    .vision(),
+    model!(
+        "opencode-go",
+        "qwen3.7-max",
+        "Qwen3.7 Max",
+        1_000_000,
+        65_536,
+        OpenCodeChat
+    ),
+    model!(
+        "opencode-go",
+        "qwen3.7-plus",
+        "Qwen3.7 Plus",
+        1_000_000,
+        65_536,
+        OpenCodeChat
+    )
+    .vision(),
+    model!(
+        "opencode-go",
+        "qwen3.6-plus",
+        "Qwen3.6 Plus",
+        1_000_000,
+        65_536,
+        OpenCodeChat
+    )
+    .vision(),
 ];
 
 pub fn catalog() -> &'static [ModelInfo] {
@@ -1849,12 +1966,18 @@ mod tests {
             access("opencode-go/muse-spark-1.3-contributor"),
             ModelAccess::OpenCodeResponses
         );
-        // Rows the docs place on the Anthropic Messages or Gemini wires
-        // are not cataloged until ilar speaks them.
+        // The docs file Qwen and MiniMax under Messages, but the gateway
+        // answers for them on chat-completions (probed 2026-09-03).
+        assert_eq!(access("opencode-go/minimax-m3"), ModelAccess::OpenCodeChat);
+        assert_eq!(access("opencode-go/qwen3.8-max"), ModelAccess::OpenCodeChat);
+        assert_eq!(access("opencode/qwen3.6-plus"), ModelAccess::OpenCodeChat);
+        // Claude and Gemini rows are not cataloged: ilar speaks neither
+        // wire, and neither answers on the OpenAI ones.
         assert!(find("opencode/claude-sonnet-5").is_none());
         assert!(find("opencode/gemini-3.8-flash").is_none());
-        assert!(find("opencode-go/minimax-m3").is_none());
-        assert!(find("opencode-go/qwen3.8-max").is_none());
+        // Dark upstream: "not supported" on Zen, a persistent 500 on Go.
+        assert!(find("opencode/qwen3.7-max").is_none());
+        assert!(find("opencode-go/minimax-m2.7").is_none());
         // Past their published deprecation date.
         assert!(find("opencode/gpt-5.2-codex").is_none());
         assert!(find("opencode/glm-5").is_none());

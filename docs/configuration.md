@@ -165,9 +165,9 @@ model = "opencode-go/glm-5.3"
 The gateway fronts each model on exactly one wire: the GPT, Grok and Muse Spark
 families on the OpenAI Responses API, everything else on chat-completions. The
 catalog records which and ilar routes accordingly, so a model id is all you
-choose. Models the docs place on the Anthropic Messages or Gemini wires
-(Claude, Gemini, and Qwen; MiniMax on Go) are not offered — ilar does not speak
-those wires.
+choose. The Qwen and MiniMax rows the docs file under the Anthropic Messages
+wire answer on chat-completions too and are offered there; the Claude and
+Gemini families are not, since ilar speaks neither of their wires.
 
 What carries over from the `openai/` rows: the GPT models keep their windows
 and `reasoning` ladders, and `general.reasoning = "high"` reaches the wire as

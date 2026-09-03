@@ -13,8 +13,9 @@
   and unknown ids default to chat-completions.
 - The docs' "Anthropic Messages" rows (MiniMax and Qwen on Go, Qwen on
   Zen) also answer on chat-completions — that column is opencode's SDK
-  choice, not the gateway's only route. Not cataloged for now: the ask
-  was the OpenAI-shaped lineup.
+  choice, not the gateway's only route. Cataloged on the chat wire
+  after all, except the dark ones: Zen's qwen3.7-max/plus answer "not
+  supported" and Go's minimax-m2.7 is a persistent 500 on both wires.
 - A Go subscription key answered on Zen for every model probed. Whether
   that is billed as Zen pay-as-you-go is the console's business, not
   ours; the docs say one key serves both.

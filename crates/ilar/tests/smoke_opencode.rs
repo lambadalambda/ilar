@@ -95,3 +95,21 @@ async fn live_zen_grok_on_responses_calls_a_tool() {
     assert_eq!(calls, ["write"]);
     assert_eq!(stop, Some(StopReason::ToolUse));
 }
+
+#[tokio::test]
+#[ignore]
+async fn live_go_qwen_on_the_chat_wire_calls_a_tool() {
+    let provider = OpenCodeProvider::go(key(), None);
+    let (calls, stop) = turn(&provider, "opencode-go/qwen3.8-flash").await;
+    assert_eq!(calls, ["write"]);
+    assert_eq!(stop, Some(StopReason::ToolUse));
+}
+
+#[tokio::test]
+#[ignore]
+async fn live_go_minimax_on_the_chat_wire_calls_a_tool() {
+    let provider = OpenCodeProvider::go(key(), None);
+    let (calls, stop) = turn(&provider, "opencode-go/minimax-m3").await;
+    assert_eq!(calls, ["write"]);
+    assert_eq!(stop, Some(StopReason::ToolUse));
+}
