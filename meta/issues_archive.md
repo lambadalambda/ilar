@@ -300,3 +300,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [The meter counts the children](issues/the-meter-counts-the-children.md)
 - [x] [OpenCode Go and Zen providers](issues/opencode-go-and-zen-providers.md)
 - [x] [Qwen and MiniMax answer on the chat wire](issues/qwen-and-minimax-answer-on-the-chat-wire.md)
+- [x] [The quality gates are green](issues/the-quality-gates-are-green.md)

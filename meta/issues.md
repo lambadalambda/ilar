@@ -121,6 +121,5 @@ milestones 15–17 stay filed — they come back when the feature does.*
 - [ ] [Skills load one body once](issues/skills-load-one-body-once.md)
 - [ ] [Damaged rewinds fail closed](issues/damaged-rewinds-fail-closed.md)
 - [ ] [Test repositories never sign](issues/test-repositories-never-sign.md)
-- [ ] [The quality gates are green](issues/the-quality-gates-are-green.md)
 - [ ] [Provider URLs are structural](issues/provider-urls-are-structural.md)
 
