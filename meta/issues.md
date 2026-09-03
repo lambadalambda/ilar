@@ -109,6 +109,7 @@ milestones 15–17 stay filed — they come back when the feature does.*
 ## Milestone 19 — More doors
 
 - [ ] [MiniMax thinks out loud](issues/minimax-thinks-out-loud.md)
+- [ ] [OpenCode rows carry their ladders](issues/opencode-rows-carry-their-ladders.md)
 
 ## Review follow-ups
 
