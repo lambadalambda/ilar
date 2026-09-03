@@ -108,7 +108,7 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 ## Milestone 19 — More doors
 
-- [ ] [Qwen and MiniMax answer on the chat wire](issues/qwen-and-minimax-answer-on-the-chat-wire.md)
+- [ ] [MiniMax thinks out loud](issues/minimax-thinks-out-loud.md)
 
 ## Review follow-ups
 
