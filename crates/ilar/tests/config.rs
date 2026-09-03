@@ -31,7 +31,7 @@ fn defaults_when_no_config_exists() {
     // A tuned dark theme by default; `terminal` is opt-in for people who
     // want their own terminal colours instead.
     assert_eq!(config.general.theme, "carbon");
-    assert_eq!(config.providers.len(), 2); // openai + zai defaults
+    assert_eq!(config.providers.len(), 4); // openai + zai + the two opencode gateways
     assert!(config.providers.contains_key("zai"));
     assert_eq!(
         config.providers["zai"].api_key.as_deref(),
@@ -572,6 +572,76 @@ fn configured_providers_expose_their_supported_models() {
             .any(|model| model.full_id() == "openai/gpt-5.6-sol")
     );
     assert!(models.iter().any(|model| model.full_id() == "zai/glm-4.7"));
+}
+
+/// One key opens both OpenCode gateways, and each lists its own rows.
+#[test]
+fn one_opencode_key_reaches_both_gateways() {
+    let (_g, empty) = tempdir();
+    let config = Loader::with_env(vec![("ILAR_OPENCODE_API_KEY", "ok".to_string())])
+        .config_dir(empty)
+        .resolve()
+        .unwrap();
+    assert_eq!(config.providers["opencode"].api_key.as_deref(), Some("ok"));
+    assert_eq!(
+        config.providers["opencode-go"].api_key.as_deref(),
+        Some("ok")
+    );
+    assert!(config.provider_for("opencode/glm-5.2").is_some());
+    assert!(config.provider_for("opencode-go/gpt-5.6-luna").is_some());
+
+    let models = config.available_models();
+    for id in [
+        "opencode/gpt-5.6-sol",
+        "opencode/kimi-k3",
+        "opencode/big-pickle",
+        "opencode-go/glm-5.3",
+        "opencode-go/grok-4.6",
+    ] {
+        assert!(
+            models.iter().any(|model| model.full_id() == id),
+            "{id} is not listed"
+        );
+    }
+    for provider in ["opencode", "opencode-go"] {
+        let listed = models
+            .iter()
+            .filter(|model| model.provider == provider)
+            .count();
+        let cataloged = ilar::model::catalog()
+            .iter()
+            .filter(|model| model.provider == provider)
+            .count();
+        assert_eq!(listed, cataloged, "{provider} lists its whole catalog");
+    }
+    // The catalog row's budget stands; an unknown id gets the fallback.
+    let luna = ilar::model::find("opencode-go/gpt-5.6-luna").unwrap();
+    assert_eq!(
+        config.input_limit("opencode-go/gpt-5.6-luna"),
+        Some(luna.input_limit)
+    );
+    assert_eq!(
+        config.context_limit("opencode/not-in-catalog"),
+        Some(128_000)
+    );
+
+    // A per-gateway key in the file wins over the shared variable, and
+    // a keyless gateway lists nothing.
+    let (_g2, dir) = tempdir();
+    write(
+        &dir.join("ilar.toml"),
+        "[providers.opencode-go]\napi_key = \"go-only\"\n",
+    );
+    let config = Loader::no_env().config_dir(dir).resolve().unwrap();
+    assert_eq!(
+        config.providers["opencode-go"].api_key.as_deref(),
+        Some("go-only")
+    );
+    assert!(config.provider_for("opencode/glm-5.2").is_none());
+    assert!(config.provider_for("opencode-go/glm-5.2").is_some());
+    let models = config.available_models();
+    assert!(models.iter().all(|model| model.provider != "opencode"));
+    assert!(models.iter().any(|model| model.provider == "opencode-go"));
 }
 
 /// The only z.ai route is the coding-plan endpoint, so the models the

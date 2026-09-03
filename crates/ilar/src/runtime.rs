@@ -349,7 +349,7 @@ impl RuntimePlan {
         let resolver: Arc<dyn ProviderResolver> = Arc::new(config.clone());
         drop(resolver.resolve_provider(&self.model).with_context(|| {
             format!(
-                "no provider configured for {} (set ILAR_ZAI_API_KEY / ILAR_OPENAI_API_KEY)",
+                "no provider configured for {} (set ILAR_ZAI_API_KEY, ILAR_OPENAI_API_KEY or ILAR_OPENCODE_API_KEY)",
                 self.model
             )
         })?);

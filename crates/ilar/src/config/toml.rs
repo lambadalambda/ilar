@@ -256,6 +256,24 @@ static PROVIDERS: &[ProviderKind] = &[
         reaches: zai_reaches,
         build: zai_provider,
     },
+    // One OpenCode key serves both gateways, so both rows read the same
+    // variable; a `[providers.*]` api_key still tells them apart.
+    ProviderKind {
+        name: crate::provider::opencode::ZEN_PREFIX,
+        api_key_env: "ILAR_OPENCODE_API_KEY",
+        auth_values: &[],
+        fallback_context_limit: 128_000,
+        reaches: opencode_reaches,
+        build: opencode_zen_provider,
+    },
+    ProviderKind {
+        name: crate::provider::opencode::GO_PREFIX,
+        api_key_env: "ILAR_OPENCODE_API_KEY",
+        auth_values: &[],
+        fallback_context_limit: 128_000,
+        reaches: opencode_reaches,
+        build: opencode_go_provider,
+    },
 ];
 
 fn provider_kind<'a>(name: &str, kinds: &'a [ProviderKind]) -> Option<&'a ProviderKind> {
@@ -307,6 +325,37 @@ fn zai_provider(
     settings: &ProviderConfigResolved,
 ) -> Option<Box<dyn crate::provider::Provider>> {
     Some(Box::new(crate::provider::zai::ZaiProvider::new(
+        settings.api_key.clone()?,
+        settings.base_url.clone(),
+    )))
+}
+
+/// Either OpenCode wire is reachable with a key; the row's provider name
+/// has already picked the gateway by the time this is asked.
+fn opencode_reaches(settings: &ProviderConfigResolved, access: crate::model::ModelAccess) -> bool {
+    use crate::model::ModelAccess;
+    settings.api_key.is_some()
+        && matches!(
+            access,
+            ModelAccess::OpenCodeChat | ModelAccess::OpenCodeResponses
+        )
+}
+
+fn opencode_zen_provider(
+    _config: &Config,
+    settings: &ProviderConfigResolved,
+) -> Option<Box<dyn crate::provider::Provider>> {
+    Some(Box::new(crate::provider::opencode::OpenCodeProvider::zen(
+        settings.api_key.clone()?,
+        settings.base_url.clone(),
+    )))
+}
+
+fn opencode_go_provider(
+    _config: &Config,
+    settings: &ProviderConfigResolved,
+) -> Option<Box<dyn crate::provider::Provider>> {
+    Some(Box::new(crate::provider::opencode::OpenCodeProvider::go(
         settings.api_key.clone()?,
         settings.base_url.clone(),
     )))
@@ -1252,7 +1301,7 @@ mod tests {
         // and the provider appears alongside the built-in ones.
         let env = Loader::with_env(vec![("ILAR_ACME_API_KEY", "acme-key".into())]);
         let resolved = resolve_providers(&FileConfig::default(), &env, &kinds);
-        assert_eq!(resolved.len(), 3);
+        assert_eq!(resolved.len(), PROVIDERS.len() + 1);
         assert_eq!(resolved["acme"].api_key.as_deref(), Some("acme-key"));
         assert_eq!(resolved["openai"].api_key, None);
 
