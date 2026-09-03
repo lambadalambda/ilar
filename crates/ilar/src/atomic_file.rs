@@ -91,7 +91,7 @@ fn replace_unix(path: &Path, content: &[u8], mode: Mode, hooks: &dyn Hooks) -> s
     let final_mode = match mode {
         Mode::Preserve => Some(destination.as_ref().map_or_else(
             || 0o666 & !process_umask(),
-            |metadata| metadata.st_mode as u32 & 0o7777,
+            |metadata| mode_bits(metadata.st_mode) & 0o7777,
         )),
         Mode::Force(mode) => Some(mode),
     };
@@ -167,8 +167,16 @@ fn process_umask() -> u32 {
     *UMASK.get_or_init(|| {
         let mask = unsafe { libc::umask(0) };
         unsafe { libc::umask(mask) };
-        u32::from(mask)
+        mode_bits(mask)
     })
+}
+
+/// `mode_t` is `u16` on macOS and `u32` on Linux; one widening site
+/// keeps the cast lint quiet on the platform where it is a no-op.
+#[cfg(unix)]
+#[allow(clippy::unnecessary_cast)]
+const fn mode_bits(mode: libc::mode_t) -> u32 {
+    mode as u32
 }
 
 #[cfg(unix)]

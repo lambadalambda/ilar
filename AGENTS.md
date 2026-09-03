@@ -7,7 +7,12 @@
   to loop/tools/providers. The TUI crate is tested too: unit tests live
   beside the module they cover, and render assertions go through
   ratatui's `TestBackend`.
-- `cargo clippy --workspace` and `cargo fmt` should stay clean.
+- `scripts/check.sh` is the quality gate: `cargo fmt --all -- --check`,
+  `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+  and `cargo test --workspace --all-features`. Formatting is whatever the
+  current stable toolchain produces (rustfmt 1.9 / Rust 1.98 as of
+  2026-09); when stable moves and rewraps code, commit that as its own
+  `style:` commit rather than folding it into feature work.
 
 ## Conventions
 

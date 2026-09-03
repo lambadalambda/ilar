@@ -2516,6 +2516,28 @@ fn apply_terminal_title(topic: Option<&str>) {
     );
 }
 
+/// The lazy preview load for the search modal's listing rows:
+/// (generation, session id, the loader's channel).
+type PreviewTask = (
+    u64,
+    String,
+    std::sync::mpsc::Receiver<Vec<(String, String, bool)>>,
+);
+/// A focus seed replaying on a worker: which child it is for, and the
+/// handle carrying its lines.
+type FocusSeedTask = (
+    String,
+    tokio::task::JoinHandle<Result<Vec<crate::transcript::Line_>, String>>,
+);
+/// A rewind in flight: the discarded-turn count for its notice, the
+/// pause state to restore on failure (the hold may predate the rewind),
+/// and the handle.
+type RewindTask = (
+    usize,
+    bool,
+    tokio::task::JoinHandle<Result<ilar::rewind::RewindReport>>,
+);
+
 #[allow(clippy::too_many_arguments)]
 async fn run_app(
     terminal: &mut ratatui::DefaultTerminal,
@@ -2546,14 +2568,8 @@ async fn run_app(
     // The content-search scan: rows stream in stamped with the query
     // generation they answer; the flag abandons a stale walk.
     let mut search_rx: Option<(u64, std::sync::mpsc::Receiver<Vec<SearchRow>>)> = None;
-    // The lazy preview load for the search modal's listing rows:
-    // (generation, session id, the loader's channel). One in flight;
-    // the newest selection wins.
-    let mut preview_rx: Option<(
-        u64,
-        String,
-        std::sync::mpsc::Receiver<Vec<(String, String, bool)>>,
-    )> = None;
+    // One in flight; the newest selection wins.
+    let mut preview_rx: Option<PreviewTask> = None;
     let mut search_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>> = None;
     // Seeded empty: the outbox scan is still running on its worker.
     // What it recovers lands mid-loop through `adoption_handle` —
@@ -2567,22 +2583,10 @@ async fn run_app(
     // doing — and a backlog landing after that point belongs to
     // someone who is present, not to someone reading.
     let mut engaged = false;
-    // A focus seed replaying on a worker: which child it is for, and
-    // the handle carrying its lines.
-    let mut focus_seed: Option<(
-        String,
-        tokio::task::JoinHandle<Result<Vec<crate::transcript::Line_>, String>>,
-    )> = None;
-    // A rewind in flight: the discarded-turn count for its notice, the
-    // pause state to restore on failure (the hold may predate the
-    // rewind), and the handle. The loop keeps drawing while git
-    // restores the tree; notifications are paused for the duration so
-    // nothing writes the log mid-rewrite.
-    let mut rewind_task: Option<(
-        usize,
-        bool,
-        tokio::task::JoinHandle<Result<ilar::rewind::RewindReport>>,
-    )> = None;
+    let mut focus_seed: Option<FocusSeedTask> = None;
+    // The loop keeps drawing while git restores the tree; notifications
+    // are paused for the duration so nothing writes the log mid-rewrite.
+    let mut rewind_task: Option<RewindTask> = None;
     // Deliveries to other sessions, running beside the turn slot.
     let mut routed: Vec<RoutedDelivery> = Vec::new();
     let mut cancel: Option<CancellationToken> = None;

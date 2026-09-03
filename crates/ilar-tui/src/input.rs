@@ -692,7 +692,8 @@ mod tests {
     /// editing method that forgets `edited()` should fail here.
     #[test]
     fn every_text_mutation_invalidates_the_wrap() {
-        let mutations: Vec<(&str, fn(&mut InputBuffer))> = vec![
+        type Mutation = (&'static str, fn(&mut InputBuffer));
+        let mutations: Vec<Mutation> = vec![
             ("insert", |input| input.insert("x")),
             ("clear", |input| input.clear()),
             ("take", |input| {

@@ -296,10 +296,10 @@ impl ReplayIdIndex {
                 "replay id Merkle proof mismatch",
             ));
         }
-        let records = bytes
-            .chunks_exact(REPLAY_ID_RECORD_LEN as usize)
-            .map(|bytes| bytes.try_into().map_err(std::io::Error::other))
-            .collect::<std::io::Result<Vec<_>>>()?;
+        let records: Vec<IdRecord> = bytes
+            .as_chunks::<{ REPLAY_ID_RECORD_LEN as usize }>()
+            .0
+            .to_vec();
         self.verified_pages.insert(page, records.clone());
         Ok(records)
     }

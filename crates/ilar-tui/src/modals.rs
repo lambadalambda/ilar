@@ -72,7 +72,7 @@ pub(crate) fn underline_hovered_item(
     let Some(first) = content.next() else {
         return false;
     };
-    let last = content.last().unwrap_or(first);
+    let last = content.next_back().unwrap_or(first);
     for x in first..=last {
         buffer[(x, row)]
             .modifier

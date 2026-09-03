@@ -93,13 +93,17 @@ fn downscaled_png(bytes: &[u8]) -> Option<ImageContent> {
     let rgba: Vec<u8> = match info.color_type {
         png::ColorType::Rgba => buf,
         png::ColorType::Rgb => buf
-            .chunks_exact(3)
-            .flat_map(|pixel| [pixel[0], pixel[1], pixel[2], 255])
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .flat_map(|&[r, g, b]| [r, g, b, 255])
             .collect(),
         png::ColorType::Grayscale => buf.iter().flat_map(|&v| [v, v, v, 255]).collect(),
         png::ColorType::GrayscaleAlpha => buf
-            .chunks_exact(2)
-            .flat_map(|pixel| [pixel[0], pixel[0], pixel[0], pixel[1]])
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .flat_map(|&[v, a]| [v, v, v, a])
             .collect(),
         png::ColorType::Indexed => return None,
     };

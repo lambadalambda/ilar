@@ -118,7 +118,7 @@ pub(crate) fn agent_panel(
     let (count, toggle_text) = if !show_all && full <= budget_rows {
         (agents.len(), None)
     } else {
-        let count = if show_all && full + 1 <= budget_rows {
+        let count = if show_all && full < budget_rows {
             agents.len()
         } else {
             budget_rows.saturating_sub(2) / 2

@@ -1780,8 +1780,7 @@ pub(crate) fn squash_finished_child(lines: &mut Vec<Line_>) {
     // where its future events attach (the lookup is by call id within
     // this Vec), and folding it would strand those events in the
     // retry queue forever.
-    let (live, folded): (Vec<Line_>, Vec<Line_>) =
-        middle.into_iter().partition(|line| tool_is_active(line));
+    let (live, folded): (Vec<Line_>, Vec<Line_>) = middle.into_iter().partition(tool_is_active);
     if !folded.is_empty() {
         lines.push(Line_::System(format!(
             "… {} line(s) folded — the focus view has the full timeline",

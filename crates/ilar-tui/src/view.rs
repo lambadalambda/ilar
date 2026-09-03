@@ -823,7 +823,7 @@ impl App {
                 // also un-sticks itself the moment everyone fits the
                 // ordinary cap again.
                 let collapsed_budget = (todo_area.height / 2).saturating_sub(2) as usize;
-                if self.agents_show_all && self.agents_view.len() * 2 + 1 <= collapsed_budget {
+                if self.agents_show_all && self.agents_view.len() * 2 < collapsed_budget {
                     self.agents_show_all = false;
                 }
                 let cap = if self.agents_show_all {
