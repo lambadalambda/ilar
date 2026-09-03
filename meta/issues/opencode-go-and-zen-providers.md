@@ -55,3 +55,25 @@ Docs: https://opencode.ai/docs/zen/ and https://opencode.ai/docs/go/.
   `https://opencode.ai/zen/go/v1/models` (unauthenticated).
 - Catalog data from models.dev (`opencode`, `opencode-go`) cross-checked
   against the docs' endpoint tables on 2026-09-03.
+
+## Outcome (2026-09-03)
+
+Shipped as `opencode/<id>` and `opencode-go/<id>`, both keyed by
+`ILAR_OPENCODE_API_KEY`. `OpenCodeProvider` holds one client per wire
+and routes by the row's `ModelAccess::OpenCodeChat | OpenCodeResponses`;
+`OpenAIProvider` learned a configurable prefix for that. 34 Zen rows and
+19 Go rows, each probed live; the Responses wire and the chat wire were
+both driven end to end with a tool call in `tests/smoke_opencode.rs`.
+
+Found on the way: Kimi behind Zen spells thinking `reasoning` and
+repeats `finish_reason` on its usage trailer — the chat mapper now reads
+both spellings and lets a content-free trailer through (a trailer that
+carries content, a call, or a *different* finish reason still errors).
+gpt-5.3-codex-spark is dark upstream on Zen and was left out. The GLM
+rows on OpenCode carry no effort ladder: the gateway accepts z.ai's
+fields but a one-token probe cannot show they are honoured. Details in
+DEVLOG.md.
+
+Left out by request: the Claude, Gemini, Qwen and Go MiniMax rows. The
+Qwen and MiniMax ones do answer on chat-completions, so they are a
+catalog change away if wanted.

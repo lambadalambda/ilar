@@ -108,7 +108,7 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 ## Milestone 19 — More doors
 
-- [ ] [OpenCode Go and Zen providers](issues/opencode-go-and-zen-providers.md)
+(all complete — see issues_archive.md)
 
 ## Review follow-ups
 

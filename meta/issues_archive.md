@@ -298,3 +298,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 
 - [x] [Current codebase review](issues/current-codebase-review.md)
 - [x] [The meter counts the children](issues/the-meter-counts-the-children.md)
+- [x] [OpenCode Go and Zen providers](issues/opencode-go-and-zen-providers.md)
