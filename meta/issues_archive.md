@@ -305,3 +305,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [OpenCode requests name their session](issues/opencode-requests-name-their-session.md)
 - [x] [Rate limits are waited out](issues/rate-limits-are-waited-out.md)
 - [x] [Delivered means delivered across compaction](issues/delivered-means-delivered-across-compaction.md)
+- [x] [Mail says who, and stays out of the way](issues/mail-says-who-and-stays-out-of-the-way.md)

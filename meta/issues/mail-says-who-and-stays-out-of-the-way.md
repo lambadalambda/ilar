@@ -39,3 +39,24 @@ must act on. Reported by the user 2026-09-03.
   the target and sets no notice.
 - docs/interface.md describes the strip labels and where delivery
   status shows.
+
+## Outcome (2026-09-03)
+
+- Strip: a waiting task or tool result is listed as `task result · next
+  step` / `task result · when the turn ends` with the headline its
+  transcript row wears (`pending_entry` in view.rs, reusing the pending
+  manager's headline parser); typed messages are unchanged.
+- Names: one resolver (`session_label` in main.rs, behind the scheduler's
+  `Runtime`) — "this session", a roster row's `agent · description`, a
+  log head's `agent · opening prompt` (48 chars), then `session <id>`;
+  cached per process. Every delivery message goes through it.
+- Chatter: a delivery starting sets no notice (the agents panel shows the
+  `delivering` row); a completed delivery is one transcript line
+  `✉ "desc" delivered to <name>`; holds and failures keep the notice
+  line, now naming the session.
+- Tests: strip rendering, the resolver's four cases, and the scheduler's
+  delivered ending landing in the transcript with no notice.
+
+Not done, by choice: the focus-view title fallback (`agent · <id>`) for
+a session no longer on the roster still shows the id — it has no store
+access, and the roster covers the live case.
