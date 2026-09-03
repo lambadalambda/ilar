@@ -29,8 +29,9 @@ Docs: https://opencode.ai/docs/zen/ and https://opencode.ai/docs/go/.
   as their `openai/` twins; `reasoning` variants reach the wire as
   `reasoning.effort` there.
 - Models on the Anthropic Messages wire (Claude, Qwen on Zen; MiniMax and
-  Qwen on Go) and the Gemini wire are out of scope here — see
-  [The Messages wire returns for OpenCode](the-messages-wire-returns-for-opencode.md).
+  Qwen on Go) and the Gemini wire are out of scope: ilar does not speak
+  those wires (be56531 removed the Messages one), and the user asked for
+  the OpenAI-shaped models only.
 
 ## Acceptance Criteria
 
