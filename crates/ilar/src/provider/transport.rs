@@ -19,6 +19,58 @@ pub(super) const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::fro
 pub(super) const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Streaming HTTP client: connect + idle timeouts only, by design.
+/// Headers that tie a request to its conversation, for the backends
+/// that key on them. The value is the request's `cache_key` — the
+/// session id — which is what the same backends already see in
+/// `prompt_cache_key`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Affinity {
+    /// The public OpenAI API, z.ai and local servers: nothing extra.
+    None,
+    /// The Codex backend pins a request to the shard holding its cached
+    /// prefix by `session-id`/`thread-id`; `prompt_cache_key` alone does
+    /// not (measured: 2/10 follow-up steps read a cache without these,
+    /// 10/10 with them).
+    Codex,
+    /// The OpenCode gateways log `x-opencode-session` (and refuse its
+    /// absence from 2026-09-06), the client name, and the user agent
+    /// reqwest otherwise leaves blank.
+    OpenCode,
+}
+
+impl Affinity {
+    pub(super) fn headers(self, cache_key: Option<&str>) -> Vec<(&'static str, String)> {
+        match self {
+            Self::None => Vec::new(),
+            Self::Codex => cache_key
+                .map(|key| {
+                    vec![
+                        ("session-id", key.to_string()),
+                        ("thread-id", key.to_string()),
+                    ]
+                })
+                .unwrap_or_default(),
+            Self::OpenCode => vec![
+                // A request outside any session (topic naming) still
+                // names one, so nothing goes out anonymous.
+                (
+                    "x-opencode-session",
+                    cache_key.map_or_else(process_session, str::to_string),
+                ),
+                ("x-opencode-client", "ilar".to_string()),
+                ("user-agent", format!("ilar/{}", env!("CARGO_PKG_VERSION"))),
+            ],
+        }
+    }
+}
+
+/// The session a request outside every session is attributed to: one
+/// per process, so a gateway sees one caller rather than a new one per
+/// request.
+fn process_session() -> String {
+    format!("ilar-process-{}", std::process::id())
+}
+
 pub(super) fn streaming_client() -> reqwest::Client {
     reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)

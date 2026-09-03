@@ -7,7 +7,7 @@ use anyhow::Context as _;
 use super::event::{ProviderEvent, StopReason};
 use super::mapper::{MapperCore, MapperLabels, required_str, wire_usage};
 use super::request::{Request, ToolDefinition, merge_options, resolve_model};
-use super::transport::{self, EventMapper as TransportEventMapper, TransportResponse};
+use super::transport::{self, Affinity, EventMapper as TransportEventMapper, TransportResponse};
 use super::{EventStream, Provider};
 use crate::session::{ChatMessage, ContentBlock, Role};
 
@@ -30,7 +30,7 @@ pub struct OpenAIProvider {
     prefix: &'static str,
     base_url: String,
     prompt_cache_key: bool,
-    session_headers: bool,
+    affinity: Affinity,
     token_url: String,
     http: reqwest::Client,
 }
@@ -46,7 +46,7 @@ impl OpenAIProvider {
             base_url: base_url.unwrap_or_else(|| "https://api.openai.com/v1".into()),
             prompt_cache_key,
             // Codex-backend headers; the public API has no use for them.
-            session_headers: false,
+            affinity: Affinity::None,
             token_url: format!("{}/oauth/token", crate::auth::AUTH_BASE),
             http: transport::streaming_client(),
         }
@@ -60,7 +60,11 @@ impl OpenAIProvider {
             prefix: "openai",
             base_url: base_url.unwrap_or_else(|| "https://chatgpt.com/backend-api/codex".into()),
             prompt_cache_key,
-            session_headers: prompt_cache_key,
+            affinity: if prompt_cache_key {
+                Affinity::Codex
+            } else {
+                Affinity::None
+            },
             token_url: format!("{}/oauth/token", crate::auth::AUTH_BASE),
             http: transport::streaming_client(),
         }
@@ -86,24 +90,20 @@ impl OpenAIProvider {
         self
     }
 
-    /// The conversation's identity as headers, which is how the Codex
-    /// backend pins a request to the shard holding its cached prefix.
-    /// `prompt_cache_key` alone does not: measured over four alternating
-    /// arms, 2/10 follow-up steps read a cache without these and 10/10
-    /// with them. Only the Codex backend reads them, so only it gets them.
+    /// The headers a gateway keys the conversation on (see [`Affinity`]).
+    pub(super) fn with_affinity(mut self, affinity: Affinity) -> Self {
+        self.affinity = affinity;
+        self
+    }
+
+    /// The conversation's identity as headers, per this backend's policy.
     fn session_headers(&self, cache_key: Option<&str>) -> Vec<(&'static str, String)> {
-        let Some(cache_key) = cache_key.filter(|_| self.session_headers) else {
-            return Vec::new();
-        };
-        vec![
-            ("session-id", cache_key.to_string()),
-            ("thread-id", cache_key.to_string()),
-        ]
+        self.affinity.headers(cache_key)
     }
 
     /// Test hook: the control arm for the session-affinity headers.
     pub fn without_session_headers_for_test(mut self) -> Self {
-        self.session_headers = false;
+        self.affinity = Affinity::None;
         self
     }
 
@@ -341,9 +341,9 @@ impl Provider for OpenAIProvider {
                     if let Some(account) = &current_account {
                         builder = builder.header("chatgpt-account-id", account);
                     }
-                    for (name, value) in &session_headers {
-                        builder = builder.header(*name, value);
-                    }
+                }
+                for (name, value) in &session_headers {
+                    builder = builder.header(*name, value);
                 }
                 let request = builder.build().map_err(transport::fatal)?;
                 match http

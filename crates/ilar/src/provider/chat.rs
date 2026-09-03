@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use super::event::{ProviderEvent, StopReason};
 use super::mapper::{MapperCore, MapperLabels, merge_usage};
 use super::request::{Request, merge_options, reserved_conflicts as conflicts, resolve_model};
-use super::transport::{self, EventMapper as TransportEventMapper, TransportResponse};
+use super::transport::{self, Affinity, EventMapper as TransportEventMapper, TransportResponse};
 use super::{EventStream, Provider};
 use crate::session::{ChatMessage, ContentBlock, Role, Usage};
 
@@ -54,13 +54,21 @@ pub struct ChatDialect {
     /// as minutes of dead air and gateway-timeout failures on long
     /// generations. No other server knows the field.
     tool_stream: bool,
+    /// Headers the endpoint keys the conversation on, if any.
+    affinity: Affinity,
 }
 
 impl ChatDialect {
     /// A cataloged, keyed endpoint: vision from the catalog row and the
     /// wire id straight from the ilar id. What varies is the prefix and
     /// whether the server knows z.ai's `tool_stream`.
-    fn keyed(prefix: &'static str, api_key: String, base_url: String, tool_stream: bool) -> Self {
+    fn keyed(
+        prefix: &'static str,
+        api_key: String,
+        base_url: String,
+        tool_stream: bool,
+        affinity: Affinity,
+    ) -> Self {
         Self {
             prefix,
             base_url,
@@ -69,18 +77,20 @@ impl ChatDialect {
             vision: None,
             options: serde_json::Value::Null,
             tool_stream,
+            affinity,
         }
     }
 
     /// The z.ai endpoint, `tool_stream` on.
     pub(super) fn zai(api_key: String, base_url: String) -> Self {
-        Self::keyed("zai", api_key, base_url, true)
+        Self::keyed("zai", api_key, base_url, true, Affinity::None)
     }
 
     /// An OpenCode gateway (Zen or Go): the prefix is the gateway's, so
-    /// one dialect serves both, and none of z.ai's body fields are sent.
+    /// one dialect serves both, none of z.ai's body fields are sent, and
+    /// every request names its session.
     pub(super) fn opencode(prefix: &'static str, api_key: String, base_url: String) -> Self {
-        Self::keyed(prefix, api_key, base_url, false)
+        Self::keyed(prefix, api_key, base_url, false, Affinity::OpenCode)
     }
 
     /// A `[models.<name>]` endpoint: its own URL, its own wire id, a key
@@ -100,6 +110,7 @@ impl ChatDialect {
             vision: Some(vision),
             options: serde_json::Value::Null,
             tool_stream: false,
+            affinity: Affinity::None,
         }
     }
 
@@ -214,6 +225,9 @@ impl Provider for ChatProvider {
             .post(format!("{}/chat/completions", self.dialect.base_url));
         if let Some(api_key) = &self.dialect.api_key {
             request = request.bearer_auth(api_key);
+        }
+        for (name, value) in self.dialect.affinity.headers(req.cache_key.as_deref()) {
+            request = request.header(name, value);
         }
         let request = request.json(&body).build()?;
 

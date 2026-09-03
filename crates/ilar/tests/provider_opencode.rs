@@ -3,6 +3,7 @@
 
 use futures::StreamExt;
 use ilar::provider::opencode::OpenCodeProvider;
+use ilar::provider::zai::ZaiProvider;
 use ilar::provider::{Provider, ProviderEvent, Request, ToolDefinition};
 
 fn request(model: &str) -> Request {
@@ -214,4 +215,76 @@ async fn a_trailer_that_changes_the_finish_reason_is_refused() {
         matches!(events.last(), Some(ProviderEvent::Error(error)) if error.contains("duplicate")),
         "{events:?}"
     );
+}
+
+/// The gateway keys on `x-opencode-session` and refuses requests without
+/// one from 2026-09-06; both wires name the session, the client and a
+/// user agent, and a request outside any session still names one.
+#[tokio::test]
+async fn both_wires_name_their_session_to_the_gateway() {
+    let header = |raw: &str, name: &str| -> Option<String> {
+        raw.lines()
+            .find_map(|line| {
+                line.split_once(':')
+                    .filter(|(k, _)| k.eq_ignore_ascii_case(name))
+            })
+            .map(|(_, v)| v.trim().to_string())
+    };
+    let with_session = |model: &str| Request {
+        cache_key: Some("session-42".into()),
+        ..request(model)
+    };
+
+    let (base, server) = http_server(CHAT_TURN);
+    let zen = OpenCodeProvider::zen("k".into(), Some(base));
+    let _ = drain(zen.stream(with_session("opencode/glm-5.2")).unwrap()).await;
+    let raw = server.await.unwrap();
+    assert_eq!(
+        header(&raw, "x-opencode-session").as_deref(),
+        Some("session-42")
+    );
+    assert_eq!(header(&raw, "x-opencode-client").as_deref(), Some("ilar"));
+    assert_eq!(
+        header(&raw, "user-agent").as_deref(),
+        Some(concat!("ilar/", env!("CARGO_PKG_VERSION")))
+    );
+
+    let (base, server) = http_server(
+        "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n",
+    );
+    let go = OpenCodeProvider::go("k".into(), Some(base));
+    let _ = drain(go.stream(with_session("opencode-go/gpt-5.6-luna")).unwrap()).await;
+    let raw = server.await.unwrap();
+    assert_eq!(
+        header(&raw, "x-opencode-session").as_deref(),
+        Some("session-42")
+    );
+    assert_eq!(header(&raw, "x-opencode-client").as_deref(), Some("ilar"));
+    // The Codex pair is that backend's, not the gateway's.
+    assert!(header(&raw, "session-id").is_none(), "{raw}");
+
+    // No session (topic naming): a per-process one stands in.
+    let (base, server) = http_server(CHAT_TURN);
+    let zen = OpenCodeProvider::zen("k".into(), Some(base));
+    let _ = drain(zen.stream(request("opencode/glm-5.2")).unwrap()).await;
+    let raw = server.await.unwrap();
+    assert_eq!(
+        header(&raw, "x-opencode-session").as_deref(),
+        Some(format!("ilar-process-{}", std::process::id()).as_str())
+    );
+
+    // z.ai gets none of it.
+    let (base, server) = http_server(CHAT_TURN);
+    let zai = ZaiProvider::new("k".into(), Some(base));
+    let _ = drain(
+        zai.stream(Request {
+            cache_key: Some("session-42".into()),
+            ..Request::with_model("zai/glm-4.7")
+        })
+        .unwrap(),
+    )
+    .await;
+    let raw = server.await.unwrap();
+    assert!(header(&raw, "x-opencode-session").is_none(), "{raw}");
+    assert!(header(&raw, "user-agent").is_none(), "{raw}");
 }

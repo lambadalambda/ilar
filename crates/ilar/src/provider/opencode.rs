@@ -11,11 +11,14 @@
 //!
 //! Zen (`opencode/<id>`) is pay-as-you-go; Go (`opencode-go/<id>`) is a
 //! subscription with usage caps counted in dollars at the listed prices.
-//! One key serves both.
+//! One key serves both. Every request carries `x-opencode-session` and
+//! friends ([`Affinity::OpenCode`]): the gateway keys on the session
+//! and, from 2026-09-06, refuses requests that do not name one.
 
 use super::chat::{ChatDialect, ChatProvider};
 use super::openai::OpenAIProvider;
 use super::request::Request;
+use super::transport::Affinity;
 use super::{EventStream, Provider};
 use crate::model::ModelAccess;
 
@@ -62,7 +65,9 @@ impl OpenCodeProvider {
                 api_key.clone(),
                 base_url.clone(),
             )),
-            responses: OpenAIProvider::new(api_key, Some(base_url)).with_prefix(prefix),
+            responses: OpenAIProvider::new(api_key, Some(base_url))
+                .with_prefix(prefix)
+                .with_affinity(Affinity::OpenCode),
         }
     }
 
