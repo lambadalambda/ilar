@@ -6145,6 +6145,47 @@ mod tests {
         assert!(!row_underlined(&terminal, area, area.y + clickable));
     }
 
+    /// A turn in flight changes nothing about hover: a finished tool
+    /// row under the pointer underlines while text streams and the
+    /// activity row spins below it.
+    #[test]
+    fn hover_underlines_while_a_turn_streams() {
+        let mut app = App::new();
+        app.push_loop_event(&LoopEvent::TurnStarted);
+        app.push_loop_event(&LoopEvent::ToolStarted {
+            id: "call-1".into(),
+            name: "read".into(),
+        });
+        app.push_loop_event(&LoopEvent::ToolFinished {
+            id: "call-1".into(),
+            name: "read".into(),
+            is_error: false,
+            result: "line one\nline two\nline three".into(),
+            child_session_id: None,
+        });
+        app.push_loop_event(&LoopEvent::TextDelta("streaming words".into()));
+        // The runtime marks the slot busy when it spawns the turn.
+        app.busy = true;
+        assert!(matches!(app.activity, Activity::Responding));
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let area = app.transcript_text_area;
+        let clickable = app
+            .transcript_hit_targets
+            .iter()
+            .position(|target| target.is_some())
+            .expect("the tool row is clickable") as u16;
+        app.update_hover(area.x + 2, area.y + clickable);
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let underlined = (area.x..area.right()).any(|column| {
+            let cell = &terminal.backend().buffer()[(column, area.y + clickable)];
+            !cell.symbol().trim().is_empty() && cell.modifier.contains(Modifier::UNDERLINED)
+        });
+        assert!(underlined, "hover must underline during a turn");
+    }
+
     /// A trackpad reports a drag for a firm tap, and the old rule —
     /// "no drag event ever arrived" — turned every expand into a coin
     /// flip: press, drift a cell, release, and the row did nothing at
