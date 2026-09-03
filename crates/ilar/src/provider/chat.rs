@@ -370,6 +370,17 @@ fn openai_message(msg: &ChatMessage, vision: bool) -> Vec<serde_json::Value> {
     vec![serde_json::Value::Object(value)]
 }
 
+/// Whether a chat-completions delta says anything at all: a reasoning or
+/// content fragment, or a tool-call fragment. Role and empty strings are
+/// the wire clearing its throat, not a message.
+fn carries_payload(delta: &serde_json::Value) -> bool {
+    let non_empty = |field: &str| delta[field].as_str().is_some_and(|text| !text.is_empty());
+    non_empty("reasoning_content")
+        || non_empty("reasoning")
+        || non_empty("content")
+        || delta.get("tool_calls").is_some()
+}
+
 const MAX_TOOL_ARGUMENT_BYTES: usize = 1024 * 1024;
 
 /// The ledger key for a wire index: chat-completions addresses tool calls
@@ -482,14 +493,19 @@ impl TransportEventMapper for OpenAiMapper {
         {
             return Err("OpenAI-compatible response contained multiple choices".into());
         }
+        // Moonshot's Kimi (behind OpenCode Zen) sends its usage in a
+        // trailing chunk that repeats the finish reason with an empty
+        // delta. Nothing in it is content, so it is the usage chunk it is;
+        // a chunk that carries content or a call after the finish is
+        // still the protocol violation it always was.
+        let choice = value["choices"].get(0);
         if self.stop_reason.is_some()
-            && value["choices"]
-                .as_array()
-                .is_some_and(|choices| !choices.is_empty())
+            && let Some(choice) = choice
         {
-            return Err("OpenAI-compatible event arrived after finish_reason".into());
-        }
-        if let Some(choice) = value["choices"].get(0) {
+            if carries_payload(&choice["delta"]) {
+                return Err("OpenAI-compatible event arrived after finish_reason".into());
+            }
+        } else if let Some(choice) = choice {
             let delta = &choice["delta"];
             // `reasoning_content` is the DeepSeek/z.ai spelling; the
             // OpenRouter-style servers behind OpenCode Zen (Kimi,

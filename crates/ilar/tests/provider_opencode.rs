@@ -169,3 +169,31 @@ async fn reasoning_is_read_under_either_spelling() {
     assert_eq!(events[2], ProviderEvent::ThinkingCompleted);
     assert_eq!(events[3], ProviderEvent::TextDelta("hi".into()));
 }
+
+/// Moonshot's Kimi sends usage in a trailer that repeats the finish
+/// reason with an empty delta; that is a usage chunk, not a late event.
+#[tokio::test]
+async fn kimi_usage_trailer_repeats_the_finish_reason() {
+    let sse = concat!(
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"{}\"}}]},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"finish_reason\":\"tool_calls\",\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}],\"usage\":{\"prompt_tokens\":211,\"completion_tokens\":99,\"prompt_tokens_details\":{\"cached_tokens\":0}}}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let (base, _server) = http_server(sse);
+    let provider = OpenCodeProvider::zen("k".into(), Some(base));
+    let events = drain(provider.stream(request("opencode/kimi-k3")).unwrap()).await;
+
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, ProviderEvent::Error(_))),
+        "{events:?}"
+    );
+    let Some(ProviderEvent::TurnComplete { stop_reason, usage }) = events.last() else {
+        panic!("{events:?}");
+    };
+    assert_eq!(*stop_reason, ilar::provider::StopReason::ToolUse);
+    assert_eq!(usage.input_tokens, 211);
+    assert_eq!(usage.output_tokens, 99);
+}
