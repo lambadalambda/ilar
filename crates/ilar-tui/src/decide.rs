@@ -419,9 +419,7 @@ pub(crate) fn may_start_notification_turn(state: &LoopState) -> bool {
 pub(crate) fn tree_depths(edges: &[(String, String)]) -> Vec<usize> {
     let mut first_occurrence = std::collections::HashMap::new();
     for (index, (session_id, _)) in edges.iter().enumerate() {
-        first_occurrence
-            .entry(session_id.as_str())
-            .or_insert(index);
+        first_occurrence.entry(session_id.as_str()).or_insert(index);
     }
     edges
         .iter()

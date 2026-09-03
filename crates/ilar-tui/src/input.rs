@@ -664,13 +664,20 @@ mod tests {
     #[test]
     fn the_wrap_computes_once_per_edit_and_width() {
         let mut input = InputBuffer::from("a draft\nwith a few lines of text");
-        let ranges =
-            |rows: &[WrappedInputRow<'_>]| rows.iter().map(|row| (row.start, row.end)).collect::<Vec<_>>();
+        let ranges = |rows: &[WrappedInputRow<'_>]| {
+            rows.iter()
+                .map(|row| (row.start, row.end))
+                .collect::<Vec<_>>()
+        };
 
         let first = ranges(&input.wrapped_rows(10));
         let again = ranges(&input.wrapped_rows(10));
         assert_eq!(first, again, "the cache answers with the same rows");
-        assert_eq!(input.wrap_computes.get(), 1, "the second ask hits the cache");
+        assert_eq!(
+            input.wrap_computes.get(),
+            1,
+            "the second ask hits the cache"
+        );
 
         input.wrapped_rows(20);
         assert_eq!(input.wrap_computes.get(), 2, "a new width recomputes");

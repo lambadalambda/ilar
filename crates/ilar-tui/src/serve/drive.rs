@@ -64,10 +64,10 @@ use axum::http::StatusCode;
 
 use ilar::agent::{LOOP_EVENT_CAPACITY, SteerSender, loop_event_channel, steer_channel};
 use ilar::config::Config;
+use ilar::delivery::Parcel;
 use ilar::provider::ProviderResolver;
 use ilar::runtime::{RuntimeOptions, RuntimePlan, SessionRuntime};
 use ilar::session::{SessionStore, SessionWriter};
-use ilar::delivery::Parcel;
 use ilar::subagent::{Notification, RouteOutcome};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -928,7 +928,11 @@ impl Consumer {
     /// is routed downward, and what `Propagate` hands back goes to the
     /// dispatcher to climb one hop at a time until it is ours or the
     /// hop budget says the tree is deeper than the spawner allows.
-    async fn deliver(&self, parcel: Parcel, redispatch: &tokio::sync::mpsc::UnboundedSender<Parcel>) {
+    async fn deliver(
+        &self,
+        parcel: Parcel,
+        redispatch: &tokio::sync::mpsc::UnboundedSender<Parcel>,
+    ) {
         if self.cancel.is_cancelled() {
             return;
         }
@@ -1011,8 +1015,7 @@ impl Consumer {
             if self.already_delivered(&notification).await {
                 return;
             }
-            let Some(slot) = try_reserve(&self.turn.running, &self.epochs, &self.session_id)
-            else {
+            let Some(slot) = try_reserve(&self.turn.running, &self.epochs, &self.session_id) else {
                 // A turn is running or starting; its slot always
                 // clears, so this wait is patient, not bounded.
                 if !self.pause(SLOT_RETRY).await {

@@ -2424,10 +2424,17 @@ mod tests {
     #[test]
     fn url_redaction_leaves_minified_json_alone() {
         let json = r#"{"host":"https://api.io","user":"bob@x.io"}"#;
-        assert_eq!(super::redact_url_credentials(json), None, "no credential here");
+        assert_eq!(
+            super::redact_url_credentials(json),
+            None,
+            "no credential here"
+        );
         let real = "fetch https://alice:tok3nvalue@git.example.com/repo";
         let redacted = super::redact_url_credentials(real).expect("a real credential");
-        assert!(redacted.contains("https://<redacted>@git.example.com"), "{redacted}");
+        assert!(
+            redacted.contains("https://<redacted>@git.example.com"),
+            "{redacted}"
+        );
     }
 
     use super::*;

@@ -79,7 +79,9 @@ pub struct Notification {
 /// its drop guards (a poisoned lock in a `Drop` during unwind aborts the
 /// process). Ignoring the poison is the correct recovery here.
 fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[derive(Debug, Clone)]
@@ -1119,7 +1121,10 @@ impl SubagentSpawner {
                 let lease = match acquired {
                     LeaseOutcome::Acquired(lease) => lease,
                     LeaseOutcome::Cancelled => {
-                        reserved.send(cancelled_task_notification(&parent_session_id, &description));
+                        reserved.send(cancelled_task_notification(
+                            &parent_session_id,
+                            &description,
+                        ));
                         return;
                     }
                     LeaseOutcome::Failed(failure) => {
@@ -1695,7 +1700,11 @@ task's scope yourself; continue only clearly disjoint work."
         {
             Ok(location) => location,
             Err(error) => {
-                return self.recorded_propagate(workspace_route_failure(&meta, notification, error));
+                return self.recorded_propagate(workspace_route_failure(
+                    &meta,
+                    notification,
+                    error,
+                ));
             }
         };
         let workspace = self.workspace.scoped(&workspace_location);
@@ -1733,7 +1742,11 @@ task's scope yourself; continue only clearly disjoint work."
         {
             Ok(location) => location,
             Err(error) => {
-                return self.recorded_propagate(workspace_route_failure(&meta, notification, error));
+                return self.recorded_propagate(workspace_route_failure(
+                    &meta,
+                    notification,
+                    error,
+                ));
             }
         };
         if leased_location != workspace_location || leased_depth != depth {
@@ -1816,8 +1829,7 @@ task's scope yourself; continue only clearly disjoint work."
             )
             .await;
             match result {
-                Err(error) if never_started_would_block(&error) =>
-                {
+                Err(error) if never_started_would_block(&error) => {
                     // The lease belongs to another turn and nothing was
                     // appended: wait for it briefly, then hand the
                     // notification back like every other transient
@@ -3084,7 +3096,11 @@ mod tests {
 
         let died = receiver.recv().await.expect("the death was reported");
         assert!(died.is_error, "{}", died.text);
-        assert!(died.text.starts_with("<tool-notification>"), "{}", died.text);
+        assert!(
+            died.text.starts_with("<tool-notification>"),
+            "{}",
+            died.text
+        );
         assert!(died.text.contains("Background job job-7"), "{}", died.text);
         assert!(
             !died.text.contains("task tool"),

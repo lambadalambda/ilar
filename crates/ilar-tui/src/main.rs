@@ -1251,22 +1251,25 @@ async fn main() -> Result<()> {
             let store = store.clone();
             let system_prompt = system_prompt.clone();
             let definitions = registry.definitions();
-            Some((restore_at, tokio::task::spawn_blocking(move || {
-                // Settled: a session is switched into when nothing is
-                // driving it, so whatever it left running died with
-                // the process that ran it.
-                let view = session_view::restored_session_view_with_store(
-                    &resumed,
-                    &store,
-                    session_view::Liveness::Settled,
-                );
-                let priced = ilar::compaction::estimate_reader_tokens_with_request(
-                    &resumed,
-                    Some(&system_prompt),
-                    &definitions,
-                );
-                (view, priced)
-            })))
+            Some((
+                restore_at,
+                tokio::task::spawn_blocking(move || {
+                    // Settled: a session is switched into when nothing is
+                    // driving it, so whatever it left running died with
+                    // the process that ran it.
+                    let view = session_view::restored_session_view_with_store(
+                        &resumed,
+                        &store,
+                        session_view::Liveness::Settled,
+                    );
+                    let priced = ilar::compaction::estimate_reader_tokens_with_request(
+                        &resumed,
+                        Some(&system_prompt),
+                        &definitions,
+                    );
+                    (view, priced)
+                }),
+            ))
         } else {
             None
         };
@@ -1420,10 +1423,7 @@ pub(crate) fn short_session_id(id: &str) -> &str {
 /// lands. An empty recovery asks for nothing.
 fn adopt_recovered(
     recovered: Vec<ilar::subagent::Notification>,
-) -> (
-    std::collections::VecDeque<ilar::delivery::Parcel>,
-    bool,
-) {
+) -> (std::collections::VecDeque<ilar::delivery::Parcel>, bool) {
     let held: std::collections::VecDeque<ilar::delivery::Parcel> = recovered
         .into_iter()
         .map(ilar::delivery::Parcel::fresh)
@@ -2380,14 +2380,12 @@ fn start_session_scan(
                 .filter(|summary| summary.id != current_session)
                 .take(MAX_SEARCH_ROWS)
                 .map(|summary| {
-                    let launched = summary.cwd.as_ref().map(|path| {
-                        path.canonicalize().unwrap_or_else(|_| path.clone())
-                    });
+                    let launched = summary
+                        .cwd
+                        .as_ref()
+                        .map(|path| path.canonicalize().unwrap_or_else(|_| path.clone()));
                     SearchRow {
-                        title: summary
-                            .title
-                            .clone()
-                            .unwrap_or_else(|| summary.id.clone()),
+                        title: summary.title.clone().unwrap_or_else(|| summary.id.clone()),
                         session_id: summary.id,
                         event: 0,
                         age: crate::modals::last_used(summary.modified, now),
@@ -2416,74 +2414,61 @@ fn start_session_scan(
             .collect();
         let needle = query.to_lowercase();
         let mut sent = 0usize;
-        ilar::recall::search_sessions(
-            &store,
-            &query,
-            SEARCH_HITS_PER_SESSION,
-            |entries, hits| {
-                if flag.load(Ordering::Relaxed) {
-                    return false;
-                }
-                let Some(best) = hits.hits.first() else {
-                    return true;
+        ilar::recall::search_sessions(&store, &query, SEARCH_HITS_PER_SESSION, |entries, hits| {
+            if flag.load(Ordering::Relaxed) {
+                return false;
+            }
+            let Some(best) = hits.hits.first() else {
+                return true;
+            };
+            let title = hits
+                .title
+                .clone()
+                .unwrap_or_else(|| hits.session_id.clone());
+            let launched = launched_in
+                .get(&hits.session_id)
+                .and_then(|launched_in| launched_in.as_ref())
+                .map(|path| path.canonicalize().unwrap_or_else(|_| path.clone()));
+            let context = ilar::recall::around(
+                entries,
+                best.event,
+                SEARCH_CONTEXT_RADIUS,
+                SEARCH_CONTEXT_CHARS,
+            )
+            .into_iter()
+            .map(|entry| {
+                let is_hit = entry.event == best.event;
+                let text = if is_hit {
+                    // The slice `around` took runs from the front;
+                    // the match may live past it. Re-center the hit
+                    // entry on the match so the reason this row
+                    // exists is always on screen.
+                    entries
+                        .iter()
+                        .find(|original| original.event == best.event)
+                        .map(|original| {
+                            center_on_match(&original.text, &needle, SEARCH_CONTEXT_CHARS)
+                        })
+                        .unwrap_or(entry.text)
+                } else {
+                    entry.text
                 };
-                let title = hits
-                    .title
-                    .clone()
-                    .unwrap_or_else(|| hits.session_id.clone());
-                let launched = launched_in
-                    .get(&hits.session_id)
-                    .and_then(|launched_in| launched_in.as_ref())
-                    .map(|path| path.canonicalize().unwrap_or_else(|_| path.clone()));
-                let context = ilar::recall::around(
-                    entries,
-                    best.event,
-                    SEARCH_CONTEXT_RADIUS,
-                    SEARCH_CONTEXT_CHARS,
-                )
-                .into_iter()
-                .map(|entry| {
-                    let is_hit = entry.event == best.event;
-                    let text = if is_hit {
-                        // The slice `around` took runs from the front;
-                        // the match may live past it. Re-center the hit
-                        // entry on the match so the reason this row
-                        // exists is always on screen.
-                        entries
-                            .iter()
-                            .find(|original| original.event == best.event)
-                            .map(|original| {
-                                center_on_match(
-                                    &original.text,
-                                    &needle,
-                                    SEARCH_CONTEXT_CHARS,
-                                )
-                            })
-                            .unwrap_or(entry.text)
-                    } else {
-                        entry.text
-                    };
-                    (entry.speaker.label().to_string(), text, is_hit)
-                })
-                .collect();
-                let row = SearchRow {
-                    session_id: hits.session_id.clone(),
-                    title_match: title.to_lowercase().contains(&needle),
-                    title,
-                    event: best.event,
-                    age: crate::modals::last_used(hits.modified, now),
-                    origin: crate::modals::row_origin(
-                        launched.as_deref(),
-                        Some(&cwd),
-                        home.as_deref(),
-                    ),
-                    match_count: hits.hits.len(),
-                    context,
-                };
-                sent += 1;
-                tx.send(vec![row]).is_ok() && sent < MAX_SEARCH_ROWS
-            },
-        );
+                (entry.speaker.label().to_string(), text, is_hit)
+            })
+            .collect();
+            let row = SearchRow {
+                session_id: hits.session_id.clone(),
+                title_match: title.to_lowercase().contains(&needle),
+                title,
+                event: best.event,
+                age: crate::modals::last_used(hits.modified, now),
+                origin: crate::modals::row_origin(launched.as_deref(), Some(&cwd), home.as_deref()),
+                match_count: hits.hits.len(),
+                context,
+            };
+            sent += 1;
+            tx.send(vec![row]).is_ok() && sent < MAX_SEARCH_ROWS
+        });
     });
     (rx, cancel)
 }
@@ -2747,9 +2732,7 @@ async fn run_app(
             let wanted = (search.generation, row.session_id.clone());
             let in_flight = preview_rx
                 .as_ref()
-                .is_some_and(|(generation, sid, _)| {
-                    *generation == wanted.0 && *sid == wanted.1
-                });
+                .is_some_and(|(generation, sid, _)| *generation == wanted.0 && *sid == wanted.1);
             if !in_flight {
                 let (tx, rx) = std::sync::mpsc::channel();
                 let store = store.clone();
@@ -2770,9 +2753,7 @@ async fn run_app(
                                     SEARCH_CONTEXT_CHARS,
                                 )
                                 .into_iter()
-                                .map(|entry| {
-                                    (entry.speaker.label().to_string(), entry.text, false)
-                                })
+                                .map(|entry| (entry.speaker.label().to_string(), entry.text, false))
                                 .collect::<Vec<_>>(),
                             )
                         })
@@ -2950,10 +2931,7 @@ async fn run_app(
             // prompt for, and a failure leaves the session as it was.
             if app.topic.is_none()
                 && topic_handle.is_none()
-                && matches!(
-                    completions.first(),
-                    Some(schedule::Completion::Root(Ok(_)))
-                )
+                && matches!(completions.first(), Some(schedule::Completion::Root(Ok(_))))
             {
                 let resolver = resolver.clone();
                 let store = store.clone();
@@ -3240,10 +3218,7 @@ async fn run_app(
                     // mid-restore and leave half a working tree. It
                     // finishes in seconds; the quit can wait for it.
                     if rewind_task.is_some() {
-                        app.set_notice(
-                            "rewinding — quit after it finishes",
-                            NoticeLevel::Warning,
-                        );
+                        app.set_notice("rewinding — quit after it finishes", NoticeLevel::Warning);
                         continue;
                     }
                     // A stash and undelivered task results are both
@@ -3269,10 +3244,9 @@ async fn run_app(
                     for delivery in &routed {
                         delivery.cancel.cancel();
                     }
-                    let _ = futures::future::join_all(
-                        routed.drain(..).map(|delivery| delivery.handle),
-                    )
-                    .await;
+                    let _ =
+                        futures::future::join_all(routed.drain(..).map(|delivery| delivery.handle))
+                            .await;
                     spawner.shutdown().await;
                     return Ok(AppExit::Quit);
                 }

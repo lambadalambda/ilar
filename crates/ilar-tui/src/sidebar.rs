@@ -815,7 +815,10 @@ mod tests {
         assert_eq!(text.len(), 6, "{text:?}");
         assert_eq!(panel.more_toggle, Some(5));
         assert_eq!(text[5], "▸ +3 more");
-        assert!(panel.lines.iter().all(|line| line.width() <= 24), "{text:?}");
+        assert!(
+            panel.lines.iter().all(|line| line.width() <= 24),
+            "{text:?}"
+        );
 
         // Expanded with room for everything: main, all five, plus the
         // way back.
@@ -860,7 +863,10 @@ mod tests {
         assert!(text[3].starts_with("✉   task number 1"), "{text:?}");
         assert_eq!(text[4], "    explore · delivering · 30s");
         assert!(text[5].starts_with("▸     task number 2"), "{text:?}");
-        assert!(panel.lines.iter().all(|line| line.width() <= 30), "{text:?}");
+        assert!(
+            panel.lines.iter().all(|line| line.width() <= 30),
+            "{text:?}"
+        );
 
         // Both lines of a row are the same click; main is one line.
         let focus = |index: usize| AgentTarget::Focus(format!("session-{index}"));

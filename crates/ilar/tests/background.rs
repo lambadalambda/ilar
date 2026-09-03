@@ -3429,7 +3429,9 @@ async fn a_turn_that_cannot_take_the_writer_marks_itself_never_started() {
     .expect_err("the held writer must decline the turn");
 
     assert!(
-        error.downcast_ref::<ilar::agent::TurnNeverStarted>().is_some(),
+        error
+            .downcast_ref::<ilar::agent::TurnNeverStarted>()
+            .is_some(),
         "not marked never-started: {error:#}"
     );
     assert!(

@@ -1280,9 +1280,7 @@ pub(crate) fn apply_child_loop_event(
             received_bytes,
             last_data,
         } => note_tool_input_progress(lines, id, *received_bytes, *last_data),
-        LoopEvent::ToolInputComplete { id, arguments } => {
-            complete_tool_input(lines, id, arguments)
-        }
+        LoopEvent::ToolInputComplete { id, arguments } => complete_tool_input(lines, id, arguments),
         LoopEvent::SubagentConfigured {
             id,
             description,
@@ -1794,7 +1792,6 @@ pub(crate) fn squash_finished_child(lines: &mut Vec<Line_>) {
     lines.extend(tail);
     lines.shrink_to_fit();
 }
-
 
 /// What a result keeps once its row sits behind a compaction cut.
 /// The head, not the tail: the first lines of a result say what the
@@ -2704,10 +2701,7 @@ mod tests {
             .collect();
         squash_finished_child(&mut lines);
 
-        assert_eq!(
-            lines.len(),
-            SQUASHED_CHILD_HEAD + 1 + SQUASHED_CHILD_TAIL
-        );
+        assert_eq!(lines.len(), SQUASHED_CHILD_HEAD + 1 + SQUASHED_CHILD_TAIL);
         assert!(matches!(&lines[0], Line_::System(text) if text == "line 0"));
         assert!(
             matches!(&lines[SQUASHED_CHILD_HEAD], Line_::System(text) if text.contains("68 line(s) folded")),
@@ -2763,9 +2757,7 @@ mod tests {
     /// no longer remembers these payloads, so RAM stops holding them.
     #[test]
     fn shedding_strips_payloads_but_keeps_the_rows() {
-        let child: Vec<Line_> = (0..100)
-            .map(|i| Line_::System(format!("c{i}")))
-            .collect();
+        let child: Vec<Line_> = (0..100).map(|i| Line_::System(format!("c{i}"))).collect();
         let mut row = agent_row("a", child, false);
         let Line_::Tool {
             argument_detail,
@@ -2810,9 +2802,7 @@ mod tests {
     /// surface, and its own TurnDone squashes it.
     #[test]
     fn a_running_child_is_not_shed() {
-        let child: Vec<Line_> = (0..100)
-            .map(|i| Line_::System(format!("c{i}")))
-            .collect();
+        let child: Vec<Line_> = (0..100).map(|i| Line_::System(format!("c{i}"))).collect();
         let mut lines = vec![agent_row("a", child, true)];
         shed_payloads(&mut lines);
         let Line_::Tool { child_lines, .. } = &lines[0] else {

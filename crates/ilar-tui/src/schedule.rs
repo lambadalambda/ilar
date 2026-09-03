@@ -538,10 +538,8 @@ mod tests {
 
         fn route(&mut self, _app: &mut App, parcel: Parcel) {
             // Detached: the turn slot is not touched.
-            self.log.push(format!(
-                "route:{}",
-                parcel.notification().parent_session_id
-            ));
+            self.log
+                .push(format!("route:{}", parcel.notification().parent_session_id));
         }
 
         fn start_notification_turn(&mut self, _app: &mut App, notification: Notification) {
@@ -1039,7 +1037,9 @@ mod tests {
         );
         let mut runtime = FakeRuntime::new();
 
-        tick(&mut app, Vec::new(), carried, &mut runtime).await.unwrap();
+        tick(&mut app, Vec::new(), carried, &mut runtime)
+            .await
+            .unwrap();
 
         assert_eq!(
             runtime.log,
@@ -1382,7 +1382,9 @@ mod tests {
             app.lines()
         );
         assert!(
-            runtime.log.contains(&"retire:the build is green".to_string()),
+            runtime
+                .log
+                .contains(&"retire:the build is green".to_string()),
             "{:?}",
             runtime.log
         );
@@ -1414,7 +1416,10 @@ mod tests {
         .unwrap();
 
         assert!(
-            runtime.log.iter().all(|entry| !entry.starts_with("retire:")),
+            runtime
+                .log
+                .iter()
+                .all(|entry| !entry.starts_with("retire:")),
             "{:?}",
             runtime.log
         );

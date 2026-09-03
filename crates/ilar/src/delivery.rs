@@ -37,9 +37,7 @@ pub fn is_delivered(parent: &SessionReader, text: &str) -> bool {
 /// [`is_delivered`] against an event slice.
 fn delivered_in(events: &[SessionEvent], text: &str) -> bool {
     events.iter().any(|event| match event {
-        SessionEvent::UserMessage {
-            text: appended, ..
-        } => appended.contains(text),
+        SessionEvent::UserMessage { text: appended, .. } => appended.contains(text),
         _ => false,
     })
 }
@@ -98,10 +96,7 @@ impl Parcel {
     /// re-adopted with a full budget at the next start.
     pub fn climbing(&self, notification: Notification) -> Result<Self, Notification> {
         match self.hops.checked_sub(1) {
-            Some(hops) => Ok(Self {
-                notification,
-                hops,
-            }),
+            Some(hops) => Ok(Self { notification, hops }),
             None => Err(notification),
         }
     }
@@ -274,7 +269,8 @@ mod tests {
         } = disposition(
             Err(anyhow::anyhow!("the writer is gone").context("delivering")),
             parcel(),
-        ) else {
+        )
+        else {
             panic!("a failed delivery must be salvaged, never dropped");
         };
         assert_eq!(salvaged, notification("done"));
@@ -304,7 +300,10 @@ mod tests {
         // log — retiring that one would tombstone the wrong file and
         // leave the real entry to be re-adopted forever.
         assert_eq!(
-            disposition(Ok(RouteOutcome::Propagate(notification("stranded"))), parcel),
+            disposition(
+                Ok(RouteOutcome::Propagate(notification("stranded"))),
+                parcel
+            ),
             Disposition::Exhausted(notification("stranded"))
         );
     }

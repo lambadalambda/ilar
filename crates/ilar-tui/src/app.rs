@@ -32,11 +32,10 @@ use crate::text::{cache_share, format_cost, safe_text};
 use crate::transcript::{
     Line_, ToolState, TranscriptHitTarget, TranscriptRenderCache, append_text_delta,
     append_thought_delta, apply_child_loop_event, apply_subagent_activity, complete_open_thought,
-    complete_tool_execution,
-    complete_tool_input, configure_subagent_row, finish_tool_row, note_tool_input_progress,
-    prune_incomplete_thoughts, push_tool_row, set_tool_arguments, set_tool_tail,
-    start_tool_execution, toggle_note_expansion, toggle_tool_expansion, tool_group_index,
-    transcript_markdown,
+    complete_tool_execution, complete_tool_input, configure_subagent_row, finish_tool_row,
+    note_tool_input_progress, prune_incomplete_thoughts, push_tool_row, set_tool_arguments,
+    set_tool_tail, start_tool_execution, toggle_note_expansion, toggle_tool_expansion,
+    tool_group_index, transcript_markdown,
 };
 use crate::{Activity, MAX_GOAL_ROUNDS, NoticeLevel, history, theme};
 
@@ -82,12 +81,7 @@ pub(crate) struct FocusView {
 }
 
 impl FocusView {
-    pub(crate) fn new(
-        session_id: String,
-        title: String,
-        lines: Vec<Line_>,
-        running: bool,
-    ) -> Self {
+    pub(crate) fn new(session_id: String, title: String, lines: Vec<Line_>, running: bool) -> Self {
         Self {
             session_id,
             title,
@@ -118,7 +112,10 @@ impl FocusView {
             self.follow_tail = false;
         } else if rows > 0 {
             let max_scroll = self.max_scroll();
-            self.scroll_top = self.scroll_top.saturating_add(rows as usize).min(max_scroll);
+            self.scroll_top = self
+                .scroll_top
+                .saturating_add(rows as usize)
+                .min(max_scroll);
             self.follow_tail = self.scroll_top == max_scroll;
         }
     }
@@ -399,8 +396,7 @@ pub(crate) struct App {
     /// budget, an activity whose row never appears (a parent this
     /// transcript does not host) walked the whole transcript every
     /// frame for the rest of the session and crowded the cap.
-    pending_subagent_activity:
-        std::collections::VecDeque<(u16, ilar::subagent::SubagentActivity)>,
+    pending_subagent_activity: std::collections::VecDeque<(u16, ilar::subagent::SubagentActivity)>,
     pub(crate) todos: std::sync::Arc<std::sync::Mutex<ilar::todo::TodoList>>,
 }
 
@@ -2022,8 +2018,7 @@ impl App {
     /// second press is the answer to everything said; the repeat
     /// quits. `None` means quit now.
     pub(crate) fn quit_warning(&mut self, undelivered: usize) -> Option<String> {
-        if (self.input_stash.is_empty() && undelivered == 0)
-            || std::mem::take(&mut self.quit_armed)
+        if (self.input_stash.is_empty() && undelivered == 0) || std::mem::take(&mut self.quit_armed)
         {
             return None;
         }
@@ -2504,7 +2499,13 @@ mod tests {
         app.set_stall_notice("provider silent for 310s — Esc aborts, the turn will retry-resume");
         assert!(app.notice.as_ref().unwrap().text.contains("310"));
         app.set_stall_notice("stall watchdog: provider silent for 600s — aborting the turn");
-        assert!(app.notice.as_ref().unwrap().text.starts_with("stall watchdog:"));
+        assert!(
+            app.notice
+                .as_ref()
+                .unwrap()
+                .text
+                .starts_with("stall watchdog:")
+        );
     }
 
     /// A retry cycle or a finishing tool is not provider silence: any
@@ -3297,8 +3298,7 @@ mod tests {
             )))
             .collect();
 
-        let mut wide =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 40)).unwrap();
+        let mut wide = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 40)).unwrap();
         wide.draw(|frame| app.render(frame)).unwrap();
         app.open_search();
         app.search_query = "needle".into();
@@ -4173,7 +4173,10 @@ mod tests {
 
         app.focus.as_mut().unwrap().running = false;
         let finished = screen(&mut app);
-        assert!(finished.contains("agent finished · Esc returns"), "{finished}");
+        assert!(
+            finished.contains("agent finished · Esc returns"),
+            "{finished}"
+        );
         assert!(finished.contains("seeded child reply"), "{finished}");
 
         // Esc's path: the root transcript comes back as it was.
@@ -4292,9 +4295,9 @@ mod tests {
             app.lines
                 .iter()
                 .find_map(|line| match line {
-                    Line_::Tool { id: row, result, .. } if row == id => {
-                        result.as_ref().map(|kept| kept.chars().count())
-                    }
+                    Line_::Tool {
+                        id: row, result, ..
+                    } if row == id => result.as_ref().map(|kept| kept.chars().count()),
                     _ => None,
                 })
                 .unwrap()

@@ -1398,24 +1398,51 @@ mod tests {
             ts: chrono::Utc::now(),
         };
         let mut call_inputs = std::collections::HashMap::new();
-        let appended = frame(TailMessage::Update(TailUpdate::Appended {
+        let appended = frame(
+            TailMessage::Update(TailUpdate::Appended {
                 line: 42,
                 event: event.clone(),
-            }), 7, &mut call_inputs);
+            }),
+            7,
+            &mut call_inputs,
+        );
         assert_eq!(appended.line, 42);
         assert!(!appended.terminal);
 
-        let rewound = frame(TailMessage::Update(TailUpdate::Rewound {
+        let rewound = frame(
+            TailMessage::Update(TailUpdate::Rewound {
                 line: 43,
                 to: 7,
                 event,
-            }), 42, &mut call_inputs);
+            }),
+            42,
+            &mut call_inputs,
+        );
         assert_eq!(rewound.line, 43);
 
-        assert_eq!(frame(TailMessage::Update(TailUpdate::Resync), 43, &mut call_inputs).line, 0);
-        let deleted = frame(TailMessage::Update(TailUpdate::Deleted), 43, &mut call_inputs);
+        assert_eq!(
+            frame(
+                TailMessage::Update(TailUpdate::Resync),
+                43,
+                &mut call_inputs
+            )
+            .line,
+            0
+        );
+        let deleted = frame(
+            TailMessage::Update(TailUpdate::Deleted),
+            43,
+            &mut call_inputs,
+        );
         assert_eq!(deleted.line, 43);
         assert!(deleted.terminal);
-        assert!(frame(TailMessage::Failed("newer ilar?".into()), 43, &mut call_inputs).terminal);
+        assert!(
+            frame(
+                TailMessage::Failed("newer ilar?".into()),
+                43,
+                &mut call_inputs
+            )
+            .terminal
+        );
     }
 }

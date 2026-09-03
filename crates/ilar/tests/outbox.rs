@@ -92,7 +92,10 @@ fn a_delivered_notification_compacts_away() {
     let root = create_session(&store, None);
     let text = "<task-notification>\nTask \"bg survey\" completed.\n</task-notification>";
     outbox::record(dir.path(), &notification(&root, text));
-    let undelivered = notification(&root, "<task-notification>\nstill waiting\n</task-notification>");
+    let undelivered = notification(
+        &root,
+        "<task-notification>\nstill waiting\n</task-notification>",
+    );
     outbox::record(dir.path(), &undelivered);
     assert_eq!(outbox::pending(&store, dir.path(), &root).len(), 2);
 
@@ -177,7 +180,10 @@ fn a_dead_sessions_file_is_swept() {
     let root = create_session(&store, None);
     outbox::record(
         dir.path(),
-        &notification("no-such-session", "<task-notification>\nlost\n</task-notification>"),
+        &notification(
+            "no-such-session",
+            "<task-notification>\nlost\n</task-notification>",
+        ),
     );
 
     assert!(outbox::pending(&store, dir.path(), &root).is_empty());
@@ -254,7 +260,11 @@ async fn a_background_completion_rides_the_outbox_until_delivered() {
         .await
         .expect("notification within timeout")
         .expect("notification present");
-    assert!(published.text.contains("outboxed answer"), "{}", published.text);
+    assert!(
+        published.text.contains("outboxed answer"),
+        "{}",
+        published.text
+    );
 
     // The channel delivered in-process, but nothing reached the
     // parent's log yet: the durable copy still counts as pending.
@@ -285,7 +295,9 @@ fn a_publish_during_compaction_is_not_erased() {
     append_user_message(&store, &parent, "delivered already");
     outbox::record(&dir, &notification(&parent, "delivered already"));
 
-    let published: Vec<String> = (0..200).map(|index| format!("live entry {index}")).collect();
+    let published: Vec<String> = (0..200)
+        .map(|index| format!("live entry {index}"))
+        .collect();
     let writer = {
         let dir = dir.clone();
         let parent = parent.clone();

@@ -482,9 +482,7 @@ fn session_own_spend(
     let mut cost = Some(0.0);
     for event in session.events() {
         if let ilar::session::SessionEvent::AssistantMessage {
-            model,
-            usage: step,
-            ..
+            model, usage: step, ..
         } = event
         {
             accrue_usage(&mut usage, &mut cost, model, step);
@@ -554,8 +552,14 @@ fn restore_child_activity(
         if liveness == Liveness::Settled {
             crate::transcript::squash_finished_child(&mut restored);
         }
-        let (grand_usage, grand_cost) =
-            restore_child_activity(&mut restored, store, session_id, depth + 1, liveness, counted);
+        let (grand_usage, grand_cost) = restore_child_activity(
+            &mut restored,
+            store,
+            session_id,
+            depth + 1,
+            liveness,
+            counted,
+        );
         add_usage(&mut task_usage, &grand_usage);
         task_cost = add_costs(task_cost, grand_cost);
         // The same rule the live path applies (fc625c6): a call that has
@@ -682,8 +686,7 @@ mod tests {
             .unwrap();
         drop(session);
 
-        let restored =
-            restored_session_view_with_store(
+        let restored = restored_session_view_with_store(
             &store.load(&session_id).unwrap(),
             &store,
             Liveness::Settled,

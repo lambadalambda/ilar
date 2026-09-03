@@ -27,8 +27,8 @@ use crate::modals::{
 use crate::selection::{highlight_transcript_selection, selected_rows_unchanged, transcript_cells};
 use crate::sidebar::{
     AgentPanel, ServicePanel, agent_panel, carve_panel, carve_panel_capped, content_areas,
-    disclosure_hit,
-    render_todo_sidebar_snapshot, service_panel, todo_render_snapshot, todo_summary, underline_row,
+    disclosure_hit, render_todo_sidebar_snapshot, service_panel, todo_render_snapshot,
+    todo_summary, underline_row,
 };
 use crate::text::{
     Truncation, abbreviated_path, context_meter, context_usage, format_bytes, format_cost,
@@ -364,10 +364,7 @@ impl App {
                     None => format!("Σ {}", format_tokens_compact(tokens)),
                 };
                 if tasks > 0 {
-                    total.push_str(&format!(
-                        " (tasks {})",
-                        format_tokens_compact(tasks)
-                    ));
+                    total.push_str(&format!(" (tasks {})", format_tokens_compact(tasks)));
                 }
                 total
             })
@@ -528,8 +525,7 @@ impl App {
                 Truncation::Right
             )
         );
-        let Some(inner) =
-            crate::modals::modal_frame(frame, area, &title, TOOL_ACTIVE, footer)
+        let Some(inner) = crate::modals::modal_frame(frame, area, &title, TOOL_ACTIVE, footer)
         else {
             return;
         };
@@ -598,7 +594,8 @@ impl App {
         self.refresh_transcript_cache(text_width, now);
         // Streaming shifts row indices; keep search matches in sync with
         // the rows actually on screen.
-        if self.search_active && self.search_computed_at != Some((self.transcript_revision, text_width))
+        if self.search_active
+            && self.search_computed_at != Some((self.transcript_revision, text_width))
         {
             self.search_matches = self.transcript_cache.matching_rows(&self.search_query);
             self.search_current = self
@@ -958,8 +955,7 @@ impl App {
 
         // A focus view routes keys nowhere near the prompt: the input
         // stays visible but must not look like it is listening.
-        let input_focused =
-            input_accepts_keys(self.busy, self.has_modal() || self.focus.is_some());
+        let input_focused = input_accepts_keys(self.busy, self.has_modal() || self.focus.is_some());
         let input_block = Block::default()
             .borders(Borders::ALL)
             .border_type(if input_focused {
