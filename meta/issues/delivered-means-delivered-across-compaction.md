@@ -51,3 +51,18 @@ task notifications.
 - Evidence: `~/.local/state/ilar/outbox`, compared against
   `~/.local/state/ilar/sessions` by exact text containment in
   `user_message` events, split at each log's last `compaction` event.
+
+## Outcome (2026-09-03)
+
+`delivery::is_delivered` now takes the store and the session id and
+reads the whole canonical log through `SessionStore::audit_events`,
+so a delivery the session has since compacted away is still a
+delivery (a rewound one too — a repeat is the worse failure). All
+three callers go through it: `outbox::pending`, `route_notification`
+and serve's adoption. Regression tests on both layers: deliver,
+compact everything out of the window, and neither `is_delivered` nor
+`pending` forgets. The next open of each affected root compacts its
+stale outbox file down to what was genuinely never delivered.
+
+The design questions in the notes — resurrecting finished subagents
+for late mail, one turn per held completion — are untouched.

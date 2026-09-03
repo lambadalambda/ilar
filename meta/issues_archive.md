@@ -304,3 +304,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [OpenCode rows carry their ladders](issues/opencode-rows-carry-their-ladders.md)
 - [x] [OpenCode requests name their session](issues/opencode-requests-name-their-session.md)
 - [x] [Rate limits are waited out](issues/rate-limits-are-waited-out.md)
+- [x] [Delivered means delivered across compaction](issues/delivered-means-delivered-across-compaction.md)

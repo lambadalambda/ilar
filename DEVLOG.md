@@ -1,5 +1,21 @@
 # DEVLOG
 
+## 2026-09-03 — Stale completions on reopen
+
+The user reported reopening a session and having a dozen task
+completions delivered to the root that had already reached a
+subagent. The outbox on this machine held 246 pending entries; 242 of
+them already sat in a `user_message` of their target log — nearly all
+*before* that log's last compaction. `delivery::is_delivered` judged
+delivery against `SessionReader::events()`, which is the active
+compaction window, so everything delivered before a compaction looked
+new again at every reopen; the 58 entries addressed to subagents then
+resumed each dead subagent, and each resume propagated a fresh
+"Nested task completed" to the root. The predicate now reads the
+whole log via `SessionStore::audit_events`. Measured by comparing
+`~/.local/state/ilar/outbox` with the session logs, split at each
+log's last `compaction` event.
+
 ## 2026-09-03 — OpenCode Zen and Go
 
 ### Findings from live probes (one-token requests, every listed model)
