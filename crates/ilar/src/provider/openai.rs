@@ -24,6 +24,10 @@ enum Auth {
 #[derive(Clone)]
 pub struct OpenAIProvider {
     auth: Auth,
+    /// Prefix an ilar model id must carry to be served here: `openai`
+    /// for the API and ChatGPT backends, the gateway's own name when a
+    /// third party fronts the Responses wire (see [`super::opencode`]).
+    prefix: &'static str,
     base_url: String,
     prompt_cache_key: bool,
     session_headers: bool,
@@ -38,6 +42,7 @@ impl OpenAIProvider {
         let prompt_cache_key = base_url.is_none();
         Self {
             auth: Auth::ApiKey(api_key),
+            prefix: "openai",
             base_url: base_url.unwrap_or_else(|| "https://api.openai.com/v1".into()),
             prompt_cache_key,
             // Codex-backend headers; the public API has no use for them.
@@ -52,12 +57,20 @@ impl OpenAIProvider {
         let prompt_cache_key = base_url.is_none();
         Self {
             auth: Auth::ChatGpt { store },
+            prefix: "openai",
             base_url: base_url.unwrap_or_else(|| "https://chatgpt.com/backend-api/codex".into()),
             prompt_cache_key,
             session_headers: prompt_cache_key,
             token_url: format!("{}/oauth/token", crate::auth::AUTH_BASE),
             http: transport::streaming_client(),
         }
+    }
+
+    /// Serve ids under another provider's prefix: the same wire behind a
+    /// gateway that names its models `<prefix>/<id>`.
+    pub fn with_prefix(mut self, prefix: &'static str) -> Self {
+        self.prefix = prefix;
+        self
     }
 
     /// Test hook: point the refresh endpoint at a mock server.
@@ -98,8 +111,11 @@ impl OpenAIProvider {
         let reasoning_summaries =
             crate::model::find(&req.model).is_some_and(|model| model.reasoning_summaries);
         let (provider, model_id) = resolve_model(&req.model)?;
-        if provider != "openai" {
-            anyhow::bail!("model provider mismatch: expected openai, got {provider}");
+        if provider != self.prefix {
+            anyhow::bail!(
+                "model provider mismatch: expected {}, got {provider}",
+                self.prefix
+            );
         }
         let input = req
             .messages
@@ -269,7 +285,7 @@ fn wire_tool(tool: &ToolDefinition) -> serde_json::Value {
 
 impl Provider for OpenAIProvider {
     fn provider_prefix(&self) -> Option<&'static str> {
-        Some("openai")
+        Some(self.prefix)
     }
 
     fn stream(&self, req: Request) -> anyhow::Result<EventStream> {

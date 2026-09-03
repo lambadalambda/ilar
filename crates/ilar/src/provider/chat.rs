@@ -1,8 +1,9 @@
 //! OpenAI-compatible chat-completions wire (`POST {base_url}/chat/completions`).
 //!
 //! One implementation serves every endpoint that speaks this dialect:
-//! z.ai's coding-plan endpoint (see [`super::zai`]) and the
-//! `[models.<name>]` entries a user points at their own server. What
+//! z.ai's coding-plan endpoint (see [`super::zai`]), the OpenCode
+//! gateways (see [`super::opencode`]) and the `[models.<name>]` entries
+//! a user points at their own server. What
 //! differs between them is [`ChatDialect`] and nothing else — the body,
 //! the message building, the SSE mapping and the transport glue are
 //! shared, so a fix to any of them lands on both.
@@ -67,6 +68,21 @@ impl ChatDialect {
             vision: None,
             options: serde_json::Value::Null,
             tool_stream: true,
+        }
+    }
+
+    /// An OpenCode gateway (Zen or Go): keyed, vision from the catalog
+    /// row, wire id straight from the ilar id, and none of z.ai's body
+    /// fields. The prefix is the gateway's, so one dialect serves both.
+    pub(super) fn opencode(prefix: &'static str, api_key: String, base_url: String) -> Self {
+        Self {
+            prefix,
+            base_url,
+            api_key: Some(api_key),
+            wire_model: None,
+            vision: None,
+            options: serde_json::Value::Null,
+            tool_stream: false,
         }
     }
 
@@ -475,7 +491,13 @@ impl TransportEventMapper for OpenAiMapper {
         }
         if let Some(choice) = value["choices"].get(0) {
             let delta = &choice["delta"];
-            if let Some(reasoning) = delta["reasoning_content"].as_str()
+            // `reasoning_content` is the DeepSeek/z.ai spelling; the
+            // OpenRouter-style servers behind OpenCode Zen (Kimi,
+            // Nemotron, Ling) send the same deltas as `reasoning`.
+            let reasoning = delta["reasoning_content"]
+                .as_str()
+                .or_else(|| delta["reasoning"].as_str());
+            if let Some(reasoning) = reasoning
                 && !reasoning.is_empty()
             {
                 self.thinking_open = true;

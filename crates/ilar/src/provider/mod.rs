@@ -10,6 +10,7 @@ mod transport;
 
 pub mod chat;
 pub mod openai;
+pub mod opencode;
 pub mod zai;
 pub use event::{ProviderEvent, StopReason};
 pub use mock::MockProvider;
