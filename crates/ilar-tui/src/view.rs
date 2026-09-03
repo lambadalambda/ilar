@@ -463,21 +463,19 @@ impl App {
         // A waiting message says what rides with it: the strip has one
         // line per entry, so the attachments are counted here where the
         // transcript row lists them.
-        let entries: Vec<(&str, String)> = attachments
+        let entries: Vec<(String, String)> = attachments
             .into_iter()
-            .map(|label| ("attached · sends with your next message", label))
-            .chain(self.pending_steers.iter().map(|message| {
-                (
-                    "steering · next step",
-                    crate::transcript::pending_summary(message),
-                )
-            }))
-            .chain(self.queued_messages.iter().map(|message| {
-                (
-                    "queued · when the turn ends",
-                    crate::transcript::pending_summary(message),
-                )
-            }))
+            .map(|label| ("attached · sends with your next message".to_string(), label))
+            .chain(
+                self.pending_steers
+                    .iter()
+                    .map(|message| pending_entry(message, "steering", "next step")),
+            )
+            .chain(
+                self.queued_messages
+                    .iter()
+                    .map(|message| pending_entry(message, "queued", "when the turn ends")),
+            )
             .collect();
         if entries.is_empty() {
             return Vec::new();
@@ -1190,6 +1188,22 @@ impl App {
 
 /// "12.3 KiB" while data flows, "12.3 KiB · no data Ns" once the stream
 /// has been silent past the stall threshold. `None` before any turn.
+/// The strip row a waiting message gets. A task or tool result is
+/// mail, not something the user typed: it wears the collapsed headline
+/// its transcript row will wear, under its own name, and never the
+/// `<task-notification>` envelope. `kind` is the typed message's fate
+/// ("steering", "queued"); `when` is shared, since a result waits the
+/// same way words do.
+fn pending_entry(message: &ilar::agent::Steer, kind: &str, when: &str) -> (String, String) {
+    match crate::app::queued_result_headline(message) {
+        Some(headline) => (format!("task result · {when}"), headline),
+        None => (
+            format!("{kind} · {when}"),
+            crate::transcript::pending_summary(message),
+        ),
+    }
+}
+
 pub(crate) fn stream_liveness(
     received: u64,
     last_data: Option<std::time::Instant>,

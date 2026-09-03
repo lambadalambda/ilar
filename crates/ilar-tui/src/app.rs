@@ -182,7 +182,7 @@ fn is_notification_envelope(text: &str) -> bool {
 /// The collapsed headline a queued task/tool result wears in the
 /// pending manager — the same first line its transcript row would
 /// show. `None` for an ordinary message.
-fn queued_result_headline(message: &ilar::agent::Steer) -> Option<String> {
+pub(crate) fn queued_result_headline(message: &ilar::agent::Steer) -> Option<String> {
     task_notification_display(&message.text)
         .or_else(|| tool_notification_display(&message.text))
         .map(|display| display.lines().next().unwrap_or_default().to_string())
@@ -2036,6 +2036,12 @@ impl App {
             ));
         }
         Some(format!("{} — Ctrl-D again quits", parts.join("; ")))
+    }
+
+    /// The notice line's text, for tests that assert what stays off it.
+    #[cfg(test)]
+    pub(crate) fn notice_text(&self) -> Option<&str> {
+        self.notice.as_ref().map(|notice| notice.text.as_str())
     }
 
     pub(crate) fn set_notice(&mut self, text: impl Into<String>, level: NoticeLevel) {
@@ -5041,6 +5047,39 @@ mod tests {
         assert!(screen.contains("Carbon"), "{screen}");
         assert!(screen.contains("save"), "{screen}");
         assert!(screen.contains("undo"), "{screen}");
+    }
+
+    /// A waiting task result is mail, not a typed message: the strip
+    /// shows the headline its transcript row will wear, under its own
+    /// fate, never the envelope.
+    #[test]
+    fn a_waiting_task_result_wears_its_headline() {
+        let mut app = App::new();
+        app.pending_steers = vec![
+            "<task-notification>\nTask \"bg survey\" completed.\n<result>\nall good\n</result>\n</task-notification>".into(),
+            "go left".into(),
+        ];
+        app.queued_messages = vec![
+            "<tool-notification>\nBackground job job-1 (\"Run checks\") completed.\n</tool-notification>".into(),
+        ];
+        let text = app
+            .pending_strip_lines(100)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            text,
+            vec![
+                " ↳ task result · next step: bg survey completed.",
+                " ↳ steering · next step: go left",
+                " ↳ task result · when the turn ends: job-1 (\"Run checks\") completed.",
+            ]
+        );
     }
 
     #[test]
