@@ -41,6 +41,12 @@
   models.dev also lists `max` on gpt-5.6-* for the openai provider,
   so those rows gained it too.
 
+- OpenCode mailed the same day that requests without
+  `x-opencode-session` will start erroring on 2026-09-06. opencode sends
+  that plus `x-opencode-request`, `x-opencode-client` and a User-Agent
+  on every gateway call; ilar sent none (reqwest sets no User-Agent).
+  Now an `Affinity` policy on the transport owns these per backend.
+
 ### Live smoke
 
 `tests/smoke_opencode.rs` (ignored, needs `ILAR_OPENCODE_API_KEY`)

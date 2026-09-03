@@ -302,3 +302,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Qwen and MiniMax answer on the chat wire](issues/qwen-and-minimax-answer-on-the-chat-wire.md)
 - [x] [The quality gates are green](issues/the-quality-gates-are-green.md)
 - [x] [OpenCode rows carry their ladders](issues/opencode-rows-carry-their-ladders.md)
+- [x] [OpenCode requests name their session](issues/opencode-requests-name-their-session.md)

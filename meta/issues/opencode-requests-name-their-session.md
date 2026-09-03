@@ -28,3 +28,15 @@ them and about to be refused.
   the session equal to the request's `cache_key`; a z.ai request does
   not carry them.
 - Live smoke still passes on both wires.
+
+## Outcome (2026-09-03)
+
+An `Affinity` policy in transport.rs now owns the conversation headers
+for every wire: `None` (public OpenAI, z.ai, custom), `Codex`
+(`session-id`/`thread-id`, unchanged) and `OpenCode`
+(`x-opencode-session`, `x-opencode-client: ilar`,
+`User-Agent: ilar/<version>`). Both OpenCode wires carry it; a request
+outside any session (topic naming) names a per-process session so
+nothing goes out anonymous. Wire-tested on both wires and on z.ai's
+absence; live smoke green on tenco. The mail itself was about the
+Python OpenAI SDK, not ilar — ilar's requests had no user agent at all.
