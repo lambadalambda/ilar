@@ -1652,7 +1652,11 @@ task's scope yourself; continue only clearly disjoint work."
         // another process delivering the same completion; the parent's
         // own log is the truth, and delivering twice is worse than the
         // load this check costs.
-        if crate::delivery::is_delivered(&parent, &notification.text) {
+        if crate::delivery::is_delivered(
+            &self.store,
+            &notification.parent_session_id,
+            &notification.text,
+        ) {
             return Ok(RouteOutcome::Complete);
         }
         let meta = parent

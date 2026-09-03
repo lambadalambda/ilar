@@ -16,11 +16,11 @@
 //! driver that forgets to salvage now fails to compile instead of
 //! quietly losing a child's work.
 
-use crate::session::{SessionEvent, SessionReader};
+use crate::session::{SessionEvent, SessionStore};
 use crate::subagent::{Notification, RouteOutcome};
 
 /// Whether this text already sits in a `UserMessage` of the target's
-/// log.
+/// log — the *whole* log, not the active compaction window.
 ///
 /// The log is the one artifact every process shares, so it is the only
 /// honest answer to "did this arrive?" — a second ilar may have
@@ -28,10 +28,22 @@ use crate::subagent::{Notification, RouteOutcome};
 /// `contains` rather than equality because a delivering prompt can
 /// carry queued steers ahead of the notification text.
 ///
+/// Read through the canonical audit walk rather than a loaded reader:
+/// a reader holds only the events since the last compaction, and
+/// judging delivery by that window made every reopen of a compacted
+/// session re-deliver everything delivered before the compaction (72
+/// stale completions for one root, measured 2026-09-03). The audit
+/// view also keeps rewound tails, so a delivery the user later rewound
+/// past still counts — a repeat is the worse failure. An unreadable log
+/// reads as undelivered, which errs toward delivering.
+///
 /// Accepted limitation, the same one the outbox compaction documents:
 /// two byte-identical notification texts for one parent dedupe as one.
-pub fn is_delivered(parent: &SessionReader, text: &str) -> bool {
-    delivered_in(parent.events(), text)
+pub fn is_delivered(store: &SessionStore, session_id: &str, text: &str) -> bool {
+    store
+        .audit_events(session_id)
+        .map(|events| delivered_in(&events, text))
+        .unwrap_or(false)
 }
 
 /// [`is_delivered`] against an event slice.
@@ -206,8 +218,10 @@ mod tests {
         assert!(!delivered_in(&events, "done"));
     }
 
+    /// The store answers from the whole log: a delivery stays one after
+    /// the session compacts it out of the active window.
     #[test]
-    fn a_reader_answers_the_same_as_its_events() {
+    fn the_store_answers_from_the_whole_log_across_compaction() {
         let dir = tempfile::tempdir().unwrap();
         let store = SessionStore::new(dir.path().to_path_buf());
         let session_id = new_id();
@@ -230,10 +244,26 @@ mod tests {
             })
             .unwrap();
         drop(session);
+        assert!(is_delivered(&store, &session_id, "the completion"));
+        assert!(!is_delivered(&store, &session_id, "another completion"));
 
-        let reader = store.load(&session_id).unwrap();
-        assert!(is_delivered(&reader, "the completion"));
-        assert!(!is_delivered(&reader, "another completion"));
+        let mut session = store.acquire_writer(&session_id).unwrap().load().unwrap();
+        let kept_from = session.events().len();
+        session
+            .append(SessionEvent::Compaction {
+                id: new_id(),
+                summary: "earlier: a completion arrived".into(),
+                kept_from,
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        drop(session);
+        assert!(
+            !delivered_in(store.load(&session_id).unwrap().events(), "the completion"),
+            "the window no longer holds it"
+        );
+        assert!(is_delivered(&store, &session_id, "the completion"));
+        assert!(!is_delivered(&store, "not-a-session", "the completion"));
     }
 
     /// The mapping every driver folds. Pinned as a whole, because the

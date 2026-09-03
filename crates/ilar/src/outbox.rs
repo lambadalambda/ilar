@@ -173,8 +173,8 @@ pub fn pending(store: &SessionStore, dir: &Path, root_session_id: &str) -> Vec<N
             continue;
         };
         let parent_id = parent_id.to_string();
-        let parent = match store.load(&parent_id) {
-            Ok(parent) => parent,
+        match store.load(&parent_id) {
+            Ok(_) => {}
             Err(error)
                 if matches!(
                     error.kind(),
@@ -192,7 +192,7 @@ pub fn pending(store: &SessionStore, dir: &Path, root_session_id: &str) -> Vec<N
             // deleting here would turn a transient IO error into
             // permanent loss. Leave the file for the next open.
             Err(_) => continue,
-        };
+        }
         if !reaches_root(store, &parent_id, root_session_id) {
             // Another process's tree: not ours to adopt or to compact.
             continue;
@@ -215,15 +215,15 @@ pub fn pending(store: &SessionStore, dir: &Path, root_session_id: &str) -> Vec<N
         // Delivery check: `crate::delivery::is_delivered`, the one
         // definition every driver shares — substring, because a
         // delivering prompt can carry queued steers ahead of the
-        // notification. Session logs are append-only (compaction
-        // appends, never rewrites), so scanning the full event list is
-        // sound. A retired entry counts as delivered too: its salvage
-        // into a transcript was the delivery of last resort.
+        // notification, and over the whole log, because a delivery
+        // the session has since compacted away is still a delivery.
+        // A retired entry counts as delivered too: its salvage into a
+        // transcript was the delivery of last resort.
         let kept: Vec<Notification> = recorded
             .into_iter()
             .filter(|notification| {
                 !retired.contains(&notification.text)
-                    && !crate::delivery::is_delivered(&parent, &notification.text)
+                    && !crate::delivery::is_delivered(store, &parent_id, &notification.text)
             })
             .collect();
         if kept.is_empty() {

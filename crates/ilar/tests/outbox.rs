@@ -113,6 +113,50 @@ fn a_delivered_notification_compacts_away() {
     );
 }
 
+/// Delivery is for the life of the log, not the life of the compaction
+/// window: a completion delivered before the session compacted is still
+/// delivered afterwards. Judging it by the active window alone made
+/// every reopen of a compacted session re-deliver its whole backlog —
+/// 72 stale completions for one root, measured 2026-09-03.
+#[test]
+fn a_delivery_before_compaction_still_counts() {
+    let store = temp_store();
+    let dir = tempfile::tempdir().unwrap();
+    let root = create_session(&store, None);
+    let text = "<task-notification>\nTask \"bg survey\" completed.\n</task-notification>";
+    outbox::record(dir.path(), &notification(&root, text));
+    append_user_message(&store, &root, text);
+    assert!(outbox::pending(&store, dir.path(), &root).is_empty());
+
+    // Re-record (a second process may publish the same completion) and
+    // compact everything so far out of the active window.
+    outbox::record(dir.path(), &notification(&root, text));
+    let mut session = store.acquire_writer(&root).unwrap().load().unwrap();
+    let kept_from = session.events().len();
+    session
+        .append(SessionEvent::Compaction {
+            id: new_id(),
+            summary: "earlier: a survey ran and reported".into(),
+            kept_from,
+            ts: chrono::Utc::now(),
+        })
+        .unwrap();
+    drop(session);
+    let window = store.load(&root).unwrap();
+    assert!(
+        !window
+            .events()
+            .iter()
+            .any(|event| matches!(event, SessionEvent::UserMessage { text: t, .. } if t == text)),
+        "the delivery must be outside the active window for this test to mean anything"
+    );
+
+    assert!(
+        outbox::pending(&store, dir.path(), &root).is_empty(),
+        "a delivery before compaction was judged undelivered"
+    );
+}
+
 /// A retired entry — one whose text was salvaged into a transcript
 /// after a terminal delivery failure — stops pending: the salvage was
 /// the delivery of last resort, and the next open must not repeat it.

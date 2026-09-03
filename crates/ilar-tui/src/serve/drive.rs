@@ -968,14 +968,9 @@ impl Consumer {
         let store = self.turn.runtime.store.clone();
         let id = self.session_id.clone();
         let text = notification.text.clone();
-        tokio::task::spawn_blocking(move || {
-            let Ok(session) = store.load(&id) else {
-                return false;
-            };
-            ilar::delivery::is_delivered(&session, &text)
-        })
-        .await
-        .unwrap_or(false)
+        tokio::task::spawn_blocking(move || ilar::delivery::is_delivered(&store, &id, &text))
+            .await
+            .unwrap_or(false)
     }
 
     /// What the outbox holds for this session's tree. Blocking work —
