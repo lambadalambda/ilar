@@ -44,7 +44,9 @@ stranding the message. Until delivery, every pending message is listed
 in a strip above the input with its fate — `steering · next step` or
 `queued · when the turn ends` — and its row disappears the moment the
 model actually receives it, which is also when the text appears in the
-transcript. If a turn ends without delivering a steer — you aborted, or
+transcript. A subagent's result waiting its turn is listed the same way
+as `task result · next step`, by the one-line headline its transcript
+row will wear, so mail never reads as something you typed. If a turn ends without delivering a steer — you aborted, or
 it errored — the undelivered steers move to the queue rather than
 vanishing. Turns with no steer channel (a notification routed from
 another session) still queue as before.
@@ -180,7 +182,12 @@ the model maintains as it plans (**Ctrl-T** opens the full overlay),
 running services — every one that runs, with exited ones collapsed
 into a count that clicks open to show who died how — and, while subagents are in flight, an `agents` panel
 with each task's description, agent, a `bg` marker for detached work,
-and a live elapsed time.
+and a live elapsed time. A result on its way to another session shows
+there too, as a `delivering` row, and when it lands the transcript gets
+one quiet line — `✉ "review the diff" delivered to explorer · survey the
+API` — naming the session by its agent and task rather than by id. Only
+a result that cannot be delivered claims the notice line above the
+input.
 
 ## Transcript
 
