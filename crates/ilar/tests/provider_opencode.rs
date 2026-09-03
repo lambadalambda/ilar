@@ -197,3 +197,21 @@ async fn kimi_usage_trailer_repeats_the_finish_reason() {
     assert_eq!(usage.input_tokens, 211);
     assert_eq!(usage.output_tokens, 99);
 }
+
+/// A content-free trailer may repeat the finish reason, not change it.
+#[tokio::test]
+async fn a_trailer_that_changes_the_finish_reason_is_refused() {
+    let sse = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}],\"usage\":{}}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let (base, _server) = http_server(sse);
+    let provider = OpenCodeProvider::zen("k".into(), Some(base));
+    let events = drain(provider.stream(request("opencode/kimi-k3")).unwrap()).await;
+    assert!(
+        matches!(events.last(), Some(ProviderEvent::Error(error)) if error.contains("duplicate")),
+        "{events:?}"
+    );
+}

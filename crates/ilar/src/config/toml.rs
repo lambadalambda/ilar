@@ -704,7 +704,7 @@ impl Config {
         &self.state_dir
     }
 
-    /// Deterministic config for tests: both providers keyed, no env.
+    /// Deterministic config for tests: openai and zai keyed, no env.
     pub fn default_for_tests() -> Self {
         let mut providers = HashMap::new();
         providers.insert(

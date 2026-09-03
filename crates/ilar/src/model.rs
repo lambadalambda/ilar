@@ -1608,19 +1608,21 @@ pub fn variant_options(full_id: &str, variant: Option<&str>) -> anyhow::Result<s
     {
         anyhow::bail!("unsupported variant {variant:?} for {full_id}");
     }
-    match (model.provider, model.access) {
-        ("openai", _) | (_, ModelAccess::OpenCodeResponses) => {
+    // The wire decides the spelling, and the access says which wire.
+    match model.access {
+        ModelAccess::OpenAi | ModelAccess::OpenAiBoth | ModelAccess::OpenCodeResponses => {
             Ok(serde_json::json!({"reasoning": {"effort": variant}}))
         }
         // GLM-5.3 thinking levels; `thinking.type` must be "enabled"
         // (disabling is unsupported and rejected by the API).
-        ("zai", _) => Ok(serde_json::json!({
+        ModelAccess::ZaiCodingPlan | ModelAccess::ZaiBoth => Ok(serde_json::json!({
             "thinking": {"type": "enabled"},
             "reasoning_effort": variant,
         })),
-        (provider, _) => {
-            anyhow::bail!("provider {provider} does not support reasoning variants")
-        }
+        ModelAccess::OpenCodeChat | ModelAccess::Custom => anyhow::bail!(
+            "provider {} does not support reasoning variants",
+            model.provider
+        ),
     }
 }
 

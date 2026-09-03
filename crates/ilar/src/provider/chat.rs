@@ -57,24 +57,10 @@ pub struct ChatDialect {
 }
 
 impl ChatDialect {
-    /// The z.ai endpoint: always keyed, vision from the catalog row,
-    /// `tool_stream` on, wire id straight from the ilar id.
-    pub(super) fn zai(api_key: String, base_url: String) -> Self {
-        Self {
-            prefix: "zai",
-            base_url,
-            api_key: Some(api_key),
-            wire_model: None,
-            vision: None,
-            options: serde_json::Value::Null,
-            tool_stream: true,
-        }
-    }
-
-    /// An OpenCode gateway (Zen or Go): keyed, vision from the catalog
-    /// row, wire id straight from the ilar id, and none of z.ai's body
-    /// fields. The prefix is the gateway's, so one dialect serves both.
-    pub(super) fn opencode(prefix: &'static str, api_key: String, base_url: String) -> Self {
+    /// A cataloged, keyed endpoint: vision from the catalog row and the
+    /// wire id straight from the ilar id. What varies is the prefix and
+    /// whether the server knows z.ai's `tool_stream`.
+    fn keyed(prefix: &'static str, api_key: String, base_url: String, tool_stream: bool) -> Self {
         Self {
             prefix,
             base_url,
@@ -82,8 +68,19 @@ impl ChatDialect {
             wire_model: None,
             vision: None,
             options: serde_json::Value::Null,
-            tool_stream: false,
+            tool_stream,
         }
+    }
+
+    /// The z.ai endpoint, `tool_stream` on.
+    pub(super) fn zai(api_key: String, base_url: String) -> Self {
+        Self::keyed("zai", api_key, base_url, true)
+    }
+
+    /// An OpenCode gateway (Zen or Go): the prefix is the gateway's, so
+    /// one dialect serves both, and none of z.ai's body fields are sent.
+    pub(super) fn opencode(prefix: &'static str, api_key: String, base_url: String) -> Self {
+        Self::keyed(prefix, api_key, base_url, false)
     }
 
     /// A `[models.<name>]` endpoint: its own URL, its own wire id, a key
@@ -370,9 +367,25 @@ fn openai_message(msg: &ChatMessage, vision: bool) -> Vec<serde_json::Value> {
     vec![serde_json::Value::Object(value)]
 }
 
+/// The neutral stop reason for a chat-completions `finish_reason`.
+fn stop_reason_for(finish: &str) -> Result<StopReason, String> {
+    Ok(match finish {
+        "stop" => StopReason::EndTurn,
+        "tool_calls" | "function_call" => StopReason::ToolUse,
+        "length" => StopReason::MaxTokens,
+        "content_filter" => StopReason::Refusal,
+        _ => {
+            return Err(format!(
+                "unknown OpenAI-compatible finish reason {finish:?}"
+            ));
+        }
+    })
+}
+
 /// Whether a chat-completions delta says anything at all: a reasoning or
 /// content fragment, or a tool-call fragment. Role and empty strings are
-/// the wire clearing its throat, not a message.
+/// the wire clearing its throat, not a message. The fields are the ones
+/// the mapper reads in `map`; a new spelling is added in both places.
 fn carries_payload(delta: &serde_json::Value) -> bool {
     let non_empty = |field: &str| delta[field].as_str().is_some_and(|text| !text.is_empty());
     non_empty("reasoning_content")
@@ -499,11 +512,16 @@ impl TransportEventMapper for OpenAiMapper {
         // a chunk that carries content or a call after the finish is
         // still the protocol violation it always was.
         let choice = value["choices"].get(0);
-        if self.stop_reason.is_some()
+        if let Some(stop_reason) = &self.stop_reason
             && let Some(choice) = choice
         {
             if carries_payload(&choice["delta"]) {
                 return Err("OpenAI-compatible event arrived after finish_reason".into());
+            }
+            if let Some(finish) = choice["finish_reason"].as_str()
+                && stop_reason_for(finish)? != *stop_reason
+            {
+                return Err("duplicate OpenAI-compatible finish reason".into());
             }
         } else if let Some(choice) = choice {
             let delta = &choice["delta"];
@@ -620,21 +638,8 @@ impl TransportEventMapper for OpenAiMapper {
                 }
             }
             if let Some(finish) = choice["finish_reason"].as_str() {
-                if self.stop_reason.is_some() {
-                    return Err("duplicate OpenAI-compatible finish reason".into());
-                }
                 self.close_thinking(&mut events);
-                let stop_reason = match finish {
-                    "stop" => StopReason::EndTurn,
-                    "tool_calls" | "function_call" => StopReason::ToolUse,
-                    "length" => StopReason::MaxTokens,
-                    "content_filter" => StopReason::Refusal,
-                    _ => {
-                        return Err(format!(
-                            "unknown OpenAI-compatible finish reason {finish:?}"
-                        ));
-                    }
-                };
+                let stop_reason = stop_reason_for(finish)?;
                 self.stop_reason = Some(stop_reason.clone());
                 // An index the wire staged but never named is not a call
                 // this mapper can complete — checked before the stop
