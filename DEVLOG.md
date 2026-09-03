@@ -32,9 +32,14 @@
   empty delta. The mapper now reads both spellings and lets a
   content-free trailer through; a trailer carrying content or a call is
   still the violation it was.
-- GLM-5.3 on Go accepts z.ai's `thinking`/`reasoning_effort` fields
-  (200) but a one-token reply cannot tell whether they are honoured, so
-  the OpenCode GLM rows carry no effort ladder yet.
+- Effort ladders come from models.dev's per-model `reasoning_options`
+  (a field the first pass did not read — the user noticed Muse Spark
+  lacked its levels). Chat-wire rows take `reasoning_effort`, as
+  opencode sends it: on Go glm-5.3 the same arithmetic prompt spent 23
+  reasoning tokens at `low` and 75 at `max`. Qwen3.8-max accepted
+  `low` and `xhigh` alike with no visible difference in one sample.
+  models.dev also lists `max` on gpt-5.6-* for the openai provider,
+  so those rows gained it too.
 
 ### Live smoke
 

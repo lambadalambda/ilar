@@ -587,6 +587,131 @@ const OPENAI_VERSIONED_PRO_VARIANTS: &[ModelVariant] = &[
     },
 ];
 
+/// Effort ladders the OpenCode gateways publish per model
+/// (models.dev `reasoning_options`, snapshot 2026-09-03). Named by their
+/// rungs rather than a family, since the same rungs recur across
+/// vendors. Responses-wire rows send them as `reasoning.effort`,
+/// chat-wire rows as `reasoning_effort` — measured to matter on
+/// glm-5.3 (23 reasoning tokens at `low`, 75 at `max`, same prompt).
+const EFFORT_NONE_TO_MAX: &[ModelVariant] = &[
+    ModelVariant {
+        id: "none",
+        name: "None",
+    },
+    ModelVariant {
+        id: "low",
+        name: "Low",
+    },
+    ModelVariant {
+        id: "medium",
+        name: "Medium",
+    },
+    ModelVariant {
+        id: "high",
+        name: "High",
+    },
+    ModelVariant {
+        id: "xhigh",
+        name: "Extra high",
+    },
+    ModelVariant {
+        id: "max",
+        name: "Max",
+    },
+];
+const EFFORT_LOW_TO_XHIGH: &[ModelVariant] = &[
+    ModelVariant {
+        id: "low",
+        name: "Low",
+    },
+    ModelVariant {
+        id: "medium",
+        name: "Medium",
+    },
+    ModelVariant {
+        id: "high",
+        name: "High",
+    },
+    ModelVariant {
+        id: "xhigh",
+        name: "Extra high",
+    },
+];
+const EFFORT_MINIMAL_TO_XHIGH: &[ModelVariant] = &[
+    ModelVariant {
+        id: "minimal",
+        name: "Minimal",
+    },
+    ModelVariant {
+        id: "low",
+        name: "Low",
+    },
+    ModelVariant {
+        id: "medium",
+        name: "Medium",
+    },
+    ModelVariant {
+        id: "high",
+        name: "High",
+    },
+    ModelVariant {
+        id: "xhigh",
+        name: "Extra high",
+    },
+];
+const EFFORT_HIGH_MAX: &[ModelVariant] = &[
+    ModelVariant {
+        id: "high",
+        name: "High",
+    },
+    ModelVariant {
+        id: "max",
+        name: "Max",
+    },
+];
+const EFFORT_MAX: &[ModelVariant] = &[ModelVariant {
+    id: "max",
+    name: "Max",
+}];
+const EFFORT_LOW_MEDIUM_XHIGH: &[ModelVariant] = &[
+    ModelVariant {
+        id: "low",
+        name: "Low",
+    },
+    ModelVariant {
+        id: "medium",
+        name: "Medium",
+    },
+    ModelVariant {
+        id: "xhigh",
+        name: "Extra high",
+    },
+];
+const EFFORT_NONE_HIGH: &[ModelVariant] = &[
+    ModelVariant {
+        id: "none",
+        name: "None",
+    },
+    ModelVariant {
+        id: "high",
+        name: "High",
+    },
+];
+const EFFORT_NONE_LOW_HIGH: &[ModelVariant] = &[
+    ModelVariant {
+        id: "none",
+        name: "None",
+    },
+    ModelVariant {
+        id: "low",
+        name: "Low",
+    },
+    ModelVariant {
+        id: "high",
+        name: "High",
+    },
+];
+
 /// GLM-5.3 thinking effort levels (https://z.ai/blog/glm-5.3). The server
 /// default is `max`; disabling thinking is not supported by the model.
 const ZAI_EFFORT_VARIANTS: &[ModelVariant] = &[
@@ -757,10 +882,10 @@ static CATALOG: &[ModelInfo] = &[
     )
     .input(272_000)
     .vision()
-    .reasoning(OPENAI_GPT52_VARIANTS),
+    .reasoning(EFFORT_NONE_TO_MAX),
     model!("openai", "gpt-5.6", "GPT-5.6", 1_050_000, 128_000, OpenAi)
         .vision()
-        .reasoning(OPENAI_GPT52_VARIANTS),
+        .reasoning(EFFORT_NONE_TO_MAX),
     model!(
         "openai",
         "gpt-5.6-luna",
@@ -771,7 +896,7 @@ static CATALOG: &[ModelInfo] = &[
     )
     .input(272_000)
     .vision()
-    .reasoning(OPENAI_GPT52_VARIANTS),
+    .reasoning(EFFORT_NONE_TO_MAX),
     model!(
         "openai",
         "gpt-5.6-terra",
@@ -782,7 +907,7 @@ static CATALOG: &[ModelInfo] = &[
     )
     .input(272_000)
     .vision()
-    .reasoning(OPENAI_GPT52_VARIANTS),
+    .reasoning(EFFORT_NONE_TO_MAX),
     model!(
         "openai",
         "gpt-5.5-pro",
@@ -1047,7 +1172,7 @@ static CATALOG: &[ModelInfo] = &[
     )
     .input(272_000)
     .vision()
-    .reasoning(OPENAI_GPT52_VARIANTS),
+    .reasoning(EFFORT_NONE_TO_MAX),
     model!(
         "opencode",
         "gpt-5.6-terra",
@@ -1058,7 +1183,7 @@ static CATALOG: &[ModelInfo] = &[
     )
     .input(272_000)
     .vision()
-    .reasoning(OPENAI_GPT52_VARIANTS),
+    .reasoning(EFFORT_NONE_TO_MAX),
     model!(
         "opencode",
         "gpt-5.6-luna",
@@ -1069,7 +1194,7 @@ static CATALOG: &[ModelInfo] = &[
     )
     .input(272_000)
     .vision()
-    .reasoning(OPENAI_GPT52_VARIANTS),
+    .reasoning(EFFORT_NONE_TO_MAX),
     model!(
         "opencode",
         "gpt-5.5",
@@ -1188,7 +1313,8 @@ static CATALOG: &[ModelInfo] = &[
         128_000,
         OpenCodeResponses
     )
-    .vision(),
+    .vision()
+    .reasoning(EFFORT_LOW_TO_XHIGH),
     model!(
         "opencode",
         "grok-4.5",
@@ -1197,7 +1323,8 @@ static CATALOG: &[ModelInfo] = &[
         128_000,
         OpenCodeResponses
     )
-    .vision(),
+    .vision()
+    .reasoning(OPENAI_WIDE_VARIANTS),
     model!(
         "opencode",
         "grok-build-0.1",
@@ -1215,7 +1342,8 @@ static CATALOG: &[ModelInfo] = &[
         131_072,
         OpenCodeResponses
     )
-    .vision(),
+    .vision()
+    .reasoning(EFFORT_MINIMAL_TO_XHIGH),
     model!(
         "opencode",
         "muse-spark-1.3-contributor-free",
@@ -1224,7 +1352,8 @@ static CATALOG: &[ModelInfo] = &[
         131_072,
         OpenCodeResponses
     )
-    .vision(),
+    .vision()
+    .reasoning(EFFORT_MINIMAL_TO_XHIGH),
     model!(
         "opencode",
         "muse-spark-1.2-contributor-free",
@@ -1233,7 +1362,8 @@ static CATALOG: &[ModelInfo] = &[
         131_072,
         OpenCodeResponses
     )
-    .vision(),
+    .vision()
+    .reasoning(EFFORT_MINIMAL_TO_XHIGH),
     model!(
         "opencode",
         "deepseek-v4-pro",
@@ -1241,7 +1371,8 @@ static CATALOG: &[ModelInfo] = &[
         1_000_000,
         384_000,
         OpenCodeChat
-    ),
+    )
+    .effort(EFFORT_HIGH_MAX),
     model!(
         "opencode",
         "deepseek-v4-flash",
@@ -1249,7 +1380,8 @@ static CATALOG: &[ModelInfo] = &[
         1_000_000,
         384_000,
         OpenCodeChat
-    ),
+    )
+    .effort(ZAI_EFFORT_VARIANTS),
     model!(
         "opencode",
         "minimax-m3",
@@ -1274,7 +1406,8 @@ static CATALOG: &[ModelInfo] = &[
         1_000_000,
         131_072,
         OpenCodeChat
-    ),
+    )
+    .effort(EFFORT_HIGH_MAX),
     model!(
         "opencode",
         "glm-5.1",
@@ -1291,7 +1424,8 @@ static CATALOG: &[ModelInfo] = &[
         131_072,
         OpenCodeChat
     )
-    .vision(),
+    .vision()
+    .effort(EFFORT_MAX),
     model!(
         "opencode",
         "kimi-k2.7-code",
@@ -1382,7 +1516,7 @@ static CATALOG: &[ModelInfo] = &[
     )
     .input(272_000)
     .vision()
-    .reasoning(OPENAI_GPT52_VARIANTS),
+    .reasoning(EFFORT_NONE_TO_MAX),
     model!(
         "opencode-go",
         "grok-4.6",
@@ -1391,7 +1525,8 @@ static CATALOG: &[ModelInfo] = &[
         128_000,
         OpenCodeResponses
     )
-    .vision(),
+    .vision()
+    .reasoning(EFFORT_LOW_TO_XHIGH),
     model!(
         "opencode-go",
         "muse-spark-1.3-contributor",
@@ -1400,7 +1535,8 @@ static CATALOG: &[ModelInfo] = &[
         131_072,
         OpenCodeResponses
     )
-    .vision(),
+    .vision()
+    .reasoning(EFFORT_MINIMAL_TO_XHIGH),
     model!(
         "opencode-go",
         "muse-spark-1.2-contributor",
@@ -1409,7 +1545,8 @@ static CATALOG: &[ModelInfo] = &[
         131_072,
         OpenCodeResponses
     )
-    .vision(),
+    .vision()
+    .reasoning(EFFORT_MINIMAL_TO_XHIGH),
     model!(
         "opencode-go",
         "glm-5.3-flash",
@@ -1418,7 +1555,8 @@ static CATALOG: &[ModelInfo] = &[
         131_072,
         OpenCodeChat
     )
-    .vision(),
+    .vision()
+    .effort(ZAI_EFFORT_VARIANTS),
     model!(
         "opencode-go",
         "glm-5.3",
@@ -1426,7 +1564,8 @@ static CATALOG: &[ModelInfo] = &[
         1_000_000,
         131_072,
         OpenCodeChat
-    ),
+    )
+    .effort(ZAI_EFFORT_VARIANTS),
     model!(
         "opencode-go",
         "glm-5.2",
@@ -1434,7 +1573,8 @@ static CATALOG: &[ModelInfo] = &[
         1_000_000,
         131_072,
         OpenCodeChat
-    ),
+    )
+    .effort(EFFORT_HIGH_MAX),
     model!(
         "opencode-go",
         "glm-5.1",
@@ -1451,7 +1591,8 @@ static CATALOG: &[ModelInfo] = &[
         131_072,
         OpenCodeChat
     )
-    .vision(),
+    .vision()
+    .effort(EFFORT_MAX),
     model!(
         "opencode-go",
         "kimi-k2.7-code",
@@ -1485,7 +1626,8 @@ static CATALOG: &[ModelInfo] = &[
         1_000_000,
         384_000,
         OpenCodeChat
-    ),
+    )
+    .effort(EFFORT_HIGH_MAX),
     model!(
         "opencode-go",
         "deepseek-v4-flash",
@@ -1493,7 +1635,8 @@ static CATALOG: &[ModelInfo] = &[
         1_000_000,
         384_000,
         OpenCodeChat
-    ),
+    )
+    .effort(ZAI_EFFORT_VARIANTS),
     model!(
         "opencode-go",
         "deepseek-v4-flash-vision-exp",
@@ -1502,7 +1645,8 @@ static CATALOG: &[ModelInfo] = &[
         384_000,
         OpenCodeChat
     )
-    .vision(),
+    .vision()
+    .effort(ZAI_EFFORT_VARIANTS),
     model!(
         "opencode-go",
         "mimo-v2.5",
@@ -1527,8 +1671,10 @@ static CATALOG: &[ModelInfo] = &[
         1_024_000,
         64_000,
         OpenCodeChat
-    ),
-    model!("opencode-go", "hy3", "Hy3", 256_000, 128_000, OpenCodeChat),
+    )
+    .effort(EFFORT_NONE_HIGH),
+    model!("opencode-go", "hy3", "Hy3", 256_000, 128_000, OpenCodeChat)
+        .effort(EFFORT_NONE_LOW_HIGH),
     // MiniMax and Qwen likewise; minimax-m2.7 is a persistent 500 on
     // both wires and minimax-m2.5 is past its deprecation date.
     model!(
@@ -1548,7 +1694,8 @@ static CATALOG: &[ModelInfo] = &[
         131_072,
         OpenCodeChat
     )
-    .vision(),
+    .vision()
+    .effort(EFFORT_LOW_MEDIUM_XHIGH),
     model!(
         "opencode-go",
         "qwen3.8-flash",
@@ -1557,7 +1704,8 @@ static CATALOG: &[ModelInfo] = &[
         131_072,
         OpenCodeChat
     )
-    .vision(),
+    .vision()
+    .effort(EFFORT_LOW_MEDIUM_XHIGH),
     model!(
         "opencode-go",
         "qwen3.7-max",
@@ -1736,7 +1884,10 @@ pub fn variant_options(full_id: &str, variant: Option<&str>) -> anyhow::Result<s
             "thinking": {"type": "enabled"},
             "reasoning_effort": variant,
         })),
-        ModelAccess::OpenCodeChat | ModelAccess::Custom => anyhow::bail!(
+        // What opencode sends through its OpenAI-compatible SDK; z.ai's
+        // `thinking` switch is not needed behind the gateway.
+        ModelAccess::OpenCodeChat => Ok(serde_json::json!({"reasoning_effort": variant})),
+        ModelAccess::Custom => anyhow::bail!(
             "provider {} does not support reasoning variants",
             model.provider
         ),
@@ -1897,7 +2048,7 @@ mod tests {
 
         assert_eq!(
             ids("openai/gpt-5.6-sol"),
-            vec!["none", "low", "medium", "high", "xhigh"]
+            vec!["none", "low", "medium", "high", "xhigh", "max"]
         );
         assert_eq!(ids("openai/gpt-5.5-pro"), vec!["medium", "high", "xhigh"]);
         assert_eq!(ids("openai/gpt-5.1"), vec!["none", "low", "medium", "high"]);
@@ -1995,11 +2146,36 @@ mod tests {
             variant_options("opencode-go/gpt-5.6-luna", Some("low")).unwrap(),
             serde_json::json!({"reasoning": {"effort": "low"}})
         );
-        // Grok has no ladder, and the chat rows have none either.
-        assert!(variant_options("opencode/grok-4.6", Some("high")).is_err());
-        assert!(variant_options("opencode/glm-5.2", Some("high")).is_err());
-        assert!(variant_options("opencode-go/glm-5.3", Some("max")).is_err());
-        assert!(find("opencode-go/glm-5.3").unwrap().variants().is_empty());
+        // Every row carries the rungs models.dev lists for it, and a
+        // chat-wire row sends them as `reasoning_effort`.
+        let ids = |model: &str| {
+            find(model)
+                .unwrap()
+                .variants()
+                .iter()
+                .map(|variant| variant.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ids("opencode-go/muse-spark-1.3-contributor"),
+            ["minimal", "low", "medium", "high", "xhigh"]
+        );
+        assert_eq!(ids("opencode/grok-4.6"), ["low", "medium", "high", "xhigh"]);
+        assert_eq!(ids("opencode-go/glm-5.3"), ["low", "high", "max"]);
+        assert_eq!(ids("opencode-go/kimi-k3"), ["max"]);
+        assert_eq!(ids("opencode-go/hy3"), ["none", "low", "high"]);
+        assert!(ids("opencode/big-pickle").is_empty());
+        assert!(ids("opencode-go/minimax-m3").is_empty());
+        assert_eq!(
+            variant_options("opencode-go/muse-spark-1.3-contributor", Some("xhigh")).unwrap(),
+            serde_json::json!({"reasoning": {"effort": "xhigh"}})
+        );
+        assert_eq!(
+            variant_options("opencode-go/glm-5.3", Some("max")).unwrap(),
+            serde_json::json!({"reasoning_effort": "max"})
+        );
+        assert!(variant_options("opencode/grok-4.6", Some("max")).is_err());
+        assert!(variant_options("opencode-go/minimax-m3", Some("high")).is_err());
     }
 
     #[test]

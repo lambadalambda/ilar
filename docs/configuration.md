@@ -169,9 +169,12 @@ choose. The Qwen and MiniMax rows the docs file under the Anthropic Messages
 wire answer on chat-completions too and are offered there; the Claude and
 Gemini families are not, since ilar speaks neither of their wires.
 
-What carries over from the `openai/` rows: the GPT models keep their windows
-and `reasoning` ladders, and `general.reasoning = "high"` reaches the wire as
-`reasoning.effort`. The other rows have no ladder. Prices are the ones the docs
+Reasoning levels are per model, as opencode publishes them (models.dev
+`reasoning_options`): the GPT rows keep their `openai/` windows and ladders,
+Muse Spark and Grok have their own, and on the chat wire GLM, DeepSeek, Kimi,
+Qwen and Hy each carry the rungs they accept. `general.reasoning = "high"`
+reaches the Responses wire as `reasoning.effort` and the chat wire as
+`reasoning_effort`; a level the model does not list is refused. Prices are the ones the docs
 publish (the lower tier where a model has two, off-peak for DeepSeek); on Go
 that figure is what the usage caps count, so the meter's dollars are the
 subscription's dollars.
