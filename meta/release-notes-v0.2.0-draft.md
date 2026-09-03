@@ -10,8 +10,9 @@ models — extend, don't reuse as-is, when tagging the real v0.2.0.
 
 ilar v0.2.0
 
-A personal coding agent in Rust: single binary, TUI-first, OpenAI
-(Responses, API key or ChatGPT OAuth) and z.ai providers.
+A personal coding agent in Rust: single binary, TUI-first, with OpenAI
+(Responses, API key or ChatGPT OAuth), z.ai, and OpenCode Zen and Go
+providers, plus any OpenAI-compatible endpoint of your own.
 
 Since the loop first ran end to end:
 

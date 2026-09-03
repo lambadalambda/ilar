@@ -92,7 +92,9 @@ bytes, not the extension) and travel as themselves — only oversized
 PNGs are re-encoded on the way in.
 
 The catalog knows which models see: every OpenAI model does, on z.ai
-only the V-series (available on the coding plan too). Attaching on anything else is refused with a notice
+only the V-series (available on the coding plan too), and on OpenCode
+whichever rows models.dev marks multimodal (the GPT, Grok, Muse Spark,
+Kimi and Qwen families among them). Attaching on anything else is refused with a notice
 naming the model, and attachments only ride a *fresh* turn — while a
 turn runs, submit puts your text back and asks you to wait, because
 steering carries text only. Esc discards attachments along with the
