@@ -1414,6 +1414,57 @@ pub(crate) fn short_session_id(id: &str) -> &str {
     id.split('-').next().unwrap_or(id)
 }
 
+/// Characters of a session's opening prompt a label carries.
+const LABEL_TITLE_CHARS: usize = 48;
+
+/// A session by name rather than by id, for every message that says
+/// where a task result went: this session; a running or delivering
+/// child by its roster row's agent and task; anything else by the
+/// agent and opening prompt its log head records; and only a session
+/// with no readable head by its short id. The head read is a file open,
+/// so it happens once per id and is remembered.
+fn session_label(
+    app: &App,
+    store: &SessionStore,
+    own_session_id: &str,
+    cache: &mut std::collections::HashMap<String, String>,
+    session_id: &str,
+) -> String {
+    if session_id == own_session_id {
+        return "this session".into();
+    }
+    if let Some(row) = app
+        .agents_view
+        .iter()
+        .find(|row| row.session_id == session_id)
+    {
+        return format!("{} · {}", row.agent, row.description);
+    }
+    if let Some(label) = cache.get(session_id) {
+        return label.clone();
+    }
+    let label = match store.head(session_id) {
+        Ok(head) => {
+            let title = head.title.map(|title| {
+                let mut chars = title.chars();
+                let short: String = chars.by_ref().take(LABEL_TITLE_CHARS).collect();
+                if chars.next().is_some() {
+                    format!("{short}…")
+                } else {
+                    short
+                }
+            });
+            match title {
+                Some(title) => format!("{} · {title}", head.meta.agent),
+                None => format!("{} · {}", head.meta.agent, short_session_id(session_id)),
+            }
+        }
+        Err(_) => format!("session {}", short_session_id(session_id)),
+    };
+    cache.insert(session_id.to_string(), label.clone());
+    label
+}
+
 /// Outbox-recovered completions enter as held parcels — and their
 /// presence asks for a delivery pause until the user's first
 /// completed turn. Opening a session is reading, not summoning: a
@@ -1695,6 +1746,9 @@ struct LoopRuntime<'a> {
     held_notifications: &'a mut std::collections::VecDeque<ilar::delivery::Parcel>,
     notifications: &'a mut tokio::sync::mpsc::Receiver<ilar::subagent::Notification>,
     routed: &'a mut Vec<RoutedDelivery>,
+    /// Names for sessions a delivery mentions, by id: a head read per
+    /// unknown id, then remembered for the process.
+    session_labels: &'a mut std::collections::HashMap<String, String>,
     ring_on_turn_completion: &'a mut bool,
     notifications_paused: &'a mut bool,
     resolver: &'a Arc<dyn ProviderResolver>,
@@ -1861,19 +1915,13 @@ impl schedule::Runtime for LoopRuntime<'_> {
         ilar::outbox::retire(self.outbox_dir, notification);
     }
 
-    fn route(&mut self, app: &mut App, parcel: ilar::delivery::Parcel) {
+    fn route(&mut self, _app: &mut App, parcel: ilar::delivery::Parcel) {
         // Detached, like an aside: the delivery resumes another
         // session, so the turn slot, the busy state and the activity
         // all stay whose they were. Several may run at once; the
-        // session claim serializes deliveries to the same child.
-        app.set_notice(
-            format!(
-                "delivering \"{}\" to {}",
-                parcel.notification().description,
-                short_session_id(&parcel.notification().parent_session_id)
-            ),
-            NoticeLevel::Info,
-        );
+        // session claim serializes deliveries to the same child. No
+        // notice: the agents panel shows the delivering row for as
+        // long as it runs, and the ending says where it went.
         let token = CancellationToken::new();
         let spawner = self.spawner.clone();
         let delivered = parcel.notification().clone();
@@ -1930,6 +1978,16 @@ impl schedule::Runtime for LoopRuntime<'_> {
 
     fn session_id(&self) -> &str {
         self.session_id
+    }
+
+    fn session_label(&mut self, app: &App, session_id: &str) -> String {
+        session_label(
+            app,
+            self.store,
+            self.session_id,
+            self.session_labels,
+            session_id,
+        )
     }
 
     fn resume_notifications(&mut self) {
@@ -2589,6 +2647,7 @@ async fn run_app(
     let mut rewind_task: Option<RewindTask> = None;
     // Deliveries to other sessions, running beside the turn slot.
     let mut routed: Vec<RoutedDelivery> = Vec::new();
+    let mut session_labels = std::collections::HashMap::new();
     let mut cancel: Option<CancellationToken> = None;
     // Live only while a root turn runs, so a message typed during that
     // turn is steered into it. Cross-session routed turns have no
@@ -3145,6 +3204,7 @@ async fn run_app(
                 held_notifications: &mut held_notifications,
                 notifications: &mut notifications,
                 routed: &mut routed,
+                session_labels: &mut session_labels,
                 ring_on_turn_completion: &mut ring_on_turn_completion,
                 notifications_paused: &mut notifications_paused,
                 resolver: &resolver,
@@ -4200,6 +4260,73 @@ async fn run_app(
 
 #[cfg(test)]
 mod tests {
+    /// Every place that names a session for a delivery goes through
+    /// one resolver: own session, roster row, log head, then the id.
+    #[test]
+    fn a_session_is_named_before_it_is_numbered() {
+        use ilar::session::{SessionEvent, SessionMeta, SessionStore, new_id};
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf());
+        let mut app = App::new();
+        let mut cache = std::collections::HashMap::new();
+        let own = new_id();
+        let label = |app: &App, cache: &mut std::collections::HashMap<String, String>, id: &str| {
+            super::session_label(app, &store, &own, cache, id)
+        };
+
+        assert_eq!(label(&app, &mut cache, &own), "this session");
+
+        let running = new_id();
+        app.agents_view.push(AgentRow {
+            foreign_parent: None,
+            session_id: running.clone(),
+            depth: 0,
+            description: "survey the API".into(),
+            agent: "explorer".into(),
+            background: true,
+            delivering: false,
+            elapsed: std::time::Duration::ZERO,
+        });
+        assert_eq!(
+            label(&app, &mut cache, &running),
+            "explorer · survey the API"
+        );
+
+        let finished = new_id();
+        store
+            .create(SessionMeta {
+                session_id: finished.clone(),
+                parent_id: Some(own.clone()),
+                agent: "reviewer".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+                cwd: None,
+            })
+            .unwrap();
+        let mut session = store.acquire_writer(&finished).unwrap().load().unwrap();
+        session
+            .append(SessionEvent::UserMessage {
+                id: new_id(),
+                text: format!("Review the diff for {}.", "x".repeat(80)),
+                images: Vec::new(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        drop(session);
+        let named = label(&app, &mut cache, &finished);
+        assert!(
+            named.starts_with("reviewer · Review the diff for xxx"),
+            "{named}"
+        );
+        assert!(named.ends_with('…'), "{named}");
+        assert!(named.chars().count() < 70, "{named}");
+        assert_eq!(cache.get(&finished), Some(&named), "remembered");
+
+        let unknown = new_id();
+        let fallback = label(&app, &mut cache, &unknown);
+        assert_eq!(fallback, format!("session {}", short_session_id(&unknown)));
+    }
+
     use super::*;
     use ilar::runtime::{create_root_session, restored_todos};
     use ilar::session::{SessionMeta, new_id};

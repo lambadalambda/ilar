@@ -77,6 +77,10 @@ pub(crate) trait Runtime {
     /// no live channel — the caller holds it instead.
     fn steer_notification(&mut self, app: &mut App, parcel: Parcel) -> Option<Parcel>;
     fn session_id(&self) -> &str;
+    /// A session by name rather than id — "this session", a roster
+    /// row's agent and task, or the persisted agent and opening prompt
+    /// — for every message that says where a result went.
+    fn session_label(&mut self, app: &App, session_id: &str) -> String;
     /// A turn ended without an abort: notifications flow again.
     fn resume_notifications(&mut self);
     /// A routed notification asked to wait for the user.
@@ -323,19 +327,22 @@ fn routed_complete<R: Runtime>(
     // its own.
     match ilar::delivery::disposition(result, parcel) {
         Disposition::Delivered => {
-            app.set_notice(
-                format!(
-                    "\"{}\" delivered to {}",
-                    delivered.description,
-                    crate::short_session_id(&delivered.parent_session_id)
-                ),
-                NoticeLevel::Info,
-            );
+            // A quiet line in the transcript, not the notice: the
+            // delivery asks nothing of the user, and the notice line
+            // is for things that do.
+            let target = runtime.session_label(app, &delivered.parent_session_id);
+            app.push_transcript_line(Line_::System(format!(
+                "✉ \"{}\" delivered to {target}",
+                delivered.description
+            )));
         }
         Disposition::Propagate(propagated) => runtime.hold_propagate(propagated),
         Disposition::Hold(requeued) => {
+            let target = runtime.session_label(app, &requeued.notification().parent_session_id);
             app.set_persistent_notice(
-                "a task result cannot reach its busy session — held; send a message to retry",
+                format!(
+                    "a task result for {target} cannot reach it while it is busy — held; send a message to retry"
+                ),
                 NoticeLevel::Warning,
             );
             if !runtime.observe(app).turn_running {
@@ -370,10 +377,8 @@ fn routed_complete<R: Runtime>(
             // The delivery failed, but the child's final word is
             // right here: salvage it into the transcript instead of
             // losing the work with the plumbing error.
-            let message = format!(
-                "a task result could not be delivered to {}: {error}",
-                crate::short_session_id(&notification.parent_session_id)
-            );
+            let target = runtime.session_label(app, &notification.parent_session_id);
+            let message = format!("a task result could not be delivered to {target}: {error}");
             app.set_notice(&message, NoticeLevel::Error);
             app.push_transcript_line(Line_::System(message));
             app.push_transcript_line(Line_::System(format!(
@@ -540,6 +545,10 @@ mod tests {
             // Detached: the turn slot is not touched.
             self.log
                 .push(format!("route:{}", parcel.notification().parent_session_id));
+        }
+
+        fn session_label(&mut self, _app: &App, session_id: &str) -> String {
+            format!("label of {session_id}")
         }
 
         fn start_notification_turn(&mut self, _app: &mut App, notification: Notification) {
@@ -1245,6 +1254,15 @@ mod tests {
 
         assert!(runtime.log.is_empty(), "{:?}", runtime.log);
         assert!(app.busy, "the running turn's busy state survives");
+        // Where it went, by name, as a transcript line — the notice
+        // line stays free for things the user must act on.
+        assert_eq!(
+            app.lines().last(),
+            Some(&Line_::System(
+                "✉ \"background task\" delivered to label of child".into()
+            ))
+        );
+        assert!(app.notice_text().is_none(), "{:?}", app.notice_text());
     }
 
     /// Two deliveries propagating in one pass must both survive. The
