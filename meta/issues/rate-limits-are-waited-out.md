@@ -30,3 +30,17 @@ user has to resume by hand, seen 2026-09-03 on muse-spark-1.3.
 - Loop: five consecutive rate limits followed by success complete the
   turn (today the fourth fails it); the delay follows `Retry-After`
   when present; the generic budget is untouched by rate-limit retries.
+
+## Outcome (2026-09-03)
+
+The transport now reports 429 and 529 as `ProviderEvent::RateLimited`,
+carrying `Retry-After` in its delay-seconds form (capped at five
+minutes; the date form reads as absent). The loop keeps two counters:
+transient errors get the old three at 0.5 s doubling, rate limits get
+six at 2 s doubling capped at 60 s — 2, 4, 8, 16, 32, 60, about two
+minutes — with the server's hint as a floor when it names one.
+`ProviderRetry` carries whichever budget applies. Still only before
+response content arrives. Covered by transport tests (hinted, bare,
+dated, oversized, and a 503 staying ordinary) and a loop test in which
+five 429s then a success complete a turn that one transient retry
+would have failed.

@@ -47,6 +47,13 @@
   on every gateway call; ilar sent none (reqwest sets no User-Agent).
   Now an `Affinity` policy on the transport owns these per backend.
 
+- A Go rate limit (429 "Please retry after a brief wait", seen on
+  muse-spark-1.3) failed a turn: 429 was retryable but shared the
+  transient budget — three tries at 0.5 s doubling, 3.5 s in all — and
+  `Retry-After` was never read. Rate limits (429, 529) now have their
+  own budget, six tries from 2 s doubling to 60 s, with the server's
+  hint as a floor.
+
 ### Live smoke
 
 `tests/smoke_opencode.rs` (ignored, needs `ILAR_OPENCODE_API_KEY`)

@@ -303,3 +303,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [The quality gates are green](issues/the-quality-gates-are-green.md)
 - [x] [OpenCode rows carry their ladders](issues/opencode-rows-carry-their-ladders.md)
 - [x] [OpenCode requests name their session](issues/opencode-requests-name-their-session.md)
+- [x] [Rate limits are waited out](issues/rate-limits-are-waited-out.md)
