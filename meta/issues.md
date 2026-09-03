@@ -110,6 +110,18 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 - [ ] [MiniMax thinks out loud](issues/minimax-thinks-out-loud.md)
 
+## Milestone 20 — Sweep: the user's eye
+
+- [ ] [UX sweep 2026-09-03](issues/ux-sweep-2026-09-03.md) — index
+- [ ] [Task rows say what finished](issues/task-rows-say-what-finished.md)
+- [ ] [The status field is shown or gone](issues/the-status-field-is-shown-or-gone.md)
+- [ ] [Names before ids, everywhere](issues/names-before-ids-everywhere.md)
+- [ ] [Wrapped rows keep their gutter](issues/wrapped-rows-keep-their-gutter.md)
+- [ ] [Plain words on every surface](issues/plain-words-on-every-surface.md)
+- [ ] [The docs say what the code does](issues/the-docs-say-what-the-code-does.md)
+- [ ] [Pickers show the deciding field](issues/pickers-show-the-deciding-field.md)
+- [ ] [exec names its session](issues/exec-names-its-session.md)
+
 ## Review follow-ups
 
 - [ ] [Images are bounded before decoding](issues/images-are-bounded-before-decoding.md)

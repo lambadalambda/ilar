@@ -17,3 +17,27 @@ standing with no visible indicator at all until some turn completes.
 A reserved surface for standing mode reminders would cover both.
 
 Size: S-M. Source: sweep 2026-08-29, event loop.
+
+## Sweep 2026-09-03 additions
+
+- The gate at app.rs:2077-2084 also drops the quit warning
+  (`"N stashed prompt(s) would be lost … — Ctrl-D again quits"`,
+  main.rs:3302) while `quit_armed` still arms — the second Ctrl-D
+  quits unwarned behind a stale clipboard error. Same for `"turn
+  aborted"` and `"N undelivered steer(s) moved to the queue"`.
+- Any notice replaces the whole status line — model, in/out, cache, Σ
+  (view.rs:189-227); persistent ones hide it indefinitely. Give
+  notices their own optional row (the strip already grows that way).
+- Informational notices to demote or drop: `compaction starting /
+  complete / nothing to compact / aborted`, `asking aside…`, `opened
+  {url}`, `services stopped`, `removed queued message`, `theme saved`,
+  `transcript exported`, `goal achieved`, `running in the background`
+  (several are already transcript lines too), `image attached …`
+  (duplicates the strip row), `Ctrl-X: M models · T themes`, `input
+  stashed (1)` (the title badge already says so).
+- A merely held result claims a persistent warning and flips the
+  activity to Paused (schedule.rs:369-380): transcript line plus a
+  `· 1 held` title badge instead; notice only for Salvage/Exhausted.
+- The input title accumulates `· 2 steering · 4 queued · 2 stashed ·
+  goal 3/25` (view.rs:872-884); steering/queued duplicate the strip,
+  goal duplicates the sidebar. Keep the line counter and `stashed`.
