@@ -106,6 +106,11 @@ milestones 15–17 stay filed — they come back when the feature does.*
 - [ ] [Live rows rerender every frame](issues/live-rows-rerender-every-frame.md)
 - [ ] [Small frictions of a long session](issues/small-frictions-of-a-long-session.md)
 
+## Milestone 19 — More doors
+
+- [ ] [OpenCode Go and Zen providers](issues/opencode-go-and-zen-providers.md)
+- [ ] [The Messages wire returns for OpenCode](issues/the-messages-wire-returns-for-opencode.md)
+
 ## Review follow-ups
 
 - [ ] [Images are bounded before decoding](issues/images-are-bounded-before-decoding.md)
