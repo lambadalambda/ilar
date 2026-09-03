@@ -202,6 +202,239 @@ static PRICING: &[(&str, &str, ModelPricing)] = &[
         "glm-5v-turbo",
         pricing!(1.2, 4.0, Some(0.24), Some(0.0)),
     ),
+    (
+        "opencode",
+        "deepseek-v4-pro",
+        pricing!(0.66, 1.98, Some(0.022), None),
+    ),
+    (
+        "opencode",
+        "deepseek-v4-flash",
+        pricing!(0.22, 0.66, Some(0.007), None),
+    ),
+    (
+        "opencode",
+        "minimax-m3",
+        pricing!(0.3, 1.2, Some(0.06), None),
+    ),
+    (
+        "opencode",
+        "minimax-m2.7",
+        pricing!(0.3, 1.2, Some(0.06), None),
+    ),
+    ("opencode", "glm-5.2", pricing!(1.4, 4.4, Some(0.26), None)),
+    ("opencode", "glm-5.1", pricing!(1.4, 4.4, Some(0.26), None)),
+    ("opencode", "kimi-k3", pricing!(3.0, 15.0, Some(0.3), None)),
+    (
+        "opencode",
+        "kimi-k2.7-code",
+        pricing!(0.95, 4.0, Some(0.19), None),
+    ),
+    (
+        "opencode",
+        "kimi-k2.6",
+        pricing!(0.95, 4.0, Some(0.16), None),
+    ),
+    (
+        "opencode",
+        "big-pickle",
+        pricing!(0.0, 0.0, Some(0.0), None),
+    ),
+    (
+        "opencode",
+        "mimo-v2.5-free",
+        pricing!(0.0, 0.0, Some(0.0), None),
+    ),
+    (
+        "opencode",
+        "ling-3.0-flash-fin-free",
+        pricing!(0.0, 0.0, Some(0.0), None),
+    ),
+    (
+        "opencode",
+        "nemotron-3-ultra-free",
+        pricing!(0.0, 0.0, Some(0.0), None),
+    ),
+    (
+        "opencode",
+        "nemotron-3.5-lightning-free",
+        pricing!(0.0, 0.0, Some(0.0), None),
+    ),
+    (
+        "opencode",
+        "gpt-5.6-sol",
+        pricing!(2.0, 10.0, Some(0.2), Some(2.5)),
+    ),
+    (
+        "opencode",
+        "gpt-5.6-terra",
+        pricing!(2.0, 12.0, Some(0.2), Some(2.5)),
+    ),
+    (
+        "opencode",
+        "gpt-5.6-luna",
+        pricing!(0.2, 1.2, Some(0.02), Some(0.25)),
+    ),
+    ("opencode", "gpt-5.5", pricing!(5.0, 30.0, Some(0.5), None)),
+    (
+        "opencode",
+        "gpt-5.5-pro",
+        pricing!(30.0, 180.0, Some(30.0), None),
+    ),
+    ("opencode", "gpt-5.4", pricing!(2.5, 15.0, Some(0.25), None)),
+    (
+        "opencode",
+        "gpt-5.4-pro",
+        pricing!(30.0, 180.0, Some(30.0), None),
+    ),
+    (
+        "opencode",
+        "gpt-5.4-mini",
+        pricing!(0.75, 4.5, Some(0.075), None),
+    ),
+    (
+        "opencode",
+        "gpt-5.4-nano",
+        pricing!(0.2, 1.25, Some(0.02), None),
+    ),
+    (
+        "opencode",
+        "gpt-5.3-codex",
+        pricing!(1.75, 14.0, Some(0.175), None),
+    ),
+    (
+        "opencode",
+        "gpt-5.2",
+        pricing!(1.75, 14.0, Some(0.175), None),
+    ),
+    (
+        "opencode",
+        "gpt-5.1",
+        pricing!(1.07, 8.5, Some(0.107), None),
+    ),
+    ("opencode", "gpt-5", pricing!(1.07, 8.5, Some(0.107), None)),
+    (
+        "opencode",
+        "gpt-5-nano",
+        pricing!(0.05, 0.4, Some(0.005), None),
+    ),
+    ("opencode", "grok-4.6", pricing!(2.0, 6.0, Some(0.5), None)),
+    ("opencode", "grok-4.5", pricing!(2.0, 6.0, Some(0.3), None)),
+    (
+        "opencode",
+        "grok-build-0.1",
+        pricing!(1.0, 2.0, Some(0.2), None),
+    ),
+    (
+        "opencode",
+        "muse-spark-1.2",
+        pricing!(1.25, 4.25, Some(0.15), None),
+    ),
+    (
+        "opencode",
+        "muse-spark-1.3-contributor-free",
+        pricing!(0.0, 0.0, Some(0.0), None),
+    ),
+    (
+        "opencode",
+        "muse-spark-1.2-contributor-free",
+        pricing!(0.0, 0.0, Some(0.0), None),
+    ),
+    (
+        "opencode-go",
+        "glm-5.3-flash",
+        pricing!(0.15, 0.5, Some(0.03), None),
+    ),
+    (
+        "opencode-go",
+        "glm-5.3",
+        pricing!(1.4, 4.4, Some(0.26), None),
+    ),
+    (
+        "opencode-go",
+        "glm-5.2",
+        pricing!(1.4, 4.4, Some(0.26), None),
+    ),
+    (
+        "opencode-go",
+        "glm-5.1",
+        pricing!(1.4, 4.4, Some(0.26), None),
+    ),
+    (
+        "opencode-go",
+        "kimi-k3",
+        pricing!(3.0, 15.0, Some(0.3), None),
+    ),
+    (
+        "opencode-go",
+        "kimi-k2.7-code",
+        pricing!(0.95, 4.0, Some(0.19), None),
+    ),
+    (
+        "opencode-go",
+        "kimi-k2.6",
+        pricing!(0.95, 4.0, Some(0.16), None),
+    ),
+    (
+        "opencode-go",
+        "longcat-2.0",
+        pricing!(0.3, 1.2, Some(0.006), None),
+    ),
+    (
+        "opencode-go",
+        "deepseek-v4-pro",
+        pricing!(0.66, 1.98, Some(0.022), None),
+    ),
+    (
+        "opencode-go",
+        "deepseek-v4-flash",
+        pricing!(0.22, 0.66, Some(0.007), None),
+    ),
+    (
+        "opencode-go",
+        "deepseek-v4-flash-vision-exp",
+        pricing!(0.22, 0.66, Some(0.007), None),
+    ),
+    (
+        "opencode-go",
+        "mimo-v2.5",
+        pricing!(0.14, 0.28, Some(0.0028), None),
+    ),
+    (
+        "opencode-go",
+        "mimo-v2.5-pro",
+        pricing!(0.435, 0.87, Some(0.003625), None),
+    ),
+    (
+        "opencode-go",
+        "hy4-preview",
+        pricing!(0.834, 2.501, Some(0.042), None),
+    ),
+    (
+        "opencode-go",
+        "hy3",
+        pricing!(0.14, 0.58, Some(0.035), None),
+    ),
+    (
+        "opencode-go",
+        "gpt-5.6-luna",
+        pricing!(0.2, 1.2, Some(0.02), Some(0.25)),
+    ),
+    (
+        "opencode-go",
+        "grok-4.6",
+        pricing!(2.0, 6.0, Some(0.5), None),
+    ),
+    (
+        "opencode-go",
+        "muse-spark-1.3-contributor",
+        pricing!(0.1, 0.2, Some(0.002), None),
+    ),
+    (
+        "opencode-go",
+        "muse-spark-1.2-contributor",
+        pricing!(0.1, 0.2, Some(0.002), None),
+    ),
 ];
 
 /// Models billed by subscription (coding plan) rather than per token.
@@ -415,6 +648,14 @@ pub(crate) enum ModelAccess {
     OpenAiBoth,
     ZaiCodingPlan,
     ZaiBoth,
+    /// An OpenCode (Zen or Go) row served on `/chat/completions`. The
+    /// gateway answers for each model on exactly one wire — the other
+    /// returns a bare 500 (probed live 2026-09-03) — so the row says
+    /// which, and the provider routes by it.
+    OpenCodeChat,
+    /// An OpenCode row served on `/responses`: the GPT, Grok and Muse
+    /// Spark families.
+    OpenCodeResponses,
     /// A `[models.<name>]` entry. Its configuration *is* its route, so
     /// there is no reachability question to ask about it.
     Custom,
@@ -436,7 +677,7 @@ macro_rules! model {
 }
 
 // Active text-output models with tool calling, from the models.dev OpenAI,
-// Z.AI, and Z.AI Coding Plan provider records. Image, embedding, realtime,
+// Z.AI, Z.AI Coding Plan, OpenCode Zen and OpenCode Go provider records. Image, embedding, realtime,
 // and deprecated models are intentionally excluded. GPT-5.6 coding defaults
 // follow Codex while models.dev remains the source for their maximum windows.
 //
@@ -454,6 +695,15 @@ macro_rules! model {
 // glm-5.3-flash was probed the same way on 2026-08-28 and answered.
 // It is `ZaiCodingPlan` by that same rule — no published price — and
 // it is the first z.ai row outside the V-series to see.
+//
+// The OpenCode rows are the ones opencode.ai/docs/{zen,go} place on the
+// Responses or chat-completions endpoint, each probed live on 2026-09-03
+// with a one-token request; rows past their published deprecation date
+// and the Anthropic- and Gemini-wire families are not cataloged. GPT
+// rows repeat their openai twins' windows (Codex-derived) rather than
+// models.dev's maxima, and Grok's "output = context" is cut to a working
+// reply budget. gpt-5.3-codex-spark is listed on Zen but the upstream
+// answers model_not_found, so it is left out.
 static CATALOG: &[ModelInfo] = &[
     model!(
         "openai",
@@ -742,6 +992,481 @@ static CATALOG: &[ModelInfo] = &[
         ZaiBoth
     ),
     model!("zai", "glm-4.5", "GLM-4.5", 131_072, 98_304, ZaiBoth),
+    // OpenCode Zen: the models the docs place on the Responses wire, then
+    // the chat-completions ones, live-probed 2026-09-03 (see the
+    // opencode module).
+    model!(
+        "opencode",
+        "gpt-5.6-sol",
+        "GPT-5.6 Sol",
+        272_000,
+        128_000,
+        OpenCodeResponses
+    )
+    .input(272_000)
+    .vision()
+    .reasoning(OPENAI_GPT52_VARIANTS),
+    model!(
+        "opencode",
+        "gpt-5.6-terra",
+        "GPT-5.6 Terra",
+        272_000,
+        128_000,
+        OpenCodeResponses
+    )
+    .input(272_000)
+    .vision()
+    .reasoning(OPENAI_GPT52_VARIANTS),
+    model!(
+        "opencode",
+        "gpt-5.6-luna",
+        "GPT-5.6 Luna",
+        272_000,
+        128_000,
+        OpenCodeResponses
+    )
+    .input(272_000)
+    .vision()
+    .reasoning(OPENAI_GPT52_VARIANTS),
+    model!(
+        "opencode",
+        "gpt-5.5",
+        "GPT-5.5",
+        1_050_000,
+        128_000,
+        OpenCodeResponses
+    )
+    .vision()
+    .reasoning(OPENAI_GPT52_VARIANTS),
+    model!(
+        "opencode",
+        "gpt-5.5-pro",
+        "GPT-5.5 Pro",
+        1_050_000,
+        128_000,
+        OpenCodeResponses
+    )
+    .vision()
+    .reasoning(OPENAI_VERSIONED_PRO_VARIANTS),
+    model!(
+        "opencode",
+        "gpt-5.4",
+        "GPT-5.4",
+        1_050_000,
+        128_000,
+        OpenCodeResponses
+    )
+    .vision()
+    .reasoning(OPENAI_GPT52_VARIANTS),
+    model!(
+        "opencode",
+        "gpt-5.4-pro",
+        "GPT-5.4 Pro",
+        1_050_000,
+        128_000,
+        OpenCodeResponses
+    )
+    .vision()
+    .reasoning(OPENAI_VERSIONED_PRO_VARIANTS),
+    model!(
+        "opencode",
+        "gpt-5.4-mini",
+        "GPT-5.4 mini",
+        400_000,
+        128_000,
+        OpenCodeResponses
+    )
+    .vision()
+    .reasoning(OPENAI_GPT52_VARIANTS),
+    model!(
+        "opencode",
+        "gpt-5.4-nano",
+        "GPT-5.4 nano",
+        400_000,
+        128_000,
+        OpenCodeResponses
+    )
+    .vision()
+    .reasoning(OPENAI_GPT52_VARIANTS),
+    model!(
+        "opencode",
+        "gpt-5.3-codex",
+        "GPT-5.3 Codex",
+        400_000,
+        128_000,
+        OpenCodeResponses
+    )
+    .vision()
+    .reasoning(OPENAI_GPT52_VARIANTS),
+    model!(
+        "opencode",
+        "gpt-5.2",
+        "GPT-5.2",
+        400_000,
+        128_000,
+        OpenCodeResponses
+    )
+    .vision()
+    .reasoning(OPENAI_GPT52_VARIANTS),
+    model!(
+        "opencode",
+        "gpt-5.1",
+        "GPT-5.1",
+        400_000,
+        128_000,
+        OpenCodeResponses
+    )
+    .vision()
+    .reasoning(OPENAI_GPT51_VARIANTS),
+    model!(
+        "opencode",
+        "gpt-5",
+        "GPT-5",
+        400_000,
+        128_000,
+        OpenCodeResponses
+    )
+    .vision()
+    .reasoning(OPENAI_GPT5_VARIANTS),
+    model!(
+        "opencode",
+        "gpt-5-nano",
+        "GPT-5 Nano",
+        400_000,
+        128_000,
+        OpenCodeResponses
+    )
+    .vision()
+    .reasoning(OPENAI_GPT5_VARIANTS),
+    model!(
+        "opencode",
+        "grok-4.6",
+        "Grok 4.6",
+        500_000,
+        128_000,
+        OpenCodeResponses
+    )
+    .vision(),
+    model!(
+        "opencode",
+        "grok-4.5",
+        "Grok 4.5",
+        500_000,
+        128_000,
+        OpenCodeResponses
+    )
+    .vision(),
+    model!(
+        "opencode",
+        "grok-build-0.1",
+        "Grok Build 0.1",
+        256_000,
+        64_000,
+        OpenCodeResponses
+    )
+    .vision(),
+    model!(
+        "opencode",
+        "muse-spark-1.2",
+        "Muse Spark 1.2",
+        1_048_576,
+        131_072,
+        OpenCodeResponses
+    )
+    .vision(),
+    model!(
+        "opencode",
+        "muse-spark-1.3-contributor-free",
+        "Muse Spark 1.3 Contributor Free",
+        1_048_576,
+        131_072,
+        OpenCodeResponses
+    )
+    .vision(),
+    model!(
+        "opencode",
+        "muse-spark-1.2-contributor-free",
+        "Muse Spark 1.2 Contributor Free",
+        1_048_576,
+        131_072,
+        OpenCodeResponses
+    )
+    .vision(),
+    model!(
+        "opencode",
+        "deepseek-v4-pro",
+        "DeepSeek V4 Pro",
+        1_000_000,
+        384_000,
+        OpenCodeChat
+    ),
+    model!(
+        "opencode",
+        "deepseek-v4-flash",
+        "DeepSeek V4 Flash",
+        1_000_000,
+        384_000,
+        OpenCodeChat
+    ),
+    model!(
+        "opencode",
+        "minimax-m3",
+        "MiniMax-M3",
+        512_000,
+        128_000,
+        OpenCodeChat
+    )
+    .vision(),
+    model!(
+        "opencode",
+        "minimax-m2.7",
+        "MiniMax-M2.7",
+        204_800,
+        131_072,
+        OpenCodeChat
+    ),
+    model!(
+        "opencode",
+        "glm-5.2",
+        "GLM-5.2",
+        1_000_000,
+        131_072,
+        OpenCodeChat
+    ),
+    model!(
+        "opencode",
+        "glm-5.1",
+        "GLM-5.1",
+        204_800,
+        131_072,
+        OpenCodeChat
+    ),
+    model!(
+        "opencode",
+        "kimi-k3",
+        "Kimi K3",
+        1_048_576,
+        131_072,
+        OpenCodeChat
+    )
+    .vision(),
+    model!(
+        "opencode",
+        "kimi-k2.7-code",
+        "Kimi K2.7 Code",
+        262_144,
+        65_536,
+        OpenCodeChat
+    )
+    .vision(),
+    model!(
+        "opencode",
+        "kimi-k2.6",
+        "Kimi K2.6",
+        262_144,
+        65_536,
+        OpenCodeChat
+    )
+    .vision(),
+    model!(
+        "opencode",
+        "big-pickle",
+        "Big Pickle",
+        200_000,
+        32_000,
+        OpenCodeChat
+    ),
+    model!(
+        "opencode",
+        "mimo-v2.5-free",
+        "MiMo V2.5 Free",
+        200_000,
+        32_000,
+        OpenCodeChat
+    )
+    .vision(),
+    model!(
+        "opencode",
+        "ling-3.0-flash-fin-free",
+        "Ling 3.0 Flash Fin Free",
+        262_144,
+        32_768,
+        OpenCodeChat
+    ),
+    model!(
+        "opencode",
+        "nemotron-3-ultra-free",
+        "Nemotron 3 Ultra Free",
+        1_000_000,
+        128_000,
+        OpenCodeChat
+    ),
+    model!(
+        "opencode",
+        "nemotron-3.5-lightning-free",
+        "Nemotron 3.5 Lightning Free",
+        262_144,
+        65_536,
+        OpenCodeChat
+    ),
+    // OpenCode Go, the same way.
+    model!(
+        "opencode-go",
+        "gpt-5.6-luna",
+        "GPT-5.6 Luna",
+        272_000,
+        128_000,
+        OpenCodeResponses
+    )
+    .input(272_000)
+    .vision()
+    .reasoning(OPENAI_GPT52_VARIANTS),
+    model!(
+        "opencode-go",
+        "grok-4.6",
+        "Grok 4.6",
+        500_000,
+        128_000,
+        OpenCodeResponses
+    )
+    .vision(),
+    model!(
+        "opencode-go",
+        "muse-spark-1.3-contributor",
+        "Muse Spark 1.3 Contributor",
+        1_048_576,
+        131_072,
+        OpenCodeResponses
+    )
+    .vision(),
+    model!(
+        "opencode-go",
+        "muse-spark-1.2-contributor",
+        "Muse Spark 1.2 Contributor",
+        1_048_576,
+        131_072,
+        OpenCodeResponses
+    )
+    .vision(),
+    model!(
+        "opencode-go",
+        "glm-5.3-flash",
+        "GLM-5.3-Flash",
+        1_000_000,
+        131_072,
+        OpenCodeChat
+    )
+    .vision(),
+    model!(
+        "opencode-go",
+        "glm-5.3",
+        "GLM-5.3",
+        1_000_000,
+        131_072,
+        OpenCodeChat
+    ),
+    model!(
+        "opencode-go",
+        "glm-5.2",
+        "GLM-5.2",
+        1_000_000,
+        131_072,
+        OpenCodeChat
+    ),
+    model!(
+        "opencode-go",
+        "glm-5.1",
+        "GLM-5.1",
+        202_752,
+        32_768,
+        OpenCodeChat
+    ),
+    model!(
+        "opencode-go",
+        "kimi-k3",
+        "Kimi K3",
+        1_048_576,
+        131_072,
+        OpenCodeChat
+    )
+    .vision(),
+    model!(
+        "opencode-go",
+        "kimi-k2.7-code",
+        "Kimi K2.7 Code",
+        262_144,
+        65_536,
+        OpenCodeChat
+    )
+    .vision(),
+    model!(
+        "opencode-go",
+        "kimi-k2.6",
+        "Kimi K2.6",
+        262_144,
+        65_536,
+        OpenCodeChat
+    )
+    .vision(),
+    model!(
+        "opencode-go",
+        "longcat-2.0",
+        "LongCat-2.0",
+        1_000_000,
+        131_072,
+        OpenCodeChat
+    ),
+    model!(
+        "opencode-go",
+        "deepseek-v4-pro",
+        "DeepSeek V4 Pro",
+        1_000_000,
+        384_000,
+        OpenCodeChat
+    ),
+    model!(
+        "opencode-go",
+        "deepseek-v4-flash",
+        "DeepSeek V4 Flash",
+        1_000_000,
+        384_000,
+        OpenCodeChat
+    ),
+    model!(
+        "opencode-go",
+        "deepseek-v4-flash-vision-exp",
+        "DeepSeek V4 Flash Vision Exp",
+        1_000_000,
+        384_000,
+        OpenCodeChat
+    )
+    .vision(),
+    model!(
+        "opencode-go",
+        "mimo-v2.5",
+        "MiMo V2.5",
+        1_000_000,
+        128_000,
+        OpenCodeChat
+    )
+    .vision(),
+    model!(
+        "opencode-go",
+        "mimo-v2.5-pro",
+        "MiMo V2.5 Pro",
+        1_048_576,
+        128_000,
+        OpenCodeChat
+    ),
+    model!(
+        "opencode-go",
+        "hy4-preview",
+        "Hy4 preview",
+        1_024_000,
+        64_000,
+        OpenCodeChat
+    ),
+    model!("opencode-go", "hy3", "Hy3", 256_000, 128_000, OpenCodeChat),
 ];
 
 pub fn catalog() -> &'static [ModelInfo] {
@@ -883,15 +1608,19 @@ pub fn variant_options(full_id: &str, variant: Option<&str>) -> anyhow::Result<s
     {
         anyhow::bail!("unsupported variant {variant:?} for {full_id}");
     }
-    match model.provider {
-        "openai" => Ok(serde_json::json!({"reasoning": {"effort": variant}})),
+    match (model.provider, model.access) {
+        ("openai", _) | (_, ModelAccess::OpenCodeResponses) => {
+            Ok(serde_json::json!({"reasoning": {"effort": variant}}))
+        }
         // GLM-5.3 thinking levels; `thinking.type` must be "enabled"
         // (disabling is unsupported and rejected by the API).
-        "zai" => Ok(serde_json::json!({
+        ("zai", _) => Ok(serde_json::json!({
             "thinking": {"type": "enabled"},
             "reasoning_effort": variant,
         })),
-        provider => anyhow::bail!("provider {provider} does not support reasoning variants"),
+        (provider, _) => {
+            anyhow::bail!("provider {provider} does not support reasoning variants")
+        }
     }
 }
 
@@ -1015,6 +1744,13 @@ mod tests {
                 "{} has an incoherent window",
                 model.full_id()
             );
+            // Grok and a few others publish output = context; a row
+            // that copied that verbatim would leave nothing to send.
+            assert!(
+                model.input_limit > 0,
+                "{} has no input budget",
+                model.full_id()
+            );
         }
         // Vision is a row flag. It was the V-series alone until
         // glm-5.3-flash, which sees without saying so in its name.
@@ -1057,6 +1793,108 @@ mod tests {
         assert!(ids("openai/gpt-5.3-chat-latest").is_empty());
         assert!(ids("openai/gpt-4.1").is_empty());
         assert!(ids("zai/glm-5.2").is_empty());
+    }
+
+    #[test]
+    fn opencode_gpt_rows_are_their_openai_twins() {
+        // Same model behind a different door: the window, the input cap,
+        // vision and the effort ladder are the ones the openai row
+        // declares, so a session can move between the two providers
+        // without the meter or compaction changing its mind.
+        let twins = CATALOG
+            .iter()
+            .filter(|model| {
+                matches!(model.provider, "opencode" | "opencode-go") && model.id.starts_with("gpt-")
+            })
+            .collect::<Vec<_>>();
+        assert!(twins.len() >= 15, "expected the GPT lineup on Zen");
+        for model in twins {
+            let twin = find(&format!("openai/{}", model.id))
+                .unwrap_or_else(|| panic!("{} has no openai twin", model.full_id()));
+            assert_eq!(
+                model.context_limit,
+                twin.context_limit,
+                "{}",
+                model.full_id()
+            );
+            assert_eq!(model.input_limit, twin.input_limit, "{}", model.full_id());
+            assert_eq!(model.output_limit, twin.output_limit, "{}", model.full_id());
+            assert_eq!(model.vision, twin.vision, "{}", model.full_id());
+            assert_eq!(model.variants, twin.variants, "{}", model.full_id());
+            assert_eq!(model.access, ModelAccess::OpenCodeResponses);
+        }
+    }
+
+    #[test]
+    fn opencode_rows_name_their_wire() {
+        // The docs put each model on one endpoint; the row records which.
+        let access = |id: &str| find(id).unwrap().access;
+        assert_eq!(access("opencode/glm-5.2"), ModelAccess::OpenCodeChat);
+        assert_eq!(access("opencode/kimi-k3"), ModelAccess::OpenCodeChat);
+        assert_eq!(access("opencode/big-pickle"), ModelAccess::OpenCodeChat);
+        assert_eq!(access("opencode/grok-4.6"), ModelAccess::OpenCodeResponses);
+        assert_eq!(
+            access("opencode/muse-spark-1.2"),
+            ModelAccess::OpenCodeResponses
+        );
+        assert_eq!(access("opencode-go/glm-5.3"), ModelAccess::OpenCodeChat);
+        assert_eq!(access("opencode-go/hy3"), ModelAccess::OpenCodeChat);
+        assert_eq!(
+            access("opencode-go/gpt-5.6-luna"),
+            ModelAccess::OpenCodeResponses
+        );
+        assert_eq!(
+            access("opencode-go/muse-spark-1.3-contributor"),
+            ModelAccess::OpenCodeResponses
+        );
+        // Rows the docs place on the Anthropic Messages or Gemini wires
+        // are not cataloged until ilar speaks them.
+        assert!(find("opencode/claude-sonnet-5").is_none());
+        assert!(find("opencode/gemini-3.8-flash").is_none());
+        assert!(find("opencode-go/minimax-m3").is_none());
+        assert!(find("opencode-go/qwen3.8-max").is_none());
+        // Past their published deprecation date.
+        assert!(find("opencode/gpt-5.2-codex").is_none());
+        assert!(find("opencode/glm-5").is_none());
+        assert!(find("opencode/kimi-k2.5").is_none());
+        assert!(find("opencode/minimax-m2.5").is_none());
+    }
+
+    #[test]
+    fn opencode_responses_rows_take_the_openai_effort_body() {
+        assert_eq!(
+            variant_options("opencode/gpt-5.6-sol", Some("high")).unwrap(),
+            serde_json::json!({"reasoning": {"effort": "high"}})
+        );
+        assert_eq!(
+            variant_options("opencode-go/gpt-5.6-luna", Some("low")).unwrap(),
+            serde_json::json!({"reasoning": {"effort": "low"}})
+        );
+        // Grok has no ladder, and the chat rows have none either.
+        assert!(variant_options("opencode/grok-4.6", Some("high")).is_err());
+        assert!(variant_options("opencode/glm-5.2", Some("high")).is_err());
+        assert!(variant_options("opencode-go/glm-5.3", Some("max")).is_err());
+        assert!(find("opencode-go/glm-5.3").unwrap().variants().is_empty());
+    }
+
+    #[test]
+    fn opencode_prices_follow_the_docs() {
+        let luna = pricing_for("opencode-go/gpt-5.6-luna").unwrap();
+        assert_eq!(
+            (luna.input, luna.output, luna.cache_read, luna.cache_write),
+            (0.2, 1.2, Some(0.02), Some(0.25))
+        );
+        // Off-peak tier for DeepSeek, on both gateways.
+        let pro = pricing_for("opencode/deepseek-v4-pro").unwrap();
+        assert_eq!(
+            (pro.input, pro.output, pro.cache_read),
+            (0.66, 1.98, Some(0.022))
+        );
+        // Free rows are priced at zero rather than unpriced, so the
+        // meter shows $0.00 instead of hiding the figure.
+        let pickle = pricing_for("opencode/big-pickle").unwrap();
+        assert_eq!((pickle.input, pickle.output), (0.0, 0.0));
+        assert!(!plan_billed("opencode-go/glm-5.3"));
     }
 
     #[test]
