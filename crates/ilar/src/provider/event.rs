@@ -75,9 +75,17 @@ pub enum ProviderEvent {
     /// Permanent provider error; stream terminates after this. String message
     /// keeps events Clone/PartialEq for tests; impls stringify typed errors.
     Error(String),
-    /// Transient transport, overload, or rate-limit failure. Consumers may
-    /// safely retry the same request when no response content was received.
+    /// Transient transport or server failure. Consumers may safely retry
+    /// the same request when no response content was received.
     RetryableError(String),
+    /// The server is rate-limiting or out of capacity (429, 529): safe to
+    /// retry like [`Self::RetryableError`], but worth more patience, and
+    /// the server may say how much — `retry_after` is its `Retry-After`
+    /// when it sent one.
+    RateLimited {
+        message: String,
+        retry_after: Option<std::time::Duration>,
+    },
 }
 
 impl ProviderEvent {

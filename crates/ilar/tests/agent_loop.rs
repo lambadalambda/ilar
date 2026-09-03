@@ -1571,6 +1571,85 @@ async fn transient_provider_errors_retry_with_bounded_backoff() {
     );
 }
 
+/// A throttled subscription is not a flaky gateway: rate limits draw on
+/// their own, larger budget, wait at least what the server asked, and
+/// leave the transient budget untouched.
+#[tokio::test]
+async fn rate_limits_have_their_own_budget_and_honour_retry_after() {
+    let (store, session_id) = temp_session("build");
+    let limited = |retry_after: Option<Duration>| {
+        vec![ProviderEvent::RateLimited {
+            message: "HTTP 429 Too Many Requests: slow down".into(),
+            retry_after,
+        }]
+    };
+    let provider = MockProvider::new(vec![
+        limited(Some(Duration::from_millis(15))),
+        limited(None),
+        limited(None),
+        limited(None),
+        limited(None),
+        vec![
+            ProviderEvent::TextDelta("ready".into()),
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+                usage: Default::default(),
+            },
+        ],
+    ]);
+    let (tx, mut rx) = events_channel();
+
+    let outcome = run_turn(
+        &provider,
+        &ToolRegistry::read_only(),
+        &store,
+        &session_id,
+        "hello",
+        &[],
+        None,
+        LoopConfig {
+            // One transient retry would fail this turn at the second 429.
+            max_provider_retries: 1,
+            max_rate_limit_retries: 6,
+            rate_limit_retry_base_delay: Duration::from_millis(10),
+            rate_limit_retry_max_delay: Duration::from_millis(20),
+            ..LoopConfig::default()
+        },
+        tx,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, TurnOutcome::Completed);
+    assert_eq!(provider.requests().len(), 6);
+    let mut retries = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let LoopEvent::ProviderRetry {
+            attempt,
+            max_retries,
+            delay,
+            ..
+        } = event
+        {
+            retries.push((attempt, max_retries, delay));
+        }
+    }
+    assert_eq!(
+        retries,
+        vec![
+            // The server's 15 ms beats the 10 ms backoff.
+            (1, 6, Duration::from_millis(15)),
+            (2, 6, Duration::from_millis(20)),
+            (3, 6, Duration::from_millis(20)),
+            (4, 6, Duration::from_millis(20)),
+            (5, 6, Duration::from_millis(20)),
+        ]
+    );
+}
+
 #[tokio::test]
 async fn transient_provider_retry_limit_returns_the_last_error() {
     let (store, session_id) = temp_session("build");

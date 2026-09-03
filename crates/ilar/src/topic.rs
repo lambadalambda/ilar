@@ -139,7 +139,9 @@ pub async fn title_session(
             ProviderEvent::TurnComplete { stop_reason, .. } => {
                 anyhow::bail!("topic call ended with {stop_reason:?}")
             }
-            ProviderEvent::Error(error) | ProviderEvent::RetryableError(error) => {
+            ProviderEvent::Error(error)
+            | ProviderEvent::RetryableError(error)
+            | ProviderEvent::RateLimited { message: error, .. } => {
                 anyhow::bail!("topic call failed: {error}")
             }
             _ => {}

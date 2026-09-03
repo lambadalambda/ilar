@@ -142,7 +142,9 @@ pub async fn ask(
                     "the aside tried to {stop_reason:?} instead of answering (tool use is disabled here)"
                 )
             }
-            ProviderEvent::Error(error) | ProviderEvent::RetryableError(error) => {
+            ProviderEvent::Error(error)
+            | ProviderEvent::RetryableError(error)
+            | ProviderEvent::RateLimited { message: error, .. } => {
                 anyhow::bail!("aside call failed: {error}")
             }
             _ => {}

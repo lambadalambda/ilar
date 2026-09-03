@@ -83,6 +83,30 @@ pub(super) fn streaming_client() -> reqwest::Client {
 /// constant for it, so it is compared numerically.
 const OVERLOADED: u16 = 529;
 
+/// A server that is throttling or full: 429, and Anthropic's 529. These
+/// are retryable like the rest, but the loop gives them a longer budget.
+fn rate_limited_status(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.as_u16() == OVERLOADED
+}
+
+/// Longest wait a server's `Retry-After` can ask for before it is
+/// treated as "come back later" rather than "wait here".
+const RETRY_AFTER_CAP: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// The server's `Retry-After`, in the delay-seconds form. The HTTP-date
+/// form is legal but no provider ilar talks to uses it; it reads as
+/// absent, and the loop's own backoff applies.
+fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<std::time::Duration> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(|seconds| std::time::Duration::from_secs(seconds).min(RETRY_AFTER_CAP))
+}
+
 fn retryable_status(status: reqwest::StatusCode) -> bool {
     matches!(
         status,
@@ -161,9 +185,15 @@ where
         };
         if !response.status().is_success() {
             let status = response.status();
+            let retry_after = retry_after(response.headers());
             let secret_refs = secrets.iter().map(String::as_str).collect::<Vec<_>>();
             let body = super::error_body::bounded_error_body(response, &secret_refs).await;
-            let event = if retryable_status(status) {
+            let event = if rate_limited_status(status) {
+                ProviderEvent::RateLimited {
+                    message: format!("HTTP {status}: {body}"),
+                    retry_after,
+                }
+            } else if retryable_status(status) {
                 ProviderEvent::RetryableError(format!("HTTP {status}: {body}"))
             } else {
                 ProviderEvent::Error(format!("HTTP {status}: {body}"))
@@ -261,6 +291,7 @@ fn is_terminal(event: &ProviderEvent) -> bool {
         ProviderEvent::TurnComplete { .. }
             | ProviderEvent::Error(_)
             | ProviderEvent::RetryableError(_)
+            | ProviderEvent::RateLimited { .. }
     )
 }
 
@@ -331,11 +362,17 @@ mod tests {
     }
 
     async fn status_response(status: &str, body: &str) -> reqwest::Response {
+        status_response_with(status, "", body).await
+    }
+
+    /// `extra` is raw header lines, each `\r\n`-terminated.
+    async fn status_response_with(status: &str, extra: &str, body: &str) -> reqwest::Response {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let status = status.to_string();
+        let extra = extra.to_string();
         let body = body.to_string();
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
@@ -344,7 +381,7 @@ mod tests {
             socket
                 .write_all(
                     format!(
-                        "HTTP/1.1 {status}\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{body}",
+                        "HTTP/1.1 {status}\r\ncontent-type: text/event-stream\r\n{extra}content-length: {}\r\n\r\n{body}",
                         body.len()
                     )
                     .as_bytes(),
@@ -393,10 +430,100 @@ mod tests {
         .collect::<Vec<_>>()
         .await;
 
-        let [ProviderEvent::RetryableError(error)] = events.as_slice() else {
-            panic!("expected a single retryable error: {events:?}");
+        let [
+            ProviderEvent::RateLimited {
+                message,
+                retry_after: None,
+            },
+        ] = events.as_slice()
+        else {
+            panic!("expected a single rate-limit error: {events:?}");
         };
-        assert!(error.contains("overloaded_error"), "{error}");
+        assert!(message.contains("overloaded_error"), "{message}");
+    }
+
+    /// A 429 is a rate limit, and the server's `Retry-After` rides along
+    /// when it sends one; a 503 stays an ordinary retryable error.
+    #[tokio::test]
+    async fn rate_limits_carry_the_servers_retry_after() {
+        let collect = |response: reqwest::Response| {
+            stream(
+                async {
+                    Ok(TransportResponse {
+                        response,
+                        secrets: Vec::new(),
+                    })
+                },
+                TextMapper,
+            )
+            .collect::<Vec<_>>()
+        };
+        let hinted = status_response_with(
+            "429 Too Many Requests",
+            "retry-after: 7\r\n",
+            "{\"error\":{\"code\":\"rate_limit_exceeded\"}}",
+        )
+        .await;
+        let events = collect(hinted).await;
+        assert!(
+            matches!(
+                events.as_slice(),
+                [ProviderEvent::RateLimited { message, retry_after: Some(after) }]
+                    if message.contains("rate_limit_exceeded")
+                        && *after == std::time::Duration::from_secs(7)
+            ),
+            "{events:?}"
+        );
+
+        let bare = status_response("429 Too Many Requests", "slow down").await;
+        let events = collect(bare).await;
+        assert!(
+            matches!(
+                events.as_slice(),
+                [ProviderEvent::RateLimited {
+                    retry_after: None,
+                    ..
+                }]
+            ),
+            "{events:?}"
+        );
+
+        // A date is legal but unread; a huge number is clamped.
+        let dated = status_response_with(
+            "429 Too Many Requests",
+            "retry-after: Wed, 21 Oct 2026 07:28:00 GMT\r\n",
+            "later",
+        )
+        .await;
+        let events = collect(dated).await;
+        assert!(
+            matches!(
+                events.as_slice(),
+                [ProviderEvent::RateLimited {
+                    retry_after: None,
+                    ..
+                }]
+            ),
+            "{events:?}"
+        );
+        let far =
+            status_response_with("429 Too Many Requests", "retry-after: 86400\r\n", "later").await;
+        let events = collect(far).await;
+        assert!(
+            matches!(
+                events.as_slice(),
+                [ProviderEvent::RateLimited { retry_after: Some(after), .. }]
+                    if *after == RETRY_AFTER_CAP
+            ),
+            "{events:?}"
+        );
+
+        let unavailable = status_response("503 Service Unavailable", "down").await;
+        let events = collect(unavailable).await;
+        assert!(
+            matches!(events.as_slice(), [ProviderEvent::RetryableError(_)]),
+            "{events:?}"
+        );
     }
 
     #[tokio::test]

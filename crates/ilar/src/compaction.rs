@@ -392,7 +392,9 @@ async fn summarize_once(
             ProviderEvent::TurnComplete { stop_reason, .. } => {
                 anyhow::bail!("compaction ended with invalid stop reason {stop_reason:?}")
             }
-            ProviderEvent::Error(e) | ProviderEvent::RetryableError(e) => {
+            ProviderEvent::Error(e)
+            | ProviderEvent::RetryableError(e)
+            | ProviderEvent::RateLimited { message: e, .. } => {
                 anyhow::bail!("compaction call failed: {e}")
             }
             _ => {}

@@ -146,6 +146,16 @@ pub struct LoopConfig {
     pub provider_retry_base_delay: std::time::Duration,
     /// Upper bound for any individual exponential-backoff delay.
     pub provider_retry_max_delay: std::time::Duration,
+    /// Rate limits (429, 529) have their own, larger budget: a throttled
+    /// subscription is not a flaky gateway, and a "please wait" deserves
+    /// waiting. Counted separately from the transient retries.
+    pub max_rate_limit_retries: usize,
+    /// Initial rate-limit delay, doubling per retry; the server's
+    /// `Retry-After` overrides it when longer.
+    pub rate_limit_retry_base_delay: std::time::Duration,
+    /// Cap on the doubling (not on `Retry-After`, which the transport
+    /// caps on its own).
+    pub rate_limit_retry_max_delay: std::time::Duration,
     /// Context window in tokens; compaction triggers above
     /// `context_limit * compaction_threshold`. None uses the resolver's
     /// model-specific default, or disables compaction if it has none.
@@ -161,6 +171,19 @@ pub struct LoopConfig {
     pub live_heartbeat: std::time::Duration,
 }
 
+/// `base` doubled `retries` times, capped — the exponential backoff both
+/// retry budgets use.
+fn backoff_delay(
+    base: std::time::Duration,
+    cap: std::time::Duration,
+    retries: usize,
+) -> std::time::Duration {
+    let multiplier = 1_u32
+        .checked_shl(retries.min(31) as u32)
+        .unwrap_or(u32::MAX);
+    base.saturating_mul(multiplier).min(cap)
+}
+
 impl Default for LoopConfig {
     fn default() -> Self {
         Self {
@@ -168,6 +191,10 @@ impl Default for LoopConfig {
             max_provider_retries: 3,
             provider_retry_base_delay: std::time::Duration::from_millis(500),
             provider_retry_max_delay: std::time::Duration::from_secs(30),
+            // 2, 4, 8, 16, 32, 60: about two minutes of patience.
+            max_rate_limit_retries: 6,
+            rate_limit_retry_base_delay: std::time::Duration::from_secs(2),
+            rate_limit_retry_max_delay: std::time::Duration::from_secs(60),
             context_limit: None,
             compaction_threshold: 0.85,
             force_compaction: false,
@@ -1740,12 +1767,15 @@ async fn run_turn_inner(
         };
 
         let mut provider_retries = 0;
+        let mut rate_limit_retries = 0;
         let (acc, aborted, errored) = loop {
             let mut stream = provider.as_provider().stream(request.clone())?;
             let mut acc = StepAccumulator::default();
             let mut aborted = false;
             let mut errored: Option<String> = None;
             let mut retryable_error = false;
+            // A rate limit, with the server's own wait when it named one.
+            let mut rate_limited: Option<Option<std::time::Duration>> = None;
             let mut received_response = false;
 
             loop {
@@ -1759,7 +1789,9 @@ async fn run_turn_inner(
                 let Some(event) = next else { break };
                 if !matches!(
                     &event,
-                    ProviderEvent::Error(_) | ProviderEvent::RetryableError(_)
+                    ProviderEvent::Error(_)
+                        | ProviderEvent::RetryableError(_)
+                        | ProviderEvent::RateLimited { .. }
                 ) {
                     received_response = true;
                 }
@@ -1931,6 +1963,15 @@ async fn run_turn_inner(
                         errored = Some(message);
                         break;
                     }
+                    ProviderEvent::RateLimited {
+                        message,
+                        retry_after,
+                    } => {
+                        retryable_error = true;
+                        rate_limited = Some(retry_after);
+                        errored = Some(message);
+                        break;
+                    }
                 }
             }
             drop(stream); // abort the underlying request
@@ -1951,24 +1992,43 @@ async fn run_turn_inner(
                         .and_then(|stop_reason| acc.validate_terminal(stop_reason).err())
                 });
 
-            if retryable_error
-                && !received_response
-                && provider_retries < config.max_provider_retries
+            // Which budget the failure draws on: a rate limit its own,
+            // anything else transient the generic one. `None` when the
+            // budget is spent or the failure is not retryable at all.
+            let plan = match rate_limited {
+                _ if !retryable_error || received_response => None,
+                Some(retry_after) if rate_limit_retries < config.max_rate_limit_retries => {
+                    let backoff = backoff_delay(
+                        config.rate_limit_retry_base_delay,
+                        config.rate_limit_retry_max_delay,
+                        rate_limit_retries,
+                    );
+                    // The server's wait is a floor, not a ceiling: a
+                    // hint shorter than the backoff would retry into the
+                    // same limit at the same pace.
+                    let delay = retry_after.map_or(backoff, |after| after.max(backoff));
+                    rate_limit_retries += 1;
+                    Some((rate_limit_retries, config.max_rate_limit_retries, delay))
+                }
+                None if provider_retries < config.max_provider_retries => {
+                    let delay = backoff_delay(
+                        config.provider_retry_base_delay,
+                        config.provider_retry_max_delay,
+                        provider_retries,
+                    );
+                    provider_retries += 1;
+                    Some((provider_retries, config.max_provider_retries, delay))
+                }
+                _ => None,
+            };
+            if let Some((attempt, max_retries, delay)) = plan
                 && let Some(message) = errored.as_ref()
             {
-                let multiplier = 1_u32
-                    .checked_shl(provider_retries.min(31) as u32)
-                    .unwrap_or(u32::MAX);
-                let delay = config
-                    .provider_retry_base_delay
-                    .saturating_mul(multiplier)
-                    .min(config.provider_retry_max_delay);
-                provider_retries += 1;
                 events
                     .publish(
                         LoopEvent::ProviderRetry {
-                            attempt: provider_retries,
-                            max_retries: config.max_provider_retries,
+                            attempt,
+                            max_retries,
                             delay,
                             error: message.clone(),
                         },
