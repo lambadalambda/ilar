@@ -228,8 +228,7 @@ pub(crate) fn after_turn(
         GoalStep::Achieved => {
             let message = format!("goal achieved after {} round(s)", round.unwrap_or(0).max(1));
             intents.push(Intent::ClearGoal);
-            intents.push(Intent::SystemLine(message.clone()));
-            intents.push(Intent::Notice(message, NoticeLevel::Info));
+            intents.push(Intent::SystemLine(message));
         }
         GoalStep::CapReached => {
             let message = format!(
@@ -726,7 +725,8 @@ mod tests {
         let intents = after_turn(&idle(), true, Some(("ship it", 2)), true, 25);
         assert_eq!(intents[0], Intent::ClearGoal);
         assert!(matches!(&intents[1], Intent::SystemLine(text) if text.contains("after 2 round")));
-        assert!(matches!(&intents[2], Intent::Notice(_, NoticeLevel::Info)));
+        // The transcript line is the announcement; no notice doubles it.
+        assert_eq!(intents.len(), 2, "{intents:?}");
         assert!(!intents.iter().any(|i| matches!(i, Intent::StartTurn(_))));
     }
 

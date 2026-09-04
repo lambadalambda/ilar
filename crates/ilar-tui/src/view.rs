@@ -457,8 +457,8 @@ impl App {
 
     /// One row per message the model has not seen yet — steers first,
     /// since they deliver at the next step, then the turn-end queue —
-    /// each stating when it will be sent. The count in the input title
-    /// says *how many* are waiting; this strip says *what*.
+    /// each stating when it will be sent, and a "+N more" tail past
+    /// four.
     pub(crate) fn pending_strip_lines(&self, width: u16) -> Vec<Line<'static>> {
         /// Rows before the strip collapses into a "+N more" count.
         const SHOWN: usize = 4;
@@ -990,12 +990,8 @@ impl App {
         } else {
             " input ".into()
         };
-        if !self.pending_steers.is_empty() {
-            input_title = format!("{}· {} steering ", input_title, self.pending_steers.len());
-        }
-        if !self.queued_messages.is_empty() {
-            input_title = format!("{}· {} queued ", input_title, self.queued_messages.len());
-        }
+        // Steers and queued messages are listed in the strip directly
+        // above, one row each; counting them again here was noise.
         if !self.input_stash.is_empty() {
             input_title = format!("{}· {} stashed ", input_title, self.input_stash.len());
         }

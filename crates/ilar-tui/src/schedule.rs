@@ -255,7 +255,6 @@ fn complete<R: Runtime>(app: &mut App, completion: Completion, runtime: &mut R) 
                     app.busy = false;
                     app.status = "compaction aborted".into();
                     app.set_activity(Activity::Paused);
-                    app.set_notice("compaction aborted", NoticeLevel::Warning);
                     app.push_transcript_line(Line_::System("compaction aborted".into()));
                 }
                 Err(error) => {
@@ -263,7 +262,7 @@ fn complete<R: Runtime>(app: &mut App, completion: Completion, runtime: &mut R) 
                     app.status = "compaction failed".into();
                     app.set_activity(Activity::Error);
                     let message = format!("compaction failed: {error:#}");
-                    app.set_notice(&message, NoticeLevel::Error);
+                    app.set_persistent_notice(&message, NoticeLevel::Error);
                     app.push_transcript_line(Line_::System(message));
                 }
             }
@@ -282,7 +281,7 @@ fn complete<R: Runtime>(app: &mut App, completion: Completion, runtime: &mut R) 
             app.status = "error".into();
             app.set_activity(Activity::Error);
             let message = format!("operation crashed: {error}");
-            app.set_notice(&message, NoticeLevel::Error);
+            app.set_persistent_notice(&message, NoticeLevel::Error);
             app.push_transcript_line(Line_::System(message));
         }
     }

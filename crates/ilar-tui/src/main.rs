@@ -2076,12 +2076,12 @@ impl schedule::Runtime for LoopRuntime<'_> {
                 output.content
             )));
         } else {
-            let line = format!(
-                "{description} running in the background as {} — completion arrives as a notification",
+            // The transcript line and the agents panel both say so; the
+            // notice line stays free.
+            app.push_transcript_line(Line_::System(format!(
+                "{description} running in the background as {} — its result will land here when it finishes",
                 request.agent
-            );
-            app.set_notice(&line, NoticeLevel::Info);
-            app.push_transcript_line(Line_::System(line));
+            )));
         }
     }
 
@@ -3299,7 +3299,8 @@ async fn run_app(
                         + routed.len()
                         + app.undelivered_queued_results();
                     if let Some(warning) = app.quit_warning(undelivered) {
-                        app.set_notice(warning, NoticeLevel::Warning);
+                        // Over anything standing: a second Ctrl-D quits.
+                        app.set_notice_now(warning, NoticeLevel::Warning);
                         continue;
                     }
                     if let Some(cancel) = &cancel {

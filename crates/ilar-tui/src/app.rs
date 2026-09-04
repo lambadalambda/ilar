@@ -1400,7 +1400,7 @@ impl App {
                 self.retry_available = true;
                 message.push_str(" — Ctrl-R to resume");
             }
-            self.set_notice(&message, NoticeLevel::Error);
+            self.set_persistent_notice(&message, NoticeLevel::Error);
             self.status = "error".into();
             self.set_activity(Activity::Error);
         }
@@ -1879,13 +1879,9 @@ impl App {
             .unwrap_or(&image.media_type)
             .to_string();
         self.pending_images.push(image);
-        self.set_notice(
-            format!(
-                "image attached ({kind} · {}) — sends with your next message, Esc discards",
-                crate::text::format_bytes(bytes as u64)
-            ),
-            NoticeLevel::Info,
-        );
+        // The pending strip lists the attachment with its fate; a
+        // notice saying the same would be the second voice.
+        let _ = (kind, bytes);
         true
     }
 
@@ -1994,13 +1990,7 @@ impl App {
                 images: std::mem::take(&mut self.pending_images),
             });
             self.end_history_browsing();
-            self.set_notice(
-                format!(
-                    "input stashed ({}) · Ctrl-S on a blank prompt pops",
-                    self.input_stash.len()
-                ),
-                NoticeLevel::Info,
-            );
+            // The input title counts the stash; help names the key.
         }
     }
 
@@ -2047,12 +2037,26 @@ impl App {
         self.notice.as_ref().map(|notice| notice.text.as_str())
     }
 
+    /// A transient notice: it stands until the next keystroke or turn.
+    /// An error is transient too — a clipboard or file error is read
+    /// once and done — unless the caller makes it standing, which only
+    /// a dead turn, a failed compaction and a crash do, since those
+    /// change what the next keystroke means.
     pub(crate) fn set_notice(&mut self, text: impl Into<String>, level: NoticeLevel) {
-        self.set_notice_with_lifetime(text, level, level == NoticeLevel::Error);
+        self.set_notice_with_lifetime(text, level, false);
     }
 
     pub(crate) fn set_persistent_notice(&mut self, text: impl Into<String>, level: NoticeLevel) {
         self.set_notice_with_lifetime(text, level, true);
+    }
+
+    /// A notice that must be read now, whatever stands: the quit
+    /// warning. It replaces even a standing error — the error is in
+    /// the transcript too, and a warning about losing work outranks a
+    /// reminder of work already lost.
+    pub(crate) fn set_notice_now(&mut self, text: impl Into<String>, level: NoticeLevel) {
+        self.notice = None;
+        self.set_notice_with_lifetime(text, level, false);
     }
 
     /// The stall watchdog's notice claims the line only from nothing,
@@ -2077,11 +2081,15 @@ impl App {
         level: NoticeLevel,
         persistent: bool,
     ) {
-        if self.notice.as_ref().is_some_and(|current| {
-            current.persistent
-                && (!persistent
-                    || (current.level == NoticeLevel::Error && level != NoticeLevel::Error))
-        }) {
+        // A standing notice is a mode reminder — an error to resume
+        // from, held results, a stall — and a transient one may not
+        // bury it. Standing notices replace each other in arrival
+        // order: the newest reminder is the one the user has not read.
+        if self
+            .notice
+            .as_ref()
+            .is_some_and(|current| current.persistent && !persistent)
+        {
             return;
         }
         let text = text.into();
@@ -2312,9 +2320,12 @@ pub(crate) fn activate_palette_command(
             let markdown = transcript_markdown(&app.session_id, &app.lines);
             match std::fs::write(&path, markdown) {
                 Ok(()) => {
-                    let message = format!("transcript exported to {}", path.display());
-                    app.set_notice(&message, NoticeLevel::Info);
-                    app.push_transcript_line(Line_::System(message));
+                    // The transcript line is the confirmation; the
+                    // notice line stays free.
+                    app.push_transcript_line(Line_::System(format!(
+                        "transcript exported to {}",
+                        path.display()
+                    )));
                 }
                 Err(error) => {
                     app.set_notice(format!("export failed: {error}"), NoticeLevel::Error);
@@ -2456,7 +2467,20 @@ mod tests {
                 images: Vec::new(),
             }]
         );
-        assert!(app.notice.is_some(), "stashing says where the text went");
+        // The input title counts the stash; no notice doubles it.
+        assert!(app.notice.is_none(), "{:?}", app.notice);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let screen = (0..24)
+            .map(|row| {
+                (0..80)
+                    .map(|column| terminal.backend().buffer()[(column, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("1 stashed"), "{screen}");
 
         app.input = crate::input::InputBuffer::from("second stash");
         app.stash_or_pop_input();
@@ -4253,7 +4277,17 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(screen.contains("2 queued"), "{screen}");
+        // The strip lists each one with its fate; the title no longer
+        // counts them a second time.
+        assert!(
+            screen.contains("queued · when the turn ends: next thing"),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("queued · when the turn ends: after that"),
+            "{screen}"
+        );
+        assert!(!screen.contains("2 queued"), "{screen}");
     }
 
     #[test]
