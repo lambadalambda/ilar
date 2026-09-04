@@ -1892,12 +1892,16 @@ task's scope yourself; continue only clearly disjoint work."
             Err(error) => (format!("Nested parent turn failed: {error:#}"), true),
         };
         let status = if is_error { "failed" } else { "completed" };
+        // Named after the task the hop is about: the grandparent's row
+        // leads with what finished, never with "Nested task" alone.
+        let text = format!(
+            "<task-notification>\nNested task \"{}\" {status}.\n<result>\n{text}\n</result>\n</task-notification>",
+            notification.description
+        );
         self.recorded_propagate(Ok(RouteOutcome::Propagate(Notification {
             parent_session_id: grandparent_id,
             description: notification.description,
-            text: format!(
-                "<task-notification>\nNested task {status}.\n<result>\n{text}\n</result>\n</task-notification>"
-            ),
+            text,
             is_error,
         })))
     }
@@ -2054,12 +2058,14 @@ fn workspace_route_failure(
             "notification workspace routing failed: {error:#}"
         ));
     };
+    let text = format!(
+        "<task-notification>\nNested task \"{}\" failed: its workspace could not be restored.\n<result>\n{error:#}\n</result>\n</task-notification>",
+        notification.description
+    );
     Ok(RouteOutcome::Propagate(Notification {
         parent_session_id: grandparent_id.clone(),
         description: notification.description,
-        text: format!(
-            "<task-notification>\nNested task failed because its workspace could not be restored.\n<result>\n{error:#}\n</result>\n</task-notification>"
-        ),
+        text,
         is_error: true,
     }))
 }
@@ -2072,12 +2078,14 @@ fn context_route_failure(
     let Some(grandparent_id) = &meta.parent_id else {
         return Err(error).context("loading routed subagent context");
     };
+    let text = format!(
+        "<task-notification>\nNested task \"{}\" failed: its context could not be loaded.\n<result>\n{error:#}\n</result>\n</task-notification>",
+        notification.description
+    );
     Ok(RouteOutcome::Propagate(Notification {
         parent_session_id: grandparent_id.clone(),
         description: notification.description,
-        text: format!(
-            "<task-notification>\nNested task failed while loading its context.\n<result>\n{error:#}\n</result>\n</task-notification>"
-        ),
+        text,
         is_error: true,
     }))
 }
