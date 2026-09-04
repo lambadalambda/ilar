@@ -65,37 +65,106 @@ pub(crate) fn task_notification_display(text: &str) -> Option<String> {
     notification_display(text, "task-notification", normalize_task_notification)
 }
 
-fn normalize_task_notification(first: &str) -> String {
-    let Some(first) = first.strip_prefix("Task \"") else {
-        return first.to_string();
+/// The row a task result wears: what finished and how, in the words
+/// the producer used, minus the wrapper and the id. A row's first
+/// line is the one thing a reader scans, so it gets `Fix tests
+/// completed` — not `Task "Fix tests" completed (task_id: 7c1e…)`.
+/// The id is still worth having (it is what the `tasks` tool and a
+/// follow-up `task_message` take), so it moves to the body.
+///
+/// Producer strings (subagent.rs): `Task "{d}" completed (task_id:
+/// {id}).`, `Task "{d}" failed: …`, `Task "{d}" was cancelled.`,
+/// `Task "{d}" was aborted.`, `Task "{d}" stalled: …`, and the
+/// propagated `Nested task "{d}" completed.` / `failed …`. Anything
+/// else is shown as written.
+fn normalize_task_notification(first: &str) -> Headline {
+    let (nested, rest) = match first.strip_prefix("Nested task \"") {
+        Some(rest) => (true, rest),
+        None => match first.strip_prefix("Task \"") {
+            Some(rest) => (false, rest),
+            None => return Headline::plain(first),
+        },
     };
-    for separator in [
-        "\" completed.",
+    // Description and outcome may both contain quotes, so the split is
+    // the first closing quote followed by one of the producer's verbs.
+    const VERBS: [&str; 5] = [
+        "\" completed",
         "\" failed:",
-        "\" was cancelled.",
-        "\" was aborted.",
+        "\" was cancelled",
+        "\" was aborted",
         "\" stalled:",
-    ] {
-        if let Some(index) = first.rfind(separator) {
-            return format!("{} {}", &first[..index], &first[index + 2..]);
-        }
+    ];
+    let Some(split) = VERBS.iter().filter_map(|verb| rest.find(verb)).min() else {
+        return Headline::plain(first);
+    };
+    let description = &rest[..split];
+    let outcome = &rest[split + 2..];
+    let (outcome, id) = split_task_id(outcome);
+    let prefix = if nested { "nested: " } else { "" };
+    Headline {
+        first: format!("{prefix}{description} {outcome}"),
+        detail: id.map(|id| format!("task_id: {id}")),
     }
-    format!("Task \"{first}")
+}
+
+/// `completed (task_id: X).` → (`completed.`, `X`); anything without
+/// the parenthetical is returned as is.
+fn split_task_id(outcome: &str) -> (String, Option<String>) {
+    let Some(open) = outcome.find(" (task_id: ") else {
+        return (outcome.to_string(), None);
+    };
+    let after = &outcome[open + " (task_id: ".len()..];
+    let Some(close) = after.find(')') else {
+        return (outcome.to_string(), None);
+    };
+    let id = after[..close].to_string();
+    let rest = &after[close + 1..];
+    (format!("{}{rest}", &outcome[..open]), Some(id))
 }
 
 pub(crate) fn tool_notification_display(text: &str) -> Option<String> {
-    notification_display(text, "tool-notification", |first| {
-        first
-            .strip_prefix("Background job ")
-            .unwrap_or(first)
-            .to_string()
-    })
+    notification_display(text, "tool-notification", normalize_tool_notification)
+}
+
+/// `Background job job-1 ("Run checks") completed.` → `Run checks
+/// completed.`, with the job id in the body: the description is what
+/// the reader recognises, the id is what a cancel takes.
+fn normalize_tool_notification(first: &str) -> Headline {
+    let Some(rest) = first.strip_prefix("Background job ") else {
+        return Headline::plain(first);
+    };
+    let Some((id, tail)) = rest.split_once(" (\"") else {
+        return Headline::plain(rest);
+    };
+    let Some(split) = tail.rfind("\") ") else {
+        return Headline::plain(rest);
+    };
+    Headline {
+        first: format!("{} {}", &tail[..split], &tail[split + 3..]),
+        detail: Some(format!("job: {id}")),
+    }
+}
+
+/// A notification's first line as the row shows it, plus a detail line
+/// the normalizer moved out of it (an id) that the body keeps.
+struct Headline {
+    first: String,
+    detail: Option<String>,
+}
+
+impl Headline {
+    fn plain(first: &str) -> Self {
+        Self {
+            first: first.to_string(),
+            detail: None,
+        }
+    }
 }
 
 fn notification_display(
     text: &str,
     tag: &str,
-    normalize_first: impl FnOnce(&str) -> String,
+    normalize_first: impl FnOnce(&str) -> Headline,
 ) -> Option<String> {
     let opening = format!("<{tag}>\n");
     let closing = format!("\n</{tag}>");
@@ -105,12 +174,17 @@ fn notification_display(
         .strip_prefix("<result>\n")
         .and_then(|body| body.strip_suffix("\n</result>"))
         .unwrap_or(body);
-    let first = normalize_first(first);
-    if body.is_empty() {
-        Some(first)
-    } else {
-        Some(format!("{first}\n{body}"))
+    let Headline { first, detail } = normalize_first(first);
+    let mut display = first;
+    if !body.is_empty() {
+        display.push('\n');
+        display.push_str(body);
     }
+    if let Some(detail) = detail {
+        display.push('\n');
+        display.push_str(&detail);
+    }
+    Some(display)
 }
 
 /// Whether the session being restored is finished or still working.
@@ -582,6 +656,75 @@ fn restore_child_activity(
 
 #[cfg(test)]
 mod tests {
+    /// The producer's own strings, not hand-written ones: every task
+    /// outcome and both job outcomes lead with what finished and how,
+    /// and the ids move to the body.
+    #[test]
+    fn a_task_row_leads_with_the_task_not_its_id() {
+        let wrap = |first: &str, body: &str| {
+            if body.is_empty() {
+                format!("<task-notification>\n{first}\n</task-notification>")
+            } else {
+                format!(
+                    "<task-notification>\n{first}\n<result>\n{body}\n</result>\n</task-notification>"
+                )
+            }
+        };
+        assert_eq!(
+            super::task_notification_display(&wrap(
+                "Task \"Fix tests\" completed (task_id: 7c1e2a3b-0000).",
+                "all green"
+            ))
+            .unwrap(),
+            "Fix tests completed.\nall green\ntask_id: 7c1e2a3b-0000"
+        );
+        assert_eq!(
+            super::task_notification_display(&wrap("Task \"Fix tests\" failed: it broke", ""))
+                .unwrap(),
+            "Fix tests failed: it broke"
+        );
+        assert_eq!(
+            super::task_notification_display(&wrap("Task \"Fix tests\" was cancelled.", ""))
+                .unwrap(),
+            "Fix tests was cancelled."
+        );
+        assert_eq!(
+            super::task_notification_display(&wrap(
+                "Task \"say \"hi\"\" stalled: no progress for 600s. It has been stopped.",
+                ""
+            ))
+            .unwrap(),
+            "say \"hi\" stalled: no progress for 600s. It has been stopped."
+        );
+        assert_eq!(
+            super::task_notification_display(&wrap(
+                "Nested task \"review the diff\" completed.",
+                "no findings"
+            ))
+            .unwrap(),
+            "nested: review the diff completed.\nno findings"
+        );
+        // Unknown shapes are shown as written, never dropped.
+        assert_eq!(
+            super::task_notification_display(&wrap("Something else entirely.", "")).unwrap(),
+            "Something else entirely."
+        );
+        assert_eq!(
+            super::tool_notification_display(
+                "<tool-notification>\nBackground job job-1 (\"Run checks\") completed.\n<result>\nok\n</result>\n</tool-notification>"
+            )
+            .unwrap(),
+            "Run checks completed.\nok\njob: job-1"
+        );
+        assert_eq!(
+            super::tool_notification_display(
+                "<tool-notification>\nBackground job job-2 (\"Run checks\") timed out after 5000ms and was stopped.\n</tool-notification>"
+            )
+            .unwrap(),
+            "Run checks timed out after 5000ms and was stopped.\njob: job-2"
+        );
+    }
+
     use super::*;
     use ilar::session::{SessionMeta, new_id};
 

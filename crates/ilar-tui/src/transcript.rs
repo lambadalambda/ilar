@@ -2232,6 +2232,13 @@ pub(crate) fn transcript_entry_lines(
 /// Render the transcript to shareable Markdown (palette: Export).
 pub(crate) fn transcript_markdown(session_id: &str, lines: &[Line_]) -> String {
     let mut output = format!("# ilar session {session_id}\n");
+    append_markdown(&mut output, lines);
+    output
+}
+
+/// The rows as Markdown, recursing into an agent row's child timeline
+/// so a delegation exports with the work it did, not just its name.
+fn append_markdown(output: &mut String, lines: &[Line_]) {
     for line in lines {
         match line {
             Line_::User(text) => {
@@ -2277,11 +2284,32 @@ pub(crate) fn transcript_markdown(session_id: &str, lines: &[Line_]) -> String {
                 }
             }
             Line_::Task { text, .. } | Line_::Job { text, .. } | Line_::System(text) => {
-                output.push_str(&format!("\n*{}*\n", text.lines().next().unwrap_or("")));
+                let mut rows = text.lines();
+                output.push_str(&format!("\n*{}*\n", rows.next().unwrap_or("")));
+                // The body — a task's result, the compaction summary —
+                // is the part worth sharing; a headline alone says only
+                // that something happened.
+                let body: Vec<&str> = rows.collect();
+                if !body.is_empty() {
+                    output.push('\n');
+                    for row in body {
+                        output.push_str("> ");
+                        output.push_str(row);
+                        output.push('\n');
+                    }
+                }
             }
         }
+        if let Line_::Tool {
+            name, child_lines, ..
+        } = line
+            && !child_lines.is_empty()
+        {
+            output.push_str(&format!("\n<details><summary>{name} timeline</summary>\n"));
+            append_markdown(output, child_lines);
+            output.push_str("\n</details>\n");
+        }
     }
-    output
 }
 
 /// Live thinking is kept as a bounded tail: enough to inspect what the

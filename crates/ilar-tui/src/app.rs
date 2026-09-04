@@ -3051,10 +3051,12 @@ mod tests {
         );
         assert!(rendered.contains("more line(s)"), "{rendered}");
         assert!(!rendered.contains("you  Task"), "{rendered}");
+        // The job leads with its description; the id waits in the body.
         assert!(
-            rendered.contains("job  ▸ job-1 (\"Run checks\") completed."),
+            rendered.contains("job  ▸ Run checks completed."),
             "{rendered}"
         );
+        assert!(!rendered.contains("job  ▸ job-1"), "{rendered}");
         assert!(!rendered.contains("you  Background job"), "{rendered}");
         assert!(!rendered.contains("<task-notification>"), "{rendered}");
         assert!(!rendered.contains("<tool-notification>"), "{rendered}");
@@ -3593,10 +3595,7 @@ mod tests {
         app.pending_manager = Some(PendingManager::default());
 
         let snapshot = app.pending_snapshot().expect("manager is open");
-        assert_eq!(
-            snapshot.rows[0],
-            "task result 1: job-1 (\"Run checks\") completed."
-        );
+        assert_eq!(snapshot.rows[0], "task result 1: Run checks completed.");
     }
 
     /// The quit warning's undelivered count reaches results that left
@@ -5077,7 +5076,7 @@ mod tests {
             vec![
                 " ↳ task result · next step: bg survey completed.",
                 " ↳ steering · next step: go left",
-                " ↳ task result · when the turn ends: job-1 (\"Run checks\") completed.",
+                " ↳ task result · when the turn ends: Run checks completed.",
             ]
         );
     }
@@ -8439,6 +8438,21 @@ mod tests {
         );
         let rendered = format!("{:?}", app.lines);
         assert!(!rendered.contains("<task-notification>"), "{rendered}");
+        let Some(Line_::Task { text, .. }) = app
+            .lines
+            .iter()
+            .find(|line| matches!(line, Line_::Task { .. }))
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            text.lines().next(),
+            Some("Close installer blockers completed.")
+        );
+        assert!(
+            text.contains("task_id: abc"),
+            "the id is kept, in the body: {text}"
+        );
     }
 
     /// Paste intents land in the surface the decision named.
