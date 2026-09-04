@@ -28,3 +28,15 @@ never recurses into child timelines.
   contains no `task_id`, no `Task "`, no job id.
 
 Size: S. Source: UX sweep 2026-09-03 (transcript).
+
+## Outcome (2026-09-04)
+
+Headlines now read `Fix tests completed.` / `Run checks completed.` /
+`nested: review the diff completed.`; the task or job id moves to the
+row's body as `task_id: …` / `job: …`, where the tasks tool and a
+follow-up still find it. The normalizer splits on the producer's own
+verbs (so descriptions and failure texts may carry quotes) and is
+tested against the producer's real strings. The propagated "Nested
+task" notes name their task at the source (subagent.rs), including the
+two failure hops. Export writes bodies as blockquotes and an agent
+row's child timeline in a `<details>` block.

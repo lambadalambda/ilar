@@ -306,3 +306,5 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Rate limits are waited out](issues/rate-limits-are-waited-out.md)
 - [x] [Delivered means delivered across compaction](issues/delivered-means-delivered-across-compaction.md)
 - [x] [Mail says who, and stays out of the way](issues/mail-says-who-and-stays-out-of-the-way.md)
+- [x] [Task rows say what finished](issues/task-rows-say-what-finished.md)
+- [x] [The status field is shown or gone](issues/the-status-field-is-shown-or-gone.md)
