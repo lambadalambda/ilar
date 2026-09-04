@@ -3990,7 +3990,6 @@ async fn run_app(
                 }
                 if matches!((code, control), (KeyCode::Char('x'), true)) && !app.busy {
                     app.model_key_pending = true;
-                    app.status = "Ctrl-X: M models · T themes".into();
                     app.set_notice("Ctrl-X: M models · T themes", NoticeLevel::Info);
                     continue;
                 }

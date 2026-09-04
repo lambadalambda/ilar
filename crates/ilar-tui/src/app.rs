@@ -1080,7 +1080,7 @@ impl App {
                 self.turn_committed = true;
                 self.turn_boundary = self.lines.len();
                 self.clear_transient_notice();
-                self.status = "thinking…".into();
+                self.status = "thinking".into();
                 self.stream_received = 0;
                 self.stream_step_base = 0;
                 self.stream_rate_anchor = None;
@@ -1201,7 +1201,10 @@ impl App {
                 self.status = format!("retrying provider ({attempt}/{max_retries})");
                 self.set_activity(Activity::Thinking);
                 self.set_notice(
-                    format!("provider retry: {error} — in {delay:?}"),
+                    format!(
+                        "retrying in {} ({attempt}/{max_retries}): {error}",
+                        crate::text::format_elapsed(*delay)
+                    ),
                     NoticeLevel::Warning,
                 );
                 None
@@ -4379,8 +4382,39 @@ mod tests {
             app.status
         );
         let (notice, _) = app.operational_notice().expect("retry notice");
-        assert!(notice.contains("overloaded"), "{notice}");
-        assert!(notice.contains("1s"), "{notice}");
+        assert!(
+            notice.starts_with("retrying in 1s (2/3): overloaded"),
+            "{notice}"
+        );
+        // The detail is rendered, not just recorded: the status line
+        // used to show the bare activity word and nothing else. (A
+        // standing notice takes the line instead, so it is cleared to
+        // look at the state.)
+        let line = |app: &App| {
+            app.status_line(120)
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        };
+        app.clear_notice();
+        assert!(
+            line(&app).contains("retrying provider (2/3)"),
+            "{}",
+            line(&app)
+        );
+
+        app.push_loop_event(&LoopEvent::TextDelta("recovered".into()));
+        assert!(app.operational_notice().is_none());
+        app.push_loop_event(&LoopEvent::ToolStarted {
+            id: "call-1".into(),
+            name: "read".into(),
+        });
+        assert!(line(&app).contains("running read"), "{}", line(&app));
+        app.push_loop_event(&LoopEvent::TurnDone {
+            outcome: ilar::agent::TurnOutcome::Completed,
+        });
+        assert!(line(&app).contains("● ready"), "{}", line(&app));
 
         app.push_loop_event(&LoopEvent::TextDelta("recovered".into()));
         assert!(app.operational_notice().is_none());

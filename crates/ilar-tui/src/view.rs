@@ -126,6 +126,9 @@ impl App {
     }
 
     pub(crate) fn status_line(&self, width: u16) -> Line<'static> {
+        /// Room the activity's detail may take before the model and the
+        /// meter start losing theirs.
+        const STATUS_DETAIL_WIDTH: usize = 36;
         let width = width as usize;
         if self.search_active {
             let counter = if self.search_matches.is_empty() {
@@ -167,6 +170,15 @@ impl App {
             Activity::Paused => ("Ⅱ", "paused", theme::WAITING),
             Activity::Error => ("×", "error", ERROR),
         };
+        // `status` is the activity's detail — "running 3 tools",
+        // "retrying provider (2/5)", "waiting for your answer" — set
+        // beside every activity change. It replaces the bare word
+        // when it says more; the word alone is the fallback.
+        let state = if self.status.is_empty() || self.status == state {
+            state.to_string()
+        } else {
+            truncate_display(&self.status, STATUS_DETAIL_WIDTH, Truncation::Right)
+        };
         // Stream liveness: the spinner animates on wall-clock time, so
         // only arriving bytes prove the provider is not hanging.
         let state = match self.activity {
@@ -177,8 +189,8 @@ impl App {
                 std::time::Instant::now(),
             )
             .map(|liveness| format!("{state} · {liveness}"))
-            .unwrap_or_else(|| state.to_string()),
-            _ => state.to_string(),
+            .unwrap_or_else(|| state.clone()),
+            _ => state,
         };
         let state = state.as_str();
         let context = context_usage(
