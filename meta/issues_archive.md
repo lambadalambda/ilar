@@ -308,3 +308,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Mail says who, and stays out of the way](issues/mail-says-who-and-stays-out-of-the-way.md)
 - [x] [Task rows say what finished](issues/task-rows-say-what-finished.md)
 - [x] [The status field is shown or gone](issues/the-status-field-is-shown-or-gone.md)
+- [x] [Names before ids, everywhere](issues/names-before-ids-everywhere.md)

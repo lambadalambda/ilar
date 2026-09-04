@@ -1,5 +1,23 @@
 # DEVLOG
 
+## 2026-09-04 — The user's eye
+
+A three-way read-only sweep of the TUI (transcript; status, notices
+and input; overlays, sidebar, keys, exec) after the mail complaint
+yielded 47 findings, filed under Milestone 20. Worked the first four:
+task rows lead with the task (the headline normalizer had never
+matched the producer's real `completed (task_id: …)` string, so every
+completion showed a UUID); `app.status` had ~25 writers and no reader,
+now rendered as the activity's detail; errors were persistent by
+default and a stale one swallowed the quit warning, now only a dead
+turn, a failed compaction or a crash stand, and standing notices
+replace each other; every remaining raw session id in a notice, the
+roster note, the search listing, the focus title and the export file
+name goes through the session resolver. Note for the record: the
+serve suite's `adoption_requeues_outbox_completions_as_follow_up_turns`
+flaked once under the full all-features run and passed 3/3 alone —
+the parked serve flake, not a regression.
+
 ## 2026-09-03 — Stale completions on reopen
 
 The user reported reopening a session and having a dozen task

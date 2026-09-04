@@ -113,7 +113,6 @@ milestones 15–17 stay filed — they come back when the feature does.*
 ## Milestone 20 — Sweep: the user's eye
 
 - [ ] [UX sweep 2026-09-03](issues/ux-sweep-2026-09-03.md) — index
-- [ ] [Names before ids, everywhere](issues/names-before-ids-everywhere.md)
 - [ ] [Wrapped rows keep their gutter](issues/wrapped-rows-keep-their-gutter.md)
 - [ ] [Plain words on every surface](issues/plain-words-on-every-surface.md)
 - [ ] [The docs say what the code does](issues/the-docs-say-what-the-code-does.md)
