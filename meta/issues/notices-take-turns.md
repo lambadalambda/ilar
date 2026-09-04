@@ -41,3 +41,18 @@ Size: S-M. Source: sweep 2026-08-29, event loop.
 - The input title accumulates `· 2 steering · 4 queued · 2 stashed ·
   goal 3/25` (view.rs:872-884); steering/queued duplicate the strip,
   goal duplicates the sidebar. Keep the line counter and `stashed`.
+
+## Progress (2026-09-04)
+
+Done: errors are transient unless a turn died, compaction failed or
+the process crashed — those three stay standing; a standing notice is
+replaced by any newer standing notice (a held-results reminder no
+longer hides behind a stale error) and never by a transient one; the
+quit warning always shows (`set_notice_now`); the confirmations that
+already had a transcript line or a strip/title badge lost their notice
+(exported, goal achieved, running in background, compaction aborted,
+image attached, input stashed); the input title stopped counting
+steers and queued messages the strip lists. Left: a reserved row for
+standing reminders so the status line keeps model and cost beside
+them, and the message-then-abort case that leaves the pause with no
+indicator — both want that row.
