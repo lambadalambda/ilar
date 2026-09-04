@@ -825,8 +825,14 @@ fn direct_resume_blocked(store: &SessionStore, id: &str) -> Option<String> {
         .map(|session| ensure_direct_resume_allowed(session.meta()))
     {
         Ok(Ok(())) => None,
-        Ok(Err(error)) => Some(format!("cannot resume {id}: {error}")),
-        Err(error) => Some(format!("cannot resume {id}: {error}")),
+        Ok(Err(error)) => Some(format!(
+            "cannot resume {}: {error}",
+            session_name(store, id)
+        )),
+        Err(error) => Some(format!(
+            "cannot resume {}: {error}",
+            session_name(store, id)
+        )),
     }
 }
 
@@ -1414,8 +1420,14 @@ pub(crate) fn short_session_id(id: &str) -> &str {
     id.split('-').next().unwrap_or(id)
 }
 
+/// What a session with no prompt yet is called in every listing — the
+/// same words the picker uses, never its id.
+const UNTITLED_SESSION: &str = "(no messages yet)";
+
 /// Characters of a session's opening prompt a label carries.
 const LABEL_TITLE_CHARS: usize = 48;
+/// Columns a roster row's "for …" note may take.
+const FOREIGN_PARENT_CHARS: usize = 24;
 
 /// A session by name rather than by id, for every message that says
 /// where a task result went: this session; a running or delivering
@@ -1443,7 +1455,18 @@ fn session_label(
     if let Some(label) = cache.get(session_id) {
         return label.clone();
     }
-    let label = match store.head(session_id) {
+    let label = session_name(store, session_id);
+    cache.insert(session_id.to_string(), label.clone());
+    label
+}
+
+/// A session named from its log head alone — agent and opening prompt
+/// — for the places that have no roster and no cache: a picker action,
+/// a resume refusal, a fork notice. `session <id>` only when the head
+/// cannot be read, which for a session being deleted is the moment
+/// after; read the name first.
+fn session_name(store: &SessionStore, session_id: &str) -> String {
+    match store.head(session_id) {
         Ok(head) => {
             let title = head.title.map(|title| {
                 let mut chars = title.chars();
@@ -1460,9 +1483,7 @@ fn session_label(
             }
         }
         Err(_) => format!("session {}", short_session_id(session_id)),
-    };
-    cache.insert(session_id.to_string(), label.clone());
-    label
+    }
 }
 
 /// Outbox-recovered completions enter as held parcels — and their
@@ -2114,7 +2135,19 @@ impl schedule::Runtime for LoopRuntime<'_> {
                 foreign_parent: (depth == 0
                     && !task.parent_session_id.is_empty()
                     && task.parent_session_id != *self.session_id)
-                    .then(|| short_session_id(&task.parent_session_id).to_string()),
+                    .then(|| {
+                        // Named, and kept short: the note shares its
+                        // row with the agent and the elapsed time.
+                        let name = self
+                            .session_labels
+                            .entry(task.parent_session_id.clone())
+                            .or_insert_with(|| session_name(self.store, &task.parent_session_id));
+                        crate::text::truncate_display(
+                            name,
+                            FOREIGN_PARENT_CHARS,
+                            crate::text::Truncation::Middle,
+                        )
+                    }),
                 session_id: task.session_id,
                 depth,
                 description: task.description,
@@ -2173,14 +2206,14 @@ fn ring_terminal_bell_if_idle(
 /// the seed follows from a blocking worker, because a large child's
 /// replay used to freeze the UI for the length of its log. Returns
 /// whether the child is streaming, which the seed needs.
-fn open_agent_focus(app: &mut App, session_id: &str) -> bool {
+fn open_agent_focus(app: &mut App, store: &SessionStore, session_id: &str) -> bool {
     let roster = app
         .agents_view
         .iter()
         .find(|row| row.session_id == session_id);
     let title = match roster {
         Some(row) => format!("{} · {}", row.agent, row.description),
-        None => format!("agent · {}", short_session_id(session_id)),
+        None => session_name(store, session_id),
     };
     let running = roster.is_some();
     // A delivering row is a routed completion being handed to a
@@ -2443,7 +2476,10 @@ fn start_session_scan(
                         .as_ref()
                         .map(|path| path.canonicalize().unwrap_or_else(|_| path.clone()));
                     SearchRow {
-                        title: summary.title.clone().unwrap_or_else(|| summary.id.clone()),
+                        title: summary
+                            .title
+                            .clone()
+                            .unwrap_or_else(|| UNTITLED_SESSION.to_string()),
                         session_id: summary.id,
                         event: 0,
                         age: crate::modals::last_used(summary.modified, now),
@@ -2482,7 +2518,7 @@ fn start_session_scan(
             let title = hits
                 .title
                 .clone()
-                .unwrap_or_else(|| hits.session_id.clone());
+                .unwrap_or_else(|| UNTITLED_SESSION.to_string());
             let launched = launched_in
                 .get(&hits.session_id)
                 .and_then(|launched_in| launched_in.as_ref())
@@ -2947,7 +2983,10 @@ async fn run_app(
                         return Ok(AppExit::SwitchInto {
                             id: fork_id,
                             prefill: None,
-                            notice: Some(format!("forked from {session_id}")),
+                            notice: Some(format!(
+                                "forked from {}",
+                                session_name(store, session_id)
+                            )),
                             stash: std::mem::take(&mut app.input_stash),
                         });
                     }
@@ -3538,26 +3577,31 @@ async fn run_app(
                                     app.session_picker = None;
                                     app.clear_transient_notice();
                                 }
-                                SessionPickerAction::Delete(id) => match store.delete(&id) {
-                                    Ok(()) => {
-                                        if let Some(picker) = app.session_picker.as_mut() {
-                                            picker.sessions.retain(|session| session.id != id);
-                                            // Through the hook, not the field:
-                                            // select() also disarms.
-                                            picker.select(0);
+                                SessionPickerAction::Delete(id) => {
+                                    // Read before the delete: afterwards
+                                    // there is no head to name it by.
+                                    let name = session_name(store, &id);
+                                    match store.delete(&id) {
+                                        Ok(()) => {
+                                            if let Some(picker) = app.session_picker.as_mut() {
+                                                picker.sessions.retain(|session| session.id != id);
+                                                // Through the hook, not the field:
+                                                // select() also disarms.
+                                                picker.select(0);
+                                            }
+                                            app.set_notice(
+                                                format!("deleted session {name}"),
+                                                NoticeLevel::Info,
+                                            );
                                         }
-                                        app.set_notice(
-                                            format!("deleted session {id}"),
-                                            NoticeLevel::Info,
-                                        );
+                                        Err(error) => {
+                                            app.set_notice(
+                                                format!("cannot delete {name}: {error}"),
+                                                NoticeLevel::Error,
+                                            );
+                                        }
                                     }
-                                    Err(error) => {
-                                        app.set_notice(
-                                            format!("cannot delete {id}: {error}"),
-                                            NoticeLevel::Error,
-                                        );
-                                    }
-                                },
+                                }
                                 SessionPickerAction::Fork(id) => {
                                     let blocked = switch_blocked(
                                         turn_handle.is_some(),
@@ -3587,7 +3631,10 @@ async fn run_app(
                                         }
                                         Err(error) => {
                                             app.set_notice(
-                                                format!("cannot fork {id}: {error}"),
+                                                format!(
+                                                    "cannot fork {}: {error}",
+                                                    session_name(store, &id)
+                                                ),
                                                 NoticeLevel::Error,
                                             );
                                         }
@@ -3790,7 +3837,8 @@ async fn run_app(
                                                 id: fork_id,
                                                 prefill: unsent,
                                                 notice: Some(format!(
-                                                    "forked at that turn from {session_id}"
+                                                    "forked at that turn from {}",
+                                                    session_name(store, session_id)
                                                 )),
                                                 stash: std::mem::take(&mut app.input_stash),
                                             });
@@ -4219,7 +4267,7 @@ async fn run_app(
                             match app.click_agent_row(mouse.column, mouse.row) {
                                 Some(AgentTarget::Main) => app.close_focus(),
                                 Some(AgentTarget::Focus(id)) => {
-                                    let streaming = open_agent_focus(app, &id);
+                                    let streaming = open_agent_focus(app, store, &id);
                                     let store = store.clone();
                                     let seed_id = id.clone();
                                     focus_seed = Some((
@@ -5011,7 +5059,7 @@ mod tests {
             foreign_parent: None,
             elapsed: std::time::Duration::from_secs(1),
         }];
-        let streaming = open_agent_focus(&mut app, &session_id);
+        let streaming = open_agent_focus(&mut app, &store, &session_id);
         land_agent_focus(
             &mut app,
             &session_id,
@@ -5033,7 +5081,7 @@ mod tests {
         // the replay still opens, marked not running.
         app.agents_view.clear();
         app.close_focus();
-        let streaming = open_agent_focus(&mut app, &session_id);
+        let streaming = open_agent_focus(&mut app, &store, &session_id);
         land_agent_focus(
             &mut app,
             &session_id,
@@ -5043,7 +5091,7 @@ mod tests {
 
         // A session the store cannot load: a notice, no focus.
         app.close_focus();
-        let streaming = open_agent_focus(&mut app, "no-such-session");
+        let streaming = open_agent_focus(&mut app, &store, "no-such-session");
         land_agent_focus(
             &mut app,
             "no-such-session",

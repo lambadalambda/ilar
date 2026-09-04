@@ -182,6 +182,28 @@ fn is_notification_envelope(text: &str) -> bool {
 /// The collapsed headline a queued task/tool result wears in the
 /// pending manager — the same first line its transcript row would
 /// show. `None` for an ordinary message.
+/// A topic as a filename stem: lowercase words joined by dashes, at
+/// most forty characters, nothing a shell or a filesystem objects to.
+pub(crate) fn topic_slug(topic: &str) -> String {
+    let mut slug = String::new();
+    let mut pending_dash = false;
+    for c in topic.chars().flat_map(char::to_lowercase) {
+        if c.is_alphanumeric() {
+            if pending_dash && !slug.is_empty() {
+                slug.push('-');
+            }
+            pending_dash = false;
+            slug.push(c);
+        } else {
+            pending_dash = true;
+        }
+        if slug.len() >= 40 {
+            break;
+        }
+    }
+    slug.trim_end_matches('-').to_string()
+}
+
 pub(crate) fn queued_result_headline(message: &ilar::agent::Steer) -> Option<String> {
     task_notification_display(&message.text)
         .or_else(|| tool_notification_display(&message.text))
@@ -2315,8 +2337,15 @@ pub(crate) fn activate_palette_command(
             app.set_notice("compaction starting", NoticeLevel::Info);
         }
         PaletteCommand::Export => {
-            let prefix: String = app.session_id.chars().take(8).collect();
-            let path = app.cwd.join(format!("ilar-transcript-{prefix}.md"));
+            // Named after the topic when there is one: a file called by
+            // what the session was about, not by eight hex digits.
+            let stem = app
+                .topic
+                .as_deref()
+                .map(topic_slug)
+                .filter(|slug| !slug.is_empty())
+                .unwrap_or_else(|| app.session_id.chars().take(8).collect());
+            let path = app.cwd.join(format!("ilar-transcript-{stem}.md"));
             let markdown = transcript_markdown(&app.session_id, &app.lines);
             match std::fs::write(&path, markdown) {
                 Ok(()) => {
@@ -5119,6 +5148,21 @@ mod tests {
     /// A waiting task result is mail, not a typed message: the strip
     /// shows the headline its transcript row will wear, under its own
     /// fate, never the envelope.
+    #[test]
+    fn a_topic_becomes_a_filename_stem() {
+        assert_eq!(
+            topic_slug("OpenCode Go & Zen providers"),
+            "opencode-go-zen-providers"
+        );
+        assert_eq!(
+            topic_slug("  --weird:: punctuation!!  "),
+            "weird-punctuation"
+        );
+        assert_eq!(topic_slug("///"), "");
+        let long = topic_slug(&"word ".repeat(20));
+        assert!(long.len() <= 41 && !long.ends_with('-'), "{long}");
+    }
+
     #[test]
     fn a_waiting_task_result_wears_its_headline() {
         let mut app = App::new();
