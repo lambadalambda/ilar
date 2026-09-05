@@ -248,13 +248,44 @@ fn read_head(
             _ => {}
         }
     }
-    let title = topic.or(opening);
+    // The topic is written after the first turn, so a tool-heavy
+    // opening pushes it past the head scan — and it may be rewritten
+    // later still. The tail is where the newest one is.
+    let title = last_topic_in_tail(path).or(topic).or(opening);
     Some(SessionHead {
         id,
         meta,
         title,
         modified,
     })
+}
+
+/// Bytes of the file's tail searched for the newest `Topic` event.
+const TOPIC_TAIL_BYTES: u64 = 256 * 1024;
+
+/// The last topic written in the file's tail, without reading the
+/// whole log: one seek and one bounded read per session.
+fn last_topic_in_tail(path: &std::path::Path) -> Option<String> {
+    let mut file = File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let start = len.saturating_sub(TOPIC_TAIL_BYTES);
+    file.seek(std::io::SeekFrom::Start(start)).ok()?;
+    let mut bytes = Vec::with_capacity((len - start) as usize);
+    file.read_to_end(&mut bytes).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    // A cut mid-line at the front is not a whole event; every later
+    // line is.
+    let lines: Vec<&str> = text.lines().skip(usize::from(start > 0)).collect();
+    lines
+        .iter()
+        .rev()
+        .filter(|line| line.contains("\"topic\""))
+        .find_map(
+            |line| match serde_json::from_str::<SessionEvent>(line).ok()? {
+                SessionEvent::Topic { text, .. } => Some(summary_title(&text)),
+                _ => None,
+            },
+        )
 }
 
 impl SessionStore {

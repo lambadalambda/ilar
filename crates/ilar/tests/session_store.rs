@@ -2692,6 +2692,60 @@ fn a_generated_topic_titles_the_session_and_the_listing() {
     );
 }
 
+/// The topic is written after the first turn, so a tool-heavy opening
+/// used to push it past the head scan and the picker showed the raw
+/// opening prompt forever. It is found from the tail now — and a
+/// retitle later in the log wins over the first one.
+#[test]
+fn a_late_topic_still_titles_the_listing() {
+    let (store, _dir) = temp_store();
+    let meta = sample_meta();
+    let mut session = store.create(meta.clone()).unwrap();
+    session
+        .append(SessionEvent::UserMessage {
+            id: new_id(),
+            text: "look at the failing build".into(),
+            images: Vec::new(),
+            ts: Utc::now(),
+        })
+        .unwrap();
+    // Well past the head scan's forty events.
+    for index in 0..120 {
+        session
+            .append(SessionEvent::ToolResult {
+                id: new_id(),
+                tool_use_id: format!("call-{index}"),
+                content: "x".repeat(400),
+                is_error: false,
+                images: Vec::new(),
+                child_session_id: None,
+                state: None,
+                ts: Utc::now(),
+            })
+            .unwrap();
+    }
+    session
+        .append(SessionEvent::Topic {
+            id: new_id(),
+            text: "first title".into(),
+            ts: Utc::now(),
+        })
+        .unwrap();
+    session
+        .append(SessionEvent::Topic {
+            id: new_id(),
+            text: "fixing the failing build".into(),
+            ts: Utc::now(),
+        })
+        .unwrap();
+    drop(session);
+
+    let head = store.head(&meta.session_id).unwrap();
+    assert_eq!(head.title.as_deref(), Some("fixing the failing build"));
+    let listed = store.list();
+    assert_eq!(listed[0].title.as_deref(), Some("fixing the failing build"));
+}
+
 #[tokio::test]
 async fn titling_records_a_topic_and_leaves_a_failure_alone() {
     use ilar::provider::{MockProvider, ProviderEvent, StopReason};

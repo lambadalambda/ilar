@@ -81,7 +81,6 @@ milestones 15–17 stay filed — they come back when the feature does.*
 - [ ] [The agents panel reaches its tail](issues/the-agents-panel-reaches-its-tail.md)
 - [ ] [Hover claims the whole row](issues/hover-claims-the-whole-row.md)
 - [ ] [Words a model acts on](issues/words-a-model-acts-on.md)
-- [ ] [The picker finds the late topic](issues/the-picker-finds-the-late-topic.md)
 - [ ] [The lock names its holder](issues/the-lock-names-its-holder.md)
 - [ ] [Tasks lists without stalling](issues/tasks-lists-without-stalling.md)
 - [ ] [Parked steers survive the process](issues/parked-steers-survive-the-process.md)
