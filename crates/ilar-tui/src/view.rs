@@ -125,6 +125,38 @@ impl App {
         format!("{model}{suffix}")
     }
 
+    /// The row a standing or transient notice gets, between the status
+    /// line and the pending strip — so a reminder never hides the model,
+    /// the usage or the meter. With no notice standing, a held backlog
+    /// still says so: the pause used to have no indicator at all once
+    /// its notice was cleared by an aborted turn.
+    pub(crate) fn notice_line(&self, width: u16) -> Option<Line<'static>> {
+        let width = width as usize;
+        let (text, color) = match self.operational_notice() {
+            Some((text, color)) => (text.to_string(), color),
+            None if self.notifications_paused && self.held_results > 0 => (
+                format!(
+                    "{} task result(s) held — send a message to deliver",
+                    self.held_results
+                ),
+                theme::PRIMARY,
+            ),
+            None => return None,
+        };
+        let marker = match color {
+            c if c == theme::ERROR => " × ",
+            c if c == theme::WAITING => " ! ",
+            _ => " · ",
+        };
+        Some(Line::from(vec![
+            Span::styled(marker.to_string(), Style::default().fg(color)),
+            Span::styled(
+                truncate_display(&text, width.saturating_sub(3), Truncation::Right),
+                Style::default().fg(color),
+            ),
+        ]))
+    }
+
     pub(crate) fn status_line(&self, width: u16) -> Line<'static> {
         /// Room the activity's detail may take before the model and the
         /// meter start losing theirs.
@@ -174,10 +206,18 @@ impl App {
         // "retrying provider (2/5)", "waiting for your answer" — set
         // beside every activity change. It replaces the bare word
         // when it says more; the word alone is the fallback.
-        let state = if self.status.is_empty() || self.status == state {
+        // The detail yields as the line narrows: the model, the usage
+        // and the meter are what a narrow line is for, and a detail cut
+        // to a few characters says nothing anyway.
+        let detail_budget = width.saturating_sub(44).min(STATUS_DETAIL_WIDTH);
+        let state = if self.status.is_empty()
+            || self.status == state
+            || self.status_activity != self.activity
+            || detail_budget < 12
+        {
             state.to_string()
         } else {
-            truncate_display(&self.status, STATUS_DETAIL_WIDTH, Truncation::Right)
+            truncate_display(&self.status, detail_budget, Truncation::Right)
         };
         // Stream liveness: the spinner animates on wall-clock time, so
         // only arriving bytes prove the provider is not hanging.
@@ -218,40 +258,6 @@ impl App {
             self.context_estimated,
             8,
         );
-        if let Some((notice, notice_color)) = self.operational_notice() {
-            let right = if width >= 80 {
-                meter.unwrap_or_else(|| percent.clone())
-            } else {
-                percent.clone()
-            };
-            let right_width = UnicodeWidthStr::width(right.as_str());
-            let prefix = format!(" {icon} ");
-            let prefix_width = UnicodeWidthStr::width(prefix.as_str());
-            if width <= right_width.saturating_add(prefix_width) {
-                return Line::from(Span::styled(
-                    truncate_display(
-                        &format!("{prefix}{notice} {right}"),
-                        width,
-                        Truncation::Right,
-                    ),
-                    Style::default().fg(state_color),
-                ));
-            }
-            let left_budget = width.saturating_sub(right_width).saturating_sub(1);
-            let notice = truncate_display(
-                notice,
-                left_budget.saturating_sub(prefix_width),
-                Truncation::Right,
-            );
-            let left_width = prefix_width + UnicodeWidthStr::width(notice.as_str());
-            let gap = width.saturating_sub(left_width).saturating_sub(right_width);
-            return Line::from(vec![
-                Span::styled(prefix, Style::default().fg(state_color)),
-                Span::styled(notice, Style::default().fg(notice_color)),
-                Span::raw(" ".repeat(gap)),
-                Span::styled(right, Style::default().fg(percent_color)),
-            ]);
-        }
         let context_display = if width >= 100 {
             meter.unwrap_or_else(|| context.clone())
         } else {
@@ -583,14 +589,19 @@ impl App {
         // terminal the transcript and input win.
         pending_lines
             .truncate(frame.area().height.saturating_sub(input_height + 6).min(5) as usize);
+        let notice_line = self.notice_line(frame.area().width);
         let chunks = Layout::vertical([
             Constraint::Min(3),
             Constraint::Length(1),
+            Constraint::Length(u16::from(notice_line.is_some())),
             Constraint::Length(pending_lines.len() as u16),
             Constraint::Length(input_height),
         ])
         .split(frame.area());
-        let (pending_area, input_chunk) = (chunks[2], chunks[3]);
+        let (notice_area, pending_area, input_chunk) = (chunks[2], chunks[3], chunks[4]);
+        if let Some(line) = notice_line {
+            frame.render_widget(Paragraph::new(line), notice_area);
+        }
         if !pending_lines.is_empty() {
             frame.render_widget(Paragraph::new(pending_lines), pending_area);
         }

@@ -318,6 +318,18 @@ pub(crate) struct App {
     pub(crate) background_running: usize,
     /// Completions being handed to other sessions right now.
     pub(crate) deliveries_in_flight: usize,
+    /// Which activity the current `status` detail was written for, and
+    /// the detail as it stood at the last activity change. A detail is
+    /// written just before its activity is set, so a change of activity
+    /// with no new detail means the old one is stale and the bare word
+    /// shows instead.
+    pub(crate) status_activity: Activity,
+    status_seen: String,
+    /// Task results waiting for the user's next message, and whether
+    /// delivery is paused for them — mirrored from the runtime each
+    /// frame so the notice row can say so without a notice.
+    pub(crate) held_results: usize,
+    pub(crate) notifications_paused: bool,
     /// `[cache_compact]` as configured; `enabled` is false by default.
     pub(crate) cache_compact: ilar::config::CacheCompactConfig,
     /// When the last provider request of this session ended, for the
@@ -507,6 +519,10 @@ impl App {
             pending_subtask: None,
             background_running: 0,
             deliveries_in_flight: 0,
+            held_results: 0,
+            notifications_paused: false,
+            status_activity: Activity::Ready,
+            status_seen: "ready".into(),
             cache_compact: ilar::config::CacheCompactConfig::default(),
             cache_idle_since: None,
             cache_compact_fired: false,
@@ -960,6 +976,12 @@ impl App {
     }
 
     pub(crate) fn set_activity(&mut self, activity: Activity) {
+        // A detail written since the last change belongs to this
+        // activity; an untouched one belonged to the previous.
+        if self.status != self.status_seen {
+            self.status_activity = activity;
+            self.status_seen = self.status.clone();
+        }
         if self.activity != activity {
             // Entering a streaming state restarts the liveness clock so a
             // long tool phase doesn't immediately read as a stalled stream.
@@ -4700,15 +4722,20 @@ mod tests {
         );
         app.set_activity(Activity::Paused);
 
+        // The notice has a row of its own; the status line keeps the
+        // meter and the state beside it at every width.
+        let notice = rendered_text(&app.notice_line(120).expect("a notice"));
+        assert!(notice.contains("notification paused"), "{notice}");
         let wide = rendered_text(&app.status_line(120));
         assert!(wide.contains("notification paused"), "{wide}");
         assert!(wide.contains("ctx ["), "{wide}");
         assert!(wide.contains("75%"), "{wide}");
 
         let narrow = rendered_text(&app.status_line(48));
-        assert!(narrow.contains("notification paused"), "{narrow}");
         assert!(narrow.contains("75%"), "{narrow}");
         assert!(UnicodeWidthStr::width(narrow.as_str()) <= 48);
+        let narrow_notice = rendered_text(&app.notice_line(48).expect("a notice"));
+        assert!(UnicodeWidthStr::width(narrow_notice.as_str()) <= 48);
     }
 
     #[test]
@@ -5206,6 +5233,52 @@ mod tests {
     /// A waiting task result is mail, not a typed message: the strip
     /// shows the headline its transcript row will wear, under its own
     /// fate, never the envelope.
+    /// A notice takes a row of its own: the status line keeps the model
+    /// and the meter beside it, and a paused backlog shows even when no
+    /// notice stands.
+    #[test]
+    fn a_notice_has_its_own_row_and_the_status_line_keeps_the_model() {
+        let mut app = App::new();
+        app.current_model = "openai/gpt-5.6-sol".into();
+        app.set_persistent_notice(
+            "error: the provider hung up — Ctrl-R to resume",
+            NoticeLevel::Error,
+        );
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let rows = (0..24)
+            .map(|row| {
+                (0..100)
+                    .map(|column| terminal.backend().buffer()[(column, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        let notice_row = rows
+            .iter()
+            .position(|row| row.contains("the provider hung up"))
+            .expect("the notice is on screen");
+        let model_row = rows
+            .iter()
+            .position(|row| row.contains("gpt-5.6-sol"))
+            .expect("the model stays on screen");
+        assert_ne!(notice_row, model_row, "{rows:?}");
+
+        app.clear_notice();
+        app.notifications_paused = true;
+        app.held_results = 3;
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let screen = (0..24)
+            .map(|row| {
+                (0..100)
+                    .map(|column| terminal.backend().buffer()[(column, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("3 task result(s) held"), "{screen}");
+    }
+
     #[test]
     fn a_topic_becomes_a_filename_stem() {
         assert_eq!(
@@ -7107,9 +7180,12 @@ mod tests {
             outcome: TurnOutcome::MaxIterations,
         });
         assert!(rendered_text(&app.status_line(80)).contains("stopped"));
+        // The activity moves on without a new detail: the stale
+        // "stopped: max iterations" must not outlive it.
         app.set_activity(Activity::Paused);
-        app.set_notice("paused", NoticeLevel::Warning);
-        assert!(rendered_text(&app.status_line(80)).contains("paused"));
+        let line = rendered_text(&app.status_line(80));
+        assert!(line.contains("paused"), "{line}");
+        assert!(!line.contains("stopped"), "{line}");
     }
 
     #[test]

@@ -2124,6 +2124,8 @@ impl schedule::Runtime for LoopRuntime<'_> {
         // cancel-all takes them too.
         app.background_running = self.spawner.running_background() + self.routed.len();
         app.deliveries_in_flight = self.routed.len();
+        app.held_results = self.held_notifications.len();
+        app.notifications_paused = *self.notifications_paused;
         let tasks = self.spawner.running_tasks();
         // Depths from the registry's own ancestry, in registry order:
         // children stay after their parent, roots keep their place.
