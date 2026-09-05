@@ -98,6 +98,15 @@ pub(crate) fn render_event(event: &LoopEvent, format: ExecFormat) -> Option<Exec
                 text: format!("retry {attempt}/{max_retries}: {error}"),
                 newline: true,
             }),
+            LoopEvent::StepInterrupted {
+                attempt,
+                max_resumes,
+                error,
+            } => Some(ExecLine {
+                stream: Stream::Err,
+                text: format!("interrupted mid-step, continuing {attempt}/{max_resumes}: {error}"),
+                newline: true,
+            }),
             LoopEvent::Compacted { .. } => Some(ExecLine {
                 stream: Stream::Err,
                 text: "context compacted".into(),
@@ -149,6 +158,16 @@ fn event_json(event: &LoopEvent) -> Option<serde_json::Value> {
             "description": description,
             "agent": agent,
             "model": model,
+        }),
+        LoopEvent::StepInterrupted {
+            attempt,
+            max_resumes,
+            error,
+        } => json!({
+            "type": "step_interrupted",
+            "attempt": attempt,
+            "max_resumes": max_resumes,
+            "error": error,
         }),
         LoopEvent::ProviderRetry {
             attempt,

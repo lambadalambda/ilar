@@ -1052,13 +1052,14 @@ impl App {
         // the former). The watchdog's notices are persistent — nothing
         // transient may bury them — so data arriving is the one thing
         // that takes them down.
-        if !matches!(event, LoopEvent::ProviderRetry { .. })
-            && self.notice.as_ref().is_some_and(|notice| {
-                (!notice.persistent && notice.text.starts_with("provider retry:"))
-                    || notice.text.starts_with("provider silent for")
-                    || notice.text.starts_with("stall watchdog:")
-            })
-        {
+        if !matches!(
+            event,
+            LoopEvent::ProviderRetry { .. } | LoopEvent::StepInterrupted { .. }
+        ) && self.notice.as_ref().is_some_and(|notice| {
+            (!notice.persistent && notice.text.starts_with("retrying in "))
+                || notice.text.starts_with("provider silent for")
+                || notice.text.starts_with("stall watchdog:")
+        }) {
             self.notice = None;
         }
         // Life also feeds the stall clock itself: a retry cycle or a
@@ -1213,6 +1214,25 @@ impl App {
                     self.set_activity(Activity::Thinking);
                 }
                 Some(touched)
+            }
+            LoopEvent::StepInterrupted {
+                attempt,
+                max_resumes,
+                error,
+            } => {
+                // The seam, where it happened: the partial step above,
+                // the continuation below.
+                self.close_open_rows();
+                self.lines.push(Line_::System(format!(
+                    "provider dropped mid-step ({error}) — continuing ({attempt}/{max_resumes})"
+                )));
+                self.status = format!("continuing after a hiccup ({attempt}/{max_resumes})");
+                self.set_activity(Activity::Thinking);
+                self.set_notice(
+                    format!("provider dropped mid-step — continuing ({attempt}/{max_resumes})"),
+                    NoticeLevel::Warning,
+                );
+                Some(self.lines.len() - 1)
             }
             LoopEvent::ProviderRetry {
                 attempt,

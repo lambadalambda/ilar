@@ -146,6 +146,11 @@ pub struct LoopConfig {
     pub provider_retry_base_delay: std::time::Duration,
     /// Upper bound for any individual exponential-backoff delay.
     pub provider_retry_max_delay: std::time::Duration,
+    /// Transient failures *after* content has streamed cannot replay the
+    /// request — the model has already spoken — but the partial step is
+    /// on the log, so the turn can continue from it with a new request.
+    /// How many times per turn it does before the failure is the user's.
+    pub max_mid_stream_resumes: usize,
     /// Rate limits (429, 529) have their own, larger budget: a throttled
     /// subscription is not a flaky gateway, and a "please wait" deserves
     /// waiting. Counted separately from the transient retries.
@@ -191,6 +196,7 @@ impl Default for LoopConfig {
             max_provider_retries: 3,
             provider_retry_base_delay: std::time::Duration::from_millis(500),
             provider_retry_max_delay: std::time::Duration::from_secs(30),
+            max_mid_stream_resumes: 2,
             // 2, 4, 8, 16, 32, 60: about two minutes of patience.
             max_rate_limit_retries: 6,
             rate_limit_retry_base_delay: std::time::Duration::from_secs(2),
@@ -496,9 +502,42 @@ async fn persist_failed_step(
     usage: Usage,
     message: &str,
 ) -> Result<()> {
+    persist_partial_step(
+        session,
+        events,
+        cancel,
+        model,
+        acc,
+        usage,
+        &format!("turn error: {message}"),
+    )
+    .await?;
+    // A failed turn ends like an aborted one for anybody watching the
+    // channel — the same outcome every caller synthesizes from the
+    // error it is about to get back.
+    events.publish_terminal(LoopEvent::TurnDone {
+        outcome: TurnOutcome::Aborted,
+    });
+    Ok(())
+}
+
+/// The partial step as the log keeps it: what streamed, a diagnostic
+/// saying why it stopped there, and a synthetic error result for every
+/// announced tool call — an unanswered tool_use poisons the transcript.
+/// Shared by the failure that ends the turn and the interruption the
+/// turn continues past; only the former ends the channel.
+async fn persist_partial_step(
+    session: &mut crate::session::Session,
+    events: &mut LoopEventSender,
+    cancel: &CancellationToken,
+    model: &str,
+    acc: &StepAccumulator,
+    usage: Usage,
+    diagnostic: &str,
+) -> Result<()> {
     let mut blocks = acc.content_blocks();
     blocks.push(ContentBlock::Diagnostic {
-        text: format!("turn error: {message}"),
+        text: diagnostic.to_string(),
         kind: DiagnosticKind::TurnError,
     });
     session.append(SessionEvent::AssistantMessage {
@@ -509,7 +548,7 @@ async fn persist_failed_step(
         stop_reason: "error".into(),
         ts: Utc::now(),
     })?;
-    let result = format!("provider error before execution: {message}");
+    let result = format!("provider error before execution: {diagnostic}");
     // Every announced call is one of these: the announcement only
     // happens after `start_tool_call` pushed the block this reads back,
     // and nothing removes a block. So answering the accumulated calls
@@ -539,12 +578,6 @@ async fn persist_failed_step(
             )
             .await;
     }
-    // A failed turn ends like an aborted one for anybody watching the
-    // channel — the same outcome every caller synthesizes from the
-    // error it is about to get back.
-    events.publish_terminal(LoopEvent::TurnDone {
-        outcome: TurnOutcome::Aborted,
-    });
     Ok(())
 }
 
@@ -1648,6 +1681,7 @@ async fn run_turn_inner(
     tool_ctx.output_tail = Some(events.output_tail_sink());
 
     let mut iterations = 0;
+    let mut mid_stream_resumes = 0;
     // Provider-generated call ids are globally unique in a session. Keeping
     // the completed ids reserved prevents a resumed model response from
     // replaying an already-applied side effect (and keeps JSONL valid).
@@ -1770,7 +1804,7 @@ async fn run_turn_inner(
 
         let mut provider_retries = 0;
         let mut rate_limit_retries = 0;
-        let (acc, aborted, errored) = loop {
+        let (acc, aborted, errored, retryable_error, rate_limited, received_response) = loop {
             let mut stream = provider.as_provider().stream(request.clone())?;
             let mut acc = StepAccumulator::default();
             let mut aborted = false;
@@ -2049,12 +2083,67 @@ async fn run_turn_inner(
                 continue;
             }
 
-            break (acc, aborted, errored);
+            break (
+                acc,
+                aborted,
+                errored,
+                retryable_error,
+                rate_limited,
+                received_response,
+            );
         };
 
         let step_usage = acc.usage;
 
         if let Some(message) = errored {
+            // A transient failure after the model had already spoken:
+            // the request cannot be replayed, but the partial step can
+            // be committed and the turn continued from it — what a
+            // manual Resume does, done here while the context is warm.
+            if retryable_error
+                && received_response
+                && !aborted
+                && mid_stream_resumes < config.max_mid_stream_resumes
+            {
+                mid_stream_resumes += 1;
+                persist_partial_step(
+                    &mut session,
+                    &mut events,
+                    &cancel,
+                    &model,
+                    &acc,
+                    step_usage,
+                    &format!("step interrupted: {message} — continuing"),
+                )
+                .await?;
+                events
+                    .publish(
+                        LoopEvent::StepInterrupted {
+                            attempt: mid_stream_resumes,
+                            max_resumes: config.max_mid_stream_resumes,
+                            error: message.clone(),
+                        },
+                        &cancel,
+                    )
+                    .await;
+                // The same patience a pre-content failure gets: a beat
+                // for a flaky connection, the server's own wait for a
+                // rate limit.
+                let delay = match rate_limited {
+                    Some(after) => after.unwrap_or(config.rate_limit_retry_base_delay),
+                    None => config.provider_retry_base_delay,
+                };
+                tokio::select! {
+                    _ = tokio::time::sleep(delay) => {}
+                    _ = cancel.cancelled() => {
+                        events.publish_terminal(LoopEvent::TurnDone {
+                            outcome: TurnOutcome::Aborted,
+                        });
+                        return Ok(TurnOutcome::Aborted);
+                    }
+                }
+                continue;
+            }
             // Persist the partial step so the UI's already-shown deltas
             // don't evaporate from the transcript — and record the error
             // itself so failures stay diagnosable from the session log

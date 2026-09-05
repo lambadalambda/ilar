@@ -63,6 +63,16 @@ pub enum LoopEvent {
         delay: std::time::Duration,
         error: String,
     },
+    /// A transient provider failure after content had already streamed.
+    /// The partial step is on the log with a diagnostic and synthetic
+    /// tool results, and the turn goes on with a fresh request from
+    /// there — bounded per turn, and said out loud so the transcript
+    /// shows the seam.
+    StepInterrupted {
+        attempt: usize,
+        max_resumes: usize,
+        error: String,
+    },
     /// One provider call completed (stop reason + usage).
     StepComplete {
         stop_reason: String,

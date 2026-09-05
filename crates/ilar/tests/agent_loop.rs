@@ -4040,3 +4040,136 @@ async fn a_long_tool_run_keeps_the_scratch_alive_without_writing_to_it() {
         "a heartbeat wrote something a reader would have to parse"
     );
 }
+
+/// A transient failure after the model has already spoken used to fail
+/// the whole turn and wait for a manual Resume. The partial step is
+/// committed and the turn goes on from it — announced, and bounded.
+#[tokio::test]
+async fn a_hiccup_after_the_first_delta_continues_the_turn() {
+    let (store, session_id) = temp_session("build");
+    let provider = MockProvider::new(vec![
+        vec![
+            ProviderEvent::TextDelta("half an answ".into()),
+            ProviderEvent::RetryableError("connection reset".into()),
+        ],
+        vec![
+            ProviderEvent::TextDelta("er, and the rest".into()),
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+                usage: Default::default(),
+            },
+        ],
+    ]);
+    let (tx, mut rx) = events_channel();
+
+    let outcome = run_turn(
+        &provider,
+        &ToolRegistry::read_only(),
+        &store,
+        &session_id,
+        "hello",
+        &[],
+        None,
+        LoopConfig {
+            provider_retry_base_delay: Duration::from_millis(1),
+            ..LoopConfig::default()
+        },
+        tx,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, TurnOutcome::Completed);
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 2);
+    // The second request continues from the committed partial step.
+    let last = requests[1].messages.last().unwrap();
+    assert!(
+        matches!(&last.content[0], ContentBlock::Text { text } if text == "half an answ"),
+        "{last:?}"
+    );
+    let session = store.load(&session_id).unwrap();
+    let transcript = session.transcript();
+    assert_eq!(transcript.len(), 3, "{transcript:?}");
+    let mut interruptions = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let LoopEvent::StepInterrupted {
+            attempt,
+            max_resumes,
+            error,
+        } = event
+        {
+            interruptions.push((attempt, max_resumes, error));
+        }
+    }
+    assert_eq!(interruptions, vec![(1, 2, "connection reset".to_string())]);
+}
+
+/// The continuation is bounded: past the budget the failure is the
+/// user's, exactly as before — and a permanent error never continues.
+#[tokio::test]
+async fn mid_stream_continuation_is_bounded_and_never_for_permanent_errors() {
+    let (store, session_id) = temp_session("build");
+    let hiccup = || {
+        vec![
+            ProviderEvent::TextDelta("bit".into()),
+            ProviderEvent::RetryableError("reset".into()),
+        ]
+    };
+    let provider = MockProvider::new(vec![hiccup(), hiccup(), hiccup(), hiccup()]);
+    let (tx, _rx) = events_channel();
+    let result = run_turn(
+        &provider,
+        &ToolRegistry::read_only(),
+        &store,
+        &session_id,
+        "hello",
+        &[],
+        None,
+        LoopConfig {
+            provider_retry_base_delay: Duration::ZERO,
+            ..LoopConfig::default()
+        },
+        tx,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+        None,
+    )
+    .await;
+    assert!(result.unwrap_err().to_string().contains("reset"));
+    assert_eq!(
+        provider.requests().len(),
+        3,
+        "two continuations, then the error"
+    );
+
+    let (store, session_id) = temp_session("build");
+    let provider = MockProvider::new(vec![
+        vec![
+            ProviderEvent::TextDelta("bit".into()),
+            ProviderEvent::Error("bad request".into()),
+        ],
+        hiccup(),
+    ]);
+    let (tx, _rx) = events_channel();
+    let result = run_turn(
+        &provider,
+        &ToolRegistry::read_only(),
+        &store,
+        &session_id,
+        "hello",
+        &[],
+        None,
+        LoopConfig::default(),
+        tx,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+        None,
+    )
+    .await;
+    assert!(result.unwrap_err().to_string().contains("bad request"));
+    assert_eq!(provider.requests().len(), 1);
+}

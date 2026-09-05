@@ -1335,7 +1335,9 @@ pub(crate) fn apply_child_loop_event(
             lines.push(Line_::System(format!("transcript compacted\n{summary}")));
             Some(lines.len() - 1)
         }
-        LoopEvent::TurnStarted | LoopEvent::ProviderRetry { .. } => None,
+        LoopEvent::TurnStarted
+        | LoopEvent::ProviderRetry { .. }
+        | LoopEvent::StepInterrupted { .. } => None,
     }
 }
 
