@@ -316,3 +316,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Compact while the cache is warm](issues/compact-while-the-cache-is-warm.md)
 - [x] [The picker finds the late topic](issues/the-picker-finds-the-late-topic.md)
 - [x] [Notices take turns](issues/notices-take-turns.md)
+- [x] [Steer the agent you are looking at](issues/steer-the-agent-you-are-looking-at.md)

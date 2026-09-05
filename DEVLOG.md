@@ -1,5 +1,26 @@
 # DEVLOG
 
+## 2026-09-05 — The daily-use batch
+
+Seven picks from the backlog, in one sitting: mid-stream hiccups now
+continue the turn from the committed partial step (bounded to two per
+turn, announced with a `StepInterrupted` event); an opt-in
+`[cache_compact]` compacts an idle session just before its prompt cache
+expires; a model switch replays once, the resume gate reads the head,
+Esc during a rewind says why it does nothing; wrapped transcript rows
+keep their gutter and error lines paint theirs; notices have a row of
+their own and a held backlog shows without one; the picker finds a
+topic written after the head scan; and the prompt under a focus view
+talks to that agent through `message_task`.
+
+Two lessons. A status detail written for one activity must not outlive
+it — the detail now belongs to the activity it was written with. And
+the gate: `cargo test --workspace --all-features` starves one serve
+test deterministically while the crate-scoped all-features run of the
+same binary never does, with identical feature sets; not understood,
+routed around in `scripts/check.sh`, recorded on the parked flake
+issue.
+
 ## 2026-09-05 — Astra, services in the handover, images
 
 - `gpt-6-astra` (models.dev 2026-09-04): 1.05M window with a 922k

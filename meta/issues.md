@@ -61,7 +61,6 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 ## Milestone 14 — Agents are places
 
-- [ ] [Steer the agent you are looking at](issues/steer-the-agent-you-are-looking-at.md)
 - [ ] [Focus seeds the step in flight](issues/focus-seeds-the-step-in-flight.md)
 
 ## Milestone 15 — Sweep: correctness
