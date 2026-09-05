@@ -75,3 +75,16 @@ the next person to see one has the numbers rather than a shrug.
 gate runs in a row ("the transcript never arrived" after 30 s) and
 passed 3/3 alone in 60 ms each time; `transcript_patiently` now waits
 a minute. The underlying sensitivity to a loaded machine stands.
+
+Later the same day, with tenco idle: `cargo test --workspace
+--all-features --bin ilar` fails this test every time (at HEAD and at
+cc9b9e8, whose full gate had passed that morning), while `cargo test -p
+ilar-tui --all-features` passes it every time, as do the workspace
+flags with any filter, and the workspace flags with
+`--test-threads=1`. The enabled feature sets of every dependency are
+identical between the two invocations (`cargo tree -e features`
+diffed). So: the same binary, the same tests, parallel, and only the
+workspace invocation starves it. Not understood. `scripts/check.sh`
+now runs the TUI's all-features suite crate-scoped, which is the same
+coverage without the interaction; the 30 s → 60 s patience change is
+kept but was not the fix.
