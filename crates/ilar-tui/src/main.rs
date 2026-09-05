@@ -820,9 +820,11 @@ fn resolve_slash(app: &App, name: &str, args: &str) -> SlashResolution {
 /// entry degrades to a notice here instead of failing the app's restart
 /// after the modal is gone.
 fn direct_resume_blocked(store: &SessionStore, id: &str) -> Option<String> {
+    // The head is enough — the gate reads metadata — and it is one
+    // file open instead of a whole replay on every picker action.
     match store
-        .load(id)
-        .map(|session| ensure_direct_resume_allowed(session.meta()))
+        .head(id)
+        .map(|head| ensure_direct_resume_allowed(Some(&head.meta)))
     {
         Ok(Ok(())) => None,
         Ok(Err(error)) => Some(format!(
@@ -920,16 +922,18 @@ fn adopt_model_selection(
     model: String,
     variant: Option<String>,
 ) -> Result<()> {
-    persist_model_change(resolver, store, session_id, &model, variant.as_deref())?;
+    // One replay serves both the append and the measurement.
+    let session = persist_model_change(resolver, store, session_id, &model, variant.as_deref())?;
     app.current_model = model.clone();
     app.current_variant = variant.clone();
     app.context_limit = display_context_limit(resolver, &model);
-    if let Ok((used, estimated)) =
-        session_context_tokens(store, session_id, system_prompt, registry)
-    {
-        app.context_used = used;
-        app.context_estimated = estimated;
-    }
+    app.context_used = ilar::compaction::estimate_tokens_with_request(
+        &session,
+        Some(system_prompt),
+        &registry.definitions(),
+    );
+    app.context_estimated = true;
+    drop(session);
     app.status = "ready".into();
     app.clear_notice();
     let selection = variant
@@ -2053,7 +2057,7 @@ impl schedule::Runtime for LoopRuntime<'_> {
             &model,
             variant.as_deref(),
         ) {
-            Ok(()) => {
+            Ok(_) => {
                 app.current_model = model.clone();
                 app.current_variant = variant;
                 app.context_limit = display_context_limit(self.resolver.as_ref(), &model);
@@ -4074,7 +4078,15 @@ async fn run_app(
                         // queue, background jobs) lives in the pending
                         // manager (Ctrl-Q) and explicit commands. Ctrl-C
                         // arrives here too — it is rewritten into Esc above.
-                        if app.busy {
+                        if rewind_task.is_some() {
+                            // Git is mid-restore; stopping it would leave
+                            // half a working tree. Say so instead of
+                            // silently doing nothing.
+                            app.set_notice(
+                                "a rewind cannot be aborted — it finishes in seconds",
+                                NoticeLevel::Warning,
+                            );
+                        } else if app.busy {
                             if let Some(cancel) = &cancel {
                                 cancel.cancel();
                                 app.status = "aborting…".into();

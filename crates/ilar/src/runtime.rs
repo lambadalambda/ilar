@@ -214,13 +214,16 @@ pub fn create_root_session(
     Ok(())
 }
 
+/// Returns the loaded session so a caller that wants to measure the
+/// context under the new model can do it on this replay rather than
+/// paying a second one.
 pub fn persist_model_change(
     resolver: &dyn ProviderResolver,
     store: &SessionStore,
     session_id: &str,
     model: &str,
     variant: Option<&str>,
-) -> Result<()> {
+) -> Result<crate::session::Session> {
     drop(resolver.resolve_provider(model)?);
     crate::model::variant_options(model, variant)?;
     let mut session = store.acquire_writer(session_id)?.load()?;
@@ -230,7 +233,7 @@ pub fn persist_model_change(
         variant: variant.map(String::from),
         ts: chrono::Utc::now(),
     })?;
-    Ok(())
+    Ok(session)
 }
 
 fn sessions_dir(config: &Config) -> std::path::PathBuf {
