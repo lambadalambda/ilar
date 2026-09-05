@@ -76,6 +76,16 @@ macro_rules! pricing {
 /// absent — their effective token price depends on the plan, so the UI
 /// shows tokens without dollars.
 static PRICING: &[(&str, &str, ModelPricing)] = &[
+    (
+        "openai",
+        "gpt-6-astra",
+        pricing!(10.0, 50.0, Some(1.0), Some(12.5)),
+    ),
+    (
+        "opencode",
+        "gpt-6-astra",
+        pricing!(10.0, 50.0, Some(1.0), Some(12.5)),
+    ),
     ("openai", "gpt-4.1", pricing!(2.0, 8.0, Some(0.5), None)),
     (
         "openai",
@@ -712,6 +722,30 @@ const EFFORT_NONE_LOW_HIGH: &[ModelVariant] = &[
     },
 ];
 
+/// GPT-6 Astra's rungs: no `none`, like the 5.x line, and `max` like 5.6.
+const EFFORT_LOW_TO_MAX: &[ModelVariant] = &[
+    ModelVariant {
+        id: "low",
+        name: "Low",
+    },
+    ModelVariant {
+        id: "medium",
+        name: "Medium",
+    },
+    ModelVariant {
+        id: "high",
+        name: "High",
+    },
+    ModelVariant {
+        id: "xhigh",
+        name: "Extra high",
+    },
+    ModelVariant {
+        id: "max",
+        name: "Max",
+    },
+];
+
 /// GLM-5.3 thinking effort levels (https://z.ai/blog/glm-5.3). The server
 /// default is `max`; disabling thinking is not supported by the model.
 const ZAI_EFFORT_VARIANTS: &[ModelVariant] = &[
@@ -872,6 +906,23 @@ macro_rules! model {
 // the docs file under the Messages wire answer on chat-completions and
 // are cataloged there; the Claude and Gemini families do not.
 static CATALOG: &[ModelInfo] = &[
+    // GPT-6 Astra (2026-09-04). models.dev: 1,050,000 context, 922,000
+    // input cap; kept at the 5.6 rows' 272k working window, which is
+    // also where Zen's price doubles. `OpenAi`, not `OpenAiBoth`: the
+    // ChatGPT backend serves it only to accounts in an access program
+    // (Codex's "Daybreak" gate), so a ChatGPT-only config would list a
+    // dark row — flip it once a login is seen to answer.
+    model!(
+        "openai",
+        "gpt-6-astra",
+        "GPT-6 Astra",
+        272_000,
+        128_000,
+        OpenAi
+    )
+    .input(272_000)
+    .vision()
+    .reasoning(EFFORT_LOW_TO_MAX),
     model!(
         "openai",
         "gpt-5.6-sol",
@@ -1161,7 +1212,19 @@ static CATALOG: &[ModelInfo] = &[
     model!("zai", "glm-4.5", "GLM-4.5", 131_072, 98_304, ZaiBoth),
     // OpenCode Zen: the models the docs place on the Responses wire, then
     // the chat-completions ones, live-probed 2026-09-03 (see the
-    // opencode module).
+    // opencode module). gpt-6-astra joined 2026-09-05 (Zen only; Go
+    // does not list it).
+    model!(
+        "opencode",
+        "gpt-6-astra",
+        "GPT-6 Astra",
+        272_000,
+        128_000,
+        OpenCodeResponses
+    )
+    .input(272_000)
+    .vision()
+    .reasoning(EFFORT_LOW_TO_MAX),
     model!(
         "opencode",
         "gpt-5.6-sol",
@@ -2046,6 +2109,10 @@ mod tests {
                 .collect::<Vec<_>>()
         };
 
+        assert_eq!(
+            ids("openai/gpt-6-astra"),
+            vec!["low", "medium", "high", "xhigh", "max"]
+        );
         assert_eq!(
             ids("openai/gpt-5.6-sol"),
             vec!["none", "low", "medium", "high", "xhigh", "max"]
