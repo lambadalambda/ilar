@@ -684,6 +684,43 @@ pub(crate) fn underline_content_spans(line: &mut Line<'static>) {
     }
 }
 
+/// Wrap one entry line keeping its gutter: the label a row leads with
+/// (`you  `, `—    `, `task `, `▸ Thought: `, or plain indent) is
+/// repeated as blank space on every continuation row, so a wrapped
+/// prompt or note stays under its label instead of falling back to
+/// column 0. A leading span counts as the gutter when it is all
+/// whitespace or ends in a space — every label does, and no content
+/// span starts a row that way.
+pub(crate) fn wrap_entry_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
+    let gutter = line
+        .spans
+        .first()
+        .map(|span| span.content.as_ref())
+        .filter(|text| !text.is_empty() && (text.ends_with(' ') || text.trim().is_empty()))
+        .map(UnicodeWidthStr::width)
+        .filter(|gutter| *gutter < width / 2)
+        .unwrap_or(0);
+    if gutter == 0 || line.width() <= width {
+        return wrap_styled_line(line, width);
+    }
+    let mut spans = line.spans.into_iter();
+    let label = spans.next().expect("a gutter is a first span");
+    let body = Line::from(spans.collect::<Vec<_>>());
+    wrap_styled_line(body, width - gutter)
+        .into_iter()
+        .enumerate()
+        .map(|(index, mut row)| {
+            let lead = if index == 0 {
+                label.clone()
+            } else {
+                Span::styled(" ".repeat(gutter), label.style)
+            };
+            row.spans.insert(0, lead);
+            row
+        })
+        .collect()
+}
+
 /// Toggle a tool row's expansion. The index returned is the *top-level*
 /// one — a row nested inside an agent's child timeline reports the row
 /// that contains it — because that is what the render cache marks, and
@@ -1446,7 +1483,7 @@ fn entry_rows(
                 let mut first_line = true;
                 transcript_entry_lines(item, width, now, activity_started)
                     .into_iter()
-                    .flat_map(|line| wrap_styled_line(line, width as usize))
+                    .flat_map(|line| wrap_entry_line(line, width as usize))
                     .map(|line| {
                         let first = std::mem::take(&mut first_line);
                         let target = if first || whole_preview {
@@ -1683,7 +1720,13 @@ fn tool_entry_rows(
         if matches!(kind, ToolKind::Tool) || child_lines.is_empty() || *state == ToolState::Failed {
             rows.extend(tool_detail_rows(
                 "result",
-                result.as_deref().unwrap_or("pending"),
+                // A settled row with nothing recorded did not "pend":
+                // the turn ended before the tool returned.
+                result.as_deref().unwrap_or(if *state == ToolState::Failed {
+                    "no result recorded — the turn ended before the tool returned"
+                } else {
+                    "pending"
+                }),
                 width,
                 indent + 4,
                 if *full { usize::MAX } else { 8 },
@@ -2215,19 +2258,30 @@ pub(crate) fn transcript_entry_lines(
             false,
             0,
         )],
-        Line_::System(text) => safe_lines(text)
-            .into_iter()
-            .enumerate()
-            .map(|(index, text)| {
-                Line::from(vec![
-                    Span::styled(
-                        if index == 0 { "—    " } else { "     " },
-                        Style::default().fg(theme::MUTED),
-                    ),
-                    Span::styled(text, Style::default().fg(theme::MUTED)),
-                ])
-            })
-            .collect(),
+        Line_::System(text) => {
+            // A turn-killing error is not the same kind of line as
+            // "switched to …": the gutter says so, the words stay
+            // readable where muted grey would bury them.
+            let error = text.starts_with("error:") || text.starts_with("turn error:");
+            let (gutter, body) = if error {
+                (theme::ERROR, theme::PRIMARY)
+            } else {
+                (theme::MUTED, theme::MUTED)
+            };
+            safe_lines(text)
+                .into_iter()
+                .enumerate()
+                .map(|(index, text)| {
+                    Line::from(vec![
+                        Span::styled(
+                            if index == 0 { "—    " } else { "     " },
+                            Style::default().fg(gutter),
+                        ),
+                        Span::styled(text, Style::default().fg(body)),
+                    ])
+                })
+                .collect()
+        }
     }
 }
 
@@ -2566,6 +2620,62 @@ fn notification_lines(
 
 #[cfg(test)]
 mod tests {
+    /// A wrapped row keeps its gutter: continuation rows sit under the
+    /// label, not at column 0, and none of them overflows.
+    #[test]
+    fn wrapped_rows_keep_their_gutter() {
+        let now = std::time::Instant::now();
+        let text = |line: &ratatui::text::Line<'_>| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        };
+        let long = "the quick brown fox jumps over the lazy dog and keeps going well past the edge";
+        for entry in [
+            Line_::User(long.into()),
+            Line_::System(long.into()),
+            Line_::Task {
+                id: "t".into(),
+                text: format!("{long}\nbody line that is also rather long and wraps around too"),
+                expanded: true,
+            },
+        ] {
+            let rows: Vec<_> = transcript_entry_lines(&entry, 30, now, now)
+                .into_iter()
+                .flat_map(|line| wrap_entry_line(line, 30))
+                .collect();
+            assert!(
+                rows.len() > 2,
+                "{:?}",
+                rows.iter().map(text).collect::<Vec<_>>()
+            );
+            for (index, row) in rows.iter().enumerate() {
+                let rendered = text(row);
+                assert!(row.width() <= 30, "{rendered:?}");
+                if index > 0 {
+                    assert!(
+                        rendered.starts_with("     "),
+                        "row {index} lost its gutter: {rendered:?}"
+                    );
+                }
+            }
+        }
+        // A row that fits is untouched, gutter and all.
+        let short = transcript_entry_lines(&Line_::User("hi".into()), 30, now, now);
+        assert_eq!(wrap_entry_line(short[0].clone(), 30).len(), 1);
+    }
+
+    /// An error line is told apart from chatter by its gutter.
+    #[test]
+    fn an_error_line_paints_its_gutter() {
+        let now = std::time::Instant::now();
+        let error = transcript_entry_lines(&Line_::System("error: boom".into()), 80, now, now);
+        assert_eq!(error[0].spans[0].style.fg, Some(theme::ERROR));
+        let chatter = transcript_entry_lines(&Line_::System("switched to x".into()), 80, now, now);
+        assert_eq!(chatter[0].spans[0].style.fg, Some(theme::MUTED));
+    }
+
     use super::*;
     use crate::text::tests::rendered_text;
 

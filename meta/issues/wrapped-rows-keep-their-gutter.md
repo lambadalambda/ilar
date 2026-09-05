@@ -30,3 +30,17 @@ the label — at 80 columns any two-sentence prompt shows it. Also:
 Omnibus by design; tick items here.
 
 Size: M. Source: UX sweep 2026-09-03 (transcript).
+
+## Progress (2026-09-05)
+
+Done: continuation rows keep their gutter (`wrap_entry_line`: the
+leading label is repeated as blank space, content wraps at the
+remaining width) for user, system, task, job and thought rows; a
+`System` line that is a turn error paints its gutter in the error
+colour and its words in the primary one; a failed row with nothing
+recorded says "no result recorded — the turn ended before the tool
+returned" instead of `pending`; the markdown rule clamps to the width.
+Left: the parent's message inside a subagent timeline labelled `you`;
+the compaction summary as an expandable note; the 20-char agent name
+clamp; progress-before-command truncation; collapsed groups naming
+their tools; `done` flipping to `×`; the `2 * 3 * 4` italic.

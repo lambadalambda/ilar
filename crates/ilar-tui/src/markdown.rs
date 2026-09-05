@@ -135,7 +135,7 @@ pub fn render(source: &str, width: usize) -> Vec<Line<'static>> {
 
         if is_rule(trimmed) {
             lines.push(Line::from(Span::styled(
-                "────────────────────────",
+                "─".repeat(width.clamp(1, 24)),
                 Style::default().fg(theme::MUTED),
             )));
             continue;
