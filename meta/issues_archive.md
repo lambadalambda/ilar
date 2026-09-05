@@ -309,3 +309,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Task rows say what finished](issues/task-rows-say-what-finished.md)
 - [x] [The status field is shown or gone](issues/the-status-field-is-shown-or-gone.md)
 - [x] [Names before ids, everywhere](issues/names-before-ids-everywhere.md)
+- [x] [GPT-6 Astra](issues/gpt-6-astra.md)

@@ -908,17 +908,17 @@ macro_rules! model {
 static CATALOG: &[ModelInfo] = &[
     // GPT-6 Astra (2026-09-04). models.dev: 1,050,000 context, 922,000
     // input cap; kept at the 5.6 rows' 272k working window, which is
-    // also where Zen's price doubles. `OpenAi`, not `OpenAiBoth`: the
-    // ChatGPT backend serves it only to accounts in an access program
-    // (Codex's "Daybreak" gate), so a ChatGPT-only config would list a
-    // dark row — flip it once a login is seen to answer.
+    // also where Zen's price doubles. `OpenAiBoth`: the ChatGPT backend
+    // serves it to subscriptions in its access program (Codex's
+    // "Daybreak" gate) — the user's is one; a login outside the program
+    // sees the row and a refusal.
     model!(
         "openai",
         "gpt-6-astra",
         "GPT-6 Astra",
         272_000,
         128_000,
-        OpenAi
+        OpenAiBoth
     )
     .input(272_000)
     .vision()
