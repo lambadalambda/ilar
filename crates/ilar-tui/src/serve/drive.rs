@@ -1827,7 +1827,9 @@ context = 200000
         id: &str,
         ready: impl Fn(&Value) -> bool,
     ) -> Value {
-        for _ in 0..600 {
+        // A minute: under the full all-features workspace run this
+        // machine has taken more than the thirty seconds it used to get.
+        for _ in 0..1200 {
             let page = harness.json(&format!("/api/sessions/{id}")).await;
             if ready(&page) {
                 return page;

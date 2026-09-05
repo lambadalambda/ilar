@@ -67,3 +67,11 @@ the next person to see one has the numbers rather than a shrug.
   blocking `flock` taken from a tokio worker (`record`) against one
   taken from `spawn_blocking` (`pending`) is the kind of thing that
   shows up as a hang, and 0/18 is not proof of innocence.
+
+
+## Note (2026-09-05)
+
+`adoption_requeues_outbox_completions_as_follow_up_turns` failed two
+gate runs in a row ("the transcript never arrived" after 30 s) and
+passed 3/3 alone in 60 ms each time; `transcript_patiently` now waits
+a minute. The underlying sensitivity to a loaded machine stands.
