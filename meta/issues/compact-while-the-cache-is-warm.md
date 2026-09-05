@@ -86,3 +86,19 @@ to choose. Today it silently pays the cold re-read every time.
 - Watch interaction with [[the-root-turn-gets-a-watchdog]]: an
   auto-compaction is a legitimate silent phase; the watchdog's
   in-turn compaction exposure notes apply to this trigger too.
+
+## Outcome (2026-09-05)
+
+TUI only; serve stays parked. `[cache_compact]` (`enabled` false by
+default, `margin_secs` 60, `context_floor` 150000, `ttl_secs` per
+provider prefix with openai 1800 s and 300 s elsewhere) is user
+configuration: a project file setting it is reported and ignored. The
+scheduler's settle pass asks `decide::cache_compact_due` each frame —
+enabled, not yet this episode, no turn, no modal, nothing queued, no
+delivery in flight, context above the floor, and the last request's
+end at least `ttl − margin` ago — and runs the manual compaction path
+once, with a transcript line up front and a standing notice at the
+end pointing at `/rewind`. The clock starts at each turn's end and at
+a compaction; a turn start resets the episode. Not done: the OpenAI
+`prompt_cache_retention` request, which needs a live check per model
+before it can be sent safely, and the serve engine.

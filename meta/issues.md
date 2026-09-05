@@ -58,7 +58,6 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 - [ ] [Kernel sandbox for tool processes](issues/kernel-sandbox-for-tool-processes.md)
 - [ ] [The replay sweep](issues/the-replay-sweep.md)
-- [ ] [Compact while the cache is warm](issues/compact-while-the-cache-is-warm.md)
 
 ## Milestone 14 — Agents are places
 
