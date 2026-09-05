@@ -1,5 +1,23 @@
 # DEVLOG
 
+## 2026-09-05 — Astra, services in the handover, images
+
+- `gpt-6-astra` (models.dev 2026-09-04): 1.05M window with a 922k
+  input cap; cataloged at the 5.6 rows' 272k working window, where Zen
+  and OpenAI double the price. Codex fetches its model catalog remotely
+  now, so its 272k is only a test fixture; it gates Astra on ChatGPT
+  behind a "Daybreak" access program — the user's subscription has it.
+- Compaction's summarizer calls no tools, so "look up the services like
+  the todos" had to be an injection: the registry keeps the service
+  manager it installed and the compaction request carries `name ·
+  command` for every running service, with a Services section in the
+  handover template.
+- Codex's image generation is a plain function tool over
+  `{provider base}/images/generations|edits` (JSON, `gpt-image-2`,
+  `data[0].b64_json`), not a Responses built-in; `image_gen` does the
+  same on either openai credential. One direct probe of the ChatGPT
+  backend with the stored token: 200, 743 KB PNG, 20 s.
+
 ## 2026-09-04 — The user's eye
 
 A three-way read-only sweep of the TUI (transcript; status, notices

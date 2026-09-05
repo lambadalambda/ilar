@@ -118,8 +118,9 @@ model `gpt-image-2` (the same call Codex makes), writes the PNG under
 `<state dir>/images/<session>/<call>.png`, returns the path, and attaches
 the image to the result so a vision model can look at what it made.
 Reference images (up to five, resolved against the working directory)
-turn the call into an edit. Each call is one image and is billed to
-that account.
+turn the call into an edit; edits go through the ChatGPT backend's JSON
+shape, so with an API key only generation is available today. Each call
+is one image and is billed to that account.
 
 ## Services
 

@@ -311,3 +311,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Names before ids, everywhere](issues/names-before-ids-everywhere.md)
 - [x] [GPT-6 Astra](issues/gpt-6-astra.md)
 - [x] [Compaction remembers the services](issues/compaction-remembers-the-services.md)
+- [x] [Image generation on the OpenAI account](issues/image-generation-on-the-openai-account.md)

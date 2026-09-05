@@ -110,10 +110,6 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 - [ ] [MiniMax thinks out loud](issues/minimax-thinks-out-loud.md)
 
-## Milestone 19 — More doors (continued)
-
-- [ ] [Image generation on the OpenAI account](issues/image-generation-on-the-openai-account.md)
-
 ## Milestone 20 — Sweep: the user's eye
 
 - [ ] [UX sweep 2026-09-03](issues/ux-sweep-2026-09-03.md) — index
