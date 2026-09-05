@@ -98,7 +98,6 @@ milestones 15–17 stay filed — they come back when the feature does.*
 - [ ] [Engines retire when idle](issues/engines-retire-when-idle.md)
 - [ ] [Serve folds once and caches](issues/serve-folds-once-and-caches.md) — *parked with serve*
 - [ ] [Limits are not optional](issues/limits-are-not-optional.md)
-- [ ] [A turn continues after a hiccup](issues/a-turn-continues-after-a-hiccup.md)
 
 ## Milestone 18 — Sweep: responsiveness & memory
 

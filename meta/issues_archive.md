@@ -312,3 +312,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [GPT-6 Astra](issues/gpt-6-astra.md)
 - [x] [Compaction remembers the services](issues/compaction-remembers-the-services.md)
 - [x] [Image generation on the OpenAI account](issues/image-generation-on-the-openai-account.md)
+- [x] [A turn continues after a hiccup](issues/a-turn-continues-after-a-hiccup.md)
