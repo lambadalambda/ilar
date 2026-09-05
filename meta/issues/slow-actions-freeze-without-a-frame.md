@@ -52,3 +52,16 @@ session, and failure restores the pause it found.
   flight — safety rests on layered busy gates; an explicit term would
   make it structural. Esc mid-rewind silently does nothing; a "rewind
   cannot be aborted" notice would be kinder.
+
+## Progress (2026-09-05)
+
+- Model switch: one replay. `persist_model_change` returns the loaded
+  session and `adopt_model_selection` measures the context on it.
+- `direct_resume_blocked` reads the session head (metadata is all the
+  gate needs) instead of replaying the log per picker action.
+- Esc during a rewind says "a rewind cannot be aborted — it finishes
+  in seconds" instead of silently doing nothing.
+
+Still inline: fork's full copy, the turn picker's load, and the
+list-mode picker's `store.list()`; and the structural note about
+`observe` not modelling a rewind in flight.
