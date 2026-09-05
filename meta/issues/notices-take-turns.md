@@ -56,3 +56,14 @@ steers and queued messages the strip lists. Left: a reserved row for
 standing reminders so the status line keeps model and cost beside
 them, and the message-then-abort case that leaves the pause with no
 indicator — both want that row.
+
+## Outcome (2026-09-05)
+
+The reserved row exists: a notice renders on its own line between the
+status line and the pending strip (`notice_line` in view.rs), so the
+model, the usage and the meter stay beside it at every width, and the
+status line's activity detail yields as the line narrows. The second
+gap is closed structurally: with delivery paused and results held, the
+row shows "N task result(s) held — send a message to deliver" derived
+from the runtime's state, whether or not a notice stands. Precedence,
+transient errors and the dropped duplicates landed on 2026-09-04.

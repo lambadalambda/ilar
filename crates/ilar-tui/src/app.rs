@@ -5279,6 +5279,37 @@ mod tests {
         assert!(screen.contains("3 task result(s) held"), "{screen}");
     }
 
+    /// Under a focus view the prompt is the agent's: the title says so
+    /// and the border shows it listening.
+    #[test]
+    fn the_prompt_addresses_the_focused_agent() {
+        let mut app = App::new();
+        app.focus = Some(FocusView {
+            session_id: "child".into(),
+            title: "explorer · survey the API".into(),
+            lines: Vec::new(),
+            group: 0,
+            running: true,
+            scroll_top: 0,
+            follow_tail: true,
+        });
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let screen = (0..24)
+            .map(|row| {
+                (0..100)
+                    .map(|column| terminal.backend().buffer()[(column, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            screen.contains(" to explorer · survey the API "),
+            "{screen}"
+        );
+    }
+
     #[test]
     fn a_topic_becomes_a_filename_stem() {
         assert_eq!(

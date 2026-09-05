@@ -1548,6 +1548,21 @@ struct RoutedDelivery {
     parcel: ilar::delivery::Parcel,
 }
 
+/// A message typed into a focus view, on its way to that agent through
+/// the same path the model's `task_message` takes: a running agent is
+/// steered, a finished one resumed with the message as its prompt. The
+/// root keeps drawing; the ending lands as a transcript line.
+struct FocusMessage {
+    handle: tokio::task::JoinHandle<ilar::tools::ToolOutput>,
+    target: String,
+    text: String,
+}
+
+/// The root's transcript line for a message sent from a focus view.
+fn focus_message_line(target: &str, text: &str) -> String {
+    format!("→ {target}: {text}")
+}
+
 enum TurnCompletion {
     /// The outcome, and any question the turn left unanswered in the
     /// log — read on the turn's own task, where the writer just kept
@@ -2693,6 +2708,7 @@ async fn run_app(
     let mut rewind_task: Option<RewindTask> = None;
     // Deliveries to other sessions, running beside the turn slot.
     let mut routed: Vec<RoutedDelivery> = Vec::new();
+    let mut focus_messages: Vec<FocusMessage> = Vec::new();
     let mut session_labels = std::collections::HashMap::new();
     let mut cancel: Option<CancellationToken> = None;
     // Live only while a root turn runs, so a message typed during that
@@ -3233,6 +3249,39 @@ async fn run_app(
             });
         }
 
+        // A focus message's ending: a running agent took it (or queued
+        // it), a finished one answered, or the send failed. Said in the
+        // root's transcript, where the send was recorded.
+        let mut index = 0;
+        while index < focus_messages.len() {
+            if !focus_messages[index].handle.is_finished() {
+                index += 1;
+                continue;
+            }
+            let message = focus_messages.remove(index);
+            let output = match message.handle.await {
+                Ok(output) => output,
+                Err(error) => {
+                    ilar::tools::ToolOutput::error(format!("the message task crashed: {error}"))
+                }
+            };
+            if output.is_error {
+                let line = format!(
+                    "message to {} failed: {}",
+                    message.target,
+                    ilar::text::bounded_detail(&output.content)
+                );
+                app.set_notice(&line, NoticeLevel::Error);
+                app.push_transcript_line(Line_::System(line));
+            } else {
+                app.push_transcript_line(Line_::System(format!(
+                    "{} · {}",
+                    message.target,
+                    ilar::text::bounded_detail(&output.content)
+                )));
+            }
+        }
+
         // The whole iteration minus the dispatch — completion
         // bookkeeping and its after_turn decisions, the intent drain,
         // the palette peek, the notification gate, the subtask spawn,
@@ -3357,6 +3406,9 @@ async fn run_app(
                     }
                     for delivery in &routed {
                         delivery.cancel.cancel();
+                    }
+                    for message in &focus_messages {
+                        message.handle.abort();
                     }
                     let _ =
                         futures::future::join_all(routed.drain(..).map(|delivery| delivery.handle))
@@ -4005,7 +4057,9 @@ async fn run_app(
                 if app.focus.is_some() {
                     if code == KeyCode::Esc {
                         app.close_focus();
-                    } else if let Some(focus) = app.focus.as_mut() {
+                        continue;
+                    }
+                    let scrolled = app.focus.as_mut().is_some_and(|focus| {
                         match code {
                             KeyCode::Up => focus.scroll_by(-1),
                             KeyCode::Down => focus.scroll_by(1),
@@ -4013,8 +4067,53 @@ async fn run_app(
                             KeyCode::PageDown => focus.scroll_by(focus.page_size() as isize),
                             KeyCode::Home => focus.scroll_to_top(),
                             KeyCode::End => focus.scroll_to_tail(),
-                            _ => {}
+                            _ => return false,
                         }
+                        true
+                    });
+                    if scrolled {
+                        continue;
+                    }
+                    // Everything else is the prompt's: typing talks to
+                    // the agent on screen, and Enter sends it the way
+                    // the model's task_message would — steering it if
+                    // it runs, resuming it if it finished.
+                    match handle_prompt_key(&mut app.input, key) {
+                        PromptAction::Submit if !app.input.is_blank() => {
+                            let text = app.input.take();
+                            app.history.push(&text);
+                            let (session_id, target) = app
+                                .focus
+                                .as_ref()
+                                .map(|focus| (focus.session_id.clone(), focus.title.clone()))
+                                .expect("focus is open");
+                            app.push_transcript_line(Line_::System(focus_message_line(
+                                &target, &text,
+                            )));
+                            app.set_notice(format!("sending to {target}…"), NoticeLevel::Info);
+                            let spawner = spawner.clone();
+                            let ctx = tool_ctx.clone();
+                            let message = text.clone();
+                            let handle = tokio::spawn(async move {
+                                spawner
+                                    .message_task(
+                                        ilar::subagent::TaskMessageInput {
+                                            task_id: session_id,
+                                            message,
+                                            workspace: None,
+                                        },
+                                        &ctx,
+                                    )
+                                    .await
+                            });
+                            focus_messages.push(FocusMessage {
+                                handle,
+                                target,
+                                text,
+                            });
+                        }
+                        PromptAction::Edited => app.clear_transient_notice(),
+                        PromptAction::Unhandled | PromptAction::Submit => {}
                     }
                     continue;
                 }
@@ -4326,6 +4425,14 @@ async fn run_app(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_focus_message_is_recorded_as_sent_to_its_target() {
+        assert_eq!(
+            super::focus_message_line("explorer · survey the API", "check the auth module too"),
+            "→ explorer · survey the API: check the auth module too"
+        );
+    }
+
     /// Every place that names a session for a delivery goes through
     /// one resolver: own session, roster row, log head, then the id.
     #[test]

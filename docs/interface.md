@@ -210,6 +210,18 @@ API` — naming the session by its agent and task rather than by id. Only
 a result that cannot be delivered claims the notice line above the
 input.
 
+## Talking to a focused agent
+
+Click an agents-panel row and the child's transcript fills the screen.
+The prompt is then that agent's: the input title reads `to explorer ·
+survey the API`, and Enter sends what you typed the way the model's own
+`task_message` does — a running agent takes it at its next step, a
+finished one is resumed with it as the prompt. The root's transcript
+records the send as `→ explorer · survey the API: …` and the agent's
+answer or a failure when it lands; the root's own queue and stash are
+untouched. Arrow keys, PageUp/PageDown, Home and End scroll the view;
+Esc leaves it.
+
 ## Transcript
 
 The transcript renders markdown with syntax-highlighted code fences and

@@ -866,6 +866,10 @@ static HELP_SECTIONS: &[HelpSection] = &[
             binding!("/btw <question>", "quick aside; answered, never recorded"),
             binding!("palette: Session usage", "token and cost totals"),
             binding!("/rewind", "pick a turn: Enter ×2 rewinds chat + tree"),
+            binding!(
+                "Enter (focus view)",
+                "message the agent on screen: steers it or resumes it"
+            ),
             binding!("^Y in that picker", "fork at the turn instead (keeps both)"),
             binding!("/fork", "fork the whole session under a new id"),
             binding!("", "rewind/fork rebuild the session; services stop"),

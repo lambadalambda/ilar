@@ -76,7 +76,6 @@ milestones 15–17 stay filed — they come back when the feature does.*
 ## Milestone 16 — Sweep: texture
 
 - [ ] [Help catches up with the surfaces](issues/help-catches-up-with-the-surfaces.md)
-- [ ] [Notices take turns](issues/notices-take-turns.md)
 - [ ] [The focus view earns its chrome](issues/the-focus-view-earns-its-chrome.md)
 - [ ] [The agents panel reaches its tail](issues/the-agents-panel-reaches-its-tail.md)
 - [ ] [Hover claims the whole row](issues/hover-claims-the-whole-row.md)

@@ -976,7 +976,9 @@ impl App {
 
         // A focus view routes keys nowhere near the prompt: the input
         // stays visible but must not look like it is listening.
-        let input_focused = input_accepts_keys(self.busy, self.has_modal() || self.focus.is_some());
+        // A focus view is not a modal for the prompt: typing there
+        // talks to the agent on screen.
+        let input_focused = input_accepts_keys(self.busy, self.has_modal());
         let input_block = Block::default()
             .borders(Borders::ALL)
             .border_type(if input_focused {
@@ -993,7 +995,9 @@ impl App {
         let input_view = self
             .input
             .multiline_view(input_area.width, input_area.height);
-        let mut input_title = if input_view.line_count > 1 {
+        let mut input_title = if let Some(focus) = &self.focus {
+            format!(" to {} ", focus.title)
+        } else if input_view.line_count > 1 {
             format!(
                 " input {}/{} ",
                 input_view.cursor_line, input_view.line_count
