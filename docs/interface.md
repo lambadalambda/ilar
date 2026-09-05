@@ -58,6 +58,20 @@ abort the goal or cancel background jobs (both confirmed with a second
 press). **Esc is strictly immediate-scope**: it aborts the running turn
 or clears the input, and never touches the queue or the goal.
 
+## When the provider stumbles
+
+A failure before any of the reply has arrived is retried in place: three
+times with a short doubling wait for ordinary hiccups, six times with a
+longer one for rate limits, honouring the server's own wait when it names
+one. A failure *after* the model has started speaking cannot be replayed,
+so the partial step is committed to the log as it stands — with a
+diagnostic and an error result for any tool call it had announced — and
+the turn continues from there with a fresh request, at most twice per
+turn. The transcript shows the seam as a line reading `provider dropped
+mid-step (…) — continuing (1/2)`. Past that budget the turn fails, the
+error stands in the notice line, and **Ctrl-R** resumes from the same
+committed state by hand.
+
 Half-written something when a more urgent message comes to mind?
 **Ctrl-S** stashes the prompt — the same key on a blank prompt pops the
 newest stash back, cursor at the end, with whatever images were
