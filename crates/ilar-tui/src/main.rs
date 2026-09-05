@@ -1887,12 +1887,14 @@ impl schedule::Runtime for LoopRuntime<'_> {
         let registry = self.registry.clone();
         *self.turn_handle = Some(tokio::spawn(async move {
             let tools = registry.definitions();
+            let services = registry.running_services();
             let result = ilar::compaction::compact_session(
                 resolver.as_ref(),
                 &store,
                 &session_id,
                 Some(&system_prompt),
                 &tools,
+                &services,
                 &token,
             )
             .await;

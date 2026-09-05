@@ -1611,6 +1611,7 @@ async fn run_turn_inner(
                 cut: crate::compaction::CompactionCut::TurnBoundary,
                 system_prompt,
                 tools: &tools,
+                services: &registry.running_services(),
                 cancel: &cancel,
             },
         )
@@ -1732,6 +1733,7 @@ async fn run_turn_inner(
                     cut: crate::compaction::CompactionCut::ActiveHistory,
                     system_prompt,
                     tools: &tools,
+                    services: &registry.running_services(),
                     cancel: &cancel,
                 },
             )

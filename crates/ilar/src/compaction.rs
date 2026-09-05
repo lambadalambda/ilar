@@ -50,6 +50,10 @@ when a section is empty.
 ## Plan
 - [the todo list as it now stands, or \"(none)\"]
 
+## Services
+- [each service still running: name, command, what it is for and how to check it, or \
+\"(none)\" — the reader owns these processes and must not start them twice]
+
 ## Next Move
 1. [the immediate concrete action, or \"(none)\"]
 2. [the one after it, if known]
@@ -70,7 +74,8 @@ Never tell them to stop, wait, or seek confirmation the conversation did not ask
 work remains, Next Move is what they do first.
 - Nothing here is lost, only out of sight: the whole conversation stays searchable with the \
 history tool, which also lists every instruction the user gave and reads around any event. \
-The todo tool, called with no arguments, returns the current plan. Summarize with that in \
+The todo tool, called with no arguments, returns the current plan, and the service tool's \
+status action, called with no name, lists what is still running. Summarize with that in \
 mind — record what matters and where to look, rather than trying to preserve everything.
 - Terse bullets, not prose.
 - Do not mention summarizing, compaction, or context limits.";
@@ -120,15 +125,32 @@ fn carries_prior_summary(messages: &[ChatMessage]) -> bool {
 
 /// The conversation exactly as the turn sent it, plus the instruction as
 /// a final user message. The shared prefix is what makes this cheap.
-fn summarizer_messages(transcript: &[ChatMessage]) -> Vec<ChatMessage> {
+fn summarizer_messages(transcript: &[ChatMessage], services: &[String]) -> Vec<ChatMessage> {
     let mut instruction = String::from(SUMMARIZATION_INSTRUCTION);
     if carries_prior_summary(transcript) {
         instruction.push_str(SUMMARY_CARRY_FORWARD);
+    }
+    if !services.is_empty() {
+        instruction.push_str(SERVICES_RUNNING_NOW);
+        for service in services {
+            instruction.push_str("\n- ");
+            instruction.push_str(service);
+        }
     }
     let mut messages = transcript.to_vec();
     messages.push(ChatMessage::user_text(instruction));
     messages
 }
+
+/// Appended when the session's service manager reports running
+/// services. The conversation says what was *started*; only the manager
+/// knows what is still up, and a summary that forgets a dev server is
+/// how the next context starts a second one on the same port.
+const SERVICES_RUNNING_NOW: &str = "
+
+Services running right now, from the session's service manager (this is live; the \
+conversation may be older). Every one of these goes in the Services section, with what it \
+is for:";
 
 /// Why this text is not a summary, or `None` when it is one. This only
 /// catches the model failing to summarize at all — empty output or an
@@ -156,6 +178,10 @@ pub struct CompactionOptions<'a> {
     pub cut: CompactionCut,
     pub system_prompt: Option<&'a str>,
     pub tools: &'a [ToolDefinition],
+    /// The services still running, one `name · command` line each —
+    /// `ToolRegistry::running_services`. Injected into the summarizer's
+    /// instruction so the handover names them.
+    pub services: &'a [String],
     pub cancel: &'a CancellationToken,
 }
 
@@ -329,6 +355,7 @@ pub async fn compact_session(
     session_id: &str,
     system_prompt: Option<&str>,
     tools: &[ToolDefinition],
+    services: &[String],
     cancel: &CancellationToken,
 ) -> Result<ManualCompactionOutcome> {
     if cancel.is_cancelled() {
@@ -351,6 +378,7 @@ pub async fn compact_session(
             cut: CompactionCut::ActiveHistory,
             system_prompt,
             tools,
+            services,
             cancel,
         },
     )
@@ -472,7 +500,7 @@ pub(crate) async fn compact_if_needed_locked(
     let request = Request {
         model: model.to_string(),
         system_prompt: options.system_prompt.map(str::to_string),
-        messages: summarizer_messages(&transcript),
+        messages: summarizer_messages(&transcript, options.services),
         tools: options.tools.to_vec(),
         cache_key: Some(session.session_id().to_string()),
         options: crate::model::variant_options(model, session.effective_variant().as_deref())?,
@@ -634,7 +662,7 @@ mod tests {
             tool_result("call-1", "ok"),
         ];
 
-        let messages = summarizer_messages(&transcript);
+        let messages = summarizer_messages(&transcript, &[]);
 
         // Every original message survives byte-identical and in order:
         // that shared prefix is what the provider serves from cache.
@@ -665,7 +693,7 @@ mod tests {
     fn the_stop_is_scoped_to_the_checkpoint_not_the_task() {
         let transcript = vec![user_text("build the thing")];
 
-        let instruction = text_of(summarizer_messages(&transcript).last().unwrap());
+        let instruction = text_of(summarizer_messages(&transcript, &[]).last().unwrap());
 
         assert!(
             instruction.contains("the task itself resumes immediately"),
@@ -684,7 +712,7 @@ mod tests {
             user_text("now do the next thing"),
         ];
 
-        let instruction = text_of(summarizer_messages(&transcript).last().unwrap());
+        let instruction = text_of(summarizer_messages(&transcript, &[]).last().unwrap());
 
         assert!(
             instruction.contains("discarded once yours exists"),

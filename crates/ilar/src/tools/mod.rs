@@ -831,6 +831,9 @@ pub trait Tool: Send + Sync {
 pub struct ToolRegistry {
     tools: Vec<Arc<dyn Tool>>,
     questions: Option<crate::question::QuestionSender>,
+    /// The session's service manager, when the service tool is
+    /// installed: compaction asks it what is still running.
+    services: Option<Arc<service::ServiceManager>>,
 }
 
 /// A tool an agent `tools:` allowlist may name on top of the builtins.
@@ -901,6 +904,7 @@ impl ToolRegistry {
                 Arc::new(web::WebFetchTool::default()),
             ],
             questions: None,
+            services: None,
         }
     }
 
@@ -915,6 +919,7 @@ impl ToolRegistry {
                 Arc::new(web::WebFetchTool::default()),
             ],
             questions: None,
+            services: None,
         }
     }
 
@@ -1019,10 +1024,29 @@ impl ToolRegistry {
         self,
         manager: std::sync::Arc<service::ServiceManager>,
     ) -> Result<Self, DuplicateToolError> {
-        self.with_child_tool(
+        let mut registry = self.with_child_tool(
             ChildTool::SERVICE,
-            std::sync::Arc::new(service::ServiceTool::new(manager)),
-        )
+            std::sync::Arc::new(service::ServiceTool::new(manager.clone())),
+        )?;
+        registry.services = Some(manager);
+        Ok(registry)
+    }
+
+    /// The services still running, one line each (`name · command`), or
+    /// nothing when no service tool is installed. What compaction
+    /// carries so an agent does not start a second dev server after a
+    /// handover.
+    pub fn running_services(&self) -> Vec<String> {
+        self.services
+            .as_ref()
+            .map(|manager| {
+                manager
+                    .running_services()
+                    .into_iter()
+                    .map(|(name, command)| format!("{name} · {command}"))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Registry with the todo tool attached (shared list for TUI display).

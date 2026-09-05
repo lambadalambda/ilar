@@ -105,6 +105,24 @@ impl ServiceManager {
         count
     }
 
+    /// The services still running, as (name, command), sorted by name —
+    /// what a compaction hands the summarizer, so the next context knows
+    /// which servers and watchers it already owns.
+    pub fn running_services(&self) -> Vec<(String, String)> {
+        let mut services = self.services.lock().unwrap();
+        let mut rows: Vec<(String, String)> = services
+            .iter_mut()
+            .filter_map(|(name, entry)| {
+                entry.refresh();
+                entry
+                    .running()
+                    .then(|| (name.clone(), entry.command.clone()))
+            })
+            .collect();
+        rows.sort();
+        rows
+    }
+
     /// (name, running, detail) rows for UI display, sorted by name.
     pub fn snapshot(&self) -> Vec<(String, bool, String)> {
         let mut services = self.services.lock().unwrap();

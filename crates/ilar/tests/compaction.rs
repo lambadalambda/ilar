@@ -81,7 +81,7 @@ async fn manual_compaction_of_empty_session_is_a_local_no_op() {
     let provider = MockProvider::new(Vec::new());
     let cancel = tokio_util::sync::CancellationToken::new();
 
-    let outcome = compact_session(&provider, &store, &session_id, None, &[], &cancel)
+    let outcome = compact_session(&provider, &store, &session_id, None, &[], &[], &cancel)
         .await
         .unwrap();
 
@@ -99,9 +99,17 @@ async fn manual_active_history_compaction_persists_without_a_new_user_message() 
     ]);
     let cancel = tokio_util::sync::CancellationToken::new();
 
-    let outcome = compact_session(&provider, &store, &session_id, Some("system"), &[], &cancel)
-        .await
-        .unwrap();
+    let outcome = compact_session(
+        &provider,
+        &store,
+        &session_id,
+        Some("system"),
+        &[],
+        &[],
+        &cancel,
+    )
+    .await
+    .unwrap();
 
     assert!(matches!(
         outcome,
@@ -135,9 +143,17 @@ async fn manual_active_history_compaction_persists_without_a_new_user_message() 
     assert!(format!("{transcript:?}").contains("handover: all important context"));
     drop(session);
 
-    let second = compact_session(&provider, &store, &session_id, Some("system"), &[], &cancel)
-        .await
-        .unwrap();
+    let second = compact_session(
+        &provider,
+        &store,
+        &session_id,
+        Some("system"),
+        &[],
+        &[],
+        &cancel,
+    )
+    .await
+    .unwrap();
     assert!(matches!(
         second,
         ManualCompactionOutcome::Compacted { ref summary, .. }
@@ -1018,9 +1034,17 @@ async fn an_apology_is_reported_not_repaired() {
     )]);
     let cancel = tokio_util::sync::CancellationToken::new();
 
-    let error = compact_session(&provider, &store, &session_id, Some("system"), &[], &cancel)
-        .await
-        .expect_err("a session must not be replaced by an apology");
+    let error = compact_session(
+        &provider,
+        &store,
+        &session_id,
+        Some("system"),
+        &[],
+        &[],
+        &cancel,
+    )
+    .await
+    .expect_err("a session must not be replaced by an apology");
 
     assert!(
         format!("{error:#}").contains("answered the conversation"),
@@ -1078,9 +1102,17 @@ async fn what_the_summary_drops_stays_findable() {
     )]);
     let cancel = tokio_util::sync::CancellationToken::new();
 
-    compact_session(&provider, &store, &session_id, Some("system"), &[], &cancel)
-        .await
-        .unwrap();
+    compact_session(
+        &provider,
+        &store,
+        &session_id,
+        Some("system"),
+        &[],
+        &[],
+        &cancel,
+    )
+    .await
+    .unwrap();
 
     // The handover is the summary alone: the request is gone from what
     // the model is sent, deliberately, and nothing is pinned to it.
@@ -1156,9 +1188,17 @@ async fn the_plan_is_state_not_conversation() {
     )]);
     let cancel = tokio_util::sync::CancellationToken::new();
 
-    compact_session(&provider, &store, &session_id, Some("system"), &[], &cancel)
-        .await
-        .unwrap();
+    compact_session(
+        &provider,
+        &store,
+        &session_id,
+        Some("system"),
+        &[],
+        &[],
+        &cancel,
+    )
+    .await
+    .unwrap();
 
     // The list is state: it survives compaction untouched...
     let session = store.load(&session_id).unwrap();
@@ -1372,7 +1412,7 @@ async fn a_manual_compaction_makes_the_next_edit_re_read_the_file() {
         )
         .await
         .unwrap();
-        compact_session(&provider, &store, &session_id, None, &[], &cancel)
+        compact_session(&provider, &store, &session_id, None, &[], &[], &cancel)
             .await
             .unwrap();
     }
@@ -1399,5 +1439,63 @@ async fn a_manual_compaction_makes_the_next_edit_re_read_the_file() {
     assert!(
         content.contains("you have not read this file in this session"),
         "{content}"
+    );
+}
+
+/// A running dev server is the thing a handover most easily forgets:
+/// the conversation says it was started, nothing says it is still up.
+/// The session's service manager knows, and its list rides into the
+/// summarizer's instruction so the Services section names it.
+#[tokio::test]
+async fn running_services_ride_into_the_handover() {
+    let (store, session_id) = temp_session();
+    seed_compactable_history(&store, &session_id);
+    let provider = MockProvider::new(vec![text_turn(
+        "## Services\n- web · npm run dev — the app under test",
+    )]);
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let services = vec!["web · npm run dev".to_string()];
+
+    compact_session(
+        &provider,
+        &store,
+        &session_id,
+        Some("system"),
+        &[],
+        &services,
+        &cancel,
+    )
+    .await
+    .unwrap();
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 1);
+    let instruction = format!("{:?}", requests[0].messages.last().unwrap());
+    assert!(instruction.contains("## Services"), "{instruction}");
+    assert!(
+        instruction.contains("Services running right now")
+            && instruction.contains("web · npm run dev"),
+        "{instruction}"
+    );
+
+    // With nothing running the section is still asked for, but no
+    // live list is claimed.
+    let provider = MockProvider::new(vec![text_turn("## Services\n- (none)")]);
+    compact_session(
+        &provider,
+        &store,
+        &session_id,
+        Some("system"),
+        &[],
+        &[],
+        &cancel,
+    )
+    .await
+    .unwrap();
+    let instruction = format!("{:?}", provider.requests()[0].messages.last().unwrap());
+    assert!(instruction.contains("## Services"), "{instruction}");
+    assert!(
+        !instruction.contains("Services running right now"),
+        "{instruction}"
     );
 }

@@ -2151,3 +2151,36 @@ async fn history_searches_this_session_and_no_other() {
     let empty = history.run(serde_json::json!({}), context(&ids[0])).await;
     assert!(empty.is_error, "{}", empty.content);
 }
+
+/// The registry answers "what is still running" for compaction: the
+/// services the tool started and has not stopped, as `name · command`.
+#[tokio::test]
+async fn the_registry_lists_its_running_services() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ctx(dir.path());
+    let reg = ToolRegistry::builtin()
+        .with_services(ilar::tools::service::ServiceManager::new())
+        .unwrap();
+    assert!(reg.running_services().is_empty());
+    assert!(ToolRegistry::builtin().running_services().is_empty());
+
+    let started = run(
+        &reg,
+        "service",
+        serde_json::json!({"action": "start", "name": "svc", "command": "sleep 30"}),
+        &ctx,
+    )
+    .await;
+    assert!(!started.is_error, "{}", started.content);
+    assert_eq!(reg.running_services(), vec!["svc · sleep 30".to_string()]);
+
+    let stopped = run(
+        &reg,
+        "service",
+        serde_json::json!({"action": "stop", "name": "svc"}),
+        &ctx,
+    )
+    .await;
+    assert!(!stopped.is_error, "{}", stopped.content);
+    assert!(reg.running_services().is_empty());
+}
