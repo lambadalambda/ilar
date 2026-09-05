@@ -5284,15 +5284,12 @@ mod tests {
     #[test]
     fn the_prompt_addresses_the_focused_agent() {
         let mut app = App::new();
-        app.focus = Some(FocusView {
-            session_id: "child".into(),
-            title: "explorer · survey the API".into(),
-            lines: Vec::new(),
-            group: 0,
-            running: true,
-            scroll_top: 0,
-            follow_tail: true,
-        });
+        app.focus = Some(FocusView::new(
+            "child".into(),
+            "explorer · survey the API".into(),
+            Vec::new(),
+            true,
+        ));
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
         terminal.draw(|frame| app.render(frame)).unwrap();

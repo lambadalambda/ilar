@@ -1555,7 +1555,6 @@ struct RoutedDelivery {
 struct FocusMessage {
     handle: tokio::task::JoinHandle<ilar::tools::ToolOutput>,
     target: String,
-    text: String,
 }
 
 /// The root's transcript line for a message sent from a focus view.
@@ -4093,7 +4092,7 @@ async fn run_app(
                             app.set_notice(format!("sending to {target}…"), NoticeLevel::Info);
                             let spawner = spawner.clone();
                             let ctx = tool_ctx.clone();
-                            let message = text.clone();
+                            let message = text;
                             let handle = tokio::spawn(async move {
                                 spawner
                                     .message_task(
@@ -4106,11 +4105,7 @@ async fn run_app(
                                     )
                                     .await
                             });
-                            focus_messages.push(FocusMessage {
-                                handle,
-                                target,
-                                text,
-                            });
+                            focus_messages.push(FocusMessage { handle, target });
                         }
                         PromptAction::Edited => app.clear_transient_notice(),
                         PromptAction::Unhandled | PromptAction::Submit => {}
