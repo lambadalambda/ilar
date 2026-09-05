@@ -109,6 +109,18 @@ placeholder, so an unmatched one expands to nothing rather than staying
 literal. A command sharing a name with a skill shadows it; `goal` is
 reserved for the built-in.
 
+## Image generation
+
+With the openai provider configured — a ChatGPT login or an API key —
+the model has an `image_gen` tool: `{prompt, size?, quality?,
+reference_paths?}`. It posts to the account's images endpoint with
+model `gpt-image-2` (the same call Codex makes), writes the PNG under
+`<state dir>/images/<session>/<call>.png`, returns the path, and attaches
+the image to the result so a vision model can look at what it made.
+Reference images (up to five, resolved against the working directory)
+turn the call into an edit. Each call is one image and is billed to
+that account.
+
 ## Services
 
 The `service` tool manages long-running processes (dev servers,

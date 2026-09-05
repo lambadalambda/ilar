@@ -423,6 +423,10 @@ impl RuntimePlan {
             .with_web_tools()?
             .with_history(store.clone())?
             .with_skills(self.skill_store)?;
+        let registry = match image_gen_backend(config) {
+            Some(backend) => registry.with_image_gen(backend)?,
+            None => registry,
+        };
         // No receiver, no question tool: a driver that cannot answer
         // makes the call fail immediately rather than hang on it.
         let (registry, questions) = if self.questions {
@@ -466,6 +470,29 @@ impl RuntimePlan {
             resumed: self.resumed,
         })
     }
+}
+
+/// Image generation rides the openai provider's own credentials: the
+/// ChatGPT login when that is the configured auth, the API key
+/// otherwise, nothing when neither is set. Images land under the state
+/// directory beside sessions and spills.
+fn image_gen_backend(config: &Config) -> Option<crate::tools::image_gen::ImageGenBackend> {
+    let settings = config.providers.get("openai")?;
+    let images_dir = config.state_dir().join("images");
+    if settings.auth.as_deref() == Some("chatgpt") {
+        return Some(crate::tools::image_gen::ImageGenBackend::with_chatgpt_auth(
+            crate::auth::AuthStore::open(config.state_dir().to_path_buf()),
+            settings.base_url.clone(),
+            images_dir,
+        ));
+    }
+    settings.api_key.clone().map(|key| {
+        crate::tools::image_gen::ImageGenBackend::with_api_key(
+            key,
+            settings.base_url.clone(),
+            images_dir,
+        )
+    })
 }
 
 #[cfg(test)]

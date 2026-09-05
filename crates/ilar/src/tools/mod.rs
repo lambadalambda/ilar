@@ -7,6 +7,7 @@ pub mod executor;
 pub mod glob;
 pub mod grep;
 pub mod history;
+pub mod image_gen;
 pub mod models;
 mod process;
 pub mod read;
@@ -852,6 +853,7 @@ impl ChildTool {
     pub const SERVICE: Self = Self("service");
     pub const MODELS: Self = Self("models");
     pub const HISTORY: Self = Self("history");
+    pub const IMAGE_GEN: Self = Self("image_gen");
 
     /// Every non-builtin tool an allowlist may name.
     pub const ALL: &'static [Self] = &[
@@ -861,6 +863,7 @@ impl ChildTool {
         Self::SERVICE,
         Self::MODELS,
         Self::HISTORY,
+        Self::IMAGE_GEN,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -1015,6 +1018,18 @@ impl ToolRegistry {
         self.with_child_tool(
             ChildTool::HISTORY,
             std::sync::Arc::new(history::HistoryTool::new(store)),
+        )
+    }
+
+    /// Registry with image generation attached — installed when the
+    /// openai provider is configured, on the credentials it has.
+    pub fn with_image_gen(
+        self,
+        backend: image_gen::ImageGenBackend,
+    ) -> Result<Self, DuplicateToolError> {
+        self.with_child_tool(
+            ChildTool::IMAGE_GEN,
+            std::sync::Arc::new(image_gen::ImageGenTool::new(backend)),
         )
     }
 

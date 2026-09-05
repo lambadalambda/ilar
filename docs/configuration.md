@@ -18,7 +18,7 @@ key — is sent, which is never a cloned repository's call to make.
 | `general.project_instructions` | `true` | Whether the working directory's `AGENTS.md`/`CLAUDE.md` is part of the system prompt. See [Project instructions](#project-instructions). User-scoped. |
 | `providers.openai.base_url` | API or ChatGPT endpoint | Override the Responses API base URL selected by `auth`. |
 | `providers.openai.api_key` | `ILAR_OPENAI_API_KEY` | OpenAI API key. |
-| `providers.openai.auth` | `api_key` | `api_key` or `chatgpt`; see [OpenAI ChatGPT OAuth](#openai-chatgpt-oauth). |
+| `providers.openai.auth` | `api_key` | `api_key` or `chatgpt`; see [OpenAI ChatGPT OAuth](#openai-chatgpt-oauth). Either credential also enables the `image_gen` tool. |
 | `providers.zai.base_url` | `https://api.z.ai/api/coding/paas/v4` | Override the z.ai OpenAI-compatible base URL. |
 | `providers.zai.api_key` | `ILAR_ZAI_API_KEY` | z.ai API key. |
 | `providers.opencode.base_url` | `https://opencode.ai/zen/v1` | Override the OpenCode Zen base URL. |
