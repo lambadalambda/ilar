@@ -1224,6 +1224,7 @@ async fn main() -> Result<()> {
 
         let context_limit = display_context_limit(resolver.as_ref(), &model_for_session);
         let mut app = App::new();
+        app.cache_compact = config.cache_compact.clone();
         app.theme = active_theme;
         app.history = history::PromptHistory::load(config.state_dir().join("prompt_history.jsonl"));
         app.skills = skill_inventory;
@@ -2118,6 +2119,7 @@ impl schedule::Runtime for LoopRuntime<'_> {
         // may want to wait for or cancel, and the pending manager's
         // cancel-all takes them too.
         app.background_running = self.spawner.running_background() + self.routed.len();
+        app.deliveries_in_flight = self.routed.len();
         let tasks = self.spawner.running_tasks();
         // Depths from the registry's own ancestry, in registry order:
         // children stay after their parent, roots keep their place.

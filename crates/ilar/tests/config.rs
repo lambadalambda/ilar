@@ -1184,3 +1184,53 @@ fn agent_max_iterations_parses_layers_and_rejects_zero() {
     let error = Loader::no_env().config_dir(dir).resolve().unwrap_err();
     assert!(format!("{error:#}").contains("max_iterations"), "{error:#}");
 }
+
+/// `[cache_compact]` is off unless the user turns it on, reads per-provider
+/// windows, and is the user's setting alone: a project file that sets it
+/// is reported and ignored.
+#[test]
+fn cache_compact_is_opt_in_and_user_scoped() {
+    let (_g, dir) = tempdir();
+    let config = Loader::no_env().config_dir(dir.clone()).resolve().unwrap();
+    assert!(!config.cache_compact.enabled);
+    assert_eq!(config.cache_compact.margin_secs, 60);
+    assert_eq!(config.cache_compact.context_floor, 150_000);
+    assert_eq!(
+        config.cache_compact.ttl_for("openai"),
+        std::time::Duration::from_secs(1800)
+    );
+    assert_eq!(
+        config.cache_compact.ttl_for("zai"),
+        std::time::Duration::from_secs(300)
+    );
+
+    write(
+        &dir.join("ilar.toml"),
+        "[cache_compact]\nenabled = true\nmargin_secs = 30\ncontext_floor = 50000\n\n[cache_compact.ttl_secs]\nzai = 120\n",
+    );
+    let (_p, project) = tempdir();
+    write(
+        &project.join("ilar.toml"),
+        "[cache_compact]\nenabled = false\nmargin_secs = 1\n",
+    );
+    let config = Loader::no_env()
+        .config_dir(dir)
+        .project_dir(project)
+        .resolve()
+        .unwrap();
+    assert!(config.cache_compact.enabled);
+    assert_eq!(config.cache_compact.margin_secs, 30);
+    assert_eq!(config.cache_compact.context_floor, 50_000);
+    assert_eq!(
+        config.cache_compact.ttl_for("zai"),
+        std::time::Duration::from_secs(120)
+    );
+    assert!(
+        config
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("[cache_compact] is user configuration")),
+        "{:?}",
+        config.warnings
+    );
+}

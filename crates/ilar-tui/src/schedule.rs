@@ -243,21 +243,32 @@ fn complete<R: Runtime>(app: &mut App, completion: Completion, runtime: &mut R) 
                     app.busy = false;
                     app.status = "ready".into();
                     app.set_activity(Activity::Ready);
-                    app.set_notice("compaction complete", NoticeLevel::Info);
+                    if std::mem::take(&mut app.auto_compaction) {
+                        // Standing: nobody was watching when it ran.
+                        app.set_persistent_notice(
+                            "compacted automatically to keep the provider cache warm — /rewind reopens the full context",
+                            NoticeLevel::Info,
+                        );
+                    } else {
+                        app.set_notice("compaction complete", NoticeLevel::Info);
+                    }
                 }
                 Ok(ManualCompactionOutcome::NothingToCompact) => {
+                    app.auto_compaction = false;
                     app.busy = false;
                     app.status = "ready".into();
                     app.set_activity(Activity::Ready);
                     app.set_notice("nothing to compact", NoticeLevel::Info);
                 }
                 Ok(ManualCompactionOutcome::Aborted) => {
+                    app.auto_compaction = false;
                     app.busy = false;
                     app.status = "compaction aborted".into();
                     app.set_activity(Activity::Paused);
                     app.push_transcript_line(Line_::System("compaction aborted".into()));
                 }
                 Err(error) => {
+                    app.auto_compaction = false;
                     app.busy = false;
                     app.status = "compaction failed".into();
                     app.set_activity(Activity::Error);
@@ -407,6 +418,21 @@ pub(crate) fn settle<R: Runtime>(
     runtime.peek_palette(app)?;
     if app.compact_requested && !runtime.observe(app).turn_running {
         app.compact_requested = false;
+        runtime.start_compaction(app);
+    } else if crate::decide::cache_compact_due(
+        &runtime.observe(app),
+        &app.cache_compact_check(),
+        std::time::Instant::now(),
+    ) {
+        // The provider still holds this context; a summary made now
+        // reads it at cached rates and leaves a small one behind for
+        // the cold read that is coming either way.
+        app.cache_compact_fired = true;
+        app.auto_compaction = true;
+        app.push_transcript_line(Line_::System(
+            "compacting while the provider cache is still warm — /rewind reopens the full context"
+                .into(),
+        ));
         runtime.start_compaction(app);
     }
     // An aside runs beside whatever else is happening — read-only, no
@@ -633,6 +659,41 @@ mod tests {
 
         assert_eq!(runtime.log, vec!["start_compaction"]);
         assert_eq!(runtime.pending.len(), 1, "the notification must wait");
+    }
+
+    /// An idle session whose cache window is closing compacts once,
+    /// says so in the transcript, and does not fire again until a turn
+    /// resets the episode.
+    #[test]
+    fn the_warm_cache_compaction_fires_once_per_idle_episode() {
+        let mut app = App::new();
+        app.cache_compact.enabled = true;
+        app.current_model = "openai/gpt-5.6-sol".into();
+        app.context_used = 400_000;
+        app.cache_idle_since =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(3600));
+        let mut runtime = FakeRuntime::new();
+
+        settle(&mut app, Vec::new(), &mut runtime).unwrap();
+        assert_eq!(runtime.log, vec!["start_compaction"]);
+        assert!(app.auto_compaction);
+        assert!(app.lines().iter().any(
+            |line| matches!(line, Line_::System(text) if text.contains("cache is still warm"))
+        ));
+
+        // Once per episode: a second pass leaves it alone.
+        runtime.turn_running = false;
+        settle(&mut app, Vec::new(), &mut runtime).unwrap();
+        assert_eq!(runtime.log, vec!["start_compaction"]);
+
+        // Off by default: a fresh app never fires.
+        let mut app = App::new();
+        app.context_used = 400_000;
+        app.cache_idle_since =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(3600));
+        let mut runtime = FakeRuntime::new();
+        settle(&mut app, Vec::new(), &mut runtime).unwrap();
+        assert!(runtime.log.is_empty(), "{:?}", runtime.log);
     }
 
     #[test]

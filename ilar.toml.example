@@ -79,6 +79,18 @@ theme = "carbon"
 # Summarize when transcript exceeds this fraction of context window.
 threshold = 0.85
 
+# Compact an idle session once, just before its last request leaves the
+# provider's prompt cache, so the cold re-read that follows a long pause
+# hits a small context. Off by default: it sends a request unattended.
+# User-scoped; a project file cannot set it.
+# [cache_compact]
+# enabled = true
+# margin_secs = 60
+# context_floor = 150000
+# [cache_compact.ttl_secs]
+# openai = 1800
+# zai = 300
+
 [subagents]
 max_concurrent = 10
 max_depth = 3

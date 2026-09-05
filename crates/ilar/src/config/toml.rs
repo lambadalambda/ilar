@@ -145,6 +145,67 @@ pub struct CompactionConfig {
     pub threshold: f64,
 }
 
+/// `[cache_compact]`: compact an idle session once, just before its
+/// last request leaves the provider's prompt cache, so the inevitable
+/// cold re-read happens on a small context instead of a huge one. Off
+/// by default — it fires an unattended provider request — and
+/// user-scoped, since a cloned repository must not spend the user's
+/// money on its own initiative.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CacheCompactConfig {
+    pub enabled: bool,
+    /// Seconds before the cache window closes at which to fire.
+    pub margin_secs: u64,
+    /// Below this many context tokens a cold read is pennies and a
+    /// summary's fidelity is not worth spending.
+    pub context_floor: u64,
+    /// Cache window per provider prefix, in seconds, overriding the
+    /// built-in guesses.
+    pub ttl_secs: HashMap<String, u64>,
+}
+
+impl Default for CacheCompactConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            margin_secs: 60,
+            context_floor: 150_000,
+            ttl_secs: HashMap::new(),
+        }
+    }
+}
+
+impl CacheCompactConfig {
+    /// The cache window assumed for a provider: what the providers
+    /// document (OpenAI's `prompt_cache_options.ttl` is 30 minutes on
+    /// GPT-5.6 and later) or, where nothing is documented, the five
+    /// minutes implicit caches have been observed to hold.
+    pub fn ttl_for(&self, provider: &str) -> std::time::Duration {
+        let seconds = self
+            .ttl_secs
+            .get(provider)
+            .copied()
+            .unwrap_or(match provider {
+                "openai" => 30 * 60,
+                _ => 5 * 60,
+            });
+        std::time::Duration::from_secs(seconds)
+    }
+
+    pub fn margin(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.margin_secs)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct CacheCompactLayer {
+    enabled: Option<bool>,
+    margin_secs: Option<u64>,
+    context_floor: Option<u64>,
+    ttl_secs: Option<HashMap<String, u64>>,
+}
+
 impl Default for CompactionConfig {
     fn default() -> Self {
         Self {
@@ -198,6 +259,7 @@ struct FileConfig {
     models: Option<HashMap<String, CustomModel>>,
     agent: Option<AgentLayer>,
     compaction: Option<CompactionLayer>,
+    cache_compact: Option<CacheCompactLayer>,
     subagents: Option<SubagentLayer>,
 }
 
@@ -371,6 +433,7 @@ pub struct Config {
     pub models: HashMap<String, CustomModel>,
     pub agent: AgentConfig,
     pub compaction: CompactionConfig,
+    pub cache_compact: CacheCompactConfig,
     pub subagents: SubagentConfig,
     /// Settings that parsed but were not honoured, one line each, for
     /// the frontend to show. A silently ignored setting reads as a bug
@@ -533,8 +596,10 @@ impl Config {
         // api_key substitutes the repository's, auth flips OAuth mode.
         let user_models = merged.models.clone();
         let user_providers = merged.providers.clone();
+        let user_cache_compact = merged.cache_compact.clone();
         let mut project_declared_models = false;
         let mut project_declared_providers = false;
+        let mut project_declared_cache_compact = false;
         for path in [
             project_dir.join("ilar.toml"),
             project_dir.join(".ilar/ilar.toml"),
@@ -560,6 +625,15 @@ impl Config {
                         path.display()
                     ));
                 }
+                // It fires unattended provider requests: the user's
+                // call, never a repository's.
+                if declares_cache_compact(&text) {
+                    project_declared_cache_compact = true;
+                    warnings.push(format!(
+                        "{}: [cache_compact] is user configuration and is ignored in project config",
+                        path.display()
+                    ));
+                }
                 merged = merge_file(merged, &text, &path)?;
             }
         }
@@ -568,6 +642,9 @@ impl Config {
         }
         if project_declared_providers {
             merged.providers = user_providers;
+        }
+        if project_declared_cache_compact {
+            merged.cache_compact = user_cache_compact;
         }
 
         let providers = resolve_providers(&merged, env, PROVIDERS);
@@ -621,6 +698,16 @@ impl Config {
                     .compaction
                     .and_then(|config| config.threshold)
                     .unwrap_or_else(default_threshold),
+            },
+            cache_compact: {
+                let defaults = CacheCompactConfig::default();
+                let layer = merged.cache_compact.unwrap_or_default();
+                CacheCompactConfig {
+                    enabled: layer.enabled.unwrap_or(defaults.enabled),
+                    margin_secs: layer.margin_secs.unwrap_or(defaults.margin_secs),
+                    context_floor: layer.context_floor.unwrap_or(defaults.context_floor),
+                    ttl_secs: layer.ttl_secs.unwrap_or(defaults.ttl_secs),
+                }
             },
             subagents: SubagentConfig {
                 max_concurrent: merged
@@ -735,6 +822,7 @@ impl Config {
             models: HashMap::new(),
             custom_models: Vec::new(),
             compaction: CompactionConfig::default(),
+            cache_compact: CacheCompactConfig::default(),
             subagents: SubagentConfig::default(),
             warnings: Vec::new(),
             user_dir: PathBuf::from("/nonexistent"),
@@ -853,6 +941,13 @@ fn user_scoped_general_keys(text: &str) -> Vec<&'static str> {
 
 /// Whether a config layer declares entries in one of the user-scoped
 /// tables (`[models.*]`, `[providers.*]`) at all.
+fn declares_cache_compact(text: &str) -> bool {
+    toml::from_str::<FileConfig>(text)
+        .ok()
+        .and_then(|file| file.cache_compact)
+        .is_some()
+}
+
 fn declares_entries<T>(text: &str, pick: fn(FileConfig) -> Option<HashMap<String, T>>) -> bool {
     toml::from_str::<FileConfig>(text)
         .ok()
@@ -934,6 +1029,18 @@ fn merge_file(base: FileConfig, text: &str, origin: &Path) -> anyhow::Result<Fil
                 .get_or_insert_with(CompactionLayer::default),
             compaction,
             threshold,
+        );
+    }
+    if let Some(cache_compact) = parsed.cache_compact {
+        overlay!(
+            merged
+                .cache_compact
+                .get_or_insert_with(CacheCompactLayer::default),
+            cache_compact,
+            enabled,
+            margin_secs,
+            context_floor,
+            ttl_secs,
         );
     }
     if let Some(subagents) = parsed.subagents {

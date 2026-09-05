@@ -403,6 +403,49 @@ pub(crate) fn stall_verdict(
 /// picker or the search bar moves the transcript out from under the
 /// user. Foreign completions are not gated here at all — their
 /// delivery resumes another session and takes nothing of this one's.
+/// What the warm-cache compaction needs to know about the session,
+/// gathered by the app so the decision stays a pure function.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CacheCompactCheck {
+    pub(crate) enabled: bool,
+    /// Already fired this idle episode: once is the budget.
+    pub(crate) fired: bool,
+    /// When the last provider request ended; `None` until one has.
+    pub(crate) idle_since: Option<std::time::Instant>,
+    pub(crate) ttl: std::time::Duration,
+    pub(crate) margin: std::time::Duration,
+    pub(crate) context_used: u64,
+    pub(crate) context_floor: u64,
+    /// Deliveries to other sessions in flight: their endings may start a
+    /// turn here, which is the cache refresh itself.
+    pub(crate) deliveries_in_flight: usize,
+}
+
+/// Whether to compact now, while the provider still holds the prefix:
+/// enabled, not yet this episode, nothing running or about to, the
+/// context big enough for a cold read to hurt, and the window about to
+/// close. A queued message or a live delivery means real work is
+/// coming, and that work refreshes the cache by itself.
+pub(crate) fn cache_compact_due(
+    state: &LoopState,
+    check: &CacheCompactCheck,
+    now: std::time::Instant,
+) -> bool {
+    if !check.enabled || check.fired || state.turn_running || state.modal.is_some() {
+        return false;
+    }
+    if state.queued > 0 || check.deliveries_in_flight > 0 {
+        return false;
+    }
+    if check.context_used < check.context_floor {
+        return false;
+    }
+    let Some(idle_since) = check.idle_since else {
+        return false;
+    };
+    now.duration_since(idle_since) >= check.ttl.saturating_sub(check.margin)
+}
+
 pub(crate) fn may_start_notification_turn(state: &LoopState) -> bool {
     !state.turn_running && !state.notifications_paused && state.modal.is_none()
 }
@@ -660,6 +703,67 @@ mod tests {
             goal_step(&searching, true, Some(3), false, 25),
             GoalStep::Idle
         );
+    }
+
+    /// Every gate of the warm-cache compaction, in one place: it fires
+    /// exactly when the window is closing on an idle, big, unattended
+    /// session, and never otherwise.
+    #[test]
+    fn warm_cache_compaction_fires_only_when_the_window_is_closing() {
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        let ready = || CacheCompactCheck {
+            enabled: true,
+            fired: false,
+            idle_since: Some(now - Duration::from_secs(1740)),
+            ttl: Duration::from_secs(1800),
+            margin: Duration::from_secs(60),
+            context_used: 400_000,
+            context_floor: 150_000,
+            deliveries_in_flight: 0,
+        };
+        assert!(cache_compact_due(&idle(), &ready(), now));
+
+        // Too early: the window is not closing yet.
+        let mut early = ready();
+        early.idle_since = Some(now - Duration::from_secs(600));
+        assert!(!cache_compact_due(&idle(), &early, now));
+        // Late is still fine: a cold read compaction would pay anyway.
+        let mut late = ready();
+        late.idle_since = Some(now - Duration::from_secs(7200));
+        assert!(cache_compact_due(&idle(), &late, now));
+
+        let mut off = ready();
+        off.enabled = false;
+        assert!(!cache_compact_due(&idle(), &off, now));
+        let mut spent = ready();
+        spent.fired = true;
+        assert!(!cache_compact_due(&idle(), &spent, now));
+        let mut small = ready();
+        small.context_used = 20_000;
+        assert!(!cache_compact_due(&idle(), &small, now));
+        let mut fresh = ready();
+        fresh.idle_since = None;
+        assert!(!cache_compact_due(&idle(), &fresh, now));
+        let mut delivering = ready();
+        delivering.deliveries_in_flight = 1;
+        assert!(!cache_compact_due(&idle(), &delivering, now));
+
+        let running = LoopState {
+            turn_running: true,
+            ..idle()
+        };
+        assert!(!cache_compact_due(&running, &ready(), now));
+        let queued = LoopState {
+            queued: 1,
+            ..idle()
+        };
+        assert!(!cache_compact_due(&queued, &ready(), now));
+        let modal = LoopState {
+            modal: Some(Modal::Help),
+            ..idle()
+        };
+        assert!(!cache_compact_due(&modal, &ready(), now));
     }
 
     #[test]

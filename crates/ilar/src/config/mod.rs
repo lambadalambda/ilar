@@ -9,8 +9,8 @@ pub use agents_md::{ProjectInstructions, SystemPrompt, system_prompt_for};
 pub(crate) use frontmatter::parse as parse_frontmatter;
 pub(crate) use toml::markdown_files;
 pub use toml::{
-    CompactionConfig, Config, Loader, ProviderConfig, SubagentConfig, ThemePersistOutcome, load,
-    persist_general_theme,
+    CacheCompactConfig, CompactionConfig, Config, Loader, ProviderConfig, SubagentConfig,
+    ThemePersistOutcome, load, persist_general_theme,
 };
 
 pub(crate) fn split_frontmatter(text: &str) -> anyhow::Result<(String, String)> {

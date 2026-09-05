@@ -72,6 +72,13 @@ mid-step (…) — continuing (1/2)`. Past that budget the turn fails, the
 error stands in the notice line, and **Ctrl-R** resumes from the same
 committed state by hand.
 
+A different kind of stumble is the one you cause by walking away: once
+the provider's prompt cache has dropped the session, the next move re-reads
+everything at full price. With `cache_compact.enabled` set (see
+[configuration](configuration.md#compacting-while-the-cache-is-warm)) an
+idle session compacts itself just before that happens, and says so in the
+transcript and the notice line.
+
 Half-written something when a more urgent message comes to mind?
 **Ctrl-S** stashes the prompt — the same key on a blank prompt pops the
 newest stash back, cursor at the end, with whatever images were

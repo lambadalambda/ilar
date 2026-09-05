@@ -316,6 +316,18 @@ pub(crate) struct App {
     pub(crate) pending_subtask: Option<SubtaskRequest>,
     /// Snapshot of spawner.running_background() for rendering.
     pub(crate) background_running: usize,
+    /// Completions being handed to other sessions right now.
+    pub(crate) deliveries_in_flight: usize,
+    /// `[cache_compact]` as configured; `enabled` is false by default.
+    pub(crate) cache_compact: ilar::config::CacheCompactConfig,
+    /// When the last provider request of this session ended, for the
+    /// warm-cache compaction; `None` while a turn runs or before one.
+    pub(crate) cache_idle_since: Option<std::time::Instant>,
+    /// The warm-cache compaction already ran this idle episode.
+    pub(crate) cache_compact_fired: bool,
+    /// The compaction in flight was the warm-cache one, so its ending
+    /// says so rather than "compaction complete".
+    pub(crate) auto_compaction: bool,
     /// Snapshot of the service manager's running count for rendering.
     pub(crate) services_running: usize,
     /// (name, running, detail) rows for the sidebar.
@@ -494,6 +506,11 @@ impl App {
             model_revert: None,
             pending_subtask: None,
             background_running: 0,
+            deliveries_in_flight: 0,
+            cache_compact: ilar::config::CacheCompactConfig::default(),
+            cache_idle_since: None,
+            cache_compact_fired: false,
+            auto_compaction: false,
             services_running: 0,
             services_view: Vec::new(),
             agents_view: Vec::new(),
@@ -926,6 +943,22 @@ impl App {
         }
     }
 
+    /// The warm-cache compaction's view of this session, for
+    /// [`crate::decide::cache_compact_due`].
+    pub(crate) fn cache_compact_check(&self) -> crate::decide::CacheCompactCheck {
+        let provider = self.current_model.split('/').next().unwrap_or_default();
+        crate::decide::CacheCompactCheck {
+            enabled: self.cache_compact.enabled,
+            fired: self.cache_compact_fired,
+            idle_since: self.cache_idle_since,
+            ttl: self.cache_compact.ttl_for(provider),
+            margin: self.cache_compact.margin(),
+            context_used: self.context_used,
+            context_floor: self.cache_compact.context_floor,
+            deliveries_in_flight: self.deliveries_in_flight,
+        }
+    }
+
     pub(crate) fn set_activity(&mut self, activity: Activity) {
         if self.activity != activity {
             // Entering a streaming state restarts the liveness clock so a
@@ -1100,6 +1133,8 @@ impl App {
                 Some(from)
             }
             LoopEvent::TurnStarted => {
+                self.cache_idle_since = None;
+                self.cache_compact_fired = false;
                 self.turn_committed = true;
                 self.turn_boundary = self.lines.len();
                 self.clear_transient_notice();
@@ -1286,6 +1321,7 @@ impl App {
                 context_tokens,
                 summary,
             } => {
+                self.cache_idle_since = Some(std::time::Instant::now());
                 self.context_used = *context_tokens;
                 self.context_estimated = true;
                 // The model no longer remembers what these rows carry,
@@ -1299,6 +1335,8 @@ impl App {
                 Some(0)
             }
             LoopEvent::TurnDone { outcome } => {
+                // The cache clock starts when the provider last answered.
+                self.cache_idle_since = Some(std::time::Instant::now());
                 let touched = if *outcome == TurnOutcome::Aborted {
                     self.close_open_rows();
                     Some(0)

@@ -28,6 +28,10 @@ key — is sent, which is never a cloned repository's call to make.
 | `models.<name>.*` | — | Your own OpenAI-compatible endpoint, used as `custom/<name>`. See [Bring your own model](#bring-your-own-model). |
 | `agent.max_iterations` | `1000` | Max provider calls per user turn (runaway-loop backstop). |
 | `compaction.threshold` | `0.85` | Context fraction at which history is handed over; must be between 0 and 1. |
+| `cache_compact.enabled` | `false` | Compact an idle session once, just before its last request leaves the provider's prompt cache. See [Compacting while the cache is warm](#compacting-while-the-cache-is-warm). User-scoped. |
+| `cache_compact.margin_secs` | `60` | How long before the cache window closes to fire. |
+| `cache_compact.context_floor` | `150000` | Below this many context tokens a cold read is cheap and nothing fires. |
+| `cache_compact.ttl_secs.<provider>` | `openai` 1800, others 300 | The cache window assumed per provider prefix, in seconds. |
 | `subagents.max_concurrent` | `10` | Maximum concurrent subagents; must be at least 1. |
 | `subagents.max_depth` | `3` | Maximum nested subagent depth; must be at least 1. |
 | `subagents.background_tool_timeout_ms` | `600000` | Background tool timeout in milliseconds; must be at least 1. |
@@ -178,6 +182,25 @@ reaches the Responses wire as `reasoning.effort` and the chat wire as
 publish (the lower tier where a model has two, off-peak for DeepSeek); on Go
 that figure is what the usage caps count, so the meter's dollars are the
 subscription's dollars.
+
+## Compacting while the cache is warm
+
+A session that idles past the provider's prompt-cache window pays a cold
+re-read of its whole context on the next move, whatever that move is. For
+the minutes before the window closes, compaction is cheap: the summary
+request reads the big context at cached rates and leaves a small one
+behind. With `cache_compact.enabled = true`, an idle session whose context
+is above `context_floor` compacts once, `margin_secs` before the assumed
+window (`ttl_secs` per provider) closes, counted from its last completed
+request. It never fires while a turn runs, while a message is queued or a
+result is being delivered, or under a modal, and only once per idle
+episode; the next turn starts a new one. The transcript gets a line when it
+fires and a standing notice when it lands; `/rewind` reopens the full
+context if you want it, at the full price the compaction avoided.
+
+It is off by default because it sends a provider request with nobody
+watching, and it is user configuration: a project file cannot turn it on.
+The TUI runs it; the parked `serve` driver does not yet.
 
 ## OpenAI ChatGPT OAuth
 
