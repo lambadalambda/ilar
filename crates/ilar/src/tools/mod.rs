@@ -522,6 +522,45 @@ fn digest(contents: &[u8]) -> [u8; 32] {
     <sha2::Sha256 as sha2::Digest>::digest(contents).into()
 }
 
+/// Progress signal for a background task's stall watchdog. A foreground
+/// task blocks the turn that called it, so that turn's own event channel
+/// is silent for as long as the child runs; the child touches this on
+/// every event of its own instead, at any depth, so a busy descendant is
+/// never mistaken for a hang.
+#[derive(Clone, Debug)]
+pub struct Heartbeat {
+    last: Arc<std::sync::Mutex<std::time::Instant>>,
+}
+
+impl Default for Heartbeat {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Heartbeat {
+    pub fn new() -> Self {
+        Self {
+            last: Arc::new(std::sync::Mutex::new(std::time::Instant::now())),
+        }
+    }
+
+    pub fn touch(&self) {
+        *self.lock() = std::time::Instant::now();
+    }
+
+    /// Time since the last touch.
+    pub fn elapsed(&self) -> std::time::Duration {
+        self.lock().elapsed()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, std::time::Instant> {
+        self.last
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 /// Per-invocation context. No permission checks — the sandbox is the
 /// permission system.
 #[derive(Clone)]
@@ -554,6 +593,10 @@ pub struct ToolContext {
     /// grep what did not fit in its result. `None` — a context with no
     /// state directory behind it — simply truncates as before.
     pub spill_dir: Option<PathBuf>,
+    /// The nearest background ancestor's stall watchdog, when this call
+    /// runs under one. Inherited by foreground children; a background
+    /// child starts its own.
+    pub heartbeat: Option<Heartbeat>,
 }
 
 impl ToolContext {
@@ -585,6 +628,7 @@ impl ToolContext {
             vision: false,
             seen_files: SeenFiles::default(),
             spill_dir: None,
+            heartbeat: None,
         })
     }
 

@@ -284,6 +284,39 @@ fn unwatched_spawner(
     )
 }
 
+/// The production shape of a nested tree: a mutable agent that owns the
+/// task tool, and a read-only one that shares its checkout as a
+/// foreground child. Watchdog at 400ms.
+fn build_and_explore_spawner(
+    provider: Arc<dyn Provider>,
+    store: &SessionStore,
+) -> Arc<SubagentSpawner> {
+    let agent = |name: &str, workspace_mode| AgentDefinition {
+        name: name.into(),
+        description: name.into(),
+        model: None,
+        prompt: "".into(),
+        workspace_mode,
+        tools: None,
+    };
+    Arc::new(
+        SubagentSpawner::new(
+            Arc::new(FixedProviderResolver::new(provider)),
+            store.clone(),
+            vec![
+                agent("build", AgentWorkspaceMode::Mutable),
+                agent("explore", AgentWorkspaceMode::ReadOnly),
+            ],
+            std::env::temp_dir(),
+            0,
+            10,
+            3,
+            ProjectInstructions::Include,
+        )
+        .with_stall_timeout(Duration::from_millis(400)),
+    )
+}
+
 /// A read-only spawner whose notification channel holds exactly one
 /// permit, so "background capacity is full" is one hung child away.
 fn crowded_read_only_spawner(
@@ -1799,6 +1832,79 @@ async fn a_result_for_a_busy_child_is_steered_not_queued() {
     );
 }
 
+/// A background task whose only work is a foreground child that keeps
+/// talking: the caller's own channel is silent for longer than the
+/// stall timeout while the child trickles text.
+#[derive(Clone)]
+struct BusyForegroundChild;
+
+impl Provider for BusyForegroundChild {
+    fn stream(&self, request: Request) -> anyhow::Result<EventStream> {
+        let has_result = request.messages.iter().any(|message| {
+            message
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+        });
+        if has_result {
+            return Ok(Box::pin(stream::iter(vec![
+                ProviderEvent::TextDelta("child reported".into()),
+                ProviderEvent::TurnComplete {
+                    stop_reason: StopReason::EndTurn,
+                    usage: Usage::default(),
+                },
+            ])));
+        }
+        let is_child = request.messages.iter().any(|message| {
+            message.content.iter().any(
+                |block| matches!(block, ContentBlock::Text { text } if text.contains("trickle")),
+            )
+        });
+        if is_child {
+            return Ok(Box::pin(stream::unfold(0u32, |n| async move {
+                // Ticks well inside the 400ms watchdog, for 1.5s: a
+                // scheduling hiccup must not turn this into the stall
+                // the test says does not happen.
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                if n < 30 {
+                    Some((ProviderEvent::TextDelta("tick ".into()), n + 1))
+                } else if n == 30 {
+                    Some((
+                        ProviderEvent::TurnComplete {
+                            stop_reason: StopReason::EndTurn,
+                            usage: Usage::default(),
+                        },
+                        n + 1,
+                    ))
+                } else {
+                    None
+                }
+            })));
+        }
+        Ok(Box::pin(stream::iter(vec![
+            ProviderEvent::ToolCallStarted {
+                id: "task-fg".into(),
+                name: "task".into(),
+                item_id: None,
+            },
+            ProviderEvent::ToolCallCompleted {
+                id: "task-fg".into(),
+                name: "task".into(),
+                input: serde_json::json!({
+                    "description": "busy fg",
+                    "prompt": "trickle",
+                    "subagent_type": "explore",
+                    "background": false,
+                }),
+            },
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+                usage: Usage::default(),
+            },
+        ])))
+    }
+}
+
 #[tokio::test]
 async fn stall_watchdog_fires_on_silent_child() {
     let (store, session_id) = temp_store();
@@ -1833,6 +1939,7 @@ async fn stall_watchdog_fires_on_silent_child() {
                 vision: false,
                 seen_files: ilar::tools::SeenFiles::default(),
                 spill_dir: None,
+                heartbeat: None,
             },
         )
         .await;
@@ -1855,6 +1962,54 @@ async fn stall_watchdog_fires_on_silent_child() {
     assert!(
         start.elapsed() < Duration::from_secs(3),
         "watchdog took too long"
+    );
+}
+
+/// The stall watchdog must see through a foreground child: while the
+/// task's turn is blocked on it, the task's own channel is silent, and
+/// a child working for longer than the timeout is not a hang.
+#[tokio::test]
+async fn stall_watchdog_counts_a_busy_foreground_child_as_progress() {
+    let (store, session_id) = temp_store();
+    let spawner = build_and_explore_spawner(Arc::new(BusyForegroundChild), &store);
+    let mut notifications = spawner.subscribe();
+    let registry = ToolRegistry::builtin()
+        .with_subagents(spawner.clone())
+        .unwrap();
+    let task = registry.get("task").unwrap();
+    let ctx = background_tool_context(session_id, spawner, std::env::temp_dir().as_ref());
+
+    let start = std::time::Instant::now();
+    let out = task
+        .run(
+            serde_json::json!({
+                "description": "busy bg",
+                "prompt": "delegate and wait",
+                "subagent_type": "build",
+                "background": true,
+            }),
+            ctx,
+        )
+        .await;
+    assert!(!out.is_error, "{out:?}");
+
+    let notification = tokio::time::timeout(Duration::from_secs(10), notifications.recv())
+        .await
+        .expect("completion notification")
+        .expect("present");
+    assert!(
+        !notification.is_error,
+        "a busy child was taken for a stall: {}",
+        notification.text
+    );
+    assert!(
+        notification.text.contains("child reported"),
+        "the task should finish its own turn: {}",
+        notification.text
+    );
+    assert!(
+        start.elapsed() >= Duration::from_millis(1500),
+        "the child cannot have finished this fast"
     );
 }
 

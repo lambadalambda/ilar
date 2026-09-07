@@ -1031,6 +1031,10 @@ impl SubagentSpawner {
             // Inherited: a child's oversized output is worth keeping for
             // the same reason its parent's is.
             spill_dir: ctx.spill_dir.clone(),
+            // Inherited for a foreground child, whose every event is
+            // its blocked caller's progress; the background branch
+            // below replaces it with the watchdog of its own.
+            heartbeat: ctx.heartbeat.clone(),
         };
 
         if background {
@@ -1151,20 +1155,24 @@ impl SubagentSpawner {
                 // the task.
                 child_ctx.cancel = cancel.clone();
                 let (tx, mut rx_evt) = loop_event_channel(LOOP_EVENT_CAPACITY);
-                // Activity tracker: any child event counts as progress.
-                let last_activity = Arc::new(Mutex::new(std::time::Instant::now()));
-                let watcher_last = last_activity.clone();
+                // Activity tracker: any event of this task's turn counts
+                // as progress, and so does any event of a foreground
+                // descendant, which touches the same heartbeat through
+                // the context it inherits.
+                let heartbeat = crate::tools::Heartbeat::new();
+                child_ctx.heartbeat = Some(heartbeat.clone());
+                let watcher_heartbeat = heartbeat.clone();
                 let watcher_activity = activity.clone();
                 let watcher = tokio::spawn(async move {
                     while let Some(event) = rx_evt.recv().await {
-                        *lock_unpoisoned(&watcher_last) = std::time::Instant::now();
+                        watcher_heartbeat.touch();
                         watcher_activity.publish(event);
                     }
                 });
                 let stall_watch = async {
                     loop {
                         tokio::time::sleep(stall_timeout / 2).await;
-                        if lock_unpoisoned(&last_activity).elapsed() >= stall_timeout {
+                        if heartbeat.elapsed() >= stall_timeout {
                             return;
                         }
                     }
@@ -1325,6 +1333,12 @@ task's scope yourself; continue only clearly disjoint work."
             tokio::select! {
                 event = rx_evt.recv() => {
                     if let Some(event) = event {
+                        // The caller is blocked on this child: its
+                        // background ancestor's watchdog, if any, hears
+                        // the child's progress as the caller's.
+                        if let Some(heartbeat) = &ctx.heartbeat {
+                            heartbeat.touch();
+                        }
                         activity.publish(event);
                     }
                 }
@@ -1825,6 +1839,9 @@ task's scope yourself; continue only clearly disjoint work."
                     // tool context, so this path has no state directory
                     // to spill into and truncates as it always did.
                     spill_dir: None,
+                    // A routed notification turn runs under no background
+                    // watchdog.
+                    heartbeat: None,
                 },
                 // No live channel: this turn is not the parent's to
                 // steer, so a message that arrives while it runs waits
