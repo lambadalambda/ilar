@@ -25,6 +25,15 @@ prompt mentions parallel inspection, 3.44. Also noted for later:
 ChatGPT backend's usage-percent headers are not read, so the TUI never
 warned.
 
+Found on the way: the background stall watchdog counted only the
+task's own loop events as progress, so a foreground `task` call — which
+blocks the caller's turn — read as silence for its whole run, and a
+subtree that was busy for ten minutes was killed twice as "stalled".
+Now a `Heartbeat` on the tool context: a background task creates one,
+foreground children inherit it and touch it on every event at any
+depth, a background child starts its own. The test reproduces the
+production shape (mutable task, read-only foreground child).
+
 ## 2026-09-05 — The daily-use batch
 
 Seven picks from the backlog, in one sitting: mid-stream hiccups now
