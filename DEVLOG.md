@@ -1,5 +1,30 @@
 # DEVLOG
 
+## 2026-09-07 — Where a weekend of tokens went
+
+A weekly ChatGPT allowance spent on two root sessions with gpt-6-astra.
+The session logs (09-05..07) say: 10,756 requests, 891M tokens read
+from cache, 28M uncached (3%), 4.2M output; two roots at 2,726 and
+1,100 requests spawning ~305 children that took two thirds of the
+requests and about half the tokens; compaction fired at ~231k every
+time and handed over to 7–15k; six error turns, none about quota. So
+nothing broken, just a 272k window kept at a median 120k, times ten
+requests per user message, times the fan-out.
+
+Context growth split: read results ~40%, bash/grep/glob ~25%, output
+incl. reasoning 18%. Pruning stale tool results mid-window was
+simulated against the logs (one prune at 150k per window, results
+older than 20 steps dropped): 3–8x return on the one cold re-ingest,
+but only ~20% of a session's cached reads, and it discards material
+the model may still want. Decided against — the current scheme is
+known not to lose anything before compaction. Kept: the base prompt
+now asks for independent tool calls in one response, since the build
+agent averaged 1.08 calls per request and the explore agent, whose
+prompt mentions parallel inspection, 3.44. Also noted for later:
+`read` and `glob` can return 256 KB / 187 KB in one result, and the
+ChatGPT backend's usage-percent headers are not read, so the TUI never
+warned.
+
 ## 2026-09-05 — The daily-use batch
 
 Seven picks from the backlog, in one sitting: mid-stream hiccups now

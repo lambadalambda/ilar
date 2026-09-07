@@ -40,7 +40,7 @@
 
 ## Milestone 10 — Everyday polish
 
-(all complete — see issues_archive.md)
+- [ ] [Independent tool calls go together](issues/independent-tool-calls-go-together.md)
 
 ## Milestone 11 — Beyond the terminal
 
