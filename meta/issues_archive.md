@@ -317,3 +317,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [The picker finds the late topic](issues/the-picker-finds-the-late-topic.md)
 - [x] [Notices take turns](issues/notices-take-turns.md)
 - [x] [Steer the agent you are looking at](issues/steer-the-agent-you-are-looking-at.md)
+- [x] [A busy child is not a stall](issues/a-busy-child-is-not-a-stall.md)
