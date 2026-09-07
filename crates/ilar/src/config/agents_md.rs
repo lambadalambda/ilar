@@ -7,7 +7,10 @@ use anyhow::Context;
 const BASE_PROMPT: &str = "You are ilar, a terminal coding agent. You have \
 tools: read, write, edit, bash, glob, grep. Work in the user's project \
 directory. Be terse; verify assumptions against the actual source before \
-acting; prefer minimal diffs. When a task is done, stop.";
+acting; prefer minimal diffs. When several tool calls are independent, make \
+them in one response: every response re-reads the whole conversation, so a \
+turn costs what its response count costs, not its tool count. When a task \
+is done, stop.";
 
 /// Whether the working directory's own context file is used for this
 /// launch. It is unauthenticated third-party input — often a year
@@ -102,6 +105,24 @@ mod tests {
         std::fs::write(user.join("AGENTS.md"), "user rules\n").unwrap();
         std::fs::write(cwd.join("AGENTS.md"), "project rules\n").unwrap();
         (guard, user, cwd)
+    }
+
+    /// Each response re-reads the whole context, so a turn's cost is its
+    /// request count; the prompt has to say so or the model serializes
+    /// reads it could have made together (measured 1.08 calls per request
+    /// for the build agent, 2026-09-05..07).
+    #[test]
+    fn the_base_prompt_asks_for_independent_calls_in_one_response() {
+        let (_guard, user, cwd) = two_locations();
+
+        let assembled = system_prompt_for(&user, &cwd, ProjectInstructions::Include).unwrap();
+
+        assert!(
+            assembled
+                .prompt
+                .contains("When several tool calls are independent, make them in one response"),
+            "{assembled:?}"
+        );
     }
 
     #[test]
