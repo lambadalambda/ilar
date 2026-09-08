@@ -41,6 +41,8 @@
 ## Milestone 10 — Everyday polish
 
 - [ ] [Independent tool calls go together](issues/independent-tool-calls-go-together.md)
+- [ ] [read says what remains](issues/read-says-what-remains.md)
+- [ ] [grep has what the model reaches for](issues/grep-has-what-the-model-reaches-for.md)
 
 ## Milestone 11 — Beyond the terminal
 

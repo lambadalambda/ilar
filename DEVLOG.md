@@ -34,6 +34,23 @@ foreground children inherit it and touch it on every event at any
 depth, a background child starts its own. The test reproduces the
 production shape (mutable task, read-only foreground child).
 
+## 2026-09-08 — The tools the model reached for
+
+Same logs, per tool: grep and write never erred, edit's 2% were the
+seen-file guard doing its job, and the 355 one-line reads were images
+being attached. Two ergonomic gaps, both visible as bash use. 3,156 of
+8,219 read results ended in a bare "(truncated)" — the model reads in
+100–300-line windows and had to guess where it was; the marker now
+names the window, the total and the next offset, counting the rest of
+the file without keeping it. And about 230 `rg`/`grep` runs went
+through bash (context lines ~60 times, `-i` ~27, a trailing `head`),
+each one serialized as a barrier tool; grep now takes `context`,
+`ignore_case`, `glob` and `limit`, rendered rg-style so the model's
+habits carry over. Left alone on purpose: bash spills were never read
+back (643 of them) but cost nothing, and the cat/sed/head chains are
+the batching the prompt now asks for directly — measure before
+touching the tools for that.
+
 ## 2026-09-05 — The daily-use batch
 
 Seven picks from the backlog, in one sitting: mid-stream hiccups now
