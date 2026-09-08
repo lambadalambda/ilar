@@ -180,7 +180,13 @@ impl Driver {
         if let Some(seat) = self.seat_by_key(key) {
             return Ok(seat);
         }
-        let known = self.routes.snapshot().session_for(key).map(str::to_string);
+        let routes = self.routes.snapshot();
+        let known = if background {
+            routes.background_session_for(key)
+        } else {
+            routes.session_for(key)
+        }
+        .map(str::to_string);
         let mut runtime = match self.open(known.clone(), private) {
             Ok(runtime) => runtime,
             // A route to a session that is gone (deleted, another state
@@ -195,12 +201,15 @@ impl Driver {
             }
             Err(error) => return Err(error),
         };
-        // Only chats are routes: a background session is nobody's
-        // address, and a retired job's would otherwise linger forever.
-        if !background {
-            self.routes
-                .update(|routes| routes.bind(key, &runtime.session_id))?;
-        }
+        // A background session is nobody's address: it is remembered
+        // in its own map, where the message and cron tools never look.
+        self.routes.update(|routes| {
+            if background {
+                routes.bind_background(key, &runtime.session_id);
+            } else {
+                routes.bind(key, &runtime.session_id);
+            }
+        })?;
         // The model's way to answer: a tool that knows this chat.
         let (tool, sent) = MessageTool::new(
             self.wiring.outbound.clone(),

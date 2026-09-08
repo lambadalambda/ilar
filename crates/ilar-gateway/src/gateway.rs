@@ -371,13 +371,13 @@ impl Gateway {
         };
         log(&format!("{key}: scheduled turn for {target}"));
         match self.driver.run(&seat, &prompt, &[]).await {
-            Ok(report) if report.sent == 0 => {
-                self.keep_handovers(&seat, &report);
-                log(&format!("{key}: nothing to say"));
-            }
             Ok(report) => {
                 self.keep_handovers(&seat, &report);
-                log(&format!("{key}: {} message(s) sent", report.sent));
+                if report.sent == 0 {
+                    log(&format!("{key}: nothing to say"));
+                } else {
+                    log(&format!("{key}: {} message(s) sent", report.sent));
+                }
             }
             Err(error) => log(&format!("{key}: scheduled turn failed: {error}")),
         }

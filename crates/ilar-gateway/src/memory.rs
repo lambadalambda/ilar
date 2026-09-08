@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
@@ -21,6 +21,8 @@ use ilar::tools::{
     Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, WorkspaceAccess, parse_input,
 };
 use serde::Deserialize;
+
+use crate::routes::write_atomically;
 
 /// Hermes's caps, which keep the core under a thousand tokens.
 pub const MEMORY_CHARS: usize = 2200;
@@ -100,11 +102,17 @@ pub struct Hit {
 
 pub struct MemoryStore {
     dir: PathBuf,
+    /// Every change is a read-modify-write of a whole file, and chats
+    /// run at once: one writer at a time.
+    write: Mutex<()>,
 }
 
 impl MemoryStore {
     pub fn new(dir: PathBuf) -> Self {
-        Self { dir }
+        Self {
+            dir,
+            write: Mutex::new(()),
+        }
     }
 
     pub fn dir(&self) -> &Path {
@@ -142,6 +150,7 @@ impl MemoryStore {
         if entry.is_empty() {
             bail!("nothing to add");
         }
+        let _write = self.write.lock().unwrap();
         let mut text = self.core(file)?;
         if entries(&text).any(|line| line == entry) {
             return Ok(());
@@ -154,8 +163,12 @@ impl MemoryStore {
         self.write_core(file, &text)
     }
 
-    /// Replace the entry that contains `old` with `new`.
+    /// Replace the first entry that contains `old` with `new`.
     pub fn replace(&self, file: CoreFile, old: &str, new: &str) -> Result<()> {
+        if old.trim().is_empty() || new.trim().is_empty() {
+            bail!("replace needs both the text to find and the new entry");
+        }
+        let _write = self.write.lock().unwrap();
         let text = self.core(file)?;
         let mut found = false;
         let rewritten: Vec<&str> = entries(&text)
@@ -175,7 +188,12 @@ impl MemoryStore {
         self.write_core(file, &joined(&rewritten))
     }
 
+    /// Remove every entry that contains `entry`.
     pub fn remove(&self, file: CoreFile, entry: &str) -> Result<()> {
+        if entry.trim().is_empty() {
+            bail!("remove needs the text of the entry");
+        }
+        let _write = self.write.lock().unwrap();
         let text = self.core(file)?;
         let kept: Vec<&str> = entries(&text)
             .filter(|line| !line.contains(entry.trim()))
@@ -228,7 +246,7 @@ impl MemoryStore {
         let id = format!(
             "{}-{}",
             when.format("%Y%m%d"),
-            &ilar::session::new_id()[..6]
+            &ilar::session::new_id()[..8]
         );
         let text = format!(
             "---\nid: {id}\nkind: {}\ntitle: {}\nsummary: {}\nwhen: {}\n---\n\n{}\n",
@@ -258,9 +276,7 @@ impl MemoryStore {
             .dir
             .join("daily")
             .join(format!("{}.md", when.format("%Y-%m-%d")));
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        let _write = self.write.lock().unwrap();
         let mut existing = std::fs::read_to_string(&path).unwrap_or_default();
         if existing.is_empty() {
             existing.push_str(&format!("# {}\n", when.format("%Y-%m-%d")));
@@ -326,10 +342,6 @@ fn joined(lines: &[&str]) -> String {
     text
 }
 
-fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
-    crate::routes::write_atomically(path, bytes)
-}
-
 fn parse_note(text: &str) -> Option<Note> {
     let rest = text.strip_prefix("---\n")?;
     let (front, body) = rest.split_once("\n---\n")?;
@@ -359,8 +371,14 @@ fn words(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Half-life of a note's score: a month-old note counts half.
-const HALF_LIFE_DAYS: f64 = 30.0;
+/// Half-life of a note's score by kind: what happened fades in a month,
+/// what was decided or preferred holds for half a year.
+fn half_life_days(kind: &str) -> f64 {
+    match kind {
+        "decision" | "preference" | "solution" => 180.0,
+        _ => 30.0,
+    }
+}
 
 /// BM25 with the usual constants, times a recency multiplier; notes
 /// that match nothing are left out.
@@ -380,6 +398,17 @@ pub fn rank(notes: &[Note], query: &str, now: DateTime<Utc>) -> Vec<Hit> {
         .collect();
     let average = documents.iter().map(Vec::len).sum::<usize>() as f64 / documents.len() as f64;
     let (k1, b) = (1.2, 0.75);
+    let idf: HashMap<&str, f64> = terms
+        .iter()
+        .map(|term| {
+            let containing = documents
+                .iter()
+                .filter(|document| document.contains(term))
+                .count() as f64;
+            let idf = ((documents.len() as f64 - containing + 0.5) / (containing + 0.5) + 1.0).ln();
+            (term.as_str(), idf)
+        })
+        .collect();
     let mut hits: Vec<Hit> = notes
         .iter()
         .zip(&documents)
@@ -390,21 +419,15 @@ pub fn rank(notes: &[Note], query: &str, now: DateTime<Utc>) -> Vec<Hit> {
                 if frequency == 0.0 {
                     continue;
                 }
-                let containing = documents
-                    .iter()
-                    .filter(|other| other.contains(term))
-                    .count() as f64;
-                let idf =
-                    ((documents.len() as f64 - containing + 0.5) / (containing + 0.5) + 1.0).ln();
                 let length = document.len() as f64;
-                score += idf * (frequency * (k1 + 1.0))
+                score += idf[term.as_str()] * (frequency * (k1 + 1.0))
                     / (frequency + k1 * (1.0 - b + b * length / average.max(1.0)));
             }
             if score <= 0.0 {
                 return None;
             }
             let age_days = (now - note.when).num_seconds().max(0) as f64 / 86_400.0;
-            let decay = 0.5_f64.powf(age_days / HALF_LIFE_DAYS);
+            let decay = 0.5_f64.powf(age_days / half_life_days(&note.kind));
             Some(Hit {
                 id: note.id.clone(),
                 kind: note.kind.clone(),
@@ -491,13 +514,13 @@ impl Tool for MemoryTool {
             "properties": {
                 "action": {"type": "string", "enum": ["add", "replace", "remove", "note"]},
                 "file": {"type": "string", "enum": ["memory", "user"], "description": "Which core file (default memory)"},
-                "text": {"type": "string", "description": "add / remove: the entry"},
-                "old": {"type": "string", "description": "replace: text the entry contains"},
+                "text": {"type": "string", "description": "add: the entry, one line; remove: text every entry to drop contains"},
+                "old": {"type": "string", "description": "replace: text the first entry to replace contains"},
                 "new": {"type": "string", "description": "replace: the new entry"},
                 "kind": {"type": "string", "enum": ["decision", "solution", "preference", "event", "task", "risk"]},
                 "title": {"type": "string"},
                 "summary": {"type": "string", "description": "note: one line"},
-                "body": {"type": "string", "description": "note: the fact in full"}
+                "body": {"type": "string", "description": "note: the fact in full (default: the summary)"}
             },
             "required": ["action"]
         })
@@ -740,6 +763,9 @@ mod tests {
             .unwrap();
         assert_eq!(store.core(CoreFile::User).unwrap(), "Likes coffee now\n");
         assert!(store.remove(CoreFile::User, "absent").is_err());
+        assert!(store.remove(CoreFile::User, "  ").is_err());
+        assert!(store.replace(CoreFile::User, "", "x").is_err());
+        assert_eq!(store.core(CoreFile::User).unwrap(), "Likes coffee now\n");
         store.remove(CoreFile::User, "coffee").unwrap();
         assert_eq!(store.core(CoreFile::User).unwrap(), "");
         let block = store.core_block().unwrap().unwrap();

@@ -16,6 +16,10 @@ pub struct Routes {
     /// Keys that are group chats.
     #[serde(default)]
     pub groups: Vec<String>,
+    /// Cron and heartbeat sessions, by their keys: remembered so a
+    /// restart resumes them, kept apart so nothing can address them.
+    #[serde(default)]
+    pub background: BTreeMap<String, String>,
 }
 
 impl Routes {
@@ -38,6 +42,15 @@ impl Routes {
 
     pub fn is_group(&self, key: &str) -> bool {
         self.groups.iter().any(|group| group == key)
+    }
+
+    pub fn background_session_for(&self, key: &str) -> Option<&str> {
+        self.background.get(key).map(String::as_str)
+    }
+
+    pub fn bind_background(&mut self, key: &str, session_id: &str) {
+        self.background
+            .insert(key.to_string(), session_id.to_string());
     }
 }
 
@@ -74,11 +87,16 @@ impl RouteStore {
     }
 }
 
+/// Write through a rename. The temporary name is unique per write, so
+/// two writers racing on one file both land — the later one wins —
+/// instead of one failing on a name the other just renamed away.
 pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension("json.tmp");
+    let serial = SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_extension(format!("tmp.{}.{serial}", std::process::id()));
     std::fs::write(&tmp, bytes)?;
     std::fs::rename(&tmp, path)?;
     Ok(())
@@ -100,8 +118,16 @@ mod tests {
                 routes.touch("fake:g", true);
             })
             .unwrap();
+        store
+            .update(|routes| routes.bind_background("heartbeat:fake:1", "b1"))
+            .unwrap();
         let reopened = RouteStore::open(path).unwrap().snapshot();
         assert_eq!(reopened.session_for("fake:1"), Some("s1"));
+        assert_eq!(reopened.session_for("heartbeat:fake:1"), None);
+        assert_eq!(
+            reopened.background_session_for("heartbeat:fake:1"),
+            Some("b1")
+        );
         assert_eq!(reopened.last_active.as_deref(), Some("fake:g"));
         assert!(reopened.is_group("fake:g"));
         assert!(!reopened.is_group("fake:1"));
