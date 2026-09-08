@@ -114,6 +114,17 @@ milestones 15–17 stay filed — they come back when the feature does.*
 - [ ] [Pickers show the deciding field](issues/pickers-show-the-deciding-field.md)
 - [ ] [exec names its session](issues/exec-names-its-session.md)
 
+## Milestone 21 — The assistant
+
+- [ ] [The assistant — index](issues/the-assistant-index.md) — index
+- [ ] [The gateway drives a session per chat](issues/the-gateway-drives-a-session-per-chat.md)
+- [ ] [Telegram](issues/telegram.md)
+- [ ] [Chats route to sessions; the message tool](issues/chats-route-to-sessions.md)
+- [ ] [A sender allowlist and a tool policy](issues/a-sender-allowlist-and-a-tool-policy.md)
+- [ ] [Cron and heartbeat turns](issues/cron-and-heartbeat-turns.md)
+- [ ] [Memory that outlives a session](issues/memory-that-outlives-a-session.md)
+- [ ] [An Anthropic-wire provider](issues/an-anthropic-wire-provider.md)
+
 ## Review follow-ups
 
 - [ ] [Images are bounded before decoding](issues/images-are-bounded-before-decoding.md)

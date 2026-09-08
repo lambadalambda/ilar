@@ -34,6 +34,52 @@ foreground children inherit it and touch it on every event at any
 depth, a background child starts its own. The test reproduces the
 production shape (mutable task, read-only foreground child).
 
+## 2026-09-08 — Memory systems, surveyed for the assistant
+
+Read for Milestone 21: OpenClaw's memory docs, Hermes Agent's, the
+Awareness Local README, the A-MEM paper, and the 2026 comparisons of
+Mem0 / Zep–Graphiti / Letta. Four findings.
+
+The lightweight systems converge. OpenClaw, Hermes, Awareness and
+Claude Code all keep Markdown as the source of truth, split memory
+into a small always-injected core (Hermes caps MEMORY.md at 2,200
+chars and USER.md at 1,375, injected once per session as a frozen
+snapshot — cache-stable, which matters here) and a large archive
+reached only by tools, and retrieve with SQLite FTS5 plus local
+embeddings fused by reciprocal rank (Awareness: 96.0% Recall@5 on
+LongMemEval, +3 points over either signal alone, zero LLM calls).
+OpenClaw adds MMR de-duplication and exponential recency decay,
+and injects nothing automatically except the curated core; the
+archive is never in the prompt. Awareness's two-phase recall
+(an ~80-token index entry per hit, then full items by id) is the
+right shape for ilar's token economics.
+
+Write paths are where designs differ. OpenClaw flushes notes right
+before compaction (a prompt that may answer NO_REPLY), which maps
+onto ilar's handover summarizer for free. Hermes runs a post-turn
+background review on the main model while the prompt cache is warm
+— the same window `cache_compact` already times — and can stage
+writes for approval. Both are cheap because the cache is warm; ilar
+knows exactly when that is.
+
+The heavy systems buy something specific. Zep/Graphiti's bi-temporal
+graph wins on "who owned this in February" questions and costs
+~600k tokens per conversation to build (Mem0's figure; third parties
+agree on the order of magnitude), with results appearing hours after
+ingestion. A-MEM's Zettelkasten notes with LLM-generated links and
+neighbour rewriting more than double multi-hop scores on LoCoMo at
+1–2.5k tokens of context, but every write is several LLM calls.
+Vendor benchmarks do not reproduce (Mem0's LongMemEval number fell
+from the paper's to 73.8% under a third-party harness). None of this
+is what a personal assistant needs first.
+
+What to take from Awareness "in spirit": typed knowledge cards
+(decision, solution, risk, task) rather than undifferentiated notes,
+the init call that hands a fresh agent the project's cards — which is
+exactly what ilar's subagent children lack at start — and the market
+idea only as "memory is a file tree, so it can be shared or published
+later." Design recorded on the memory issue.
+
 ## 2026-09-08 — The tools the model reached for
 
 Same logs, per tool: grep and write never erred, edit's 2% were the
