@@ -318,3 +318,5 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Notices take turns](issues/notices-take-turns.md)
 - [x] [Steer the agent you are looking at](issues/steer-the-agent-you-are-looking-at.md)
 - [x] [A busy child is not a stall](issues/a-busy-child-is-not-a-stall.md)
+- [x] [read says what remains](issues/read-says-what-remains.md)
+- [x] [grep has what the model reaches for](issues/grep-has-what-the-model-reaches-for.md)
