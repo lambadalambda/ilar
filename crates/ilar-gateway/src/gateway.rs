@@ -252,13 +252,15 @@ impl Gateway {
         {
             log(&format!("{key}: routes not saved: {error:#}"));
         }
-        let images = attachments(&message.media);
+        let (images, notes) = attachments(&message.media);
+        let prompt = format!("{}{notes}", message.text);
         log(&format!(
-            "{key}: turn from {} ({} chars)",
+            "{key}: turn from {} ({} chars, {} attachment(s))",
             message.sender_id,
-            message.text.len()
+            message.text.len(),
+            message.media.len()
         ));
-        match self.driver.run(&seat, &message.text, &images).await {
+        match self.driver.run(&seat, &prompt, &images).await {
             Ok(report) => {
                 self.keep_handovers(&seat, &report);
                 self.deliver_unless_sent(&seat, &report).await;
@@ -498,12 +500,34 @@ impl Gateway {
     }
 }
 
-/// Image attachments the model can see; anything else is left to the
-/// channel to mention in the text.
-fn attachments(media: &[PathBuf]) -> Vec<ImageContent> {
-    media
-        .iter()
-        .filter_map(|path| std::fs::read(path).ok())
-        .filter_map(|bytes| ilar::image::from_file_bytes(&bytes))
-        .collect()
+/// What arrived with a message: images the model can see, and a line
+/// per attachment naming its path, so a file it cannot see it can
+/// still `read`, and an image it can see it can still open.
+pub fn attachments(media: &[PathBuf]) -> (Vec<ImageContent>, String) {
+    let mut images = Vec::new();
+    let mut notes = String::new();
+    for path in media {
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                notes.push_str(&format!(
+                    "\n(attachment {} unreadable: {error})",
+                    path.display()
+                ));
+                continue;
+            }
+        };
+        match ilar::image::from_file_bytes(&bytes) {
+            Some(image) => {
+                images.push(image);
+                notes.push_str(&format!("\n(image attached, also at {})", path.display()));
+            }
+            None => notes.push_str(&format!(
+                "\n(file attached: {}, {} bytes — read it if it matters)",
+                path.display(),
+                bytes.len()
+            )),
+        }
+    }
+    (images, notes)
 }

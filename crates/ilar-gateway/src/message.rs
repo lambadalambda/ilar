@@ -36,6 +36,8 @@ pub struct MessageTool {
     home_channel: String,
     home_chat: String,
     routes: Arc<RouteStore>,
+    /// Where a relative media path is looked for.
+    workspace: PathBuf,
     /// Messages sent during the current turn; the driver reads it to
     /// decide whether the final text still needs delivering.
     sent: Arc<AtomicUsize>,
@@ -51,6 +53,7 @@ impl MessageTool {
         home_channel: &str,
         home_chat: &str,
         routes: Arc<RouteStore>,
+        workspace: PathBuf,
         constraints: &str,
     ) -> (Arc<Self>, Arc<AtomicUsize>) {
         let sent = Arc::new(AtomicUsize::new(0));
@@ -69,6 +72,7 @@ impl MessageTool {
             home_channel: home_channel.to_string(),
             home_chat: home_chat.to_string(),
             routes,
+            workspace,
             sent: sent.clone(),
             description: Box::leak(description.into_boxed_str()),
         });
@@ -101,7 +105,7 @@ impl Tool for MessageTool {
                 "text": {"type": "string", "description": "What to send"},
                 "channel": {"type": "string", "description": "Another chat's channel (default: this chat's)"},
                 "chat": {"type": "string", "description": "Another chat's id (default: this chat)"},
-                "media": {"type": "array", "items": {"type": "string"}, "description": "Files to attach, by path"}
+                "media": {"type": "array", "items": {"type": "string"}, "description": "Files to attach, by path (relative to the workspace or absolute); images arrive as pictures"}
             },
             "required": ["text"]
         })
@@ -113,6 +117,7 @@ impl Tool for MessageTool {
         let home_channel = self.home_channel.clone();
         let home_chat = self.home_chat.clone();
         let routes = self.routes.clone();
+        let workspace = self.workspace.clone();
         let sent = self.sent.clone();
         Box::pin(async move {
             let input: Input = match parse_input(input, "message") {
@@ -132,11 +137,29 @@ impl Tool for MessageTool {
             if input.text.trim().is_empty() && input.media.is_empty() {
                 return ToolOutput::error("message: nothing to send");
             }
+            // A channel sends what it is given by absolute path, and
+            // a path that is not there is an error now rather than a
+            // silent nothing later.
+            let mut media = Vec::with_capacity(input.media.len());
+            for path in input.media {
+                let resolved = if path.is_absolute() {
+                    path
+                } else {
+                    workspace.join(path)
+                };
+                if !resolved.is_file() {
+                    return ToolOutput::error(format!(
+                        "message: no file at {}",
+                        resolved.display()
+                    ));
+                }
+                media.push(resolved);
+            }
             let message = Outbound {
                 channel,
                 chat_id,
                 text: input.text,
-                media: input.media,
+                media,
             };
             if outbound.send(message).await.is_err() {
                 return ToolOutput::error("message: the gateway is not delivering");

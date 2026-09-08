@@ -428,6 +428,87 @@ async fn a_heartbeat_with_nothing_to_say_sends_nothing() {
 }
 
 #[tokio::test]
+async fn attachments_reach_the_model_and_files_go_back_out_by_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let picture = dir.path().join("picture.png");
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    png.extend_from_slice(&[0; 32]);
+    std::fs::write(&picture, &png).unwrap();
+    let report = dir.path().join("report.txt");
+    std::fs::write(&report, "quarterly numbers").unwrap();
+    std::fs::create_dir_all(dir.path().join("workspace")).unwrap();
+    std::fs::write(dir.path().join("workspace/out.txt"), "here you go").unwrap();
+    let (gateway, fake) = gateway(
+        dir.path(),
+        vec![
+            says("got them"),
+            calls(
+                "message",
+                serde_json::json!({"text": "the file", "media": ["out.txt"]}),
+            ),
+            says("(sent)"),
+            calls(
+                "message",
+                serde_json::json!({"text": "oops", "media": ["missing.bin"]}),
+            ),
+            says("no such file"),
+        ],
+    );
+    // In: an image becomes a picture on the turn, a file a line naming it.
+    fake.inject_with_media(
+        "look at these",
+        "chat-1",
+        vec![picture.clone(), report.clone()],
+    )
+    .await;
+    fake.wait_for_sent(1, WAIT).await;
+    let routes = RouteStore::open(dir.path().join("state/gateway/routes.json"))
+        .unwrap()
+        .snapshot();
+    let session_id = routes.session_for("fake:chat-1").unwrap().to_string();
+    let store = ilar::runtime::session_store(&config(dir.path()));
+    let reader = store.load(&session_id).unwrap();
+    let user = reader
+        .events()
+        .iter()
+        .find_map(|event| match event {
+            ilar::session::SessionEvent::UserMessage { text, images, .. } => {
+                Some((text.clone(), images.len()))
+            }
+            _ => None,
+        })
+        .expect("the user message");
+    assert_eq!(user.1, 1, "{user:?}");
+    assert!(user.0.contains("look at these"), "{}", user.0);
+    assert!(
+        user.0
+            .contains(&format!("file attached: {}", report.display())),
+        "{}",
+        user.0
+    );
+    assert!(
+        user.0.contains(&format!("also at {}", picture.display())),
+        "{}",
+        user.0
+    );
+    // Out: a relative path resolves against the workspace and goes out absolute.
+    fake.inject("send me the file", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(2, WAIT).await;
+    assert_eq!(sent[1].text, "the file");
+    assert_eq!(sent[1].media, vec![dir.path().join("workspace/out.txt")]);
+    // A file that is not there is refused, and the model says so.
+    fake.inject("and the other", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(3, WAIT).await;
+    assert_eq!(sent[2].text, "no such file");
+    assert!(has_tool_result(
+        dir.path(),
+        "fake:chat-1",
+        |content, is_error| { is_error && content.contains("no file at") }
+    ));
+    gateway.cancel();
+}
+
+#[tokio::test]
 async fn safe_mode_hides_the_unsafe_tools_from_the_chat_and_its_agents() {
     let dir = tempfile::tempdir().unwrap();
     let settings = GatewayConfig {

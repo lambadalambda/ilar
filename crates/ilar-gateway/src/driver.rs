@@ -216,6 +216,7 @@ impl Driver {
             channel,
             chat_id,
             self.routes.clone(),
+            self.gateway.workspace(&self.config),
             self.wiring
                 .constraints
                 .get(channel)

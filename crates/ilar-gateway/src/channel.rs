@@ -62,6 +62,26 @@ impl FakeChannel {
         self.inject_with(text, chat_id, sender_id, true).await;
     }
 
+    /// With attachments, as files the channel fetched.
+    pub async fn inject_with_media(
+        &self,
+        text: &str,
+        chat_id: &str,
+        media: Vec<std::path::PathBuf>,
+    ) {
+        self.injector
+            .send(Inbound {
+                channel: self.name.clone(),
+                chat_id: chat_id.to_string(),
+                sender_id: "alice".into(),
+                text: text.to_string(),
+                media,
+                is_group: false,
+            })
+            .await
+            .expect("fake channel receiver dropped");
+    }
+
     async fn inject_with(&self, text: &str, chat_id: &str, sender_id: &str, is_group: bool) {
         self.injector
             .send(Inbound {
