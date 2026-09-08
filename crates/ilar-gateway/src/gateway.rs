@@ -164,7 +164,11 @@ impl Gateway {
             log(&format!("{key}: routes not saved: {error:#}"));
         }
         let images = attachments(&message.media);
-        log(&format!("{key}: turn ({} chars)", message.text.len()));
+        log(&format!(
+            "{key}: turn from {} ({} chars)",
+            message.sender_id,
+            message.text.len()
+        ));
         match self.driver.run(&seat, &message.text, &images).await {
             Ok(report) => {
                 self.deliver(&message.channel, &message.chat_id, &report.text)

@@ -34,6 +34,28 @@ foreground children inherit it and touch it on every event at any
 depth, a background child starts its own. The test reproduces the
 production shape (mutable task, read-only foreground child).
 
+## 2026-09-08 — The assistant answers on Delta Chat
+
+Milestone 21's first two steps in a day: `ilar-gateway`, a crate that
+drives one live `SessionRuntime` per chat and feeds subagent
+completions back as follow-up turns with the outbox obligations the
+TUI honours; and Delta Chat through `deltachat-rpc-server`'s stdio
+directly — picoclaw's Python-over-WebSocket bridge turned out to need
+about twenty calls of a binary that speaks line-delimited JSON-RPC,
+so the adapter is a client, not a bridge. Two core changes made it
+possible without a fork: `[gateway]`/`[channels]` pass through the
+config user-scoped, and `RuntimePlan::start_with` takes the resolver
+so the crate's tests run against a mock. The review caught a race
+that could give one chat two sessions (opening now takes a lock) and
+a salvage that retired its outbox entry before the salvage landed.
+
+Two lessons. A chatmail address is not something a person can write
+to; the bot has to hand out its secure-join invite, so it does, at
+every start and through `ilar-gateway invite`. And this Mac's sandbox
+blocks IMAP/SMTP while letting the HTTPS account creation through,
+which looks like a working account that never receives anything —
+the live run lives on tenco.
+
 ## 2026-09-08 — Memory systems, surveyed for the assistant
 
 Read for Milestone 21: OpenClaw's memory docs, Hermes Agent's, the

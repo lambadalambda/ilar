@@ -40,3 +40,9 @@ text and file sends); the real server's framing and event shape were
 verified locally with `deltachat-rpc-server` 2.59. The live
 acceptance run — a real chatmail account, a message from the user's
 own Delta Chat — is still owed.
+
+Live on tenco 2026-09-08 16:51: the user added the bot through its
+secure-join invite and wrote "hello"; the turn ran on
+`opencode/muse-spark-1.3-contributor-free` and the answer arrived.
+Still owed from the acceptance list: an image in, a file out, a
+stranger ignored, and the rpc server dying.
