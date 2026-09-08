@@ -69,14 +69,16 @@ impl FakeChannel {
     pub async fn wait_for_sent(&self, count: usize, timeout: std::time::Duration) -> Vec<Outbound> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
+            // Armed before the check, so a send between the two is
+            // not a wakeup missed.
+            let notified = self.delivered.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             let sent = self.sent();
             if sent.len() >= count {
                 return sent;
             }
-            if tokio::time::timeout_at(deadline, self.delivered.notified())
-                .await
-                .is_err()
-            {
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
                 return self.sent();
             }
         }

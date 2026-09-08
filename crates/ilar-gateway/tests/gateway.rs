@@ -113,6 +113,34 @@ async fn two_chats_are_two_sessions_and_the_routes_remember_them() {
 }
 
 #[tokio::test]
+async fn an_inbox_message_reaches_the_last_active_chat() {
+    let dir = tempfile::tempdir().unwrap();
+    let (gateway, fake) = gateway(dir.path(), vec![says("hi alice"), says("noted the build")]);
+
+    fake.inject("hi", "chat-1", "alice").await;
+    fake.wait_for_sent(1, WAIT).await;
+    ilar_gateway::inbox::write(
+        gateway.inbox_dir(),
+        &ilar_gateway::inbox::InboxMessage {
+            source: "ci".into(),
+            text: "build green".into(),
+            to: None,
+        },
+    )
+    .unwrap();
+    let sent = fake.wait_for_sent(2, WAIT).await;
+    assert_eq!(sent.len(), 2, "{sent:?}");
+    assert_eq!(sent[1].text, "noted the build");
+    assert_eq!(sent[1].chat_id, "chat-1");
+    assert!(
+        ilar_gateway::inbox::drain(gateway.inbox_dir())
+            .unwrap()
+            .is_empty()
+    );
+    gateway.cancel();
+}
+
+#[tokio::test]
 async fn a_session_held_elsewhere_gets_the_busy_reply() {
     let dir = tempfile::tempdir().unwrap();
     let (gateway, fake) = gateway(dir.path(), vec![says("first"), says("never")]);

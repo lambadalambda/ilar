@@ -32,6 +32,15 @@ pub struct Gateway {
 /// What a chat is told when its session is held by another process.
 pub const BUSY_REPLY: &str =
     "This chat's session is open somewhere else (a TUI, most likely); try again when it is closed.";
+/// The same, for a subagent's report that has to wait.
+pub const BUSY_FOLLOW_UP: &str = "A subagent finished, but this chat's session is open somewhere else; its report is delivered once that closes.";
+/// What a chat is told when a turn failed. The cause goes to the log:
+/// an error chain names paths and provider bodies, and the chat may
+/// not be the operator.
+pub const FAILED_REPLY: &str = "That turn failed; the gateway log has the cause.";
+
+/// How long a stop waits for turns in flight before giving up on them.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(15);
 
 impl Gateway {
     pub fn new(
@@ -99,43 +108,52 @@ impl Gateway {
             .take()
             .context("gateway already running")?;
         let mut inbox_tick = tokio::time::interval(Duration::from_secs(1));
+        let mut handlers = tokio::task::JoinSet::new();
         loop {
             tokio::select! {
                 () = self.cancel.cancelled() => break,
                 message = inbound.recv() => match message {
                     Some(message) => {
                         let gateway = self.clone();
-                        tokio::spawn(async move { gateway.handle_inbound(message).await });
+                        handlers.spawn(async move { gateway.handle_inbound(message).await });
                     }
                     None => break,
                 },
                 follow_up = follow_ups.recv() => match follow_up {
                     Some(follow_up) => {
                         let gateway = self.clone();
-                        tokio::spawn(async move { gateway.handle_follow_up(follow_up).await });
+                        handlers.spawn(async move { gateway.handle_follow_up(follow_up).await });
                     }
                     None => break,
                 },
+                Some(_) = handlers.join_next(), if !handlers.is_empty() => {}
                 _ = inbox_tick.tick() => self.poll_inbox(&inbound_tx).await,
             }
         }
+        // Turns in flight see the cancellation and wind down; give them
+        // the time to, then stop waiting.
         channel_tasks.shutdown().await;
+        let drain = async { while handlers.join_next().await.is_some() {} };
+        if tokio::time::timeout(SHUTDOWN_GRACE, drain).await.is_err() {
+            log("stopping with turns still in flight");
+            handlers.abort_all();
+        }
         self.driver.shutdown().await;
         Ok(())
     }
 
     async fn handle_inbound(&self, message: Inbound) {
         let key = message.session_key();
-        let seat = match self.driver.seat(&key, &message.channel, &message.chat_id) {
+        let seat = match self
+            .driver
+            .seat(&key, &message.channel, &message.chat_id)
+            .await
+        {
             Ok(seat) => seat,
             Err(error) => {
                 log(&format!("{key}: cannot open a session: {error:#}"));
-                self.deliver(
-                    &message.channel,
-                    &message.chat_id,
-                    &format!("error: {error:#}"),
-                )
-                .await;
+                self.deliver(&message.channel, &message.chat_id, FAILED_REPLY)
+                    .await;
                 return;
             }
         };
@@ -159,33 +177,39 @@ impl Gateway {
             }
             Err(TurnError::Failed(error)) => {
                 log(&format!("{key}: turn failed: {error:#}"));
-                self.deliver(
-                    &message.channel,
-                    &message.chat_id,
-                    &format!("error: {error:#}"),
-                )
-                .await;
+                self.deliver(&message.channel, &message.chat_id, FAILED_REPLY)
+                    .await;
             }
         }
     }
 
     /// A child's completion, delivered to the root as a prompt — the
     /// same words a TUI would append — and retired from the outbox
-    /// once the log holds them.
+    /// once the log holds them. A held writer means wait and try
+    /// again; a failed turn leaves the entry for the next start.
     async fn handle_follow_up(&self, follow_up: FollowUp) {
-        let key = follow_up.session_key;
-        let Some(seat) = self.driver.seats().into_iter().find(|seat| seat.key == key) else {
+        let key = follow_up.session_key.clone();
+        let Some(seat) = self.driver.seat_by_key(&key) else {
             log(&format!("{key}: follow-up for a chat with no seat"));
             return;
         };
-        let notification = follow_up.notification;
-        match self.driver.run(&seat, &notification.text, &[]).await {
+        match self.driver.run(&seat, &follow_up.prompt, &[]).await {
             Ok(report) => {
-                ilar::outbox::retire(&self.driver.outbox_dir(), &notification);
+                ilar::outbox::retire(&self.driver.outbox_dir(), &follow_up.retire);
                 self.deliver(&seat.channel, &seat.chat_id, &report.text)
                     .await;
             }
-            Err(error) => log(&format!("{key}: follow-up not delivered: {error}")),
+            Err(TurnError::Busy(why)) => {
+                log(&format!("{key}: follow-up waits: {why}"));
+                self.deliver(&seat.channel, &seat.chat_id, BUSY_FOLLOW_UP)
+                    .await;
+                self.driver.requeue(follow_up);
+            }
+            Err(TurnError::Failed(error)) => {
+                log(&format!("{key}: follow-up failed: {error:#}"));
+                self.deliver(&seat.channel, &seat.chat_id, FAILED_REPLY)
+                    .await;
+            }
         }
     }
 

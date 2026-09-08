@@ -47,11 +47,15 @@ impl std::fmt::Display for TurnError {
     }
 }
 
-/// A child's completion owed to a root session as a prompt.
+/// A child's completion owed to a root session as a prompt. `retire`
+/// is the outbox entry the prompt settles — the completion itself, or
+/// the stranded one a salvage speaks for — and is retired only once
+/// the log holds the prompt.
 #[derive(Debug, Clone)]
 pub struct FollowUp {
     pub session_key: String,
-    pub notification: Notification,
+    pub prompt: String,
+    pub retire: Notification,
 }
 
 /// One chat's live runtime.
@@ -69,6 +73,9 @@ pub struct Driver {
     resolver: Arc<dyn ProviderResolver>,
     routes: Arc<RouteStore>,
     seats: Mutex<HashMap<String, Arc<Seat>>>,
+    /// Opening a seat is slow file work; two messages racing on a
+    /// fresh chat must not each create a session.
+    opening: tokio::sync::Mutex<()>,
     follow_ups: mpsc::Sender<FollowUp>,
     cancel: CancellationToken,
 }
@@ -88,6 +95,7 @@ impl Driver {
             resolver,
             routes,
             seats: Mutex::new(HashMap::new()),
+            opening: tokio::sync::Mutex::new(()),
             follow_ups,
             cancel,
         }
@@ -97,11 +105,19 @@ impl Driver {
         self.config.state_dir().join("outbox")
     }
 
+    pub fn seat_by_key(&self, key: &str) -> Option<Arc<Seat>> {
+        self.seats.lock().unwrap().get(key).cloned()
+    }
+
     /// The chat's runtime, opened on first use: its session resumed
     /// when the routes name one that still exists, created otherwise.
-    pub fn seat(&self, key: &str, channel: &str, chat_id: &str) -> Result<Arc<Seat>> {
-        if let Some(seat) = self.seats.lock().unwrap().get(key) {
-            return Ok(seat.clone());
+    pub async fn seat(&self, key: &str, channel: &str, chat_id: &str) -> Result<Arc<Seat>> {
+        if let Some(seat) = self.seat_by_key(key) {
+            return Ok(seat);
+        }
+        let _opening = self.opening.lock().await;
+        if let Some(seat) = self.seat_by_key(key) {
+            return Ok(seat);
         }
         let known = self.routes.snapshot().session_for(key).map(str::to_string);
         let runtime = match self.open(known.clone()) {
@@ -178,12 +194,28 @@ impl Driver {
         self.seats.lock().unwrap().values().cloned().collect()
     }
 
-    /// Stop every seat's background work and services.
+    /// Hand a follow-up back after a wait — the seat's writer was held
+    /// — without holding up whoever asked.
+    pub fn requeue(&self, follow_up: FollowUp) {
+        let sender = self.follow_ups.clone();
+        let cancel = self.cancel.child_token();
+        tokio::spawn(async move {
+            tokio::select! {
+                () = cancel.cancelled() => {}
+                () = tokio::time::sleep(HOLD_RETRY) => { let _ = sender.send(follow_up).await; }
+            }
+        });
+    }
+
+    /// Stop every seat's background work and services, all at once:
+    /// each shutdown waits out an abort grace, and seats are many.
     pub async fn shutdown(&self) {
-        for seat in self.seats() {
+        let seats = self.seats();
+        futures::future::join_all(seats.iter().map(|seat| async {
             seat.runtime.spawner.shutdown().await;
             seat.runtime.services.stop_all();
-        }
+        }))
+        .await;
     }
 }
 
@@ -233,26 +265,11 @@ pub async fn turn(
             text,
             outcome,
         }),
-        Err(error) if is_busy(&error) => Err(TurnError::Busy(format!("{error:#}"))),
+        Err(error) if ilar::agent::TurnNeverStarted::writer_held(&error) => {
+            Err(TurnError::Busy(format!("{error:#}")))
+        }
         Err(error) => Err(TurnError::Failed(error)),
     }
-}
-
-/// The writer lease is an OS lock, and a refused lock is `WouldBlock`
-/// somewhere in the chain — behind the loop's "never started" marker,
-/// whose own chain skips the layer it wraps.
-fn is_busy(error: &anyhow::Error) -> bool {
-    let would_block = |cause: &(dyn std::error::Error + 'static)| {
-        cause
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(|io| io.kind() == std::io::ErrorKind::WouldBlock)
-    };
-    error.chain().any(|cause| {
-        would_block(cause)
-            || cause
-                .downcast_ref::<ilar::agent::TurnNeverStarted>()
-                .is_some_and(|marker| marker.causes().any(would_block))
-    })
 }
 
 /// Everything a seat's subagents publish, from the outbox first (what a
@@ -275,13 +292,17 @@ async fn watch_notifications(
         .map(Parcel::fresh)
         .collect();
     let mut held: Vec<Parcel> = Vec::new();
+    // A fixed deadline, not a fresh sleep per iteration: a steady
+    // trickle of live notifications must not starve the held ones.
+    let mut retry_at: Option<tokio::time::Instant> = None;
     loop {
         while let Some(parcel) = queue.pop_front() {
             let notification = parcel.notification().clone();
             if notification.parent_session_id == session_id {
                 let follow_up = FollowUp {
                     session_key: key.clone(),
-                    notification,
+                    prompt: notification.text.clone(),
+                    retire: notification,
                 };
                 if follow_ups.send(follow_up).await.is_err() {
                     return;
@@ -294,39 +315,23 @@ async fn watch_notifications(
             match disposition(routed, parcel) {
                 Disposition::Delivered => {}
                 Disposition::Propagate(next) => queue.push_back(next),
-                Disposition::Hold(parcel) => held.push(parcel),
+                Disposition::Hold(parcel) => {
+                    held.push(parcel);
+                    retry_at.get_or_insert_with(|| tokio::time::Instant::now() + HOLD_RETRY);
+                }
                 Disposition::Exhausted(stranded) => {
-                    salvage(
-                        &follow_ups,
-                        &key,
-                        &session_id,
-                        &outbox_dir,
-                        stranded,
-                        "no session left to climb to",
-                    )
-                    .await;
+                    salvage(&follow_ups, &key, stranded, "no session left to climb to").await;
                 }
                 Disposition::Salvage {
                     notification,
                     error,
-                } => {
-                    salvage(
-                        &follow_ups,
-                        &key,
-                        &session_id,
-                        &outbox_dir,
-                        notification,
-                        &error,
-                    )
-                    .await
-                }
+                } => salvage(&follow_ups, &key, notification, &error).await,
             }
         }
         let retry = async {
-            if held.is_empty() {
-                std::future::pending::<()>().await;
-            } else {
-                tokio::time::sleep(HOLD_RETRY).await;
+            match retry_at {
+                Some(at) => tokio::time::sleep_until(at).await,
+                None => std::future::pending::<()>().await,
             }
         };
         tokio::select! {
@@ -335,38 +340,35 @@ async fn watch_notifications(
                 Some(notification) => queue.push_back(Parcel::fresh(notification)),
                 None => return,
             },
-            () = retry => queue.extend(held.drain(..)),
+            () = retry => {
+                retry_at = None;
+                queue.extend(held.drain(..));
+            }
         }
     }
 }
 
 /// How long a held delivery waits before the next attempt.
-const HOLD_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
+pub const HOLD_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The delivery of last resort: the child's report goes to the chat's
-/// own session as an error prompt, and the outbox entry is retired so
-/// the next start does not announce it again.
+/// own session as an error prompt. The stranded outbox entry rides
+/// along and is retired only once that prompt is in the log.
 async fn salvage(
     follow_ups: &mpsc::Sender<FollowUp>,
     key: &str,
-    session_id: &str,
-    outbox_dir: &std::path::Path,
     stranded: Notification,
     reason: &str,
 ) {
-    ilar::outbox::retire(outbox_dir, &stranded);
+    let prompt = format!(
+        "<task-notification>\nTask \"{}\" finished but its result could not be delivered to the session that asked for it ({reason}). Its report:\n\n{}\n</task-notification>",
+        stranded.description, stranded.text
+    );
     let _ = follow_ups
         .send(FollowUp {
             session_key: key.to_string(),
-            notification: Notification {
-                parent_session_id: session_id.to_string(),
-                description: stranded.description.clone(),
-                text: format!(
-                    "<task-notification>\nTask \"{}\" finished but its result could not be delivered to the session that asked for it ({reason}). Its report:\n\n{}\n</task-notification>",
-                    stranded.description, stranded.text
-                ),
-                is_error: true,
-            },
+            prompt,
+            retire: stranded,
         })
         .await;
 }
