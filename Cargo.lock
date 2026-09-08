@@ -1098,6 +1098,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "ilar-gateway"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "futures",
+ "ilar",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "toml",
+]
+
+[[package]]
 name = "ilar-tui"
 version = "0.2.0"
 dependencies = [

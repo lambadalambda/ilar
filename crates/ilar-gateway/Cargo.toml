@@ -1,0 +1,26 @@
+[package]
+name = "ilar-gateway"
+description = "ilar as an always-on assistant: channels, routing, cron, memory"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "ilar-gateway"
+path = "src/main.rs"
+
+[dependencies]
+ilar = { workspace = true }
+tokio = { workspace = true }
+tokio-util = "0.7.19"
+futures = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+chrono = { workspace = true }
+clap = { version = "4.6.6", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"
