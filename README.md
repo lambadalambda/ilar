@@ -55,6 +55,11 @@ mechanisms, not security boundaries.
 - **Headless when you need it.** `ilar exec "…"` prints the answer on
   stdout and everything else on stderr; `--json` streams NDJSON events.
   Same sessions, same runtime as the TUI.
+- **An assistant on your messenger.** `ilar-gateway` runs the same
+  runtime as a library behind messaging channels — Delta Chat first —
+  one session per chat, replying through a `message` tool, with memory
+  that outlives a session, cron and heartbeat turns, and a tool policy
+  built into the registries. [Details](docs/gateway.md).
 - **Watch it from a browser** *(stood down)*. `ilar serve` tails the
   store into a page with no build step, but it is not in the default
   build while the terminal agent gets its house in order: build with
@@ -90,6 +95,7 @@ ilar login                       # ChatGPT OAuth, or set ILAR_ZAI_API_KEY / ILAR
 ilar                             # the TUI; F1 shows every keybinding
 ilar --continue                  # resume the latest session
 ilar exec "what broke in CI?"    # headless one-shot, answer on stdout
+ilar-gateway                     # the assistant, on the channels in ilar.toml
 ```
 
 ## Documentation
@@ -98,6 +104,7 @@ ilar exec "what broke in CI?"    # headless one-shot, answer on stdout
 | --- | --- |
 | [The interface](docs/interface.md) | Status line, steering, `/btw`, `/sessions`, goal mode, topics, themes. |
 | [Sessions](docs/sessions.md) | The on-disk model, compaction as handover, rewind and fork, `ilar exec`. |
+| [ilar-gateway](docs/gateway.md) | The assistant: channels, routing, the message tool, memory, cron and heartbeat, the tool policy, Delta Chat. |
 | [ilar serve](docs/serve.md) | The web view — *stood down, behind `--features serve`*: routes, the SSE envelope, tokens and what they are not. |
 | [Configuration](docs/configuration.md) | `ilar.toml`, environment, web search, ChatGPT OAuth, project instructions. |
 | [Agents, skills, commands](docs/agents-and-skills.md) | Custom agents, subagent tasks, services, MCP. |

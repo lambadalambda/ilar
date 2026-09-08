@@ -2,7 +2,9 @@
 
 ## Build & test
 
-- `cargo build` / `cargo test` from the workspace root.
+- `cargo build` / `cargo test` from the workspace root. Three crates:
+  `crates/ilar` (the library), `crates/ilar-tui` (the `ilar` binary) and
+  `crates/ilar-gateway` (the `ilar-gateway` binary, the assistant).
 - Core crate (`crates/ilar`) is TDD'd: run tests before committing changes
   to loop/tools/providers. The TUI crate is tested too: unit tests live
   beside the module they cover, and render assertions go through
@@ -29,4 +31,7 @@ trait with `ToolKind::ReadOnly | Mutating` and the executor schedules
 read-only tools concurrently behind the barrier model; sessions are
 append-only JSONL; subagents are `JoinSet` tasks writing child sessions,
 completing with a synthetic message into the parent loop (the pattern both
-Claude Code and opencode converged on).
+Claude Code and opencode converged on). `ilar-gateway` drives that
+runtime as a library: one `SessionRuntime` per chat, channels in and out
+through a bus, its own tools added to the registry after start; the core
+knows nothing about channels.
