@@ -261,6 +261,11 @@ struct FileConfig {
     compaction: Option<CompactionLayer>,
     cache_compact: Option<CacheCompactLayer>,
     subagents: Option<SubagentLayer>,
+    /// The assistant gateway's own settings, parsed by its crate: the
+    /// core carries the table and decides only whose it is.
+    gateway: Option<toml::Table>,
+    /// `[channels.<name>]`, likewise.
+    channels: Option<toml::Table>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -435,6 +440,12 @@ pub struct Config {
     pub compaction: CompactionConfig,
     pub cache_compact: CacheCompactConfig,
     pub subagents: SubagentConfig,
+    /// `[gateway]` as written in the user's file, for the gateway crate
+    /// to parse. User-scoped: a project may not point the user's
+    /// assistant anywhere.
+    pub gateway: Option<toml::Table>,
+    /// `[channels.<name>]`, likewise.
+    pub channels: Option<toml::Table>,
     /// Settings that parsed but were not honoured, one line each, for
     /// the frontend to show. A silently ignored setting reads as a bug
     /// in the program rather than a rule about the setting.
@@ -597,6 +608,8 @@ impl Config {
         let user_models = merged.models.clone();
         let user_providers = merged.providers.clone();
         let user_cache_compact = merged.cache_compact.clone();
+        let user_gateway = merged.gateway.clone();
+        let user_channels = merged.channels.clone();
         let mut project_declared_models = false;
         let mut project_declared_providers = false;
         let mut project_declared_cache_compact = false;
@@ -634,6 +647,20 @@ impl Config {
                         path.display()
                     ));
                 }
+                // The assistant answers to whoever can message it; which
+                // channels it listens on is nobody's business but the
+                // user's.
+                for (table, declared) in [
+                    ("[gateway]", declares_table(&text, |file| file.gateway)),
+                    ("[channels]", declares_table(&text, |file| file.channels)),
+                ] {
+                    if declared {
+                        warnings.push(format!(
+                            "{}: {table} is user configuration and is ignored in project config",
+                            path.display()
+                        ));
+                    }
+                }
                 merged = merge_file(merged, &text, &path)?;
             }
         }
@@ -646,6 +673,8 @@ impl Config {
         if project_declared_cache_compact {
             merged.cache_compact = user_cache_compact;
         }
+        merged.gateway = user_gateway;
+        merged.channels = user_channels;
 
         let providers = resolve_providers(&merged, env, PROVIDERS);
 
@@ -725,6 +754,8 @@ impl Config {
                     .and_then(|config| config.background_tool_timeout_ms)
                     .unwrap_or_else(default_background_tool_timeout_ms),
             },
+            gateway: merged.gateway,
+            channels: merged.channels,
             user_dir,
             project_dir,
             state_dir,
@@ -824,6 +855,8 @@ impl Config {
             compaction: CompactionConfig::default(),
             cache_compact: CacheCompactConfig::default(),
             subagents: SubagentConfig::default(),
+            gateway: None,
+            channels: None,
             warnings: Vec::new(),
             user_dir: PathBuf::from("/nonexistent"),
             project_dir: PathBuf::from("/nonexistent"),
@@ -948,6 +981,13 @@ fn declares_cache_compact(text: &str) -> bool {
         .is_some()
 }
 
+fn declares_table(text: &str, pick: fn(FileConfig) -> Option<toml::Table>) -> bool {
+    toml::from_str::<FileConfig>(text)
+        .ok()
+        .and_then(pick)
+        .is_some()
+}
+
 fn declares_entries<T>(text: &str, pick: fn(FileConfig) -> Option<HashMap<String, T>>) -> bool {
     toml::from_str::<FileConfig>(text)
         .ok()
@@ -991,6 +1031,12 @@ fn merge_file(base: FileConfig, text: &str, origin: &Path) -> anyhow::Result<Fil
             theme,
             project_instructions,
         );
+    }
+    if parsed.gateway.is_some() {
+        merged.gateway = parsed.gateway;
+    }
+    if parsed.channels.is_some() {
+        merged.channels = parsed.channels;
     }
     if let Some(providers) = parsed.providers {
         let map = merged.providers.get_or_insert_with(HashMap::new);

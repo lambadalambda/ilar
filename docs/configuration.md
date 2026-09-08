@@ -35,6 +35,8 @@ key — is sent, which is never a cloned repository's call to make.
 | `subagents.max_concurrent` | `10` | Maximum concurrent subagents; must be at least 1. |
 | `subagents.max_depth` | `3` | Maximum nested subagent depth; must be at least 1. |
 | `subagents.background_tool_timeout_ms` | `600000` | Background tool timeout in milliseconds; must be at least 1. |
+| `gateway.*` | — | The assistant gateway's settings (`ilar-gateway`); parsed by that crate. User-scoped. |
+| `channels.<name>.*` | — | One messaging channel the gateway listens on. User-scoped. |
 
 Environment variables:
 

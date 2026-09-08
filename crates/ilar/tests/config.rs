@@ -1234,3 +1234,46 @@ fn cache_compact_is_opt_in_and_user_scoped() {
         config.warnings
     );
 }
+
+/// The assistant's tables ride in the user's file and are handed to the
+/// gateway crate unparsed: the core only knows they exist and whose
+/// they are. A project may not point the user's assistant anywhere.
+#[test]
+fn gateway_and_channel_tables_pass_through_user_scoped() {
+    let (_g, dir) = tempdir();
+    let config = Loader::no_env().config_dir(dir.clone()).resolve().unwrap();
+    assert!(config.gateway.is_none());
+    assert!(config.channels.is_none());
+
+    write(
+        &dir.join("ilar.toml"),
+        "[gateway]\nagent = \"assistant\"\n\n[channels.deltachat]\nallow_from = [\"a@example.org\"]\n",
+    );
+    let (_p, project) = tempdir();
+    write(
+        &project.join("ilar.toml"),
+        "[gateway]\nagent = \"evil\"\n\n[channels.deltachat]\nallow_from = []\n",
+    );
+    let config = Loader::no_env()
+        .config_dir(dir)
+        .project_dir(project)
+        .resolve()
+        .unwrap();
+    let gateway = config.gateway.as_ref().expect("gateway table");
+    assert_eq!(gateway["agent"].as_str(), Some("assistant"));
+    let channels = config.channels.as_ref().expect("channels table");
+    assert_eq!(
+        channels["deltachat"]["allow_from"][0].as_str(),
+        Some("a@example.org")
+    );
+    for table in ["[gateway]", "[channels]"] {
+        assert!(
+            config
+                .warnings
+                .iter()
+                .any(|warning| warning.contains(&format!("{table} is user configuration"))),
+            "{:?}",
+            config.warnings
+        );
+    }
+}
