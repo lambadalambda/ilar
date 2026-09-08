@@ -24,3 +24,4 @@ pub mod memory;
 pub mod message;
 pub mod policy;
 pub mod routes;
+pub mod status;

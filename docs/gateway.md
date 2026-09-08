@@ -53,6 +53,8 @@ declares them is warned about and ignored.
 | `gateway.heartbeat.chats` | `[]` | Session keys to beat on, e.g. `deltachat:12`. |
 | `gateway.scheduler_tick_secs` | `30` | How often due jobs and heartbeats are looked for. |
 | `gateway.memory.enabled` | `true` | Core memory in the prompt, the archive behind the tools, a daily note at each compaction. |
+| `gateway.status` | `true` | A status line in the chat while a turn runs. |
+| `gateway.status_interval_secs` | `4` | The least time between two edits of it. |
 | `channels.deltachat.*` | — | The Delta Chat adapter; see below. |
 
 ### Delta Chat
@@ -96,6 +98,16 @@ so.
 
 Turns on one chat are serialized; different chats run at once. Image
 attachments are handed to the model the way `read` attaches them.
+
+## Watching a turn
+
+While a turn runs for a chat, the bot posts "working…" and edits that
+line as things move: "thinking — <topic>" from the reasoning summary,
+"running bash: <command>", "delegating to explore: …", "writing…". The
+line is deleted the moment the reply goes out, or when the turn ends
+without one. On Delta Chat every edit and the deletion are messages
+on the wire, so edits are spaced by `status_interval_secs`. Background
+turns, cron and heartbeat, show nothing.
 
 ## Commands
 

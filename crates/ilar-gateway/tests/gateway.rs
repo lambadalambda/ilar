@@ -621,6 +621,51 @@ async fn slash_new_starts_a_fresh_session_and_slash_model_lists_and_switches() {
 }
 
 #[tokio::test]
+async fn a_status_line_follows_the_turn_and_vanishes_before_the_reply() {
+    use ilar_gateway::channel::Seen;
+    let dir = tempfile::tempdir().unwrap();
+    let settings = GatewayConfig {
+        status_interval_secs: 0,
+        ..GatewayConfig::default()
+    };
+    let (gateway, fake) = gateway_with(
+        dir.path(),
+        vec![
+            calls("bash", serde_json::json!({"command": "echo hi"})),
+            says("done"),
+        ],
+        settings,
+    );
+    fake.inject("run something", "chat-1", "alice").await;
+    fake.wait_for_sent(1, WAIT).await;
+    let seen = fake.seen();
+    assert_eq!(
+        seen.first(),
+        Some(&Seen::StatusPosted("working…".into())),
+        "{seen:?}"
+    );
+    assert!(
+        seen.iter()
+            .any(|s| matches!(s, Seen::StatusEdited(line) if line.starts_with("running bash"))),
+        "{seen:?}"
+    );
+    let cleared = seen
+        .iter()
+        .position(|s| *s == Seen::StatusCleared)
+        .expect("cleared");
+    let replied = seen
+        .iter()
+        .position(|s| *s == Seen::Sent("done".into()))
+        .expect("replied");
+    assert!(cleared < replied, "{seen:?}");
+    assert_eq!(
+        seen.iter().filter(|s| **s == Seen::StatusCleared).count(),
+        1
+    );
+    gateway.cancel();
+}
+
+#[tokio::test]
 async fn safe_mode_hides_the_unsafe_tools_from_the_chat_and_its_agents() {
     let dir = tempfile::tempdir().unwrap();
     let settings = GatewayConfig {

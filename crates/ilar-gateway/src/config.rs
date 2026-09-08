@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use anyhow::Context;
 use serde::Deserialize;
 
-#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct GatewayConfig {
     /// The agent every chat runs as; the core's default when unset.
@@ -34,6 +34,19 @@ pub struct GatewayConfig {
     pub scheduler_tick_secs: u64,
     #[serde(default)]
     pub memory: Memory,
+    /// A status line in the chat while a turn runs — "thinking — …",
+    /// "running bash: …" — edited as things move and deleted when the
+    /// reply comes. Off with `status = false`.
+    #[serde(default = "default_true")]
+    pub status: bool,
+    /// Seconds between two edits of the status line: on Delta Chat
+    /// every edit is a message on the wire.
+    #[serde(default = "default_status_interval_secs")]
+    pub status_interval_secs: u64,
+}
+
+fn default_status_interval_secs() -> u64 {
+    4
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -43,6 +56,23 @@ pub struct Memory {
     /// daily note at every compaction. On unless said otherwise.
     #[serde(default = "default_true")]
     pub enabled: bool,
+}
+
+impl Default for GatewayConfig {
+    fn default() -> Self {
+        Self {
+            agent: None,
+            model: None,
+            workspace: None,
+            notify_interval_secs: default_notify_interval_secs(),
+            tools: Default::default(),
+            heartbeat: Default::default(),
+            scheduler_tick_secs: default_scheduler_tick_secs(),
+            memory: Default::default(),
+            status: true,
+            status_interval_secs: default_status_interval_secs(),
+        }
+    }
 }
 
 impl Default for Memory {
@@ -138,6 +168,8 @@ mod tests {
         assert_eq!(parsed.notify_interval_secs, 60);
         assert!(parsed.workspace.is_none());
         assert!(parsed.model.is_none());
+        assert!(parsed.status);
+        assert_eq!(parsed.status_interval_secs, 4);
         let table: toml::Table = toml::from_str("model = \"zai/glm-4.7\"").unwrap();
         let parsed: GatewayConfig = table.try_into().unwrap();
         assert_eq!(parsed.model.as_deref(), Some("zai/glm-4.7"));

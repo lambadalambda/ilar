@@ -195,6 +195,17 @@ impl DeltaChat {
         self.accounts_dir.join("invite.txt")
     }
 
+    /// The live connection and the account, for anything sent.
+    fn connection(&self) -> Result<(Arc<Rpc>, u32)> {
+        let rpc = self
+            .live
+            .lock()
+            .unwrap()
+            .clone()
+            .context("deltachat is not connected")?;
+        Ok((rpc, self.account.load(Ordering::Acquire)))
+    }
+
     fn allowed(&self, address: &str) -> bool {
         self.config.allow_from.is_empty()
             || self
@@ -329,6 +340,53 @@ impl Channel for DeltaChat {
                     _ => {}
                 }
             }
+        })
+    }
+
+    /// The status line is an ordinary message, edited in place and
+    /// deleted for everyone when the reply comes: each of those is a
+    /// message on the wire, which is why the gateway throttles edits.
+    fn post_status<'a>(
+        &'a self,
+        chat_id: &'a str,
+        text: &'a str,
+    ) -> ChannelFuture<'a, Result<Option<String>>> {
+        Box::pin(async move {
+            let (rpc, account) = self.connection()?;
+            let chat_id: u64 = chat_id.parse()?;
+            let id = rpc
+                .call("misc_send_text_message", json!([account, chat_id, text]))
+                .await?;
+            Ok(id.as_u64().map(|id| id.to_string()))
+        })
+    }
+
+    fn edit_status<'a>(
+        &'a self,
+        _chat_id: &'a str,
+        status_id: &'a str,
+        text: &'a str,
+    ) -> ChannelFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let (rpc, account) = self.connection()?;
+            let msg_id: u64 = status_id.parse()?;
+            rpc.call("send_edit_request", json!([account, msg_id, text]))
+                .await?;
+            Ok(())
+        })
+    }
+
+    fn clear_status<'a>(
+        &'a self,
+        _chat_id: &'a str,
+        status_id: &'a str,
+    ) -> ChannelFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let (rpc, account) = self.connection()?;
+            let msg_id: u64 = status_id.parse()?;
+            rpc.call("delete_messages_for_all", json!([account, [msg_id]]))
+                .await?;
+            Ok(())
         })
     }
 

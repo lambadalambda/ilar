@@ -294,16 +294,33 @@ impl Driver {
         Ok(runtime)
     }
 
-    /// One turn on a seat; a second caller waits for the first.
+    /// One turn on a seat; a second caller waits for the first. Status
+    /// lines, when wanted, go to `status` as the turn moves.
     pub async fn run(
         &self,
         seat: &Seat,
         prompt: &str,
         images: &[ImageContent],
+        status: Option<mpsc::UnboundedSender<String>>,
     ) -> std::result::Result<TurnReport, TurnError> {
         let _turn = seat.turn.lock().await;
         let sent_before = seat.sent.load(std::sync::atomic::Ordering::Acquire);
-        let mut report = turn(&seat.runtime, prompt, images, self.cancel.child_token()).await?;
+        let mut narrator = crate::status::Narrator::default();
+        let observe = move |event: &LoopEvent| {
+            if let Some(status) = &status
+                && let Some(line) = narrator.observe(event)
+            {
+                let _ = status.send(line);
+            }
+        };
+        let mut report = turn(
+            &seat.runtime,
+            prompt,
+            images,
+            self.cancel.child_token(),
+            observe,
+        )
+        .await?;
         report.sent = seat.sent.load(std::sync::atomic::Ordering::Acquire) - sent_before;
         Ok(report)
     }
@@ -449,6 +466,7 @@ pub async fn turn(
     prompt: &str,
     images: &[ImageContent],
     cancel: CancellationToken,
+    mut observe: impl FnMut(&LoopEvent),
 ) -> std::result::Result<TurnReport, TurnError> {
     let (events, mut rx) = loop_event_channel(LOOP_EVENT_CAPACITY);
     let turn = ilar::agent::run_turn(
@@ -468,10 +486,13 @@ pub async fn turn(
     tokio::pin!(turn);
     let mut text = String::new();
     let mut compactions = Vec::new();
-    let mut note = |event: LoopEvent| match event {
-        LoopEvent::TextDelta(delta) => text.push_str(&delta),
-        LoopEvent::Compacted { summary, .. } => compactions.push(summary),
-        _ => {}
+    let mut note = |event: LoopEvent| {
+        observe(&event);
+        match event {
+            LoopEvent::TextDelta(delta) => text.push_str(&delta),
+            LoopEvent::Compacted { summary, .. } => compactions.push(summary),
+            _ => {}
+        }
     };
     let outcome = loop {
         tokio::select! {

@@ -37,7 +37,15 @@ pub struct Gateway {
     cron: Arc<CronStore>,
     memory: Arc<MemoryStore>,
     settings: GatewayConfig,
+    /// The status line each chat is watching, while a turn runs there.
+    statuses: Mutex<HashMap<String, Status>>,
     cancel: CancellationToken,
+}
+
+/// A posted status line and the task that keeps it current.
+struct Status {
+    id: String,
+    updater: tokio::task::JoinHandle<()>,
 }
 
 /// What a chat is told when its session is held by another process.
@@ -109,6 +117,7 @@ impl Gateway {
             cron,
             memory,
             settings,
+            statuses: Mutex::new(HashMap::new()),
             cancel,
         }))
     }
@@ -281,7 +290,10 @@ impl Gateway {
             message.text.len(),
             message.media.len()
         ));
-        match self.driver.run(&seat, &prompt, &images).await {
+        let status = self.begin_status(&seat).await;
+        let outcome = self.driver.run(&seat, &prompt, &images, status).await;
+        self.end_status(&key).await;
+        match outcome {
             Ok(report) => {
                 self.keep_handovers(&seat, &report);
                 self.deliver_unless_sent(&seat, &report).await;
@@ -362,7 +374,10 @@ impl Gateway {
             log(&format!("{key}: follow-up for a chat with no seat"));
             return;
         };
-        match self.driver.run(&seat, &follow_up.prompt, &[]).await {
+        let status = self.begin_status(&seat).await;
+        let outcome = self.driver.run(&seat, &follow_up.prompt, &[], status).await;
+        self.end_status(&key).await;
+        match outcome {
             Ok(report) => {
                 ilar::outbox::retire(&self.driver.outbox_dir(), &follow_up.retire);
                 self.keep_handovers(&seat, &report);
@@ -446,7 +461,7 @@ impl Gateway {
             }
         };
         log(&format!("{key}: scheduled turn for {target}"));
-        match self.driver.run(&seat, &prompt, &[]).await {
+        match self.driver.run(&seat, &prompt, &[], None).await {
             Ok(report) => {
                 self.keep_handovers(&seat, &report);
                 if report.sent == 0 {
@@ -493,10 +508,91 @@ impl Gateway {
             .await;
     }
 
+    /// A status line in the chat for the turn about to run: "working…",
+    /// then whatever the narrator says, edited no more often than the
+    /// interval allows. `None` when the channel has no such thing, the
+    /// setting is off, or the seat is a background one.
+    async fn begin_status(
+        &self,
+        seat: &crate::driver::Seat,
+    ) -> Option<mpsc::UnboundedSender<String>> {
+        if !self.settings.status || seat.background {
+            return None;
+        }
+        let channel = self.channels.get(&seat.channel)?.clone();
+        let id = match channel
+            .post_status(&seat.chat_id, crate::status::WORKING)
+            .await
+        {
+            Ok(Some(id)) => id,
+            Ok(None) => return None,
+            Err(error) => {
+                log(&format!("{}: status not posted: {error:#}", seat.key));
+                return None;
+            }
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        let interval = Duration::from_secs(self.settings.status_interval_secs);
+        let chat_id = seat.chat_id.clone();
+        let status_id = id.clone();
+        let updater = tokio::spawn(async move {
+            let mut last_edit: Option<tokio::time::Instant> = None;
+            let mut shown = crate::status::WORKING.to_string();
+            while let Some(mut line) = rx.recv().await {
+                // Wait out the interval, keeping only the newest line.
+                if let Some(last) = last_edit {
+                    let due = last + interval;
+                    loop {
+                        tokio::select! {
+                            () = tokio::time::sleep_until(due) => break,
+                            newer = rx.recv() => match newer {
+                                Some(newer) => line = newer,
+                                None => return,
+                            },
+                        }
+                    }
+                }
+                if line == shown {
+                    continue;
+                }
+                if let Err(error) = channel.edit_status(&chat_id, &status_id, &line).await {
+                    log(&format!("status not edited: {error:#}"));
+                    return;
+                }
+                shown = line;
+                last_edit = Some(tokio::time::Instant::now());
+            }
+        });
+        self.statuses
+            .lock()
+            .unwrap()
+            .insert(seat.key.clone(), Status { id, updater });
+        Some(tx)
+    }
+
+    /// Take the chat's status line down, if one is up.
+    async fn end_status(&self, key: &str) {
+        let status = self.statuses.lock().unwrap().remove(key);
+        let Some(status) = status else {
+            return;
+        };
+        status.updater.abort();
+        let Some((channel, chat_id)) = split_key(key) else {
+            return;
+        };
+        if let Some(target) = self.channels.get(channel)
+            && let Err(error) = target.clear_status(chat_id, &status.id).await
+        {
+            log(&format!("{key}: status not cleared: {error:#}"));
+        }
+    }
+
     /// One outbound message, to its channel. Only the dispatcher calls
-    /// this, one message at a time.
+    /// this, one message at a time. The chat's status line goes first:
+    /// the reply is what it was waiting for.
     async fn send(&self, message: Outbound) {
         let key = session_key(&message.channel, &message.chat_id);
+        self.end_status(&key).await;
         let Some(target) = self.channels.get(&message.channel) else {
             log(&format!("{key}: no such channel; dropping a message"));
             return;

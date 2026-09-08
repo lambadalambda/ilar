@@ -28,6 +28,43 @@ pub trait Channel: Send + Sync {
     ) -> ChannelFuture<'a, anyhow::Result<()>>;
 
     fn send<'a>(&'a self, message: Outbound) -> ChannelFuture<'a, anyhow::Result<()>>;
+
+    /// Post a status line the chat can watch while a turn runs, and
+    /// hand back what edits and clears it later. `None`: this channel
+    /// has no such thing.
+    fn post_status<'a>(
+        &'a self,
+        _chat_id: &'a str,
+        _text: &'a str,
+    ) -> ChannelFuture<'a, anyhow::Result<Option<String>>> {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn edit_status<'a>(
+        &'a self,
+        _chat_id: &'a str,
+        _status_id: &'a str,
+        _text: &'a str,
+    ) -> ChannelFuture<'a, anyhow::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn clear_status<'a>(
+        &'a self,
+        _chat_id: &'a str,
+        _status_id: &'a str,
+    ) -> ChannelFuture<'a, anyhow::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// What a fake channel saw of a status line, in order with the sends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Seen {
+    Sent(String),
+    StatusPosted(String),
+    StatusEdited(String),
+    StatusCleared,
 }
 
 /// A channel with nobody behind it: tests inject what a person would
@@ -37,6 +74,8 @@ pub struct FakeChannel {
     injector: mpsc::Sender<Inbound>,
     injected: Mutex<Option<mpsc::Receiver<Inbound>>>,
     sent: Mutex<Vec<Outbound>>,
+    /// Everything, sends and status changes, in the order it happened.
+    seen: Mutex<Vec<Seen>>,
     delivered: tokio::sync::Notify,
     /// Runs left that fail right away, for a test of the restart.
     failing_runs: std::sync::atomic::AtomicUsize,
@@ -51,6 +90,7 @@ impl FakeChannel {
             injector,
             injected: Mutex::new(Some(injected)),
             sent: Mutex::new(Vec::new()),
+            seen: Mutex::new(Vec::new()),
             delivered: tokio::sync::Notify::new(),
             failing_runs: std::sync::atomic::AtomicUsize::new(0),
             runs: std::sync::atomic::AtomicUsize::new(0),
@@ -115,6 +155,10 @@ impl FakeChannel {
         self.sent.lock().unwrap().clone()
     }
 
+    pub fn seen(&self) -> Vec<Seen> {
+        self.seen.lock().unwrap().clone()
+    }
+
     /// Wait until at least `count` messages went out, or the timeout.
     pub async fn wait_for_sent(&self, count: usize, timeout: std::time::Duration) -> Vec<Outbound> {
         let deadline = tokio::time::Instant::now() + timeout;
@@ -174,8 +218,52 @@ impl Channel for FakeChannel {
 
     fn send<'a>(&'a self, message: Outbound) -> ChannelFuture<'a, anyhow::Result<()>> {
         Box::pin(async move {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(Seen::Sent(message.text.clone()));
             self.sent.lock().unwrap().push(message);
             self.delivered.notify_waiters();
+            Ok(())
+        })
+    }
+
+    fn post_status<'a>(
+        &'a self,
+        _chat_id: &'a str,
+        text: &'a str,
+    ) -> ChannelFuture<'a, anyhow::Result<Option<String>>> {
+        Box::pin(async move {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(Seen::StatusPosted(text.to_string()));
+            Ok(Some("status-1".to_string()))
+        })
+    }
+
+    fn edit_status<'a>(
+        &'a self,
+        _chat_id: &'a str,
+        _status_id: &'a str,
+        text: &'a str,
+    ) -> ChannelFuture<'a, anyhow::Result<()>> {
+        Box::pin(async move {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(Seen::StatusEdited(text.to_string()));
+            Ok(())
+        })
+    }
+
+    fn clear_status<'a>(
+        &'a self,
+        _chat_id: &'a str,
+        _status_id: &'a str,
+    ) -> ChannelFuture<'a, anyhow::Result<()>> {
+        Box::pin(async move {
+            self.seen.lock().unwrap().push(Seen::StatusCleared);
             Ok(())
         })
     }
