@@ -20,6 +20,8 @@ struct Cli {
 enum Command {
     /// Listen on the configured channels (the default).
     Run,
+    /// Print the Delta Chat invite link the running gateway wrote.
+    Invite,
     /// Send a message to the running gateway from a script.
     Notify {
         text: String,
@@ -44,6 +46,18 @@ async fn main() -> Result<()> {
                 &InboxMessage { source, text, to },
             )?;
             println!("{}", path.display());
+            Ok(())
+        }
+        Command::Invite => {
+            let settings: DeltaChatConfig = channel_table(&config, "deltachat")
+                .unwrap_or_default()
+                .try_into()
+                .context("parsing [channels.deltachat] in ilar.toml")?;
+            let path = DeltaChat::new(settings, &gateway_dir(&config)).invite_path();
+            let invite = std::fs::read_to_string(&path).with_context(|| {
+                format!("no invite at {} — is the gateway running?", path.display())
+            })?;
+            print!("{invite}");
             Ok(())
         }
         Command::Run => run(config, gateway).await,

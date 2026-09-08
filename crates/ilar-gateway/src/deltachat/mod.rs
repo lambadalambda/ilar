@@ -154,10 +154,36 @@ impl DeltaChat {
             .and_then(|value| value.as_str().map(str::to_string))
             .unwrap_or_else(|| "unknown".into());
         log(&format!("deltachat: {address} is listening"));
+        // A chatmail address is not enough to start a chat with: a
+        // contact is added from a secure-join invite. Say it every
+        // start and keep it in a file, so a person can be pointed at
+        // it without reading the log.
+        match rpc
+            .call("get_chat_securejoin_qr_code", json!([account, null]))
+            .await
+        {
+            Ok(Value::String(invite)) => {
+                log(&format!("deltachat: invite {invite}"));
+                let path = self.invite_path();
+                if let Err(error) = std::fs::write(&path, format!("{invite}\n")) {
+                    log(&format!(
+                        "deltachat: invite not written to {}: {error}",
+                        path.display()
+                    ));
+                }
+            }
+            Ok(other) => log(&format!("deltachat: no invite ({other})")),
+            Err(error) => log(&format!("deltachat: no invite: {error:#}")),
+        }
         if self.config.allow_from.is_empty() {
             log("deltachat: allow_from is empty — anyone who writes gets an answer");
         }
         Ok(account as u32)
+    }
+
+    /// Where the invite link is kept, beside the account.
+    pub fn invite_path(&self) -> PathBuf {
+        self.accounts_dir.join("invite.txt")
     }
 
     fn allowed(&self, address: &str) -> bool {
@@ -402,6 +428,7 @@ mod tests {
                         .unwrap_or(Value::Null),
                     "misc_send_text_message" => json!(42),
                     "send_msg" => json!(43),
+                    "get_chat_securejoin_qr_code" => json!("https://i.delta.chat/#TEST"),
                     _ => Value::Null,
                 };
                 reply(&writer, id, result).await;
@@ -512,6 +539,10 @@ mod tests {
             "{seen:?}"
         );
         assert!(seen.iter().any(|m| m == "accept_chat"), "{seen:?}");
+        assert!(
+            seen.iter().any(|m| m == "get_chat_securejoin_qr_code"),
+            "{seen:?}"
+        );
         assert!(seen.iter().any(|m| m == "markseen_msgs"), "{seen:?}");
         cancel.cancel();
         let _ = running.await;

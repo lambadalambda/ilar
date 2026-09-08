@@ -9,6 +9,7 @@ this page grows with it.
 ilar-gateway                       # listen on the configured channels
 ilar-gateway notify "build green"  # a message from a script, to the last active chat
 ilar-gateway notify --to deltachat:12 --source ci "…"
+ilar-gateway invite                # the Delta Chat invite link to add the bot with
 ```
 
 ## Configuration
