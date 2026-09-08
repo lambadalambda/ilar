@@ -288,6 +288,9 @@ impl Driver {
                 // left off and the model is told so on the spot.
                 questions: false,
                 project_instructions: None,
+                // An assistant has a SOUL.md before it has coding
+                // instructions: who it is, how it talks.
+                context_files: Some(ilar::config::SOUL_FILES),
             },
         )?;
         // The policy reaches the subagents too: an agent definition's

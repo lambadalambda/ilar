@@ -71,6 +71,17 @@ so.
 Turns on one chat are serialized; different chats run at once. Image
 attachments are handed to the model the way `read` attaches them.
 
+## Who it is: SOUL.md
+
+A chat assistant needs a personality more than a coding agent does. A
+gateway session reads `SOUL.md` where a terminal session reads
+`AGENTS.md`: in the user config directory (`~/.config/ilar/SOUL.md`)
+and in the assistant's workspace, first found wins, with `AGENTS.md`
+and then `CLAUDE.md` as the fallbacks in each place. Put who the
+assistant is and how it talks there; the base instructions about tools
+stay underneath. Subagents the assistant spawns are workers and keep
+reading `AGENTS.md`.
+
 ## Who may talk, and what the model may run
 
 A channel names the senders it answers; anyone else is ignored

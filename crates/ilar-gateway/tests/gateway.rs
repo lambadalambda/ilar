@@ -534,6 +534,30 @@ async fn a_channel_that_dies_is_started_again() {
 }
 
 #[tokio::test]
+async fn a_soul_file_speaks_for_the_assistant_before_the_coding_instructions() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("config")).unwrap();
+    std::fs::write(
+        dir.path().join("config/AGENTS.md"),
+        "Be terse and commit often.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("config/SOUL.md"),
+        "You are Sprocket, warm and a little dry.\n",
+    )
+    .unwrap();
+    let (gateway, fake) = gateway(dir.path(), vec![says("hi")]);
+    fake.inject("hello", "chat-1", "alice").await;
+    fake.wait_for_sent(1, WAIT).await;
+    let prompt = gateway.system_prompt("fake:chat-1").unwrap();
+    assert!(prompt.contains("You are Sprocket"), "{prompt}");
+    assert!(!prompt.contains("commit often"), "{prompt}");
+    assert!(prompt.contains("(from SOUL.md)"), "{prompt}");
+    gateway.cancel();
+}
+
+#[tokio::test]
 async fn safe_mode_hides_the_unsafe_tools_from_the_chat_and_its_agents() {
     let dir = tempfile::tempdir().unwrap();
     let settings = GatewayConfig {
