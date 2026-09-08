@@ -109,6 +109,9 @@ impl CronStore {
             bail!("the schedule never fires");
         }
         let mut jobs = self.jobs.lock().unwrap();
+        if jobs.iter().any(|existing| existing.id == job.id) {
+            bail!("job id {} is taken", job.id);
+        }
         jobs.push(job.clone());
         self.save(&jobs)?;
         Ok(job)
@@ -127,7 +130,9 @@ impl CronStore {
 
     /// Jobs whose time has come, each advanced to its next firing — or
     /// retired when there is none — before they are handed back, so a
-    /// tick that dies mid-way does not fire them twice.
+    /// tick that dies mid-way does not fire them twice. A job past due
+    /// at start fires once, not once per missed slot; `every` counts
+    /// from the tick that fired it, so it drifts by tick granularity.
     pub fn take_due(&self, now: DateTime<Utc>) -> Result<Vec<Job>> {
         let mut jobs = self.jobs.lock().unwrap();
         let mut due = Vec::new();
@@ -146,13 +151,7 @@ impl CronStore {
     }
 
     fn save(&self, jobs: &[Job]) -> Result<()> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(jobs)?)?;
-        std::fs::rename(&tmp, &self.path)?;
-        Ok(())
+        crate::routes::write_atomically(&self.path, &serde_json::to_vec_pretty(jobs)?)
     }
 
     pub fn path(&self) -> &Path {

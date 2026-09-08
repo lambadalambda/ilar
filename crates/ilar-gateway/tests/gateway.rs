@@ -295,29 +295,31 @@ async fn a_heartbeat_with_nothing_to_say_sends_nothing() {
         },
         ..GatewayConfig::default()
     };
+    // The first beat has something to say and says it through the
+    // tool; its final text and the later, silent beats send nothing.
     let (gateway, fake) = gateway_with(
         dir.path(),
         vec![
             says("hi"),
-            says("nothing to report"),
+            messages("beat!", None),
+            says("(the beat's final text)"),
             says("nothing to report"),
             says("nothing to report"),
         ],
         settings,
     );
     fake.inject("hello", "chat-1", "alice").await;
-    fake.wait_for_sent(1, WAIT).await;
-    // Beats happen (the seat appears), and none of them reaches the chat.
-    for _ in 0..40 {
-        if gateway.tool_names("heartbeat:fake:chat-1").is_some() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    let sent = fake.wait_for_sent(2, WAIT).await;
+    let texts: Vec<&str> = sent.iter().map(|m| m.text.as_str()).collect();
+    assert_eq!(texts, ["hi", "beat!"], "{sent:?}");
     assert!(gateway.tool_names("heartbeat:fake:chat-1").is_some());
-    tokio::time::sleep(Duration::from_millis(1500)).await;
-    let texts: Vec<String> = fake.sent().iter().map(|m| m.text.clone()).collect();
-    assert_eq!(texts, ["hi"]);
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert_eq!(fake.sent().len(), 2, "{:?}", fake.sent());
+    // A background session is nobody's address.
+    let routes = RouteStore::open(dir.path().join("state/gateway/routes.json"))
+        .unwrap()
+        .snapshot();
+    assert!(routes.session_for("heartbeat:fake:chat-1").is_none());
     gateway.cancel();
 }
 

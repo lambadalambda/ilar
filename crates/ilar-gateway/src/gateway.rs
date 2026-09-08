@@ -222,7 +222,7 @@ impl Gateway {
         let key = message.session_key();
         let seat = match self
             .driver
-            .seat(&key, &message.channel, &message.chat_id)
+            .seat(&key, &message.channel, &message.chat_id, message.is_group)
             .await
         {
             Ok(seat) => seat,

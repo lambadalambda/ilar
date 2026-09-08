@@ -135,8 +135,14 @@ impl Driver {
 
     /// The chat's runtime, opened on first use: its session resumed
     /// when the routes name one that still exists, created otherwise.
-    pub async fn seat(&self, key: &str, channel: &str, chat_id: &str) -> Result<Arc<Seat>> {
-        self.seat_of(key, channel, chat_id, false).await
+    pub async fn seat(
+        &self,
+        key: &str,
+        channel: &str,
+        chat_id: &str,
+        is_group: bool,
+    ) -> Result<Arc<Seat>> {
+        self.seat_of(key, channel, chat_id, false, !is_group).await
     }
 
     /// A scheduled turn's runtime: its own session under `key`, homed

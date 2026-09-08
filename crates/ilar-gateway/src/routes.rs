@@ -74,7 +74,7 @@ impl RouteStore {
     }
 }
 
-fn write_atomically(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }

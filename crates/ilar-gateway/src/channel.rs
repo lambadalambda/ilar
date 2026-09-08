@@ -61,7 +61,7 @@ impl FakeChannel {
                 sender_id: sender_id.to_string(),
                 text: text.to_string(),
                 media: Vec::new(),
-                is_group: false,
+                is_group,
             })
             .await
             .expect("fake channel receiver dropped");

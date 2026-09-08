@@ -53,8 +53,11 @@ fn default_scheduler_tick_secs() -> u64 {
 }
 
 fn default_heartbeat_prompt() -> String {
-    "Heartbeat. Look at what you know is going on; if there is something the person should      hear now, send it with the message tool, otherwise stay silent."
-        .into()
+    concat!(
+        "Heartbeat. Look at what you know is going on; if there is something the person ",
+        "should hear now, send it with the message tool, otherwise stay silent."
+    )
+    .into()
 }
 
 fn default_notify_interval_secs() -> u64 {
