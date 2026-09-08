@@ -38,6 +38,9 @@ pub struct FakeChannel {
     injected: Mutex<Option<mpsc::Receiver<Inbound>>>,
     sent: Mutex<Vec<Outbound>>,
     delivered: tokio::sync::Notify,
+    /// Runs left that fail right away, for a test of the restart.
+    failing_runs: std::sync::atomic::AtomicUsize,
+    runs: std::sync::atomic::AtomicUsize,
 }
 
 impl FakeChannel {
@@ -49,7 +52,19 @@ impl FakeChannel {
             injected: Mutex::new(Some(injected)),
             sent: Mutex::new(Vec::new()),
             delivered: tokio::sync::Notify::new(),
+            failing_runs: std::sync::atomic::AtomicUsize::new(0),
+            runs: std::sync::atomic::AtomicUsize::new(0),
         })
+    }
+
+    /// Make the next `count` runs fail at once, as a dead server would.
+    pub fn fail_next_runs(&self, count: usize) {
+        self.failing_runs
+            .store(count, std::sync::atomic::Ordering::Release);
+    }
+
+    pub fn runs(&self) -> usize {
+        self.runs.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// What a person typed. Buffered, so it may precede `run`.
@@ -131,6 +146,13 @@ impl Channel for FakeChannel {
         cancel: CancellationToken,
     ) -> ChannelFuture<'a, anyhow::Result<()>> {
         Box::pin(async move {
+            self.runs.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            let failing = self.failing_runs.load(std::sync::atomic::Ordering::Acquire);
+            if failing > 0 {
+                self.failing_runs
+                    .store(failing - 1, std::sync::atomic::Ordering::Release);
+                anyhow::bail!("fake channel {}: the server died", self.name);
+            }
             let Some(mut injected) = self.injected.lock().unwrap().take() else {
                 anyhow::bail!("fake channel {} already running", self.name);
             };

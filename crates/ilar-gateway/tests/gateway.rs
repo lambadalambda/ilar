@@ -509,6 +509,31 @@ async fn attachments_reach_the_model_and_files_go_back_out_by_path() {
 }
 
 #[tokio::test]
+async fn a_channel_that_dies_is_started_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path());
+    let settings = GatewayConfig {
+        workspace: Some(dir.path().join("workspace")),
+        ..GatewayConfig::default()
+    };
+    let resolver = Arc::new(FixedProviderResolver::new(Arc::new(MockProvider::new(
+        vec![says("back")],
+    ))));
+    let fake = FakeChannel::new("fake");
+    fake.fail_next_runs(1);
+    let gateway = Gateway::new(config, settings, resolver, vec![fake.clone()]).unwrap();
+    tokio::spawn(gateway.clone().run());
+    // The first run dies at once; the restart comes after a pause, and
+    // a message injected meanwhile is delivered by the second run.
+    fake.inject("anyone there?", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(1, Duration::from_secs(20)).await;
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0].text, "back");
+    assert!(fake.runs() >= 2, "{}", fake.runs());
+    gateway.cancel();
+}
+
+#[tokio::test]
 async fn safe_mode_hides_the_unsafe_tools_from_the_chat_and_its_agents() {
     let dir = tempfile::tempdir().unwrap();
     let settings = GatewayConfig {

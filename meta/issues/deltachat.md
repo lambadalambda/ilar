@@ -52,3 +52,9 @@ arrived in the chat with its caption (verified in the account
 database). Inbound images and files are named to the model with their
 path, images also attached as pictures; the live inbound run awaits a
 message from the user.
+
+Inbound, 2026-09-08 18:42–18:44, live: a photo arrived as an image on
+the turn and was described; a markdown file arrived by path and was
+read with the `read` tool. A channel whose run ends now restarts after
+a pause (tested with the fake channel); the rpc server dying under the
+adapter takes that path.

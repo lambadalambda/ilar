@@ -51,6 +51,8 @@ pub const FAILED_REPLY: &str = "That turn failed; the gateway log has the cause.
 
 /// How long a stop waits for turns in flight before giving up on them.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(15);
+/// The pause before a channel that stopped is started again.
+const CHANNEL_RESTART: Duration = Duration::from_secs(5);
 
 impl Gateway {
     pub fn new(
@@ -157,9 +159,21 @@ impl Gateway {
             let tx = inbound_tx.clone();
             let cancel = self.cancel.child_token();
             channel_tasks.spawn(async move {
+                // A channel that stops — its server died, its socket
+                // dropped — is started again after a pause, for as
+                // long as the gateway runs. Only a cancel ends it.
                 let name = channel.name().to_string();
-                if let Err(error) = channel.run(tx, cancel).await {
-                    log(&format!("channel {name} stopped: {error:#}"));
+                loop {
+                    match channel.run(tx.clone(), cancel.clone()).await {
+                        Ok(()) => return,
+                        Err(error) => log(&format!("channel {name} stopped: {error:#}")),
+                    }
+                    tokio::select! {
+                        () = cancel.cancelled() => return,
+                        () = tokio::time::sleep(CHANNEL_RESTART) => {
+                            log(&format!("channel {name}: starting again"));
+                        }
+                    }
                 }
             });
         }

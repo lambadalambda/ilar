@@ -325,3 +325,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Chats route to sessions; the message tool](issues/chats-route-to-sessions.md)
 - [x] [Cron and heartbeat turns](issues/cron-and-heartbeat-turns.md)
 - [x] [Memory that outlives a session](issues/memory-that-outlives-a-session.md)
+- [x] [DeltaChat](issues/deltachat.md)
