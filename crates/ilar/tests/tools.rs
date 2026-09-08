@@ -1874,6 +1874,135 @@ async fn grep_accepts_absolute_paths_outside_cwd() {
 }
 
 #[tokio::test]
+async fn grep_context_lines_surround_matches() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("a.txt"),
+        "one\ntwo NEEDLE\nthree\nfour\nfive\nsix\nseven NEEDLE\neight\n",
+    )
+    .unwrap();
+    let out = run(
+        &registry(),
+        "grep",
+        serde_json::json!({"pattern": "NEEDLE", "context": 1}),
+        &ctx(dir.path()),
+    )
+    .await;
+    assert!(!out.is_error, "{}", out.content);
+    assert_eq!(
+        out.content,
+        "a.txt-1-one\na.txt:2:two NEEDLE\na.txt-3-three\n--\na.txt-6-six\na.txt:7:seven NEEDLE\na.txt-8-eight\n"
+    );
+}
+
+#[tokio::test]
+async fn grep_ignore_case_matches_any_casing() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "Needle\nneedle\nNEEDLE\nnope\n").unwrap();
+    let out = run(
+        &registry(),
+        "grep",
+        serde_json::json!({"pattern": "needle", "ignore_case": true}),
+        &ctx(dir.path()),
+    )
+    .await;
+    assert_eq!(
+        out.content,
+        "a.txt:1:Needle\na.txt:2:needle\na.txt:3:NEEDLE\n"
+    );
+    let out = run(
+        &registry(),
+        "grep",
+        serde_json::json!({"pattern": "needle"}),
+        &ctx(dir.path()),
+    )
+    .await;
+    assert_eq!(out.content, "a.txt:2:needle\n");
+}
+
+#[tokio::test]
+async fn grep_glob_filters_the_files_searched() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("src/deep")).unwrap();
+    std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+    std::fs::write(dir.path().join("src/a.rs"), "NEEDLE\n").unwrap();
+    std::fs::write(dir.path().join("src/deep/b.rs"), "NEEDLE\n").unwrap();
+    std::fs::write(dir.path().join("src/c.md"), "NEEDLE\n").unwrap();
+    std::fs::write(dir.path().join("docs/d.rs"), "NEEDLE\n").unwrap();
+    // No slash: the file name, at any depth.
+    let out = run(
+        &registry(),
+        "grep",
+        serde_json::json!({"pattern": "NEEDLE", "glob": "*.rs"}),
+        &ctx(dir.path()),
+    )
+    .await;
+    assert_eq!(
+        out.content,
+        "docs/d.rs:1:NEEDLE\nsrc/a.rs:1:NEEDLE\nsrc/deep/b.rs:1:NEEDLE\n"
+    );
+    // A slash: the path relative to cwd, with alternation.
+    let out = run(
+        &registry(),
+        "grep",
+        serde_json::json!({"pattern": "NEEDLE", "glob": "src/*.{rs,md}"}),
+        &ctx(dir.path()),
+    )
+    .await;
+    assert_eq!(out.content, "src/a.rs:1:NEEDLE\nsrc/c.md:1:NEEDLE\n");
+    let out = run(
+        &registry(),
+        "grep",
+        serde_json::json!({"pattern": "NEEDLE", "glob": "["}),
+        &ctx(dir.path()),
+    )
+    .await;
+    assert!(out.is_error, "{}", out.content);
+}
+
+#[tokio::test]
+async fn grep_context_separates_files_and_drops_context_past_the_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "NEEDLE\nafter\n").unwrap();
+    std::fs::write(dir.path().join("b.txt"), "before\nNEEDLE\nafter\n").unwrap();
+    let out = run(
+        &registry(),
+        "grep",
+        serde_json::json!({"pattern": "NEEDLE", "context": 1}),
+        &ctx(dir.path()),
+    )
+    .await;
+    assert_eq!(
+        out.content,
+        "a.txt:1:NEEDLE\na.txt-2-after\n--\nb.txt-1-before\nb.txt:2:NEEDLE\nb.txt-3-after\n"
+    );
+    // The cap admits one match with its context; the next match's
+    // leading context does not survive it.
+    let out = run(
+        &registry(),
+        "grep",
+        serde_json::json!({"pattern": "NEEDLE", "context": 1, "limit": 1}),
+        &ctx(dir.path()),
+    )
+    .await;
+    assert_eq!(out.content, "a.txt:1:NEEDLE\na.txt-2-after\n…(truncated)\n");
+}
+
+#[tokio::test]
+async fn grep_limit_caps_the_matches_and_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "x\nx\nx\nx\nx\n").unwrap();
+    let out = run(
+        &registry(),
+        "grep",
+        serde_json::json!({"pattern": "x", "limit": 2}),
+        &ctx(dir.path()),
+    )
+    .await;
+    assert_eq!(out.content, "a.txt:1:x\na.txt:2:x\n…(truncated)\n");
+}
+
+#[tokio::test]
 async fn grep_no_matches_is_not_error() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("a.txt"), "hello\n").unwrap();

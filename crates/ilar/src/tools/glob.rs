@@ -74,6 +74,20 @@ fn literal_prefix(pattern: &str) -> PathBuf {
 /// model writes by hand, far below anything that hurts.
 const MAX_BRACE_EXPANSIONS: usize = 64;
 
+/// A pattern with its alternation expanded and every branch compiled —
+/// what the glob tool and grep's file filter both start from.
+pub(super) fn compile_pattern(pattern: &str) -> Result<Vec<glob::Pattern>, String> {
+    compile(&expand_braces(pattern)?)
+}
+
+fn compile(expanded: &[String]) -> Result<Vec<glob::Pattern>, String> {
+    expanded
+        .iter()
+        .map(|pattern| glob::Pattern::new(pattern))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("invalid pattern: {error}"))
+}
+
 /// Expand `{a,b}` alternation, which `glob::Pattern` lacks: without
 /// this, `**/{route,client}/*.ts` pays for the whole walk and then
 /// reports "(no matches)" because nothing contains a literal brace.
@@ -168,13 +182,9 @@ fn scan(
         Ok(expanded) => expanded,
         Err(error) => return ToolOutput::error(format!("glob: {error}")),
     };
-    let compiled = match expanded
-        .iter()
-        .map(|pattern| glob::Pattern::new(pattern))
-        .collect::<Result<Vec<_>, _>>()
-    {
+    let compiled = match compile(&expanded) {
         Ok(compiled) => compiled,
-        Err(error) => return ToolOutput::error(format!("glob: invalid pattern: {error}")),
+        Err(error) => return ToolOutput::error(format!("glob: {error}")),
     };
     let options = glob::MatchOptions {
         case_sensitive: true,

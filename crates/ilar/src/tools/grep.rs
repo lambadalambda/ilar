@@ -18,6 +18,9 @@ const MAX_OUTPUT_LINE_BYTES: usize = 8 * 1024;
 /// over a monorepo, which the match cap cannot short-circuit.
 const MAX_ENTRIES: usize = 500_000;
 const MAX_THREADS: usize = 8;
+/// Context lines either side of a match, at most. rg's `-C` in the
+/// weekend logs never went past this.
+const MAX_CONTEXT: usize = 10;
 
 pub struct GrepTool;
 
@@ -29,14 +32,72 @@ struct Input {
     /// Search gitignored files too. Off by default.
     #[serde(default)]
     include_ignored: bool,
+    /// Lines of context before and after each match.
+    #[serde(default)]
+    context: Option<usize>,
+    #[serde(default)]
+    ignore_case: bool,
+    /// Only search files matching this glob.
+    #[serde(default)]
+    glob: Option<String>,
+    /// Stop after this many matches.
+    #[serde(default)]
+    limit: Option<usize>,
 }
 
-/// One rendered `path:line:text` hit, kept with its sort key so parallel
-/// walking cannot reorder the output.
+/// One rendered line — a `path:line:text` match or a `path-line-text`
+/// context line — kept with its sort key so parallel walking cannot
+/// reorder the output.
 struct Hit {
     path: String,
     line: usize,
+    is_match: bool,
     rendered: String,
+}
+
+/// Everything a scan needs besides the file: shared across the walk's
+/// threads.
+struct Search {
+    regex: regex::Regex,
+    context: usize,
+    files: Option<FileFilter>,
+}
+
+/// The `glob` input: a pattern without `/` is matched against the file
+/// name at any depth, one with `/` against the path relative to cwd —
+/// rg's rule, and the one a model writing `*.rs` expects.
+struct FileFilter {
+    patterns: Vec<glob::Pattern>,
+    against_path: bool,
+}
+
+impl FileFilter {
+    fn parse(pattern: &str) -> Result<Self, String> {
+        // `./src/*.rs` is how a model spells "from here"; the walk's
+        // relative paths never start that way.
+        let pattern = pattern.strip_prefix("./").unwrap_or(pattern);
+        Ok(Self {
+            patterns: super::glob::compile_pattern(pattern)
+                .map_err(|error| format!("glob: {error}"))?,
+            against_path: pattern.contains('/'),
+        })
+    }
+
+    fn admits(&self, relative: &str, file_name: &str) -> bool {
+        let options = glob::MatchOptions {
+            case_sensitive: true,
+            require_literal_separator: self.against_path,
+            require_literal_leading_dot: false,
+        };
+        let subject = if self.against_path {
+            relative
+        } else {
+            file_name
+        };
+        self.patterns
+            .iter()
+            .any(|pattern| pattern.matches_with(subject, options))
+    }
 }
 
 impl Tool for GrepTool {
@@ -48,7 +109,9 @@ impl Tool for GrepTool {
         "Search file contents with a regex, recursively from cwd (or path, \
          which may be relative to cwd or absolute). \
          Gitignored files are skipped unless include_ignored is set. \
-         Returns file:line:match."
+         Returns file:line:match; with context, surrounding lines as \
+         file-line-text and -- between groups. Narrow with glob (*.rs, \
+         src/**/*.ts) and cap with limit instead of piping through head."
     }
 
     fn concurrency(&self) -> ToolConcurrency {
@@ -67,6 +130,19 @@ impl Tool for GrepTool {
                 "include_ignored": {
                     "type": "boolean",
                     "description": "Search gitignored files too (default false)"
+                },
+                "context": {
+                    "type": "integer",
+                    "description": "Lines of context before and after each match (0–10, default 0)"
+                },
+                "ignore_case": {"type": "boolean", "description": "Case-insensitive match (default false)"},
+                "glob": {
+                    "type": "string",
+                    "description": "Only search files matching this glob: a bare name pattern (*.rs, *.{js,ts}) at any depth, or a path (src/**/*.rs) relative to cwd"
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Stop after this many matches (default and maximum 200): the first found, then sorted by path"
                 }
             },
             "required": ["pattern"]
@@ -87,12 +163,31 @@ impl Tool for GrepTool {
             let requested = input.path.as_deref().unwrap_or(".");
             let root = ctx.cwd.join(requested);
             let spill = super::bash::SpillTarget::from_context(&ctx);
+            let regex = match regex::RegexBuilder::new(&input.pattern)
+                .case_insensitive(input.ignore_case)
+                .build()
+            {
+                Ok(regex) => regex,
+                Err(error) => return ToolOutput::error(format!("grep: invalid regex: {error}")),
+            };
+            let files = match input.glob.as_deref().map(FileFilter::parse) {
+                Some(Ok(filter)) => Some(filter),
+                Some(Err(error)) => return ToolOutput::error(format!("grep: {error}")),
+                None => None,
+            };
+            let search = Search {
+                regex,
+                context: input.context.unwrap_or(0).min(MAX_CONTEXT),
+                files,
+            };
+            let limit = input.limit.unwrap_or(MAX_MATCHES).clamp(1, MAX_MATCHES);
             match super::blocking_scan(move |cancelled| {
                 grep_files(
                     &ctx.cwd,
                     &root,
-                    &input.pattern,
+                    &search,
                     input.include_ignored,
+                    limit,
                     MAX_ENTRIES,
                     &cancelled,
                 )
@@ -111,7 +206,7 @@ impl Tool for GrepTool {
 fn grep_one_file(
     path: &std::path::Path,
     relative: &str,
-    regex: &regex::Regex,
+    search: &Search,
     cancelled: &std::sync::atomic::AtomicBool,
 ) -> (Vec<Hit>, bool) {
     let Ok(file) = std::fs::File::open(path) else {
@@ -119,10 +214,19 @@ fn grep_one_file(
     };
     let mut reader = std::io::BufReader::new(file).take(MAX_FILE_BYTES + 1);
     let mut hits = Vec::new();
+    let mut matches = 0_usize;
     let mut truncated = false;
     let mut line = Vec::new();
     let mut line_number = 0_usize;
     let mut file_bytes = 0_u64;
+    // Context bookkeeping: the last `context` unemitted lines wait in
+    // `before`; a match emits them, itself, and then the next `after`
+    // lines as they come. `last_emitted` keeps overlapping windows
+    // from repeating a line.
+    let mut before: std::collections::VecDeque<(usize, String)> =
+        std::collections::VecDeque::with_capacity(search.context);
+    let mut after = 0_usize;
+    let mut last_emitted = 0_usize;
     loop {
         if cancelled.load(Ordering::Acquire) {
             return (hits, truncated);
@@ -153,18 +257,29 @@ fn grep_one_file(
         }
         line_number += 1;
         let text = String::from_utf8_lossy(&line);
-        if regex.is_match(&text) {
-            let mut rendered = format!("{relative}:{line_number}:{}", text.trim_end());
-            truncate_bytes_ellipsis(&mut rendered, MAX_OUTPUT_LINE_BYTES);
-            hits.push(Hit {
-                path: relative.to_string(),
-                line: line_number,
-                rendered,
-            });
-            if hits.len() >= MAX_MATCHES_PER_FILE {
+        if search.regex.is_match(&text) {
+            for (number, kept) in before.drain(..) {
+                if number > last_emitted {
+                    hits.push(hit(relative, number, &kept, false));
+                }
+            }
+            hits.push(hit(relative, line_number, &text, true));
+            last_emitted = line_number;
+            after = search.context;
+            matches += 1;
+            if matches >= MAX_MATCHES_PER_FILE {
                 truncated = true;
                 break;
             }
+        } else if after > 0 {
+            hits.push(hit(relative, line_number, &text, false));
+            last_emitted = line_number;
+            after -= 1;
+        } else if search.context > 0 {
+            if before.len() == search.context {
+                before.pop_front();
+            }
+            before.push_back((line_number, text.into_owned()));
         }
         if file_limit_reached {
             break;
@@ -173,18 +288,29 @@ fn grep_one_file(
     (hits, truncated)
 }
 
+/// rg's spelling: `:` around a match's line number, `-` around a
+/// context line's.
+fn hit(relative: &str, line: usize, text: &str, is_match: bool) -> Hit {
+    let sep = if is_match { ':' } else { '-' };
+    let mut rendered = format!("{relative}{sep}{line}{sep}{}", text.trim_end());
+    truncate_bytes_ellipsis(&mut rendered, MAX_OUTPUT_LINE_BYTES);
+    Hit {
+        path: relative.to_string(),
+        line,
+        is_match,
+        rendered,
+    }
+}
+
 fn grep_files(
     cwd: &std::path::Path,
     root: &std::path::Path,
-    pattern: &str,
+    search: &Search,
     include_ignored: bool,
+    limit: usize,
     max_entries: usize,
     cancelled: &std::sync::atomic::AtomicBool,
 ) -> ToolOutput {
-    let regex = match regex::Regex::new(pattern) {
-        Ok(regex) => regex,
-        Err(error) => return ToolOutput::error(format!("grep: invalid regex: {error}")),
-    };
     let threads = std::thread::available_parallelism()
         .map(|count| count.get())
         .unwrap_or(1)
@@ -204,6 +330,7 @@ fn grep_files(
         .build_parallel();
 
     let hits = std::sync::Mutex::new(Vec::<Hit>::new());
+    let matched = std::sync::atomic::AtomicUsize::new(0);
     let scanned = std::sync::atomic::AtomicUsize::new(0);
     let clipped = std::sync::atomic::AtomicBool::new(false);
     let capped_entries = std::sync::atomic::AtomicBool::new(false);
@@ -223,7 +350,7 @@ fn grep_files(
                 capped_entries.store(true, Ordering::Release);
                 return ignore::WalkState::Quit;
             }
-            if hits.lock().unwrap().len() >= MAX_MATCHES {
+            if matched.load(Ordering::Acquire) >= limit {
                 return ignore::WalkState::Quit;
             }
             let relative = entry
@@ -232,11 +359,18 @@ fn grep_files(
                 .unwrap_or(entry.path())
                 .to_string_lossy()
                 .into_owned();
-            let (found, file_clipped) = grep_one_file(entry.path(), &relative, &regex, cancelled);
+            if let Some(files) = &search.files
+                && !files.admits(&relative, &entry.file_name().to_string_lossy())
+            {
+                return ignore::WalkState::Continue;
+            }
+            let (found, file_clipped) = grep_one_file(entry.path(), &relative, search, cancelled);
             if file_clipped {
                 clipped.store(true, Ordering::Release);
             }
             if !found.is_empty() {
+                let found_matches = found.iter().filter(|hit| hit.is_match).count();
+                matched.fetch_add(found_matches, Ordering::AcqRel);
                 hits.lock().unwrap().extend(found);
             }
             ignore::WalkState::Continue
@@ -250,18 +384,44 @@ fn grep_files(
     // Parallel walking loses walk order; make the output reproducible.
     hits.sort_by(|left, right| left.path.cmp(&right.path).then(left.line.cmp(&right.line)));
     let mut truncated = clipped.load(Ordering::Acquire);
-    if hits.len() > MAX_MATCHES {
-        hits.truncate(MAX_MATCHES);
+    // The cap counts matches; a match's own context rides along with it,
+    // and everything past the last admitted match is dropped — including
+    // the context that was leading up to the next one.
+    let mut seen_matches = 0_usize;
+    let mut kept = hits
+        .iter()
+        .position(|hit| {
+            if hit.is_match {
+                seen_matches += 1;
+            }
+            seen_matches > limit
+        })
+        .unwrap_or(hits.len());
+    if kept < hits.len() {
+        while kept > 0 && !hits[kept - 1].is_match && hits[kept - 1].line + 1 == hits[kept].line {
+            kept -= 1;
+        }
+        hits.truncate(kept);
         truncated = true;
     }
     let mut out = String::new();
-    for hit in hits {
-        if out.len().saturating_add(hit.rendered.len() + 1) > MAX_OUTPUT_BYTES {
+    let mut previous: Option<(&str, usize)> = None;
+    for hit in &hits {
+        // rg's group separator: only meaningful when context makes
+        // groups, and only where the next line is not adjacent.
+        let separated = search.context > 0
+            && previous.is_some_and(|(path, line)| path != hit.path || hit.line > line + 1);
+        let needed = hit.rendered.len() + 1 + if separated { 3 } else { 0 };
+        if out.len().saturating_add(needed) > MAX_OUTPUT_BYTES {
             truncated = true;
             break;
         }
+        if separated {
+            out.push_str("--\n");
+        }
         out.push_str(&hit.rendered);
         out.push('\n');
+        previous = Some((&hit.path, hit.line));
     }
     if capped_entries.load(Ordering::Acquire) {
         close_with(
@@ -340,6 +500,15 @@ async fn spill_over_budget(
 mod tests {
     use super::*;
 
+    /// A search with none of the options: what the pre-option tool did.
+    fn plain(pattern: &str) -> Search {
+        Search {
+            regex: regex::Regex::new(pattern).unwrap(),
+            context: 0,
+            files: None,
+        }
+    }
+
     #[tokio::test]
     async fn matches_past_the_preview_budget_spill_to_disk() {
         let dir = tempfile::tempdir().unwrap();
@@ -353,8 +522,9 @@ mod tests {
         let full = grep_files(
             dir.path(),
             dir.path(),
-            "needle",
+            &plain("needle"),
             false,
+            MAX_MATCHES,
             MAX_ENTRIES,
             &cancelled,
         );
@@ -492,7 +662,15 @@ mod tests {
             .unwrap();
         }
         let cancelled = std::sync::atomic::AtomicBool::new(false);
-        let out = grep_files(dir.path(), dir.path(), "zzz-absent", false, 5, &cancelled);
+        let out = grep_files(
+            dir.path(),
+            dir.path(),
+            &plain("zzz-absent"),
+            false,
+            MAX_MATCHES,
+            5,
+            &cancelled,
+        );
         assert!(!out.is_error, "{}", out.content);
         assert!(
             out.content.contains("scanned 5 files"),
