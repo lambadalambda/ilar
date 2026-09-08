@@ -229,6 +229,98 @@ async fn a_message_to_an_unknown_chat_is_refused_and_the_final_text_still_arrive
     gateway.cancel();
 }
 
+fn schedules_once(secs_from_now: i64, prompt: &str) -> Vec<ProviderEvent> {
+    let at = (chrono::Utc::now() + chrono::Duration::seconds(secs_from_now)).to_rfc3339();
+    vec![
+        ProviderEvent::ToolCallStarted {
+            id: "cron-1".into(),
+            name: "cron".into(),
+            item_id: None,
+        },
+        ProviderEvent::ToolCallCompleted {
+            id: "cron-1".into(),
+            name: "cron".into(),
+            input: serde_json::json!({
+                "action": "add", "name": "ping", "prompt": prompt, "at": at,
+            }),
+        },
+        ProviderEvent::TurnComplete {
+            stop_reason: StopReason::ToolUse,
+            usage: Usage::default(),
+        },
+    ]
+}
+
+#[tokio::test]
+async fn a_scheduled_turn_speaks_only_through_the_message_tool_and_a_one_shot_retires() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = GatewayConfig {
+        scheduler_tick_secs: 1,
+        ..GatewayConfig::default()
+    };
+    // The chat asks for a reminder; the reminder's turn sends one
+    // message and then says something that must not be delivered.
+    let (gateway, fake) = gateway_with(
+        dir.path(),
+        vec![
+            schedules_once(1, "remind them"),
+            says("scheduled"),
+            messages("scheduled hi", None),
+            says("(not for the chat)"),
+        ],
+        settings,
+    );
+    fake.inject("remind me", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(2, Duration::from_secs(15)).await;
+    let texts: Vec<&str> = sent.iter().map(|m| m.text.as_str()).collect();
+    assert_eq!(texts, ["scheduled", "scheduled hi"], "{sent:?}");
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(fake.sent().len(), 2, "{:?}", fake.sent());
+    let jobs = ilar_gateway::cron::CronStore::open(dir.path().join("state/gateway/cron.json"))
+        .unwrap()
+        .list();
+    assert!(jobs.is_empty(), "{jobs:?}");
+    gateway.cancel();
+}
+
+#[tokio::test]
+async fn a_heartbeat_with_nothing_to_say_sends_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = GatewayConfig {
+        scheduler_tick_secs: 1,
+        heartbeat: ilar_gateway::config::Heartbeat {
+            every_secs: 1,
+            prompt: "anything?".into(),
+            chats: vec!["fake:chat-1".into()],
+        },
+        ..GatewayConfig::default()
+    };
+    let (gateway, fake) = gateway_with(
+        dir.path(),
+        vec![
+            says("hi"),
+            says("nothing to report"),
+            says("nothing to report"),
+            says("nothing to report"),
+        ],
+        settings,
+    );
+    fake.inject("hello", "chat-1", "alice").await;
+    fake.wait_for_sent(1, WAIT).await;
+    // Beats happen (the seat appears), and none of them reaches the chat.
+    for _ in 0..40 {
+        if gateway.tool_names("heartbeat:fake:chat-1").is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(gateway.tool_names("heartbeat:fake:chat-1").is_some());
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let texts: Vec<String> = fake.sent().iter().map(|m| m.text.clone()).collect();
+    assert_eq!(texts, ["hi"]);
+    gateway.cancel();
+}
+
 #[tokio::test]
 async fn safe_mode_hides_the_unsafe_tools_from_the_chat_and_its_agents() {
     let dir = tempfile::tempdir().unwrap();

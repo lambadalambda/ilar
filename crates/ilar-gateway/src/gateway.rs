@@ -15,6 +15,7 @@ use tokio_util::sync::CancellationToken;
 use crate::bus::{Inbound, Outbound, session_key, split_key};
 use crate::channel::Channel;
 use crate::config::{GatewayConfig, gateway_dir};
+use crate::cron::CronStore;
 use crate::driver::{Driver, FollowUp, TurnError, TurnReport, Wiring, log};
 use crate::inbox::{self, RateLimit};
 use crate::routes::RouteStore;
@@ -31,6 +32,8 @@ pub struct Gateway {
     /// order they were said.
     outbound_tx: mpsc::Sender<Outbound>,
     outbound: Mutex<Option<mpsc::Receiver<Outbound>>>,
+    cron: Arc<CronStore>,
+    settings: GatewayConfig,
     cancel: CancellationToken,
 }
 
@@ -56,6 +59,8 @@ impl Gateway {
     ) -> Result<Arc<Self>> {
         let dir = gateway_dir(&config);
         let routes = Arc::new(RouteStore::open(dir.join("routes.json"))?);
+        let cron = Arc::new(CronStore::open(dir.join("cron.json"))?);
+        let settings = gateway.clone();
         let (follow_tx, follow_rx) = mpsc::channel(64);
         let (outbound_tx, outbound_rx) = mpsc::channel(256);
         let cancel = CancellationToken::new();
@@ -78,6 +83,7 @@ impl Gateway {
                 follow_ups: follow_tx,
                 outbound: outbound_tx.clone(),
                 constraints,
+                cron: cron.clone(),
             },
             cancel.clone(),
         ));
@@ -93,6 +99,8 @@ impl Gateway {
             follow_ups: Mutex::new(Some(follow_rx)),
             outbound_tx,
             outbound: Mutex::new(Some(outbound_rx)),
+            cron,
+            settings,
             cancel,
         }))
     }
@@ -163,6 +171,10 @@ impl Gateway {
             })
         };
         let mut inbox_tick = tokio::time::interval(Duration::from_secs(1));
+        let mut scheduler_tick = tokio::time::interval(Duration::from_secs(
+            self.settings.scheduler_tick_secs.max(1),
+        ));
+        let mut last_heartbeat: HashMap<String, Instant> = HashMap::new();
         let mut handlers = tokio::task::JoinSet::new();
         loop {
             tokio::select! {
@@ -183,6 +195,12 @@ impl Gateway {
                 },
                 Some(_) = handlers.join_next(), if !handlers.is_empty() => {}
                 _ = inbox_tick.tick() => self.poll_inbox(&inbound_tx).await,
+                _ = scheduler_tick.tick() => {
+                    for (key, target, prompt) in self.due_now(&mut last_heartbeat) {
+                        let gateway = self.clone();
+                        handlers.spawn(async move { gateway.handle_scheduled(key, target, prompt).await });
+                    }
+                }
             }
         }
         // Turns in flight see the cancellation and wind down; give them
@@ -271,15 +289,84 @@ impl Gateway {
         }
     }
 
+    /// Everything whose time has come: due cron jobs, and a heartbeat
+    /// for every configured chat whose interval has passed. Each is a
+    /// session key, the chat it speaks to, and the prompt.
+    fn due_now(
+        &self,
+        last_heartbeat: &mut HashMap<String, Instant>,
+    ) -> Vec<(String, String, String)> {
+        let mut due = Vec::new();
+        match self.cron.take_due(chrono::Utc::now()) {
+            Ok(jobs) => {
+                for job in jobs {
+                    due.push((job.session_key(), job.target.clone(), job.prompt.clone()));
+                }
+            }
+            Err(error) => log(&format!("cron: {error:#}")),
+        }
+        let heartbeat = &self.settings.heartbeat;
+        if heartbeat.every_secs > 0 {
+            let interval = Duration::from_secs(heartbeat.every_secs);
+            let now = Instant::now();
+            for chat in &heartbeat.chats {
+                let beat = last_heartbeat
+                    .get(chat)
+                    .is_none_or(|last| now.duration_since(*last) >= interval);
+                if beat {
+                    last_heartbeat.insert(chat.clone(), now);
+                    due.push((
+                        format!("heartbeat:{chat}"),
+                        chat.clone(),
+                        heartbeat.prompt.clone(),
+                    ));
+                }
+            }
+        }
+        due
+    }
+
+    /// A cron or heartbeat turn: its own session, homed on the chat it
+    /// is for, and heard from only through the message tool.
+    async fn handle_scheduled(&self, key: String, target: String, prompt: String) {
+        let Some((channel, chat_id)) = split_key(&target) else {
+            log(&format!("{key}: target {target:?} is not channel:chat"));
+            return;
+        };
+        if self.routes.snapshot().session_for(&target).is_none() {
+            log(&format!(
+                "{key}: target {target} has never written; skipped"
+            ));
+            return;
+        }
+        let seat = match self.driver.background_seat(&key, channel, chat_id).await {
+            Ok(seat) => seat,
+            Err(error) => {
+                log(&format!("{key}: cannot open a session: {error:#}"));
+                return;
+            }
+        };
+        log(&format!("{key}: scheduled turn for {target}"));
+        match self.driver.run(&seat, &prompt, &[]).await {
+            Ok(report) if report.sent == 0 => log(&format!("{key}: nothing to say")),
+            Ok(report) => log(&format!("{key}: {} message(s) sent", report.sent)),
+            Err(error) => log(&format!("{key}: scheduled turn failed: {error}")),
+        }
+    }
+
     /// The final text of a turn goes out only when the model sent
     /// nothing itself; a model that used the message tool has said
-    /// what it wanted to say.
+    /// what it wanted to say. A background seat has no final text to
+    /// deliver at all.
     async fn deliver_unless_sent(&self, seat: &crate::driver::Seat, report: &TurnReport) {
         if report.sent > 0 {
             log(&format!(
                 "{}: {} message(s) sent by the model",
                 seat.key, report.sent
             ));
+            return;
+        }
+        if seat.background {
             return;
         }
         self.deliver(&seat.channel, &seat.chat_id, &report.text)

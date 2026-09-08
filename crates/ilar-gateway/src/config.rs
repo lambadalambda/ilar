@@ -25,6 +25,36 @@ pub struct GatewayConfig {
     /// spawns.
     #[serde(default)]
     pub tools: crate::policy::ToolPolicy,
+    /// A periodic turn on chats of your choosing, silent unless the
+    /// model uses the message tool.
+    #[serde(default)]
+    pub heartbeat: Heartbeat,
+    /// How often due jobs and heartbeats are looked for.
+    #[serde(default = "default_scheduler_tick_secs")]
+    pub scheduler_tick_secs: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Heartbeat {
+    /// Off when zero.
+    #[serde(default)]
+    pub every_secs: u64,
+    #[serde(default = "default_heartbeat_prompt")]
+    pub prompt: String,
+    /// Session keys (`channel:chat`) to beat on; only chats that have
+    /// written are reachable anyway.
+    #[serde(default)]
+    pub chats: Vec<String>,
+}
+
+fn default_scheduler_tick_secs() -> u64 {
+    30
+}
+
+fn default_heartbeat_prompt() -> String {
+    "Heartbeat. Look at what you know is going on; if there is something the person should      hear now, send it with the message tool, otherwise stay silent."
+        .into()
 }
 
 fn default_notify_interval_secs() -> u64 {

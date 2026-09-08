@@ -22,6 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::bus::Outbound;
 use crate::config::GatewayConfig;
+use crate::cron::{CronStore, CronTool};
 use crate::message::MessageTool;
 use crate::routes::RouteStore;
 
@@ -69,6 +70,9 @@ pub struct Seat {
     pub key: String,
     pub channel: String,
     pub chat_id: String,
+    /// A cron or heartbeat seat: it speaks to its chat only through
+    /// the message tool, never by its final text.
+    pub background: bool,
     pub runtime: SessionRuntime,
     /// Messages the model sent through its tool, ever; a turn compares
     /// before and after to know whether its final text is still owed.
@@ -84,6 +88,7 @@ pub struct Wiring {
     pub outbound: mpsc::Sender<Outbound>,
     /// Each channel's delivery constraints, for the tool's description.
     pub constraints: HashMap<String, String>,
+    pub cron: Arc<CronStore>,
 }
 
 pub struct Driver {
@@ -131,6 +136,27 @@ impl Driver {
     /// The chat's runtime, opened on first use: its session resumed
     /// when the routes name one that still exists, created otherwise.
     pub async fn seat(&self, key: &str, channel: &str, chat_id: &str) -> Result<Arc<Seat>> {
+        self.seat_of(key, channel, chat_id, false).await
+    }
+
+    /// A scheduled turn's runtime: its own session under `key`, homed
+    /// on the chat it is addressed to.
+    pub async fn background_seat(
+        &self,
+        key: &str,
+        channel: &str,
+        chat_id: &str,
+    ) -> Result<Arc<Seat>> {
+        self.seat_of(key, channel, chat_id, true).await
+    }
+
+    async fn seat_of(
+        &self,
+        key: &str,
+        channel: &str,
+        chat_id: &str,
+        background: bool,
+    ) -> Result<Arc<Seat>> {
         if let Some(seat) = self.seat_by_key(key) {
             return Ok(seat);
         }
@@ -168,10 +194,20 @@ impl Driver {
                 .unwrap_or(""),
         );
         runtime.registry.add(tool)?;
+        // And its calendar, unless the policy says otherwise.
+        if self.gateway.tools.admits("cron") {
+            let home = crate::bus::session_key(channel, chat_id);
+            runtime.registry.add(CronTool::new(
+                self.wiring.cron.clone(),
+                self.routes.clone(),
+                &home,
+            ))?;
+        }
         let seat = Arc::new(Seat {
             key: key.to_string(),
             channel: channel.to_string(),
             chat_id: chat_id.to_string(),
+            background,
             runtime,
             sent,
             turn: tokio::sync::Mutex::new(()),

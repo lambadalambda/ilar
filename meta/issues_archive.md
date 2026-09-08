@@ -322,3 +322,5 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [grep has what the model reaches for](issues/grep-has-what-the-model-reaches-for.md)
 - [x] [The gateway drives a session per chat](issues/the-gateway-drives-a-session-per-chat.md)
 - [x] [A sender allowlist and a tool policy](issues/a-sender-allowlist-and-a-tool-policy.md)
+- [x] [Chats route to sessions; the message tool](issues/chats-route-to-sessions.md)
+- [x] [Cron and heartbeat turns](issues/cron-and-heartbeat-turns.md)

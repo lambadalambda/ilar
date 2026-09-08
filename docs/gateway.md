@@ -26,6 +26,10 @@ declares them is warned about and ignored.
 | `gateway.tools.allow` | all | Only these tools. |
 | `gateway.tools.deny` | `[]` | Never these. |
 | `gateway.tools.safe_mode` | `false` | Also deny `bash`, `write`, `edit`, `service`, `image_gen`. |
+| `gateway.heartbeat.every_secs` | `0` (off) | A periodic turn on each listed chat. |
+| `gateway.heartbeat.prompt` | a short "anything to say?" | What the heartbeat turn is asked. |
+| `gateway.heartbeat.chats` | `[]` | Session keys to beat on, e.g. `deltachat:12`. |
+| `gateway.scheduler_tick_secs` | `30` | How often due jobs and heartbeats are looked for. |
 | `channels.deltachat.*` | — | The Delta Chat adapter; see below. |
 
 ### Delta Chat
@@ -78,6 +82,20 @@ denied tool is absent from the model's list, and the agents a chat
 may spawn have their definitions narrowed before the spawner is
 built, so a subagent cannot be the way around it. Safe mode is the
 policy for a bot you do not want changing the machine.
+
+## Scheduled turns: cron and heartbeat
+
+The model has a `cron` tool: add a named prompt with a five-field cron
+expression, an interval or a one-shot time, addressed to its own chat
+or a known one; list; remove. Jobs live in `<state dir>/gateway/cron.json`.
+A due job runs on its own session, `cron:<id>`, homed on the chat it
+is for; a one-shot retires after firing. The heartbeat is the same
+kind of turn on a fixed interval, on `heartbeat:<channel>:<chat>` for
+each configured chat.
+
+Neither kind of turn delivers its final text. A scheduled turn reaches
+the chat only through the message tool, so a job or a heartbeat with
+nothing to say says nothing.
 
 ## Replying: the message tool
 

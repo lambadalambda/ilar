@@ -19,3 +19,11 @@ already runs for child completions.
 
 - A one-shot job fires once and is retired; a heartbeat with nothing to
   say sends nothing.
+
+## Status (2026-09-08)
+
+Done: `cron.json` store, `cron` tool (add / list / remove; cron
+expression, interval or one-shot), heartbeat per configured chat,
+both on their own sessions with delivery only through the message
+tool; a one-shot retires. The unscoped case never arises: every job
+and beat is homed on a chat that has written.

@@ -14,6 +14,7 @@
 pub mod bus;
 pub mod channel;
 pub mod config;
+pub mod cron;
 pub mod deltachat;
 pub mod driver;
 pub mod gateway;
