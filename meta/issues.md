@@ -119,7 +119,6 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 - [ ] [The assistant — index](issues/the-assistant-index.md) — index
 - [ ] [DeltaChat](issues/deltachat.md)
-- [ ] [Memory that outlives a session](issues/memory-that-outlives-a-session.md)
 
 ## Review follow-ups
 

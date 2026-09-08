@@ -23,6 +23,7 @@ use tokio_util::sync::CancellationToken;
 use crate::bus::Outbound;
 use crate::config::GatewayConfig;
 use crate::cron::{CronStore, CronTool};
+use crate::memory::{MemoryGetTool, MemorySearchTool, MemoryStore, MemoryTool};
 use crate::message::MessageTool;
 use crate::routes::RouteStore;
 
@@ -36,6 +37,9 @@ pub struct TurnReport {
     /// Counted under the seat's lock, so another turn's sends are
     /// never mistaken for this one's.
     pub sent: usize,
+    /// Handover summaries the turn compacted into, oldest first: what
+    /// the daily note keeps.
+    pub compactions: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -89,6 +93,7 @@ pub struct Wiring {
     /// Each channel's delivery constraints, for the tool's description.
     pub constraints: HashMap<String, String>,
     pub cron: Arc<CronStore>,
+    pub memory: Arc<MemoryStore>,
 }
 
 pub struct Driver {
@@ -153,7 +158,11 @@ impl Driver {
         channel: &str,
         chat_id: &str,
     ) -> Result<Arc<Seat>> {
-        self.seat_of(key, channel, chat_id, true).await
+        let private = !self
+            .routes
+            .snapshot()
+            .is_group(&crate::bus::session_key(channel, chat_id));
+        self.seat_of(key, channel, chat_id, true, private).await
     }
 
     async fn seat_of(
@@ -162,6 +171,7 @@ impl Driver {
         channel: &str,
         chat_id: &str,
         background: bool,
+        private: bool,
     ) -> Result<Arc<Seat>> {
         if let Some(seat) = self.seat_by_key(key) {
             return Ok(seat);
@@ -171,7 +181,7 @@ impl Driver {
             return Ok(seat);
         }
         let known = self.routes.snapshot().session_for(key).map(str::to_string);
-        let mut runtime = match self.open(known.clone()) {
+        let mut runtime = match self.open(known.clone(), private) {
             Ok(runtime) => runtime,
             // A route to a session that is gone (deleted, another state
             // dir) is a route to nothing: start over rather than refuse
@@ -181,12 +191,16 @@ impl Driver {
                     "{key}: session {} unusable ({error:#}); starting a new one",
                     known.unwrap_or_default()
                 ));
-                self.open(None)?
+                self.open(None, private)?
             }
             Err(error) => return Err(error),
         };
-        self.routes
-            .update(|routes| routes.bind(key, &runtime.session_id))?;
+        // Only chats are routes: a background session is nobody's
+        // address, and a retired job's would otherwise linger forever.
+        if !background {
+            self.routes
+                .update(|routes| routes.bind(key, &runtime.session_id))?;
+        }
         // The model's way to answer: a tool that knows this chat.
         let (tool, sent) = MessageTool::new(
             self.wiring.outbound.clone(),
@@ -200,6 +214,21 @@ impl Driver {
                 .unwrap_or(""),
         );
         runtime.registry.add(tool)?;
+        if self.gateway.memory.enabled {
+            let memory = self.wiring.memory.clone();
+            for (name, tool) in [
+                (
+                    "memory",
+                    MemoryTool::new(memory.clone()) as Arc<dyn ilar::tools::Tool>,
+                ),
+                ("memory_search", MemorySearchTool::new(memory.clone())),
+                ("memory_get", MemoryGetTool::new(memory)),
+            ] {
+                if self.gateway.tools.admits(name) {
+                    runtime.registry.add(tool)?;
+                }
+            }
+        }
         // And its calendar, unless the policy says otherwise.
         if self.gateway.tools.admits("cron") {
             let home = crate::bus::session_key(channel, chat_id);
@@ -234,7 +263,7 @@ impl Driver {
         Ok(seat)
     }
 
-    fn open(&self, resume: Option<String>) -> Result<SessionRuntime> {
+    fn open(&self, resume: Option<String>, private: bool) -> Result<SessionRuntime> {
         let workspace = self.gateway.workspace(&self.config);
         std::fs::create_dir_all(&workspace)
             .with_context(|| format!("creating workspace {}", workspace.display()))?;
@@ -267,6 +296,16 @@ impl Driver {
                 agent.tools = policy.narrow(agent.tools.as_deref(), nameable.iter().copied());
             }
             plan.agent.tools = policy.narrow(plan.agent.tools.as_deref(), nameable.iter().copied());
+        }
+        // The core memory rides in the system prompt, frozen for the
+        // session, and never into a group: what the assistant knows
+        // about its person is not for a room.
+        if private
+            && self.gateway.memory.enabled
+            && let Some(block) = self.wiring.memory.core_block()?
+        {
+            plan.system_prompt.push_str("\n\n");
+            plan.system_prompt.push_str(&block);
         }
         let mut runtime = plan.start_with(&self.config, self.resolver.clone())?;
         if !policy.is_empty() {
@@ -348,20 +387,23 @@ pub async fn turn(
     );
     tokio::pin!(turn);
     let mut text = String::new();
+    let mut compactions = Vec::new();
+    let mut note = |event: LoopEvent| match event {
+        LoopEvent::TextDelta(delta) => text.push_str(&delta),
+        LoopEvent::Compacted { summary, .. } => compactions.push(summary),
+        _ => {}
+    };
     let outcome = loop {
         tokio::select! {
             event = rx.recv() => match event {
-                Some(LoopEvent::TextDelta(delta)) => text.push_str(&delta),
-                Some(_) => {}
+                Some(event) => note(event),
                 None => break (&mut turn).await,
             },
             outcome = &mut turn => break outcome,
         }
     };
     while let Ok(event) = rx.try_recv() {
-        if let LoopEvent::TextDelta(delta) = event {
-            text.push_str(&delta);
-        }
+        note(event);
     }
     match outcome {
         Ok(outcome) => Ok(TurnReport {
@@ -369,6 +411,7 @@ pub async fn turn(
             text,
             outcome,
             sent: 0,
+            compactions,
         }),
         Err(error) if ilar::agent::TurnNeverStarted::writer_held(&error) => {
             Err(TurnError::Busy(format!("{error:#}")))

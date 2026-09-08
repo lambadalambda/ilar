@@ -64,6 +64,20 @@ allowlist there, since an unrestricted agent's registry comes from
 nothing but its defaults. A stranger gets no reply at all: a reply is
 a spam vector, and on Delta Chat it accepts the contact request.
 
+Evening: steps 5 and 6. Cron and heartbeat are the same thing — a
+prompt on a session of its own, homed on a chat, heard only through
+the message tool — so a job or a beat with nothing to say says
+nothing. Memory went in as designed: two capped core files frozen
+into the prompt per session and kept out of groups, an archive of
+typed one-fact files and daily notes that is never injected, BM25
+with a thirty-day half-life done in-process because the corpus is a
+few hundred small files, two-phase search then get, and every
+compaction's handover written to the day's note. Left for later, on
+the issue: embeddings, the post-turn review, cards in a subagent's
+brief, promotion into the core. The review of the cron commit caught
+background sessions being written into the routes file, where the
+model could have addressed them.
+
 Two lessons. A chatmail address is not something a person can write
 to; the bot has to hand out its secure-join invite, so it does, at
 every start and through `ilar-gateway invite`. And this Mac's sandbox

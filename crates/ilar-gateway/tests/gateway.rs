@@ -229,6 +229,110 @@ async fn a_message_to_an_unknown_chat_is_refused_and_the_final_text_still_arrive
     gateway.cancel();
 }
 
+/// One tool call, then the turn yields for its result. Ids are
+/// unique across a test: a session refuses a repeated one.
+fn calls(name: &str, input: serde_json::Value) -> Vec<ProviderEvent> {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+    let id = format!(
+        "{name}-{}",
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    vec![
+        ProviderEvent::ToolCallStarted {
+            id: id.clone(),
+            name: name.into(),
+            item_id: None,
+        },
+        ProviderEvent::ToolCallCompleted {
+            id,
+            name: name.into(),
+            input,
+        },
+        ProviderEvent::TurnComplete {
+            stop_reason: StopReason::ToolUse,
+            usage: Usage::default(),
+        },
+    ]
+}
+
+/// Whether a chat's session log holds a tool result matching `check`.
+fn has_tool_result(dir: &Path, key: &str, check: impl Fn(&str, bool) -> bool) -> bool {
+    let routes = RouteStore::open(dir.join("state/gateway/routes.json"))
+        .unwrap()
+        .snapshot();
+    let session_id = routes.session_for(key).unwrap().to_string();
+    let store = ilar::runtime::session_store(&config(dir));
+    store
+        .load(&session_id)
+        .unwrap()
+        .events()
+        .iter()
+        .any(|event| {
+            matches!(event, ilar::session::SessionEvent::ToolResult { content, is_error, .. }
+                if check(content, *is_error))
+        })
+}
+
+#[tokio::test]
+async fn a_fact_kept_in_one_chat_is_found_from_another_and_the_core_reaches_a_new_private_chat() {
+    let dir = tempfile::tempdir().unwrap();
+    let (gateway, fake) = gateway(
+        dir.path(),
+        vec![
+            calls(
+                "memory",
+                serde_json::json!({
+                    "action": "note", "kind": "preference", "title": "Tea",
+                    "summary": "the person likes earl grey", "body": "Never coffee after noon.",
+                }),
+            ),
+            calls(
+                "memory",
+                serde_json::json!({
+                    "action": "add", "file": "user", "text": "Likes earl grey",
+                }),
+            ),
+            says("kept"),
+            calls("memory_search", serde_json::json!({"query": "earl grey"})),
+            says("found it"),
+            says("hello new chat"),
+            says("hello group"),
+        ],
+    );
+    fake.inject("remember I like earl grey", "chat-1", "alice")
+        .await;
+    fake.wait_for_sent(1, WAIT).await;
+    fake.inject("what tea do I like?", "chat-2", "alice").await;
+    fake.wait_for_sent(2, WAIT).await;
+    assert!(has_tool_result(
+        dir.path(),
+        "fake:chat-2",
+        |content, is_error| {
+            !is_error && content.contains("[preference]") && content.contains("earl grey")
+        }
+    ));
+    // A chat opened after the core was written sees it; a group does not.
+    fake.inject("hi", "chat-3", "alice").await;
+    fake.wait_for_sent(3, WAIT).await;
+    let prompt = gateway.system_prompt("fake:chat-3").unwrap();
+    assert!(
+        prompt.contains("# Memory") && prompt.contains("Likes earl grey"),
+        "{prompt}"
+    );
+    fake.inject_in_group("hi all", "room-1", "alice").await;
+    fake.wait_for_sent(4, WAIT).await;
+    let prompt = gateway.system_prompt("fake:room-1").unwrap();
+    assert!(!prompt.contains("# Memory"), "{prompt}");
+    // The first two chats opened before the core existed: frozen prompts.
+    assert!(
+        !gateway
+            .system_prompt("fake:chat-1")
+            .unwrap()
+            .contains("# Memory")
+    );
+    gateway.cancel();
+}
+
 fn schedules_once(secs_from_now: i64, prompt: &str) -> Vec<ProviderEvent> {
     let at = (chrono::Utc::now() + chrono::Duration::seconds(secs_from_now)).to_rfc3339();
     vec![

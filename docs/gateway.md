@@ -30,6 +30,7 @@ declares them is warned about and ignored.
 | `gateway.heartbeat.prompt` | a short "anything to say?" | What the heartbeat turn is asked. |
 | `gateway.heartbeat.chats` | `[]` | Session keys to beat on, e.g. `deltachat:12`. |
 | `gateway.scheduler_tick_secs` | `30` | How often due jobs and heartbeats are looked for. |
+| `gateway.memory.enabled` | `true` | Core memory in the prompt, the archive behind the tools, a daily note at each compaction. |
 | `channels.deltachat.*` | — | The Delta Chat adapter; see below. |
 
 ### Delta Chat
@@ -83,6 +84,23 @@ may spawn have their definitions narrowed before the spawner is
 built, so a subagent cannot be the way around it. Safe mode is the
 policy for a bot you do not want changing the machine.
 
+## Memory that outlives a session
+
+Two tiers, under `<state dir>/gateway/memory/`. The core is two small
+files with hard caps, `MEMORY.md` (about the world, 2,200 characters)
+and `USER.md` (about the person, 1,375), which the `memory` tool edits
+with add, replace and remove; an overflow is an error the model
+resolves by consolidating. The core is injected into the system
+prompt once, when a chat's session opens, and stays frozen for that
+session; it is never injected into a group chat.
+
+The archive is one fact per file under `notes/`, typed as a decision,
+solution, preference, event, task or risk, written with the same
+tool's `note` action, plus daily notes under `daily/` that receive
+every compaction handover. Nothing in the archive is ever injected:
+`memory_search` returns an index, best first with recent notes
+ranking higher, and `memory_get` reads the chosen notes in full.
+
 ## Scheduled turns: cron and heartbeat
 
 The model has a `cron` tool: add a named prompt with a five-field cron
@@ -99,7 +117,9 @@ nothing to say says nothing.
 
 ## Replying: the message tool
 
-Every gateway session has a `message` tool that knows its chat. The
+Every gateway session has a `message` tool that knows its chat. It is
+always present, whatever the tool policy says: a chat with no way to
+answer is not a chat. The
 model replies by calling it, so it can send several messages, attach
 files, or say nothing; the turn's final text is delivered only when
 the model sent nothing itself, and then exactly once. Another chat can

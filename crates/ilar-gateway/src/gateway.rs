@@ -18,6 +18,7 @@ use crate::config::{GatewayConfig, gateway_dir};
 use crate::cron::CronStore;
 use crate::driver::{Driver, FollowUp, TurnError, TurnReport, Wiring, log};
 use crate::inbox::{self, RateLimit};
+use crate::memory::MemoryStore;
 use crate::routes::RouteStore;
 
 pub struct Gateway {
@@ -33,6 +34,7 @@ pub struct Gateway {
     outbound_tx: mpsc::Sender<Outbound>,
     outbound: Mutex<Option<mpsc::Receiver<Outbound>>>,
     cron: Arc<CronStore>,
+    memory: Arc<MemoryStore>,
     settings: GatewayConfig,
     cancel: CancellationToken,
 }
@@ -60,6 +62,7 @@ impl Gateway {
         let dir = gateway_dir(&config);
         let routes = Arc::new(RouteStore::open(dir.join("routes.json"))?);
         let cron = Arc::new(CronStore::open(dir.join("cron.json"))?);
+        let memory = Arc::new(MemoryStore::new(dir.join("memory")));
         let settings = gateway.clone();
         let (follow_tx, follow_rx) = mpsc::channel(64);
         let (outbound_tx, outbound_rx) = mpsc::channel(256);
@@ -84,6 +87,7 @@ impl Gateway {
                 outbound: outbound_tx.clone(),
                 constraints,
                 cron: cron.clone(),
+                memory: memory.clone(),
             },
             cancel.clone(),
         ));
@@ -100,6 +104,7 @@ impl Gateway {
             outbound_tx,
             outbound: Mutex::new(Some(outbound_rx)),
             cron,
+            memory,
             settings,
             cancel,
         }))
@@ -111,6 +116,14 @@ impl Gateway {
 
     pub fn inbox_dir(&self) -> &std::path::Path {
         &self.inbox_dir
+    }
+
+    /// A seat's system prompt, for a test that checks what a chat is
+    /// told.
+    pub fn system_prompt(&self, key: &str) -> Option<String> {
+        self.driver
+            .seat_by_key(key)
+            .map(|seat| seat.runtime.system_prompt.clone())
     }
 
     /// The tools a chat's model can see, once it has a seat.
@@ -246,7 +259,10 @@ impl Gateway {
             message.text.len()
         ));
         match self.driver.run(&seat, &message.text, &images).await {
-            Ok(report) => self.deliver_unless_sent(&seat, &report).await,
+            Ok(report) => {
+                self.keep_handovers(&seat, &report);
+                self.deliver_unless_sent(&seat, &report).await;
+            }
             Err(TurnError::Busy(why)) => {
                 log(&format!("{key}: {why}"));
                 self.deliver(&message.channel, &message.chat_id, BUSY_REPLY)
@@ -273,18 +289,25 @@ impl Gateway {
         match self.driver.run(&seat, &follow_up.prompt, &[]).await {
             Ok(report) => {
                 ilar::outbox::retire(&self.driver.outbox_dir(), &follow_up.retire);
+                self.keep_handovers(&seat, &report);
                 self.deliver_unless_sent(&seat, &report).await;
             }
+            // A background seat's troubles stay in the log: the chat
+            // never asked it anything.
             Err(TurnError::Busy(why)) => {
                 log(&format!("{key}: follow-up waits: {why}"));
-                self.deliver(&seat.channel, &seat.chat_id, BUSY_FOLLOW_UP)
-                    .await;
+                if !seat.background {
+                    self.deliver(&seat.channel, &seat.chat_id, BUSY_FOLLOW_UP)
+                        .await;
+                }
                 self.driver.requeue(follow_up);
             }
             Err(TurnError::Failed(error)) => {
                 log(&format!("{key}: follow-up failed: {error:#}"));
-                self.deliver(&seat.channel, &seat.chat_id, FAILED_REPLY)
-                    .await;
+                if !seat.background {
+                    self.deliver(&seat.channel, &seat.chat_id, FAILED_REPLY)
+                        .await;
+                }
             }
         }
     }
@@ -348,9 +371,30 @@ impl Gateway {
         };
         log(&format!("{key}: scheduled turn for {target}"));
         match self.driver.run(&seat, &prompt, &[]).await {
-            Ok(report) if report.sent == 0 => log(&format!("{key}: nothing to say")),
-            Ok(report) => log(&format!("{key}: {} message(s) sent", report.sent)),
+            Ok(report) if report.sent == 0 => {
+                self.keep_handovers(&seat, &report);
+                log(&format!("{key}: nothing to say"));
+            }
+            Ok(report) => {
+                self.keep_handovers(&seat, &report);
+                log(&format!("{key}: {} message(s) sent", report.sent));
+            }
             Err(error) => log(&format!("{key}: scheduled turn failed: {error}")),
+        }
+    }
+
+    /// A compaction's handover is the turn's own summary of what it
+    /// was doing; the daily note keeps it, since the session log it
+    /// came from is not what a future session reads.
+    fn keep_handovers(&self, seat: &crate::driver::Seat, report: &TurnReport) {
+        if !self.settings.memory.enabled {
+            return;
+        }
+        for summary in &report.compactions {
+            let heading = format!("handover in {}", seat.key);
+            if let Err(error) = self.memory.daily(chrono::Utc::now(), &heading, summary) {
+                log(&format!("{}: daily note not written: {error:#}", seat.key));
+            }
         }
     }
 

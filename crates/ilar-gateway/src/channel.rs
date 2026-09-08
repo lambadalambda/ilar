@@ -54,6 +54,15 @@ impl FakeChannel {
 
     /// What a person typed. Buffered, so it may precede `run`.
     pub async fn inject(&self, text: &str, chat_id: &str, sender_id: &str) {
+        self.inject_with(text, chat_id, sender_id, false).await;
+    }
+
+    /// The same, in a group.
+    pub async fn inject_in_group(&self, text: &str, chat_id: &str, sender_id: &str) {
+        self.inject_with(text, chat_id, sender_id, true).await;
+    }
+
+    async fn inject_with(&self, text: &str, chat_id: &str, sender_id: &str, is_group: bool) {
         self.injector
             .send(Inbound {
                 channel: self.name.clone(),

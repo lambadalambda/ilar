@@ -53,3 +53,15 @@ cost in tokens and latency that is wrong for a personal assistant.
 - A fact stored in one session is found by search in another; the
   core is byte-identical across a session's turns; a group chat's
   prompt contains no core memory; a compaction writes a daily note.
+
+## Status (2026-09-08)
+
+Done: the core files with Hermes's caps and the `memory` tool (add /
+replace / remove / note), injection frozen per session and never in
+a group, the archive of typed one-fact files and daily notes, BM25
+with recency decay (in-process, no database: the corpus is small),
+the two-phase `memory_search` / `memory_get`, and every compaction's
+handover kept in the daily note. Left: local embeddings, the opt-in
+post-turn review with approval staging, the cards in a subagent's
+brief, and promotion of daily notes into the core by a scheduled
+review.

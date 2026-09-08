@@ -324,3 +324,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [A sender allowlist and a tool policy](issues/a-sender-allowlist-and-a-tool-policy.md)
 - [x] [Chats route to sessions; the message tool](issues/chats-route-to-sessions.md)
 - [x] [Cron and heartbeat turns](issues/cron-and-heartbeat-turns.md)
+- [x] [Memory that outlives a session](issues/memory-that-outlives-a-session.md)

@@ -32,6 +32,27 @@ pub struct GatewayConfig {
     /// How often due jobs and heartbeats are looked for.
     #[serde(default = "default_scheduler_tick_secs")]
     pub scheduler_tick_secs: u64,
+    #[serde(default)]
+    pub memory: Memory,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Memory {
+    /// Core files in the prompt, the archive behind the tools, and a
+    /// daily note at every compaction. On unless said otherwise.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for Memory {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
@@ -126,6 +147,12 @@ mod tests {
         let parsed: GatewayConfig = table.try_into().unwrap();
         assert!(parsed.tools.safe_mode);
         assert_eq!(parsed.tools.deny, ["task"]);
+    }
+
+    #[test]
+    fn the_default_heartbeat_prompt_is_one_clean_line() {
+        assert!(!default_heartbeat_prompt().contains("  "));
+        assert!(GatewayConfig::default().memory.enabled);
     }
 
     #[test]
