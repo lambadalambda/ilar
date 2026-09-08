@@ -274,52 +274,14 @@ impl Driver {
     }
 
     fn open(&self, resume: Option<String>, private: bool) -> Result<SessionRuntime> {
-        let workspace = self.gateway.workspace(&self.config);
-        std::fs::create_dir_all(&workspace)
-            .with_context(|| format!("creating workspace {}", workspace.display()))?;
-        let mut plan = RuntimePlan::resolve(
+        let plan = plan(
             &self.config,
-            &RuntimeOptions {
-                model: self.gateway.model.clone(),
-                agent: self.gateway.agent.clone(),
-                resume,
-                cwd: workspace,
-                // Nobody sits at a channel to answer a form: the tool is
-                // left off and the model is told so on the spot.
-                questions: false,
-                project_instructions: None,
-                // An assistant has a SOUL.md before it has coding
-                // instructions: who it is, how it talks.
-                context_files: Some(ilar::config::SOUL_FILES),
-            },
+            &self.gateway,
+            &self.wiring.memory,
+            resume,
+            private,
         )?;
-        // The policy reaches the subagents too: an agent definition's
-        // own restriction is narrowed before the spawner is built from
-        // it, and the chat's registry is filtered after.
         let policy = &self.gateway.tools;
-        if !policy.is_empty() {
-            // Every name an agent definition may use: the builtins and
-            // the child tools a spawner adds.
-            let nameable: Vec<&'static str> = ilar::tools::ToolRegistry::builtin()
-                .tool_names()
-                .into_iter()
-                .chain(ilar::tools::child_tool_names())
-                .collect();
-            for agent in &mut plan.agents {
-                agent.tools = policy.narrow(agent.tools.as_deref(), nameable.iter().copied());
-            }
-            plan.agent.tools = policy.narrow(plan.agent.tools.as_deref(), nameable.iter().copied());
-        }
-        // The core memory rides in the system prompt, frozen for the
-        // session, and never into a group: what the assistant knows
-        // about its person is not for a room.
-        if private
-            && self.gateway.memory.enabled
-            && let Some(block) = self.wiring.memory.core_block()?
-        {
-            plan.system_prompt.push_str("\n\n");
-            plan.system_prompt.push_str(&block);
-        }
         let mut runtime = plan.start_with(&self.config, self.resolver.clone())?;
         if !policy.is_empty() {
             let admitted = policy.admit(runtime.registry.tool_names());
@@ -420,6 +382,64 @@ impl Driver {
         }))
         .await;
     }
+}
+
+/// The session plan a gateway chat runs on: the assistant's workspace,
+/// agent and model, a SOUL.md before any coding instructions, the tool
+/// policy narrowed into every agent definition, and — for a private
+/// chat — the core memory frozen into the system prompt.
+pub fn plan(
+    config: &Config,
+    gateway: &GatewayConfig,
+    memory: &MemoryStore,
+    resume: Option<String>,
+    private: bool,
+) -> Result<RuntimePlan> {
+    let workspace = gateway.workspace(config);
+    std::fs::create_dir_all(&workspace)
+        .with_context(|| format!("creating workspace {}", workspace.display()))?;
+    let mut plan = RuntimePlan::resolve(
+        config,
+        &RuntimeOptions {
+            model: gateway.model.clone(),
+            agent: gateway.agent.clone(),
+            resume,
+            cwd: workspace,
+            // Nobody sits at a channel to answer a form: the tool is
+            // left off and the model is told so on the spot.
+            questions: false,
+            project_instructions: None,
+            // An assistant has a SOUL.md before it has coding
+            // instructions: who it is, how it talks.
+            context_files: Some(ilar::config::SOUL_FILES),
+        },
+    )?;
+    // The policy reaches the subagents too: an agent definition's
+    // own restriction is narrowed before the spawner is built from
+    // it, and the chat's registry is filtered after.
+    let policy = &gateway.tools;
+    if !policy.is_empty() {
+        let nameable: Vec<&'static str> = ilar::tools::ToolRegistry::builtin()
+            .tool_names()
+            .into_iter()
+            .chain(ilar::tools::child_tool_names())
+            .collect();
+        for agent in &mut plan.agents {
+            agent.tools = policy.narrow(agent.tools.as_deref(), nameable.iter().copied());
+        }
+        plan.agent.tools = policy.narrow(plan.agent.tools.as_deref(), nameable.iter().copied());
+    }
+    // The core memory rides in the system prompt, frozen for the
+    // session, and never into a group: what the assistant knows
+    // about its person is not for a room.
+    if private
+        && gateway.memory.enabled
+        && let Some(block) = memory.core_block()?
+    {
+        plan.system_prompt.push_str("\n\n");
+        plan.system_prompt.push_str(&block);
+    }
+    Ok(plan)
 }
 
 /// Run one turn and keep its text. The events are the loop's own; this

@@ -26,6 +26,12 @@ enum Command {
     Run,
     /// Print the Delta Chat invite link the running gateway wrote.
     Invite,
+    /// Print the system prompt a chat's session gets, and exit.
+    Prompt {
+        /// As a group chat sees it: without the core memory.
+        #[arg(long)]
+        group: bool,
+    },
     /// Send a message to the running gateway from a script.
     Notify {
         text: String,
@@ -62,6 +68,13 @@ async fn main() -> Result<()> {
                 format!("no invite at {} — is the gateway running?", path.display())
             })?;
             print!("{invite}");
+            Ok(())
+        }
+        Command::Prompt { group } => {
+            let memory =
+                ilar_gateway::memory::MemoryStore::new(gateway_dir(&config).join("memory"));
+            let plan = ilar_gateway::driver::plan(&config, &gateway, &memory, None, !group)?;
+            println!("{}", plan.system_prompt);
             Ok(())
         }
         Command::Run => run(config, gateway).await,
