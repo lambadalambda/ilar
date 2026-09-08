@@ -53,10 +53,26 @@ pub const BUSY_REPLY: &str =
     "This chat's session is open somewhere else (a TUI, most likely); try again when it is closed.";
 /// The same, for a subagent's report that has to wait.
 pub const BUSY_FOLLOW_UP: &str = "A subagent finished, but this chat's session is open somewhere else; its report is delivered once that closes.";
-/// What a chat is told when a turn failed. The cause goes to the log:
-/// an error chain names paths and provider bodies, and the chat may
-/// not be the operator.
-pub const FAILED_REPLY: &str = "That turn failed; the gateway log has the cause.";
+/// What a chat is told when something failed: what, and the cause,
+/// clipped. The chat is allowlisted to its operator, who wants the
+/// reason where they are; the full chain is in the log regardless.
+pub fn failed_reply(what: &str, error: &anyhow::Error) -> String {
+    let cause: String = format!("{error:#}")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let cause = if cause.chars().count() > FAILURE_CAUSE_CHARS {
+        let mut cut: String = cause.chars().take(FAILURE_CAUSE_CHARS - 1).collect();
+        cut.push('…');
+        cut
+    } else {
+        cause
+    };
+    format!("{what} failed: {cause}")
+}
+
+/// How much of a failure's cause goes into the chat.
+const FAILURE_CAUSE_CHARS: usize = 400;
 
 /// How long a stop waits for turns in flight before giving up on them.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(15);
@@ -274,8 +290,12 @@ impl Gateway {
             Ok(seat) => seat,
             Err(error) => {
                 log(&format!("{key}: cannot open a session: {error:#}"));
-                self.deliver(&message.channel, &message.chat_id, FAILED_REPLY)
-                    .await;
+                self.deliver(
+                    &message.channel,
+                    &message.chat_id,
+                    &failed_reply("Opening this chat's session", &error),
+                )
+                .await;
                 return;
             }
         };
@@ -308,8 +328,12 @@ impl Gateway {
             }
             Err(TurnError::Failed(error)) => {
                 log(&format!("{key}: turn failed: {error:#}"));
-                self.deliver(&message.channel, &message.chat_id, FAILED_REPLY)
-                    .await;
+                self.deliver(
+                    &message.channel,
+                    &message.chat_id,
+                    &failed_reply("That turn", &error),
+                )
+                .await;
             }
         }
     }
@@ -326,7 +350,7 @@ impl Gateway {
                 ),
                 Err(error) => {
                     log(&format!("{key}: /new failed: {error:#}"));
-                    FAILED_REPLY.to_string()
+                    failed_reply("/new", &error)
                 }
             },
             Command::Model(None) => {
@@ -368,7 +392,7 @@ impl Gateway {
                     Ok(seat) => seat,
                     Err(error) => {
                         log(&format!("{key}: /model failed: {error:#}"));
-                        return FAILED_REPLY.to_string();
+                        return failed_reply("/model", &error);
                     }
                 };
                 match self.driver.set_model(&seat, &model) {
@@ -414,8 +438,12 @@ impl Gateway {
             Err(TurnError::Failed(error)) => {
                 log(&format!("{key}: follow-up failed: {error:#}"));
                 if !seat.background {
-                    self.deliver(&seat.channel, &seat.chat_id, FAILED_REPLY)
-                        .await;
+                    self.deliver(
+                        &seat.channel,
+                        &seat.chat_id,
+                        &failed_reply("Delivering a subagent's report", &error),
+                    )
+                    .await;
                 }
             }
         }
@@ -721,4 +749,22 @@ pub fn attachments(media: &[PathBuf]) -> (Vec<ImageContent>, String) {
         }
     }
     (images, notes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failure_names_what_and_why_on_one_clipped_line() {
+        let error = anyhow::anyhow!("model refused\nstatus 429").context("provider error");
+        assert_eq!(
+            failed_reply("That turn", &error),
+            "That turn failed: provider error: model refused status 429"
+        );
+        let long = anyhow::anyhow!("{}", "x".repeat(1000));
+        let reply = failed_reply("/new", &long);
+        assert!(reply.chars().count() <= "/new failed: ".len() + FAILURE_CAUSE_CHARS);
+        assert!(reply.ends_with('…'));
+    }
 }
