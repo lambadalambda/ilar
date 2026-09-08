@@ -11,6 +11,9 @@ use serde::Deserialize;
 pub struct GatewayConfig {
     /// The agent every chat runs as; the core's default when unset.
     pub agent: Option<String>,
+    /// `provider/model` for every chat; `general.model` when unset.
+    /// An assistant on a channel rarely wants the terminal's model.
+    pub model: Option<String>,
     /// Where the assistant's sessions work. Not a project checkout:
     /// `<state dir>/gateway/workspace` when unset.
     pub workspace: Option<PathBuf>,
@@ -76,6 +79,10 @@ mod tests {
         assert_eq!(parsed.agent.as_deref(), Some("assistant"));
         assert_eq!(parsed.notify_interval_secs, 60);
         assert!(parsed.workspace.is_none());
+        assert!(parsed.model.is_none());
+        let table: toml::Table = toml::from_str("model = \"zai/glm-4.7\"").unwrap();
+        let parsed: GatewayConfig = table.try_into().unwrap();
+        assert_eq!(parsed.model.as_deref(), Some("zai/glm-4.7"));
     }
 
     #[test]

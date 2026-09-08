@@ -166,7 +166,7 @@ impl Driver {
         RuntimePlan::resolve(
             &self.config,
             &RuntimeOptions {
-                model: None,
+                model: self.gateway.model.clone(),
                 agent: self.gateway.agent.clone(),
                 resume,
                 cwd: workspace,

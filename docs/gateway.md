@@ -19,6 +19,7 @@ declares them is warned about and ignored.
 | Key | Default | Meaning |
 |---|---|---|
 | `gateway.agent` | the core's default | The agent every chat runs as. |
+| `gateway.model` | `general.model` | `provider/model` for every chat. |
 | `gateway.workspace` | `<state dir>/gateway/workspace` | Where the assistant's sessions work. |
 | `gateway.notify_interval_secs` | `60` | One inbox message per source per interval. |
 | `channels.deltachat.*` | — | The Delta Chat adapter; see below. |
