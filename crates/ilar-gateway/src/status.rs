@@ -35,10 +35,18 @@ impl Narrator {
             }
             LoopEvent::ToolStarted { id, name } => {
                 self.tools.insert(id.clone(), name.clone());
+                // The reply on its way is not a status; the line is
+                // about to go anyway.
+                if name == "message" {
+                    return None;
+                }
                 format!("calling {name}…")
             }
             LoopEvent::ToolInputComplete { id, arguments } => {
                 let name = self.tools.get(id).cloned().unwrap_or_default();
+                if name == "message" {
+                    return None;
+                }
                 let input: serde_json::Value = serde_json::from_str(arguments).unwrap_or_default();
                 let summary = summarize_tool_input(&name, &input);
                 if summary.trim().is_empty() {
@@ -132,6 +140,13 @@ mod tests {
         assert!(running.starts_with("running bash: "), "{running}");
         assert!(running.contains("cargo test"), "{running}");
         assert_eq!(narrator.observe(&LoopEvent::TurnStarted), None);
+        assert_eq!(
+            narrator.observe(&LoopEvent::ToolStarted {
+                id: "2".into(),
+                name: "message".into()
+            }),
+            None
+        );
         assert_eq!(
             narrator.observe(&LoopEvent::TextDelta("x".into())),
             Some("writing…".into())
