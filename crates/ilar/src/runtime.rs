@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result};
 
 use crate::agent::LoopConfig;
-use crate::config::{AgentDefinition, Config, ProjectInstructions, system_prompt_for};
+use crate::config::{AgentDefinition, Config, ProjectInstructions, system_prompt_with};
 use crate::provider::ProviderResolver;
 use crate::question::QuestionReceiver;
 use crate::session::{SessionMeta, SessionReader, SessionStore, new_id};
@@ -44,6 +44,10 @@ pub struct RuntimeOptions {
     /// `--project-instructions` / `--no-project-instructions`, for one
     /// launch. `None` leaves the decision to configuration.
     pub project_instructions: Option<bool>,
+    /// The context files read in each location, first found wins;
+    /// [`crate::config::CONTEXT_FILES`] when unset. An assistant asks
+    /// for [`crate::config::SOUL_FILES`].
+    pub context_files: Option<&'static [&'static str]>,
 }
 
 /// The session a driver is about to run, before anything is written.
@@ -318,8 +322,15 @@ impl RuntimePlan {
             options.project_instructions,
             config.general.project_instructions,
         );
-        let assembled = system_prompt_for(config.dirs().0, &options.cwd, project_instructions)
-            .context("loading project instructions")?;
+        let assembled = system_prompt_with(
+            config.dirs().0,
+            &options.cwd,
+            project_instructions,
+            options
+                .context_files
+                .unwrap_or(crate::config::CONTEXT_FILES),
+        )
+        .context("loading project instructions")?;
         let skipped_project_instructions = assembled.skipped_project_file;
         let mut system_prompt = assembled.prompt;
         if !skill_listing.is_empty() {

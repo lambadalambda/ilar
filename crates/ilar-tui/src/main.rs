@@ -986,6 +986,7 @@ async fn run_exec(config: &ilar::config::Config, args: ExecArgs) -> Result<i32> 
                 args.project_instructions,
                 args.no_project_instructions,
             ),
+            context_files: None,
         },
     )?
     .start(config)?;
@@ -1192,6 +1193,7 @@ async fn main() -> Result<()> {
                     args.project_instructions,
                     args.no_project_instructions,
                 ),
+                context_files: None,
             },
         )?;
         if args.print_prompt {

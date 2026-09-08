@@ -11,7 +11,8 @@ this order:
 
 1. ilar's built-in base instructions.
 2. User instructions from `${ILAR_CONFIG_DIR:-~/.config/ilar}/AGENTS.md`, or
-   `CLAUDE.md` when `AGENTS.md` is absent.
+   `CLAUDE.md` when `AGENTS.md` is absent. (`ilar-gateway` looks for a
+   `SOUL.md` first in each location — see [the gateway](gateway.md).)
 3. Working-directory instructions from `./AGENTS.md`, with the same
    `CLAUDE.md` fallback. Omitted when the launch refused them — see
    [Skipping the project's file](configuration.md#skipping-the-projects-file).

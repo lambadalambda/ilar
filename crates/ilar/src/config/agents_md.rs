@@ -34,12 +34,30 @@ pub struct SystemPrompt {
     pub skipped_project_file: Option<&'static str>,
 }
 
+/// The context files a coding session reads, first found wins.
+pub const CONTEXT_FILES: &[&str] = &["AGENTS.md", "CLAUDE.md"];
+
+/// The same for an assistant: a `SOUL.md` — who it is, how it talks —
+/// beats the coding instructions when there is one.
+pub const SOUL_FILES: &[&str] = &["SOUL.md", "AGENTS.md", "CLAUDE.md"];
+
 /// Assemble the system prompt from the user config directory and exact working
 /// directory. AGENTS.md wins over CLAUDE.md within each location.
 pub fn system_prompt_for(
     user_config_dir: &Path,
     cwd: &Path,
     project: ProjectInstructions,
+) -> anyhow::Result<SystemPrompt> {
+    system_prompt_with(user_config_dir, cwd, project, CONTEXT_FILES)
+}
+
+/// [`system_prompt_for`] reading the first of `names` present in each
+/// location.
+pub fn system_prompt_with(
+    user_config_dir: &Path,
+    cwd: &Path,
+    project: ProjectInstructions,
+    names: &[&str],
 ) -> anyhow::Result<SystemPrompt> {
     let skip = project == ProjectInstructions::Skip;
     let mut locations = vec![("User context", user_config_dir)];
@@ -49,7 +67,7 @@ pub fn system_prompt_for(
 
     let mut prompt = BASE_PROMPT.to_string();
     for (label, dir) in locations {
-        if let Some((path, content)) = context_file_in(dir)? {
+        if let Some((path, content)) = context_file_in(dir, names)? {
             let name = path
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -62,7 +80,7 @@ pub fn system_prompt_for(
     }
     Ok(SystemPrompt {
         prompt,
-        skipped_project_file: skip.then(|| context_file_present(cwd)).flatten(),
+        skipped_project_file: skip.then(|| context_file_present(cwd, names)).flatten(),
     })
 }
 
@@ -70,14 +88,19 @@ pub fn system_prompt_for(
 /// which must not open it: a project `AGENTS.md` is unauthenticated
 /// third-party input, and a launch that refuses it should not fail on
 /// it either — so this only asks whether it is there.
-fn context_file_present(dir: &Path) -> Option<&'static str> {
-    ["AGENTS.md", "CLAUDE.md"]
-        .into_iter()
-        .find(|name| dir.join(name).is_file())
+fn context_file_present(dir: &Path, names: &[&str]) -> Option<&'static str> {
+    // The names are the two static lists above; anything else is
+    // reported by its list's first static match, which is close enough
+    // for a skipped file's name.
+    CONTEXT_FILES
+        .iter()
+        .chain(SOUL_FILES.iter())
+        .copied()
+        .find(|name| names.contains(name) && dir.join(name).is_file())
 }
 
-fn context_file_in(dir: &Path) -> anyhow::Result<Option<(PathBuf, String)>> {
-    for name in ["AGENTS.md", "CLAUDE.md"] {
+fn context_file_in(dir: &Path, names: &[&str]) -> anyhow::Result<Option<(PathBuf, String)>> {
+    for name in names {
         let path = dir.join(name);
         match std::fs::read_to_string(&path) {
             Ok(content) => return Ok(Some((path, content))),
@@ -123,6 +146,29 @@ mod tests {
                 .contains("When several tool calls are independent, make them in one response"),
             "{assembled:?}"
         );
+    }
+
+    /// An assistant asks for a SOUL.md first; without one, the coding
+    /// instructions stand, and a coding session never reads a SOUL.md.
+    #[test]
+    fn a_soul_file_is_preferred_only_when_asked_for() {
+        let (_guard, user, cwd) = two_locations();
+        std::fs::write(user.join("SOUL.md"), "you are Sprocket\n").unwrap();
+
+        let soul =
+            system_prompt_with(&user, &cwd, ProjectInstructions::Include, SOUL_FILES).unwrap();
+        assert!(soul.prompt.contains("you are Sprocket"), "{soul:?}");
+        assert!(!soul.prompt.contains("user rules"), "{soul:?}");
+        assert!(soul.prompt.contains("project rules"), "{soul:?}");
+
+        let coding = system_prompt_for(&user, &cwd, ProjectInstructions::Include).unwrap();
+        assert!(!coding.prompt.contains("Sprocket"), "{coding:?}");
+        assert!(coding.prompt.contains("user rules"), "{coding:?}");
+
+        std::fs::remove_file(user.join("SOUL.md")).unwrap();
+        let fallback =
+            system_prompt_with(&user, &cwd, ProjectInstructions::Include, SOUL_FILES).unwrap();
+        assert!(fallback.prompt.contains("user rules"), "{fallback:?}");
     }
 
     #[test]
