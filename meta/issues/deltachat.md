@@ -46,3 +46,9 @@ secure-join invite and wrote "hello"; the turn ran on
 `opencode/muse-spark-1.3-contributor-free` and the answer arrived.
 Still owed from the acceptance list: an image in, a file out, a
 stranger ignored, and the rpc server dying.
+
+Attachments, 2026-09-08 18:40: a file sent through the message tool
+arrived in the chat with its caption (verified in the account
+database). Inbound images and files are named to the model with their
+path, images also attached as pictures; the live inbound run awaits a
+message from the user.
