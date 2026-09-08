@@ -215,6 +215,71 @@ async fn read_honors_offset_and_limit() {
 }
 
 #[tokio::test]
+async fn read_says_where_the_window_ends_and_what_remains() {
+    let dir = tempfile::tempdir().unwrap();
+    let content: Vec<String> = (1..=50).map(|i| i.to_string()).collect();
+    std::fs::write(dir.path().join("n.txt"), content.join("\n")).unwrap();
+    let out = run(
+        &registry(),
+        "read",
+        serde_json::json!({"path": "n.txt", "offset": 10, "limit": 3}),
+        &ctx(dir.path()),
+    )
+    .await;
+    assert!(
+        out.content
+            .ends_with("(truncated: showing lines 10–12 of 50; continue with offset 13)\n"),
+        "{}",
+        out.content
+    );
+
+    // A window that reaches the end carries no marker.
+    let out = run(
+        &registry(),
+        "read",
+        serde_json::json!({"path": "n.txt", "offset": 48, "limit": 10}),
+        &ctx(dir.path()),
+    )
+    .await;
+    assert!(!out.content.contains("truncated"), "{}", out.content);
+}
+
+#[tokio::test]
+async fn read_says_what_remains_past_the_byte_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    // 200-byte lines: the 256 KB cap lands well inside the 2000-line limit.
+    let line = format!("{}\n", "p".repeat(200));
+    std::fs::write(dir.path().join("large.txt"), line.repeat(3000)).unwrap();
+    let out = run(
+        &registry(),
+        "read",
+        serde_json::json!({"path": "large.txt"}),
+        &ctx(dir.path()),
+    )
+    .await;
+    assert!(!out.is_error, "{}", out.content);
+    let marker = out.content.lines().last().unwrap();
+    let shown: usize = marker
+        .split("lines 1–")
+        .nth(1)
+        .and_then(|rest| rest.split(' ').next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("marker names the window: {marker}"));
+    assert!(shown > 1000 && shown < 2000, "{marker}");
+    assert_eq!(
+        marker,
+        format!(
+            "(truncated: showing lines 1–{shown} of 3000; continue with offset {})",
+            shown + 1
+        )
+    );
+    // The line the marker names as last shown is the last one shown:
+    // the marker's room is reserved up front, never cut from the tail.
+    let last_line = out.content.lines().rev().nth(2).unwrap();
+    assert!(last_line.starts_with(&format!("{shown}→")), "{last_line}");
+}
+
+#[tokio::test]
 async fn read_windows_files_larger_than_output_cap() {
     let dir = tempfile::tempdir().unwrap();
     let mut content = "padding\n".repeat(40_000);

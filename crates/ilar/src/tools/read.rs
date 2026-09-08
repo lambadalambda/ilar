@@ -14,6 +14,12 @@ use crate::text::truncate_bytes;
 
 const MAX_LINES: usize = 2000;
 const MAX_OUTPUT_BYTES: usize = 256 * 1024;
+/// Room kept for the closing marker, so it never has to cut lines the
+/// numbers it carries were computed from.
+const MARKER_RESERVE: usize = 160;
+/// Past this size the rest of the file is not counted for the marker:
+/// a window of a multi-gigabyte log should not cost a pass over it.
+const MAX_COUNTED_BYTES: u64 = 64 * 1024 * 1024;
 
 /// On-disk ceiling for an image the result may carry, checked before any
 /// decode: a malformed header must never talk the decoder into allocating
@@ -121,6 +127,7 @@ fn read_window(
     let mut out = String::new();
     let mut reached_eof = false;
     let mut truncated = false;
+    let budget = MAX_OUTPUT_BYTES - MARKER_RESERVE;
 
     loop {
         if cancelled.load(Ordering::Acquire) {
@@ -130,7 +137,7 @@ fn read_window(
         let selected = next_number >= start && emitted < limit;
         let prefix_overhead = next_number.to_string().len() + "→\n".len();
         let keep = if selected {
-            MAX_OUTPUT_BYTES
+            budget
                 .saturating_sub(out.len())
                 .saturating_sub(prefix_overhead)
         } else {
@@ -156,7 +163,7 @@ fn read_window(
         truncate_bytes(&mut text, keep);
         let _ = writeln!(out, "{line_number}→{}", text.trim_end_matches('\r'));
         emitted += 1;
-        if line.truncated || out.len() >= MAX_OUTPUT_BYTES {
+        if line.truncated || out.len() >= budget {
             truncated = true;
             break;
         }
@@ -177,11 +184,52 @@ fn read_window(
     // is nothing the model can match `old_string` against.
     seen_files.record_from_disk(path);
     if truncated {
-        const MARKER: &str = "…\n(truncated)\n";
-        truncate_bytes(&mut out, MAX_OUTPUT_BYTES.saturating_sub(MARKER.len()));
-        out.push_str(MARKER);
+        // The rest of the file is only counted, never kept: the marker
+        // tells the model where it is and where to continue, which is
+        // what a bare "(truncated)" left it guessing at — 3,156 times
+        // over one weekend.
+        let last_shown = start + emitted - 1;
+        let total = if total_bytes.is_some_and(|bytes| bytes > MAX_COUNTED_BYTES) {
+            None
+        } else {
+            match count_remaining_lines(&mut reader, line_number, cancelled) {
+                Ok(total) => Some(total),
+                Err(error) => return ToolOutput::error(format!("read {display_path}: {error}")),
+            }
+        };
+        let marker = match total {
+            // The cap landed on the last line: the window did reach the
+            // end, and a "continue" would only run past it.
+            Some(total) if last_shown >= total => None,
+            Some(total) => Some(format!(
+                "…\n(truncated: showing lines {start}–{last_shown} of {total}; continue with offset {})\n",
+                last_shown + 1
+            )),
+            None => Some(format!(
+                "…\n(truncated: showing lines {start}–{last_shown}; the file is too large to count; continue with offset {})\n",
+                last_shown + 1
+            )),
+        };
+        if let Some(marker) = marker {
+            debug_assert!(marker.len() <= MARKER_RESERVE);
+            out.push_str(&marker);
+        }
     }
     ToolOutput::text(out)
+}
+
+/// Lines in the file, given `consumed` already read: streams the rest
+/// without retaining it.
+fn count_remaining_lines<R: BufRead>(
+    reader: &mut R,
+    consumed: usize,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> std::io::Result<usize> {
+    let mut total = consumed;
+    while read_line_prefix(reader, 0, cancelled)?.is_some() {
+        total += 1;
+    }
+    Ok(total)
 }
 
 /// Peeks the buffered head without consuming it; `Some` output means the
