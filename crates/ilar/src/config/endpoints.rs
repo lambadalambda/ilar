@@ -46,14 +46,21 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
-    /// The wire for one discovered model.
-    pub fn dialect(&self, model_id: &str, vision: bool) -> crate::provider::chat::ChatDialect {
+    /// The wire for one discovered model, under the endpoint's own
+    /// prefix — the registered row's, which is the leaked static name.
+    pub fn dialect(
+        &self,
+        model_id: &str,
+        prefix: &'static str,
+        vision: bool,
+    ) -> crate::provider::chat::ChatDialect {
         let dialect = crate::provider::chat::ChatDialect::custom(
             self.base_url.trim_end_matches('/').to_string(),
             model_id.to_string(),
             self.api_key.clone(),
             vision,
-        );
+        )
+        .with_prefix(prefix);
         match &self.options {
             Some(options) => dialect.with_options(options.clone()),
             None => dialect,

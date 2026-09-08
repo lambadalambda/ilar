@@ -114,6 +114,14 @@ impl ChatDialect {
         }
     }
 
+    /// The same wire under another prefix: a discovered endpoint's
+    /// models are addressed as `<endpoint>/<id>`, and the request path
+    /// checks a model's prefix against its dialect's.
+    pub fn with_prefix(mut self, prefix: &'static str) -> Self {
+        self.prefix = prefix;
+        self
+    }
+
     /// Body fields merged into every request. Configuration screens them
     /// with [`reserved_conflicts`] when it reads them; the request path
     /// screens them again with the same list on the way out.

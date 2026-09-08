@@ -1329,7 +1329,15 @@ fn an_endpoint_discovers_its_models_and_remembers_them() {
     let row = ilar::model::find("lemon/Qwen3.8-27B-GGUF").expect("registered");
     assert_eq!(row.context_limit, 131_072);
     assert!(ilar::model::supports_vision("lemon/Qwen3.8-27B-GGUF"));
-    assert!(config.provider_for("lemon/Qwen3.8-27B-GGUF").is_some());
+    // The wire answers to the endpoint's name: a request checks the
+    // model's prefix against its dialect's, and "custom" would fail it.
+    let provider = config
+        .provider_for("lemon/Qwen3.8-27B-GGUF")
+        .expect("a provider");
+    assert_eq!(
+        ilar::provider::Provider::provider_prefix(provider.as_ref()),
+        Some("lemon")
+    );
     assert!(config.provider_for("lemon/Z-Image-Turbo").is_none());
     assert_eq!(
         config.context_limit("lemon/Qwen3.8-27B-GGUF"),

@@ -837,7 +837,7 @@ impl Config {
         if let Some(endpoint) = self.endpoints.get(provider_name) {
             let row = crate::model::find(model)?;
             return Some(Box::new(crate::provider::chat::ChatProvider::new(
-                endpoint.dialect(model_id, row.supports_vision()),
+                endpoint.dialect(model_id, row.provider, row.supports_vision()),
             )));
         }
         let settings = self.providers.get(provider_name)?;
