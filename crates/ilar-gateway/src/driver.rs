@@ -31,6 +31,10 @@ pub struct TurnReport {
     pub session_id: String,
     pub text: String,
     pub outcome: TurnOutcome,
+    /// Messages the model sent through its tool during this turn.
+    /// Counted under the seat's lock, so another turn's sends are
+    /// never mistaken for this one's.
+    pub sent: usize,
 }
 
 #[derive(Debug)]
@@ -163,11 +167,7 @@ impl Driver {
                 .map(String::as_str)
                 .unwrap_or(""),
         );
-        let registry = std::mem::replace(
-            &mut runtime.registry,
-            ilar::tools::ToolRegistry::read_only(),
-        );
-        runtime.registry = registry.with_tool(tool)?;
+        runtime.registry.add(tool)?;
         let seat = Arc::new(Seat {
             key: key.to_string(),
             channel: channel.to_string(),
@@ -196,7 +196,7 @@ impl Driver {
         let workspace = self.gateway.workspace(&self.config);
         std::fs::create_dir_all(&workspace)
             .with_context(|| format!("creating workspace {}", workspace.display()))?;
-        RuntimePlan::resolve(
+        let mut plan = RuntimePlan::resolve(
             &self.config,
             &RuntimeOptions {
                 model: self.gateway.model.clone(),
@@ -220,7 +220,10 @@ impl Driver {
         images: &[ImageContent],
     ) -> std::result::Result<TurnReport, TurnError> {
         let _turn = seat.turn.lock().await;
-        turn(&seat.runtime, prompt, images, self.cancel.child_token()).await
+        let sent_before = seat.sent.load(std::sync::atomic::Ordering::Acquire);
+        let mut report = turn(&seat.runtime, prompt, images, self.cancel.child_token()).await?;
+        report.sent = seat.sent.load(std::sync::atomic::Ordering::Acquire) - sent_before;
+        Ok(report)
     }
 
     pub fn seats(&self) -> Vec<Arc<Seat>> {
@@ -297,6 +300,7 @@ pub async fn turn(
             session_id: runtime.session_id.clone(),
             text,
             outcome,
+            sent: 0,
         }),
         Err(error) if ilar::agent::TurnNeverStarted::writer_held(&error) => {
             Err(TurnError::Busy(format!("{error:#}")))

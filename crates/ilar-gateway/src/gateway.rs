@@ -12,10 +12,10 @@ use ilar::session::ImageContent;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::bus::{Inbound, Outbound, split_key};
+use crate::bus::{Inbound, Outbound, session_key, split_key};
 use crate::channel::Channel;
 use crate::config::{GatewayConfig, gateway_dir};
-use crate::driver::{Driver, FollowUp, TurnError, Wiring, log};
+use crate::driver::{Driver, FollowUp, TurnError, TurnReport, Wiring, log};
 use crate::inbox::{self, RateLimit};
 use crate::routes::RouteStore;
 
@@ -26,6 +26,10 @@ pub struct Gateway {
     inbox_dir: PathBuf,
     rate: Mutex<RateLimit>,
     follow_ups: Mutex<Option<mpsc::Receiver<FollowUp>>>,
+    /// One queue out, drained in order by one task: what the model
+    /// sends and what the gateway says on its behalf leave in the
+    /// order they were said.
+    outbound_tx: mpsc::Sender<Outbound>,
     outbound: Mutex<Option<mpsc::Receiver<Outbound>>>,
     cancel: CancellationToken,
 }
@@ -72,7 +76,7 @@ impl Gateway {
             routes.clone(),
             Wiring {
                 follow_ups: follow_tx,
-                outbound: outbound_tx,
+                outbound: outbound_tx.clone(),
                 constraints,
             },
             cancel.clone(),
@@ -87,6 +91,7 @@ impl Gateway {
             inbox_dir: dir.join("inbox"),
             rate: Mutex::new(rate),
             follow_ups: Mutex::new(Some(follow_rx)),
+            outbound_tx,
             outbound: Mutex::new(Some(outbound_rx)),
             cancel,
         }))
@@ -129,6 +134,14 @@ impl Gateway {
             .unwrap()
             .take()
             .context("gateway already running")?;
+        let dispatcher = {
+            let gateway = self.clone();
+            tokio::spawn(async move {
+                while let Some(message) = outbound.recv().await {
+                    gateway.send(message).await;
+                }
+            })
+        };
         let mut inbox_tick = tokio::time::interval(Duration::from_secs(1));
         let mut handlers = tokio::task::JoinSet::new();
         loop {
@@ -148,7 +161,6 @@ impl Gateway {
                     }
                     None => break,
                 },
-                Some(message) = outbound.recv() => self.send(message).await,
                 Some(_) = handlers.join_next(), if !handlers.is_empty() => {}
                 _ = inbox_tick.tick() => self.poll_inbox(&inbound_tx).await,
             }
@@ -162,6 +174,9 @@ impl Gateway {
             handlers.abort_all();
         }
         self.driver.shutdown().await;
+        // The senders are gone with the seats; the dispatcher ends when
+        // the queue is empty, so nothing said during the grace is lost.
+        let _ = tokio::time::timeout(SHUTDOWN_GRACE, dispatcher).await;
         Ok(())
     }
 
@@ -192,12 +207,8 @@ impl Gateway {
             message.sender_id,
             message.text.len()
         ));
-        let sent_before = seat.sent.load(std::sync::atomic::Ordering::Acquire);
         match self.driver.run(&seat, &message.text, &images).await {
-            Ok(report) => {
-                self.deliver_unless_sent(&seat, sent_before, &report.text)
-                    .await;
-            }
+            Ok(report) => self.deliver_unless_sent(&seat, &report).await,
             Err(TurnError::Busy(why)) => {
                 log(&format!("{key}: {why}"));
                 self.deliver(&message.channel, &message.chat_id, BUSY_REPLY)
@@ -221,12 +232,10 @@ impl Gateway {
             log(&format!("{key}: follow-up for a chat with no seat"));
             return;
         };
-        let sent_before = seat.sent.load(std::sync::atomic::Ordering::Acquire);
         match self.driver.run(&seat, &follow_up.prompt, &[]).await {
             Ok(report) => {
                 ilar::outbox::retire(&self.driver.outbox_dir(), &follow_up.retire);
-                self.deliver_unless_sent(&seat, sent_before, &report.text)
-                    .await;
+                self.deliver_unless_sent(&seat, &report).await;
             }
             Err(TurnError::Busy(why)) => {
                 log(&format!("{key}: follow-up waits: {why}"));
@@ -245,54 +254,47 @@ impl Gateway {
     /// The final text of a turn goes out only when the model sent
     /// nothing itself; a model that used the message tool has said
     /// what it wanted to say.
-    async fn deliver_unless_sent(
-        &self,
-        seat: &crate::driver::Seat,
-        sent_before: usize,
-        text: &str,
-    ) {
-        let sent = seat.sent.load(std::sync::atomic::Ordering::Acquire) - sent_before;
-        if sent > 0 {
+    async fn deliver_unless_sent(&self, seat: &crate::driver::Seat, report: &TurnReport) {
+        if report.sent > 0 {
             log(&format!(
-                "{}: {sent} message(s) sent by the model",
-                seat.key
+                "{}: {} message(s) sent by the model",
+                seat.key, report.sent
             ));
             return;
         }
-        self.deliver(&seat.channel, &seat.chat_id, text).await;
+        self.deliver(&seat.channel, &seat.chat_id, &report.text)
+            .await;
     }
 
-    /// One outbound message from the model's tool, to its channel.
+    /// One outbound message, to its channel. Only the dispatcher calls
+    /// this, one message at a time.
     async fn send(&self, message: Outbound) {
+        let key = session_key(&message.channel, &message.chat_id);
         let Some(target) = self.channels.get(&message.channel) else {
-            log(&format!(
-                "no channel named {}; dropping a message",
-                message.channel
-            ));
+            log(&format!("{key}: no such channel; dropping a message"));
             return;
         };
-        let key = format!("{}:{}", message.channel, message.chat_id);
         if let Err(error) = target.send(message).await {
             log(&format!("{key}: send failed: {error:#}"));
         }
     }
 
+    /// Something the gateway says on the model's behalf, through the
+    /// same queue as the model's own sends, so it never overtakes them.
     async fn deliver(&self, channel: &str, chat_id: &str, text: &str) {
         if text.trim().is_empty() {
             return;
         }
-        let Some(target) = self.channels.get(channel) else {
-            log(&format!("no channel named {channel}; dropping a reply"));
-            return;
-        };
         let message = Outbound {
             channel: channel.to_string(),
             chat_id: chat_id.to_string(),
             text: text.to_string(),
             media: Vec::new(),
         };
-        if let Err(error) = target.send(message).await {
-            log(&format!("{channel}:{chat_id}: send failed: {error:#}"));
+        if self.outbound_tx.send(message).await.is_err() {
+            log(&format!(
+                "{channel}:{chat_id}: the dispatcher is gone; dropping a reply"
+            ));
         }
     }
 

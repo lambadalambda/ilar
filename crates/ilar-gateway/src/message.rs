@@ -9,7 +9,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use ilar::tools::{Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, WorkspaceAccess};
+use ilar::tools::{
+    Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, WorkspaceAccess, parse_input,
+};
 use serde::Deserialize;
 use tokio::sync::mpsc;
 
@@ -84,7 +86,8 @@ impl Tool for MessageTool {
     }
 
     fn concurrency(&self) -> ToolConcurrency {
-        ToolConcurrency::Concurrent
+        // Sequential, so two sends in one response arrive in order.
+        ToolConcurrency::Barrier
     }
 
     fn workspace_access(&self) -> WorkspaceAccess {
@@ -112,9 +115,9 @@ impl Tool for MessageTool {
         let routes = self.routes.clone();
         let sent = self.sent.clone();
         Box::pin(async move {
-            let input: Input = match serde_json::from_value(input) {
+            let input: Input = match parse_input(input, "message") {
                 Ok(input) => input,
-                Err(error) => return ToolOutput::error(format!("message: invalid input: {error}")),
+                Err(error) => return error,
             };
             let channel = input.channel.unwrap_or(home_channel);
             let chat_id = input.chat.unwrap_or(home_chat);

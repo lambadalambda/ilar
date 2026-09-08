@@ -168,7 +168,11 @@ async fn a_message_sent_by_the_tool_replaces_the_final_text() {
     let dir = tempfile::tempdir().unwrap();
     let (gateway, fake) = gateway(
         dir.path(),
-        vec![messages("via tool", None), says("final words")],
+        vec![
+            messages("via tool", None),
+            says("final words"),
+            says("second reply"),
+        ],
     );
 
     fake.inject("hi", "chat-1", "alice").await;
@@ -176,9 +180,12 @@ async fn a_message_sent_by_the_tool_replaces_the_final_text() {
     assert_eq!(sent.len(), 1, "{sent:?}");
     assert_eq!(sent[0].text, "via tool");
     assert_eq!(sent[0].chat_id, "chat-1");
-    // The final text never follows: give it a moment to be sure.
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(fake.sent().len(), 1, "{:?}", fake.sent());
+    // The final text never follows: the next turn's reply is the next
+    // thing the chat sees.
+    fake.inject("and?", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(2, WAIT).await;
+    let texts: Vec<&str> = sent.iter().map(|m| m.text.as_str()).collect();
+    assert_eq!(texts, ["via tool", "second reply"], "{sent:?}");
     gateway.cancel();
 }
 
