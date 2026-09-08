@@ -21,7 +21,29 @@ declares them is warned about and ignored.
 | `gateway.agent` | the core's default | The agent every chat runs as. |
 | `gateway.workspace` | `<state dir>/gateway/workspace` | Where the assistant's sessions work. |
 | `gateway.notify_interval_secs` | `60` | One inbox message per source per interval. |
-| `channels.<name>.*` | — | A channel adapter's own settings. None are wired yet. |
+| `channels.deltachat.*` | — | The Delta Chat adapter; see below. |
+
+### Delta Chat
+
+The adapter spawns `deltachat-rpc-server` (`pip install
+deltachat-rpc-server`, or any build on PATH) and speaks its JSON-RPC
+over stdio; no bridge, no Python at run time.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `rpc_server` | `deltachat-rpc-server` on PATH | The server binary. |
+| `accounts_dir` | `<state dir>/gateway/deltachat` | Where the account lives. |
+| `setup_qr` | — | A `DCACCOUNT:` QR for a fresh chatmail identity (e.g. `DCACCOUNT:https://nine.testrun.org/new`). |
+| `addr`, `password` | — | An existing address instead of the QR. |
+| `display_name` | — | The name contacts see. |
+| `allow_from` | `[]` | Addresses allowed to talk. Empty admits everyone, and the log says so at start. |
+| `ack_reaction` | — | An emoji to react with on receipt. |
+
+The account is configured on first start and reused after. The
+adapter ignores its own messages, info messages and other bots,
+accepts a contact request from an allowed address, flags group chats,
+and hands attachments to the turn as files. Replies go out as text, or
+as a file message per attachment with the text on the first.
 
 ## How a message becomes a turn
 

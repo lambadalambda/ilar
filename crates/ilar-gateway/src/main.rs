@@ -3,7 +3,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ilar_gateway::channel::Channel;
-use ilar_gateway::config::{GatewayConfig, channel_names, gateway_dir};
+use ilar_gateway::config::{GatewayConfig, channel_names, channel_table, gateway_dir};
+use ilar_gateway::deltachat::{DeltaChat, DeltaChatConfig};
 use ilar_gateway::driver::log;
 use ilar_gateway::gateway::Gateway;
 use ilar_gateway::inbox::{self, InboxMessage};
@@ -53,9 +54,18 @@ async fn run(config: ilar::config::Config, gateway: GatewayConfig) -> Result<()>
     for warning in &config.warnings {
         log(warning);
     }
-    let channels: Vec<Arc<dyn Channel>> = Vec::new();
-    if let Some(name) = channel_names(&config).first() {
-        anyhow::bail!("channel {name:?} is not supported yet");
+    let mut channels: Vec<Arc<dyn Channel>> = Vec::new();
+    for name in channel_names(&config) {
+        let table = channel_table(&config, &name).unwrap_or_default();
+        match name.as_str() {
+            "deltachat" => {
+                let settings: DeltaChatConfig = table
+                    .try_into()
+                    .context("parsing [channels.deltachat] in ilar.toml")?;
+                channels.push(DeltaChat::new(settings, &gateway_dir(&config)));
+            }
+            other => anyhow::bail!("channel {other:?} is not supported"),
+        }
     }
     if channels.is_empty() {
         log("no channels configured; listening to the inbox only");
