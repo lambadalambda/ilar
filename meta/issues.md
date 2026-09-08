@@ -118,7 +118,6 @@ milestones 15–17 stay filed — they come back when the feature does.*
 ## Milestone 21 — The assistant
 
 - [ ] [The assistant — index](issues/the-assistant-index.md) — index
-- [ ] [The gateway drives a session per chat](issues/the-gateway-drives-a-session-per-chat.md)
 - [ ] [DeltaChat](issues/deltachat.md)
 - [ ] [Chats route to sessions; the message tool](issues/chats-route-to-sessions.md)
 - [ ] [A sender allowlist and a tool policy](issues/a-sender-allowlist-and-a-tool-policy.md)

@@ -320,3 +320,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [A busy child is not a stall](issues/a-busy-child-is-not-a-stall.md)
 - [x] [read says what remains](issues/read-says-what-remains.md)
 - [x] [grep has what the model reaches for](issues/grep-has-what-the-model-reaches-for.md)
+- [x] [The gateway drives a session per chat](issues/the-gateway-drives-a-session-per-chat.md)

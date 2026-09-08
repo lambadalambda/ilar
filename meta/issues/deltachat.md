@@ -31,3 +31,12 @@ and talks to it directly: no bridge, no Python, no WebSocket.
   gets an answer, an image is seen, a file is sent back, a message
   from an unknown sender gets nothing; the server process dying is
   survived.
+
+## Status (2026-09-08)
+
+Adapter and rpc client written and unit-tested against a fake server
+(setup from a QR, filtering, contact-request acceptance, group flag,
+text and file sends); the real server's framing and event shape were
+verified locally with `deltachat-rpc-server` 2.59. The live
+acceptance run — a real chatmail account, a message from the user's
+own Delta Chat — is still owed.
