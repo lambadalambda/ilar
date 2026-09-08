@@ -348,8 +348,19 @@ impl RuntimePlan {
 
     /// Create or resume the session and build its tools.
     pub fn start(self, config: &Config) -> Result<SessionRuntime> {
-        let store = session_store(config);
         let resolver: Arc<dyn ProviderResolver> = Arc::new(config.clone());
+        self.start_with(config, resolver)
+    }
+
+    /// [`start`](Self::start) with the provider resolver supplied: what
+    /// a driver under test hands a mock, and what a driver with its own
+    /// routing hands whatever it routes through.
+    pub fn start_with(
+        self,
+        config: &Config,
+        resolver: Arc<dyn ProviderResolver>,
+    ) -> Result<SessionRuntime> {
+        let store = session_store(config);
         drop(resolver.resolve_provider(&self.model).with_context(|| {
             format!(
                 "no provider configured for {} (set ILAR_ZAI_API_KEY, ILAR_OPENAI_API_KEY or ILAR_OPENCODE_API_KEY)",
