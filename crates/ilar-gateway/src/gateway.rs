@@ -12,12 +12,12 @@ use ilar::session::ImageContent;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::bus::{Inbound, Outbound, session_key, split_key};
+use crate::bus::{Inbound, Outbound, session_key, split_for_delivery, split_key};
 use crate::channel::Channel;
 use crate::commands::{self, Command};
 use crate::config::{GatewayConfig, gateway_dir};
 use crate::cron::CronStore;
-use crate::driver::{Driver, FollowUp, TurnError, TurnReport, Wiring, log};
+use crate::driver::{Driver, FollowUp, ModelSwitch, TurnError, TurnReport, Wiring, log};
 use crate::inbox::{self, RateLimit};
 use crate::memory::MemoryStore;
 use crate::routes::RouteStore;
@@ -62,6 +62,9 @@ pub const FAILED_REPLY: &str = "That turn failed; the gateway log has the cause.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(15);
 /// The pause before a channel that stopped is started again.
 const CHANNEL_RESTART: Duration = Duration::from_secs(5);
+/// The longest text the gateway itself sends in one message: a chat
+/// folds anything much longer behind a "[...]".
+const DELIVERY_PIECE_CHARS: usize = 700;
 
 impl Gateway {
     pub fn new(
@@ -317,7 +320,10 @@ impl Gateway {
             Command::Help => commands::HELP.to_string(),
             Command::Unknown(name) => format!("No command /{name}.\n{}", commands::HELP),
             Command::New => match self.driver.close(key).await {
-                Ok(()) => "Started a fresh chat. What I remember about you stays.".to_string(),
+                Ok(()) => format!(
+                    "Started a fresh chat on {}. What I remember about you stays.",
+                    self.driver.default_model()
+                ),
                 Err(error) => {
                     log(&format!("{key}: /new failed: {error:#}"));
                     FAILED_REPLY.to_string()
@@ -332,14 +338,23 @@ impl Gateway {
                     Ok(seat) => self.driver.current_model(&seat).ok(),
                     Err(_) => None,
                 };
-                let mut lines = vec!["Models:".to_string()];
+                // Grouped by provider, one line each, so the list fits
+                // what a chat shows without folding.
+                let mut by_provider: std::collections::BTreeMap<String, Vec<String>> =
+                    std::collections::BTreeMap::new();
                 for model in self.driver.available_models() {
-                    let mark = if Some(&model) == current.as_ref() {
-                        " ← current"
-                    } else {
-                        ""
-                    };
-                    lines.push(format!("  {model}{mark}"));
+                    let (provider, id) = model.split_once('/').unwrap_or(("", &model));
+                    by_provider
+                        .entry(provider.to_string())
+                        .or_default()
+                        .push(id.to_string());
+                }
+                let mut lines = vec![format!(
+                    "Current: {}",
+                    current.unwrap_or_else(|| "unknown".into())
+                )];
+                for (provider, ids) in by_provider {
+                    lines.push(format!("{provider}: {}", ids.join(", ")));
                 }
                 lines.push("/model <provider/model> switches.".to_string());
                 lines.join("\n")
@@ -356,8 +371,11 @@ impl Gateway {
                         return FAILED_REPLY.to_string();
                     }
                 };
-                match self.driver.set_model(&seat, &model).await {
-                    Ok(()) => format!("Switched to {model}."),
+                match self.driver.set_model(&seat, &model) {
+                    Ok(ModelSwitch::Applied) => format!("Switched to {model}."),
+                    Ok(ModelSwitch::Pending) => format!(
+                        "Switched to {model} from your next message on; the turn running now keeps its model."
+                    ),
                     Err(error) => format!("{error:#}"),
                 }
             }
@@ -608,16 +626,19 @@ impl Gateway {
         if text.trim().is_empty() {
             return;
         }
-        let message = Outbound {
-            channel: channel.to_string(),
-            chat_id: chat_id.to_string(),
-            text: text.to_string(),
-            media: Vec::new(),
-        };
-        if self.outbound_tx.send(message).await.is_err() {
-            log(&format!(
-                "{channel}:{chat_id}: the dispatcher is gone; dropping a reply"
-            ));
+        for piece in split_for_delivery(text, DELIVERY_PIECE_CHARS) {
+            let message = Outbound {
+                channel: channel.to_string(),
+                chat_id: chat_id.to_string(),
+                text: piece,
+                media: Vec::new(),
+            };
+            if self.outbound_tx.send(message).await.is_err() {
+                log(&format!(
+                    "{channel}:{chat_id}: the dispatcher is gone; dropping a reply"
+                ));
+                return;
+            }
         }
     }
 

@@ -37,6 +37,34 @@ pub fn session_key(channel: &str, chat_id: &str) -> String {
     format!("{channel}:{chat_id}")
 }
 
+/// Cut a long text into pieces a channel will show whole, at line
+/// boundaries where possible; a single line longer than `max` is cut
+/// where it must be.
+pub fn split_for_delivery(text: &str, max: usize) -> Vec<String> {
+    let mut pieces = Vec::new();
+    let mut current = String::new();
+    for line in text.split_inclusive('\n') {
+        if current.chars().count() + line.chars().count() > max && !current.is_empty() {
+            pieces.push(std::mem::take(&mut current));
+        }
+        let mut line = line;
+        while line.chars().count() > max {
+            let cut = line
+                .char_indices()
+                .nth(max)
+                .map(|(i, _)| i)
+                .unwrap_or(line.len());
+            pieces.push(line[..cut].to_string());
+            line = &line[cut..];
+        }
+        current.push_str(line);
+    }
+    if !current.trim().is_empty() {
+        pieces.push(current);
+    }
+    pieces
+}
+
 /// The two halves of a key. A chat id may itself contain colons, so the
 /// split is at the first one.
 pub fn split_key(key: &str) -> Option<(&str, &str)> {
@@ -46,6 +74,18 @@ pub fn split_key(key: &str) -> Option<(&str, &str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_texts_split_at_lines_and_only_cut_a_line_when_they_must() {
+        assert_eq!(split_for_delivery("short", 10), vec!["short"]);
+        let text = "one\ntwo\nthree\n";
+        assert_eq!(split_for_delivery(text, 8), vec!["one\ntwo\n", "three\n"]);
+        assert_eq!(
+            split_for_delivery("abcdefghij", 4),
+            vec!["abcd", "efgh", "ij"]
+        );
+        assert!(split_for_delivery("", 4).is_empty());
+    }
 
     #[test]
     fn keys_split_at_the_first_colon() {

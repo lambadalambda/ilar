@@ -58,6 +58,15 @@ impl std::fmt::Display for TurnError {
     }
 }
 
+/// When a model switch takes effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelSwitch {
+    /// Recorded now.
+    Applied,
+    /// Recorded when the running turn ends; the next turn uses it.
+    Pending,
+}
+
 /// A child's completion owed to a root session as a prompt. `retire`
 /// is the outbox entry the prompt settles — the completion itself, or
 /// the stranded one a salvage speaks for — and is retired only once
@@ -77,6 +86,9 @@ pub struct Seat {
     /// A cron or heartbeat seat: it speaks to its chat only through
     /// the message tool, never by its final text.
     pub background: bool,
+    /// A model switch asked for while a turn was running: applied
+    /// when the next turn takes the lock.
+    pending_model: Mutex<Option<String>>,
     pub runtime: SessionRuntime,
     /// Messages the model sent through its tool, ever; a turn compares
     /// before and after to know whether its final text is still owed.
@@ -253,6 +265,7 @@ impl Driver {
             channel: channel.to_string(),
             chat_id: chat_id.to_string(),
             background,
+            pending_model: Mutex::new(None),
             runtime,
             sent,
             turn: tokio::sync::Mutex::new(()),
@@ -304,6 +317,11 @@ impl Driver {
         status: Option<mpsc::UnboundedSender<String>>,
     ) -> std::result::Result<TurnReport, TurnError> {
         let _turn = seat.turn.lock().await;
+        let pending = seat.pending_model.lock().unwrap().take();
+        if let Some(model) = pending {
+            self.persist_model(seat, &model)
+                .map_err(TurnError::Failed)?;
+        }
         let sent_before = seat.sent.load(std::sync::atomic::Ordering::Acquire);
         let mut narrator = crate::status::Narrator::default();
         let observe = move |event: &LoopEvent| {
@@ -359,21 +377,42 @@ impl Driver {
             .effective_model())
     }
 
-    /// Switch a seat's session to `model`, for its next turn on. The
-    /// switch is recorded in the session like one made in the TUI.
-    pub async fn set_model(&self, seat: &Seat, model: &str) -> Result<()> {
+    /// The model a fresh chat starts on.
+    pub fn default_model(&self) -> String {
+        self.gateway
+            .model
+            .clone()
+            .unwrap_or_else(|| self.config.general.model.clone())
+    }
+
+    /// Switch a seat's session to `model`. Recorded now when the seat
+    /// is idle; when a turn is running, recorded as that turn ends, so
+    /// the answer never waits behind it.
+    pub fn set_model(&self, seat: &Seat, model: &str) -> Result<ModelSwitch> {
         if !self.available_models().iter().any(|known| known == model) {
             bail!("no model {model}; /model lists them");
         }
-        let _turn = seat.turn.lock().await;
+        match seat.turn.try_lock() {
+            Ok(_idle) => {
+                self.persist_model(seat, model)?;
+                Ok(ModelSwitch::Applied)
+            }
+            Err(_) => {
+                *seat.pending_model.lock().unwrap() = Some(model.to_string());
+                Ok(ModelSwitch::Pending)
+            }
+        }
+    }
+
+    fn persist_model(&self, seat: &Seat, model: &str) -> Result<()> {
         ilar::runtime::persist_model_change(
             self.resolver.as_ref(),
             &seat.runtime.store,
             &seat.runtime.session_id,
             model,
             None,
-        )?;
-        Ok(())
+        )
+        .map(drop)
     }
 
     /// Hand a follow-up back after a wait — the seat's writer was held

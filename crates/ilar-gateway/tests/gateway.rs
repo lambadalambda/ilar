@@ -576,7 +576,12 @@ async fn slash_new_starts_a_fresh_session_and_slash_model_lists_and_switches() {
 
     fake.inject("/new", "chat-1", "alice").await;
     let sent = fake.wait_for_sent(2, WAIT).await;
-    assert!(sent[1].text.starts_with("Started a fresh chat"), "{sent:?}");
+    assert!(
+        sent[1]
+            .text
+            .starts_with("Started a fresh chat on zai/glm-4.7."),
+        "{sent:?}"
+    );
     assert_eq!(session_of("fake:chat-1"), None);
     fake.inject("hi again", "chat-1", "alice").await;
     fake.wait_for_sent(3, WAIT).await;
@@ -585,13 +590,12 @@ async fn slash_new_starts_a_fresh_session_and_slash_model_lists_and_switches() {
 
     fake.inject("/model", "chat-1", "alice").await;
     let sent = fake.wait_for_sent(4, WAIT).await;
-    assert!(sent[3].text.starts_with("Models:"), "{sent:?}");
     assert!(
-        sent[3].text.contains("zai/glm-4.7 ← current"),
-        "{}",
-        sent[3].text
+        sent[3].text.starts_with("Current: zai/glm-4.7\n"),
+        "{sent:?}"
     );
-    assert!(sent[3].text.contains("zai/glm-4.5"), "{}", sent[3].text);
+    assert!(sent[3].text.contains("zai: "), "{}", sent[3].text);
+    assert!(sent[3].text.contains("glm-4.5"), "{}", sent[3].text);
 
     fake.inject("/model nope/none", "chat-1", "alice").await;
     let sent = fake.wait_for_sent(5, WAIT).await;

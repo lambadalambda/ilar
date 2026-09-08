@@ -115,9 +115,9 @@ A message that is a slash command is answered by the gateway itself:
 
 | | |
 |---|---|
-| `/new` | A fresh session for this chat. The old one stays on disk; memory stays. |
-| `/model` | The models this configuration can reach, the current one marked. |
-| `/model <provider/model>` | Switch this chat, from its next turn on. Recorded in the session like a switch in the TUI. |
+| `/new` | A fresh session for this chat, on the configured model. The old one stays on disk; memory stays. |
+| `/model` | The current model, then the models this configuration can reach by provider. |
+| `/model <provider/model>` | Switch this chat. Recorded at once when the chat is idle, or as the running turn ends; the reply says which. |
 | `/help` | The list above. |
 
 ## Who it is: SOUL.md
