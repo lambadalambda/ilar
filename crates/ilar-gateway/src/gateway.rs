@@ -105,6 +105,26 @@ impl Gateway {
         &self.inbox_dir
     }
 
+    /// The tools a chat's model can see, once it has a seat.
+    pub fn tool_names(&self, key: &str) -> Option<Vec<&'static str>> {
+        self.driver
+            .seat_by_key(key)
+            .map(|seat| seat.runtime.registry.tool_names())
+    }
+
+    /// Each agent a chat may spawn, with the tools it is restricted to
+    /// (`None` is unrestricted).
+    pub fn agent_tools(&self, key: &str) -> Option<Vec<(String, Option<Vec<String>>)>> {
+        self.driver.seat_by_key(key).map(|seat| {
+            seat.runtime
+                .spawner
+                .agents()
+                .iter()
+                .map(|agent| (agent.name.clone(), agent.tools.clone()))
+                .collect()
+        })
+    }
+
     /// Run until cancelled. Channels run on their own tasks; every
     /// message and follow-up is handled on its own task, and a chat's
     /// turns serialize on its seat.

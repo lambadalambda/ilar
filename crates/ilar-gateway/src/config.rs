@@ -21,6 +21,10 @@ pub struct GatewayConfig {
     /// messages, so a script in a loop cannot flood a chat.
     #[serde(default = "default_notify_interval_secs")]
     pub notify_interval_secs: u64,
+    /// What the model may run for a chat, and for the subagents it
+    /// spawns.
+    #[serde(default)]
+    pub tools: crate::policy::ToolPolicy,
 }
 
 fn default_notify_interval_secs() -> u64 {
@@ -83,6 +87,12 @@ mod tests {
         let table: toml::Table = toml::from_str("model = \"zai/glm-4.7\"").unwrap();
         let parsed: GatewayConfig = table.try_into().unwrap();
         assert_eq!(parsed.model.as_deref(), Some("zai/glm-4.7"));
+        assert!(parsed.tools.is_empty());
+        let table: toml::Table =
+            toml::from_str("[tools]\nsafe_mode = true\ndeny = [\"task\"]").unwrap();
+        let parsed: GatewayConfig = table.try_into().unwrap();
+        assert!(parsed.tools.safe_mode);
+        assert_eq!(parsed.tools.deny, ["task"]);
     }
 
     #[test]

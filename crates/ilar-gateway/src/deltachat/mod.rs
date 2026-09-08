@@ -36,10 +36,14 @@ pub struct DeltaChatConfig {
     pub addr: Option<String>,
     pub password: Option<String>,
     pub display_name: Option<String>,
-    /// Addresses allowed to talk. Empty admits everyone, and the
-    /// gateway says so when it starts.
+    /// Addresses allowed to talk. Empty refuses to start unless
+    /// `allow_anyone` says so.
     #[serde(default)]
     pub allow_from: Vec<String>,
+    /// Talk to anyone who writes. Off: a bot with tools is not
+    /// something to leave open by accident.
+    #[serde(default)]
+    pub allow_anyone: bool,
     /// An emoji to react with on receipt, as a "seen".
     pub ack_reaction: Option<String>,
 }
@@ -176,7 +180,12 @@ impl DeltaChat {
             Err(error) => log(&format!("deltachat: no invite: {error:#}")),
         }
         if self.config.allow_from.is_empty() {
-            log("deltachat: allow_from is empty — anyone who writes gets an answer");
+            if !self.config.allow_anyone {
+                bail!(
+                    "[channels.deltachat] has no allow_from; list the addresses that may talk, or set allow_anyone = true"
+                );
+            }
+            log("deltachat: allow_anyone — whoever writes gets an answer");
         }
         Ok(account as u32)
     }
@@ -553,10 +562,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_open_allow_list_refuses_to_start() {
+        let (_events, events_rx) = mpsc::channel(1);
+        let (rpc, _calls) = fake_server(true, vec![], vec![], events_rx);
+        let channel = DeltaChat::over(DeltaChatConfig::default(), rpc);
+        let (inbound_tx, _inbound) = mpsc::channel(1);
+        let error = channel
+            .run(inbound_tx, CancellationToken::new())
+            .await
+            .expect_err("an empty allow_from must not start");
+        assert!(error.to_string().contains("allow_from"), "{error:#}");
+    }
+
+    #[tokio::test]
     async fn sending_uses_text_and_file_messages() {
         let (_events, events_rx) = mpsc::channel(1);
         let (rpc, calls) = fake_server(true, vec![], vec![], events_rx);
-        let channel = DeltaChat::over(DeltaChatConfig::default(), rpc);
+        let channel = DeltaChat::over(
+            DeltaChatConfig {
+                allow_anyone: true,
+                ..DeltaChatConfig::default()
+            },
+            rpc,
+        );
         let (inbound_tx, _inbound) = mpsc::channel(1);
         let cancel = CancellationToken::new();
         let runner = channel.clone();

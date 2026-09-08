@@ -208,8 +208,34 @@ impl Driver {
                 questions: false,
                 project_instructions: None,
             },
-        )?
-        .start_with(&self.config, self.resolver.clone())
+        )?;
+        // The policy reaches the subagents too: an agent definition's
+        // own restriction is narrowed before the spawner is built from
+        // it, and the chat's registry is filtered after.
+        let policy = &self.gateway.tools;
+        if !policy.is_empty() {
+            // Every name an agent definition may use: the builtins and
+            // the child tools a spawner adds.
+            let nameable: Vec<&'static str> = ilar::tools::ToolRegistry::builtin()
+                .tool_names()
+                .into_iter()
+                .chain(ilar::tools::child_tool_names())
+                .collect();
+            for agent in &mut plan.agents {
+                agent.tools = policy.narrow(agent.tools.as_deref(), nameable.iter().copied());
+            }
+            plan.agent.tools = policy.narrow(plan.agent.tools.as_deref(), nameable.iter().copied());
+        }
+        let mut runtime = plan.start_with(&self.config, self.resolver.clone())?;
+        if !policy.is_empty() {
+            let admitted = policy.admit(runtime.registry.tool_names());
+            let registry = std::mem::replace(
+                &mut runtime.registry,
+                ilar::tools::ToolRegistry::read_only(),
+            );
+            runtime.registry = registry.restricted_to(&admitted);
+        }
+        Ok(runtime)
     }
 
     /// One turn on a seat; a second caller waits for the first.

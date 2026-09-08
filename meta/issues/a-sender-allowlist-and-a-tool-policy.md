@@ -20,3 +20,13 @@ behalf.
 
 - An unlisted sender never reaches the loop; a denied tool is absent
   from the model's tool list, not refused at call time.
+
+## Status (2026-09-08)
+
+Done. One departure from the requirement: a stranger gets no reply at
+all rather than one fixed reply — a reply is a spam vector, and on
+Delta Chat it would accept the contact request. The gate is
+`allow_anyone` rather than a config flag named in the issue, and the
+policy is `[gateway.tools]` with `allow`, `deny` and `safe_mode`,
+applied to the chat's registry and to every agent definition its
+spawner is built from.

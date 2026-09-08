@@ -81,10 +81,18 @@ fn messages(text: &str, chat: Option<&str>) -> Vec<ProviderEvent> {
 
 /// A gateway on a fake channel and a scripted provider, running.
 fn gateway(dir: &Path, turns: Vec<Vec<ProviderEvent>>) -> (Arc<Gateway>, Arc<FakeChannel>) {
+    gateway_with(dir, turns, GatewayConfig::default())
+}
+
+fn gateway_with(
+    dir: &Path,
+    turns: Vec<Vec<ProviderEvent>>,
+    settings: GatewayConfig,
+) -> (Arc<Gateway>, Arc<FakeChannel>) {
     let config = config(dir);
     let settings = GatewayConfig {
         workspace: Some(dir.join("workspace")),
-        ..GatewayConfig::default()
+        ..settings
     };
     let resolver = Arc::new(FixedProviderResolver::new(Arc::new(MockProvider::new(
         turns,
@@ -202,6 +210,56 @@ async fn a_message_to_an_unknown_chat_is_refused_and_the_final_text_still_arrive
     assert_eq!(sent.len(), 1, "{sent:?}");
     assert_eq!(sent[0].text, "sorry, cannot");
     assert_eq!(sent[0].chat_id, "chat-1");
+    // The tool told the model why.
+    let routes = RouteStore::open(dir.path().join("state/gateway/routes.json"))
+        .unwrap()
+        .snapshot();
+    let session_id = routes.session_for("fake:chat-1").unwrap().to_string();
+    let store = ilar::runtime::session_store(&config(dir.path()));
+    let refused = store
+        .load(&session_id)
+        .unwrap()
+        .events()
+        .iter()
+        .any(|event| {
+            matches!(event, ilar::session::SessionEvent::ToolResult { content, is_error, .. }
+                if *is_error && content.contains("no chat fake:stranger"))
+        });
+    assert!(refused);
+    gateway.cancel();
+}
+
+#[tokio::test]
+async fn safe_mode_hides_the_unsafe_tools_from_the_chat_and_its_agents() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = GatewayConfig {
+        tools: ilar_gateway::policy::ToolPolicy {
+            safe_mode: true,
+            deny: vec!["task".into()],
+            ..Default::default()
+        },
+        ..GatewayConfig::default()
+    };
+    let (gateway, fake) = gateway_with(dir.path(), vec![says("hello")], settings);
+    fake.inject("hi", "chat-1", "alice").await;
+    fake.wait_for_sent(1, WAIT).await;
+    let names = gateway.tool_names("fake:chat-1").expect("a seat");
+    for gone in ["bash", "edit", "write", "task"] {
+        assert!(!names.contains(&gone), "{gone} survived: {names:?}");
+    }
+    for kept in ["read", "grep", "message"] {
+        assert!(names.contains(&kept), "{kept} missing: {names:?}");
+    }
+    // A subagent the chat spawns is under the same policy: the mutable
+    // agent's definition was narrowed before the spawner was built.
+    let agents = gateway.agent_tools("fake:chat-1").expect("a seat");
+    let (_, build) = agents
+        .iter()
+        .find(|(name, _)| name == "build")
+        .expect("the build agent");
+    let build = build.as_ref().expect("narrowed to a list");
+    assert!(!build.iter().any(|t| t == "bash"), "{build:?}");
+    assert!(build.iter().any(|t| t == "read"), "{build:?}");
     gateway.cancel();
 }
 

@@ -120,7 +120,6 @@ milestones 15–17 stay filed — they come back when the feature does.*
 - [ ] [The assistant — index](issues/the-assistant-index.md) — index
 - [ ] [DeltaChat](issues/deltachat.md)
 - [ ] [Chats route to sessions; the message tool](issues/chats-route-to-sessions.md)
-- [ ] [A sender allowlist and a tool policy](issues/a-sender-allowlist-and-a-tool-policy.md)
 - [ ] [Cron and heartbeat turns](issues/cron-and-heartbeat-turns.md)
 - [ ] [Memory that outlives a session](issues/memory-that-outlives-a-session.md)
 
