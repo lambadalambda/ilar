@@ -39,6 +39,21 @@ impl TurnNeverStarted {
     pub fn causes(&self) -> impl Iterator<Item = &(dyn std::error::Error + 'static)> {
         self.0.chain()
     }
+
+    /// Whether a turn declined before its prompt append because the
+    /// session's writer was held elsewhere — the retry case for every
+    /// driver. The marker hides its wrapped display layer from the
+    /// outer chain, so the io::Error is only reachable through its
+    /// own causes.
+    pub fn writer_held(error: &anyhow::Error) -> bool {
+        error.downcast_ref::<Self>().is_some_and(|marker| {
+            marker.causes().any(|cause| {
+                cause
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::WouldBlock)
+            })
+        })
+    }
 }
 
 impl std::fmt::Display for TurnNeverStarted {

@@ -2046,20 +2046,9 @@ async fn session_workspace_location(
     Ok((location, chain.len().saturating_sub(1)))
 }
 
-/// Whether a turn declined before its prompt append because the
-/// session's writer was held elsewhere — the router's retry case. The
-/// marker hides its wrapped display layer from the outer chain, so
-/// the io::Error is only reachable through the marker's own causes.
+/// The router's retry case: see [`TurnNeverStarted::writer_held`].
 fn never_started_would_block(error: &anyhow::Error) -> bool {
-    error
-        .downcast_ref::<crate::agent::TurnNeverStarted>()
-        .is_some_and(|marker| {
-            marker.causes().any(|cause| {
-                cause
-                    .downcast_ref::<std::io::Error>()
-                    .is_some_and(|io| io.kind() == std::io::ErrorKind::WouldBlock)
-            })
-        })
+    crate::agent::TurnNeverStarted::writer_held(error)
 }
 
 fn workspace_route_failure(
