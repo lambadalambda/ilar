@@ -1,0 +1,22 @@
+# ilar-gateway as a systemd user service.
+#
+#   cp scripts/ilar-gateway.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now ilar-gateway
+#   loginctl enable-linger "$USER"     # keep it running when you are logged out
+#   journalctl --user -u ilar-gateway -f
+[Unit]
+Description=ilar assistant gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/ilar-gateway run
+WorkingDirectory=%h
+Restart=on-failure
+RestartSec=5
+# The rpc server and any tool the assistant runs are looked up here.
+Environment=PATH=%h/.local/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target

@@ -12,6 +12,27 @@ ilar-gateway notify --to deltachat:12 --source ci "…"
 ilar-gateway invite                # the Delta Chat invite link to add the bot with
 ```
 
+## Running it
+
+`ilar-gateway` runs in the foreground and logs to stderr; Ctrl-C stops
+it, waiting a few seconds for turns in flight. `scripts/install.sh`
+installs it next to `ilar`. On a systemd machine run it as a user
+service, from `scripts/ilar-gateway.service`:
+
+```sh
+cp scripts/ilar-gateway.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now ilar-gateway
+loginctl enable-linger "$USER"      # keep it up when you are logged out
+journalctl --user -u ilar-gateway -f
+```
+
+It restarts on failure. After editing `ilar.toml` or `SOUL.md`,
+`systemctl --user restart ilar-gateway`: configuration is read at
+start, and a chat's prompt when its session opens. Delta Chat's
+account survives restarts; the invite is logged at each start and
+printed by `ilar-gateway invite`.
+
 ## Configuration
 
 Both tables live in the user's `ilar.toml` only; a project file that

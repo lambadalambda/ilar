@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the release binary and install it.
+# Build the release binaries — ilar and ilar-gateway — and install them.
 #
 #   scripts/install.sh [destination]     # default: ~/.local/bin
 #
@@ -15,18 +15,20 @@ root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cargo build --release --manifest-path "$root/Cargo.toml"
 
 mkdir -p "$dest"
-rm -f "$dest/ilar"
-cp "$root/target/release/ilar" "$dest/ilar"
+for bin in ilar ilar-gateway; do
+    rm -f "$dest/$bin"
+    cp "$root/target/release/$bin" "$dest/$bin"
 
-# Re-sign only if the fresh inode was not enough; an ad-hoc signature is
-# what the toolchain would have applied anyway.
-if ! version=$("$dest/ilar" --version 2>/dev/null); then
-    echo "installed binary would not run; re-signing" >&2
-    codesign --force -s - "$dest/ilar"
-    version=$("$dest/ilar" --version)
-fi
+    # Re-sign only if the fresh inode was not enough; an ad-hoc signature is
+    # what the toolchain would have applied anyway.
+    if ! version=$("$dest/$bin" --version 2>/dev/null); then
+        echo "installed binary would not run; re-signing" >&2
+        codesign --force -s - "$dest/$bin"
+        version=$("$dest/$bin" --version)
+    fi
 
-echo "$version -> $dest/ilar"
+    echo "$version -> $dest/$bin"
+done
 case ":$PATH:" in
     *":$dest:"*) ;;
     *) echo "note: $dest is not on PATH" >&2 ;;
