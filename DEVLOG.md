@@ -49,6 +49,21 @@ so the crate's tests run against a mock. The review caught a race
 that could give one chat two sessions (opening now takes a lock) and
 a salvage that retired its outbox entry before the salvage landed.
 
+Later the same day, steps 3 and 4: the model answers a chat by
+calling a `message` tool rather than by returning text, so it can
+send several, attach files, address another known chat, or stay
+silent; the final text is delivered only when it sent nothing, and
+the count that decides that is taken under the seat's lock, after a
+review caught a second turn queued behind a first one losing its
+reply. Everything out goes through one queue drained by one task, so
+the gateway's own lines never overtake the model's. The policy is
+built into registries: a denied tool is absent from the model's list,
+and every agent definition the chat's spawner is built from is
+narrowed first — a deny-only policy has to become an explicit
+allowlist there, since an unrestricted agent's registry comes from
+nothing but its defaults. A stranger gets no reply at all: a reply is
+a spam vector, and on Delta Chat it accepts the contact request.
+
 Two lessons. A chatmail address is not something a person can write
 to; the bot has to hand out its secure-join invite, so it does, at
 every start and through `ilar-gateway invite`. And this Mac's sandbox
