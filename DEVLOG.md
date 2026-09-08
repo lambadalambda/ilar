@@ -34,6 +34,23 @@ foreground children inherit it and touch it on every event at any
 depth, a background child starts its own. The test reproduces the
 production shape (mutable task, read-only foreground child).
 
+## 2026-09-08 — Endpoints discover their models
+
+`[endpoints.<name>]`: one section for a server that lists what it
+serves, instead of a `[models.*]` section per model. The listing is
+fetched at config load on a thread of its own — the loader is
+synchronous and sometimes runs inside a runtime — with a three-second
+timeout and cached under the state dir, so a server that is down at
+start still yields last time's models with a warning. Discovered rows
+join the runtime catalog under `<name>/<id>`; that took `RuntimeModel`
+growing a provider and the registry matching on both halves. Lemonade
+turned out richer than its spec: `labels` (`chat`, `vision`,
+`reasoning`) and `context_length` per model, so those are honoured and
+the endpoint's `context` is only a default for plain listings like
+llama.cpp's. Only ids the listing had resolve; a model added to the
+server later needs a restart. On tenco Lemonade lives on port 13305,
+not the documented 8000, and lists eight chat models.
+
 ## 2026-09-08 — The assistant answers on Delta Chat
 
 Milestone 21's first two steps in a day: `ilar-gateway`, a crate that
