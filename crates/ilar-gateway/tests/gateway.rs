@@ -56,6 +56,29 @@ fn delegates(prompt: &str) -> Vec<ProviderEvent> {
     ]
 }
 
+fn messages(text: &str, chat: Option<&str>) -> Vec<ProviderEvent> {
+    let mut input = serde_json::json!({"text": text});
+    if let Some(chat) = chat {
+        input["chat"] = serde_json::json!(chat);
+    }
+    vec![
+        ProviderEvent::ToolCallStarted {
+            id: "msg-1".into(),
+            name: "message".into(),
+            item_id: None,
+        },
+        ProviderEvent::ToolCallCompleted {
+            id: "msg-1".into(),
+            name: "message".into(),
+            input,
+        },
+        ProviderEvent::TurnComplete {
+            stop_reason: StopReason::ToolUse,
+            usage: Usage::default(),
+        },
+    ]
+}
+
 /// A gateway on a fake channel and a scripted provider, running.
 fn gateway(dir: &Path, turns: Vec<Vec<ProviderEvent>>) -> (Arc<Gateway>, Arc<FakeChannel>) {
     let config = config(dir);
@@ -137,6 +160,41 @@ async fn an_inbox_message_reaches_the_last_active_chat() {
             .unwrap()
             .is_empty()
     );
+    gateway.cancel();
+}
+
+#[tokio::test]
+async fn a_message_sent_by_the_tool_replaces_the_final_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let (gateway, fake) = gateway(
+        dir.path(),
+        vec![messages("via tool", None), says("final words")],
+    );
+
+    fake.inject("hi", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(1, WAIT).await;
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0].text, "via tool");
+    assert_eq!(sent[0].chat_id, "chat-1");
+    // The final text never follows: give it a moment to be sure.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(fake.sent().len(), 1, "{:?}", fake.sent());
+    gateway.cancel();
+}
+
+#[tokio::test]
+async fn a_message_to_an_unknown_chat_is_refused_and_the_final_text_still_arrives() {
+    let dir = tempfile::tempdir().unwrap();
+    let (gateway, fake) = gateway(
+        dir.path(),
+        vec![messages("psst", Some("stranger")), says("sorry, cannot")],
+    );
+
+    fake.inject("hi", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(1, WAIT).await;
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0].text, "sorry, cannot");
+    assert_eq!(sent[0].chat_id, "chat-1");
     gateway.cancel();
 }
 

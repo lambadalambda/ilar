@@ -271,6 +271,10 @@ impl Channel for DeltaChat {
         "deltachat"
     }
 
+    fn constraints(&self) -> &str {
+        "plain text, no markdown rendering; keep one message under 4000 characters; files are attached by absolute path"
+    }
+
     fn run<'a>(
         &'a self,
         inbound: mpsc::Sender<Inbound>,

@@ -20,7 +20,9 @@ use ilar::subagent::{Notification, SubagentSpawner};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::bus::Outbound;
 use crate::config::GatewayConfig;
+use crate::message::MessageTool;
 use crate::routes::RouteStore;
 
 /// What a turn produced: the streamed text, and how the loop ended.
@@ -64,7 +66,20 @@ pub struct Seat {
     pub channel: String,
     pub chat_id: String,
     pub runtime: SessionRuntime,
+    /// Messages the model sent through its tool, ever; a turn compares
+    /// before and after to know whether its final text is still owed.
+    pub sent: Arc<std::sync::atomic::AtomicUsize>,
     turn: tokio::sync::Mutex<()>,
+}
+
+/// The channels a driver talks through, and what it knows about the
+/// channels it talks for.
+pub struct Wiring {
+    pub follow_ups: mpsc::Sender<FollowUp>,
+    /// Where the message tool sends; the gateway dispatches to channels.
+    pub outbound: mpsc::Sender<Outbound>,
+    /// Each channel's delivery constraints, for the tool's description.
+    pub constraints: HashMap<String, String>,
 }
 
 pub struct Driver {
@@ -76,7 +91,7 @@ pub struct Driver {
     /// Opening a seat is slow file work; two messages racing on a
     /// fresh chat must not each create a session.
     opening: tokio::sync::Mutex<()>,
-    follow_ups: mpsc::Sender<FollowUp>,
+    wiring: Wiring,
     cancel: CancellationToken,
 }
 
@@ -86,7 +101,7 @@ impl Driver {
         gateway: GatewayConfig,
         resolver: Arc<dyn ProviderResolver>,
         routes: Arc<RouteStore>,
-        follow_ups: mpsc::Sender<FollowUp>,
+        wiring: Wiring,
         cancel: CancellationToken,
     ) -> Self {
         Self {
@@ -96,7 +111,7 @@ impl Driver {
             routes,
             seats: Mutex::new(HashMap::new()),
             opening: tokio::sync::Mutex::new(()),
-            follow_ups,
+            wiring,
             cancel,
         }
     }
@@ -120,7 +135,7 @@ impl Driver {
             return Ok(seat);
         }
         let known = self.routes.snapshot().session_for(key).map(str::to_string);
-        let runtime = match self.open(known.clone()) {
+        let mut runtime = match self.open(known.clone()) {
             Ok(runtime) => runtime,
             // A route to a session that is gone (deleted, another state
             // dir) is a route to nothing: start over rather than refuse
@@ -136,11 +151,29 @@ impl Driver {
         };
         self.routes
             .update(|routes| routes.bind(key, &runtime.session_id))?;
+        // The model's way to answer: a tool that knows this chat.
+        let (tool, sent) = MessageTool::new(
+            self.wiring.outbound.clone(),
+            channel,
+            chat_id,
+            self.routes.clone(),
+            self.wiring
+                .constraints
+                .get(channel)
+                .map(String::as_str)
+                .unwrap_or(""),
+        );
+        let registry = std::mem::replace(
+            &mut runtime.registry,
+            ilar::tools::ToolRegistry::read_only(),
+        );
+        runtime.registry = registry.with_tool(tool)?;
         let seat = Arc::new(Seat {
             key: key.to_string(),
             channel: channel.to_string(),
             chat_id: chat_id.to_string(),
             runtime,
+            sent,
             turn: tokio::sync::Mutex::new(()),
         });
         tokio::spawn(watch_notifications(
@@ -149,7 +182,7 @@ impl Driver {
             self.outbox_dir(),
             seat.runtime.session_id.clone(),
             key.to_string(),
-            self.follow_ups.clone(),
+            self.wiring.follow_ups.clone(),
             self.cancel.child_token(),
         ));
         self.seats
@@ -197,7 +230,7 @@ impl Driver {
     /// Hand a follow-up back after a wait — the seat's writer was held
     /// — without holding up whoever asked.
     pub fn requeue(&self, follow_up: FollowUp) {
-        let sender = self.follow_ups.clone();
+        let sender = self.wiring.follow_ups.clone();
         let cancel = self.cancel.child_token();
         tokio::spawn(async move {
             tokio::select! {

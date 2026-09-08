@@ -18,4 +18,5 @@ pub mod deltachat;
 pub mod driver;
 pub mod gateway;
 pub mod inbox;
+pub mod message;
 pub mod routes;

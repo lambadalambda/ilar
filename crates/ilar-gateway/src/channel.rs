@@ -14,6 +14,12 @@ pub type ChannelFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub trait Channel: Send + Sync {
     fn name(&self) -> &str;
 
+    /// What the model is told about sending here: formatting, length,
+    /// how files travel. Empty when there is nothing to say.
+    fn constraints(&self) -> &str {
+        ""
+    }
+
     /// Run until cancelled, publishing everything received.
     fn run<'a>(
         &'a self,

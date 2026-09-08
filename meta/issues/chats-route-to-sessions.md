@@ -20,3 +20,11 @@ text, so it can send several, send to another chat, or send nothing.
 
 - Two chats keep two sessions; a cron turn cannot message an
   unscoped chat; the fallback delivery happens exactly once.
+
+## Status (2026-09-08)
+
+Done: session keys and the routes file (with the gateway issue), the
+`message` tool with its constraints and the known-chat restriction,
+the final-text fallback exactly once, the group flag recorded. Left
+for the cron issue: the background keys and the rule that an unscoped
+background turn may not message a chat.

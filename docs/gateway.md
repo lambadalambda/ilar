@@ -59,7 +59,17 @@ TUI: as a prompt, retired from the outbox once the log holds it. A
 session open in a TUI refuses the gateway's turn and the chat is told
 so.
 
-Turns on one chat are serialized; different chats run at once. The
-final text of a turn is the reply; a turn that says nothing sends
-nothing. Image attachments are handed to the model the way `read`
-attaches them.
+Turns on one chat are serialized; different chats run at once. Image
+attachments are handed to the model the way `read` attaches them.
+
+## Replying: the message tool
+
+Every gateway session has a `message` tool that knows its chat. The
+model replies by calling it, so it can send several messages, attach
+files, or say nothing; the turn's final text is delivered only when
+the model sent nothing itself, and then exactly once. Another chat can
+be named with `channel` and `chat`, but only one that has written to
+the bot: the model does not open conversations with strangers. The
+tool's description carries the channel's delivery constraints (for
+Delta Chat: plain text, one message under 4000 characters, files by
+absolute path).
