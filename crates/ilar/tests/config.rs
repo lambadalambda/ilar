@@ -1277,3 +1277,94 @@ fn gateway_and_channel_tables_pass_through_user_scoped() {
         );
     }
 }
+
+/// A one-request HTTP server answering `GET /models` with `body`, on a
+/// port of its own; returns the base URL.
+fn model_listing_server(body: &'static str) -> String {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0u8; 2048];
+        let _ = stream.read(&mut request);
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = stream.write_all(response.as_bytes());
+    });
+    format!("http://127.0.0.1:{port}/api/v1")
+}
+
+/// An endpoint's models are discovered from its listing, addressed as
+/// `<endpoint>/<id>`, resolvable, and remembered for a start when the
+/// server is down.
+#[test]
+fn an_endpoint_discovers_its_models_and_remembers_them() {
+    let base = model_listing_server(
+        r#"{"object":"list","data":[
+            {"id":"Qwen3.8-27B-GGUF","labels":["chat","vision"],"downloaded":true,"context_length":131072},
+            {"id":"Z-Image-Turbo","labels":["image"],"downloaded":true}
+        ]}"#,
+    );
+    let (_g, dir) = tempdir();
+    let (_s, state) = tempdir();
+    write(
+        &dir.join("ilar.toml"),
+        &format!("[endpoints.lemon]\nbase_url = \"{base}\"\ncontext = 65536\n"),
+    );
+    let config = Loader::no_env()
+        .config_dir(dir.clone())
+        .state_dir(state.clone())
+        .resolve()
+        .unwrap();
+    let ids: Vec<String> = config
+        .available_models()
+        .iter()
+        .map(|model| model.full_id())
+        .filter(|id| id.starts_with("lemon/"))
+        .collect();
+    assert_eq!(ids, ["lemon/Qwen3.8-27B-GGUF"]);
+    let row = ilar::model::find("lemon/Qwen3.8-27B-GGUF").expect("registered");
+    assert_eq!(row.context_limit, 131_072);
+    assert!(ilar::model::supports_vision("lemon/Qwen3.8-27B-GGUF"));
+    assert!(config.provider_for("lemon/Qwen3.8-27B-GGUF").is_some());
+    assert!(config.provider_for("lemon/Z-Image-Turbo").is_none());
+    assert_eq!(
+        config.context_limit("lemon/Qwen3.8-27B-GGUF"),
+        Some(131_072)
+    );
+    assert!(state.join("endpoints/lemon.json").is_file());
+
+    // The server is gone (its one request is spent): the cached listing
+    // stands in, and the warnings say so.
+    let again = Loader::no_env()
+        .config_dir(dir)
+        .state_dir(state)
+        .resolve()
+        .unwrap();
+    assert!(again.provider_for("lemon/Qwen3.8-27B-GGUF").is_some());
+    assert!(
+        again
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("listed last time")),
+        "{:?}",
+        again.warnings
+    );
+}
+
+#[test]
+fn an_endpoint_name_may_not_shadow_a_provider() {
+    let (_g, dir) = tempdir();
+    write(
+        &dir.join("ilar.toml"),
+        "[endpoints.openai]\nbase_url = \"http://127.0.0.1:1/v1\"\n",
+    );
+    let error = Loader::no_env().config_dir(dir).resolve().unwrap_err();
+    assert!(
+        error.to_string().contains("must not be a provider name"),
+        "{error:#}"
+    );
+}

@@ -1807,6 +1807,9 @@ pub const CUSTOM_PROVIDER: &str = "custom";
 /// A `[models.<name>]` entry as the catalog needs to see it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RuntimeModel {
+    /// The prefix the row is addressed under: [`CUSTOM_PROVIDER`] for a
+    /// `[models.<name>]` entry, the endpoint's name for a discovered one.
+    pub provider: String,
     /// The section name, which is also the id in `custom/<name>`.
     pub id: String,
     pub name: String,
@@ -1840,14 +1843,21 @@ pub(crate) fn register_runtime(models: &[RuntimeModel]) -> Vec<&'static ModelInf
     models
         .iter()
         .map(|model| {
-            let existing = registry.iter().position(|row| row.id == model.id);
+            let existing = registry
+                .iter()
+                .position(|row| row.provider == model.provider && row.id == model.id);
             if let Some(index) = existing
                 && same_row(registry[index], model)
             {
                 return registry[index];
             }
+            let provider: &'static str = if model.provider == CUSTOM_PROVIDER {
+                CUSTOM_PROVIDER
+            } else {
+                String::leak(model.provider.clone())
+            };
             let leaked: &'static ModelInfo = Box::leak(Box::new(ModelInfo {
-                provider: CUSTOM_PROVIDER,
+                provider,
                 id: String::leak(model.id.clone()),
                 name: String::leak(model.name.clone()),
                 context_limit: model.context_limit,
@@ -1879,14 +1889,11 @@ fn same_row(row: &ModelInfo, model: &RuntimeModel) -> bool {
 }
 
 fn find_runtime(provider: &str, id: &str) -> Option<&'static ModelInfo> {
-    if provider != CUSTOM_PROVIDER {
-        return None;
-    }
     RUNTIME
         .read()
         .expect("runtime model registry")
         .iter()
-        .find(|row| row.id == id)
+        .find(|row| row.provider == provider && row.id == id)
         .copied()
 }
 

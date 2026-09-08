@@ -26,6 +26,7 @@ key — is sent, which is never a cloned repository's call to make.
 | `providers.opencode-go.base_url` | `https://opencode.ai/zen/go/v1` | Override the OpenCode Go base URL. |
 | `providers.opencode-go.api_key` | `ILAR_OPENCODE_API_KEY` | The same key, used as `opencode-go/<model>`. |
 | `models.<name>.*` | — | Your own OpenAI-compatible endpoint, used as `custom/<name>`. See [Bring your own model](#bring-your-own-model). |
+| `endpoints.<name>.*` | — | An OpenAI-compatible server whose models are discovered from its listing, each used as `<name>/<id>`. See [Discover an endpoint's models](#discover-an-endpoints-models). |
 | `agent.max_iterations` | `1000` | Max provider calls per user turn (runaway-loop backstop). |
 | `compaction.threshold` | `0.85` | Context fraction at which history is handed over; must be between 0 and 1. |
 | `cache_compact.enabled` | `false` | Compact an idle session once, just before its last request leaves the provider's prompt cache. See [Compacting while the cache is warm](#compacting-while-the-cache-is-warm). User-scoped. |
@@ -150,6 +151,42 @@ is warned about at startup and ignored wholesale, because a repository must
 not be able to route the conversation to an endpoint it chose. The same rule
 covers `[providers]` — a project `base_url` would send requests carrying
 *your* key wherever it pointed.
+
+## Discover an endpoint's models
+
+A server that lists what it serves — Lemonade, llama.cpp, vLLM, LM
+Studio, anything answering `GET /models` in the OpenAI shape — can be
+one `[endpoints.<name>]` section instead of a `[models.*]` section per
+model. Its models are discovered when configuration loads and appear
+as `<name>/<id>`: in the picker, in `/model`, as an agent's `model`.
+
+```toml
+[endpoints.lemonade]
+base_url = "http://127.0.0.1:13305/api/v1"
+context = 65536          # for models whose listing does not say
+```
+
+| Field | Required | Default | Description |
+| --- | --- | --- | --- |
+| `base_url` | yes | — | Everything up to `/models` and `/chat/completions`. |
+| `api_key` | no | none | Sent as `Authorization: Bearer …` on the listing and every request. |
+| `context` | no | `32768` | The window for a model whose listing does not state one. |
+| `output` | no | a quarter of the window | Tokens reserved for the reply. |
+| `vision` | no | `false` | For models whose listing does not say. |
+| `models` | no | all | Only these ids. |
+| `options` | no | none | Body fields merged into every request. |
+
+What the listing says wins: Lemonade's carries `labels` — only models
+labelled `chat` are taken, `vision` sets vision — and `context_length`,
+so those models get their own window. A plain listing without labels,
+as llama.cpp and vLLM produce, contributes every model on the
+endpoint's defaults. A model marked not downloaded is left out.
+
+The listing is fetched with a three-second timeout and kept under
+`<state dir>/endpoints/<name>.json`. A server that is down at start
+still yields the models it listed last time, with a warning; one never
+reached yields none, also with a warning. Like `[models]`, the table
+is user configuration: a project file that declares it is ignored.
 
 ## OpenCode Zen and Go
 

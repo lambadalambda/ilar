@@ -2,8 +2,11 @@
 //! meta/issues/config-and-agents-md.md.
 
 mod agents_md;
+mod endpoints;
 mod frontmatter;
 mod toml;
+
+pub use endpoints::Endpoint;
 
 pub use agents_md::{
     CONTEXT_FILES, ProjectInstructions, SOUL_FILES, SystemPrompt, system_prompt_for,

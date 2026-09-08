@@ -67,12 +67,13 @@ pub struct CustomModel {
 /// `output`. A local server's `context` is one budget shared by prompt
 /// and reply, so some of it has to be held back; a quarter is the
 /// conservative reading, in the same spirit as the catalog's windows.
-const DEFAULT_OUTPUT_FRACTION: u64 = 4;
+pub(super) const DEFAULT_OUTPUT_FRACTION: u64 = 4;
 
 impl CustomModel {
     /// The catalog row this entry publishes under `custom/<name>`.
     fn runtime(&self, name: &str) -> crate::model::RuntimeModel {
         crate::model::RuntimeModel {
+            provider: crate::model::CUSTOM_PROVIDER.to_string(),
             id: name.to_string(),
             name: self
                 .display_name
@@ -106,7 +107,7 @@ impl CustomModel {
 /// Never the URL itself: validation has already refused the ones without
 /// a host, and echoing a raw URL would put any `user:pass@` in it on
 /// screen for the sake of a provenance label.
-fn endpoint_origin(base_url: &str) -> String {
+pub(super) fn endpoint_origin(base_url: &str) -> String {
     let host = url::Url::parse(base_url)
         .ok()
         .and_then(|url| match (url.host_str(), url.port()) {
@@ -257,6 +258,8 @@ struct FileConfig {
     general: Option<GeneralConfig>,
     providers: Option<HashMap<String, ProviderConfig>>,
     models: Option<HashMap<String, CustomModel>>,
+    /// `[endpoints.<name>]`: servers whose models are discovered.
+    endpoints: Option<HashMap<String, super::endpoints::Endpoint>>,
     agent: Option<AgentLayer>,
     compaction: Option<CompactionLayer>,
     cache_compact: Option<CacheCompactLayer>,
@@ -436,6 +439,9 @@ pub struct Config {
     /// `[models.<name>]` entries, by name. Their catalog rows are
     /// published to [`crate::model`]; these are the endpoints behind them.
     pub models: HashMap<String, CustomModel>,
+    /// `[endpoints.<name>]` entries, by name; their discovered rows are
+    /// in the catalog under `<name>/<id>`.
+    pub endpoints: HashMap<String, super::endpoints::Endpoint>,
     pub agent: AgentConfig,
     pub compaction: CompactionConfig,
     pub cache_compact: CacheCompactConfig,
@@ -606,6 +612,8 @@ impl Config {
         // lever: base_url re-routes requests carrying the user's key,
         // api_key substitutes the repository's, auth flips OAuth mode.
         let user_models = merged.models.clone();
+        let user_endpoints = merged.endpoints.clone();
+        let mut project_declared_endpoints = false;
         let user_providers = merged.providers.clone();
         let user_cache_compact = merged.cache_compact.clone();
         let user_gateway = merged.gateway.clone();
@@ -628,6 +636,13 @@ impl Config {
                     project_declared_models = true;
                     warnings.push(format!(
                         "{}: [models] is user configuration and is ignored in project config",
+                        path.display()
+                    ));
+                }
+                if declares_entries(&text, |file| file.endpoints) {
+                    project_declared_endpoints = true;
+                    warnings.push(format!(
+                        "{}: [endpoints] is user configuration and is ignored in project config",
                         path.display()
                     ));
                 }
@@ -667,6 +682,9 @@ impl Config {
         if project_declared_models {
             merged.models = user_models;
         }
+        if project_declared_endpoints {
+            merged.endpoints = user_endpoints;
+        }
         if project_declared_providers {
             merged.providers = user_providers;
         }
@@ -687,7 +705,19 @@ impl Config {
             .iter()
             .map(|name| models[name].runtime(name))
             .collect::<Vec<_>>();
-        let custom_models = crate::model::register_runtime(&rows);
+        let mut custom_models = crate::model::register_runtime(&rows);
+
+        // Discovered models join too, endpoint by endpoint in name order,
+        // so `general.model` may name one of them as well.
+        let endpoints = merged.endpoints.take().unwrap_or_default();
+        let mut endpoint_names = endpoints.keys().cloned().collect::<Vec<_>>();
+        endpoint_names.sort();
+        for name in &endpoint_names {
+            let (discovered, notes) =
+                super::endpoints::discover(name, &endpoints[name], &state_dir);
+            warnings.extend(notes);
+            custom_models.extend(crate::model::register_runtime(&discovered));
+        }
 
         let model = merged
             .general
@@ -715,6 +745,7 @@ impl Config {
             },
             providers,
             models,
+            endpoints,
             custom_models,
             agent: AgentConfig {
                 max_iterations: merged
@@ -800,6 +831,15 @@ impl Config {
                 entry.dialect(model_id),
             )));
         }
+        // A discovered model: the endpoint is the provider, and only
+        // an id the listing had is reachable — the row registered at
+        // load is what says whether it sees images.
+        if let Some(endpoint) = self.endpoints.get(provider_name) {
+            let row = crate::model::find(model)?;
+            return Some(Box::new(crate::provider::chat::ChatProvider::new(
+                endpoint.dialect(model_id, row.supports_vision()),
+            )));
+        }
         let settings = self.providers.get(provider_name)?;
         let kind = provider_kind(provider_name, PROVIDERS)?;
         (kind.build)(self, settings)
@@ -855,6 +895,7 @@ impl Config {
             compaction: CompactionConfig::default(),
             cache_compact: CacheCompactConfig::default(),
             subagents: SubagentConfig::default(),
+            endpoints: HashMap::new(),
             gateway: None,
             channels: None,
             warnings: Vec::new(),
@@ -1061,6 +1102,12 @@ fn merge_file(base: FileConfig, text: &str, origin: &Path) -> anyhow::Result<Fil
             .get_or_insert_with(HashMap::new)
             .extend(models);
     }
+    if let Some(endpoints) = parsed.endpoints {
+        merged
+            .endpoints
+            .get_or_insert_with(HashMap::new)
+            .extend(endpoints);
+    }
     if let Some(agent) = parsed.agent {
         overlay!(
             merged.agent.get_or_insert_with(AgentLayer::default),
@@ -1231,6 +1278,46 @@ fn validate_file(config: &FileConfig, origin: &Path) -> anyhow::Result<()> {
     }
     if let Some(models) = &config.models {
         validate_models(models, origin, PROVIDERS)?;
+    }
+    if let Some(endpoints) = &config.endpoints {
+        validate_endpoints(endpoints, origin, PROVIDERS)?;
+    }
+    Ok(())
+}
+
+/// `[endpoints.<name>]`: the name becomes a model-id prefix, so it has
+/// to be usable as one and must not shadow a provider; the URL has to
+/// be one requests can go to.
+fn validate_endpoints(
+    endpoints: &HashMap<String, super::endpoints::Endpoint>,
+    origin: &Path,
+    kinds: &[ProviderKind],
+) -> anyhow::Result<()> {
+    let mut names = endpoints.keys().collect::<Vec<_>>();
+    names.sort();
+    for name in names {
+        let entry = &endpoints[name];
+        anyhow::ensure!(
+            !name.is_empty() && !name.contains('/'),
+            "{}: endpoint name {name:?} must be non-empty and contain no slash",
+            origin.display()
+        );
+        anyhow::ensure!(
+            provider_kind(name, kinds).is_none() && name != crate::model::CUSTOM_PROVIDER,
+            "{}: endpoint name {name:?} must not be a provider name",
+            origin.display()
+        );
+        anyhow::ensure!(
+            url::Url::parse(&entry.base_url)
+                .is_ok_and(|url| url.has_host() && matches!(url.scheme(), "http" | "https")),
+            "{}: endpoints.{name}.base_url must be an http:// or https:// URL",
+            origin.display()
+        );
+        anyhow::ensure!(
+            entry.context != Some(0) && entry.output != Some(0),
+            "{}: endpoints.{name}: context and output must be at least 1",
+            origin.display()
+        );
     }
     Ok(())
 }

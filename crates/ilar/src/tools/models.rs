@@ -119,6 +119,7 @@ mod tests {
     #[test]
     fn listing_shows_a_configured_endpoints_host_instead_of_pricing() {
         let rows = crate::model::register_runtime(&[crate::model::RuntimeModel {
+            provider: crate::model::CUSTOM_PROVIDER.to_string(),
             id: "qwen-listed-by-the-tool".into(),
             name: "Qwen".into(),
             context_limit: 32_768,
