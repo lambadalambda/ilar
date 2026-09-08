@@ -10,6 +10,7 @@ ilar-gateway                       # listen on the configured channels
 ilar-gateway notify "build green"  # a message from a script, to the last active chat
 ilar-gateway notify --to deltachat:12 --source ci "…"
 ilar-gateway invite                # the Delta Chat invite link to add the bot with
+ilar-gateway prompt                # the system prompt a private chat gets; --group for a room
 ```
 
 ## Running it
@@ -70,6 +71,10 @@ over stdio; no bridge, no Python at run time.
 | `allow_from` | `[]` | Addresses allowed to talk. A stranger gets no turn and no reply. |
 | `allow_anyone` | `false` | Talk to whoever writes. Without it an empty `allow_from` refuses to start. |
 | `ack_reaction` | — | An emoji to react with on receipt. |
+
+A `.xdc` attachment — a zip with an `index.html` and a `manifest.toml`
+— is sent as a webxdc app, which opens inside the chat; the model is
+told so, and can build one with its ordinary tools.
 
 The account is configured on first start and reused after. The
 adapter ignores its own messages, info messages and other bots,

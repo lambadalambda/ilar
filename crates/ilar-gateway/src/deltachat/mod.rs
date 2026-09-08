@@ -281,7 +281,10 @@ impl Channel for DeltaChat {
     }
 
     fn constraints(&self) -> &str {
-        "plain text, no markdown rendering; keep one message under 4000 characters; files are attached by absolute path"
+        "plain text, no markdown rendering; keep one message under 4000 characters; files are \
+         attached by path; a .xdc file (a zip holding index.html and manifest.toml with a \
+         name = \"…\" line, no external resources) is delivered as a webxdc app the person \
+         opens inside the chat"
     }
 
     fn run<'a>(
@@ -354,7 +357,7 @@ impl Channel for DeltaChat {
             for path in &message.media {
                 let data = json!({
                     "file": path,
-                    "viewtype": if is_image(path) { "Image" } else { "File" },
+                    "viewtype": viewtype(path),
                     "text": text.take(),
                 });
                 rpc.call("send_msg", json!([account, chat_id, data]))
@@ -365,15 +368,20 @@ impl Channel for DeltaChat {
     }
 }
 
-fn is_image(path: &std::path::Path) -> bool {
-    path.extension()
+/// How Delta Chat should show a file: pictures as pictures, an `.xdc`
+/// — a zip with an `index.html` and a `manifest.toml` — as a webxdc
+/// app the person can open in the chat, anything else as a file.
+fn viewtype(path: &std::path::Path) -> &'static str {
+    match path
+        .extension()
         .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| {
-            matches!(
-                ext.to_ascii_lowercase().as_str(),
-                "png" | "jpg" | "jpeg" | "gif" | "webp"
-            )
-        })
+        .map(|ext| ext.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("png" | "jpg" | "jpeg" | "gif" | "webp") => "Image",
+        Some("xdc") => "Webxdc",
+        _ => "File",
+    }
 }
 
 #[cfg(test)]
@@ -612,7 +620,11 @@ mod tests {
                 channel: "deltachat".into(),
                 chat_id: "5".into(),
                 text: "with a picture".into(),
-                media: vec!["/tmp/a.png".into(), "/tmp/b.bin".into()],
+                media: vec![
+                    "/tmp/a.png".into(),
+                    "/tmp/b.bin".into(),
+                    "/tmp/c.xdc".into(),
+                ],
             })
             .await
             .unwrap();
@@ -621,12 +633,13 @@ mod tests {
             .iter()
             .filter(|(m, _)| m == "misc_send_text_message" || m == "send_msg")
             .collect();
-        assert_eq!(sends.len(), 3, "{sends:?}");
+        assert_eq!(sends.len(), 4, "{sends:?}");
         assert_eq!(sends[0].1, json!([1, 5, "plain"]));
         assert_eq!(sends[1].1[2]["viewtype"], "Image");
         assert_eq!(sends[1].1[2]["text"], "with a picture");
         assert_eq!(sends[2].1[2]["viewtype"], "File");
         assert_eq!(sends[2].1[2]["text"], Value::Null);
+        assert_eq!(sends[3].1[2]["viewtype"], "Webxdc");
         cancel.cancel();
         let _ = running.await;
     }
