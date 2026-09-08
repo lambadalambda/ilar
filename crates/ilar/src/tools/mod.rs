@@ -988,6 +988,13 @@ impl ToolRegistry {
 
     /// Registry with an extra tool (tests, future custom tools).
     pub fn with_tool(mut self, tool: Arc<dyn Tool>) -> Result<Self, DuplicateToolError> {
+        self.add(tool)?;
+        Ok(self)
+    }
+
+    /// Add a tool to a registry that already exists — a driver adding
+    /// its own to a runtime's after start.
+    pub fn add(&mut self, tool: Arc<dyn Tool>) -> Result<(), DuplicateToolError> {
         if tool.name() == crate::question::QUESTION_TOOL_NAME
             || self
                 .tools
@@ -997,7 +1004,7 @@ impl ToolRegistry {
             return Err(DuplicateToolError(tool.name()));
         }
         self.tools.push(tool);
-        Ok(self)
+        Ok(())
     }
 
     /// Registry with an optional child tool attached. The [`ChildTool`]
