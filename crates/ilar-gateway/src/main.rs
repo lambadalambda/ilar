@@ -10,7 +10,11 @@ use ilar_gateway::gateway::Gateway;
 use ilar_gateway::inbox::{self, InboxMessage};
 
 #[derive(Parser)]
-#[command(name = "ilar-gateway", version, about = "ilar as an always-on assistant")]
+#[command(
+    name = "ilar-gateway",
+    version,
+    about = "ilar as an always-on assistant"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,

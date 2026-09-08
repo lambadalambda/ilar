@@ -92,6 +92,17 @@ so.
 Turns on one chat are serialized; different chats run at once. Image
 attachments are handed to the model the way `read` attaches them.
 
+## Commands
+
+A message that is a slash command is answered by the gateway itself:
+
+| | |
+|---|---|
+| `/new` | A fresh session for this chat. The old one stays on disk; memory stays. |
+| `/model` | The models this configuration can reach, the current one marked. |
+| `/model <provider/model>` | Switch this chat, from its next turn on. Recorded in the session like a switch in the TUI. |
+| `/help` | The list above. |
+
 ## Who it is: SOUL.md
 
 A chat assistant needs a personality more than a coding agent does. A

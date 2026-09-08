@@ -13,6 +13,7 @@
 
 pub mod bus;
 pub mod channel;
+pub mod commands;
 pub mod config;
 pub mod cron;
 pub mod deltachat;

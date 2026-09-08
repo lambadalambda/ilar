@@ -9,7 +9,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use ilar::agent::{LOOP_EVENT_CAPACITY, LoopEvent, TurnOutcome, loop_event_channel};
 use ilar::config::Config;
 use ilar::delivery::{Disposition, Parcel, disposition};
@@ -348,6 +348,53 @@ impl Driver {
 
     pub fn seats(&self) -> Vec<Arc<Seat>> {
         self.seats.lock().unwrap().values().cloned().collect()
+    }
+
+    /// Close a chat's seat and forget its route: the next message
+    /// opens a fresh session. The old session stays on disk. Whatever
+    /// the seat was running is stopped first.
+    pub async fn close(&self, key: &str) -> Result<()> {
+        let seat = self.seats.lock().unwrap().remove(key);
+        if let Some(seat) = seat {
+            seat.runtime.spawner.shutdown().await;
+            seat.runtime.services.stop_all();
+        }
+        self.routes.update(|routes| routes.unbind(key))
+    }
+
+    /// Every model this configuration can reach, as `provider/id`.
+    pub fn available_models(&self) -> Vec<String> {
+        self.config
+            .available_models()
+            .iter()
+            .map(|model| model.full_id())
+            .collect()
+    }
+
+    /// The model a seat's next turn runs on.
+    pub fn current_model(&self, seat: &Seat) -> Result<String> {
+        Ok(seat
+            .runtime
+            .store
+            .load(&seat.runtime.session_id)?
+            .effective_model())
+    }
+
+    /// Switch a seat's session to `model`, for its next turn on. The
+    /// switch is recorded in the session like one made in the TUI.
+    pub async fn set_model(&self, seat: &Seat, model: &str) -> Result<()> {
+        if !self.available_models().iter().any(|known| known == model) {
+            bail!("no model {model}; /model lists them");
+        }
+        let _turn = seat.turn.lock().await;
+        ilar::runtime::persist_model_change(
+            self.resolver.as_ref(),
+            &seat.runtime.store,
+            &seat.runtime.session_id,
+            model,
+            None,
+        )?;
+        Ok(())
     }
 
     /// Hand a follow-up back after a wait — the seat's writer was held

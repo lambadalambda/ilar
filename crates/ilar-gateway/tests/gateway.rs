@@ -558,6 +558,69 @@ async fn a_soul_file_speaks_for_the_assistant_before_the_coding_instructions() {
 }
 
 #[tokio::test]
+async fn slash_new_starts_a_fresh_session_and_slash_model_lists_and_switches() {
+    let dir = tempfile::tempdir().unwrap();
+    let (gateway, fake) = gateway(dir.path(), vec![says("one"), says("two"), says("three")]);
+    let routes_path = dir.path().join("state/gateway/routes.json");
+    let session_of = |key: &str| {
+        RouteStore::open(routes_path.clone())
+            .unwrap()
+            .snapshot()
+            .session_for(key)
+            .map(str::to_string)
+    };
+
+    fake.inject("hi", "chat-1", "alice").await;
+    fake.wait_for_sent(1, WAIT).await;
+    let first = session_of("fake:chat-1").expect("a session");
+
+    fake.inject("/new", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(2, WAIT).await;
+    assert!(sent[1].text.starts_with("Started a fresh chat"), "{sent:?}");
+    assert_eq!(session_of("fake:chat-1"), None);
+    fake.inject("hi again", "chat-1", "alice").await;
+    fake.wait_for_sent(3, WAIT).await;
+    let second = session_of("fake:chat-1").expect("a new session");
+    assert_ne!(first, second);
+
+    fake.inject("/model", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(4, WAIT).await;
+    assert!(sent[3].text.starts_with("Models:"), "{sent:?}");
+    assert!(
+        sent[3].text.contains("zai/glm-4.7 ← current"),
+        "{}",
+        sent[3].text
+    );
+    assert!(sent[3].text.contains("zai/glm-4.5"), "{}", sent[3].text);
+
+    fake.inject("/model nope/none", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(5, WAIT).await;
+    assert!(
+        sent[4].text.contains("no model nope/none"),
+        "{}",
+        sent[4].text
+    );
+
+    fake.inject("/model zai/glm-4.5", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(6, WAIT).await;
+    assert_eq!(sent[5].text, "Switched to zai/glm-4.5.");
+    fake.inject("and now?", "chat-1", "alice").await;
+    fake.wait_for_sent(7, WAIT).await;
+    let store = ilar::runtime::session_store(&config(dir.path()));
+    let reader = store.load(&second).unwrap();
+    assert_eq!(reader.effective_model(), "zai/glm-4.5");
+    let on_new_model = reader.events().iter().any(|event| {
+        matches!(event, ilar::session::SessionEvent::AssistantMessage { model, .. } if model == "zai/glm-4.5")
+    });
+    assert!(on_new_model);
+
+    fake.inject("/help", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(8, WAIT).await;
+    assert!(sent[7].text.contains("/new"), "{}", sent[7].text);
+    gateway.cancel();
+}
+
+#[tokio::test]
 async fn safe_mode_hides_the_unsafe_tools_from_the_chat_and_its_agents() {
     let dir = tempfile::tempdir().unwrap();
     let settings = GatewayConfig {

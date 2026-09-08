@@ -14,6 +14,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::bus::{Inbound, Outbound, session_key, split_key};
 use crate::channel::Channel;
+use crate::commands::{self, Command};
 use crate::config::{GatewayConfig, gateway_dir};
 use crate::cron::CronStore;
 use crate::driver::{Driver, FollowUp, TurnError, TurnReport, Wiring, log};
@@ -247,6 +248,12 @@ impl Gateway {
 
     async fn handle_inbound(&self, message: Inbound) {
         let key = message.session_key();
+        if let Some(command) = commands::parse(&message.text) {
+            let reply = self.command(&key, &message, command).await;
+            self.deliver(&message.channel, &message.chat_id, &reply)
+                .await;
+            return;
+        }
         let seat = match self
             .driver
             .seat(&key, &message.channel, &message.chat_id, message.is_group)
@@ -288,6 +295,59 @@ impl Gateway {
                 log(&format!("{key}: turn failed: {error:#}"));
                 self.deliver(&message.channel, &message.chat_id, FAILED_REPLY)
                     .await;
+            }
+        }
+    }
+
+    /// A slash command, answered by the gateway itself.
+    async fn command(&self, key: &str, message: &Inbound, command: Command) -> String {
+        match command {
+            Command::Help => commands::HELP.to_string(),
+            Command::Unknown(name) => format!("No command /{name}.\n{}", commands::HELP),
+            Command::New => match self.driver.close(key).await {
+                Ok(()) => "Started a fresh chat. What I remember about you stays.".to_string(),
+                Err(error) => {
+                    log(&format!("{key}: /new failed: {error:#}"));
+                    FAILED_REPLY.to_string()
+                }
+            },
+            Command::Model(None) => {
+                let current = match self
+                    .driver
+                    .seat(key, &message.channel, &message.chat_id, message.is_group)
+                    .await
+                {
+                    Ok(seat) => self.driver.current_model(&seat).ok(),
+                    Err(_) => None,
+                };
+                let mut lines = vec!["Models:".to_string()];
+                for model in self.driver.available_models() {
+                    let mark = if Some(&model) == current.as_ref() {
+                        " ← current"
+                    } else {
+                        ""
+                    };
+                    lines.push(format!("  {model}{mark}"));
+                }
+                lines.push("/model <provider/model> switches.".to_string());
+                lines.join("\n")
+            }
+            Command::Model(Some(model)) => {
+                let seat = match self
+                    .driver
+                    .seat(key, &message.channel, &message.chat_id, message.is_group)
+                    .await
+                {
+                    Ok(seat) => seat,
+                    Err(error) => {
+                        log(&format!("{key}: /model failed: {error:#}"));
+                        return FAILED_REPLY.to_string();
+                    }
+                };
+                match self.driver.set_model(&seat, &model).await {
+                    Ok(()) => format!("Switched to {model}."),
+                    Err(error) => format!("{error:#}"),
+                }
             }
         }
     }

@@ -32,6 +32,11 @@ impl Routes {
             .insert(key.to_string(), session_id.to_string());
     }
 
+    /// Forget a chat's session: the next message starts a new one.
+    pub fn unbind(&mut self, key: &str) {
+        self.sessions.remove(key);
+    }
+
     pub fn touch(&mut self, key: &str, is_group: bool) {
         self.last_active = Some(key.to_string());
         let listed = self.groups.iter().any(|group| group == key);
