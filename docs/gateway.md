@@ -145,7 +145,7 @@ Everything of the assistant's lives in one directory, `gateway.home`,
 | | |
 |---|---|
 | `SOUL.md` | Who it is and how it talks. |
-| `skills/`, `agents/`, `commands/` | Its own; the terminal agent's under `~/.config/ilar` are not read. A symlink shares one. |
+| `skills/`, `agents/`, `commands/` | Its own; the terminal agent's under `~/.config/ilar` are not read, nor the built-in skills, nor a working directory's `.ilar/skills`. A symlink shares one. |
 | `memory/` | The core files, the notes, the daily notes. |
 | `workspace/` | Where its sessions work. |
 | `routes.json`, `cron.json`, `inbox/` | Chats, jobs, notifications. |
@@ -155,6 +155,16 @@ Everything of the assistant's lives in one directory, `gateway.home`,
 Providers, keys and the `[gateway]` table itself stay in `ilar.toml`:
 those are configuration; the home is the agent's own state, which it
 will come to write itself.
+
+## Where it is
+
+After the base instructions every gateway session gets a short block
+about its situation: that it is reached over a chat and answers
+through the message tool, where its home and workspace are, that a
+script can wake it with `ilar-gateway notify` and that it should use
+that from cron jobs, services and long builds to report back, and that
+scheduled turns speak only through the message tool. `ilar-gateway
+prompt` shows it.
 
 ## Who it is: SOUL.md
 

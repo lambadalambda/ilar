@@ -376,3 +376,18 @@ fn verbatim_opencode_skill_files_load() {
     assert!(browser.description.contains("Prefer agent-browser over"));
     assert!(browser.body.contains("agent-browser"), "body preserved");
 }
+
+#[test]
+fn an_own_only_store_lists_the_user_dir_and_nothing_else() {
+    let user = tempfile::tempdir().unwrap();
+    write(
+        &user.path().join("skills/deploy.md"),
+        "---\ndescription = \"How we deploy\"\n---\nRun deploy.sh.\n",
+    );
+    let skills = SkillStore::own_only(user.path().into()).list().unwrap();
+    let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, ["deploy"]);
+    // The ordinary store on the same dir has the built-ins too.
+    let with_builtins = store(user.path(), user.path()).list().unwrap();
+    assert!(with_builtins.iter().any(|s| s.name == "worktree-isolation"));
+}

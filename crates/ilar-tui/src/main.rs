@@ -988,6 +988,7 @@ async fn run_exec(config: &ilar::config::Config, args: ExecArgs) -> Result<i32> 
             ),
             context_files: None,
             user_dir: None,
+            own_skills_only: false,
         },
     )?
     .start(config)?;
@@ -1196,6 +1197,7 @@ async fn main() -> Result<()> {
                 ),
                 context_files: None,
                 user_dir: None,
+                own_skills_only: false,
             },
         )?;
         if args.print_prompt {

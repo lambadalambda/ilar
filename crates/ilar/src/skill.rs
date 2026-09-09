@@ -127,29 +127,47 @@ fn skill_files(dir: &std::path::Path) -> anyhow::Result<Vec<(String, PathBuf)>> 
 
 pub struct SkillStore {
     user_dir: PathBuf,
-    project_dir: PathBuf,
+    /// `None` for a store that reads the user dir alone.
+    project_dir: Option<PathBuf>,
+    builtins: bool,
 }
 
 impl SkillStore {
     pub fn new(user_dir: PathBuf, project_dir: PathBuf) -> Self {
         Self {
             user_dir,
-            project_dir,
+            project_dir: Some(project_dir),
+            builtins: true,
+        }
+    }
+
+    /// The user dir's skills and nothing else: no built-ins, no
+    /// project `.ilar/skills`.
+    pub fn own_only(user_dir: PathBuf) -> Self {
+        Self {
+            user_dir,
+            project_dir: None,
+            builtins: false,
         }
     }
 
     /// All available skills: built-ins, user dir, project .ilar/skills
     /// (later wins by name).
     pub fn list(&self) -> anyhow::Result<Vec<Skill>> {
-        let mut skills = vec![
-            parse_skill_md("worktree-isolation", WORKTREE_ISOLATION).expect("builtin skill parses"),
-            parse_skill_md("mcp-via-cli", MCP_VIA_CLI).expect("builtin skill parses"),
-        ];
-        for (dir, sub) in [
-            (&self.user_dir, "skills"),
-            (&self.project_dir, ".ilar/skills"),
-        ] {
-            let dir = dir.join(sub);
+        let mut skills = if self.builtins {
+            vec![
+                parse_skill_md("worktree-isolation", WORKTREE_ISOLATION)
+                    .expect("builtin skill parses"),
+                parse_skill_md("mcp-via-cli", MCP_VIA_CLI).expect("builtin skill parses"),
+            ]
+        } else {
+            Vec::new()
+        };
+        let mut dirs = vec![self.user_dir.join("skills")];
+        if let Some(project) = &self.project_dir {
+            dirs.push(project.join(".ilar/skills"));
+        }
+        for dir in dirs {
             for (name, path) in skill_files(&dir)? {
                 let text = std::fs::read_to_string(&path)
                     .with_context(|| format!("reading skill definition {}", path.display()))?;

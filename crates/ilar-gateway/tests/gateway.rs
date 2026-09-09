@@ -580,6 +580,14 @@ async fn a_soul_file_speaks_for_the_assistant_before_the_coding_instructions() {
     assert!(prompt.contains("Greets people warmly"), "{prompt}");
     assert!(!prompt.contains("commit often"), "{prompt}");
     assert!(!prompt.contains("Deploys to production"), "{prompt}");
+    // It is told where it is, and lists only its own skills.
+    assert!(prompt.contains("# Where you are"), "{prompt}");
+    assert!(prompt.contains("ilar-gateway notify"), "{prompt}");
+    assert!(
+        prompt.contains(&dir.path().join("state/gateway").display().to_string()),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("worktree-isolation"), "{prompt}");
     gateway.cancel();
 }
 

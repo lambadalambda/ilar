@@ -25,6 +25,7 @@ pub mod message;
 pub mod policy;
 pub mod review;
 pub mod routes;
+pub mod situation;
 pub mod skills;
 pub mod status;
 pub mod weekly;

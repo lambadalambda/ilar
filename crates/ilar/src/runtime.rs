@@ -52,6 +52,9 @@ pub struct RuntimeOptions {
     /// from; the user config directory when unset. An assistant reads
     /// them from its home.
     pub user_dir: Option<PathBuf>,
+    /// Skills from `user_dir` alone: no built-ins, no project
+    /// `.ilar/skills`. For an assistant that keeps its own.
+    pub own_skills_only: bool,
 }
 
 /// The session a driver is about to run, before anything is written.
@@ -307,10 +310,11 @@ impl RuntimePlan {
         crate::model::variant_options(&model, reasoning.as_deref())
             .with_context(|| format!("invalid reasoning for {model}"))?;
 
-        let skill_store = Arc::new(crate::skill::SkillStore::new(
-            user_dir.clone(),
-            config.dirs().1.to_path_buf(),
-        ));
+        let skill_store = Arc::new(if options.own_skills_only {
+            crate::skill::SkillStore::own_only(user_dir.clone())
+        } else {
+            crate::skill::SkillStore::new(user_dir.clone(), config.dirs().1.to_path_buf())
+        });
         let skill_listing = skill_store
             .listing_prompt()
             .context("loading skill definitions")?;

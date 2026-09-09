@@ -574,8 +574,18 @@ pub fn plan(
             // the terminal agent's configuration.
             context_files: Some(ilar::config::SOUL_FILES),
             user_dir: Some(gateway.home(config)),
+            // Its own skills only: not the built-ins, not the working
+            // directory's.
+            own_skills_only: true,
         },
     )?;
+    // Where it is: reached over a chat, with a home, wakeable from a
+    // script. Before the memory, which is about the person.
+    plan.system_prompt.push_str("\n\n");
+    plan.system_prompt.push_str(&crate::situation::block(
+        &gateway.home(config),
+        &gateway.workspace(config),
+    ));
     // The policy reaches the subagents too: an agent definition's
     // own restriction is narrowed before the spawner is built from
     // it, and the chat's registry is filtered after.
