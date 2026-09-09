@@ -739,14 +739,17 @@ async fn a_message_during_a_turn_steers_it_and_one_reply_covers_both() {
     };
     let (gateway, fake) = gateway_with(
         dir.path(),
+        // The steer lands after the first tool; the second gives the
+        // status line time to show it before the reply takes it down.
         vec![
-            calls("bash", serde_json::json!({"command": "sleep 2"})),
+            calls("bash", serde_json::json!({"command": "sleep 1"})),
+            calls("bash", serde_json::json!({"command": "sleep 1"})),
             says("done, and noted"),
         ],
         settings,
     );
     fake.inject("run something slow", "chat-1", "alice").await;
-    tokio::time::sleep(Duration::from_millis(600)).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
     fake.inject("also this", "chat-1", "alice").await;
     let sent = fake.wait_for_sent(1, Duration::from_secs(15)).await;
     assert_eq!(sent.len(), 1, "{sent:?}");
