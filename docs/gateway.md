@@ -30,7 +30,11 @@ journalctl --user -u ilar-gateway -f
 
 It restarts on failure. After editing `ilar.toml` or `SOUL.md`,
 `systemctl --user restart ilar-gateway`: configuration is read at
-start, and a chat's prompt when its session opens. Delta Chat's
+start, and a chat's prompt when its session opens. The last active
+chat is told on the way: "⏹ ilar-gateway stopping", then
+"▶ ilar-gateway 0.2.0 (f3cd7a7) started · model …" with the commit
+the binary was built from, so a deploy is visible where you are
+looking. `gateway.announce = false` keeps it quiet. Delta Chat's
 account survives restarts; the invite is logged at each start and
 printed by `ilar-gateway invite`.
 
@@ -64,6 +68,7 @@ declares them is warned about and ignored.
 | `gateway.weekly.archive_after_days` | `90` | Unused this long, it is moved to `skills/.archive/`. |
 | `gateway.status` | `true` | A status line in the chat while a turn runs. |
 | `gateway.status_interval_secs` | `4` | The least time between two edits of it. |
+| `gateway.announce` | `true` | A line to the last active chat when the gateway starts and stops. |
 | `channels.deltachat.*` | — | The Delta Chat adapter; see below. |
 
 ### Delta Chat

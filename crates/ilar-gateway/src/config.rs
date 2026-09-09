@@ -43,6 +43,10 @@ pub struct GatewayConfig {
     /// reply comes. Off with `status = false`.
     #[serde(default = "default_true")]
     pub status: bool,
+    /// One line to the last active chat when the gateway starts and
+    /// when it stops, so a restart is visible where the person looks.
+    #[serde(default = "default_true")]
+    pub announce: bool,
     /// Seconds between two edits of the status line: on Delta Chat
     /// every edit is a message on the wire.
     #[serde(default = "default_status_interval_secs")]
@@ -82,6 +86,7 @@ impl Default for GatewayConfig {
             scheduler_tick_secs: default_scheduler_tick_secs(),
             memory: Default::default(),
             status: true,
+            announce: true,
             status_interval_secs: default_status_interval_secs(),
             review: Default::default(),
             weekly: Default::default(),

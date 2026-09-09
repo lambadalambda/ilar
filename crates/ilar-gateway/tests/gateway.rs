@@ -843,6 +843,47 @@ async fn a_skill_the_assistant_writes_is_listed_next_session_and_loads_now() {
 }
 
 #[tokio::test]
+async fn the_gateway_announces_its_stop_and_its_start_to_the_last_chat() {
+    let dir = tempfile::tempdir().unwrap();
+    let announcing = GatewayConfig {
+        announce: true,
+        ..GatewayConfig::default()
+    };
+    let (gateway, fake) = gateway_with(dir.path(), vec![says("hi")], announcing.clone());
+    // Nothing at start: no chat has written yet.
+    fake.inject("hello", "chat-1", "alice").await;
+    fake.wait_for_sent(1, WAIT).await;
+    gateway.cancel();
+    let sent = fake.wait_for_sent(2, WAIT).await;
+    let texts: Vec<&str> = sent.iter().map(|m| m.text.as_str()).collect();
+    assert_eq!(texts, ["hi", "⏹ ilar-gateway stopping"], "{sent:?}");
+
+    // The next gateway on the same home says hello to that chat.
+    let (gateway, fake) = gateway_with(dir.path(), vec![], announcing);
+    let sent = fake.wait_for_sent(1, WAIT).await;
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0].chat_id, "chat-1");
+    assert!(
+        sent[0].text.starts_with("▶ ilar-gateway 0.") && sent[0].text.contains("started · model "),
+        "{}",
+        sent[0].text
+    );
+    gateway.cancel();
+    fake.wait_for_sent(2, WAIT).await;
+
+    // And keeps quiet when told to.
+    let quiet = GatewayConfig {
+        announce: false,
+        ..GatewayConfig::default()
+    };
+    let (gateway, fake) = gateway_with(dir.path(), vec![], quiet);
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    gateway.cancel();
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert!(fake.sent().is_empty(), "{:?}", fake.sent());
+}
+
+#[tokio::test]
 async fn the_weekly_review_is_a_job_the_gateway_owns_and_speaks_to_the_last_chat() {
     let dir = tempfile::tempdir().unwrap();
     let settings = GatewayConfig {

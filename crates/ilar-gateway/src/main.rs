@@ -9,6 +9,29 @@ use ilar_gateway::driver::log;
 use ilar_gateway::gateway::Gateway;
 use ilar_gateway::inbox::{self, InboxMessage};
 
+/// Ctrl-C, or the SIGTERM systemd stops a service with.
+async fn stop_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut term = match signal(SignalKind::terminate()) {
+            Ok(term) => term,
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
 #[derive(Parser)]
 #[command(
     name = "ilar-gateway",
@@ -106,10 +129,10 @@ async fn run(config: ilar::config::Config, gateway: GatewayConfig) -> Result<()>
         Gateway::new(config, gateway, resolver, channels).context("starting the gateway")?;
     let stopper = gateway.clone();
     tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            log("stopping");
-            stopper.cancel();
-        }
+        stop_signal().await;
+        log("stopping");
+        stopper.cancel();
     });
+    log(&format!("{} starting", ilar_gateway::gateway::build_line()));
     gateway.run().await
 }

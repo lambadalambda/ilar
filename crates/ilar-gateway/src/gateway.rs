@@ -82,6 +82,21 @@ const FAILURE_CAUSE_CHARS: usize = 400;
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(15);
 /// The pause before a channel that stopped is started again.
 const CHANNEL_RESTART: Duration = Duration::from_secs(5);
+/// How long the start announcement keeps trying while the channel
+/// connects, and how long the stop announcement may take.
+const ANNOUNCE_RETRY: Duration = Duration::from_secs(2);
+const ANNOUNCE_TRIES: u32 = 30;
+const ANNOUNCE_GRACE: Duration = Duration::from_secs(5);
+
+/// What the start line says about this build.
+pub fn build_line() -> String {
+    let commit = env!("ILAR_GATEWAY_COMMIT");
+    if commit.is_empty() {
+        format!("ilar-gateway {}", env!("CARGO_PKG_VERSION"))
+    } else {
+        format!("ilar-gateway {} ({commit})", env!("CARGO_PKG_VERSION"))
+    }
+}
 /// The longest text the gateway itself sends in one message: a chat
 /// folds anything much longer behind a "[...]".
 const DELIVERY_PIECE_CHARS: usize = 700;
@@ -268,12 +283,16 @@ impl Gateway {
                 }
             })
         };
+        let mut handlers = tokio::task::JoinSet::new();
+        if self.settings.announce {
+            let gateway = self.clone();
+            handlers.spawn(async move { gateway.announce_start().await });
+        }
         let mut inbox_tick = tokio::time::interval(Duration::from_secs(1));
         let mut scheduler_tick = tokio::time::interval(Duration::from_secs(
             self.settings.scheduler_tick_secs.max(1),
         ));
         let mut last_heartbeat: HashMap<String, Instant> = HashMap::new();
-        let mut handlers = tokio::task::JoinSet::new();
         loop {
             tokio::select! {
                 () = self.cancel.cancelled() => break,
@@ -300,6 +319,10 @@ impl Gateway {
                     }
                 }
             }
+        }
+        // Say goodbye while the channels are still up.
+        if self.settings.announce {
+            let _ = tokio::time::timeout(ANNOUNCE_GRACE, self.announce_stop()).await;
         }
         // Turns in flight see the cancellation and wind down; give them
         // the time to, then stop waiting.
@@ -833,6 +856,74 @@ impl Gateway {
         };
         if let Err(error) = target.send(message).await {
             log(&format!("{key}: send failed: {error:#}"));
+        }
+    }
+
+    /// The chat the gateway announces itself to: the last one heard
+    /// from, if any.
+    fn announce_target(&self) -> Option<(String, String)> {
+        let last = self.routes.snapshot().last_active?;
+        split_key(&last).map(|(channel, chat)| (channel.to_string(), chat.to_string()))
+    }
+
+    /// One line to the last active chat once the gateway is up. The
+    /// channel may still be connecting, so a failed send is tried
+    /// again for a while; a chat that has never written gets nothing.
+    async fn announce_start(&self) {
+        let Some((channel, chat_id)) = self.announce_target() else {
+            return;
+        };
+        let Some(target) = self.channels.get(&channel).cloned() else {
+            return;
+        };
+        let text = format!(
+            "▶ {} started · model {}",
+            build_line(),
+            self.driver.default_model()
+        );
+        for attempt in 1..=ANNOUNCE_TRIES {
+            let message = Outbound {
+                channel: channel.clone(),
+                chat_id: chat_id.clone(),
+                text: text.clone(),
+                media: Vec::new(),
+            };
+            match target.send(message).await {
+                Ok(()) => return,
+                Err(error) if attempt == ANNOUNCE_TRIES => {
+                    log(&format!(
+                        "{channel}:{chat_id}: start not announced: {error:#}"
+                    ));
+                }
+                Err(_) => {
+                    tokio::select! {
+                        () = self.cancel.cancelled() => return,
+                        () = tokio::time::sleep(ANNOUNCE_RETRY) => {}
+                    }
+                }
+            }
+        }
+    }
+
+    /// One line as the gateway goes down, sent directly: the queue is
+    /// about to close and the channels with it.
+    async fn announce_stop(&self) {
+        let Some((channel, chat_id)) = self.announce_target() else {
+            return;
+        };
+        let Some(target) = self.channels.get(&channel) else {
+            return;
+        };
+        let message = Outbound {
+            channel: channel.clone(),
+            chat_id: chat_id.clone(),
+            text: "⏹ ilar-gateway stopping".into(),
+            media: Vec::new(),
+        };
+        if let Err(error) = target.send(message).await {
+            log(&format!(
+                "{channel}:{chat_id}: stop not announced: {error:#}"
+            ));
         }
     }
 
