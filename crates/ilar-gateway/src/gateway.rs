@@ -90,6 +90,7 @@ const CHANNEL_RESTART: Duration = Duration::from_secs(5);
 const ANNOUNCE_RETRY: Duration = Duration::from_secs(2);
 const ANNOUNCE_TRIES: u32 = 30;
 const ANNOUNCE_GRACE: Duration = Duration::from_secs(5);
+const ANNOUNCE_SETTLE: Duration = Duration::from_millis(1500);
 
 /// What the start line says about this build.
 pub fn build_line() -> String {
@@ -971,7 +972,12 @@ impl Gateway {
             media: Vec::new(),
         };
         match target.send(message).await {
-            Ok(()) => log(&format!("{channel}:{chat_id}: stop announced")),
+            Ok(()) => {
+                log(&format!("{channel}:{chat_id}: stop announced"));
+                // A channel may only have queued it: give the wire a
+                // moment before the channel goes down with the process.
+                tokio::time::sleep(ANNOUNCE_SETTLE).await;
+            }
             Err(error) => log(&format!(
                 "{channel}:{chat_id}: stop not announced: {error:#}"
             )),
