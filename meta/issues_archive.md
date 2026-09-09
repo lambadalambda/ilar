@@ -331,3 +331,5 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [The assistant writes its skills](issues/the-assistant-writes-its-skills.md)
 - [x] [A weekly review of memory and skills](issues/a-weekly-review-of-memory-and-skills.md)
 - [x] [The gateway announces itself](issues/the-gateway-announces-itself.md)
+- [x] [Image generation can be switched off](issues/image-generation-can-be-switched-off.md)
+- [x] [The chosen model survives a restart](issues/the-chosen-model-survives-a-restart.md)
