@@ -112,7 +112,8 @@ reserved for the built-in.
 ## Image generation
 
 With the openai provider configured — a ChatGPT login or an API key —
-the model has an `image_gen` tool: `{prompt, size?, quality?,
+and unless `providers.openai.image_gen = false`, the model has an
+`image_gen` tool: `{prompt, size?, quality?,
 reference_paths?}`. It posts to the account's images endpoint with
 model `gpt-image-2` (the same call Codex makes), writes the PNG under
 `<state dir>/images/<session>/<call>.png`, returns the path, and attaches

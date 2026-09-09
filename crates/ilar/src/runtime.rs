@@ -509,10 +509,14 @@ impl RuntimePlan {
 
 /// Image generation rides the openai provider's own credentials: the
 /// ChatGPT login when that is the configured auth, the API key
-/// otherwise, nothing when neither is set. Images land under the state
+/// otherwise, nothing when neither is set or when the provider says
+/// `image_gen = false`. Images land under the state
 /// directory beside sessions and spills.
 fn image_gen_backend(config: &Config) -> Option<crate::tools::image_gen::ImageGenBackend> {
     let settings = config.providers.get("openai")?;
+    if !settings.image_gen {
+        return None;
+    }
     let images_dir = config.state_dir().join("images");
     if settings.auth.as_deref() == Some("chatgpt") {
         return Some(crate::tools::image_gen::ImageGenBackend::with_chatgpt_auth(
@@ -533,6 +537,30 @@ fn image_gen_backend(config: &Config) -> Option<crate::tools::image_gen::ImageGe
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_generation_follows_the_openai_credential_unless_switched_off() {
+        let config_with = |section: &str| {
+            let guard = tempfile::tempdir().unwrap();
+            let user = guard.path().join("config");
+            std::fs::create_dir_all(&user).unwrap();
+            std::fs::write(user.join("ilar.toml"), section).unwrap();
+            let config = crate::config::Loader::no_env()
+                .config_dir(user)
+                .state_dir(guard.path().join("state"))
+                .resolve()
+                .unwrap();
+            image_gen_backend(&config).is_some()
+        };
+        assert!(config_with("[providers.openai]\napi_key = \"k\"\n"));
+        assert!(config_with(
+            "[providers.openai]\napi_key = \"k\"\nimage_gen = true\n"
+        ));
+        assert!(!config_with(
+            "[providers.openai]\napi_key = \"k\"\nimage_gen = false\n"
+        ));
+        assert!(!config_with("[providers.zai]\napi_key = \"k\"\n"));
+    }
 
     /// Resuming must not smuggle back the project file the current
     /// launch refused: the prompt is rebuilt from configuration, this

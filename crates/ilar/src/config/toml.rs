@@ -28,6 +28,9 @@ pub struct ProviderConfig {
     pub api_key: Option<String>,
     /// "chatgpt" -> OAuth mode (run `ilar login`).
     pub auth: Option<String>,
+    /// openai only: `false` leaves the `image_gen` tool out even
+    /// though the credential would enable it.
+    pub image_gen: Option<bool>,
 }
 
 /// A `[models.<name>]` entry: one OpenAI-compatible endpoint, reachable
@@ -479,6 +482,9 @@ pub struct ProviderConfigResolved {
     pub base_url: Option<String>,
     pub api_key: Option<String>,
     pub auth: Option<String>,
+    /// Whether the credential also brings image generation; only the
+    /// openai provider reads it.
+    pub image_gen: bool,
 }
 
 /// Loader with overridable directories and environment (tests pass env
@@ -877,6 +883,7 @@ impl Config {
                 base_url: None,
                 api_key: Some("test-openai-key".into()),
                 auth: None,
+                image_gen: true,
             },
         );
         providers.insert(
@@ -885,6 +892,7 @@ impl Config {
                 base_url: None,
                 api_key: Some("test-zai-key".into()),
                 auth: None,
+                image_gen: true,
             },
         );
         Self {
@@ -964,6 +972,9 @@ fn resolve_providers(
                     api_key: field(|config| config.api_key.clone())
                         .or_else(|| env.env_lookup(kind.api_key_env)),
                     auth: field(|config| config.auth.clone()),
+                    image_gen: configured
+                        .and_then(|config| config.image_gen)
+                        .unwrap_or(true),
                 },
             )
         })
@@ -1094,6 +1105,7 @@ fn merge_file(base: FileConfig, text: &str, origin: &Path) -> anyhow::Result<Fil
                 base_url,
                 api_key,
                 auth,
+                image_gen,
             );
         }
     }
@@ -1421,6 +1433,13 @@ fn validate_providers(
             anyhow::bail!("{}: unsupported provider {name:?}", origin.display());
         };
         validate_provider_value(origin, kind.name, "auth", &provider.auth, kind.auth_values)?;
+        if provider.image_gen.is_some() && kind.name != "openai" {
+            anyhow::bail!(
+                "{}: providers.{}.image_gen: only the openai provider generates images",
+                origin.display(),
+                kind.name
+            );
+        }
     }
     Ok(())
 }
@@ -1586,6 +1605,20 @@ mod tests {
                 .to_string(),
             "ilar.toml: unsupported provider \"acme\""
         );
+        // Only openai generates images, so only openai takes the switch.
+        let no_images = provider_section([(
+            "acme",
+            ProviderConfig {
+                image_gen: Some(false),
+                ..ProviderConfig::default()
+            },
+        )]);
+        assert_eq!(
+            validate_providers(&no_images, origin, &kinds)
+                .unwrap_err()
+                .to_string(),
+            "ilar.toml: providers.acme.image_gen: only the openai provider generates images"
+        );
     }
 
     #[test]
@@ -1594,6 +1627,7 @@ mod tests {
             base_url: None,
             api_key: Some(format!("{name}-key")),
             auth: None,
+            image_gen: true,
         };
         let providers: HashMap<String, ProviderConfigResolved> = ["openai", "zai"]
             .into_iter()

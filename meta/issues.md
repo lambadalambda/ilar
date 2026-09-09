@@ -132,3 +132,5 @@ milestones 15–17 stay filed — they come back when the feature does.*
 - [ ] [Test repositories never sign](issues/test-repositories-never-sign.md)
 - [ ] [Provider URLs are structural](issues/provider-urls-are-structural.md)
 
+- [ ] [Image generation can be switched off](issues/image-generation-can-be-switched-off.md)
+- [ ] [The chosen model survives a restart](issues/the-chosen-model-survives-a-restart.md)
