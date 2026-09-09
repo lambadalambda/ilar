@@ -81,7 +81,15 @@ fn messages(text: &str, chat: Option<&str>) -> Vec<ProviderEvent> {
 
 /// A gateway on a fake channel and a scripted provider, running.
 fn gateway(dir: &Path, turns: Vec<Vec<ProviderEvent>>) -> (Arc<Gateway>, Arc<FakeChannel>) {
-    gateway_with(dir, turns, GatewayConfig::default())
+    // No goodbye on cancel: a test counting sends after it would flake.
+    gateway_with(
+        dir,
+        turns,
+        GatewayConfig {
+            announce: false,
+            ..GatewayConfig::default()
+        },
+    )
 }
 
 fn gateway_with(
@@ -934,7 +942,8 @@ async fn the_gateway_announces_its_stop_and_its_start_to_the_last_chat() {
     assert_eq!(sent.len(), 1, "{sent:?}");
     assert_eq!(sent[0].chat_id, "chat-1");
     assert!(
-        sent[0].text.starts_with("▶ ilar-gateway 0.") && sent[0].text.contains("started · model "),
+        sent[0].text.starts_with("▶ ilar-gateway 0.")
+            && sent[0].text.contains("started · default model "),
         "{}",
         sent[0].text
     );

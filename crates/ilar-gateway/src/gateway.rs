@@ -462,41 +462,28 @@ impl Gateway {
                     failed_reply("/new", &error)
                 }
             },
-            Command::Model {
-                model: None,
-                save: true,
-            } => {
+            Command::Model { model: None, save } => {
                 let current = match self
                     .driver
                     .seat(key, &message.channel, &message.chat_id, message.is_group)
                     .await
                 {
-                    Ok(seat) => self.driver.current_model(&seat),
+                    Ok(seat) => self.driver.chosen_model(&seat),
                     Err(error) => Err(error),
                 };
-                match current.and_then(|model| {
-                    self.driver.save_default_model(&model)?;
-                    Ok(model)
-                }) {
-                    Ok(model) => format!("{model} is the default for new chats now."),
-                    Err(error) => {
-                        log(&format!("{key}: /model --save failed: {error:#}"));
-                        failed_reply("/model --save", &error)
-                    }
+                if save {
+                    return match current.and_then(|model| {
+                        self.driver.save_default_model(&model)?;
+                        Ok(model)
+                    }) {
+                        Ok(model) => format!("{model} is the default for new chats now."),
+                        Err(error) => {
+                            log(&format!("{key}: /model --save failed: {error:#}"));
+                            failed_reply("/model --save", &error)
+                        }
+                    };
                 }
-            }
-            Command::Model {
-                model: None,
-                save: false,
-            } => {
-                let current = match self
-                    .driver
-                    .seat(key, &message.channel, &message.chat_id, message.is_group)
-                    .await
-                {
-                    Ok(seat) => self.driver.current_model(&seat).ok(),
-                    Err(_) => None,
-                };
+                let current = current.ok();
                 // Grouped by provider, one line each, so the list fits
                 // what a chat shows without folding.
                 let mut by_provider: std::collections::BTreeMap<String, Vec<String>> =
@@ -937,7 +924,7 @@ impl Gateway {
             return;
         };
         let text = format!(
-            "▶ {} started · model {}",
+            "▶ {} started · default model {}",
             build_line(),
             self.driver.default_model()
         );

@@ -16,10 +16,11 @@ WorkingDirectory=%h
 Restart=on-failure
 RestartSec=5
 # SIGTERM to the gateway only: it says goodbye through the rpc server
-# and stops it; anything left is killed after. The stop waits for the
-# gateway's own grace (fifteen seconds for turns in flight).
+# and stops it; anything left is killed after. The stop waits out the
+# gateway's own graces: fifteen seconds for turns in flight, five per
+# subagent abort, fifteen for the last replies to leave.
 KillMode=mixed
-TimeoutStopSec=25
+TimeoutStopSec=45
 # The rpc server and any tool the assistant runs are looked up here.
 Environment=PATH=%h/.local/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin
 

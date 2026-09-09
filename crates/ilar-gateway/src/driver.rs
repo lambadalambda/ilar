@@ -394,13 +394,29 @@ impl Driver {
             .collect()
     }
 
-    /// The model a seat's next turn runs on.
+    /// The model a seat's next turn runs on: a switch asked for during
+    /// a running turn counts, since that is what the next turn takes.
+    pub fn chosen_model(&self, seat: &Seat) -> Result<String> {
+        if let Some(pending) = seat.pending_model.lock().unwrap().clone() {
+            return Ok(pending);
+        }
+        self.current_model(seat)
+    }
+
+    /// The model the seat's session records.
     pub fn current_model(&self, seat: &Seat) -> Result<String> {
         Ok(seat
             .runtime
             .store
             .load(&seat.runtime.session_id)?
             .effective_model())
+    }
+
+    fn known_model(&self, model: &str) -> Result<()> {
+        if !self.available_models().iter().any(|known| known == model) {
+            bail!("no model {model}; /model lists them");
+        }
+        Ok(())
     }
 
     /// A question over the seat's conversation, answered without
@@ -451,9 +467,7 @@ impl Driver {
 
     /// Make `model` the default for new chats, in `<home>/model`.
     pub fn save_default_model(&self, model: &str) -> Result<()> {
-        if !self.available_models().iter().any(|known| known == model) {
-            bail!("no model {model}; /model lists them");
-        }
+        self.known_model(model)?;
         crate::routes::write_atomically(
             &self.gateway.home(&self.config).join(SAVED_MODEL_FILE),
             format!("{model}\n").as_bytes(),
@@ -464,9 +478,7 @@ impl Driver {
     /// is idle; when a turn is running, recorded as that turn ends, so
     /// the answer never waits behind it.
     pub fn set_model(&self, seat: &Seat, model: &str) -> Result<ModelSwitch> {
-        if !self.available_models().iter().any(|known| known == model) {
-            bail!("no model {model}; /model lists them");
-        }
+        self.known_model(model)?;
         match seat.turn.try_lock() {
             Ok(_idle) => {
                 self.persist_model(seat, model)?;

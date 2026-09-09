@@ -32,7 +32,7 @@ It restarts on failure. After editing `ilar.toml` or `SOUL.md`,
 `systemctl --user restart ilar-gateway`: configuration is read at
 start, and a chat's prompt when its session opens. The last active
 chat is told on the way: "⏹ ilar-gateway stopping", then
-"▶ ilar-gateway 0.2.0 (f3cd7a7) started · model …" with the commit
+"▶ ilar-gateway 0.2.0 (f3cd7a7) started · default model …" with the commit
 the binary was built from, so a deploy is visible where you are
 looking. `gateway.announce = false` keeps it quiet. Delta Chat's
 account survives restarts; the invite is logged at each start and
@@ -131,7 +131,7 @@ A message that is a slash command is answered by the gateway itself:
 |---|---|
 | `/new` | A fresh session for this chat, on the configured model. The old one stays on disk; memory stays. |
 | `/model` | The current model, then the models this configuration can reach by provider. |
-| `/model <provider/model>` | Switch this chat. Recorded at once when the chat is idle, or as the running turn ends; the reply says which. The switch is the session's and outlives a restart. |
+| `/model <provider/model>` | Switch this chat. Recorded at once when the chat is idle, or as the running turn ends; the reply says which. The switch is the session's and outlives a restart; a session whose model is no longer configured cannot be resumed, and the chat starts over on the default. |
 | `/model <provider/model> --save`, `/model --save` | Also make it, or the chat's current model, the default for new chats: kept as `<home>/model`, above `gateway.model`. |
 | `/pending` | What the review staged, when approval is on. |
 | `/approve [id\|all]`, `/reject [id\|all]` | Decide on it. |
