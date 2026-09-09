@@ -48,6 +48,10 @@ pub struct RuntimeOptions {
     /// [`crate::config::CONTEXT_FILES`] when unset. An assistant asks
     /// for [`crate::config::SOUL_FILES`].
     pub context_files: Option<&'static [&'static str]>,
+    /// Where the instruction file, skills, agents and commands are read
+    /// from; the user config directory when unset. An assistant reads
+    /// them from its home.
+    pub user_dir: Option<PathBuf>,
 }
 
 /// The session a driver is about to run, before anything is written.
@@ -67,6 +71,7 @@ pub struct RuntimePlan {
     pub skipped_project_instructions: Option<&'static str>,
     skill_store: Arc<crate::skill::SkillStore>,
     persisted_model: Option<String>,
+    user_dir: PathBuf,
     cwd: PathBuf,
     questions: bool,
     project_instructions: ProjectInstructions,
@@ -269,7 +274,13 @@ impl RuntimePlan {
             .and_then(|session| session.meta())
             .map(|meta| meta.agent.clone());
         let agent_name = selected_agent_name(options.agent.as_deref(), persisted_agent.as_deref());
-        let agents = config.agents().context("loading agent definitions")?;
+        let user_dir = options
+            .user_dir
+            .clone()
+            .unwrap_or_else(|| config.dirs().0.to_path_buf());
+        let agents = config
+            .agents_from(&user_dir)
+            .context("loading agent definitions")?;
         let agent = agents
             .iter()
             .find(|candidate| candidate.name == agent_name)
@@ -297,7 +308,7 @@ impl RuntimePlan {
             .with_context(|| format!("invalid reasoning for {model}"))?;
 
         let skill_store = Arc::new(crate::skill::SkillStore::new(
-            config.dirs().0.to_path_buf(),
+            user_dir.clone(),
             config.dirs().1.to_path_buf(),
         ));
         let skill_listing = skill_store
@@ -311,19 +322,17 @@ impl RuntimePlan {
             .collect();
         // Commands are never listed in the system prompt: unlike skills
         // they are only ever invoked by the user.
-        let commands = crate::command::CommandStore::new(
-            config.dirs().0.to_path_buf(),
-            config.dirs().1.to_path_buf(),
-        )
-        .list()
-        .context("loading commands")?;
+        let commands =
+            crate::command::CommandStore::new(user_dir.clone(), config.dirs().1.to_path_buf())
+                .list()
+                .context("loading commands")?;
 
         let project_instructions = selected_project_instructions(
             options.project_instructions,
             config.general.project_instructions,
         );
         let assembled = system_prompt_with(
-            config.dirs().0,
+            &user_dir,
             &options.cwd,
             project_instructions,
             options
@@ -351,6 +360,7 @@ impl RuntimePlan {
             skipped_project_instructions,
             skill_store,
             persisted_model,
+            user_dir,
             cwd: options.cwd.clone(),
             questions: options.questions,
             project_instructions,
@@ -427,7 +437,7 @@ impl RuntimePlan {
                 config.subagents.max_depth,
                 self.project_instructions,
             )?
-            .with_user_config_dir(config.dirs().0.to_path_buf())
+            .with_user_config_dir(self.user_dir.clone())
             // Every published notification also lands here until its
             // delivery is provable from the parent's log, so quitting or
             // crashing with one in flight delays it instead of losing it.

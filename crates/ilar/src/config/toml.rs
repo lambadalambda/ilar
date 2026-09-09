@@ -796,9 +796,15 @@ impl Config {
 
     /// Markdown agents from the config dir merged over built-ins.
     pub fn agents(&self) -> anyhow::Result<Vec<AgentDefinition>> {
+        self.agents_from(&self.user_dir)
+    }
+
+    /// The same, with another directory standing in for the user's —
+    /// an assistant's home, whose `agents/` are its own.
+    pub fn agents_from(&self, user_dir: &Path) -> anyhow::Result<Vec<AgentDefinition>> {
         let mut agents = AgentDefinition::builtins();
         for dir in [
-            self.user_dir.join("agents"),
+            user_dir.join("agents"),
             self.project_dir.join(".ilar/agents"),
         ] {
             for path in markdown_files(&dir)? {
