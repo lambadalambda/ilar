@@ -890,7 +890,11 @@ impl Gateway {
                 if let Some(last) = last_edit {
                     let due = last + interval;
                     loop {
+                        // Once due, post what we have: a line arriving
+                        // in the same instant waits its own interval,
+                        // so every line shows when the interval is zero.
                         tokio::select! {
+                            biased;
                             () = tokio::time::sleep_until(due) => break,
                             newer = rx.recv() => match newer {
                                 Some(newer) => line = newer,
