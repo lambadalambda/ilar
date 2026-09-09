@@ -744,9 +744,11 @@ async fn a_status_line_follows_the_turn_and_vanishes_before_the_reply() {
         Some(&Seen::StatusPosted("working…".into())),
         "{seen:?}"
     );
+    // "calling bash…" or "running bash: echo hi": edits coalesce, and
+    // on a fast machine the tool is done before the second one posts.
     assert!(
         seen.iter()
-            .any(|s| matches!(s, Seen::StatusEdited(line) if line.starts_with("running bash"))),
+            .any(|s| matches!(s, Seen::StatusEdited(line) if line.contains("bash"))),
         "{seen:?}"
     );
     let cleared = seen
