@@ -15,6 +15,11 @@ ExecStart=%h/.local/bin/ilar-gateway run
 WorkingDirectory=%h
 Restart=on-failure
 RestartSec=5
+# SIGTERM to the gateway only: it says goodbye through the rpc server
+# and stops it; anything left is killed after. The stop waits for the
+# gateway's own grace (fifteen seconds for turns in flight).
+KillMode=mixed
+TimeoutStopSec=25
 # The rpc server and any tool the assistant runs are looked up here.
 Environment=PATH=%h/.local/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin
 

@@ -34,6 +34,9 @@ pub struct Gateway {
     /// order they were said.
     outbound_tx: mpsc::Sender<Outbound>,
     outbound: Mutex<Option<mpsc::Receiver<Outbound>>>,
+    /// Raised at the end of a shutdown: the dispatcher drains what is
+    /// queued and ends, instead of waiting on senders the seats keep.
+    outbound_closed: CancellationToken,
     cron: Arc<CronStore>,
     memory: Arc<MemoryStore>,
     skills: Arc<crate::skills::SkillLibrary>,
@@ -153,6 +156,7 @@ impl Gateway {
             rate: Mutex::new(rate),
             follow_ups: Mutex::new(Some(follow_rx)),
             outbound_tx,
+            outbound_closed: CancellationToken::new(),
             outbound: Mutex::new(Some(outbound_rx)),
             cron,
             memory,
@@ -277,9 +281,22 @@ impl Gateway {
         }
         let dispatcher = {
             let gateway = self.clone();
+            let closed = self.outbound_closed.clone();
             tokio::spawn(async move {
-                while let Some(message) = outbound.recv().await {
-                    gateway.send(message).await;
+                loop {
+                    tokio::select! {
+                        biased;
+                        message = outbound.recv() => match message {
+                            Some(message) => gateway.send(message).await,
+                            None => break,
+                        },
+                        () = closed.cancelled() => {
+                            while let Ok(message) = outbound.try_recv() {
+                                gateway.send(message).await;
+                            }
+                            break;
+                        }
+                    }
                 }
             })
         };
@@ -333,8 +350,9 @@ impl Gateway {
             handlers.abort_all();
         }
         self.driver.shutdown().await;
-        // The senders are gone with the seats; the dispatcher ends when
-        // the queue is empty, so nothing said during the grace is lost.
+        // Nothing said during the grace is lost: the dispatcher drains
+        // the queue, then ends.
+        self.outbound_closed.cancel();
         let _ = tokio::time::timeout(SHUTDOWN_GRACE, dispatcher).await;
         Ok(())
     }
@@ -889,7 +907,10 @@ impl Gateway {
                 media: Vec::new(),
             };
             match target.send(message).await {
-                Ok(()) => return,
+                Ok(()) => {
+                    log(&format!("{channel}:{chat_id}: start announced"));
+                    return;
+                }
                 Err(error) if attempt == ANNOUNCE_TRIES => {
                     log(&format!(
                         "{channel}:{chat_id}: start not announced: {error:#}"
@@ -920,10 +941,11 @@ impl Gateway {
             text: "⏹ ilar-gateway stopping".into(),
             media: Vec::new(),
         };
-        if let Err(error) = target.send(message).await {
-            log(&format!(
+        match target.send(message).await {
+            Ok(()) => log(&format!("{channel}:{chat_id}: stop announced")),
+            Err(error) => log(&format!(
                 "{channel}:{chat_id}: stop not announced: {error:#}"
-            ));
+            )),
         }
     }
 
