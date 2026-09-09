@@ -22,3 +22,13 @@ person is looking.
 - Tests: a stop line on cancel, a start line from a fresh gateway on
   the same home, nothing with `announce = false`.
 - The start line on tenco after a restart shows the deployed commit.
+
+## Notes
+
+- Done 2026-09-09. Found on the way: systemd's default `KillMode`
+  signalled the rpc server too, so the stop line had nothing to go
+  through, and the shutdown always waited the full dispatcher grace
+  because the seats keep senders to the queue. The unit now has
+  `KillMode=mixed` and `TimeoutStopSec=25`; the dispatcher drains and
+  ends on a token raised after the driver stops. Re-copy the unit file
+  on an existing install.
