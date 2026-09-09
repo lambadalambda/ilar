@@ -119,8 +119,9 @@ reads it at its next step boundary, the status line says "steered: …"
 when the model has it, and one reply covers both messages; a message
 arriving as the model stops reopens the turn rather than stranding
 it. A slash command is still answered at once. Should the turn end
-without reading it — it failed, or the gateway was stopping — the
-message runs as a turn of its own afterwards.
+without reading it because it failed, the message runs as a turn of
+its own afterwards; if the gateway was stopping, it is logged as
+undelivered.
 
 ## Watching a turn
 

@@ -101,6 +101,17 @@ pub fn build_line() -> String {
         format!("ilar-gateway {} ({commit})", env!("CARGO_PKG_VERSION"))
     }
 }
+/// Several steers as one prompt: texts in order, attachments together.
+fn fold_steers(steers: Vec<ilar::agent::Steer>) -> ilar::agent::Steer {
+    let text = steers
+        .iter()
+        .map(|steer| steer.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let images: Vec<ImageContent> = steers.into_iter().flat_map(|steer| steer.images).collect();
+    ilar::agent::Steer { text, images }
+}
+
 /// The longest text the gateway itself sends in one message: a chat
 /// folds anything much longer behind a "[...]".
 const DELIVERY_PIECE_CHARS: usize = 700;
@@ -408,26 +419,47 @@ impl Gateway {
             message.media.len()
         ));
         self.turn_for(&seat, &prompt, &images).await;
-        // What the turn was handed and never read — it failed, or was
-        // cancelled — is a turn of its own; once, so a turn that keeps
-        // failing does not spin.
-        let leftover = self.driver.take_undelivered(&seat);
-        if !leftover.is_empty() {
+        self.run_leftovers(&seat).await;
+    }
+
+    /// What the last turn on the seat was handed and never read — it
+    /// failed — runs as a turn of its own, once, so a turn that keeps
+    /// failing does not spin; what that one leaves is reported, not
+    /// run. Nothing runs while the gateway is stopping: a turn under
+    /// a cancelled token would record the message and answer nothing.
+    async fn run_leftovers(&self, seat: &Arc<crate::driver::Seat>) {
+        let leftover = self.driver.take_undelivered(seat);
+        if leftover.is_empty() {
+            return;
+        }
+        let key = &seat.key;
+        if self.cancel.is_cancelled() {
             log(&format!(
-                "{key}: {} undelivered steer(s) run now",
-                leftover.len()
+                "{key}: {} steer(s) undelivered at shutdown: {:?}",
+                leftover.len(),
+                leftover.iter().map(|s| s.text.as_str()).collect::<Vec<_>>()
             ));
-            let prompt = leftover
-                .iter()
-                .map(|steer| steer.text.as_str())
-                .collect::<Vec<_>>()
-                .join("\n\n");
-            let images: Vec<ImageContent> = leftover
-                .into_iter()
-                .flat_map(|steer| steer.images)
-                .collect();
-            self.turn_for(&seat, &prompt, &images).await;
-            self.driver.take_undelivered(&seat);
+            return;
+        }
+        log(&format!(
+            "{key}: {} undelivered steer(s) run now",
+            leftover.len()
+        ));
+        let folded = fold_steers(leftover);
+        self.turn_for(seat, &folded.text, &folded.images).await;
+        let dropped = self.driver.take_undelivered(seat);
+        if !dropped.is_empty() {
+            let folded = fold_steers(dropped);
+            log(&format!(
+                "{key}: still undelivered, dropped: {:?}",
+                folded.text
+            ));
+            self.deliver(
+                &seat.channel,
+                &seat.chat_id,
+                &format!("I could not get to this message: {}", folded.text),
+            )
+            .await;
         }
     }
 
@@ -600,6 +632,9 @@ impl Gateway {
         let status = self.begin_status(&seat).await;
         let outcome = self.driver.run(&seat, &follow_up.prompt, &[], status).await;
         self.end_status(&key).await;
+        // A message may have steered this turn too; whatever it never
+        // read must not wait for the next one.
+        let seat_for_leftovers = seat.clone();
         match outcome {
             Ok(report) => {
                 ilar::outbox::retire(&self.driver.outbox_dir(), &follow_up.retire);
@@ -629,6 +664,7 @@ impl Gateway {
                 }
             }
         }
+        self.run_leftovers(&seat_for_leftovers).await;
     }
 
     /// Everything whose time has come: due cron jobs, and a heartbeat

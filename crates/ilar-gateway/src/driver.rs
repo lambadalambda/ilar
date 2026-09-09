@@ -606,6 +606,7 @@ pub fn plan(
     private: bool,
 ) -> Result<RuntimePlan> {
     let workspace = gateway.workspace(config);
+    let home = gateway.home(config);
     std::fs::create_dir_all(&workspace)
         .with_context(|| format!("creating workspace {}", workspace.display()))?;
     let mut plan = RuntimePlan::resolve(
@@ -617,7 +618,7 @@ pub fn plan(
             model: resume.is_none().then(|| default_model(config, gateway)),
             agent: gateway.agent.clone(),
             resume,
-            cwd: workspace,
+            cwd: workspace.clone(),
             // Nobody sits at a channel to answer a form: the tool is
             // left off and the model is told so on the spot.
             questions: false,
@@ -627,7 +628,7 @@ pub fn plan(
             // its skills and its agents from its own home, not from
             // the terminal agent's configuration.
             context_files: Some(ilar::config::SOUL_FILES),
-            user_dir: Some(gateway.home(config)),
+            user_dir: Some(home.clone()),
             // Its own skills only: not the built-ins, not the working
             // directory's.
             own_skills_only: true,
@@ -636,10 +637,8 @@ pub fn plan(
     // Where it is: reached over a chat, with a home, wakeable from a
     // script. Before the memory, which is about the person.
     plan.system_prompt.push_str("\n\n");
-    plan.system_prompt.push_str(&crate::situation::block(
-        &gateway.home(config),
-        &gateway.workspace(config),
-    ));
+    plan.system_prompt
+        .push_str(&crate::situation::block(&home, &workspace));
     // The policy reaches the subagents too: an agent definition's
     // own restriction is narrowed before the spawner is built from
     // it, and the chat's registry is filtered after.
