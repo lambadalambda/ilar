@@ -8,6 +8,12 @@ pub enum Command {
     /// List the models, or switch to one.
     Model(Option<String>),
     Help,
+    /// What the review staged and has not been approved.
+    Pending,
+    /// Apply a staged plan by id, or `all`.
+    Approve(String),
+    /// Drop a staged plan by id, or `all`.
+    Reject(String),
     Unknown(String),
 }
 
@@ -26,12 +32,17 @@ pub fn parse(text: &str) -> Option<Command> {
         ("new", _) => Command::New,
         ("model", argument) => Command::Model(argument.map(str::to_string)),
         ("help", _) => Command::Help,
+        ("pending", _) => Command::Pending,
+        ("approve", argument) => Command::Approve(argument.unwrap_or("all").to_string()),
+        ("reject", argument) => Command::Reject(argument.unwrap_or("all").to_string()),
         (other, _) => Command::Unknown(other.to_string()),
     })
 }
 
 pub const HELP: &str = "/new — start a fresh chat (memory stays)\n\
 /model — list the models; /model <provider/model> switches\n\
+/pending — what the review wants to remember, when approval is on\n\
+/approve [id|all], /reject [id|all] — decide on it\n\
 /help — this";
 
 #[cfg(test)]
@@ -49,6 +60,13 @@ mod tests {
         );
         assert_eq!(parse("/model   "), Some(Command::Model(None)));
         assert_eq!(parse("/help"), Some(Command::Help));
+        assert_eq!(parse("/pending"), Some(Command::Pending));
+        assert_eq!(parse("/approve"), Some(Command::Approve("all".into())));
+        assert_eq!(
+            parse("/approve ab12"),
+            Some(Command::Approve("ab12".into()))
+        );
+        assert_eq!(parse("/reject all"), Some(Command::Reject("all".into())));
         assert_eq!(parse("/dance"), Some(Command::Unknown("dance".into())));
         assert_eq!(parse("/"), None);
         assert_eq!(parse("what about /new?"), None);

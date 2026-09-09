@@ -89,6 +89,11 @@ pub struct Seat {
     /// A model switch asked for while a turn was running: applied
     /// when the next turn takes the lock.
     pending_model: Mutex<Option<String>>,
+    /// What happened since the last review.
+    pub episode: Mutex<crate::review::Episode>,
+    /// Bumped by every turn; a scheduled review runs only if no turn
+    /// came after the one that scheduled it.
+    pub review_generation: std::sync::atomic::AtomicU64,
     pub runtime: SessionRuntime,
     /// Messages the model sent through its tool, ever; a turn compares
     /// before and after to know whether its final text is still owed.
@@ -266,6 +271,8 @@ impl Driver {
             chat_id: chat_id.to_string(),
             background,
             pending_model: Mutex::new(None),
+            episode: Mutex::new(crate::review::Episode::default()),
+            review_generation: std::sync::atomic::AtomicU64::new(0),
             runtime,
             sent,
             turn: tokio::sync::Mutex::new(()),
@@ -323,8 +330,11 @@ impl Driver {
                 .map_err(TurnError::Failed)?;
         }
         let sent_before = seat.sent.load(std::sync::atomic::Ordering::Acquire);
+        seat.review_generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         let mut narrator = crate::status::Narrator::default();
         let observe = move |event: &LoopEvent| {
+            seat.episode.lock().unwrap().observe(event);
             if let Some(status) = &status
                 && let Some(line) = narrator.observe(event)
             {
@@ -375,6 +385,46 @@ impl Driver {
             .store
             .load(&seat.runtime.session_id)?
             .effective_model())
+    }
+
+    /// A question over the seat's conversation, answered without
+    /// recording anything and served from the cached prefix — the
+    /// review's vehicle. `None` when a turn holds the seat or the seat
+    /// has no conversation yet.
+    pub async fn aside(&self, seat: &Seat, question: &str) -> Result<Option<String>> {
+        let Ok(_idle) = seat.turn.try_lock() else {
+            return Ok(None);
+        };
+        ilar::aside::ask(
+            seat.runtime.resolver.as_ref(),
+            &seat.runtime.store,
+            &seat.runtime.session_id,
+            Some(&seat.runtime.system_prompt),
+            &seat.runtime.registry.definitions(),
+            question,
+            &self.cancel.child_token(),
+        )
+        .await
+    }
+
+    /// How long a seat should be quiet before its review runs: just
+    /// before the provider's cache window closes, unless configured.
+    pub fn review_idle(&self, seat: &Seat) -> std::time::Duration {
+        if let Some(secs) = self.gateway.review.after_idle_secs {
+            return std::time::Duration::from_secs(secs);
+        }
+        let provider = self
+            .current_model(seat)
+            .ok()
+            .and_then(|model| {
+                model
+                    .split_once('/')
+                    .map(|(provider, _)| provider.to_string())
+            })
+            .unwrap_or_default();
+        let ttl = self.config.cache_compact.ttl_for(&provider);
+        let margin = std::time::Duration::from_secs(self.config.cache_compact.margin_secs);
+        ttl.checked_sub(margin).unwrap_or(ttl / 2)
     }
 
     /// The model a fresh chat starts on.

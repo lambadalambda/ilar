@@ -47,6 +47,10 @@ pub struct GatewayConfig {
     /// every edit is a message on the wire.
     #[serde(default = "default_status_interval_secs")]
     pub status_interval_secs: u64,
+    /// The review after a turn: once per idle episode, what was worth
+    /// keeping.
+    #[serde(default)]
+    pub review: crate::review::ReviewConfig,
 }
 
 fn default_status_interval_secs() -> u64 {
@@ -76,6 +80,7 @@ impl Default for GatewayConfig {
             memory: Default::default(),
             status: true,
             status_interval_secs: default_status_interval_secs(),
+            review: Default::default(),
         }
     }
 }

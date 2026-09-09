@@ -54,6 +54,10 @@ declares them is warned about and ignored.
 | `gateway.heartbeat.chats` | `[]` | Session keys to beat on, e.g. `deltachat:12`. |
 | `gateway.scheduler_tick_secs` | `30` | How often due jobs and heartbeats are looked for. |
 | `gateway.memory.enabled` | `true` | Core memory in the prompt, the archive behind the tools, a daily note at each compaction. |
+| `gateway.review.enabled` | `true` | The review after a turn; see below. |
+| `gateway.review.min_tool_calls` | `5` | An episode with fewer, and no error, is not reviewed. |
+| `gateway.review.after_idle_secs` | just before the cache closes | Quiet time before the review runs. |
+| `gateway.review.approval` | `false` | Stage the review's writes for `/approve`. |
 | `gateway.status` | `true` | A status line in the chat while a turn runs. |
 | `gateway.status_interval_secs` | `4` | The least time between two edits of it. |
 | `channels.deltachat.*` | — | The Delta Chat adapter; see below. |
@@ -119,6 +123,8 @@ A message that is a slash command is answered by the gateway itself:
 | `/new` | A fresh session for this chat, on the configured model. The old one stays on disk; memory stays. |
 | `/model` | The current model, then the models this configuration can reach by provider. |
 | `/model <provider/model>` | Switch this chat. Recorded at once when the chat is idle, or as the running turn ends; the reply says which. |
+| `/pending` | What the review staged, when approval is on. |
+| `/approve [id\|all]`, `/reject [id\|all]` | Decide on it. |
 | `/help` | The list above. |
 
 ## The home
@@ -178,6 +184,22 @@ tool's `note` action, plus daily notes under `daily/` that receive
 every compaction handover. Nothing in the archive is ever injected:
 `memory_search` returns an index, best first with recent notes
 ranking higher, and `memory_get` reads the chosen notes in full.
+
+## The review after a turn
+
+Once a chat has been quiet for a while after a turn — by default just
+before the provider's prompt cache would go cold, so the conversation
+is served from cache — the assistant is asked, as an aside that records
+nothing, whether anything in the episode was worth keeping: a
+preference or correction, a fact about its world, a decision, a
+workflow that worked. Only an episode with enough tool calls, or an
+error, is asked, and "nothing" is a welcome answer. Otherwise the
+answer is a plan of memory entries and notes, written through the
+memory store, and the chat gets one line: "💾 remembered: …". With
+`gateway.review.approval` the plan is staged instead, the chat is told
+what it would remember, and `/pending`, `/approve` and `/reject`
+decide. Unlike Hermes, there is no bias toward action: most episodes
+should end in nothing.
 
 ## Scheduled turns: cron and heartbeat
 

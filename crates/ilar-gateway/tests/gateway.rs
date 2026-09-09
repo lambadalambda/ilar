@@ -685,6 +685,102 @@ async fn a_status_line_follows_the_turn_and_vanishes_before_the_reply() {
     gateway.cancel();
 }
 
+const REVIEW_PLAN: &str = "{\"memory\": [{\"file\": \"user\", \"action\": \"add\", \"text\": \
+\"Likes earl grey\"}], \"notes\": [{\"kind\": \"preference\", \"title\": \"Tea\", \"summary\": \
+\"prefers earl grey\"}]}";
+
+#[tokio::test]
+async fn the_review_after_an_idle_episode_keeps_what_was_worth_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = GatewayConfig {
+        review: ilar_gateway::review::ReviewConfig {
+            min_tool_calls: 1,
+            after_idle_secs: Some(1),
+            ..Default::default()
+        },
+        ..GatewayConfig::default()
+    };
+    // A turn with a tool call, then the aside answering the review.
+    let (gateway, fake) = gateway_with(
+        dir.path(),
+        vec![
+            calls("bash", serde_json::json!({"command": "true"})),
+            says("done"),
+            says(REVIEW_PLAN),
+        ],
+        settings,
+    );
+    fake.inject("run it", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(2, Duration::from_secs(20)).await;
+    let texts: Vec<&str> = sent.iter().map(|m| m.text.as_str()).collect();
+    assert_eq!(texts[0], "done");
+    assert!(
+        texts[1].starts_with("💾 remembered: user: Likes earl grey"),
+        "{texts:?}"
+    );
+    let user = std::fs::read_to_string(dir.path().join("state/gateway/memory/USER.md")).unwrap();
+    assert_eq!(user, "Likes earl grey\n");
+    let notes = std::fs::read_dir(dir.path().join("state/gateway/memory/notes")).unwrap();
+    assert_eq!(notes.count(), 1);
+    gateway.cancel();
+}
+
+#[tokio::test]
+async fn a_quiet_episode_is_not_reviewed_and_approval_stages_the_plan() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = GatewayConfig {
+        review: ilar_gateway::review::ReviewConfig {
+            min_tool_calls: 1,
+            after_idle_secs: Some(1),
+            approval: true,
+            ..Default::default()
+        },
+        ..GatewayConfig::default()
+    };
+    let (gateway, fake) = gateway_with(
+        dir.path(),
+        vec![
+            says("just chatting"),
+            calls("bash", serde_json::json!({"command": "true"})),
+            says("done"),
+            says(REVIEW_PLAN),
+        ],
+        settings,
+    );
+    // No tool call: nothing to review, nothing arrives.
+    fake.inject("hi", "chat-1", "alice").await;
+    fake.wait_for_sent(1, WAIT).await;
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert_eq!(fake.sent().len(), 1, "{:?}", fake.sent());
+    // A tool call: the review runs and, with approval on, stages.
+    fake.inject("run it", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(3, Duration::from_secs(20)).await;
+    assert!(
+        sent[2]
+            .text
+            .starts_with("📝 I would remember: user: Likes earl grey"),
+        "{sent:?}"
+    );
+    assert!(!dir.path().join("state/gateway/memory/USER.md").exists());
+    fake.inject("/pending", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(4, WAIT).await;
+    assert!(sent[3].text.contains("Likes earl grey"), "{sent:?}");
+    fake.inject("/approve all", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(5, WAIT).await;
+    assert!(
+        sent[4]
+            .text
+            .starts_with("💾 remembered: user: Likes earl grey"),
+        "{sent:?}"
+    );
+    let user = std::fs::read_to_string(dir.path().join("state/gateway/memory/USER.md")).unwrap();
+    assert_eq!(user, "Likes earl grey\n");
+    fake.inject("/pending", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(6, WAIT).await;
+    assert_eq!(sent[5].text, "Nothing pending.");
+    gateway.cancel();
+}
+
 #[tokio::test]
 async fn safe_mode_hides_the_unsafe_tools_from_the_chat_and_its_agents() {
     let dir = tempfile::tempdir().unwrap();

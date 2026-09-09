@@ -36,7 +36,10 @@ pub struct Gateway {
     outbound: Mutex<Option<mpsc::Receiver<Outbound>>>,
     cron: Arc<CronStore>,
     memory: Arc<MemoryStore>,
+    pending: crate::review::PendingStore,
     settings: GatewayConfig,
+    /// The gateway's own handle, for tasks it spawns on itself.
+    me: std::sync::Weak<Gateway>,
     /// The status line each chat is watching, while a turn runs there.
     statuses: Mutex<HashMap<String, Status>>,
     cancel: CancellationToken,
@@ -121,7 +124,7 @@ impl Gateway {
             },
             cancel.clone(),
         ));
-        Ok(Arc::new(Self {
+        Ok(Arc::new_cyclic(|me| Self {
             driver,
             routes,
             channels: channels
@@ -135,10 +138,19 @@ impl Gateway {
             outbound: Mutex::new(Some(outbound_rx)),
             cron,
             memory,
+            pending: crate::review::PendingStore::new(dir.join("pending")),
             settings,
             statuses: Mutex::new(HashMap::new()),
+            me: me.clone(),
             cancel,
         }))
+    }
+
+    /// An owning handle to this gateway, for a task it spawns.
+    fn clone_handle(&self) -> Arc<Self> {
+        self.me
+            .upgrade()
+            .expect("the gateway is alive while it runs")
     }
 
     pub fn cancel(&self) {
@@ -320,6 +332,7 @@ impl Gateway {
             Ok(report) => {
                 self.keep_handovers(&seat, &report);
                 self.deliver_unless_sent(&seat, &report).await;
+                self.schedule_review(seat.clone());
             }
             Err(TurnError::Busy(why)) => {
                 log(&format!("{key}: {why}"));
@@ -342,6 +355,31 @@ impl Gateway {
     async fn command(&self, key: &str, message: &Inbound, command: Command) -> String {
         match command {
             Command::Help => commands::HELP.to_string(),
+            Command::Pending => match self.pending.list() {
+                Ok(list) if list.is_empty() => "Nothing pending.".to_string(),
+                Ok(list) => list
+                    .iter()
+                    .map(|p| format!("{} ({}): {}", p.id, p.chat, p.plan.describe().join("; ")))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                Err(error) => failed_reply("/pending", &error),
+            },
+            Command::Approve(id) => match self.pending.take(&id) {
+                Ok(taken) if taken.is_empty() => format!("Nothing pending as {id}."),
+                Ok(taken) => {
+                    let mut lines = Vec::new();
+                    for p in taken {
+                        lines.extend(p.plan.apply(&self.memory));
+                    }
+                    format!("💾 remembered: {}", lines.join("; "))
+                }
+                Err(error) => failed_reply("/approve", &error),
+            },
+            Command::Reject(id) => match self.pending.take(&id) {
+                Ok(taken) if taken.is_empty() => format!("Nothing pending as {id}."),
+                Ok(taken) => format!("Dropped {}.", taken.len()),
+                Err(error) => failed_reply("/reject", &error),
+            },
             Command::Unknown(name) => format!("No command /{name}.\n{}", commands::HELP),
             Command::New => match self.driver.close(key).await {
                 Ok(()) => format!(
@@ -424,6 +462,7 @@ impl Gateway {
                 ilar::outbox::retire(&self.driver.outbox_dir(), &follow_up.retire);
                 self.keep_handovers(&seat, &report);
                 self.deliver_unless_sent(&seat, &report).await;
+                self.schedule_review(seat.clone());
             }
             // A background seat's troubles stay in the log: the chat
             // never asked it anything.
@@ -518,6 +557,92 @@ impl Gateway {
             }
             Err(error) => log(&format!("{key}: scheduled turn failed: {error}")),
         }
+    }
+
+    /// After a turn, arrange the review: it runs once the seat has been
+    /// quiet for the idle window, only if no later turn reset that
+    /// window, and only if the episode was worth it.
+    fn schedule_review(&self, seat: Arc<crate::driver::Seat>) {
+        if !self.settings.review.enabled || seat.background {
+            return;
+        }
+        let generation = seat
+            .review_generation
+            .load(std::sync::atomic::Ordering::Acquire);
+        let idle = self.driver.review_idle(&seat);
+        let gateway = self.clone_handle();
+        let cancel = self.cancel.child_token();
+        tokio::spawn(async move {
+            tokio::select! {
+                () = cancel.cancelled() => return,
+                () = tokio::time::sleep(idle) => {}
+            }
+            if seat
+                .review_generation
+                .load(std::sync::atomic::Ordering::Acquire)
+                != generation
+            {
+                return;
+            }
+            gateway.review(&seat).await;
+        });
+    }
+
+    /// The review itself: an aside over the conversation, its answer a
+    /// plan applied through the memory store or staged for approval,
+    /// and one line to the chat about what was kept.
+    async fn review(&self, seat: &crate::driver::Seat) {
+        let episode = seat.episode.lock().unwrap().clone();
+        if !episode.worth_reviewing(self.settings.review.min_tool_calls) {
+            return;
+        }
+        let answer = match self.driver.aside(seat, crate::review::PROMPT).await {
+            Ok(Some(answer)) => answer,
+            Ok(None) => return,
+            Err(error) => {
+                log(&format!("{}: review failed: {error:#}", seat.key));
+                return;
+            }
+        };
+        *seat.episode.lock().unwrap() = crate::review::Episode::default();
+        let Some(plan) = crate::review::Plan::parse(&answer) else {
+            log(&format!("{}: review: nothing to keep", seat.key));
+            return;
+        };
+        if plan.is_empty() {
+            log(&format!(
+                "{}: review answered without a plan: {}",
+                seat.key,
+                answer.trim()
+            ));
+            return;
+        }
+        if self.settings.review.approval {
+            match self.pending.stage(&seat.key, plan.clone()) {
+                Ok(staged) => {
+                    let lines = plan.describe().join("; ");
+                    self.deliver(
+                        &seat.channel,
+                        &seat.chat_id,
+                        &format!(
+                            "📝 I would remember: {lines} — /approve {} or /reject {}",
+                            staged.id, staged.id
+                        ),
+                    )
+                    .await;
+                }
+                Err(error) => log(&format!("{}: review not staged: {error:#}", seat.key)),
+            }
+            return;
+        }
+        let outcome = plan.apply(&self.memory);
+        log(&format!("{}: review kept {}", seat.key, outcome.join("; ")));
+        self.deliver(
+            &seat.channel,
+            &seat.chat_id,
+            &format!("💾 remembered: {}", outcome.join("; ")),
+        )
+        .await;
     }
 
     /// A compaction's handover is the turn's own summary of what it

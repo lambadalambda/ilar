@@ -327,3 +327,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Memory that outlives a session](issues/memory-that-outlives-a-session.md)
 - [x] [DeltaChat](issues/deltachat.md)
 - [x] [The assistant has a home](issues/the-assistant-has-a-home.md)
+- [x] [The review after a turn](issues/the-review-after-a-turn.md)

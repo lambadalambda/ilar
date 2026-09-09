@@ -28,7 +28,7 @@ use crate::routes::write_atomically;
 pub const MEMORY_CHARS: usize = 2200;
 pub const USER_CHARS: usize = 1375;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CoreFile {
     Memory,
@@ -53,7 +53,7 @@ impl CoreFile {
 
 /// A note's kind: what Awareness calls a knowledge card, typed so a
 /// reader can ask for decisions or risks and not events.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NoteKind {
     Decision,
