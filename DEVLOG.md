@@ -34,6 +34,36 @@ foreground children inherit it and touch it on every event at any
 depth, a background child starts its own. The test reproduces the
 production shape (mutable task, read-only foreground child).
 
+## 2026-09-09 — Restarts you can see, and settings that stay put
+
+Three asks from daily use. The gateway now tells the last active chat
+when it stops and when it starts, the start line carrying the commit
+the binary was built from (a build script asks git) and the model
+new chats get, so a deploy is visible where the person is looking.
+The first live restart exposed two things the tests could not: systemd
+signalled the whole cgroup, so the rpc server was dead before the
+goodbye could go through it (`KillMode=mixed` now), and every shutdown
+waited the dispatcher's full grace because the seats keep senders to
+the outbound queue, so the receiver never closed (a token raised after
+the driver stops ends it). `systemctl stop` sends SIGTERM, which the
+binary only now handles like Ctrl-C.
+
+`providers.openai.image_gen = false` keeps the image tool out even
+with a ChatGPT login; the per-provider merge copies fields by name and
+had to learn the new one, which the test caught. And a `/model` switch
+was lost at every restart: the gateway passed `gateway.model` as the
+launch's model on every reopen, and the launch outranks the session's
+own record. A resumed session now gets no launch model; the default
+applies to fresh sessions only. `/model <m> --save` (or `/model
+--save` for the chat's current model) writes `<home>/model`, which
+sits above `gateway.model` as the default for new chats — state, so
+it lives in the home rather than in `ilar.toml`.
+
+Process note: workspace-wide clippy on the Mac ran twenty-five minutes
+and starved the machine; the rule from now on is that clippy and full
+suites run on secunda or tenco, where the whole check script takes a
+minute.
+
 ## 2026-09-09 — The assistant learns: a home, a review, its own skills
 
 Hermes's three learning loops, read from its source and taken with
