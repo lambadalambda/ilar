@@ -112,8 +112,9 @@ impl SkillLibrary {
         Ok(path)
     }
 
-    /// Replace one passage. `old` must occur exactly once, so a patch
-    /// changes only what it names.
+    /// Replace one passage of the body. `old` must occur exactly once
+    /// there, so a patch changes only what it names; the frontmatter
+    /// is not patched, since a stray match would break the file.
     pub fn patch(&self, name: &str, old: &str, new: &str) -> Result<()> {
         Self::check_name(name)?;
         if old.is_empty() {
@@ -123,12 +124,14 @@ impl SkillLibrary {
         let path = self.path(name);
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("no skill {name} in {}", self.dir.display()))?;
-        match text.matches(old).count() {
+        let (head, body) = split_frontmatter(&text);
+        match body.matches(old).count() {
             1 => {}
-            0 => bail!("skill {name} does not contain the text to replace"),
+            0 => bail!("the body of skill {name} does not contain the text to replace"),
             n => bail!("skill {name} contains that text {n} times; be more specific"),
         }
-        crate::routes::write_atomically(&path, text.replacen(old, new, 1).as_bytes())?;
+        let patched = format!("{head}{}", body.replacen(old, new, 1));
+        crate::routes::write_atomically(&path, patched.as_bytes())?;
         self.touch(name, |usage| {
             usage.patches += 1;
             usage.last_patched_at = Some(Utc::now());
@@ -144,6 +147,9 @@ impl SkillLibrary {
         body: &str,
     ) -> Result<()> {
         Self::check_name(name)?;
+        if description.trim().is_empty() || body.trim().is_empty() {
+            bail!("a skill needs a description and a body");
+        }
         let _write = self.write.lock().unwrap();
         let path = self.path(name);
         if !path.exists() {
@@ -233,6 +239,18 @@ impl SkillLibrary {
         let mut ledger = self.ledger()?;
         change(ledger.entry(name.to_string()).or_default());
         self.save_ledger(&ledger)
+    }
+}
+
+/// The frontmatter with its fences, and the body after it; a file
+/// without a frontmatter is all body.
+fn split_frontmatter(text: &str) -> (&str, &str) {
+    let Some(rest) = text.strip_prefix("---\n") else {
+        return ("", text);
+    };
+    match rest.find("\n---\n") {
+        Some(at) => text.split_at(4 + at + 5),
+        None => ("", text),
     }
 }
 
@@ -407,6 +425,13 @@ mod tests {
             .patch("deploy-check", "tail the log", "tail the journal")
             .unwrap();
         assert!(library.patch("deploy-check", "absent", "x").is_err());
+        assert!(
+            library
+                .patch("deploy-check", "Check a deploy", "x")
+                .is_err(),
+            "the frontmatter is not patched"
+        );
+        assert!(library.rewrite("deploy-check", "x", &[], " ").is_err());
         library.patch("deploy-check", "curl", "fetch").unwrap();
         assert!(
             library.patch("deploy-check", "the", "a").is_err(),

@@ -619,7 +619,9 @@ impl Gateway {
     /// quiet for the idle window, only if no later turn reset that
     /// window, and only if the episode was worth it.
     fn schedule_review(&self, seat: Arc<crate::driver::Seat>) {
-        if !self.settings.review.enabled || seat.background {
+        // A room is not reviewed: what is said there is not the user's
+        // to remember, and the core memory is withheld from it too.
+        if !self.settings.review.enabled || seat.background || !seat.private {
             return;
         }
         let generation = seat
@@ -660,19 +662,24 @@ impl Gateway {
                 return;
             }
         };
-        *seat.episode.lock().unwrap() = crate::review::Episode::default();
-        let Some(plan) = crate::review::Plan::parse(&answer) else {
-            log(&format!("{}: review: nothing to keep", seat.key));
-            return;
+        let plan = match crate::review::Answer::parse(&answer) {
+            crate::review::Answer::Nothing => {
+                *seat.episode.lock().unwrap() = crate::review::Episode::default();
+                log(&format!("{}: review: nothing to keep", seat.key));
+                return;
+            }
+            crate::review::Answer::Unparsed => {
+                // The episode stays: the next review sees it again.
+                log(&format!(
+                    "{}: review answered without a plan: {}",
+                    seat.key,
+                    answer.trim()
+                ));
+                return;
+            }
+            crate::review::Answer::Plan(plan) => plan,
         };
-        if plan.is_empty() {
-            log(&format!(
-                "{}: review answered without a plan: {}",
-                seat.key,
-                answer.trim()
-            ));
-            return;
-        }
+        *seat.episode.lock().unwrap() = crate::review::Episode::default();
         if self.settings.review.approval {
             match self.pending.stage(&seat.key, plan.clone()) {
                 Ok(staged) => {

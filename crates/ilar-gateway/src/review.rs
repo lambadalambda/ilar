@@ -154,25 +154,51 @@ pub struct NoteDraft {
     pub body: Option<String>,
 }
 
+/// What the review's answer amounted to.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Answer {
+    /// "nothing", or an empty plan: the episode is done with.
+    Nothing,
+    /// A plan with at least one change.
+    Plan(Plan),
+    /// Not an answer to the question; the episode is kept for the
+    /// next review.
+    Unparsed,
+}
+
+impl Answer {
+    /// Tolerant of prose around the object and of a code fence.
+    pub fn parse(answer: &str) -> Self {
+        let trimmed = answer.trim().trim_matches('`').trim();
+        let word = trimmed.trim_end_matches(['.', '!']);
+        if word.eq_ignore_ascii_case("nothing") || word.is_empty() {
+            return Self::Nothing;
+        }
+        let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}')) else {
+            return Self::Unparsed;
+        };
+        if end <= start {
+            return Self::Unparsed;
+        }
+        match serde_json::from_str::<Plan>(&trimmed[start..=end]) {
+            Ok(plan) if plan.is_empty() => Self::Nothing,
+            Ok(plan) => Self::Plan(plan),
+            Err(_) => Self::Unparsed,
+        }
+    }
+}
+
 impl Plan {
     pub fn is_empty(&self) -> bool {
         self.memory.is_empty() && self.notes.is_empty() && self.skills.is_empty()
     }
 
-    /// The model's answer as a plan: `None` for "nothing", an empty
-    /// plan for an answer that was not one. Tolerant of prose around
-    /// the object and of a code fence.
+    /// A plan out of the model's answer, if it holds one.
     pub fn parse(answer: &str) -> Option<Self> {
-        let trimmed = answer.trim().trim_matches('`').trim();
-        if trimmed.eq_ignore_ascii_case("nothing") || trimmed.is_empty() {
-            return None;
+        match Answer::parse(answer) {
+            Answer::Plan(plan) => Some(plan),
+            _ => None,
         }
-        let start = trimmed.find('{')?;
-        let end = trimmed.rfind('}')?;
-        if end <= start {
-            return None;
-        }
-        serde_json::from_str(&trimmed[start..=end]).ok()
     }
 
     /// One line per change, for the chat.
@@ -386,9 +412,11 @@ mod tests {
 
     #[test]
     fn answers_parse_into_plans_and_nothing_is_nothing() {
-        assert_eq!(Plan::parse("nothing"), None);
-        assert_eq!(Plan::parse("  Nothing.  "), None);
-        assert_eq!(Plan::parse("no json here").map(|p| p.is_empty()), None);
+        assert_eq!(Answer::parse("nothing"), Answer::Nothing);
+        assert_eq!(Answer::parse("  Nothing.  "), Answer::Nothing);
+        assert_eq!(Answer::parse("{}"), Answer::Nothing);
+        assert_eq!(Answer::parse("no json here"), Answer::Unparsed);
+        assert_eq!(Answer::parse("{not json}"), Answer::Unparsed);
         let plan = Plan::parse(
             "Here you go:\n```json\n{\"memory\": [{\"file\": \"user\", \"action\": \"add\", \
              \"text\": \"Likes earl grey\"}], \"notes\": [{\"kind\": \"decision\", \"title\": \

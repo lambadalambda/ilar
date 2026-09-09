@@ -86,6 +86,9 @@ pub struct Seat {
     /// A cron or heartbeat seat: it speaks to its chat only through
     /// the message tool, never by its final text.
     pub background: bool,
+    /// A private chat, not a room: the only kind that is reviewed and
+    /// that gets the core memory.
+    pub private: bool,
     /// A model switch asked for while a turn was running: applied
     /// when the next turn takes the lock.
     pending_model: Mutex<Option<String>>,
@@ -277,6 +280,7 @@ impl Driver {
             channel: channel.to_string(),
             chat_id: chat_id.to_string(),
             background,
+            private,
             pending_model: Mutex::new(None),
             episode: Mutex::new(crate::review::Episode::default()),
             review_generation: std::sync::atomic::AtomicU64::new(0),
