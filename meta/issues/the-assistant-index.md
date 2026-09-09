@@ -18,6 +18,10 @@ policy) is ~5k lines of Go around a 1.5k-line loop.
 4. [A sender allowlist and a tool policy](a-sender-allowlist-and-a-tool-policy.md)
 5. [Cron and heartbeat turns](cron-and-heartbeat-turns.md)
 6. [Memory that outlives a session](memory-that-outlives-a-session.md)
+7. [The assistant has a home](the-assistant-has-a-home.md)
+8. [The review after a turn](the-review-after-a-turn.md)
+9. [The assistant writes its skills](the-assistant-writes-its-skills.md)
+10. [A weekly review of memory and skills](a-weekly-review-of-memory-and-skills.md)
 
 ## Rules
 
@@ -27,9 +31,11 @@ policy) is ~5k lines of Go around a 1.5k-line loop.
   never a transcript view. `ilar serve` was stood down for growing one.
 - Nothing is exposed to a channel before 4 is done.
 
-## Status (2026-09-08)
+## Status (2026-09-09)
 
-Steps 1, 3, 4, 5 and 6 done and live on tenco; step 2 (DeltaChat) is
-live and answering, with its remaining acceptance items (an image in,
-a file out, a stranger ignored, the rpc server dying) still owed. The
-memory issue's later items are listed on it.
+Steps 1 through 10 done and live on tenco. DeltaChat's remaining
+acceptance items (a stranger ignored, the rpc server dying) are still
+owed on its issue; the memory issue's later items are listed on it.
+Open from the reviews: `/approve` from any chat applies any chat's
+staged plan, and the review's skill edits land without approval when
+approval is off — both design calls, noted, not taken.

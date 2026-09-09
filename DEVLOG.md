@@ -34,6 +34,44 @@ foreground children inherit it and touch it on every event at any
 depth, a background child starts its own. The test reproduces the
 production shape (mutable task, read-only foreground child).
 
+## 2026-09-09 — The assistant learns: a home, a review, its own skills
+
+Hermes's three learning loops, read from its source and taken with
+adjustments. First the ground for them: the gateway's state directory
+is now the assistant's home, holding `SOUL.md`, `skills/`, `agents/`,
+`commands/`, `memory/` and `workspace/`, so nothing of the assistant's
+is under `~/.config/ilar` any more; that took the core's
+`RuntimeOptions` growing a `user_dir` (every read of the user config
+dir in the runtime goes through it) and a `context_files` list, and
+the spawner following the same directory for subagents.
+
+The review after a turn is Hermes's "memory review" made cheaper: it
+runs once the chat has been quiet for just under the provider's cache
+window, as an aside over the conversation that records nothing and
+takes no writer lease, so the whole thing is one cached request. Only
+an episode with enough tool calls or an error is asked, and the
+prompt has no bias toward action — Hermes's version is told to look
+for things to keep; ours is told "nothing" is welcome. The answer is
+a JSON plan applied through the memory store, or staged for
+`/approve` when `gateway.review.approval` is on. The review found two
+holes on its own: it ran for rooms, which never get the core memory
+either (now private chats only), and an answer that was not a plan
+was logged as "nothing to keep" and the episode dropped (now a
+three-way parse, and an unparsed answer keeps the episode for next
+time).
+
+`skill_manage` is the assistant's own skill library, in the layout
+the `skill` tool reads, with a `.usage.json` ledger of views and
+patches, and Hermes's two rules in the tool's text: lessons, not
+logs, and patch before create. A patch matches the body only, since
+a match inside the frontmatter corrupts the file the core parses.
+The weekly review is Hermes's Curator plus OpenClaw's dreaming as one
+cron job the gateway owns: upserted at every start from
+`[gateway.weekly]`, addressed to `last` (the last active chat), its
+prompt asking for promotion into the core, retirement and skill
+consolidation, and a model-free sweep right before it that archives
+skills unused for ninety days and names the ones unused for thirty.
+
 ## 2026-09-08 — Endpoints discover their models
 
 `[endpoints.<name>]`: one section for a server that lists what it
