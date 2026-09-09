@@ -9,6 +9,10 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct GatewayConfig {
+    /// The assistant's home: `SOUL.md`, `skills/`, `agents/`, memory,
+    /// workspace, routes, jobs, the channel accounts. `<state
+    /// dir>/gateway` when unset.
+    pub home: Option<PathBuf>,
     /// The agent every chat runs as; the core's default when unset.
     pub agent: Option<String>,
     /// `provider/model` for every chat; `general.model` when unset.
@@ -61,6 +65,7 @@ pub struct Memory {
 impl Default for GatewayConfig {
     fn default() -> Self {
         Self {
+            home: None,
             agent: None,
             model: None,
             workspace: None,
@@ -126,14 +131,19 @@ impl GatewayConfig {
         }
     }
 
+    /// Where everything of the assistant's lives.
+    pub fn home(&self, config: &ilar::config::Config) -> PathBuf {
+        self.home.clone().unwrap_or_else(|| gateway_dir(config))
+    }
+
     pub fn workspace(&self, config: &ilar::config::Config) -> PathBuf {
         self.workspace
             .clone()
-            .unwrap_or_else(|| gateway_dir(config).join("workspace"))
+            .unwrap_or_else(|| self.home(config).join("workspace"))
     }
 }
 
-/// The gateway's own state, beside the sessions it drives.
+/// The default home, beside the sessions the gateway drives.
 pub fn gateway_dir(config: &ilar::config::Config) -> PathBuf {
     config.state_dir().join("gateway")
 }

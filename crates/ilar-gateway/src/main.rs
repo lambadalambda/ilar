@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ilar_gateway::channel::Channel;
-use ilar_gateway::config::{GatewayConfig, channel_names, channel_table, gateway_dir};
+use ilar_gateway::config::{GatewayConfig, channel_names, channel_table};
 use ilar_gateway::deltachat::{DeltaChat, DeltaChatConfig};
 use ilar_gateway::driver::log;
 use ilar_gateway::gateway::Gateway;
@@ -52,7 +52,7 @@ async fn main() -> Result<()> {
     match cli.command.unwrap_or(Command::Run) {
         Command::Notify { text, source, to } => {
             let path = inbox::write(
-                &gateway_dir(&config).join("inbox"),
+                &gateway.home(&config).join("inbox"),
                 &InboxMessage { source, text, to },
             )?;
             println!("{}", path.display());
@@ -63,7 +63,7 @@ async fn main() -> Result<()> {
                 .unwrap_or_default()
                 .try_into()
                 .context("parsing [channels.deltachat] in ilar.toml")?;
-            let path = DeltaChat::new(settings, &gateway_dir(&config)).invite_path();
+            let path = DeltaChat::new(settings, &gateway.home(&config)).invite_path();
             let invite = std::fs::read_to_string(&path).with_context(|| {
                 format!("no invite at {} — is the gateway running?", path.display())
             })?;
@@ -72,7 +72,7 @@ async fn main() -> Result<()> {
         }
         Command::Prompt { group } => {
             let memory =
-                ilar_gateway::memory::MemoryStore::new(gateway_dir(&config).join("memory"));
+                ilar_gateway::memory::MemoryStore::new(gateway.home(&config).join("memory"));
             let plan = ilar_gateway::driver::plan(&config, &gateway, &memory, None, !group)?;
             println!("{}", plan.system_prompt);
             Ok(())
@@ -93,7 +93,7 @@ async fn run(config: ilar::config::Config, gateway: GatewayConfig) -> Result<()>
                 let settings: DeltaChatConfig = table
                     .try_into()
                     .context("parsing [channels.deltachat] in ilar.toml")?;
-                channels.push(DeltaChat::new(settings, &gateway_dir(&config)));
+                channels.push(DeltaChat::new(settings, &gateway.home(&config)));
             }
             other => anyhow::bail!("channel {other:?} is not supported"),
         }

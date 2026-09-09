@@ -466,8 +466,11 @@ pub fn plan(
             questions: false,
             project_instructions: None,
             // An assistant has a SOUL.md before it has coding
-            // instructions: who it is, how it talks.
+            // instructions: who it is, how it talks — and reads it,
+            // its skills and its agents from its own home, not from
+            // the terminal agent's configuration.
             context_files: Some(ilar::config::SOUL_FILES),
+            user_dir: Some(gateway.home(config)),
         },
     )?;
     // The policy reaches the subagents too: an agent definition's

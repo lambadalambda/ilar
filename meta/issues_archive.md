@@ -326,3 +326,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Cron and heartbeat turns](issues/cron-and-heartbeat-turns.md)
 - [x] [Memory that outlives a session](issues/memory-that-outlives-a-session.md)
 - [x] [DeltaChat](issues/deltachat.md)
+- [x] [The assistant has a home](issues/the-assistant-has-a-home.md)

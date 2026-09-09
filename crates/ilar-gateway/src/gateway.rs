@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 use crate::bus::{Inbound, Outbound, session_key, split_for_delivery, split_key};
 use crate::channel::Channel;
 use crate::commands::{self, Command};
-use crate::config::{GatewayConfig, gateway_dir};
+use crate::config::GatewayConfig;
 use crate::cron::CronStore;
 use crate::driver::{Driver, FollowUp, ModelSwitch, TurnError, TurnReport, Wiring, log};
 use crate::inbox::{self, RateLimit};
@@ -89,7 +89,7 @@ impl Gateway {
         resolver: Arc<dyn ProviderResolver>,
         channels: Vec<Arc<dyn Channel>>,
     ) -> Result<Arc<Self>> {
-        let dir = gateway_dir(&config);
+        let dir = gateway.home(&config);
         let routes = Arc::new(RouteStore::open(dir.join("routes.json"))?);
         let cron = Arc::new(CronStore::open(dir.join("cron.json"))?);
         let memory = Arc::new(MemoryStore::new(dir.join("memory")));

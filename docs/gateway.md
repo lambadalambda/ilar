@@ -41,6 +41,7 @@ declares them is warned about and ignored.
 
 | Key | Default | Meaning |
 |---|---|---|
+| `gateway.home` | `<state dir>/gateway` | The assistant's home; see below. |
 | `gateway.agent` | the core's default | The agent every chat runs as. |
 | `gateway.model` | `general.model` | `provider/model` for every chat. |
 | `gateway.workspace` | `<state dir>/gateway/workspace` | Where the assistant's sessions work. |
@@ -120,16 +121,33 @@ A message that is a slash command is answered by the gateway itself:
 | `/model <provider/model>` | Switch this chat. Recorded at once when the chat is idle, or as the running turn ends; the reply says which. |
 | `/help` | The list above. |
 
+## The home
+
+Everything of the assistant's lives in one directory, `gateway.home`,
+`~/.local/state/ilar/gateway/` unless set otherwise:
+
+| | |
+|---|---|
+| `SOUL.md` | Who it is and how it talks. |
+| `skills/`, `agents/`, `commands/` | Its own; the terminal agent's under `~/.config/ilar` are not read. A symlink shares one. |
+| `memory/` | The core files, the notes, the daily notes. |
+| `workspace/` | Where its sessions work. |
+| `routes.json`, `cron.json`, `inbox/` | Chats, jobs, notifications. |
+| `deltachat/` | The channel's account, and `invite.txt`. |
+
+Providers, keys and the `[gateway]` table itself stay in `ilar.toml`:
+those are configuration; the home is the agent's own state, which it
+will come to write itself.
+
 ## Who it is: SOUL.md
 
 A chat assistant needs a personality more than a coding agent does. A
-gateway session reads `SOUL.md` where a terminal session reads
-`AGENTS.md`: in the user config directory (`~/.config/ilar/SOUL.md`)
-and in the assistant's workspace, first found wins, with `AGENTS.md`
-and then `CLAUDE.md` as the fallbacks in each place. Put who the
-assistant is and how it talks there; the base instructions about tools
-stay underneath. Subagents the assistant spawns are workers and keep
-reading `AGENTS.md`.
+gateway session reads `<home>/SOUL.md` where a terminal session reads
+`~/.config/ilar/AGENTS.md`, and the workspace's own `SOUL.md` after
+it, with `AGENTS.md` and `CLAUDE.md` as fallbacks in each of those two
+places only. An assistant with no `SOUL.md` gets the base
+instructions about tools and nothing else, so write one. Subagents
+the assistant spawns are workers and read `AGENTS.md` from the home.
 
 ## Who may talk, and what the model may run
 

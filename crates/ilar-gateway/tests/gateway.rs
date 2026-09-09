@@ -536,15 +536,29 @@ async fn a_channel_that_dies_is_started_again() {
 #[tokio::test]
 async fn a_soul_file_speaks_for_the_assistant_before_the_coding_instructions() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(dir.path().join("config")).unwrap();
+    // The terminal agent's configuration: not the assistant's.
+    std::fs::create_dir_all(dir.path().join("config/skills/deploy")).unwrap();
     std::fs::write(
         dir.path().join("config/AGENTS.md"),
         "Be terse and commit often.\n",
     )
     .unwrap();
     std::fs::write(
-        dir.path().join("config/SOUL.md"),
+        dir.path().join("config/skills/deploy/SKILL.md"),
+        "---\nname: deploy\ndescription: Deploys to production\n---\nrun the deploy script\n",
+    )
+    .unwrap();
+    // The assistant's home: its own SOUL.md and skills.
+    let home = dir.path().join("state/gateway");
+    std::fs::create_dir_all(home.join("skills/greet")).unwrap();
+    std::fs::write(
+        home.join("SOUL.md"),
         "You are Sprocket, warm and a little dry.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        home.join("skills/greet/SKILL.md"),
+        "---\nname: greet\ndescription: Greets people warmly\n---\nsay hello\n",
     )
     .unwrap();
     let (gateway, fake) = gateway(dir.path(), vec![says("hi")]);
@@ -552,8 +566,10 @@ async fn a_soul_file_speaks_for_the_assistant_before_the_coding_instructions() {
     fake.wait_for_sent(1, WAIT).await;
     let prompt = gateway.system_prompt("fake:chat-1").unwrap();
     assert!(prompt.contains("You are Sprocket"), "{prompt}");
-    assert!(!prompt.contains("commit often"), "{prompt}");
     assert!(prompt.contains("(from SOUL.md)"), "{prompt}");
+    assert!(prompt.contains("Greets people warmly"), "{prompt}");
+    assert!(!prompt.contains("commit often"), "{prompt}");
+    assert!(!prompt.contains("Deploys to production"), "{prompt}");
     gateway.cancel();
 }
 

@@ -118,6 +118,9 @@ milestones 15–17 stay filed — they come back when the feature does.*
 ## Milestone 21 — The assistant
 
 - [ ] [The assistant — index](issues/the-assistant-index.md) — index
+- [ ] [The review after a turn](issues/the-review-after-a-turn.md)
+- [ ] [The assistant writes its skills](issues/the-assistant-writes-its-skills.md)
+- [ ] [A weekly review of memory and skills](issues/a-weekly-review-of-memory-and-skills.md)
 
 ## Review follow-ups
 
