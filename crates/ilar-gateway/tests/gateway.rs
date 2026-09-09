@@ -729,6 +729,57 @@ async fn a_model_switch_outlives_a_restart_and_save_sets_the_default() {
 }
 
 #[tokio::test]
+async fn a_message_during_a_turn_steers_it_and_one_reply_covers_both() {
+    use ilar_gateway::channel::Seen;
+    let dir = tempfile::tempdir().unwrap();
+    let settings = GatewayConfig {
+        status_interval_secs: 0,
+        announce: false,
+        ..GatewayConfig::default()
+    };
+    let (gateway, fake) = gateway_with(
+        dir.path(),
+        vec![
+            calls("bash", serde_json::json!({"command": "sleep 2"})),
+            says("done, and noted"),
+        ],
+        settings,
+    );
+    fake.inject("run something slow", "chat-1", "alice").await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    fake.inject("also this", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(1, Duration::from_secs(15)).await;
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0].text, "done, and noted");
+    // No second turn follows: the steer was read inside the first.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(fake.sent().len(), 1, "{:?}", fake.sent());
+    let seen = fake.seen();
+    assert!(
+        seen.iter()
+            .any(|s| matches!(s, Seen::StatusEdited(line) if line == "steered: also this")),
+        "{seen:?}"
+    );
+    let routes = RouteStore::open(dir.path().join("state/gateway/routes.json"))
+        .unwrap()
+        .snapshot();
+    let session_id = routes.session_for("fake:chat-1").unwrap().to_string();
+    let store = ilar::runtime::session_store(&config(dir.path()));
+    let texts: Vec<String> = store
+        .load(&session_id)
+        .unwrap()
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            ilar::session::SessionEvent::UserMessage { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts, ["run something slow", "also this"], "{texts:?}");
+    gateway.cancel();
+}
+
+#[tokio::test]
 async fn a_status_line_follows_the_turn_and_vanishes_before_the_reply() {
     use ilar_gateway::channel::Seen;
     let dir = tempfile::tempdir().unwrap();

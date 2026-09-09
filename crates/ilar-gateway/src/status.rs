@@ -58,6 +58,7 @@ impl Narrator {
             LoopEvent::SubagentConfigured {
                 description, agent, ..
             } => format!("delegating to {agent}: {description}"),
+            LoopEvent::Steered { text, .. } => format!("steered: {}", clip(text)),
             LoopEvent::TextDelta(_) => "writing…".to_string(),
             LoopEvent::Compacted { .. } => "compacting the conversation…".to_string(),
             LoopEvent::ProviderRetry {

@@ -113,6 +113,15 @@ so.
 Turns on one chat are serialized; different chats run at once. Image
 attachments are handed to the model the way `read` attaches them.
 
+A message that arrives while the chat's turn is running does not wait
+for it: it steers, as typing into the TUI mid-turn does. The loop
+reads it at its next step boundary, the status line says "steered: …"
+when the model has it, and one reply covers both messages; a message
+arriving as the model stops reopens the turn rather than stranding
+it. A slash command is still answered at once. Should the turn end
+without reading it — it failed, or the gateway was stopping — the
+message runs as a turn of its own afterwards.
+
 ## Watching a turn
 
 While a turn runs for a chat, the bot posts "working…" and edits that

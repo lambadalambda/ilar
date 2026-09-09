@@ -391,31 +391,73 @@ impl Gateway {
         }
         let (images, notes) = attachments(&message.media);
         let prompt = format!("{}{notes}", message.text);
+        // A turn already running here reads the message at its next
+        // step, as the TUI's steering does; its reply covers both.
+        if self.driver.steer(&seat, &prompt, &images) {
+            log(&format!(
+                "{key}: steer from {} ({} chars)",
+                message.sender_id,
+                message.text.len()
+            ));
+            return;
+        }
         log(&format!(
             "{key}: turn from {} ({} chars, {} attachment(s))",
             message.sender_id,
             message.text.len(),
             message.media.len()
         ));
-        let status = self.begin_status(&seat).await;
-        let outcome = self.driver.run(&seat, &prompt, &images, status).await;
-        self.end_status(&key).await;
+        self.turn_for(&seat, &prompt, &images).await;
+        // What the turn was handed and never read — it failed, or was
+        // cancelled — is a turn of its own; once, so a turn that keeps
+        // failing does not spin.
+        let leftover = self.driver.take_undelivered(&seat);
+        if !leftover.is_empty() {
+            log(&format!(
+                "{key}: {} undelivered steer(s) run now",
+                leftover.len()
+            ));
+            let prompt = leftover
+                .iter()
+                .map(|steer| steer.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            let images: Vec<ImageContent> = leftover
+                .into_iter()
+                .flat_map(|steer| steer.images)
+                .collect();
+            self.turn_for(&seat, &prompt, &images).await;
+            self.driver.take_undelivered(&seat);
+        }
+    }
+
+    /// One turn on a seat, with its status line and its reply, and the
+    /// chat told when it could not run.
+    async fn turn_for(
+        &self,
+        seat: &Arc<crate::driver::Seat>,
+        prompt: &str,
+        images: &[ImageContent],
+    ) {
+        let key = &seat.key;
+        let status = self.begin_status(seat).await;
+        let outcome = self.driver.run(seat, prompt, images, status).await;
+        self.end_status(key).await;
         match outcome {
             Ok(report) => {
-                self.keep_handovers(&seat, &report);
-                self.deliver_unless_sent(&seat, &report).await;
+                self.keep_handovers(seat, &report);
+                self.deliver_unless_sent(seat, &report).await;
                 self.schedule_review(seat.clone());
             }
             Err(TurnError::Busy(why)) => {
                 log(&format!("{key}: {why}"));
-                self.deliver(&message.channel, &message.chat_id, BUSY_REPLY)
-                    .await;
+                self.deliver(&seat.channel, &seat.chat_id, BUSY_REPLY).await;
             }
             Err(TurnError::Failed(error)) => {
                 log(&format!("{key}: turn failed: {error:#}"));
                 self.deliver(
-                    &message.channel,
-                    &message.chat_id,
+                    &seat.channel,
+                    &seat.chat_id,
                     &failed_reply("That turn", &error),
                 )
                 .await;

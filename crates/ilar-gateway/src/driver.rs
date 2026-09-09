@@ -10,7 +10,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
-use ilar::agent::{LOOP_EVENT_CAPACITY, LoopEvent, TurnOutcome, loop_event_channel};
+use ilar::agent::{
+    LOOP_EVENT_CAPACITY, LoopEvent, Steer, SteerReceiver, SteerSender, TurnOutcome,
+    loop_event_channel, steer_channel,
+};
 use ilar::config::Config;
 use ilar::delivery::{Disposition, Parcel, disposition};
 use ilar::provider::ProviderResolver;
@@ -102,6 +105,13 @@ pub struct Seat {
     /// before and after to know whether its final text is still owed.
     pub sent: Arc<std::sync::atomic::AtomicUsize>,
     turn: tokio::sync::Mutex<()>,
+    /// The running turn's way in for a message that arrives meanwhile;
+    /// `None` while the seat is idle.
+    steer: Mutex<Option<SteerSender>>,
+    /// Steers handed to the turn and not yet read by the model. Cleared
+    /// as the loop reports each one delivered; whatever is left when
+    /// the turn ends is the caller's to run again.
+    undelivered: Mutex<Vec<Steer>>,
 }
 
 /// The channels a driver talks through, and what it knows about the
@@ -287,6 +297,8 @@ impl Driver {
             runtime,
             sent,
             turn: tokio::sync::Mutex::new(()),
+            steer: Mutex::new(None),
+            undelivered: Mutex::new(Vec::new()),
         });
         tokio::spawn(watch_notifications(
             seat.runtime.spawner.clone(),
@@ -351,22 +363,64 @@ impl Driver {
             if let Some(name) = watch.observe(event) {
                 let _ = skills.note_view(&name);
             }
+            if let LoopEvent::Steered { text, .. } = event {
+                let mut undelivered = seat.undelivered.lock().unwrap();
+                if let Some(at) = undelivered.iter().position(|steer| steer.text == *text) {
+                    undelivered.remove(at);
+                }
+            }
             if let Some(status) = &status
                 && let Some(line) = narrator.observe(event)
             {
                 let _ = status.send(line);
             }
         };
-        let mut report = turn(
+        let (steer_tx, steer_rx) = steer_channel();
+        *seat.steer.lock().unwrap() = Some(steer_tx);
+        let outcome = turn(
             &seat.runtime,
             prompt,
             images,
             self.cancel.child_token(),
             observe,
+            Some(steer_rx),
         )
-        .await?;
+        .await;
+        *seat.steer.lock().unwrap() = None;
+        let mut report = outcome?;
         report.sent = seat.sent.load(std::sync::atomic::Ordering::Acquire) - sent_before;
         Ok(report)
+    }
+
+    /// Hand a message to the turn running on the seat, the way typing
+    /// into the TUI mid-turn does: the loop reads it at its next step.
+    /// `false` when no turn is running, or it is just ending — then
+    /// the message is a turn of its own.
+    pub fn steer(&self, seat: &Seat, text: &str, images: &[ImageContent]) -> bool {
+        if seat.turn.try_lock().is_ok() {
+            return false;
+        }
+        let steer = Steer {
+            text: text.to_string(),
+            images: images.to_vec(),
+        };
+        let sender = seat.steer.lock().unwrap().clone();
+        let Some(sender) = sender else {
+            return false;
+        };
+        // Recorded before the send, so the loop's report of delivery
+        // cannot arrive first and find nothing to clear.
+        seat.undelivered.lock().unwrap().push(steer.clone());
+        if sender.send(steer).is_err() {
+            seat.undelivered.lock().unwrap().pop();
+            return false;
+        }
+        true
+    }
+
+    /// Steers the last turn on the seat never delivered.
+    pub fn take_undelivered(&self, seat: &Seat) -> Vec<Steer> {
+        std::mem::take(&mut *seat.undelivered.lock().unwrap())
     }
 
     pub fn seats(&self) -> Vec<Arc<Seat>> {
@@ -622,6 +676,7 @@ pub async fn turn(
     images: &[ImageContent],
     cancel: CancellationToken,
     mut observe: impl FnMut(&LoopEvent),
+    steer: Option<SteerReceiver>,
 ) -> std::result::Result<TurnReport, TurnError> {
     let (events, mut rx) = loop_event_channel(LOOP_EVENT_CAPACITY);
     let turn = ilar::agent::run_turn(
@@ -636,7 +691,7 @@ pub async fn turn(
         events,
         cancel,
         runtime.tool_ctx.clone(),
-        None,
+        steer,
     );
     tokio::pin!(turn);
     let mut text = String::new();
