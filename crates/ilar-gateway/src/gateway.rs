@@ -462,7 +462,33 @@ impl Gateway {
                     failed_reply("/new", &error)
                 }
             },
-            Command::Model(None) => {
+            Command::Model {
+                model: None,
+                save: true,
+            } => {
+                let current = match self
+                    .driver
+                    .seat(key, &message.channel, &message.chat_id, message.is_group)
+                    .await
+                {
+                    Ok(seat) => self.driver.current_model(&seat),
+                    Err(error) => Err(error),
+                };
+                match current.and_then(|model| {
+                    self.driver.save_default_model(&model)?;
+                    Ok(model)
+                }) {
+                    Ok(model) => format!("{model} is the default for new chats now."),
+                    Err(error) => {
+                        log(&format!("{key}: /model --save failed: {error:#}"));
+                        failed_reply("/model --save", &error)
+                    }
+                }
+            }
+            Command::Model {
+                model: None,
+                save: false,
+            } => {
                 let current = match self
                     .driver
                     .seat(key, &message.channel, &message.chat_id, message.is_group)
@@ -482,17 +508,23 @@ impl Gateway {
                         .or_default()
                         .push(id.to_string());
                 }
-                let mut lines = vec![format!(
-                    "Current: {}",
-                    current.unwrap_or_else(|| "unknown".into())
-                )];
+                let mut lines = vec![
+                    format!("Current: {}", current.unwrap_or_else(|| "unknown".into())),
+                    format!("Default for new chats: {}", self.driver.default_model()),
+                ];
                 for (provider, ids) in by_provider {
                     lines.push(format!("{provider}: {}", ids.join(", ")));
                 }
-                lines.push("/model <provider/model> switches.".to_string());
+                lines.push(
+                    "/model <provider/model> switches; add --save to make it the default."
+                        .to_string(),
+                );
                 lines.join("\n")
             }
-            Command::Model(Some(model)) => {
+            Command::Model {
+                model: Some(model),
+                save,
+            } => {
                 let seat = match self
                     .driver
                     .seat(key, &message.channel, &message.chat_id, message.is_group)
@@ -504,12 +536,22 @@ impl Gateway {
                         return failed_reply("/model", &error);
                     }
                 };
-                match self.driver.set_model(&seat, &model) {
+                let switched = match self.driver.set_model(&seat, &model) {
                     Ok(ModelSwitch::Applied) => format!("Switched to {model}."),
                     Ok(ModelSwitch::Pending) => format!(
                         "Switched to {model} from your next message on; the turn running now keeps its model."
                     ),
-                    Err(error) => format!("{error:#}"),
+                    Err(error) => return format!("{error:#}"),
+                };
+                if !save {
+                    return switched;
+                }
+                match self.driver.save_default_model(&model) {
+                    Ok(()) => format!("{switched} It is the default for new chats now."),
+                    Err(error) => {
+                        log(&format!("{key}: /model --save failed: {error:#}"));
+                        format!("{switched} Not saved as the default: {error:#}")
+                    }
                 }
             }
         }

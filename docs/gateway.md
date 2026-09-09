@@ -47,7 +47,7 @@ declares them is warned about and ignored.
 |---|---|---|
 | `gateway.home` | `<state dir>/gateway` | The assistant's home; see below. |
 | `gateway.agent` | the core's default | The agent every chat runs as. |
-| `gateway.model` | `general.model` | `provider/model` for every chat. |
+| `gateway.model` | `general.model` | `provider/model` a fresh chat starts on, unless `/model … --save` saved one. |
 | `gateway.workspace` | `<state dir>/gateway/workspace` | Where the assistant's sessions work. |
 | `gateway.notify_interval_secs` | `60` | One inbox message per source per interval. |
 | `gateway.tools.allow` | all | Only these tools. |
@@ -131,7 +131,8 @@ A message that is a slash command is answered by the gateway itself:
 |---|---|
 | `/new` | A fresh session for this chat, on the configured model. The old one stays on disk; memory stays. |
 | `/model` | The current model, then the models this configuration can reach by provider. |
-| `/model <provider/model>` | Switch this chat. Recorded at once when the chat is idle, or as the running turn ends; the reply says which. |
+| `/model <provider/model>` | Switch this chat. Recorded at once when the chat is idle, or as the running turn ends; the reply says which. The switch is the session's and outlives a restart. |
+| `/model <provider/model> --save`, `/model --save` | Also make it, or the chat's current model, the default for new chats: kept as `<home>/model`, above `gateway.model`. |
 | `/pending` | What the review staged, when approval is on. |
 | `/approve [id\|all]`, `/reject [id\|all]` | Decide on it. |
 | `/help` | The list above. |
@@ -148,6 +149,7 @@ Everything of the assistant's lives in one directory, `gateway.home`,
 | `memory/` | The core files, the notes, the daily notes. |
 | `workspace/` | Where its sessions work. |
 | `routes.json`, `cron.json`, `inbox/` | Chats, jobs, notifications. |
+| `model` | The default for new chats, when `/model … --save` set one. |
 | `deltachat/` | The channel's account, and `invite.txt`. |
 
 Providers, keys and the `[gateway]` table itself stay in `ilar.toml`:

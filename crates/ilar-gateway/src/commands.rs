@@ -5,8 +5,12 @@
 pub enum Command {
     /// Start over: a fresh session for this chat. Memory stays.
     New,
-    /// List the models, or switch to one.
-    Model(Option<String>),
+    /// List the models, or switch to one; `save` makes it the default
+    /// for new chats as well.
+    Model {
+        model: Option<String>,
+        save: bool,
+    },
     Help,
     /// What the review staged and has not been approved.
     Pending,
@@ -30,7 +34,16 @@ pub fn parse(text: &str) -> Option<Command> {
     }
     Some(match (name, argument) {
         ("new", _) => Command::New,
-        ("model", argument) => Command::Model(argument.map(str::to_string)),
+        ("model", argument) => {
+            let words: Vec<&str> = argument.unwrap_or_default().split_whitespace().collect();
+            Command::Model {
+                model: words
+                    .iter()
+                    .find(|w| **w != "--save")
+                    .map(|w| w.to_string()),
+                save: words.contains(&"--save"),
+            }
+        }
         ("help", _) => Command::Help,
         ("pending", _) => Command::Pending,
         ("approve", argument) => Command::Approve(argument.unwrap_or("all").to_string()),
@@ -40,7 +53,7 @@ pub fn parse(text: &str) -> Option<Command> {
 }
 
 pub const HELP: &str = "/new — start a fresh chat (memory stays)\n\
-/model — list the models; /model <provider/model> switches\n\
+/model — list the models; /model <provider/model> switches; add --save to make it the default for new chats\n\
 /pending — what the review wants to remember, when approval is on\n\
 /approve [id|all], /reject [id|all] — decide on it\n\
 /help — this";
@@ -53,12 +66,41 @@ mod tests {
     fn commands_parse_and_prose_does_not() {
         assert_eq!(parse("/new"), Some(Command::New));
         assert_eq!(parse("  /new please"), Some(Command::New));
-        assert_eq!(parse("/model"), Some(Command::Model(None)));
+        assert_eq!(
+            parse("/model"),
+            Some(Command::Model {
+                model: None,
+                save: false
+            })
+        );
+        assert_eq!(
+            parse("/model --save"),
+            Some(Command::Model {
+                model: None,
+                save: true
+            })
+        );
+        assert_eq!(
+            parse("/model zai/glm-4.7 --save"),
+            Some(Command::Model {
+                model: Some("zai/glm-4.7".into()),
+                save: true
+            })
+        );
         assert_eq!(
             parse("/model zai/glm-4.7"),
-            Some(Command::Model(Some("zai/glm-4.7".into())))
+            Some(Command::Model {
+                model: Some("zai/glm-4.7".into()),
+                save: false
+            })
         );
-        assert_eq!(parse("/model   "), Some(Command::Model(None)));
+        assert_eq!(
+            parse("/model   "),
+            Some(Command::Model {
+                model: None,
+                save: false
+            })
+        );
         assert_eq!(parse("/help"), Some(Command::Help));
         assert_eq!(parse("/pending"), Some(Command::Pending));
         assert_eq!(parse("/approve"), Some(Command::Approve("all".into())));

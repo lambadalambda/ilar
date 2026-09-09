@@ -443,12 +443,21 @@ impl Driver {
         ttl.checked_sub(margin).unwrap_or(ttl / 2)
     }
 
-    /// The model a fresh chat starts on.
+    /// The model a fresh chat starts on: the one saved from a chat
+    /// with `/model … --save`, else `gateway.model`, else the core's.
     pub fn default_model(&self) -> String {
-        self.gateway
-            .model
-            .clone()
-            .unwrap_or_else(|| self.config.general.model.clone())
+        default_model(&self.config, &self.gateway)
+    }
+
+    /// Make `model` the default for new chats, in `<home>/model`.
+    pub fn save_default_model(&self, model: &str) -> Result<()> {
+        if !self.available_models().iter().any(|known| known == model) {
+            bail!("no model {model}; /model lists them");
+        }
+        crate::routes::write_atomically(
+            &self.gateway.home(&self.config).join(SAVED_MODEL_FILE),
+            format!("{model}\n").as_bytes(),
+        )
     }
 
     /// Switch a seat's session to `model`. Recorded now when the seat
@@ -506,6 +515,19 @@ impl Driver {
     }
 }
 
+/// Where `/model … --save` keeps the default for new chats.
+pub const SAVED_MODEL_FILE: &str = "model";
+
+/// The saved default, then the configured one, then the core's.
+fn default_model(config: &Config, gateway: &GatewayConfig) -> String {
+    std::fs::read_to_string(gateway.home(config).join(SAVED_MODEL_FILE))
+        .ok()
+        .map(|text| text.trim().to_string())
+        .filter(|model| !model.is_empty())
+        .or_else(|| gateway.model.clone())
+        .unwrap_or_else(|| config.general.model.clone())
+}
+
 /// The session plan a gateway chat runs on: the assistant's workspace,
 /// agent and model, a SOUL.md before any coding instructions, the tool
 /// policy narrowed into every agent definition, and — for a private
@@ -523,7 +545,10 @@ pub fn plan(
     let mut plan = RuntimePlan::resolve(
         config,
         &RuntimeOptions {
-            model: gateway.model.clone(),
+            // A resumed session keeps the model it records, so a
+            // `/model` switch outlives a restart; the default is for
+            // fresh sessions only.
+            model: resume.is_none().then(|| default_model(config, gateway)),
             agent: gateway.agent.clone(),
             resume,
             cwd: workspace,

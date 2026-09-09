@@ -609,7 +609,9 @@ async fn slash_new_starts_a_fresh_session_and_slash_model_lists_and_switches() {
     fake.inject("/model", "chat-1", "alice").await;
     let sent = fake.wait_for_sent(4, WAIT).await;
     assert!(
-        sent[3].text.starts_with("Current: zai/glm-4.7\n"),
+        sent[3]
+            .text
+            .starts_with("Current: zai/glm-4.7\nDefault for new chats: zai/glm-4.7\n"),
         "{sent:?}"
     );
     assert!(sent[3].text.contains("zai: "), "{}", sent[3].text);
@@ -639,6 +641,74 @@ async fn slash_new_starts_a_fresh_session_and_slash_model_lists_and_switches() {
     fake.inject("/help", "chat-1", "alice").await;
     let sent = fake.wait_for_sent(8, WAIT).await;
     assert!(sent[7].text.contains("/new"), "{}", sent[7].text);
+    gateway.cancel();
+}
+
+#[tokio::test]
+async fn a_model_switch_outlives_a_restart_and_save_sets_the_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let quiet = GatewayConfig {
+        announce: false,
+        ..GatewayConfig::default()
+    };
+    let (gateway, fake) = gateway_with(dir.path(), vec![says("one")], quiet.clone());
+    fake.inject("hi", "chat-1", "alice").await;
+    fake.wait_for_sent(1, WAIT).await;
+    fake.inject("/model zai/glm-4.5", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(2, WAIT).await;
+    assert_eq!(sent[1].text, "Switched to zai/glm-4.5.");
+    gateway.cancel();
+
+    // Started again on the same home, the chat is still on it.
+    let (gateway, fake) = gateway_with(dir.path(), vec![says("two")], quiet.clone());
+    fake.inject("/model", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(1, WAIT).await;
+    assert!(
+        sent[0]
+            .text
+            .starts_with("Current: zai/glm-4.5\nDefault for new chats: zai/glm-4.7\n"),
+        "{}",
+        sent[0].text
+    );
+    // Saved, it is what a fresh chat starts on.
+    fake.inject("/model zai/glm-4.5 --save", "chat-1", "alice")
+        .await;
+    let sent = fake.wait_for_sent(2, WAIT).await;
+    assert_eq!(
+        sent[1].text,
+        "Switched to zai/glm-4.5. It is the default for new chats now."
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("state/gateway/model")).unwrap(),
+        "zai/glm-4.5\n"
+    );
+    fake.inject("/new", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(3, WAIT).await;
+    assert!(
+        sent[2]
+            .text
+            .starts_with("Started a fresh chat on zai/glm-4.5."),
+        "{}",
+        sent[2].text
+    );
+    fake.inject("hello", "chat-1", "alice").await;
+    fake.wait_for_sent(4, WAIT).await;
+    fake.inject("/model", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(5, WAIT).await;
+    assert!(
+        sent[4].text.starts_with("Current: zai/glm-4.5\n"),
+        "{}",
+        sent[4].text
+    );
+    // `/model --save` alone saves what the chat is on.
+    fake.inject("/model zai/glm-4.7", "chat-1", "alice").await;
+    fake.wait_for_sent(6, WAIT).await;
+    fake.inject("/model --save", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(7, WAIT).await;
+    assert_eq!(
+        sent[6].text,
+        "zai/glm-4.7 is the default for new chats now."
+    );
     gateway.cancel();
 }
 
