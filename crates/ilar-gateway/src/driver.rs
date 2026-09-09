@@ -111,6 +111,7 @@ pub struct Wiring {
     pub constraints: HashMap<String, String>,
     pub cron: Arc<CronStore>,
     pub memory: Arc<MemoryStore>,
+    pub skills: Arc<crate::skills::SkillLibrary>,
 }
 
 pub struct Driver {
@@ -256,6 +257,12 @@ impl Driver {
                 }
             }
         }
+        // Its own skills, to write as well as read.
+        if self.gateway.tools.admits("skill_manage") {
+            runtime.registry.add(crate::skills::SkillManageTool::new(
+                self.wiring.skills.clone(),
+            ))?;
+        }
         // And its calendar, unless the policy says otherwise.
         if self.gateway.tools.admits("cron") {
             let home = crate::bus::session_key(channel, chat_id);
@@ -333,8 +340,13 @@ impl Driver {
         seat.review_generation
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         let mut narrator = crate::status::Narrator::default();
+        let mut watch = crate::skills::SkillWatch::default();
+        let skills = self.wiring.skills.clone();
         let observe = move |event: &LoopEvent| {
             seat.episode.lock().unwrap().observe(event);
+            if let Some(name) = watch.observe(event) {
+                let _ = skills.note_view(&name);
+            }
             if let Some(status) = &status
                 && let Some(line) = narrator.observe(event)
             {

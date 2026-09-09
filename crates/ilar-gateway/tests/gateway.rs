@@ -782,6 +782,65 @@ async fn a_quiet_episode_is_not_reviewed_and_approval_stages_the_plan() {
 }
 
 #[tokio::test]
+async fn a_skill_the_assistant_writes_is_listed_next_session_and_loads_now() {
+    let dir = tempfile::tempdir().unwrap();
+    let (gateway, fake) = gateway(
+        dir.path(),
+        vec![
+            calls(
+                "skill_manage",
+                serde_json::json!({
+                    "action": "create", "name": "deploy-check",
+                    "description": "Check a deploy is up",
+                    "triggers": ["is it up"],
+                    "body": "# Deploy check\n\n1. curl the health URL.\n2. Read the journal.",
+                }),
+            ),
+            says("saved it"),
+            calls("skill", serde_json::json!({"name": "deploy-check"})),
+            says("loaded it"),
+            says("fresh"),
+        ],
+    );
+    fake.inject("remember how we check deploys", "chat-1", "alice")
+        .await;
+    fake.wait_for_sent(1, WAIT).await;
+    let path = dir
+        .path()
+        .join("state/gateway/skills/deploy-check/SKILL.md");
+    assert!(path.is_file(), "{}", path.display());
+    // Loadable at once through the core's skill tool, and counted.
+    fake.inject("use it", "chat-1", "alice").await;
+    fake.wait_for_sent(2, WAIT).await;
+    assert!(has_tool_result(
+        dir.path(),
+        "fake:chat-1",
+        |content, is_error| { !is_error && content.contains("curl the health URL") }
+    ));
+    let ledger = ilar_gateway::skills::SkillLibrary::new(dir.path().join("state/gateway/skills"))
+        .ledger()
+        .unwrap();
+    assert_eq!(ledger["deploy-check"].views, 1);
+    // Listed in the prompt of the next session.
+    assert!(
+        !gateway
+            .system_prompt("fake:chat-1")
+            .unwrap()
+            .contains("Check a deploy is up")
+    );
+    fake.inject("/new", "chat-1", "alice").await;
+    fake.wait_for_sent(3, WAIT).await;
+    fake.inject("hi", "chat-1", "alice").await;
+    fake.wait_for_sent(4, WAIT).await;
+    let prompt = gateway.system_prompt("fake:chat-1").unwrap();
+    assert!(
+        prompt.contains("deploy-check: Check a deploy is up (use when: is it up)"),
+        "{prompt}"
+    );
+    gateway.cancel();
+}
+
+#[tokio::test]
 async fn safe_mode_hides_the_unsafe_tools_from_the_chat_and_its_agents() {
     let dir = tempfile::tempdir().unwrap();
     let settings = GatewayConfig {

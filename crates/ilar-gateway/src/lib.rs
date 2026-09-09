@@ -25,4 +25,5 @@ pub mod message;
 pub mod policy;
 pub mod review;
 pub mod routes;
+pub mod skills;
 pub mod status;

@@ -95,7 +95,11 @@ answer with one JSON object and nothing else: {\"memory\": [{\"file\": \"user\" 
 \"…\"}], \"notes\": [{\"kind\": \"decision\"|\"solution\"|\"preference\"|\"event\"|\"task\"|\
 \"risk\", \"title\": \"…\", \"summary\": \"one line\", \"body\": \"the fact in full\"}]}. \
 Memory entries are one short line each and the files are small: prefer replace over add \
-when an entry is already about the same thing. Never store secrets, paths that change, or \
+when an entry is already about the same thing. A workflow worth repeating is a skill, not a \
+memory entry: add \"skills\": [{\"action\": \"create\" or \"patch\", \"name\": \"lowercase-with-\
+dashes\", \"description\": \"…\", \"triggers\": [\"…\"], \"body\": \"…\", \"old\": \"…\", \
+\"new\": \"…\"}] — a distilled rule with its reason, never the story of what happened, and \
+patch a skill that exists before creating one. Never store secrets, paths that change, or \
 what is easily looked up.";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -104,6 +108,24 @@ pub struct Plan {
     pub memory: Vec<MemoryEdit>,
     #[serde(default)]
     pub notes: Vec<NoteDraft>,
+    #[serde(default)]
+    pub skills: Vec<SkillEdit>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SkillEdit {
+    pub action: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub triggers: Vec<String>,
+    #[serde(default)]
+    pub body: Option<String>,
+    #[serde(default)]
+    pub old: Option<String>,
+    #[serde(default)]
+    pub new: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -134,7 +156,7 @@ pub struct NoteDraft {
 
 impl Plan {
     pub fn is_empty(&self) -> bool {
-        self.memory.is_empty() && self.notes.is_empty()
+        self.memory.is_empty() && self.notes.is_empty() && self.skills.is_empty()
     }
 
     /// The model's answer as a plan: `None` for "nothing", an empty
@@ -168,13 +190,38 @@ impl Plan {
         for note in &self.notes {
             lines.push(format!("note ({}): {}", kind_name(note.kind), note.title));
         }
+        for skill in &self.skills {
+            lines.push(format!("skill {}: {}", skill.action, skill.name));
+        }
         lines
     }
 
     /// Write the plan through the store. Every edit is attempted; the
     /// outcome lines say what landed and what did not.
-    pub fn apply(&self, store: &MemoryStore) -> Vec<String> {
+    pub fn apply(&self, store: &MemoryStore, skills: &crate::skills::SkillLibrary) -> Vec<String> {
         let mut outcome = Vec::new();
+        for skill in &self.skills {
+            let result = match skill.action.as_str() {
+                "create" => skills
+                    .create(
+                        &skill.name,
+                        skill.description.as_deref().unwrap_or(""),
+                        &skill.triggers,
+                        skill.body.as_deref().unwrap_or(""),
+                    )
+                    .map(drop),
+                "patch" => skills.patch(
+                    &skill.name,
+                    skill.old.as_deref().unwrap_or(""),
+                    skill.new.as_deref().unwrap_or(""),
+                ),
+                other => Err(anyhow::anyhow!("unknown skill action {other:?}")),
+            };
+            outcome.push(match result {
+                Ok(()) => format!("skill {}: {}", skill.action, skill.name),
+                Err(error) => format!("skill {} not written — {error:#}", skill.name),
+            });
+        }
         for edit in &self.memory {
             let result = match edit.action.as_str() {
                 "add" => store.add(edit.file, edit.text.as_deref().unwrap_or("")),
@@ -366,7 +413,8 @@ mod tests {
              \"notes\": [{\"kind\": \"event\", \"title\": \"Moved\", \"summary\": \"moved house\"}]}",
         )
         .unwrap();
-        let outcome = plan.apply(&store);
+        let skills = crate::skills::SkillLibrary::new(dir.path().join("skills"));
+        let outcome = plan.apply(&store, &skills);
         assert_eq!(outcome[0], "user: Likes tea");
         assert!(outcome[1].contains("not written"), "{outcome:?}");
         assert!(outcome[2].starts_with("note "), "{outcome:?}");

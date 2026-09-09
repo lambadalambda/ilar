@@ -185,6 +185,20 @@ every compaction handover. Nothing in the archive is ever injected:
 `memory_search` returns an index, best first with recent notes
 ranking higher, and `memory_get` reads the chosen notes in full.
 
+## Skills it writes itself
+
+`skill_manage` lets the assistant keep its own procedures under
+`<home>/skills/`, in the `SKILL.md` layout the `skill` tool reads:
+create, patch (the passage to replace must occur once, so a patch
+changes only what it names), rewrite, delete. Two rules travel in the
+tool's description, both Hermes's: lessons, not logs — a distilled
+rule with its reason, never the story of what happened — and patch a
+skill that exists before creating one. A new skill loads at once and
+is listed in the prompt from the next session on. A ledger,
+`skills/.usage.json`, counts views and patches per skill for the
+weekly review. The review after a turn may create or patch skills
+through the same library.
+
 ## The review after a turn
 
 Once a chat has been quiet for a while after a turn — by default just

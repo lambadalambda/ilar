@@ -36,6 +36,7 @@ pub struct Gateway {
     outbound: Mutex<Option<mpsc::Receiver<Outbound>>>,
     cron: Arc<CronStore>,
     memory: Arc<MemoryStore>,
+    skills: Arc<crate::skills::SkillLibrary>,
     pending: crate::review::PendingStore,
     settings: GatewayConfig,
     /// The gateway's own handle, for tasks it spawns on itself.
@@ -96,6 +97,7 @@ impl Gateway {
         let routes = Arc::new(RouteStore::open(dir.join("routes.json"))?);
         let cron = Arc::new(CronStore::open(dir.join("cron.json"))?);
         let memory = Arc::new(MemoryStore::new(dir.join("memory")));
+        let skills = Arc::new(crate::skills::SkillLibrary::new(dir.join("skills")));
         let settings = gateway.clone();
         let (follow_tx, follow_rx) = mpsc::channel(64);
         let (outbound_tx, outbound_rx) = mpsc::channel(256);
@@ -121,6 +123,7 @@ impl Gateway {
                 constraints,
                 cron: cron.clone(),
                 memory: memory.clone(),
+                skills: skills.clone(),
             },
             cancel.clone(),
         ));
@@ -138,6 +141,7 @@ impl Gateway {
             outbound: Mutex::new(Some(outbound_rx)),
             cron,
             memory,
+            skills,
             pending: crate::review::PendingStore::new(dir.join("pending")),
             settings,
             statuses: Mutex::new(HashMap::new()),
@@ -369,7 +373,7 @@ impl Gateway {
                 Ok(taken) => {
                     let mut lines = Vec::new();
                     for p in taken {
-                        lines.extend(p.plan.apply(&self.memory));
+                        lines.extend(p.plan.apply(&self.memory, &self.skills));
                     }
                     format!("💾 remembered: {}", lines.join("; "))
                 }
@@ -635,7 +639,7 @@ impl Gateway {
             }
             return;
         }
-        let outcome = plan.apply(&self.memory);
+        let outcome = plan.apply(&self.memory, &self.skills);
         log(&format!("{}: review kept {}", seat.key, outcome.join("; ")));
         self.deliver(
             &seat.channel,
