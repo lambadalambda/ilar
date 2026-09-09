@@ -34,6 +34,30 @@ foreground children inherit it and touch it on every event at any
 depth, a background child starts its own. The test reproduces the
 production shape (mutable task, read-only foreground child).
 
+## 2026-09-10 — Where it is, its own skills, and steering
+
+Three more from daily use. The gateway's prompt now carries a "Where
+you are" block after the base instructions: reached over a chat and
+answered through the message tool, the home and workspace paths, and
+`ilar-gateway notify` as the way a script it started can wake it —
+nothing had told the assistant that command existed. Skills come from
+the home alone now: a `RuntimeOptions.own_skills_only` the gateway
+sets makes the skill store skip the two built-ins and the working
+directory's `.ilar/skills`, which the service's `~` had been
+contributing to the list; `~/.config/ilar/skills` was already out
+since the home work.
+
+Steering is the TUI's, reused. The core loop has taken a steer
+channel all along and the gateway passed `None`; now each seat holds
+the running turn's sender, a message arriving while the turn lock is
+held goes through it instead of waiting, the narrator shows "steered:
+…" when the loop reports delivery, and the seat keeps the steers it
+handed over until each is reported read, so whatever a cancelled turn
+never saw runs once as a turn of its own. The test for it shook out a
+real flake in the status updater: with a zero interval the select
+between "due" and "newer line" was unbiased, so a line arriving in
+the same instant could replace the one about to post. Biased now.
+
 ## 2026-09-09 — Restarts you can see, and settings that stay put
 
 Three asks from daily use. The gateway now tells the last active chat

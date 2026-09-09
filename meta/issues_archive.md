@@ -333,3 +333,6 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [The gateway announces itself](issues/the-gateway-announces-itself.md)
 - [x] [Image generation can be switched off](issues/image-generation-can-be-switched-off.md)
 - [x] [The chosen model survives a restart](issues/the-chosen-model-survives-a-restart.md)
+- [x] [The assistant knows where it is](issues/the-assistant-knows-where-it-is.md)
+- [x] [The gateway loads only its own skills](issues/the-gateway-loads-only-its-own-skills.md)
+- [x] [A message during a turn steers it](issues/a-message-during-a-turn-steers-it.md)

@@ -132,6 +132,3 @@ milestones 15–17 stay filed — they come back when the feature does.*
 - [ ] [Test repositories never sign](issues/test-repositories-never-sign.md)
 - [ ] [Provider URLs are structural](issues/provider-urls-are-structural.md)
 
-- [ ] [The assistant knows where it is](issues/the-assistant-knows-where-it-is.md)
-- [ ] [The gateway loads only its own skills](issues/the-gateway-loads-only-its-own-skills.md)
-- [ ] [A message during a turn steers it](issues/a-message-during-a-turn-steers-it.md)

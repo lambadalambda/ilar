@@ -23,3 +23,16 @@ The core supports it; the gateway passes no steer channel.
 - Tests: a message during a slow tool call reaches the model inside
   the same turn, with one reply; a steer left over from a failed turn
   runs afterwards.
+
+## Notes
+
+- Done 2026-09-10. The "left over from a failed turn" path is
+  reached only when the gateway is cancelled mid-tool, since the loop
+  drains steers at every step boundary and once more as the model
+  stops; it is implemented (the leftovers run once as a turn of their
+  own) but not covered by a test, as the mock provider cannot fail a
+  turn between a steer's arrival and its delivery.
+- Found on the way: with `status_interval_secs = 0` the updater's
+  select was unbiased, so a line arriving in the same instant as the
+  due time could replace the one about to post; now biased, so every
+  line posts in order once due.
