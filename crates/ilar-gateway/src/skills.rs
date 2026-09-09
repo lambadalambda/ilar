@@ -159,6 +159,27 @@ impl SkillLibrary {
         })
     }
 
+    /// Move a skill aside, to `.archive/<name>`: out of the listing,
+    /// still on disk.
+    pub fn archive(&self, name: &str) -> Result<()> {
+        Self::check_name(name)?;
+        let _write = self.write.lock().unwrap();
+        let from = self.dir.join(name);
+        if !from.join("SKILL.md").exists() {
+            bail!("no skill {name}");
+        }
+        let archive = self.dir.join(".archive");
+        std::fs::create_dir_all(&archive)?;
+        let to = archive.join(name);
+        if to.exists() {
+            std::fs::remove_dir_all(&to)?;
+        }
+        std::fs::rename(&from, &to)?;
+        let mut ledger = self.ledger()?;
+        ledger.remove(name);
+        self.save_ledger(&ledger)
+    }
+
     pub fn delete(&self, name: &str) -> Result<()> {
         Self::check_name(name)?;
         let _write = self.write.lock().unwrap();

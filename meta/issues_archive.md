@@ -329,3 +329,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [The assistant has a home](issues/the-assistant-has-a-home.md)
 - [x] [The review after a turn](issues/the-review-after-a-turn.md)
 - [x] [The assistant writes its skills](issues/the-assistant-writes-its-skills.md)
+- [x] [A weekly review of memory and skills](issues/a-weekly-review-of-memory-and-skills.md)

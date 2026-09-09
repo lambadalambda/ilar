@@ -61,6 +61,10 @@ impl Schedule {
     }
 }
 
+/// The target that means "whichever chat was last heard from", for
+/// jobs the gateway owns; a job the model adds is always addressed.
+pub const LAST_ACTIVE: &str = "last";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Job {
     pub id: String,
@@ -113,6 +117,26 @@ impl CronStore {
             bail!("job id {} is taken", job.id);
         }
         jobs.push(job.clone());
+        self.save(&jobs)?;
+        Ok(job)
+    }
+
+    /// A job the gateway owns, kept in step with configuration: added
+    /// when absent, updated in place when present, so a changed
+    /// schedule or prompt takes effect at the next start.
+    pub fn upsert(&self, mut job: Job, now: DateTime<Utc>) -> Result<Job> {
+        job.next_run = job.schedule.next_after(now)?;
+        if job.next_run.is_none() {
+            bail!("the schedule never fires");
+        }
+        let mut jobs = self.jobs.lock().unwrap();
+        match jobs.iter_mut().find(|existing| existing.id == job.id) {
+            Some(existing) => {
+                job.last_run = existing.last_run;
+                *existing = job.clone();
+            }
+            None => jobs.push(job.clone()),
+        }
         self.save(&jobs)?;
         Ok(job)
     }

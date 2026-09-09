@@ -383,7 +383,9 @@ async fn a_scheduled_turn_speaks_only_through_the_message_tool_and_a_one_shot_re
     let jobs = ilar_gateway::cron::CronStore::open(dir.path().join("state/gateway/cron.json"))
         .unwrap()
         .list();
-    assert!(jobs.is_empty(), "{jobs:?}");
+    // Only the gateway's own weekly job remains.
+    let ids: Vec<&str> = jobs.iter().map(|job| job.id.as_str()).collect();
+    assert_eq!(ids, ["weekly"], "{jobs:?}");
     gateway.cancel();
 }
 
@@ -837,6 +839,49 @@ async fn a_skill_the_assistant_writes_is_listed_next_session_and_loads_now() {
         prompt.contains("deploy-check: Check a deploy is up (use when: is it up)"),
         "{prompt}"
     );
+    gateway.cancel();
+}
+
+#[tokio::test]
+async fn the_weekly_review_is_a_job_the_gateway_owns_and_speaks_to_the_last_chat() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = GatewayConfig {
+        scheduler_tick_secs: 1,
+        weekly: ilar_gateway::weekly::WeeklyConfig {
+            // Every second, so the test sees it fire.
+            cron: "* * * * * *".into(),
+            ..Default::default()
+        },
+        ..GatewayConfig::default()
+    };
+    let (gateway, fake) = gateway_with(
+        dir.path(),
+        vec![
+            says("hi"),
+            messages("weekly: nothing needed changing", None),
+            says("(the job's final text)"),
+        ],
+        settings,
+    );
+    // Nobody has written yet: the job is scheduled but skipped.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let jobs = ilar_gateway::cron::CronStore::open(dir.path().join("state/gateway/cron.json"))
+        .unwrap()
+        .list();
+    assert_eq!(jobs.len(), 1, "{jobs:?}");
+    assert_eq!(jobs[0].id, "weekly");
+    assert_eq!(jobs[0].target, "last");
+    assert!(fake.sent().is_empty());
+    // Once a chat has written, the job speaks to it through the tool.
+    fake.inject("hello", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(2, Duration::from_secs(15)).await;
+    let texts: Vec<&str> = sent.iter().map(|m| m.text.as_str()).collect();
+    assert_eq!(
+        &texts[..2],
+        ["hi", "weekly: nothing needed changing"],
+        "{sent:?}"
+    );
+    assert!(gateway.tool_names("cron:weekly").is_some());
     gateway.cancel();
 }
 

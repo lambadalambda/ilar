@@ -234,6 +234,32 @@ impl Gateway {
             .unwrap()
             .take()
             .context("gateway already running")?;
+        // The weekly review is a job the gateway owns: present and
+        // current while it is on, gone while it is off.
+        let weekly = &self.settings.weekly;
+        let outcome = if weekly.enabled {
+            self.cron
+                .upsert(
+                    crate::cron::Job {
+                        id: crate::weekly::JOB_ID.into(),
+                        name: "weekly review".into(),
+                        schedule: crate::cron::Schedule::Cron {
+                            expr: weekly.cron.clone(),
+                        },
+                        prompt: crate::weekly::PROMPT.into(),
+                        target: crate::cron::LAST_ACTIVE.into(),
+                        next_run: None,
+                        last_run: None,
+                    },
+                    chrono::Utc::now(),
+                )
+                .map(drop)
+        } else {
+            self.cron.remove(crate::weekly::JOB_ID).map(drop)
+        };
+        if let Err(error) = outcome {
+            log(&format!("weekly review not scheduled: {error:#}"));
+        }
         let dispatcher = {
             let gateway = self.clone();
             tokio::spawn(async move {
@@ -531,7 +557,33 @@ impl Gateway {
 
     /// A cron or heartbeat turn: its own session, homed on the chat it
     /// is for, and heard from only through the message tool.
-    async fn handle_scheduled(&self, key: String, target: String, prompt: String) {
+    async fn handle_scheduled(&self, key: String, target: String, mut prompt: String) {
+        // The gateway's own job goes to whoever was last heard from,
+        // and has the sweep's findings appended.
+        let target = if target == crate::cron::LAST_ACTIVE {
+            match self.routes.snapshot().last_active {
+                Some(last) => last,
+                None => {
+                    log(&format!("{key}: no chat has written yet; skipped"));
+                    return;
+                }
+            }
+        } else {
+            target
+        };
+        if key == format!("cron:{}", crate::weekly::JOB_ID) {
+            match crate::weekly::sweep(&self.skills, chrono::Utc::now(), &self.settings.weekly) {
+                Ok(sweep) => {
+                    let report = sweep.report();
+                    if !report.is_empty() {
+                        log(&format!("{key}: {report}"));
+                        prompt.push(' ');
+                        prompt.push_str(&report);
+                    }
+                }
+                Err(error) => log(&format!("{key}: sweep failed: {error:#}")),
+            }
+        }
         let Some((channel, chat_id)) = split_key(&target) else {
             log(&format!("{key}: target {target:?} is not channel:chat"));
             return;

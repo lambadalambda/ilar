@@ -58,6 +58,10 @@ declares them is warned about and ignored.
 | `gateway.review.min_tool_calls` | `5` | An episode with fewer, and no error, is not reviewed. |
 | `gateway.review.after_idle_secs` | just before the cache closes | Quiet time before the review runs. |
 | `gateway.review.approval` | `false` | Stage the review's writes for `/approve`. |
+| `gateway.weekly.enabled` | `true` | The weekly review of memory and skills; see below. |
+| `gateway.weekly.cron` | `0 4 * * 1` | When it runs, UTC. |
+| `gateway.weekly.stale_after_days` | `30` | A skill unused this long is named stale to the review. |
+| `gateway.weekly.archive_after_days` | `90` | Unused this long, it is moved to `skills/.archive/`. |
 | `gateway.status` | `true` | A status line in the chat while a turn runs. |
 | `gateway.status_interval_secs` | `4` | The least time between two edits of it. |
 | `channels.deltachat.*` | — | The Delta Chat adapter; see below. |
@@ -214,6 +218,19 @@ memory store, and the chat gets one line: "💾 remembered: …". With
 what it would remember, and `/pending`, `/approve` and `/reject`
 decide. Unlike Hermes, there is no bias toward action: most episodes
 should end in nothing.
+
+## The weekly review
+
+A cron job the gateway owns, `weekly`, kept in step with the
+configuration at every start. It runs on a background session of its
+own, addressed to whichever chat was last heard from, with a fixed
+prompt: read the week's daily notes, promote what recurs into the core
+memory through the `memory` tool so the caps hold, drop what is no
+longer true, file the rest as notes, merge overlapping skills through
+`skill_manage`, and send one message saying what changed. Right before
+it, a sweep that needs no model moves skills unused for ninety days to
+`skills/.archive/` and names the ones unused for thirty, so the prompt
+can ask about them.
 
 ## Scheduled turns: cron and heartbeat
 

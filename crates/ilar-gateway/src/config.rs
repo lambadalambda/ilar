@@ -51,6 +51,9 @@ pub struct GatewayConfig {
     /// keeping.
     #[serde(default)]
     pub review: crate::review::ReviewConfig,
+    /// The weekly review of memory and skills: a cron job of its own.
+    #[serde(default)]
+    pub weekly: crate::weekly::WeeklyConfig,
 }
 
 fn default_status_interval_secs() -> u64 {
@@ -81,6 +84,7 @@ impl Default for GatewayConfig {
             status: true,
             status_interval_secs: default_status_interval_secs(),
             review: Default::default(),
+            weekly: Default::default(),
         }
     }
 }

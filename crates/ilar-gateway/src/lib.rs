@@ -27,3 +27,4 @@ pub mod review;
 pub mod routes;
 pub mod skills;
 pub mod status;
+pub mod weekly;
