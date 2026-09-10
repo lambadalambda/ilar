@@ -339,3 +339,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [The prompt preview shows the whole request](issues/the-prompt-preview-shows-the-whole-request.md)
 
 - [x] [Model picker applies default reasoning selection](issues/model-picker-default-selection.md)
+- [x] [The message tool refuses nonsense](issues/the-message-tool-refuses-nonsense.md)
