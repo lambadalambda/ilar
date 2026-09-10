@@ -2180,3 +2180,12 @@ follow-up-vs-route decision, its own backoff, its adoption-once, and
 its missing watchdog. Rewriting a dormant driver is exactly the tax
 standing it down was meant to stop paying. The issue stays open,
 marked, with the remainder parked beside the feature.
+
+## Model-picker defaults belong to a model
+
+The reasoning picker used `None` for both “this model is running with provider
+defaults” and “this is a different model.” Its unchanged-level shortcut therefore
+dismissed Astra's default selection before the model-switch persistence path ran.
+The picker now takes the current model identity and gates both the no-op check
+and active-row marker on it. Explicit selections and same-model no-ops remain
+unchanged. Regression reproduced before the fix; all 458 TUI tests pass.

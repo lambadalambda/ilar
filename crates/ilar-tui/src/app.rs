@@ -2363,8 +2363,11 @@ pub(crate) fn activate_palette_command(
             if let Some(model) = ilar::model::find(&app.current_model)
                 && !model.variants().is_empty()
             {
-                app.variant_picker =
-                    Some(VariantPicker::new(model, app.current_variant.as_deref()));
+                app.variant_picker = Some(VariantPicker::new(
+                    model,
+                    &app.current_model,
+                    app.current_variant.as_deref(),
+                ));
             } else {
                 app.status = "current model has no reasoning variants".into();
                 app.set_notice(
@@ -5573,6 +5576,7 @@ mod tests {
         let mut app = App::new();
         app.variant_picker = Some(VariantPicker::new(
             ilar::model::find("openai/gpt-5.2").unwrap(),
+            "openai/gpt-5.2",
             Some("high"),
         ));
 

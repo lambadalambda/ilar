@@ -2491,6 +2491,7 @@ pub(crate) enum VariantPickerAction {
 
 pub(crate) struct VariantPicker {
     pub(crate) model: &'static ilar::model::ModelInfo,
+    is_current_model: bool,
     active_variant: Option<String>,
     nav: ListNav,
     pub(crate) error: Option<String>,
@@ -2499,8 +2500,11 @@ pub(crate) struct VariantPicker {
 impl VariantPicker {
     pub(crate) fn new(
         model: &'static ilar::model::ModelInfo,
-        active_variant: Option<&str>,
+        current_model: &str,
+        current_variant: Option<&str>,
     ) -> Self {
+        let is_current_model = model.full_id() == current_model;
+        let active_variant = current_variant.filter(|_| is_current_model);
         let selected = active_variant
             .and_then(|active| {
                 model
@@ -2512,6 +2516,7 @@ impl VariantPicker {
             .unwrap_or(0);
         Self {
             model,
+            is_current_model,
             active_variant: active_variant.map(String::from),
             nav: ListNav { selected },
             error: None,
@@ -2581,10 +2586,10 @@ impl Picker for VariantPicker {
         VariantPickerAction::Dismiss
     }
 
-    /// Re-choosing the running level changes nothing, so it closes.
+    /// Only re-choosing the running model AND level is a no-op.
     fn choose(&mut self) -> Self::Action {
         let selected = self.selected_variant();
-        if selected == self.active_variant {
+        if self.is_current_model && selected == self.active_variant {
             VariantPickerAction::Dismiss
         } else {
             VariantPickerAction::Choose(selected)
@@ -2921,7 +2926,8 @@ pub(crate) fn render_variant_picker(frame: &mut Frame, picker: &VariantPicker) -
                 let variant = &picker.model.variants()[index - 1];
                 (variant.id, variant.name)
             };
-            let active = picker.active_variant.as_deref() == (index > 0).then_some(id);
+            let active = picker.is_current_model
+                && picker.active_variant.as_deref() == (index > 0).then_some(id);
             (
                 marked_row(width, is_selected, active, name, &format!("  {id}")),
                 choice_style(is_selected, active),
@@ -4044,9 +4050,47 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_variant_picker_confirms_default_for_new_model() {
+        for id in ["openai/gpt-6-astra", "opencode/gpt-6-astra"] {
+            let model = ilar::model::find(id).unwrap();
+            for current_variant in [None, Some("high")] {
+                let mut picker = VariantPicker::new(model, "openai/gpt-5.2", current_variant);
+                assert_eq!(picker.selected_index(), 0);
+                assert_eq!(
+                    picker.handle_key(KeyCode::Enter, false),
+                    VariantPickerAction::Choose(None),
+                    "{id} from {current_variant:?}"
+                );
+                let high = model
+                    .variants()
+                    .iter()
+                    .position(|v| v.id == "high")
+                    .unwrap();
+                picker.select(high + 1);
+                assert_eq!(
+                    picker.handle_key(KeyCode::Enter, false),
+                    VariantPickerAction::Choose(Some("high".into()))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn reasoning_variant_picker_dismisses_only_unchanged_selection() {
+        let model = ilar::model::find("openai/gpt-6-astra").unwrap();
+        for variant in [None, Some("high")] {
+            let mut picker = VariantPicker::new(model, &model.full_id(), variant);
+            assert_eq!(
+                picker.handle_key(KeyCode::Enter, false),
+                VariantPickerAction::Dismiss
+            );
+        }
+    }
+
+    #[test]
     fn reasoning_variant_picker_includes_default_and_current_level() {
         let model = ilar::model::find("openai/gpt-5.2").unwrap();
-        let mut picker = VariantPicker::new(model, Some("high"));
+        let mut picker = VariantPicker::new(model, &model.full_id(), Some("high"));
 
         assert_eq!(picker.selected_index(), 4);
         assert_eq!(

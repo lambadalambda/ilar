@@ -3955,12 +3955,12 @@ async fn run_app(
                                         && !model.variants().is_empty()
                                     {
                                         app.clear_transient_notice();
-                                        let active_variant = (new_model == app.current_model)
-                                            .then_some(app.current_variant.as_deref())
-                                            .flatten();
                                         app.model_picker = None;
-                                        app.variant_picker =
-                                            Some(VariantPicker::new(model, active_variant));
+                                        app.variant_picker = Some(VariantPicker::new(
+                                            model,
+                                            &app.current_model,
+                                            app.current_variant.as_deref(),
+                                        ));
                                         continue;
                                     }
                                     match adopt_model_selection(
