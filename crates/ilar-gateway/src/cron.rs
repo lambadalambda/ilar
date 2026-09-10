@@ -262,8 +262,8 @@ impl Tool for CronTool {
     fn description(&self) -> &'static str {
         "Schedule a prompt to run later on its own session, addressed to this chat (or a \
          known one): action add with name, prompt and one of cron (five-field expression), \
-         every_secs or at (RFC 3339); action list; action remove with id. A scheduled turn \
-         reaches the chat only through the message tool."
+         every_secs or at (RFC 3339); action list; action remove with id, or a unique name. A \
+         scheduled turn reaches the chat only through the message tool."
     }
 
     fn concurrency(&self) -> ToolConcurrency {
@@ -362,8 +362,7 @@ impl Tool for CronTool {
                         }
                     };
                     match store.remove(&id) {
-                        Ok(true) => ToolOutput::text(format!("removed {id}")),
-                        Ok(false) => ToolOutput::error(format!("cron: no job {id}")),
+                        Ok(_) => ToolOutput::text(format!("removed {id}")),
                         Err(error) => ToolOutput::error(format!("cron: {error:#}")),
                     }
                 }
@@ -379,7 +378,7 @@ impl Tool for CronTool {
                         }
                         (None, Some(secs), None) if secs > MAX_EVERY_SECS => {
                             return ToolOutput::error(format!(
-                                "cron: every_secs {secs} is over a year; use a cron expression"
+                                "cron: every_secs {secs} is over a year; the most is {MAX_EVERY_SECS}"
                             ));
                         }
                         (None, Some(secs), None) => Schedule::Every { secs },
@@ -408,11 +407,10 @@ impl Tool for CronTool {
                     let target = resolve_target(input.target.as_deref(), &home);
                     let routes = routes.snapshot();
                     if routes.session_for(&target).is_none() {
-                        let known: Vec<&str> = routes.sessions.keys().map(String::as_str).collect();
                         return ToolOutput::error(format!(
                             "cron: no chat {target}; target is channel:chat, and only chats that \
                              have written can be targeted. Known: {}",
-                            known.join(", ")
+                            routes.known_chats()
                         ));
                     }
                     let job = Job {

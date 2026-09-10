@@ -249,41 +249,29 @@ impl Plan {
             });
         }
         for edit in &self.memory {
+            let file = file_name(edit.file);
+            let text = edit.text.as_deref().unwrap_or("");
             let result = match edit.action.as_str() {
-                "add" => store
-                    .add(edit.file, edit.text.as_deref().unwrap_or(""))
-                    .map(drop),
-                "replace" => store.replace(
-                    edit.file,
-                    edit.old.as_deref().unwrap_or(""),
-                    edit.new.as_deref().unwrap_or(""),
-                ),
+                "add" => store.add(edit.file, text).map(|added| {
+                    if added {
+                        format!("{file}: {text}")
+                    } else {
+                        format!("{file}: already had {text}")
+                    }
+                }),
+                "replace" => store
+                    .replace(
+                        edit.file,
+                        edit.old.as_deref().unwrap_or(""),
+                        edit.new.as_deref().unwrap_or(""),
+                    )
+                    .map(|()| format!("{file}: {}", edit.new.clone().unwrap_or_default())),
                 "remove" => store
-                    .remove(edit.file, edit.text.as_deref().unwrap_or(""))
-                    .map(drop),
+                    .remove(edit.file, text)
+                    .map(|dropped| format!("{file}: removed {}", dropped.join("; "))),
                 other => Err(anyhow::anyhow!("unknown action {other:?}")),
             };
-            let line = match result {
-                Ok(()) => match edit.action.as_str() {
-                    "add" => format!(
-                        "{}: {}",
-                        file_name(edit.file),
-                        edit.text.clone().unwrap_or_default()
-                    ),
-                    "replace" => format!(
-                        "{}: {}",
-                        file_name(edit.file),
-                        edit.new.clone().unwrap_or_default()
-                    ),
-                    _ => format!(
-                        "{}: removed {}",
-                        file_name(edit.file),
-                        edit.text.clone().unwrap_or_default()
-                    ),
-                },
-                Err(error) => format!("{}: not written — {error:#}", file_name(edit.file)),
-            };
-            outcome.push(line);
+            outcome.push(result.unwrap_or_else(|error| format!("{file}: not written — {error:#}")));
         }
         for note in &self.notes {
             let line = match store.note(

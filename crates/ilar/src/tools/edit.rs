@@ -105,7 +105,7 @@ impl Tool for EditTool {
             if input.old_string.is_empty() {
                 return ToolOutput::error(
                     "old_string is empty; edit replaces a passage that exists. To create a file \
-                     or append to one, use write",
+                     or replace one whole, use write",
                 );
             }
             if input.old_string == input.new_string {

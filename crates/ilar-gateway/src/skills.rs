@@ -112,6 +112,17 @@ impl SkillLibrary {
         Ok(path)
     }
 
+    /// A skill's file, or the error that names the skills there are.
+    fn read(&self, name: &str, path: &Path) -> Result<String> {
+        std::fs::read_to_string(path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                self.missing(name)
+            } else {
+                anyhow::Error::from(error).context(format!("reading skill {name}"))
+            }
+        })
+    }
+
     /// The error for a name that is not a skill: says which are.
     fn missing(&self, name: &str) -> anyhow::Error {
         let names = self.names().unwrap_or_default();
@@ -135,7 +146,7 @@ impl SkillLibrary {
         }
         let _write = self.write.lock().unwrap();
         let path = self.path(name);
-        let text = std::fs::read_to_string(&path).map_err(|_| self.missing(name))?;
+        let text = self.read(name, &path)?;
         let (head, body) = split_frontmatter(&text);
         match body.matches(old).count() {
             1 => {}
@@ -154,7 +165,6 @@ impl SkillLibrary {
     }
 
     /// Rewrite a skill whole: the same file the core reads, new content.
-    /// Rewrite a skill whole: the same file the core reads, new content.
     /// `triggers` of `None` keeps the ones it has.
     pub fn rewrite(
         &self,
@@ -169,12 +179,17 @@ impl SkillLibrary {
         }
         let _write = self.write.lock().unwrap();
         let path = self.path(name);
-        let text = std::fs::read_to_string(&path).map_err(|_| self.missing(name))?;
+        let text = self.read(name, &path)?;
         let kept = match triggers {
             Some(triggers) => triggers.to_vec(),
             None => ilar::skill::parse_skill_md(name, &text)
                 .map(|skill| skill.triggers)
-                .unwrap_or_default(),
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "skill {name}'s frontmatter cannot be read ({error:#}); pass triggers \
+                         to rewrite it whole"
+                    )
+                })?,
         };
         crate::routes::write_atomically(&path, Self::render(description, &kept, body).as_bytes())?;
         self.touch(name, |usage| {

@@ -243,7 +243,9 @@ impl Tool for ServiceTool {
                         return ToolOutput::error("service start requires name and command");
                     };
                     if command.trim().is_empty() {
-                        return ToolOutput::error("service start: command is empty");
+                        return ToolOutput::error(
+                            "service start: command is empty; give the command to run",
+                        );
                     }
                     if !valid_name(&name) {
                         return ToolOutput::error(format!(

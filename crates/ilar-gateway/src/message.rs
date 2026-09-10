@@ -63,7 +63,7 @@ fn address(
         Some(key) if key.contains(':') => {
             let (name, id) = key.split_once(':').unwrap_or((&key, ""));
             match channel {
-                Some(given) if given != name && !given.contains(':') => {
+                Some(given) if given != name && given != key => {
                     return Err(format!(
                         "chat is a chat's id, not a session key; {key:?} is on {name} but \
                          channel says {given:?}"
@@ -197,11 +197,10 @@ impl Tool for MessageTool {
             // does not get to open conversations with strangers.
             let routes = routes.snapshot();
             if routes.session_for(&key).is_none() {
-                let known: Vec<&str> = routes.sessions.keys().map(String::as_str).collect();
                 return ToolOutput::error(format!(
                     "message: no chat {key}; only chats that have written to you can be \
                      messaged. Known: {}",
-                    known.join(", ")
+                    routes.known_chats()
                 ));
             }
             if input.text.trim().is_empty() && input.media.is_empty() {

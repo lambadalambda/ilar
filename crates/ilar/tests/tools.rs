@@ -1540,7 +1540,7 @@ async fn bash_timeout_kills() {
     let out = run(
         &registry(),
         "bash",
-        serde_json::json!({"command": "printf partial-output; sleep 30", "timeout_ms": 300}),
+        serde_json::json!({"command": "printf partial-output; sleep 30", "timeout_ms": 1000}),
         &ctx(dir.path()),
     )
     .await;
@@ -1574,7 +1574,7 @@ async fn bash_timeout_kills_descendants() {
         "bash",
         serde_json::json!({
             "command": "sleep 30 & echo $! > child.pid; wait",
-            "timeout_ms": 300
+            "timeout_ms": 1000
         }),
         &ctx(dir.path()),
     )

@@ -504,7 +504,8 @@ impl Tool for MemoryTool {
     fn description(&self) -> &'static str {
         "Remember across sessions. add / replace / remove change a core file (file: memory for \
          the world, user for the person) that is injected into every future session and has a \
-         hard cap — an overflow is an error, so consolidate. note files one durable fact in the \
+         hard cap — an overflow is an error, so consolidate; show prints both files as they \
+         are. note files one durable fact in the \
          archive (kind: decision, solution, preference, event, task, risk; title; a one-line \
          summary; body), found later with memory_search. Save preferences, corrections, \
          decisions and conventions; skip the trivial, the searchable, and today's paths."

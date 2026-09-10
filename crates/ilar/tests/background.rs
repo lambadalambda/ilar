@@ -1416,7 +1416,7 @@ async fn background_bash_timeout_is_overridable() {
             serde_json::json!({
                 "command": "sleep 10",
                 "run_in_background": true,
-                "timeout_ms": 100
+                "timeout_ms": 1000
             }),
             ctx,
         )

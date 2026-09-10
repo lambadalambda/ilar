@@ -19,11 +19,8 @@ const CONTEXT_RADIUS: usize = 2;
 
 #[derive(serde::Deserialize)]
 struct Input {
-    #[serde(default)]
     query: Option<String>,
-    #[serde(default)]
     event: Option<u64>,
-    #[serde(default)]
     speaker: Option<String>,
 }
 

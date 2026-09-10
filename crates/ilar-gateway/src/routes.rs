@@ -23,6 +23,19 @@ pub struct Routes {
 }
 
 impl Routes {
+    /// The chats that have written, for a refusal to name.
+    pub fn known_chats(&self) -> String {
+        if self.sessions.is_empty() {
+            "(none yet)".to_string()
+        } else {
+            self.sessions
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    }
+
     pub fn session_for(&self, key: &str) -> Option<&str> {
         self.sessions.get(key).map(String::as_str)
     }

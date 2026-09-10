@@ -465,16 +465,21 @@ impl Tool for BashTool {
                 Err(e) => return e,
             };
             if input.command.trim().is_empty() {
-                return ToolOutput::error("bash: command is empty");
+                return ToolOutput::error("bash: command is empty; give the shell command to run");
             }
             if let Some(timeout) = input.timeout_ms
                 && timeout < 1000
             {
-                return ToolOutput::error(format!(
-                    "bash: timeout_ms is in milliseconds and {timeout} is under a second; \
-                     for {timeout} seconds pass {}",
-                    timeout * 1000
-                ));
+                return ToolOutput::error(if timeout == 0 {
+                    "bash: timeout_ms 0 is no time at all; pass at least 1000, or omit it"
+                        .to_string()
+                } else {
+                    format!(
+                        "bash: timeout_ms is in milliseconds and {timeout} is under a second; \
+                         for {timeout} seconds pass {}",
+                        timeout * 1000
+                    )
+                });
             }
             let spill = SpillTarget::from_context(&ctx);
             if input.run_in_background {

@@ -200,9 +200,9 @@ fn scan(
     let root = cwd.join(literal_prefix(pattern));
     if !root.exists() {
         return ToolOutput::error(format!(
-            "glob: no such directory {}; the part of the pattern before the first wildcard \
-             must exist",
-            root.display()
+            "glob: no such path {:?}; the part of the pattern before the first wildcard must \
+             exist",
+            literal_prefix(pattern)
         ));
     }
     let threads = std::thread::available_parallelism()
@@ -361,7 +361,11 @@ mod tests {
             )
             .await;
         assert!(out.is_error, "{}", out.content);
-        assert!(out.content.contains("no such directory"), "{}", out.content);
+        assert!(
+            out.content.contains("no such path \"nope\""),
+            "{}",
+            out.content
+        );
     }
 
     #[test]
