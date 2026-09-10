@@ -180,6 +180,26 @@ async fn an_inbox_message_reaches_the_last_active_chat() {
 }
 
 #[tokio::test]
+async fn a_turn_that_only_thinks_is_reported_not_swallowed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (gateway, fake) = gateway(
+        dir.path(),
+        vec![vec![
+            ProviderEvent::ThinkingDelta("hmm, let me think about that at length".into()),
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            },
+        ]],
+    );
+    fake.inject("so?", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(1, WAIT).await;
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0].text, ilar_gateway::gateway::EMPTY_REPLY);
+    gateway.cancel();
+}
+
+#[tokio::test]
 async fn a_message_sent_by_the_tool_replaces_the_final_text() {
     let dir = tempfile::tempdir().unwrap();
     let (gateway, fake) = gateway(

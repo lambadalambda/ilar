@@ -55,6 +55,11 @@ struct Status {
     updater: tokio::task::JoinHandle<()>,
 }
 
+/// What a chat is told when the model ended its turn with no message
+/// and no text.
+pub const EMPTY_REPLY: &str =
+    "The model ended its turn without a reply. Send that again, or switch with /model.";
+
 /// What a chat is told when its session is held by another process.
 pub const BUSY_REPLY: &str =
     "This chat's session is open somewhere else (a TUI, most likely); try again when it is closed.";
@@ -898,6 +903,18 @@ impl Gateway {
             return;
         }
         if seat.background {
+            return;
+        }
+        // A turn that ends with nothing — a model that spent its whole
+        // output thinking, say — must not end in silence: the chat is
+        // told, and the log has it.
+        if report.text.trim().is_empty() {
+            log(&format!(
+                "{}: the turn ended without a reply ({:?})",
+                seat.key, report.outcome
+            ));
+            self.deliver(&seat.channel, &seat.chat_id, EMPTY_REPLY)
+                .await;
             return;
         }
         self.deliver(&seat.channel, &seat.chat_id, &report.text)

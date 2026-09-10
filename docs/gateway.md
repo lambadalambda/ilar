@@ -283,7 +283,9 @@ always present, whatever the tool policy says: a chat with no way to
 answer is not a chat. The
 model replies by calling it, so it can send several messages, attach
 files, or say nothing; the turn's final text is delivered only when
-the model sent nothing itself, and then exactly once. Another chat can
+the model sent nothing itself, and then exactly once; a turn that ends
+with neither — a model that spent its output thinking — is reported to
+the chat rather than answered with silence. Another chat can
 be named with `channel` and `chat`, but only one that has written to
 the bot: the model does not open conversations with strangers. The
 tool's description carries the channel's delivery constraints (for
