@@ -167,7 +167,8 @@ impl MemoryStore {
         }
         text.push_str(entry);
         text.push('\n');
-        self.write_core(file, &text)
+        self.write_core(file, &text)?;
+        Ok(true)
     }
 
     /// Replace the first entry that contains `old` with `new`.

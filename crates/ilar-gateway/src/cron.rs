@@ -191,7 +191,10 @@ enum Action {
     Remove,
 }
 
+/// Unknown fields are refused: a `channel`/`chat` pair meant for the
+/// message tool would otherwise schedule for the home chat unnoticed.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Input {
     action: Action,
     name: Option<String>,
@@ -200,9 +203,38 @@ struct Input {
     cron: Option<String>,
     every_secs: Option<u64>,
     at: Option<DateTime<Utc>>,
-    /// Another chat than this one, as `channel:chat`.
+    /// Another chat than this one, as `channel:chat`; a bare id means
+    /// this channel.
     target: Option<String>,
     id: Option<String>,
+}
+
+/// The least interval: the scheduler ticks every thirty seconds, so
+/// anything shorter would fire on every tick.
+const MIN_EVERY_SECS: u64 = 60;
+/// A year: beyond it an interval is a mistake, not a plan.
+const MAX_EVERY_SECS: u64 = 366 * 24 * 3600;
+
+/// The chat a job speaks to: this one unless named; a bare id is on
+/// this chat's channel.
+fn resolve_target(target: Option<&str>, home: &str) -> String {
+    match target.map(str::trim).filter(|t| !t.is_empty()) {
+        None => home.to_string(),
+        Some(target) if target.contains(':') => target.to_string(),
+        Some(id) => {
+            let channel = home.split_once(':').map(|(c, _)| c).unwrap_or(home);
+            format!("{channel}:{id}")
+        }
+    }
+}
+
+/// How a schedule reads in a listing.
+fn describe(schedule: &Schedule) -> String {
+    match schedule {
+        Schedule::Cron { expr } => format!("cron {expr}"),
+        Schedule::Every { secs } => format!("every {secs}s"),
+        Schedule::At { at } => format!("at {}", at.to_rfc3339()),
+    }
 }
 
 /// The `cron` tool: the model schedules its own reminders and checks.
@@ -247,13 +279,13 @@ impl Tool for CronTool {
             "type": "object",
             "properties": {
                 "action": {"type": "string", "enum": ["add", "list", "remove"]},
-                "name": {"type": "string"},
+                "name": {"type": "string", "description": "A short label for the job"},
                 "prompt": {"type": "string", "description": "What the scheduled turn is asked"},
-                "cron": {"type": "string", "description": "Five-field cron expression, UTC"},
-                "every_secs": {"type": "integer"},
-                "at": {"type": "string", "description": "RFC 3339 timestamp, once"},
-                "target": {"type": "string", "description": "channel:chat (default: this chat)"},
-                "id": {"type": "string", "description": "For remove"}
+                "cron": {"type": "string", "description": "Five-field cron expression, in UTC"},
+                "every_secs": {"type": "integer", "description": "Seconds between runs, at least 60"},
+                "at": {"type": "string", "description": "Once, at an RFC 3339 time such as 2026-09-10T15:00:00Z; UTC unless an offset is given"},
+                "target": {"type": "string", "description": "channel:chat of another chat that has written (default: this chat); a bare id means this channel"},
+                "id": {"type": "string", "description": "For remove: the id from add or list; a unique name also works"}
             },
             "required": ["action"]
         })
@@ -278,9 +310,10 @@ impl Tool for CronTool {
                         jobs.iter()
                             .map(|job| {
                                 format!(
-                                    "{} {} → {} next {}: {}",
+                                    "{} {} ({}) → {} next {}: {}",
                                     job.id,
                                     job.name,
+                                    describe(&job.schedule),
                                     job.target,
                                     job.next_run
                                         .map(|at| at.to_rfc3339())
@@ -293,8 +326,40 @@ impl Tool for CronTool {
                     )
                 }
                 Action::Remove => {
-                    let Some(id) = input.id else {
-                        return ToolOutput::error("cron: remove needs id");
+                    let Some(wanted) = input.id.or(input.name) else {
+                        return ToolOutput::error("cron: remove needs id (or a unique name)");
+                    };
+                    let jobs = store.list();
+                    let by_name: Vec<&Job> = jobs.iter().filter(|job| job.name == wanted).collect();
+                    let id = match jobs.iter().find(|job| job.id == wanted) {
+                        Some(job) => job.id.clone(),
+                        None if by_name.len() == 1 => by_name[0].id.clone(),
+                        None if by_name.len() > 1 => {
+                            return ToolOutput::error(format!(
+                                "cron: {} jobs are named {wanted:?}; remove by id: {}",
+                                by_name.len(),
+                                by_name
+                                    .iter()
+                                    .map(|job| job.id.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ));
+                        }
+                        None => {
+                            let listed = jobs
+                                .iter()
+                                .map(|job| format!("{} {}", job.id, job.name))
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            return ToolOutput::error(format!(
+                                "cron: no job {wanted:?}; jobs: {}",
+                                if listed.is_empty() {
+                                    "(none)".to_string()
+                                } else {
+                                    listed
+                                }
+                            ));
+                        }
                     };
                     match store.remove(&id) {
                         Ok(true) => ToolOutput::text(format!("removed {id}")),
@@ -303,9 +368,28 @@ impl Tool for CronTool {
                     }
                 }
                 Action::Add => {
+                    let now = Utc::now();
                     let schedule = match (input.cron, input.every_secs, input.at) {
                         (Some(expr), None, None) => Schedule::Cron { expr },
+                        (None, Some(secs), None) if secs < MIN_EVERY_SECS => {
+                            return ToolOutput::error(format!(
+                                "cron: every_secs is at least {MIN_EVERY_SECS}; for something \
+                                 once and soon, use at"
+                            ));
+                        }
+                        (None, Some(secs), None) if secs > MAX_EVERY_SECS => {
+                            return ToolOutput::error(format!(
+                                "cron: every_secs {secs} is over a year; use a cron expression"
+                            ));
+                        }
                         (None, Some(secs), None) => Schedule::Every { secs },
+                        (None, None, Some(at)) if at <= now => {
+                            return ToolOutput::error(format!(
+                                "cron: at {} is in the past; now is {}",
+                                at.to_rfc3339(),
+                                now.to_rfc3339()
+                            ));
+                        }
                         (None, None, Some(at)) => Schedule::At { at },
                         _ => {
                             return ToolOutput::error(
@@ -313,13 +397,22 @@ impl Tool for CronTool {
                             );
                         }
                     };
-                    let (Some(name), Some(prompt)) = (input.name, input.prompt) else {
-                        return ToolOutput::error("cron: add needs name and prompt");
+                    let (Some(name), Some(prompt)) = (
+                        input.name.filter(|n| !n.trim().is_empty()),
+                        input.prompt.filter(|p| !p.trim().is_empty()),
+                    ) else {
+                        return ToolOutput::error(
+                            "cron: add needs a name and a prompt, neither empty",
+                        );
                     };
-                    let target = input.target.unwrap_or(home);
-                    if routes.snapshot().session_for(&target).is_none() {
+                    let target = resolve_target(input.target.as_deref(), &home);
+                    let routes = routes.snapshot();
+                    if routes.session_for(&target).is_none() {
+                        let known: Vec<&str> = routes.sessions.keys().map(String::as_str).collect();
                         return ToolOutput::error(format!(
-                            "cron: no chat {target}; only chats that have written can be targeted"
+                            "cron: no chat {target}; target is channel:chat, and only chats that \
+                             have written can be targeted. Known: {}",
+                            known.join(", ")
                         ));
                     }
                     let job = Job {
@@ -331,7 +424,7 @@ impl Tool for CronTool {
                         next_run: None,
                         last_run: None,
                     };
-                    match store.add(job, Utc::now()) {
+                    match store.add(job, now) {
                         Ok(job) => ToolOutput::text(format!(
                             "scheduled {} ({}), next {}",
                             job.name,
@@ -349,6 +442,81 @@ impl Tool for CronTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ilar::tools::Tool;
+
+    #[test]
+    fn a_target_is_a_key_or_a_bare_id_on_this_channel() {
+        assert_eq!(resolve_target(None, "fake:12"), "fake:12");
+        assert_eq!(resolve_target(Some(" "), "fake:12"), "fake:12");
+        assert_eq!(resolve_target(Some("15"), "fake:12"), "fake:15");
+        assert_eq!(resolve_target(Some("other:3"), "fake:12"), "other:3");
+    }
+
+    #[tokio::test]
+    async fn the_tool_refuses_what_cannot_be_meant_and_says_the_fix() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(CronStore::open(dir.path().join("cron.json")).unwrap());
+        let routes = Arc::new(RouteStore::open(dir.path().join("routes.json")).unwrap());
+        routes
+            .update(|routes| {
+                routes.bind("fake:12", "s1");
+                routes.bind("fake:15", "s2");
+            })
+            .unwrap();
+        let tool = CronTool::new(store.clone(), routes, "fake:12");
+        let ctx = || ToolContext::root(dir.path().to_path_buf());
+        let run = |input: serde_json::Value| tool.run(input, ctx());
+
+        let out = run(serde_json::json!({"action": "add", "name": "n", "prompt": "p", "every_secs": 60, "channel": "fake", "chat": "15"})).await;
+        assert!(out.is_error);
+        assert!(out.content.contains("unknown field"), "{}", out.content);
+
+        let out =
+            run(serde_json::json!({"action": "add", "name": "n", "prompt": "p", "every_secs": 5}))
+                .await;
+        assert!(out.content.contains("at least 60"), "{}", out.content);
+
+        let out = run(serde_json::json!({"action": "add", "name": "n", "prompt": "p", "at": "2020-01-01T00:00:00Z"})).await;
+        assert!(
+            out.content.contains("in the past; now is"),
+            "{}",
+            out.content
+        );
+
+        let out =
+            run(serde_json::json!({"action": "add", "name": " ", "prompt": "p", "every_secs": 60}))
+                .await;
+        assert!(out.content.contains("neither empty"), "{}", out.content);
+
+        let out = run(serde_json::json!({"action": "add", "name": "n", "prompt": "p", "every_secs": 60, "target": "99"})).await;
+        assert!(
+            out.content.contains("no chat fake:99")
+                && out.content.contains("Known: fake:12, fake:15"),
+            "{}",
+            out.content
+        );
+
+        let out = run(serde_json::json!({"action": "add", "name": "hourly", "prompt": "p", "every_secs": 3600, "target": "15"})).await;
+        assert!(!out.is_error, "{}", out.content);
+        assert_eq!(store.list()[0].target, "fake:15");
+
+        let out = run(serde_json::json!({"action": "list"})).await;
+        assert!(
+            out.content.contains("hourly (every 3600s) → fake:15"),
+            "{}",
+            out.content
+        );
+
+        let out = run(serde_json::json!({"action": "remove", "id": "nope"})).await;
+        assert!(
+            out.content.contains("jobs: ") && out.content.contains("hourly"),
+            "{}",
+            out.content
+        );
+        let out = run(serde_json::json!({"action": "remove", "name": "hourly"})).await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(store.list().is_empty());
+    }
 
     fn at(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)

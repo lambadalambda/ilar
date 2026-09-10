@@ -58,6 +58,22 @@ fn address(
     home_channel: &str,
     home_chat: &str,
 ) -> Result<(String, String), String> {
+    // A session key in `chat` is the same slip as one in `channel`.
+    let (channel, chat) = match chat {
+        Some(key) if key.contains(':') => {
+            let (name, id) = key.split_once(':').unwrap_or((&key, ""));
+            match channel {
+                Some(given) if given != name && !given.contains(':') => {
+                    return Err(format!(
+                        "chat is a chat's id, not a session key; {key:?} is on {name} but \
+                         channel says {given:?}"
+                    ));
+                }
+                _ => (Some(name.to_string()), Some(id.to_string())),
+            }
+        }
+        other => (channel, other),
+    };
     match (channel, chat) {
         (None, None) => Ok((home_channel.to_string(), home_chat.to_string())),
         (None, Some(chat)) => Ok((home_channel.to_string(), chat)),
@@ -283,6 +299,19 @@ mod tests {
         );
         assert!(
             ok(Some("fake:15"), Some("12"))
+                .unwrap_err()
+                .contains("not a session key")
+        );
+        assert_eq!(
+            ok(None, Some("fake:15")).unwrap(),
+            ("fake".into(), "15".into())
+        );
+        assert_eq!(
+            ok(Some("fake"), Some("fake:15")).unwrap(),
+            ("fake".into(), "15".into())
+        );
+        assert!(
+            ok(Some("other"), Some("fake:15"))
                 .unwrap_err()
                 .contains("not a session key")
         );

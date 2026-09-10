@@ -6,7 +6,9 @@
 //! is a query away rather than gone — which is what makes it safe to
 //! compact hard.
 
-use super::{Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, WorkspaceAccess};
+use super::{
+    Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, WorkspaceAccess, parse_input,
+};
 use crate::recall;
 use crate::session::SessionStore;
 
@@ -14,6 +16,16 @@ use crate::session::SessionStore;
 const CONTEXT_ENTRY_CHARS: usize = 400;
 /// Events either side of a hit when reading around it.
 const CONTEXT_RADIUS: usize = 2;
+
+#[derive(serde::Deserialize)]
+struct Input {
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default)]
+    event: Option<u64>,
+    #[serde(default)]
+    speaker: Option<String>,
+}
 
 pub struct HistoryTool {
     store: SessionStore,
@@ -125,15 +137,16 @@ impl Tool for HistoryTool {
     fn run(&self, input: serde_json::Value, ctx: ToolContext) -> ToolFuture {
         let store = self.store.clone();
         Box::pin(async move {
-            let query = input
-                .get("query")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string);
-            let event = input.get("event").and_then(serde_json::Value::as_u64);
-            let speaker_word = input
-                .get("speaker")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string);
+            // Typed, so a field of the wrong shape is a type error and
+            // not a silent fall-through into another mode.
+            let Input {
+                query,
+                event,
+                speaker: speaker_word,
+            } = match parse_input(input, "history") {
+                Ok(input) => input,
+                Err(error) => return error,
+            };
             let speaker = match speaker_word.as_deref() {
                 None => None,
                 Some(word) => match recall::parse_speaker(word) {

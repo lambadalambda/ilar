@@ -449,8 +449,8 @@ impl Tool for BashTool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "command": {"type": "string"},
-                "timeout_ms": {"type": "integer", "description": "Kill after this long (default 120000 foreground; configured default for background)"},
+                "command": {"type": "string", "description": "The shell command, run with sh -c in the project cwd"},
+                "timeout_ms": {"type": "integer", "description": "Kill after this many milliseconds (default 120000 foreground; configured default for background)"},
                 "run_in_background": {"type": "boolean", "description": "Run detached and deliver the result as a notification"},
                 "preview_bytes": {"type": "integer", "description": "Output size you expect: on success the inline preview is capped at this (clamped 1024-30720) and the full output still goes to the spill file. Ignored when the command fails, so error output stays visible."}
             },
@@ -464,6 +464,18 @@ impl Tool for BashTool {
                 Ok(v) => v,
                 Err(e) => return e,
             };
+            if input.command.trim().is_empty() {
+                return ToolOutput::error("bash: command is empty");
+            }
+            if let Some(timeout) = input.timeout_ms
+                && timeout < 1000
+            {
+                return ToolOutput::error(format!(
+                    "bash: timeout_ms is in milliseconds and {timeout} is under a second; \
+                     for {timeout} seconds pass {}",
+                    timeout * 1000
+                ));
+            }
             let spill = SpillTarget::from_context(&ctx);
             if input.run_in_background {
                 if ctx.has_workspace_lease() {
@@ -630,6 +642,28 @@ fn run_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn an_empty_command_and_a_seconds_shaped_timeout_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = || ToolContext::root(dir.path().to_path_buf());
+        let out = BashTool
+            .run(serde_json::json!({"command": "  "}), ctx())
+            .await;
+        assert!(
+            out.is_error && out.content.contains("empty"),
+            "{}",
+            out.content
+        );
+        let out = BashTool
+            .run(
+                serde_json::json!({"command": "true", "timeout_ms": 30}),
+                ctx(),
+            )
+            .await;
+        assert!(out.is_error, "{}", out.content);
+        assert!(out.content.contains("pass 30000"), "{}", out.content);
+    }
 
     fn spill_file(dir: &Path, name: &str, age: std::time::Duration) -> PathBuf {
         let path = dir.join(name);
