@@ -1832,7 +1832,11 @@ async fn resumed_subagent_rejects_persisted_agent_mismatch() {
         .await;
 
     assert!(output.is_error);
-    assert!(output.content.contains("persisted agent"));
+    assert!(
+        output.content.contains("it ran as agent") && output.content.contains("subagent_type"),
+        "{}",
+        output.content
+    );
 }
 
 #[tokio::test]
