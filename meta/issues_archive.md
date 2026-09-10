@@ -336,3 +336,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [The assistant knows where it is](issues/the-assistant-knows-where-it-is.md)
 - [x] [The gateway loads only its own skills](issues/the-gateway-loads-only-its-own-skills.md)
 - [x] [A message during a turn steers it](issues/a-message-during-a-turn-steers-it.md)
+- [x] [The prompt preview shows the whole request](issues/the-prompt-preview-shows-the-whole-request.md)

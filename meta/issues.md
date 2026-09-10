@@ -132,4 +132,3 @@ milestones 15–17 stay filed — they come back when the feature does.*
 - [ ] [Test repositories never sign](issues/test-repositories-never-sign.md)
 - [ ] [Provider URLs are structural](issues/provider-urls-are-structural.md)
 
-- [ ] [The prompt preview shows the whole request](issues/the-prompt-preview-shows-the-whole-request.md)

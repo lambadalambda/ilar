@@ -34,6 +34,22 @@ foreground children inherit it and touch it on every event at any
 depth, a background child starts its own. The test reproduces the
 production shape (mutable task, read-only foreground child).
 
+## 2026-09-10 — The preview is the request
+
+`ilar --print-prompt` and `ilar-gateway prompt` printed the system
+prompt and nothing else, while the model also gets the tool list with
+every description and schema, and the options a reasoning variant
+adds. Now both print the whole first request: a header with the
+model, reasoning, request options and agent, the system prompt as
+sent, then each tool. The point was that it cannot drift: the
+runtime's tool construction moved out of `start_with` into a
+`tooling` step that builds the registry, spawner, services and tool
+context without touching the store, `start_with` creates the session
+and calls it, and `RuntimePlan::preview` calls it alone. The gateway's
+seat tools moved into one `seat_tools` the seat opening and the
+preview share, under the same policy. A preview creates no session;
+both tests check the store stays empty.
+
 ## 2026-09-10 — Where it is, its own skills, and steering
 
 Three more from daily use. The gateway's prompt now carries a "Where
