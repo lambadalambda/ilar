@@ -292,8 +292,8 @@ impl Channel for DeltaChat {
     }
 
     fn constraints(&self) -> &str {
-        "plain text, no markdown rendering; a long text is sent as several bubbles of up to \
-         3600 characters or 36 lines, split at line breaks, so write it whole; files are \
+        "plain text, no markdown rendering; a long text is sent as several bubbles of about \
+         3000 characters each, split at line breaks, so write it whole; files are \
          attached by path; a .xdc file (a zip holding index.html and manifest.toml with a \
          name = \"…\" line, no external resources) is delivered as a webxdc app the person \
          opens inside the chat"
@@ -406,11 +406,13 @@ impl Channel for DeltaChat {
                 .with_context(|| format!("chat id {:?} is not a Delta Chat id", message.chat_id))?;
             let mut text = Some(message.text).filter(|text| !text.trim().is_empty());
             if message.media.is_empty() {
-                // Delta Chat folds a bubble past 3,800 characters or 38
-                // lines behind "Show full message", so a long text goes
-                // out as several bubbles under both caps.
+                // Delta Chat folds a bubble past 38 display lines of 100
+                // characters behind "Show full message", so a long text
+                // goes out as several bubbles under that.
                 if let Some(text) = text {
-                    for piece in crate::bus::split_for_delivery(&text, BUBBLE_CHARS, BUBBLE_LINES) {
+                    for piece in
+                        crate::bus::split_for_delivery(&text, BUBBLE_LINES, BUBBLE_LINE_CHARS)
+                    {
                         rpc.call("misc_send_text_message", json!([account, chat_id, piece]))
                             .await?;
                     }
@@ -432,11 +434,12 @@ impl Channel for DeltaChat {
     }
 }
 
-/// The most one bubble shows whole: Delta Chat's core cuts a text at
-/// 3,800 characters or 38 lines (`DC_DESIRED_TEXT_LEN`), so pieces stay
-/// a little under both.
-const BUBBLE_CHARS: usize = 3_600;
-const BUBBLE_LINES: usize = 36;
+/// The most one bubble shows whole: Delta Chat's core
+/// (`truncate_by_lines`) cuts a text at 38 display lines, a display
+/// line being 100 characters or a line break, whichever comes first.
+/// Pieces stay under that with room for the count's rounding.
+const BUBBLE_LINES: usize = 34;
+const BUBBLE_LINE_CHARS: usize = 100;
 
 /// How Delta Chat should show a file: pictures as pictures, an `.xdc`
 /// — a zip with an `index.html` and a `manifest.toml` — as a webxdc
