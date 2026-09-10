@@ -34,6 +34,38 @@ foreground children inherit it and touch it on every event at any
 depth, a background child starts its own. The test reproduces the
 production shape (mutable task, read-only foreground child).
 
+## 2026-09-10 — Tools that refuse what cannot be meant
+
+A chat got eight text-only messages each claiming to carry a photo:
+the message tool had refused a `channel` of `deltachat:12` (a session
+key, doubled into `deltachat:12:12`) with a message that did not say
+what was wrong, and then sent every retry that spoke of an attachment
+with an empty `media`. The fix — take the key apart, name the known
+chats, refuse a text that claims an attachment unless `no_attachment`
+says it is meant — set the standard, and an audit of every tool
+against it turned up three batches.
+
+Destructive: `edit` with an empty `old_string` and `replace_all`
+inserted the new text between every character of the file;
+`skill_manage` patch without `new` deleted the passage and rewrite
+without `triggers` dropped them; `memory` remove swept every entry
+containing the text and said only "removed". Accepting nonsense:
+`cron` ignored unknown fields, so a message-style `channel`/`chat`
+pair scheduled for the home chat unnoticed; it also took a one-second
+interval, empty names, and said "never fires" for a past time; `bash`
+took a seconds-shaped `timeout_ms` and killed the command at once;
+`history` read its fields leniently, so a wrong type changed the mode.
+And refusals that left the model guessing: `grep` and `glob` on a
+missing directory returned nothing; `webfetch` without a scheme
+returned the URL parser's words; `read` on a directory the OS error;
+`memory_get` dropped unknown ids silently and the cap said
+"consolidate" with no way to read the core (there is a `show` action
+now); `skill_manage` said "no skill" without the names.
+
+The rule that came out of it: a refusal names the fix, a tool that
+knows the valid values lists them, and a silent default that changes
+meaning is a refusal instead.
+
 ## 2026-09-10 — The preview is the request
 
 `ilar --print-prompt` and `ilar-gateway prompt` printed the system

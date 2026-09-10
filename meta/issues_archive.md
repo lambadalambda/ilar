@@ -340,3 +340,6 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 
 - [x] [Model picker applies default reasoning selection](issues/model-picker-default-selection.md)
 - [x] [The message tool refuses nonsense](issues/the-message-tool-refuses-nonsense.md)
+- [x] [Tools that destroy on empty input](issues/tools-that-destroy-on-empty-input.md)
+- [x] [Tools that accept what cannot be meant](issues/tools-that-accept-what-cannot-be-meant.md)
+- [x] [Refusals that say the fix](issues/refusals-that-say-the-fix.md)

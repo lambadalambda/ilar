@@ -132,6 +132,3 @@ milestones 15–17 stay filed — they come back when the feature does.*
 - [ ] [Test repositories never sign](issues/test-repositories-never-sign.md)
 - [ ] [Provider URLs are structural](issues/provider-urls-are-structural.md)
 
-- [ ] [Tools that destroy on empty input](issues/tools-that-destroy-on-empty-input.md)
-- [ ] [Tools that accept what cannot be meant](issues/tools-that-accept-what-cannot-be-meant.md)
-- [ ] [Refusals that say the fix](issues/refusals-that-say-the-fix.md)
