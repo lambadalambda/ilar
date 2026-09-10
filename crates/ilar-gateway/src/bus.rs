@@ -37,33 +37,44 @@ pub fn session_key(channel: &str, chat_id: &str) -> String {
     format!("{channel}:{chat_id}")
 }
 
-/// Cut a long text into pieces a channel will show whole: at most
-/// `max_chars` characters and `max_lines` lines each, split at line
-/// boundaries where possible; a single line longer than `max_chars`
-/// is cut where it must be.
-pub fn split_for_delivery(text: &str, max_chars: usize, max_lines: usize) -> Vec<String> {
+/// Cut a long text into pieces a channel will show whole, counting
+/// the way Delta Chat's `truncate_by_lines` does: a line of `line_len`
+/// characters is one display line, a longer one is several, a blank
+/// line is one. Pieces stay under `max_lines` display lines and split
+/// at line breaks; a single line too long for a piece is cut at a
+/// space where it can be.
+pub fn split_for_delivery(text: &str, max_lines: usize, line_len: usize) -> Vec<String> {
+    let max_lines = max_lines.max(1);
+    let line_len = line_len.max(1);
+    let display_lines = |line: &str| line.chars().count().max(1).div_ceil(line_len);
     let mut pieces = Vec::new();
     let mut current = String::new();
-    let mut lines = 0;
+    let mut used = 0;
     for line in text.split_inclusive('\n') {
-        let over =
-            current.chars().count() + line.chars().count() > max_chars || lines + 1 > max_lines;
-        if over && !current.is_empty() {
-            pieces.push(std::mem::take(&mut current));
-            lines = 0;
-        }
         let mut line = line;
-        while line.chars().count() > max_chars {
-            let cut = line
+        // A line that cannot fit a piece of its own is cut at spaces.
+        while display_lines(line.trim_end_matches('\n')) > max_lines {
+            let limit = max_lines * line_len;
+            let hard = line
                 .char_indices()
-                .nth(max_chars)
+                .nth(limit)
                 .map(|(i, _)| i)
                 .unwrap_or(line.len());
+            let cut = line[..hard].rfind(' ').map(|i| i + 1).unwrap_or(hard);
+            if !current.is_empty() {
+                pieces.push(std::mem::take(&mut current));
+                used = 0;
+            }
             pieces.push(line[..cut].to_string());
             line = &line[cut..];
         }
+        let needed = display_lines(line.trim_end_matches('\n'));
+        if used + needed > max_lines && !current.is_empty() {
+            pieces.push(std::mem::take(&mut current));
+            used = 0;
+        }
         current.push_str(line);
-        lines += 1;
+        used += needed;
     }
     if !current.trim().is_empty() {
         pieces.push(current);
@@ -82,24 +93,53 @@ mod tests {
     use super::*;
 
     #[test]
-    fn long_texts_split_at_lines_and_only_cut_a_line_when_they_must() {
-        assert_eq!(split_for_delivery("short", 10, 10), vec!["short"]);
+    fn long_texts_split_by_display_lines_the_way_delta_chat_counts() {
+        assert_eq!(split_for_delivery("short", 10, 100), vec!["short"]);
+        // Three one-line paragraphs, two per piece.
         let text = "one\ntwo\nthree\n";
         assert_eq!(
-            split_for_delivery(text, 8, 10),
+            split_for_delivery(text, 2, 100),
             vec!["one\ntwo\n", "three\n"]
         );
+        // A 250-character line is three display lines of 100.
+        let long = "x".repeat(250);
+        assert_eq!(split_for_delivery(&long, 3, 100), vec![long.clone()]);
         assert_eq!(
-            split_for_delivery("abcdefghij", 4, 10),
-            vec!["abcd", "efgh", "ij"]
+            split_for_delivery(&format!("{long}\n{long}\n"), 3, 100).len(),
+            2
         );
-        assert!(split_for_delivery("", 4, 10).is_empty());
-        // A line cap too: many short lines fold a bubble as surely as
-        // a long one.
-        assert_eq!(
-            split_for_delivery("a\nb\nc\nd\ne\n", 100, 2),
-            vec!["a\nb\n", "c\nd\n", "e\n"]
+        // A line too long for any piece is cut at a space.
+        let words = "word ".repeat(100);
+        let pieces = split_for_delivery(&words, 2, 100);
+        assert!(pieces.len() >= 3, "{pieces:?}");
+        assert!(
+            pieces.iter().all(|p| p.chars().count() <= 200),
+            "{pieces:?}"
         );
+        assert!(pieces[0].ends_with(' '), "{pieces:?}");
+        assert!(split_for_delivery("", 4, 100).is_empty());
+        // The shape that folded: paragraphs of 600-1,100 characters with
+        // blank lines between, 38 display lines in 3,600 characters.
+        let essay = [599, 661, 1089, 471, 401, 1097, 629]
+            .iter()
+            .map(|n| "w".repeat(*n))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let pieces = split_for_delivery(&essay, 34, 100);
+        assert!(pieces.len() >= 2, "{}", pieces.len());
+        for piece in &pieces {
+            let lines: usize = piece
+                .split_inclusive('\n')
+                .map(|l| {
+                    l.trim_end_matches('\n')
+                        .chars()
+                        .count()
+                        .max(1)
+                        .div_ceil(100)
+                })
+                .sum();
+            assert!(lines <= 34, "{lines}");
+        }
     }
 
     #[test]
