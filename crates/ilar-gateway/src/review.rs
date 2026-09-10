@@ -250,13 +250,17 @@ impl Plan {
         }
         for edit in &self.memory {
             let result = match edit.action.as_str() {
-                "add" => store.add(edit.file, edit.text.as_deref().unwrap_or("")),
+                "add" => store
+                    .add(edit.file, edit.text.as_deref().unwrap_or(""))
+                    .map(drop),
                 "replace" => store.replace(
                     edit.file,
                     edit.old.as_deref().unwrap_or(""),
                     edit.new.as_deref().unwrap_or(""),
                 ),
-                "remove" => store.remove(edit.file, edit.text.as_deref().unwrap_or("")),
+                "remove" => store
+                    .remove(edit.file, edit.text.as_deref().unwrap_or(""))
+                    .map(drop),
                 other => Err(anyhow::anyhow!("unknown action {other:?}")),
             };
             let line = match result {

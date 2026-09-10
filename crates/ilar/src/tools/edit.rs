@@ -102,6 +102,12 @@ impl Tool for EditTool {
                 Ok(v) => v,
                 Err(e) => return e,
             };
+            if input.old_string.is_empty() {
+                return ToolOutput::error(
+                    "old_string is empty; edit replaces a passage that exists. To create a file \
+                     or append to one, use write",
+                );
+            }
             if input.old_string == input.new_string {
                 return ToolOutput::error("old_string and new_string are identical");
             }
@@ -411,6 +417,26 @@ fn normalize(line: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn an_empty_old_string_is_refused_before_anything_is_touched() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "abc").unwrap();
+        let out = EditTool
+            .run(
+                serde_json::json!({
+                    "path": "a.txt", "old_string": "", "new_string": "x", "replace_all": true
+                }),
+                ToolContext::root(dir.path().to_path_buf()),
+            )
+            .await;
+        assert!(out.is_error);
+        assert!(out.content.contains("use write"), "{}", out.content);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "abc"
+        );
+    }
 
     fn input(old_string: &str, new_string: &str) -> Input {
         Input {

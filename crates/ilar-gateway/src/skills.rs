@@ -139,11 +139,13 @@ impl SkillLibrary {
     }
 
     /// Rewrite a skill whole: the same file the core reads, new content.
+    /// Rewrite a skill whole: the same file the core reads, new content.
+    /// `triggers` of `None` keeps the ones it has.
     pub fn rewrite(
         &self,
         name: &str,
         description: &str,
-        triggers: &[String],
+        triggers: Option<&[String]>,
         body: &str,
     ) -> Result<()> {
         Self::check_name(name)?;
@@ -152,13 +154,15 @@ impl SkillLibrary {
         }
         let _write = self.write.lock().unwrap();
         let path = self.path(name);
-        if !path.exists() {
-            bail!("no skill {name}; create it");
-        }
-        crate::routes::write_atomically(
-            &path,
-            Self::render(description, triggers, body).as_bytes(),
-        )?;
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("no skill {name}; create it"))?;
+        let kept = match triggers {
+            Some(triggers) => triggers.to_vec(),
+            None => ilar::skill::parse_skill_md(name, &text)
+                .map(|skill| skill.triggers)
+                .unwrap_or_default(),
+        };
+        crate::routes::write_atomically(&path, Self::render(description, &kept, body).as_bytes())?;
         self.touch(name, |usage| {
             usage.patches += 1;
             usage.last_patched_at = Some(Utc::now());
@@ -285,7 +289,7 @@ impl SkillWatch {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 enum Action {
     Create,
@@ -299,10 +303,11 @@ struct Input {
     action: Action,
     name: String,
     description: Option<String>,
-    #[serde(default)]
-    triggers: Vec<String>,
+    /// Absent on rewrite keeps the skill's own.
+    triggers: Option<Vec<String>>,
     body: Option<String>,
     old: Option<String>,
+    /// Required on patch; an explicit empty string deletes the passage.
     new: Option<String>,
 }
 
@@ -350,7 +355,7 @@ impl Tool for SkillManageTool {
                 "triggers": {"type": "array", "items": {"type": "string"}, "description": "Cue phrases that should invoke it"},
                 "body": {"type": "string", "description": "Markdown: when to use, procedure, pitfalls, verification"},
                 "old": {"type": "string", "description": "patch: the passage to replace, occurring once"},
-                "new": {"type": "string", "description": "patch: its replacement"}
+                "new": {"type": "string", "description": "patch: its replacement; an empty string deletes the passage"}
             },
             "required": ["action", "name"]
         })
@@ -368,22 +373,23 @@ impl Tool for SkillManageTool {
                     .create(
                         &input.name,
                         input.description.as_deref().unwrap_or(""),
-                        &input.triggers,
+                        input.triggers.as_deref().unwrap_or(&[]),
                         input.body.as_deref().unwrap_or(""),
                     )
                     .map(|path| format!("created {} at {}", input.name, path.display())),
-                Action::Patch => library
-                    .patch(
-                        &input.name,
-                        input.old.as_deref().unwrap_or(""),
-                        input.new.as_deref().unwrap_or(""),
-                    )
-                    .map(|()| format!("patched {}", input.name)),
+                Action::Patch => match input.new.as_deref() {
+                    Some(new) => library
+                        .patch(&input.name, input.old.as_deref().unwrap_or(""), new)
+                        .map(|()| format!("patched {}", input.name)),
+                    None => Err(anyhow::anyhow!(
+                        "patch needs new, the replacement; pass new: \"\" to delete the passage"
+                    )),
+                },
                 Action::Rewrite => library
                     .rewrite(
                         &input.name,
                         input.description.as_deref().unwrap_or(""),
-                        &input.triggers,
+                        input.triggers.as_deref(),
                         input.body.as_deref().unwrap_or(""),
                     )
                     .map(|()| format!("rewrote {}", input.name)),
@@ -392,6 +398,9 @@ impl Tool for SkillManageTool {
                     .map(|()| format!("deleted {}", input.name)),
             };
             match outcome {
+                Ok(text) if input.action == Action::Delete => ToolOutput::text(format!(
+                    "{text}. It leaves the prompt from the next session on; the skill tool no longer loads it."
+                )),
                 Ok(text) => ToolOutput::text(format!(
                     "{text}. It is listed in the prompt from the next session on; the skill tool loads it now."
                 )),
@@ -431,7 +440,26 @@ mod tests {
                 .is_err(),
             "the frontmatter is not patched"
         );
-        assert!(library.rewrite("deploy-check", "x", &[], " ").is_err());
+        assert!(library.rewrite("deploy-check", "x", None, " ").is_err());
+        // A rewrite without triggers keeps the ones it has.
+        library
+            .rewrite("deploy-check", "Check a deploy, v2", None, "# v2\n\nbody")
+            .unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("triggers = [\"deploy\", \"is it up\"]"),
+            "{text}"
+        );
+        library
+            .rewrite(
+                "deploy-check",
+                "Check a deploy, v3",
+                Some(&["ship".into()]),
+                "# v3\n\nbody",
+            )
+            .unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("triggers = [\"ship\"]"), "{text}");
         library.patch("deploy-check", "curl", "fetch").unwrap();
         assert!(
             library.patch("deploy-check", "the", "a").is_err(),

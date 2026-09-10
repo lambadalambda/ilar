@@ -144,16 +144,23 @@ impl MemoryStore {
         write_atomically(&self.core_path(file), text.as_bytes())
     }
 
-    /// Append one entry, a line of its own.
-    pub fn add(&self, file: CoreFile, entry: &str) -> Result<()> {
+    /// Append one entry, a line of its own. `false` when it was there
+    /// already.
+    pub fn add(&self, file: CoreFile, entry: &str) -> Result<bool> {
         let entry = entry.trim();
         if entry.is_empty() {
             bail!("nothing to add");
         }
+        if entry.lines().count() > 1 {
+            bail!(
+                "an entry is one line and this text has {}; add each on its own",
+                entry.lines().count()
+            );
+        }
         let _write = self.write.lock().unwrap();
         let mut text = self.core(file)?;
         if entries(&text).any(|line| line == entry) {
-            return Ok(());
+            return Ok(false);
         }
         if !text.is_empty() && !text.ends_with('\n') {
             text.push('\n');
@@ -188,20 +195,20 @@ impl MemoryStore {
         self.write_core(file, &joined(&rewritten))
     }
 
-    /// Remove every entry that contains `entry`.
-    pub fn remove(&self, file: CoreFile, entry: &str) -> Result<()> {
+    /// Remove every entry that contains `entry`, and say which.
+    pub fn remove(&self, file: CoreFile, entry: &str) -> Result<Vec<String>> {
         if entry.trim().is_empty() {
             bail!("remove needs the text of the entry");
         }
         let _write = self.write.lock().unwrap();
         let text = self.core(file)?;
-        let kept: Vec<&str> = entries(&text)
-            .filter(|line| !line.contains(entry.trim()))
-            .collect();
-        if kept.len() == entries(&text).count() {
+        let (dropped, kept): (Vec<&str>, Vec<&str>) =
+            entries(&text).partition(|line| line.contains(entry.trim()));
+        if dropped.is_empty() {
             bail!("no entry contains {entry:?}");
         }
-        self.write_core(file, &joined(&kept))
+        self.write_core(file, &joined(&kept))?;
+        Ok(dropped.into_iter().map(String::from).collect())
     }
 
     /// The block injected into a system prompt, or nothing when both
@@ -539,7 +546,13 @@ impl Tool for MemoryTool {
                     .as_deref()
                     .ok_or_else(|| anyhow::anyhow!("add needs text"))
                     .and_then(|text| store.add(input.file, text))
-                    .map(|()| "added".to_string()),
+                    .map(|added| {
+                        if added {
+                            "added".to_string()
+                        } else {
+                            "already there, unchanged".to_string()
+                        }
+                    }),
                 MemoryAction::Replace => match (input.old.as_deref(), input.new.as_deref()) {
                     (Some(old), Some(new)) => store
                         .replace(input.file, old, new)
@@ -551,7 +564,17 @@ impl Tool for MemoryTool {
                     .as_deref()
                     .ok_or_else(|| anyhow::anyhow!("remove needs text"))
                     .and_then(|text| store.remove(input.file, text))
-                    .map(|()| "removed".to_string()),
+                    .map(|dropped| {
+                        format!(
+                            "removed {}: {}",
+                            dropped.len(),
+                            dropped
+                                .iter()
+                                .map(|line| format!("{line:?}"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    }),
                 MemoryAction::Note => {
                     match (input.kind, input.title.as_deref(), input.summary.as_deref()) {
                         (Some(kind), Some(title), Some(summary)) => store
@@ -752,8 +775,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(dir.path().to_path_buf());
         assert_eq!(store.core_block().unwrap(), None);
-        store.add(CoreFile::User, "Likes tea").unwrap();
-        store.add(CoreFile::User, "Likes tea").unwrap();
+        assert!(store.add(CoreFile::User, "Likes tea").unwrap());
+        assert!(!store.add(CoreFile::User, "Likes tea").unwrap());
+        assert!(store.add(CoreFile::User, "one\ntwo").is_err());
         store
             .add(CoreFile::Memory, "The repo is at ~/repos/x")
             .unwrap();
@@ -766,7 +790,10 @@ mod tests {
         assert!(store.remove(CoreFile::User, "  ").is_err());
         assert!(store.replace(CoreFile::User, "", "x").is_err());
         assert_eq!(store.core(CoreFile::User).unwrap(), "Likes coffee now\n");
-        store.remove(CoreFile::User, "coffee").unwrap();
+        assert_eq!(
+            store.remove(CoreFile::User, "coffee").unwrap(),
+            ["Likes coffee now"]
+        );
         assert_eq!(store.core(CoreFile::User).unwrap(), "");
         let block = store.core_block().unwrap().unwrap();
         assert!(block.contains("## About the world"), "{block}");

@@ -78,7 +78,7 @@ Notes:
   instead of guessing at flags.
 "#;
 
-fn parse_skill_md(name: &str, text: &str) -> anyhow::Result<Skill> {
+pub fn parse_skill_md(name: &str, text: &str) -> anyhow::Result<Skill> {
     let (frontmatter, body) = crate::config::split_frontmatter(text)?;
     let fm = crate::config::parse_frontmatter(&frontmatter).context("invalid skill frontmatter")?;
     Ok(Skill {
