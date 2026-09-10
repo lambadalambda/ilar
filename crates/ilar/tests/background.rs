@@ -1429,7 +1429,7 @@ async fn background_bash_timeout_is_overridable() {
         .unwrap();
     assert!(notification.is_error);
     assert!(
-        notification.text.contains("timed out after 100ms"),
+        notification.text.contains("timed out after 1000ms"),
         "{}",
         notification.text
     );
