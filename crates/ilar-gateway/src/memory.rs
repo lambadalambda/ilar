@@ -817,7 +817,7 @@ mod tests {
         assert!(!out.is_error, "{}", out.content);
         assert!(out.content.contains("MEMORY.md (0 of"), "{}", out.content);
         assert!(
-            out.content.contains("USER.md (9 of") && out.content.contains("Likes tea"),
+            out.content.contains("USER.md (10 of") && out.content.contains("Likes tea"),
             "{}",
             out.content
         );
