@@ -288,4 +288,8 @@ be named with `channel` and `chat`, but only one that has written to
 the bot: the model does not open conversations with strangers. The
 tool's description carries the channel's delivery constraints (for
 Delta Chat: plain text, one message under 4000 characters, files by
-absolute path).
+absolute path). The tool refuses what cannot be meant: a chat that has
+never written (it names the ones that have), a file that is not there,
+and a text that speaks of an attachment while `media` is empty — the
+last unless the call says `no_attachment: true`, for a text that means
+it. A session key given as `channel` is taken apart, not doubled.

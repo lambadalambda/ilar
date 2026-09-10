@@ -29,6 +29,9 @@ struct Input {
     /// Files to attach, by path.
     #[serde(default)]
     media: Vec<PathBuf>,
+    /// The text speaks of an attachment on purpose and there is none.
+    #[serde(default)]
+    no_attachment: bool,
 }
 
 pub struct MessageTool {
@@ -102,7 +105,8 @@ impl MessageTool {
              every reply you want them to see; your final text is delivered only if you sent \
              nothing this turn. Another known chat is named with channel (the channel's name, \
              {home_channel}) and chat (its id). Files travel in media, by path: the text alone \
-             attaches nothing, and a text that speaks of an attachment without one is refused.{}",
+             attaches nothing, and a text that speaks of an attachment without one is refused \
+             unless no_attachment is true.{}",
             if constraints.is_empty() {
                 String::new()
             } else {
@@ -147,7 +151,8 @@ impl Tool for MessageTool {
                 "text": {"type": "string", "description": "What to send"},
                 "channel": {"type": "string", "description": "Another chat's channel (default: this chat's)"},
                 "chat": {"type": "string", "description": "Another chat's id (default: this chat)"},
-                "media": {"type": "array", "items": {"type": "string"}, "description": "Files to attach, by path (relative to the workspace or absolute); images arrive as pictures"}
+                "media": {"type": "array", "items": {"type": "string"}, "description": "Files to attach, by path (relative to the workspace or absolute); images arrive as pictures"},
+                "no_attachment": {"type": "boolean", "description": "Send a text that mentions an attachment without one, on purpose"}
             },
             "required": ["text"]
         })
@@ -186,10 +191,10 @@ impl Tool for MessageTool {
             if input.text.trim().is_empty() && input.media.is_empty() {
                 return ToolOutput::error("message: nothing to send");
             }
-            if input.media.is_empty() && claims_attachment(&input.text) {
+            if input.media.is_empty() && !input.no_attachment && claims_attachment(&input.text) {
                 return ToolOutput::error(
                     "message: the text speaks of an attachment but media is empty; put the \
-                     file's path in media, or reword the text",
+                     file's path in media, or send with no_attachment: true if that is meant",
                 );
             }
             // A channel sends what it is given by absolute path, and
@@ -324,6 +329,15 @@ mod tests {
         .await;
         assert!(out.is_error);
         assert!(out.content.contains("media is empty"), "{}", out.content);
+
+        let out = send(
+            &tool,
+            dir.path(),
+            serde_json::json!({"text": "I attached the bracket to the wall", "no_attachment": true}),
+        )
+        .await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(rx.recv().await.unwrap().media.is_empty());
 
         let out = send(
             &tool,
