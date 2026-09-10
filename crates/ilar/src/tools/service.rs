@@ -242,6 +242,9 @@ impl Tool for ServiceTool {
                     let (Some(name), Some(command)) = (input.name, input.command) else {
                         return ToolOutput::error("service start requires name and command");
                     };
+                    if command.trim().is_empty() {
+                        return ToolOutput::error("service start: command is empty");
+                    }
                     if !valid_name(&name) {
                         return ToolOutput::error(format!(
                             "invalid service name {name:?} (use [a-zA-Z0-9_-], max 64 chars)"

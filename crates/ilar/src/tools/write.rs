@@ -44,8 +44,8 @@ impl Tool for WriteTool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "path": {"type": "string"},
-                "content": {"type": "string"}
+                "path": {"type": "string", "description": "Relative to cwd, or absolute"},
+                "content": {"type": "string", "description": "The whole file; to change part of one, use edit"}
             },
             "required": ["path", "content"]
         })

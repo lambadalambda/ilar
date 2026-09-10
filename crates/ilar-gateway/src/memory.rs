@@ -135,7 +135,8 @@ impl MemoryStore {
     fn write_core(&self, file: CoreFile, text: &str) -> Result<()> {
         if text.chars().count() > file.cap() {
             bail!(
-                "{} would be {} characters; the cap is {}. Consolidate or remove entries first.",
+                "{} would be {} characters; the cap is {}. Consolidate or remove entries first \
+                 (action show lists what is there).",
                 file.file_name(),
                 text.chars().count(),
                 file.cap()
@@ -463,6 +464,7 @@ enum MemoryAction {
     Replace,
     Remove,
     Note,
+    Show,
 }
 
 #[derive(Deserialize)]
@@ -520,7 +522,7 @@ impl Tool for MemoryTool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["add", "replace", "remove", "note"]},
+                "action": {"type": "string", "enum": ["add", "replace", "remove", "note", "show"], "description": "show: both core files as they are now, with their caps"},
                 "file": {"type": "string", "enum": ["memory", "user"], "description": "Which core file (default memory)"},
                 "text": {"type": "string", "description": "add: the entry, one line; remove: text every entry to drop contains"},
                 "old": {"type": "string", "description": "replace: text the first entry to replace contains"},
@@ -542,6 +544,25 @@ impl Tool for MemoryTool {
                 Err(error) => return error,
             };
             let outcome = match input.action {
+                MemoryAction::Show => [CoreFile::Memory, CoreFile::User]
+                    .into_iter()
+                    .map(|file| {
+                        store.core(file).map(|text| {
+                            format!(
+                                "{} ({} of {} characters):\n{}",
+                                file.file_name(),
+                                text.chars().count(),
+                                file.cap(),
+                                if text.is_empty() {
+                                    "(empty)\n"
+                                } else {
+                                    text.as_str()
+                                }
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()
+                    .map(|parts| parts.join("\n")),
                 MemoryAction::Add => input
                     .text
                     .as_deref()
@@ -740,9 +761,18 @@ impl Tool for MemoryGetTool {
                 Err(error) => return error,
             };
             match store.get(&input.ids) {
-                Ok(notes) if notes.is_empty() => ToolOutput::error("memory_get: no such notes"),
-                Ok(notes) => ToolOutput::text(
-                    notes
+                Ok(notes) if notes.is_empty() => ToolOutput::error(format!(
+                    "memory_get: no notes with ids {}; ids come from memory_search",
+                    input.ids.join(", ")
+                )),
+                Ok(notes) => {
+                    let unknown: Vec<&str> = input
+                        .ids
+                        .iter()
+                        .filter(|id| !notes.iter().any(|note| &note.id == *id))
+                        .map(String::as_str)
+                        .collect();
+                    let mut text = notes
                         .iter()
                         .map(|note| {
                             format!(
@@ -755,8 +785,15 @@ impl Tool for MemoryGetTool {
                             )
                         })
                         .collect::<Vec<_>>()
-                        .join("\n\n"),
-                ),
+                        .join("\n\n");
+                    if !unknown.is_empty() {
+                        text.push_str(&format!(
+                            "\n\n(no notes with ids {}; ids come from memory_search)",
+                            unknown.join(", ")
+                        ));
+                    }
+                    ToolOutput::text(text)
+                }
                 Err(error) => ToolOutput::error(format!("memory_get: {error:#}")),
             }
         })
@@ -766,6 +803,55 @@ impl Tool for MemoryGetTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ilar::tools::Tool;
+
+    #[tokio::test]
+    async fn show_lists_the_core_and_get_names_unknown_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(MemoryStore::new(dir.path().to_path_buf()));
+        store.add(CoreFile::User, "Likes tea").unwrap();
+        let ctx = || ToolContext::root(dir.path().to_path_buf());
+        let out = MemoryTool::new(store.clone())
+            .run(serde_json::json!({"action": "show"}), ctx())
+            .await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("MEMORY.md (0 of"), "{}", out.content);
+        assert!(
+            out.content.contains("USER.md (9 of") && out.content.contains("Likes tea"),
+            "{}",
+            out.content
+        );
+
+        let out = MemoryGetTool::new(store.clone())
+            .run(serde_json::json!({"ids": ["nope"]}), ctx())
+            .await;
+        assert!(out.is_error);
+        assert!(
+            out.content
+                .contains("no notes with ids nope; ids come from memory_search"),
+            "{}",
+            out.content
+        );
+        let id = store
+            .note(
+                NoteKind::Event,
+                "Moved",
+                "moved house",
+                "moved house",
+                Utc::now(),
+            )
+            .unwrap()
+            .id;
+        let out = MemoryGetTool::new(store)
+            .run(serde_json::json!({"ids": [id, "nope"]}), ctx())
+            .await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(
+            out.content.contains("Moved") && out.content.contains("(no notes with ids nope"),
+            "{}",
+            out.content
+        );
+    }
 
     fn at(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)

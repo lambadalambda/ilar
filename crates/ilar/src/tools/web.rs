@@ -448,7 +448,7 @@ impl Tool for WebFetchTool {
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
-            "properties": {"url": {"type": "string", "maxLength": MAX_FETCH_URL_CHARS}},
+            "properties": {"url": {"type": "string", "maxLength": MAX_FETCH_URL_CHARS, "description": "An absolute URL with its scheme, e.g. https://example.com/docs"}},
             "required": ["url"]
         })
     }
@@ -463,6 +463,15 @@ impl Tool for WebFetchTool {
             if input.url.chars().count() > MAX_FETCH_URL_CHARS {
                 return ToolOutput::error(format!(
                     "webfetch URL exceeds {MAX_FETCH_URL_CHARS} characters"
+                ));
+            }
+            if !input.url.contains("://") {
+                return ToolOutput::error(bounded_format(
+                    format_args!(
+                        "webfetch: the URL needs a scheme; try https://{}",
+                        input.url.trim()
+                    ),
+                    MAX_FETCH_ERROR_CHARS,
                 ));
             }
             let url = match parse_url(&input.url, allow_private_initial) {
@@ -1043,6 +1052,23 @@ impl SearchBackend for ExaBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_url_without_a_scheme_is_told_to_add_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = WebFetchTool::default()
+            .run(
+                serde_json::json!({"url": "example.com/docs"}),
+                ToolContext::root(dir.path().to_path_buf()),
+            )
+            .await;
+        assert!(out.is_error, "{}", out.content);
+        assert!(
+            out.content.contains("try https://example.com/docs"),
+            "{}",
+            out.content
+        );
+    }
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     async fn spawn_server(

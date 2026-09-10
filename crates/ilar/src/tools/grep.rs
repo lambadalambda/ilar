@@ -162,6 +162,11 @@ impl Tool for GrepTool {
             // purpose — spilled tool output lives in the state dir.
             let requested = input.path.as_deref().unwrap_or(".");
             let root = ctx.cwd.join(requested);
+            if !root.exists() {
+                return ToolOutput::error(format!(
+                    "grep: no such path {requested}; find the right one with glob"
+                ));
+            }
             let spill = super::bash::SpillTarget::from_context(&ctx);
             let regex = match regex::RegexBuilder::new(&input.pattern)
                 .case_insensitive(input.ignore_case)
@@ -499,6 +504,23 @@ async fn spill_over_budget(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_missing_path_is_an_error_not_an_empty_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = GrepTool
+            .run(
+                serde_json::json!({"pattern": "x", "path": "src/nope"}),
+                ToolContext::root(dir.path().to_path_buf()),
+            )
+            .await;
+        assert!(out.is_error, "{}", out.content);
+        assert!(
+            out.content.contains("no such path src/nope"),
+            "{}",
+            out.content
+        );
+    }
 
     /// A search with none of the options: what the pre-option tool did.
     fn plain(pattern: &str) -> Search {

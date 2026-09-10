@@ -65,7 +65,7 @@ impl Tool for ReadTool {
             "properties": {
                 "path": {"type": "string", "description": "File path, relative to cwd"},
                 "offset": {"type": "integer", "description": "1-based line to start at"},
-                "limit": {"type": "integer", "description": "Max lines to return"}
+                "limit": {"type": "integer", "description": "Max lines to return, at most 2000 (the default)"}
             },
             "required": ["path"]
         })
@@ -78,6 +78,15 @@ impl Tool for ReadTool {
                 Err(e) => return e,
             };
             let path = ctx.cwd.join(&input.path);
+            if path.is_dir() {
+                return ToolOutput::error(format!(
+                    "read {}: is a directory; list it with glob, then read a file in it",
+                    input.path
+                ));
+            }
+            if input.limit == Some(0) {
+                return ToolOutput::error("read: limit is at least 1; omit it for the default");
+            }
             let start = input.offset.unwrap_or(1).max(1);
             let limit = input.limit.unwrap_or(MAX_LINES).min(MAX_LINES);
             let vision = ctx.vision;
@@ -329,6 +338,30 @@ fn read_line_prefix<R: BufRead>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_directory_and_a_zero_limit_are_refused_with_the_fix() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+        let ctx = || ToolContext::root(dir.path().to_path_buf());
+        let out = ReadTool
+            .run(serde_json::json!({"path": "src"}), ctx())
+            .await;
+        assert!(
+            out.is_error && out.content.contains("list it with glob"),
+            "{}",
+            out.content
+        );
+        let out = ReadTool
+            .run(serde_json::json!({"path": "a.txt", "limit": 0}), ctx())
+            .await;
+        assert!(
+            out.is_error && out.content.contains("at least 1"),
+            "{}",
+            out.content
+        );
+    }
 
     /// The pre-decode size guard is the only thing between a malformed
     /// header and reading an arbitrarily large file into memory, and the

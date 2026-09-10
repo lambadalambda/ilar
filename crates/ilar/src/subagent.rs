@@ -826,8 +826,9 @@ impl SubagentSpawner {
                     };
                     if meta.agent != input.subagent_type {
                         return ToolOutput::error(format!(
-                            "resuming task session {id:?}: persisted agent does not match {:?}",
-                            input.subagent_type
+                            "resuming task session {id:?}: it ran as agent {:?}, not {:?}; resume \
+                             it with that subagent_type or start a new task",
+                            meta.agent, input.subagent_type
                         ));
                     }
                     if meta.parent_id.as_deref() != Some(ctx.session_id.as_str()) {
@@ -879,7 +880,10 @@ impl SubagentSpawner {
                     id.clone()
                 }
                 Err(error) => {
-                    return ToolOutput::error(format!("resuming task session {id:?}: {error}"));
+                    return ToolOutput::error(format!(
+                        "resuming task session {id:?}: {error}. Task ids come from task results \
+                         and the tasks tool; never invent one"
+                    ));
                 }
             },
             None => {

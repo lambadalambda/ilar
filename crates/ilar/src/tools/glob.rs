@@ -198,6 +198,13 @@ fn scan(
     // to cwd. Same semantics as read/write/edit.
     let absolute = Path::new(pattern).is_absolute();
     let root = cwd.join(literal_prefix(pattern));
+    if !root.exists() {
+        return ToolOutput::error(format!(
+            "glob: no such directory {}; the part of the pattern before the first wildcard \
+             must exist",
+            root.display()
+        ));
+    }
     let threads = std::thread::available_parallelism()
         .map(|count| count.get())
         .unwrap_or(1)
@@ -343,6 +350,19 @@ impl Tool for GlobTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_missing_literal_prefix_is_an_error_not_no_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = GlobTool
+            .run(
+                serde_json::json!({"pattern": "nope/**/*.rs"}),
+                ToolContext::root(dir.path().to_path_buf()),
+            )
+            .await;
+        assert!(out.is_error, "{}", out.content);
+        assert!(out.content.contains("no such directory"), "{}", out.content);
+    }
 
     #[test]
     fn literal_prefix_stops_at_the_first_metacharacter() {

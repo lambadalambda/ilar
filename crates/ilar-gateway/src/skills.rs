@@ -112,6 +112,19 @@ impl SkillLibrary {
         Ok(path)
     }
 
+    /// The error for a name that is not a skill: says which are.
+    fn missing(&self, name: &str) -> anyhow::Error {
+        let names = self.names().unwrap_or_default();
+        anyhow::anyhow!(
+            "no skill {name}; skills: {}",
+            if names.is_empty() {
+                "(none)".to_string()
+            } else {
+                names.join(", ")
+            }
+        )
+    }
+
     /// Replace one passage of the body. `old` must occur exactly once
     /// there, so a patch changes only what it names; the frontmatter
     /// is not patched, since a stray match would break the file.
@@ -122,12 +135,14 @@ impl SkillLibrary {
         }
         let _write = self.write.lock().unwrap();
         let path = self.path(name);
-        let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("no skill {name} in {}", self.dir.display()))?;
+        let text = std::fs::read_to_string(&path).map_err(|_| self.missing(name))?;
         let (head, body) = split_frontmatter(&text);
         match body.matches(old).count() {
             1 => {}
-            0 => bail!("the body of skill {name} does not contain the text to replace"),
+            0 => bail!(
+                "the body of skill {name} does not contain the text to replace; the \
+                 description and triggers are changed with rewrite"
+            ),
             n => bail!("skill {name} contains that text {n} times; be more specific"),
         }
         let patched = format!("{head}{}", body.replacen(old, new, 1));
@@ -154,8 +169,7 @@ impl SkillLibrary {
         }
         let _write = self.write.lock().unwrap();
         let path = self.path(name);
-        let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("no skill {name}; create it"))?;
+        let text = std::fs::read_to_string(&path).map_err(|_| self.missing(name))?;
         let kept = match triggers {
             Some(triggers) => triggers.to_vec(),
             None => ilar::skill::parse_skill_md(name, &text)
@@ -176,7 +190,7 @@ impl SkillLibrary {
         let _write = self.write.lock().unwrap();
         let from = self.dir.join(name);
         if !from.join("SKILL.md").exists() {
-            bail!("no skill {name}");
+            return Err(self.missing(name));
         }
         let archive = self.dir.join(".archive");
         std::fs::create_dir_all(&archive)?;
@@ -195,7 +209,7 @@ impl SkillLibrary {
         let _write = self.write.lock().unwrap();
         let dir = self.dir.join(name);
         if !dir.join("SKILL.md").exists() {
-            bail!("no skill {name}");
+            return Err(self.missing(name));
         }
         std::fs::remove_dir_all(&dir)?;
         let mut ledger = self.ledger()?;
@@ -434,6 +448,8 @@ mod tests {
             .patch("deploy-check", "tail the log", "tail the journal")
             .unwrap();
         assert!(library.patch("deploy-check", "absent", "x").is_err());
+        let missing = library.patch("nope", "a", "b").unwrap_err().to_string();
+        assert!(missing.contains("skills: deploy-check"), "{missing}");
         assert!(
             library
                 .patch("deploy-check", "Check a deploy", "x")
@@ -441,6 +457,22 @@ mod tests {
             "the frontmatter is not patched"
         );
         assert!(library.rewrite("deploy-check", "x", None, " ").is_err());
+        library.patch("deploy-check", "curl", "fetch").unwrap();
+        assert!(
+            library.patch("deploy-check", "the", "a").is_err(),
+            "occurs twice"
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("tail the journal") && text.contains("fetch"),
+            "{text}"
+        );
+        library.note_view("deploy-check").unwrap();
+        let ledger = library.ledger().unwrap();
+        assert_eq!(ledger["deploy-check"].patches, 2);
+        assert_eq!(ledger["deploy-check"].views, 1);
+        assert!(ledger["deploy-check"].created_at.is_some());
+        assert_eq!(library.names().unwrap(), ["deploy-check"]);
         // A rewrite without triggers keeps the ones it has.
         library
             .rewrite("deploy-check", "Check a deploy, v2", None, "# v2\n\nbody")
@@ -460,22 +492,6 @@ mod tests {
             .unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("triggers = [\"ship\"]"), "{text}");
-        library.patch("deploy-check", "curl", "fetch").unwrap();
-        assert!(
-            library.patch("deploy-check", "the", "a").is_err(),
-            "occurs twice"
-        );
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            text.contains("tail the journal") && text.contains("fetch"),
-            "{text}"
-        );
-        library.note_view("deploy-check").unwrap();
-        let ledger = library.ledger().unwrap();
-        assert_eq!(ledger["deploy-check"].patches, 2);
-        assert_eq!(ledger["deploy-check"].views, 1);
-        assert!(ledger["deploy-check"].created_at.is_some());
-        assert_eq!(library.names().unwrap(), ["deploy-check"]);
         library.delete("deploy-check").unwrap();
         assert!(library.names().unwrap().is_empty());
         assert!(library.ledger().unwrap().is_empty());

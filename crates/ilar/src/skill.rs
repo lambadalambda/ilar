@@ -249,7 +249,7 @@ impl crate::tools::Tool for SkillTool {
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
-            "properties": {"name": {"type": "string"}},
+            "properties": {"name": {"type": "string", "description": "A skill's name from the list in the prompt"}},
             "required": ["name"]
         })
     }
