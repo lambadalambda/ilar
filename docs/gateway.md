@@ -289,8 +289,10 @@ the chat rather than answered with silence. Another chat can
 be named with `channel` and `chat`, but only one that has written to
 the bot: the model does not open conversations with strangers. The
 tool's description carries the channel's delivery constraints (for
-Delta Chat: plain text, one message under 4000 characters, files by
-absolute path). The tool refuses what cannot be meant: a chat that has
+Delta Chat: plain text, files by path). Delta Chat folds a bubble past
+3,800 characters or 38 lines behind "Show full message", so the
+adapter sends a long text as several bubbles under both caps, split
+at line breaks; the model writes it whole. The tool refuses what cannot be meant: a chat that has
 never written (it names the ones that have), a file that is not there,
 and a text that speaks of an attachment while `media` is empty — the
 last unless the call says `no_attachment: true`, for a text that means

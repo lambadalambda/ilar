@@ -12,7 +12,7 @@ use ilar::session::ImageContent;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::bus::{Inbound, Outbound, session_key, split_for_delivery, split_key};
+use crate::bus::{Inbound, Outbound, session_key, split_key};
 use crate::channel::Channel;
 use crate::commands::{self, Command};
 use crate::config::GatewayConfig;
@@ -116,10 +116,6 @@ fn fold_steers(steers: Vec<ilar::agent::Steer>) -> ilar::agent::Steer {
     let images: Vec<ImageContent> = steers.into_iter().flat_map(|steer| steer.images).collect();
     ilar::agent::Steer { text, images }
 }
-
-/// The longest text the gateway itself sends in one message: a chat
-/// folds anything much longer behind a "[...]".
-const DELIVERY_PIECE_CHARS: usize = 700;
 
 impl Gateway {
     pub fn new(
@@ -1102,19 +1098,17 @@ impl Gateway {
         if text.trim().is_empty() {
             return;
         }
-        for piece in split_for_delivery(text, DELIVERY_PIECE_CHARS) {
-            let message = Outbound {
-                channel: channel.to_string(),
-                chat_id: chat_id.to_string(),
-                text: piece,
-                media: Vec::new(),
-            };
-            if self.outbound_tx.send(message).await.is_err() {
-                log(&format!(
-                    "{channel}:{chat_id}: the dispatcher is gone; dropping a reply"
-                ));
-                return;
-            }
+        // Whole: a channel that folds long texts splits them itself.
+        let message = Outbound {
+            channel: channel.to_string(),
+            chat_id: chat_id.to_string(),
+            text: text.to_string(),
+            media: Vec::new(),
+        };
+        if self.outbound_tx.send(message).await.is_err() {
+            log(&format!(
+                "{channel}:{chat_id}: the dispatcher is gone; dropping a reply"
+            ));
         }
     }
 

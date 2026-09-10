@@ -37,27 +37,33 @@ pub fn session_key(channel: &str, chat_id: &str) -> String {
     format!("{channel}:{chat_id}")
 }
 
-/// Cut a long text into pieces a channel will show whole, at line
-/// boundaries where possible; a single line longer than `max` is cut
-/// where it must be.
-pub fn split_for_delivery(text: &str, max: usize) -> Vec<String> {
+/// Cut a long text into pieces a channel will show whole: at most
+/// `max_chars` characters and `max_lines` lines each, split at line
+/// boundaries where possible; a single line longer than `max_chars`
+/// is cut where it must be.
+pub fn split_for_delivery(text: &str, max_chars: usize, max_lines: usize) -> Vec<String> {
     let mut pieces = Vec::new();
     let mut current = String::new();
+    let mut lines = 0;
     for line in text.split_inclusive('\n') {
-        if current.chars().count() + line.chars().count() > max && !current.is_empty() {
+        let over =
+            current.chars().count() + line.chars().count() > max_chars || lines + 1 > max_lines;
+        if over && !current.is_empty() {
             pieces.push(std::mem::take(&mut current));
+            lines = 0;
         }
         let mut line = line;
-        while line.chars().count() > max {
+        while line.chars().count() > max_chars {
             let cut = line
                 .char_indices()
-                .nth(max)
+                .nth(max_chars)
                 .map(|(i, _)| i)
                 .unwrap_or(line.len());
             pieces.push(line[..cut].to_string());
             line = &line[cut..];
         }
         current.push_str(line);
+        lines += 1;
     }
     if !current.trim().is_empty() {
         pieces.push(current);
@@ -77,14 +83,23 @@ mod tests {
 
     #[test]
     fn long_texts_split_at_lines_and_only_cut_a_line_when_they_must() {
-        assert_eq!(split_for_delivery("short", 10), vec!["short"]);
+        assert_eq!(split_for_delivery("short", 10, 10), vec!["short"]);
         let text = "one\ntwo\nthree\n";
-        assert_eq!(split_for_delivery(text, 8), vec!["one\ntwo\n", "three\n"]);
         assert_eq!(
-            split_for_delivery("abcdefghij", 4),
+            split_for_delivery(text, 8, 10),
+            vec!["one\ntwo\n", "three\n"]
+        );
+        assert_eq!(
+            split_for_delivery("abcdefghij", 4, 10),
             vec!["abcd", "efgh", "ij"]
         );
-        assert!(split_for_delivery("", 4).is_empty());
+        assert!(split_for_delivery("", 4, 10).is_empty());
+        // A line cap too: many short lines fold a bubble as surely as
+        // a long one.
+        assert_eq!(
+            split_for_delivery("a\nb\nc\nd\ne\n", 100, 2),
+            vec!["a\nb\n", "c\nd\n", "e\n"]
+        );
     }
 
     #[test]

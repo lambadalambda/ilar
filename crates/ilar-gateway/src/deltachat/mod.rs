@@ -292,7 +292,8 @@ impl Channel for DeltaChat {
     }
 
     fn constraints(&self) -> &str {
-        "plain text, no markdown rendering; keep one message under 4000 characters; files are \
+        "plain text, no markdown rendering; a long text is sent as several bubbles of up to \
+         3600 characters or 36 lines, split at line breaks, so write it whole; files are \
          attached by path; a .xdc file (a zip holding index.html and manifest.toml with a \
          name = \"…\" line, no external resources) is delivered as a webxdc app the person \
          opens inside the chat"
@@ -405,9 +406,14 @@ impl Channel for DeltaChat {
                 .with_context(|| format!("chat id {:?} is not a Delta Chat id", message.chat_id))?;
             let mut text = Some(message.text).filter(|text| !text.trim().is_empty());
             if message.media.is_empty() {
+                // Delta Chat folds a bubble past 3,800 characters or 38
+                // lines behind "Show full message", so a long text goes
+                // out as several bubbles under both caps.
                 if let Some(text) = text {
-                    rpc.call("misc_send_text_message", json!([account, chat_id, text]))
-                        .await?;
+                    for piece in crate::bus::split_for_delivery(&text, BUBBLE_CHARS, BUBBLE_LINES) {
+                        rpc.call("misc_send_text_message", json!([account, chat_id, piece]))
+                            .await?;
+                    }
                 }
                 return Ok(());
             }
@@ -425,6 +431,12 @@ impl Channel for DeltaChat {
         })
     }
 }
+
+/// The most one bubble shows whole: Delta Chat's core cuts a text at
+/// 3,800 characters or 38 lines (`DC_DESIRED_TEXT_LEN`), so pieces stay
+/// a little under both.
+const BUBBLE_CHARS: usize = 3_600;
+const BUBBLE_LINES: usize = 36;
 
 /// How Delta Chat should show a file: pictures as pictures, an `.xdc`
 /// — a zip with an `index.html` and a `manifest.toml` — as a webxdc
@@ -686,12 +698,25 @@ mod tests {
             })
             .await
             .unwrap();
+        // Two paragraphs that will not fit one bubble go as two.
+        let long = format!("{}\n\n{}\n", "a".repeat(2_000), "b".repeat(2_000));
+        channel
+            .send(Outbound {
+                channel: "deltachat".into(),
+                chat_id: "5".into(),
+                text: long,
+                media: vec![],
+            })
+            .await
+            .unwrap();
         let recorded = calls.lock().unwrap().clone();
         let sends: Vec<&(String, Value)> = recorded
             .iter()
             .filter(|(m, _)| m == "misc_send_text_message" || m == "send_msg")
             .collect();
-        assert_eq!(sends.len(), 4, "{sends:?}");
+        assert_eq!(sends.len(), 6, "{sends:?}");
+        assert!(sends[4].1[2].as_str().unwrap().starts_with("aaaa"));
+        assert!(sends[5].1[2].as_str().unwrap().starts_with("bbbb"));
         assert_eq!(sends[0].1, json!([1, 5, "plain"]));
         assert_eq!(sends[1].1[2]["viewtype"], "Image");
         assert_eq!(sends[1].1[2]["text"], "with a picture");
