@@ -204,6 +204,19 @@ impl Gateway {
             .map(|seat| seat.runtime.system_prompt.clone())
     }
 
+    /// What a chat on the first channel would be sent, as text: the
+    /// system prompt with the situation and memory blocks, every tool
+    /// with its schema. `private` false shows what a room gets.
+    pub fn preview(&self, private: bool) -> Result<String> {
+        let channel = self
+            .channels
+            .keys()
+            .min()
+            .cloned()
+            .unwrap_or_else(|| "channel".to_string());
+        Ok(self.driver.preview(&channel, "chat", private)?.render())
+    }
+
     /// The tools a chat's model can see, once it has a seat.
     pub fn tool_names(&self, key: &str) -> Option<Vec<&'static str>> {
         self.driver

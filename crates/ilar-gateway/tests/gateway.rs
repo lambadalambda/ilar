@@ -1027,6 +1027,25 @@ async fn the_gateway_announces_its_stop_and_its_start_to_the_last_chat() {
 }
 
 #[tokio::test]
+async fn the_preview_shows_the_whole_request_a_chat_would_get() {
+    let dir = tempfile::tempdir().unwrap();
+    let (gateway, _fake) = gateway(dir.path(), vec![]);
+    let text = gateway.preview(true).unwrap();
+    assert!(text.starts_with("model: zai/glm-4.7\n"), "{text}");
+    assert!(text.contains("# Where you are"), "{text}");
+    assert!(text.contains("\n--- message\n"), "{text}");
+    assert!(text.contains("on fake"), "{text}");
+    for tool in ["memory", "memory_search", "cron", "skill_manage", "read"] {
+        assert!(text.contains(&format!("\n--- {tool}\n")), "{tool}: {text}");
+    }
+    // Nothing opened: no seat, no session.
+    assert!(gateway.system_prompt("fake:chat").is_none());
+    let store = ilar::runtime::session_store(&config(dir.path()));
+    assert!(store.list().is_empty());
+    gateway.cancel();
+}
+
+#[tokio::test]
 async fn the_weekly_review_is_a_job_the_gateway_owns_and_speaks_to_the_last_chat() {
     let dir = tempfile::tempdir().unwrap();
     let settings = GatewayConfig {

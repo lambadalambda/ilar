@@ -183,7 +183,8 @@ struct Args {
     #[arg(long)]
     agent: Option<String>,
 
-    /// Print the resolved system prompt and exit (debugging).
+    /// Print what the model would get — model, options, system prompt,
+    /// every tool with its schema — and exit.
     #[arg(long)]
     print_prompt: bool,
 
@@ -1201,7 +1202,7 @@ async fn main() -> Result<()> {
             },
         )?;
         if args.print_prompt {
-            println!("{}", plan.system_prompt);
+            println!("{}", plan.preview(&config)?.render());
             return Ok(());
         }
         let skipped_project_instructions = plan.skipped_project_instructions;

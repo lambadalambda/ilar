@@ -241,50 +241,7 @@ impl Driver {
                 routes.bind(key, &runtime.session_id);
             }
         })?;
-        // The model's way to answer: a tool that knows this chat.
-        let (tool, sent) = MessageTool::new(
-            self.wiring.outbound.clone(),
-            channel,
-            chat_id,
-            self.routes.clone(),
-            self.gateway.workspace(&self.config),
-            self.wiring
-                .constraints
-                .get(channel)
-                .map(String::as_str)
-                .unwrap_or(""),
-        );
-        runtime.registry.add(tool)?;
-        if self.gateway.memory.enabled {
-            let memory = self.wiring.memory.clone();
-            for (name, tool) in [
-                (
-                    "memory",
-                    MemoryTool::new(memory.clone()) as Arc<dyn ilar::tools::Tool>,
-                ),
-                ("memory_search", MemorySearchTool::new(memory.clone())),
-                ("memory_get", MemoryGetTool::new(memory)),
-            ] {
-                if self.gateway.tools.admits(name) {
-                    runtime.registry.add(tool)?;
-                }
-            }
-        }
-        // Its own skills, to write as well as read.
-        if self.gateway.tools.admits("skill_manage") {
-            runtime.registry.add(crate::skills::SkillManageTool::new(
-                self.wiring.skills.clone(),
-            ))?;
-        }
-        // And its calendar, unless the policy says otherwise.
-        if self.gateway.tools.admits("cron") {
-            let home = crate::bus::session_key(channel, chat_id);
-            runtime.registry.add(CronTool::new(
-                self.wiring.cron.clone(),
-                self.routes.clone(),
-                &home,
-            ))?;
-        }
+        let sent = self.seat_tools(&mut runtime.registry, channel, chat_id)?;
         let seat = Arc::new(Seat {
             key: key.to_string(),
             channel: channel.to_string(),
@@ -324,17 +281,96 @@ impl Driver {
             resume,
             private,
         )?;
-        let policy = &self.gateway.tools;
         let mut runtime = plan.start_with(&self.config, self.resolver.clone())?;
-        if !policy.is_empty() {
-            let admitted = policy.admit(runtime.registry.tool_names());
-            let registry = std::mem::replace(
-                &mut runtime.registry,
-                ilar::tools::ToolRegistry::read_only(),
-            );
-            runtime.registry = registry.restricted_to(&admitted);
-        }
+        self.restrict(&mut runtime.registry);
         Ok(runtime)
+    }
+
+    /// The tool policy, applied to the core's registry.
+    fn restrict(&self, registry: &mut ilar::tools::ToolRegistry) {
+        let policy = &self.gateway.tools;
+        if policy.is_empty() {
+            return;
+        }
+        let admitted = policy.admit(registry.tool_names());
+        let core = std::mem::replace(registry, ilar::tools::ToolRegistry::read_only());
+        *registry = core.restricted_to(&admitted);
+    }
+
+    /// The chat's own tools on top of the core's: the way to answer,
+    /// its memory, its skills, its calendar — each under the policy
+    /// except the message tool, without which a chat is not a chat.
+    /// Returns the counter of messages the model sends.
+    fn seat_tools(
+        &self,
+        registry: &mut ilar::tools::ToolRegistry,
+        channel: &str,
+        chat_id: &str,
+    ) -> Result<Arc<std::sync::atomic::AtomicUsize>> {
+        let (tool, sent) = MessageTool::new(
+            self.wiring.outbound.clone(),
+            channel,
+            chat_id,
+            self.routes.clone(),
+            self.gateway.workspace(&self.config),
+            self.wiring
+                .constraints
+                .get(channel)
+                .map(String::as_str)
+                .unwrap_or(""),
+        );
+        registry.add(tool)?;
+        if self.gateway.memory.enabled {
+            let memory = self.wiring.memory.clone();
+            for (name, tool) in [
+                (
+                    "memory",
+                    MemoryTool::new(memory.clone()) as Arc<dyn ilar::tools::Tool>,
+                ),
+                ("memory_search", MemorySearchTool::new(memory.clone())),
+                ("memory_get", MemoryGetTool::new(memory)),
+            ] {
+                if self.gateway.tools.admits(name) {
+                    registry.add(tool)?;
+                }
+            }
+        }
+        if self.gateway.tools.admits("skill_manage") {
+            registry.add(crate::skills::SkillManageTool::new(
+                self.wiring.skills.clone(),
+            ))?;
+        }
+        if self.gateway.tools.admits("cron") {
+            let home = crate::bus::session_key(channel, chat_id);
+            registry.add(CronTool::new(
+                self.wiring.cron.clone(),
+                self.routes.clone(),
+                &home,
+            ))?;
+        }
+        Ok(sent)
+    }
+
+    /// What a chat on `channel` would get, without opening a session:
+    /// the plan's preview with the chat's tools added under the policy,
+    /// exactly as `seat_of` builds them.
+    pub fn preview(
+        &self,
+        channel: &str,
+        chat_id: &str,
+        private: bool,
+    ) -> Result<ilar::runtime::Preview> {
+        let plan = plan(
+            &self.config,
+            &self.gateway,
+            &self.wiring.memory,
+            None,
+            private,
+        )?;
+        let mut preview = plan.preview(&self.config)?;
+        self.restrict(&mut preview.registry);
+        self.seat_tools(&mut preview.registry, channel, chat_id)?;
+        Ok(preview)
     }
 
     /// One turn on a seat; a second caller waits for the first. Status

@@ -49,7 +49,8 @@ enum Command {
     Run,
     /// Print the Delta Chat invite link the running gateway wrote.
     Invite,
-    /// Print the system prompt a chat's session gets, and exit.
+    /// Print what a chat's model would get — model, options, system
+    /// prompt, every tool with its schema — and exit.
     Prompt {
         /// As a group chat sees it: without the core memory.
         #[arg(long)]
@@ -94,33 +95,44 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Prompt { group } => {
-            let memory =
-                ilar_gateway::memory::MemoryStore::new(gateway.home(&config).join("memory"));
-            let plan = ilar_gateway::driver::plan(&config, &gateway, &memory, None, !group)?;
-            println!("{}", plan.system_prompt);
+            let channels = channels_from(&config, &gateway)?;
+            let resolver: Arc<dyn ilar::provider::ProviderResolver> = Arc::new(config.clone());
+            let preview = Gateway::new(config, gateway, resolver, channels)
+                .context("building the gateway")?
+                .preview(!group)?;
+            println!("{preview}");
             Ok(())
         }
         Command::Run => run(config, gateway).await,
     }
 }
 
-async fn run(config: ilar::config::Config, gateway: GatewayConfig) -> Result<()> {
-    for warning in &config.warnings {
-        log(warning);
-    }
+/// The channels the configuration names, built but not started.
+fn channels_from(
+    config: &ilar::config::Config,
+    gateway: &GatewayConfig,
+) -> Result<Vec<Arc<dyn Channel>>> {
     let mut channels: Vec<Arc<dyn Channel>> = Vec::new();
-    for name in channel_names(&config) {
-        let table = channel_table(&config, &name).unwrap_or_default();
+    for name in channel_names(config) {
+        let table = channel_table(config, &name).unwrap_or_default();
         match name.as_str() {
             "deltachat" => {
                 let settings: DeltaChatConfig = table
                     .try_into()
                     .context("parsing [channels.deltachat] in ilar.toml")?;
-                channels.push(DeltaChat::new(settings, &gateway.home(&config)));
+                channels.push(DeltaChat::new(settings, &gateway.home(config)));
             }
             other => anyhow::bail!("channel {other:?} is not supported"),
         }
     }
+    Ok(channels)
+}
+
+async fn run(config: ilar::config::Config, gateway: GatewayConfig) -> Result<()> {
+    for warning in &config.warnings {
+        log(warning);
+    }
+    let channels = channels_from(&config, &gateway)?;
     if channels.is_empty() {
         log("no channels configured; listening to the inbox only");
     }

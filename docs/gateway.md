@@ -10,7 +10,7 @@ ilar-gateway                       # listen on the configured channels
 ilar-gateway notify "build green"  # a message from a script, to the last active chat
 ilar-gateway notify --to deltachat:12 --source ci "…"
 ilar-gateway invite                # the Delta Chat invite link to add the bot with
-ilar-gateway prompt                # the system prompt a private chat gets; --group for a room
+ilar-gateway prompt                # what a private chat's model gets: prompt, tools, schemas; --group for a room
 ```
 
 ## Running it
@@ -174,7 +174,10 @@ through the message tool, where its home and workspace are, that a
 script can wake it with `ilar-gateway notify` and that it should use
 that from cron jobs, services and long builds to report back, and that
 scheduled turns speak only through the message tool. `ilar-gateway
-prompt` shows it.
+prompt` prints the whole request a chat would get — model, request
+options, the system prompt with this block and the core memory, and
+every tool with its description and schema, the chat's own included —
+like `ilar --print-prompt` does for a terminal session.
 
 ## Who it is: SOUL.md
 

@@ -424,6 +424,70 @@ impl RuntimePlan {
             }
         };
 
+        // Oversized bash output is written here, and last week's is
+        // swept on the way past. Never fatal: a state directory that
+        // cannot be read simply has nothing to clean.
+        crate::tools::bash::clean_spills(&crate::tools::bash::spill_dir(config.state_dir()));
+        // Same errand, same indifference to failure: live-turn scratches
+        // whose process died before its drop guard ran.
+        crate::session::sweep_live_scratches(&sessions_dir(config));
+        let Tooling {
+            registry,
+            spawner,
+            services,
+            todos,
+            tool_ctx,
+            loop_config,
+            questions,
+        } = self.tooling(config, resolver.clone(), &store)?;
+
+        Ok(SessionRuntime {
+            store,
+            session_id,
+            model: self.model,
+            reasoning: self.reasoning,
+            agent: self.agent,
+            system_prompt: self.system_prompt,
+            registry,
+            spawner,
+            services,
+            todos,
+            tool_ctx,
+            loop_config,
+            resolver,
+            questions,
+            skills: self.skills,
+            commands: self.commands,
+            resumed: self.resumed,
+        })
+    }
+
+    /// What the session would send, without a session: the model and
+    /// its request options, the prompt, and every tool with its
+    /// description and schema, built by the same code `start` uses.
+    /// The registry is public so a driver can add its own tools
+    /// before rendering.
+    pub fn preview(&self, config: &Config) -> Result<Preview> {
+        let resolver: Arc<dyn ProviderResolver> = Arc::new(config.clone());
+        let tooling = self.tooling(config, resolver, &session_store(config))?;
+        Ok(Preview {
+            model: self.model.clone(),
+            reasoning: self.reasoning.clone(),
+            options: crate::model::variant_options(&self.model, self.reasoning.as_deref())?,
+            agent: self.agent.name.clone(),
+            system_prompt: self.system_prompt.clone(),
+            registry: tooling.registry,
+        })
+    }
+
+    /// The tools and their surroundings, exactly as a session gets
+    /// them. Nothing here touches the store or the state directory.
+    fn tooling(
+        &self,
+        config: &Config,
+        resolver: Arc<dyn ProviderResolver>,
+        store: &SessionStore,
+    ) -> Result<Tooling> {
         let loop_config = LoopConfig {
             compaction_threshold: config.compaction.threshold,
             max_iterations: config.agent.max_iterations,
@@ -432,9 +496,9 @@ impl RuntimePlan {
         let services = ServiceManager::new();
         let spawner = Arc::new(
             SubagentSpawner::try_new(
-                resolver.clone(),
+                resolver,
                 store.clone(),
-                self.agents,
+                self.agents.clone(),
                 self.cwd.clone(),
                 0,
                 config.subagents.max_concurrent,
@@ -461,7 +525,7 @@ impl RuntimePlan {
             .with_todos(todos.clone())?
             .with_web_tools()?
             .with_history(store.clone())?
-            .with_skills(self.skill_store)?;
+            .with_skills(self.skill_store.clone())?;
         let registry = match image_gen_backend(config) {
             Some(backend) => registry.with_image_gen(backend)?,
             None => registry,
@@ -474,40 +538,71 @@ impl RuntimePlan {
         } else {
             (registry, None)
         };
-        // Oversized bash output is written here, and last week's is
-        // swept on the way past. Never fatal: a state directory that
-        // cannot be read simply has nothing to clean.
-        let spill_dir = crate::tools::bash::spill_dir(config.state_dir());
-        crate::tools::bash::clean_spills(&spill_dir);
-        // Same errand, same indifference to failure: live-turn scratches
-        // whose process died before its drop guard ran.
-        crate::session::sweep_live_scratches(&sessions_dir(config));
         // A resumed session's cwd comes off disk and may be gone —
         // deleted worktree, unmounted volume. That is an error to
         // report, not a reason to abort the process.
-        let tool_ctx = ToolContext::try_root(self.cwd)?
+        let tool_ctx = ToolContext::try_root(self.cwd.clone())?
             .with_subagents(spawner.clone())
-            .with_spill_dir(spill_dir);
-
-        Ok(SessionRuntime {
-            store,
-            session_id,
-            model: self.model,
-            reasoning: self.reasoning,
-            agent: self.agent,
-            system_prompt: self.system_prompt,
+            .with_spill_dir(crate::tools::bash::spill_dir(config.state_dir()));
+        Ok(Tooling {
             registry,
             spawner,
             services,
             todos,
             tool_ctx,
             loop_config,
-            resolver,
             questions,
-            skills: self.skills,
-            commands: self.commands,
-            resumed: self.resumed,
         })
+    }
+}
+
+/// The parts of a runtime that are not the session.
+struct Tooling {
+    registry: ToolRegistry,
+    spawner: Arc<SubagentSpawner>,
+    services: Arc<ServiceManager>,
+    todos: Arc<Mutex<TodoList>>,
+    tool_ctx: ToolContext,
+    loop_config: LoopConfig,
+    questions: Option<QuestionReceiver>,
+}
+
+/// What the first request of a session would carry, for reading.
+pub struct Preview {
+    pub model: String,
+    pub reasoning: Option<String>,
+    /// The provider options the reasoning variant adds; `Null` for none.
+    pub options: serde_json::Value,
+    pub agent: String,
+    pub system_prompt: String,
+    pub registry: ToolRegistry,
+}
+
+impl Preview {
+    /// The whole request as text: a header, the system prompt as sent,
+    /// then each tool with its description and input schema.
+    pub fn render(&self) -> String {
+        let mut out = format!("model: {}\n", self.model);
+        if let Some(reasoning) = &self.reasoning {
+            out.push_str(&format!("reasoning: {reasoning}\n"));
+        }
+        if !self.options.is_null() {
+            out.push_str(&format!("request options: {}\n", self.options));
+        }
+        out.push_str(&format!("agent: {}\n", self.agent));
+        let tools = self.registry.definitions();
+        out.push_str(&format!("tools: {}\n", tools.len()));
+        out.push_str("\n===== system prompt =====\n\n");
+        out.push_str(&self.system_prompt);
+        out.push_str(&format!("\n\n===== tools ({}) =====\n", tools.len()));
+        for tool in tools {
+            out.push_str(&format!("\n--- {}\n{}\n", tool.name, tool.description));
+            let schema = serde_json::to_string_pretty(&tool.input_schema)
+                .unwrap_or_else(|_| tool.input_schema.to_string());
+            out.push_str(&schema);
+            out.push('\n');
+        }
+        out
     }
 }
 
@@ -541,6 +636,34 @@ fn image_gen_backend(config: &Config) -> Option<crate::tools::image_gen::ImageGe
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_preview_renders_the_request_and_creates_no_session() {
+        let guard = tempfile::tempdir().unwrap();
+        let cwd = guard.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let config = crate::config::Loader::with_env(vec![("ILAR_ZAI_API_KEY", "zk".to_string())])
+            .config_dir(guard.path().join("config"))
+            .state_dir(guard.path().join("state"))
+            .resolve()
+            .unwrap();
+        let plan = RuntimePlan::resolve(
+            &config,
+            &RuntimeOptions {
+                cwd,
+                questions: true,
+                ..RuntimeOptions::default()
+            },
+        )
+        .unwrap();
+        let text = plan.preview(&config).unwrap().render();
+        assert!(text.starts_with("model: zai/glm-4.7\n"), "{text}");
+        assert!(text.contains("===== system prompt ====="), "{text}");
+        assert!(text.contains("\n--- read\n"), "{text}");
+        assert!(text.contains("\"properties\""), "{text}");
+        assert!(text.contains("\n--- question\n"), "{text}");
+        assert!(session_store(&config).list().is_empty());
+    }
 
     #[test]
     fn image_generation_follows_the_openai_credential_unless_switched_off() {
