@@ -20,12 +20,20 @@ const POLL: std::time::Duration = std::time::Duration::from_millis(250);
 
 pub(crate) async fn run(config: &Config, id: &str, theme: crate::theme::ThemeId) -> Result<()> {
     let store = ilar::runtime::session_store(config);
-    store.load(id).with_context(|| format!("no session {id}"))?;
+    let reader = store.load(id).with_context(|| format!("no session {id}"))?;
+    // The footer names the session's model and directory, not ours.
+    let model = reader.effective_model();
+    let cwd = reader.meta().and_then(|meta| meta.cwd.clone());
+    drop(reader);
     let (mut terminal, _session) = crate::TerminalSession::start()?;
     let mut app = App::new();
     app.theme = theme;
     app.session_id = id.to_string();
     app.status = "read-only view".into();
+    app.current_model = model;
+    if let Some(cwd) = cwd {
+        app.cwd = cwd;
+    }
     app.push_transcript_line(Line_::System(format!(
         "read-only view of session {id} — follows the file; q or Esc to leave"
     )));
