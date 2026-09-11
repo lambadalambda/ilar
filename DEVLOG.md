@@ -34,6 +34,33 @@ foreground children inherit it and touch it on every event at any
 depth, a background child starts its own. The test reproduces the
 production shape (mutable task, read-only foreground child).
 
+## 2026-09-11 — Pictures, bounded twice
+
+A chat that had generated and inspected 47 pictures came to hold
+108 MB of base64 images, every one of them re-sent on every request,
+until Lemonade's router refused the body: its cpp-httplib cap is
+compiled in at 100 MB, no key, no flag (measured, not read). The
+first cut was the obvious one — the images were full-size PNGs of
+832 by 1216 at one to three megabytes each; fitted to 1024 px and
+stored as JPEG when opaque and smaller, the same pictures are about
+150 KB, so a conversation like that one weighs seven megabytes and
+no cap is near. That touches only images arriving from now on, which
+is the point: nothing in a running session's cached prefix changes.
+
+The second is for the session that already held the pictures, and
+for any that outgrows the budget later: a sliding window would have
+rewritten the prefix on every new image and cost a cache miss each
+time, so the drop is recorded instead. An `image_cutoff` event names
+the index before which pictures no longer travel; the turn loop
+writes one when the images past the last cutoff exceed 24 MB, keeping
+the newest four, so the rewrite happens once and the prefix then
+holds until the next. The transcript keeps the words and puts a note
+where each picture was; the log keeps the pictures for the viewer.
+
+Along the way a real flake: grep's limit notice depended on whether
+the parallel walk had seen a match past the cap before it quit. The
+notice now says what is known — the cap was reached — and no more.
+
 ## 2026-09-10 — Tools that refuse what cannot be meant
 
 A chat got eight text-only messages each claiming to carry a photo:

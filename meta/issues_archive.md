@@ -343,3 +343,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Tools that destroy on empty input](issues/tools-that-destroy-on-empty-input.md)
 - [x] [Tools that accept what cannot be meant](issues/tools-that-accept-what-cannot-be-meant.md)
 - [x] [Refusals that say the fix](issues/refusals-that-say-the-fix.md)
+- [x] [Pictures stop outgrowing the request](issues/pictures-stop-outgrowing-the-request.md)
