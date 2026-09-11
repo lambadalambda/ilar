@@ -1798,24 +1798,27 @@ mod tests {
             },
         ];
         let messages = transcript_of(&events);
-        let user_blocks = |index: usize| messages[index].content.clone();
+        assert_eq!(messages.len(), 3, "{messages:?}");
         assert!(matches!(
-            &user_blocks(0)[..],
+            &messages[0].content[..],
             [ContentBlock::Text { text }, ContentBlock::Text { text: note }]
                 if text == "first" && note == crate::image::IMAGE_ELIDED
         ));
-        let ContentBlock::ToolResult {
-            content, images, ..
-        } = &user_blocks(2)[0]
+        // The tool result and the next user message share one user
+        // message: the result's picture is gone, the newer one travels.
+        let [
+            ContentBlock::ToolResult {
+                content, images, ..
+            },
+            ContentBlock::Text { text },
+            ContentBlock::Image { .. },
+        ] = &messages[2].content[..]
         else {
             panic!("{messages:?}");
         };
         assert!(images.is_empty());
         assert!(content.ends_with(crate::image::IMAGE_ELIDED), "{content}");
-        assert!(matches!(
-            &user_blocks(3)[..],
-            [ContentBlock::Text { .. }, ContentBlock::Image { .. }]
-        ));
+        assert_eq!(text, "second");
     }
 
     use super::*;

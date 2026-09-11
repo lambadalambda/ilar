@@ -453,21 +453,24 @@ mod tests {
         let content = from_file_bytes(&small).unwrap();
         assert_eq!(content, ImageContent::png(&small));
 
-        // An oversized opaque png is fitted to the ingest size and
-        // stored as a JPEG, since that is smaller.
-        let pixels = vec![7u8; 3000 * 1000 * 4];
-        let big = encode_png(3000, 1000, &pixels).unwrap();
+        // An oversized opaque photo-like png is fitted to the ingest
+        // size and stored as a JPEG, since that is smaller. (A flat
+        // colour would stay a PNG: smaller wins.)
+        let mut seed = 7u32;
+        let noisy: Vec<u8> = (0..3000 * 1000 * 4)
+            .map(|i| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                if i % 4 == 3 { 255 } else { (seed >> 24) as u8 }
+            })
+            .collect();
+        let big = encode_png(3000, 1000, &noisy).unwrap();
         let content = from_file_bytes(&big).unwrap();
         assert_eq!(content.media_type, "image/jpeg");
         assert_eq!(header_dimensions(&content.data), Some((1024, 341)));
-        assert!(
-            content.byte_len() < big.len() / 10,
-            "{}",
-            content.byte_len()
-        );
+        assert!(content.byte_len() < big.len() / 4, "{}", content.byte_len());
 
         // A transparent one stays a PNG, fitted.
-        let mut see_through = vec![7u8; 3000 * 1000 * 4];
+        let mut see_through = noisy.clone();
         see_through[3] = 0;
         let big = encode_png(3000, 1000, &see_through).unwrap();
         let content = from_file_bytes(&big).unwrap();
