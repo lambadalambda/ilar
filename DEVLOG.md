@@ -34,6 +34,19 @@ foreground children inherit it and touch it on every event at any
 depth, a background child starts its own. The test reproduces the
 production shape (mutable task, read-only foreground child).
 
+## 2026-09-11 — Watching a session
+
+Opening a gateway chat in the TUI took its writer lease, so the chat
+was paused while you looked and typing drove it. `ilar --view <id>`
+now opens a session read-only: the picker's own restore for the
+transcript, the TUI's own renderer, a tail on the file that rebuilds
+the view on every change, and no runtime at all — no provider, no
+lease. Enter says it is a view. Liveness — whether open tool rows
+should stay open — comes from a probe of the lease, taken for an
+instant when free. Checked live: with the view open on the Delta Chat
+session, a notify turn started on it without the chat being told the
+session was busy.
+
 ## 2026-09-11 — Three stops for a runaway
 
 A gateway turn ran away: after a short thought about a hallucinated
