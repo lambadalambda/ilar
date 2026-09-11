@@ -931,6 +931,31 @@ impl App {
         self.touch_transcript(Some(at));
     }
 
+    /// The transcript again from a fresh restore: everything after the
+    /// leading system lines goes, the restore lands in its place, and
+    /// the totals start over from what it says.
+    pub(crate) fn replace_transcript(
+        &mut self,
+        restored: crate::session_view::RestoredSessionView,
+    ) {
+        let keep = self
+            .lines
+            .iter()
+            .take_while(|line| matches!(line, Line_::System(_)))
+            .count();
+        self.lines.truncate(keep);
+        self.turn_boundary = keep;
+        self.session_usage = ilar::session::Usage::default();
+        self.session_cost = None;
+        self.task_usage = ilar::session::Usage::default();
+        self.task_cost = None;
+        self.latest_usage = None;
+        self.land_restored_view(restored, keep);
+        if self.follow_tail {
+            self.scroll_to_tail();
+        }
+    }
+
     /// Record a transcript change: bump the revision, and tell the
     /// render cache the lowest line index whose rows may have moved so
     /// it can leave the rest alone. `None` means no line changed.

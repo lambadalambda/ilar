@@ -21,6 +21,7 @@ mod text;
 mod theme;
 mod transcript;
 mod view;
+mod watch;
 
 use std::sync::Arc;
 
@@ -174,6 +175,11 @@ struct Args {
     /// Session id to resume.
     #[arg(long)]
     session: Option<String>,
+
+    /// Open a session read-only: its transcript, followed live, with
+    /// no writer lease taken — the way to look at a gateway chat.
+    #[arg(long, conflicts_with_all = ["session", "continue_last"])]
+    view: Option<String>,
 
     /// Resume the most recently modified session.
     #[arg(long = "continue", conflicts_with = "session")]
@@ -1145,6 +1151,9 @@ async fn main() -> Result<()> {
     )> = None;
     let mut first_run = true;
     let mut terminal_hold: Option<(ratatui::DefaultTerminal, TerminalSession)> = None;
+    if let Some(id) = args.view.as_deref() {
+        return watch::run(&config, id, configured_theme).await;
+    }
     let mut active_theme = configured_theme;
     // Settings that parsed but were not honoured. Shown once, on the
     // first session: they are a property of the config, not the session.

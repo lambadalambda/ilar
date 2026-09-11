@@ -94,6 +94,7 @@ installed binary still refuses to run.
 ilar login                       # ChatGPT OAuth, or set ILAR_ZAI_API_KEY / ILAR_OPENAI_API_KEY / ILAR_OPENCODE_API_KEY
 ilar                             # the TUI; F1 shows every keybinding
 ilar --continue                  # resume the latest session
+ilar --view <session-id>         # watch a session read-only, live (a gateway chat, say)
 ilar exec "what broke in CI?"    # headless one-shot, answer on stdout
 ilar-gateway                     # the assistant, on the channels in ilar.toml
 ```
