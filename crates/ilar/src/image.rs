@@ -173,7 +173,7 @@ fn shrunk_png(bytes: &[u8]) -> Option<ImageContent> {
         Some((w, h, small)) => (*w, *h, small.as_slice()),
         None => (width, height, rgba.as_slice()),
     };
-    let opaque = rgba.chunks_exact(4).all(|pixel| pixel[3] == 255);
+    let opaque = rgba.as_chunks::<4>().0.iter().all(|pixel| pixel[3] == 255);
     let png_bytes = match &fitted {
         Some(_) => encode_png(width as u32, height as u32, rgba).ok()?,
         None => bytes.to_vec(),
@@ -221,8 +221,10 @@ fn decode_png(bytes: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
 /// their way to a model, where a PNG's exactness buys nothing.
 pub fn encode_jpeg(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>> {
     let rgb: Vec<u8> = rgba
-        .chunks_exact(4)
-        .flat_map(|pixel| [pixel[0], pixel[1], pixel[2]])
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|&[r, g, b, _]| [r, g, b])
         .collect();
     let mut out = Vec::new();
     jpeg_encoder::Encoder::new(&mut out, JPEG_QUALITY).encode(

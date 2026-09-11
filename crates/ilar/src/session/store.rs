@@ -1752,6 +1752,7 @@ mod tests {
     #[test]
     fn an_image_cutoff_keeps_the_words_and_drops_the_pictures_before_it() {
         use super::*;
+        use crate::session::{ImageContent, Usage};
         let image = ImageContent::new("image/png", b"pix");
         let now = chrono::Utc::now();
         let events = vec![
