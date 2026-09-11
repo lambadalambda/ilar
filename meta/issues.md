@@ -132,6 +132,3 @@ milestones 15–17 stay filed — they come back when the feature does.*
 - [ ] [Test repositories never sign](issues/test-repositories-never-sign.md)
 - [ ] [Provider URLs are structural](issues/provider-urls-are-structural.md)
 
-- [ ] [A turn can be aborted from the chat](issues/a-turn-can-be-aborted-from-the-chat.md)
-- [ ] [A response has an output cap](issues/a-response-has-an-output-cap.md)
-- [ ] [A tool call has an argument cap](issues/a-tool-call-has-an-argument-cap.md)

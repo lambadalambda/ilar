@@ -344,3 +344,6 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Tools that accept what cannot be meant](issues/tools-that-accept-what-cannot-be-meant.md)
 - [x] [Refusals that say the fix](issues/refusals-that-say-the-fix.md)
 - [x] [Pictures stop outgrowing the request](issues/pictures-stop-outgrowing-the-request.md)
+- [x] [A turn can be aborted from the chat](issues/a-turn-can-be-aborted-from-the-chat.md)
+- [x] [A response has an output cap](issues/a-response-has-an-output-cap.md)
+- [x] [A tool call has an argument cap](issues/a-tool-call-has-an-argument-cap.md)

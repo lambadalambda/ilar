@@ -34,6 +34,29 @@ foreground children inherit it and touch it on every event at any
 depth, a background child starts its own. The test reproduces the
 production shape (mutable task, read-only foreground child).
 
+## 2026-09-11 — Three stops for a runaway
+
+A gateway turn ran away: after a short thought about a hallucinated
+watermark the local model began a `message` tool call and streamed
+its arguments for ten minutes, thirty thousand tokens at twice its
+usual speed — the speculative draft guessing right on repetition. The
+only way to stop it was to restart the service, which also dropped
+the messages waiting to steer the turn. Three stops now, none of
+which needs the model's cooperation. `/abort` (or `/stop`) cancels
+the running turn on a chat through a per-turn token the seat holds;
+the chat gets "Aborted." and the messages that were waiting run as a
+turn of their own, the leftover path a failed turn already had. A
+response has an output cap, `agent.max_output_tokens` (32,768 by
+default, `0` for none), sent as the wire's own cap — `max_tokens` on
+chat completions, `max_output_tokens` on the Responses API — and
+yielding to a value the configuration's options already carry; a
+response cut there says so in its text, where the reader is. And one
+tool call's arguments are cut at 1 MiB whatever the cap allows, since
+no call is legitimately that large and this one was exactly that.
+
+Noted and parked: Qwen's presence penalty for thinking mode. DRY is
+the first sampler to reach for if loops recur on Lemonade.
+
 ## 2026-09-11 — Pictures, bounded twice
 
 A chat that had generated and inspected 47 pictures came to hold
