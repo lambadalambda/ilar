@@ -122,7 +122,8 @@ impl MessageTool {
              nothing this turn. Another known chat is named with channel (the channel's name, \
              {home_channel}) and chat (its id). Files travel in media, by path: the text alone \
              attaches nothing, and a text that speaks of an attachment without one is refused \
-             unless no_attachment is true.{}",
+             unless no_attachment is true. A text that names pictures carries them in the same \
+             call: never the caption first and the files in a call after.{}",
             if constraints.is_empty() {
                 String::new()
             } else {
