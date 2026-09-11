@@ -803,6 +803,40 @@ async fn a_message_during_a_turn_steers_it_and_one_reply_covers_both() {
 }
 
 #[tokio::test]
+async fn slash_abort_ends_the_turn_and_the_waiting_message_runs_after() {
+    let dir = tempfile::tempdir().unwrap();
+    let (gateway, fake) = gateway(
+        dir.path(),
+        vec![
+            calls("bash", serde_json::json!({"command": "sleep 20"})),
+            says("after the abort"),
+        ],
+    );
+    fake.inject("/abort", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(1, WAIT).await;
+    assert_eq!(sent[0].text, "Nothing is running.");
+
+    fake.inject("run something slow", "chat-1", "alice").await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    fake.inject("also this", "chat-1", "alice").await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    fake.inject("/abort", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(4, Duration::from_secs(15)).await;
+    let texts: Vec<&str> = sent.iter().map(|m| m.text.as_str()).collect();
+    assert_eq!(
+        texts,
+        [
+            "Nothing is running.",
+            "Aborting the running turn.",
+            ilar_gateway::gateway::ABORTED_REPLY,
+            "after the abort",
+        ],
+        "{sent:?}"
+    );
+    gateway.cancel();
+}
+
+#[tokio::test]
 async fn a_status_line_follows_the_turn_and_vanishes_before_the_reply() {
     use ilar_gateway::channel::Seen;
     let dir = tempfile::tempdir().unwrap();

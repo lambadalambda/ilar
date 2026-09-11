@@ -2891,7 +2891,9 @@ mod tests {
         for _ in 0..4 {
             acc.push_tool_input_delta("call", &chunk).unwrap();
         }
-        let error = acc.push_tool_input_delta("call", "x").unwrap_err();
+        let Err(error) = acc.push_tool_input_delta("call", "x") else {
+            panic!("the cap did not bite");
+        };
         assert!(
             error.contains("tool call message streamed more than"),
             "{error}"

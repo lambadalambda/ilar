@@ -55,6 +55,9 @@ struct Status {
     updater: tokio::task::JoinHandle<()>,
 }
 
+/// What a chat is told when its turn was cancelled.
+pub const ABORTED_REPLY: &str = "Aborted.";
+
 /// What a chat is told when the model ended its turn with no message
 /// and no text.
 pub const EMPTY_REPLY: &str =
@@ -490,6 +493,12 @@ impl Gateway {
         let outcome = self.driver.run(seat, prompt, images, status).await;
         self.end_status(key).await;
         match outcome {
+            Ok(report) if report.outcome == ilar::agent::TurnOutcome::Aborted => {
+                log(&format!("{key}: turn aborted"));
+                self.keep_handovers(seat, &report);
+                self.deliver(&seat.channel, &seat.chat_id, ABORTED_REPLY)
+                    .await;
+            }
             Ok(report) => {
                 self.keep_handovers(seat, &report);
                 self.deliver_unless_sent(seat, &report).await;
@@ -541,6 +550,13 @@ impl Gateway {
                 Err(error) => failed_reply("/reject", &error),
             },
             Command::Unknown(name) => format!("No command /{name}.\n{}", commands::HELP),
+            Command::Abort => match self.driver.seat_by_key(key) {
+                Some(seat) if self.driver.abort(&seat) => {
+                    log(&format!("{key}: turn aborted from the chat"));
+                    "Aborting the running turn.".to_string()
+                }
+                _ => "Nothing is running.".to_string(),
+            },
             Command::New => match self.driver.close(key).await {
                 Ok(()) => format!(
                     "Started a fresh chat on {}. What I remember about you stays.",

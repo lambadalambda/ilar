@@ -287,6 +287,7 @@ struct FileConfig {
 #[serde(deny_unknown_fields)]
 struct AgentLayer {
     max_iterations: Option<usize>,
+    max_output_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -765,8 +766,14 @@ impl Config {
             agent: AgentConfig {
                 max_iterations: merged
                     .agent
+                    .as_ref()
                     .and_then(|config| config.max_iterations)
                     .unwrap_or_else(default_max_iterations),
+                max_output_tokens: merged
+                    .agent
+                    .as_ref()
+                    .and_then(|config| config.max_output_tokens)
+                    .unwrap_or_else(default_max_output_tokens),
             },
             compaction: CompactionConfig {
                 threshold: merged
@@ -1140,6 +1147,7 @@ fn merge_file(base: FileConfig, text: &str, origin: &Path) -> anyhow::Result<Fil
             merged.agent.get_or_insert_with(AgentLayer::default),
             agent,
             max_iterations,
+            max_output_tokens,
         );
     }
     if let Some(compaction) = parsed.compaction {

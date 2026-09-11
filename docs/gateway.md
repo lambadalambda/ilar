@@ -145,6 +145,7 @@ A message that is a slash command is answered by the gateway itself:
 | `/model <provider/model> --save`, `/model --save` | Also make it, or the chat's current model, the default for new chats: kept as `<home>/model`, above `gateway.model`. |
 | `/pending` | What the review staged, when approval is on. |
 | `/approve [id\|all]`, `/reject [id\|all]` | Decide on it. |
+| `/abort` (or `/stop`) | Cancel the turn running on this chat. The chat gets "Aborted."; messages that arrived meanwhile run as a turn of their own. |
 | `/help` | The list above. |
 
 ## The home
