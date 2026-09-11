@@ -1931,6 +1931,32 @@ pub fn supports_vision(full_id: &str) -> bool {
     find(full_id).is_some_and(ModelInfo::supports_vision)
 }
 
+/// `options` with the wire's output cap added, spelled the way the
+/// model's access wants it — `max_output_tokens` on the Responses API,
+/// `max_tokens` on chat completions — unless the options already name
+/// one, which is the configuration's to decide.
+pub fn with_output_cap(
+    options: serde_json::Value,
+    full_id: &str,
+    cap: Option<u64>,
+) -> serde_json::Value {
+    let Some(cap) = cap else {
+        return options;
+    };
+    let key = match find(full_id).map(|model| model.access) {
+        Some(ModelAccess::OpenAi | ModelAccess::OpenAiBoth | ModelAccess::OpenCodeResponses) => {
+            "max_output_tokens"
+        }
+        _ => "max_tokens",
+    };
+    let mut table = match options {
+        serde_json::Value::Object(table) => table,
+        _ => serde_json::Map::new(),
+    };
+    table.entry(key).or_insert_with(|| serde_json::json!(cap));
+    serde_json::Value::Object(table)
+}
+
 pub fn variant_options(full_id: &str, variant: Option<&str>) -> anyhow::Result<serde_json::Value> {
     let Some(variant) = variant else {
         return Ok(serde_json::Value::Null);
@@ -1966,6 +1992,28 @@ pub fn variant_options(full_id: &str, variant: Option<&str>) -> anyhow::Result<s
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_output_cap_is_spelled_for_the_wire_and_yields_to_configuration() {
+        use super::*;
+        let cap = Some(32_768);
+        assert_eq!(
+            with_output_cap(serde_json::Value::Null, "zai/glm-4.7", cap),
+            serde_json::json!({"max_tokens": 32768})
+        );
+        assert_eq!(
+            with_output_cap(serde_json::Value::Null, "openai/gpt-5.6-sol", cap),
+            serde_json::json!({"max_output_tokens": 32768})
+        );
+        assert_eq!(
+            with_output_cap(serde_json::json!({"max_tokens": 5}), "zai/glm-4.7", cap),
+            serde_json::json!({"max_tokens": 5})
+        );
+        assert_eq!(
+            with_output_cap(serde_json::json!({"a": 1}), "custom/anything", None),
+            serde_json::json!({"a": 1})
+        );
+    }
+
     use super::*;
 
     #[test]

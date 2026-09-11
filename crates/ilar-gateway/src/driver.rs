@@ -108,6 +108,9 @@ pub struct Seat {
     /// The running turn's way in for a message that arrives meanwhile;
     /// `None` while the seat is idle.
     steer: Mutex<Option<SteerSender>>,
+    /// The running turn's own cancellation, for `/abort`; `None` while
+    /// the seat is idle.
+    turn_cancel: Mutex<Option<CancellationToken>>,
     /// Steers handed to the turn and not yet read by the model. Cleared
     /// as the loop reports each one delivered; whatever is left when
     /// the turn ends is the caller's to run again.
@@ -255,6 +258,7 @@ impl Driver {
             sent,
             turn: tokio::sync::Mutex::new(()),
             steer: Mutex::new(None),
+            turn_cancel: Mutex::new(None),
             undelivered: Mutex::new(Vec::new()),
         });
         tokio::spawn(watch_notifications(
@@ -413,15 +417,18 @@ impl Driver {
         };
         let (steer_tx, steer_rx) = steer_channel();
         *seat.steer.lock().unwrap() = Some(steer_tx);
+        let cancel = self.cancel.child_token();
+        *seat.turn_cancel.lock().unwrap() = Some(cancel.clone());
         let outcome = turn(
             &seat.runtime,
             prompt,
             images,
-            self.cancel.child_token(),
+            cancel,
             observe,
             Some(steer_rx),
         )
         .await;
+        *seat.turn_cancel.lock().unwrap() = None;
         *seat.steer.lock().unwrap() = None;
         let mut report = outcome?;
         report.sent = seat.sent.load(std::sync::atomic::Ordering::Acquire) - sent_before;
@@ -452,6 +459,17 @@ impl Driver {
             return false;
         }
         true
+    }
+
+    /// Cancel the turn running on the seat; `false` when none is.
+    pub fn abort(&self, seat: &Seat) -> bool {
+        match seat.turn_cancel.lock().unwrap().as_ref() {
+            Some(cancel) => {
+                cancel.cancel();
+                true
+            }
+            None => false,
+        }
     }
 
     /// Steers the last turn on the seat never delivered.

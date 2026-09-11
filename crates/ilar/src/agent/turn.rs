@@ -113,6 +113,10 @@ impl From<&str> for Steer {
     }
 }
 
+/// The most bytes one tool call's arguments may stream before the
+/// response is cut as a runaway.
+pub const MAX_TOOL_INPUT_BYTES: u64 = 1024 * 1024;
+
 /// Unbounded on purpose: a steer that blocks the UI thread would defeat
 /// the point, and the volume is bounded by how fast a person types.
 pub type SteerSender = tokio::sync::mpsc::UnboundedSender<Steer>;
@@ -189,6 +193,10 @@ pub struct LoopConfig {
     /// milliseconds instead of sleeping through the shipped interval —
     /// the same trade `serve`'s `WatchConfig` makes with its polls.
     pub live_heartbeat: std::time::Duration,
+    /// The most tokens one response may produce, sent as the wire's
+    /// cap; `None` sends none. A looping model otherwise generates
+    /// until the context fills.
+    pub max_output_tokens: Option<u64>,
 }
 
 /// `base` doubled `retries` times, capped — the exponential backoff both
@@ -220,6 +228,7 @@ impl Default for LoopConfig {
             compaction_threshold: 0.85,
             force_compaction: false,
             live_heartbeat: crate::session::SCRATCH_HEARTBEAT,
+            max_output_tokens: None,
         }
     }
 }
@@ -411,6 +420,21 @@ impl StepAccumulator {
         }
         let received = self.tool_received_bytes.entry(id.to_string()).or_default();
         *received = received.saturating_add(delta.len() as u64);
+        // No tool call's arguments are legitimately this large; a
+        // model streaming them without end is looping, and the
+        // response is cut here whatever the output cap allows.
+        if *received > MAX_TOOL_INPUT_BYTES {
+            let name = self
+                .announced_calls
+                .get(id)
+                .cloned()
+                .unwrap_or_else(|| "?".into());
+            return Err(format!(
+                "tool call {name} streamed more than {} bytes of arguments; the response was \
+                 cut as a runaway",
+                MAX_TOOL_INPUT_BYTES
+            ));
+        }
 
         // The scanner looks for a streamed `path`, which is exactly the
         // summary these two tools publish; every other tool summarises
@@ -1542,8 +1566,12 @@ async fn run_turn_inner(
         .map_err(|error| TurnNeverStarted::mark(error.into()))?;
     let model = session.effective_model();
     let variant = session.effective_variant();
-    let request_options = crate::model::variant_options(&model, variant.as_deref())
-        .map_err(TurnNeverStarted::mark)?;
+    let request_options = crate::model::with_output_cap(
+        crate::model::variant_options(&model, variant.as_deref())
+            .map_err(TurnNeverStarted::mark)?,
+        &model,
+        config.max_output_tokens,
+    );
     let provider = resolver
         .resolve_provider(&model)
         .map_err(TurnNeverStarted::mark)?;
@@ -2251,6 +2279,21 @@ async fn run_turn_inner(
                 ts: Utc::now(),
             })?;
         }
+        // A response cut at the output cap says so where the reader is:
+        // the note travels as text, into a chat's reply or a TUI's row.
+        if stop_reason == "max_tokens"
+            && let Some(cap) = config.max_output_tokens
+        {
+            events
+                .publish(
+                    LoopEvent::TextDelta(format!(
+                        "\n\n[stopped at the output cap of {cap} tokens; agent.max_output_tokens \
+                         raises it]"
+                    )),
+                    &cancel,
+                )
+                .await;
+        }
         // The step is on the main stream now, so the scratch copy of it
         // is worse than useless: it resets, and a reader drops whatever
         // it was showing in favour of the committed event.
@@ -2836,6 +2879,24 @@ mod tests {
         };
         assert_eq!(id, "call_1");
         assert_eq!(item_id.as_deref(), Some("fc_1"));
+    }
+
+    #[test]
+    fn arguments_past_the_cap_cut_the_response_as_a_runaway() {
+        let mut acc = StepAccumulator::default();
+        acc.start_tool_call("call".into(), "message".into(), None)
+            .unwrap();
+        acc.announced_calls.insert("call".into(), "message".into());
+        let chunk = "x".repeat(256 * 1024);
+        for _ in 0..4 {
+            acc.push_tool_input_delta("call", &chunk).unwrap();
+        }
+        let error = acc.push_tool_input_delta("call", "x").unwrap_err();
+        assert!(
+            error.contains("tool call message streamed more than"),
+            "{error}"
+        );
+        assert!(error.contains("runaway"), "{error}");
     }
 
     #[test]

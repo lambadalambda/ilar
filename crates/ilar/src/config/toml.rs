@@ -128,18 +128,27 @@ pub struct AgentConfig {
     /// working limit: long-thinking models routinely need hundreds.
     #[serde(default = "default_max_iterations")]
     pub max_iterations: usize,
+    /// The most tokens one response may produce; `0` sends no cap. A
+    /// looping model otherwise generates until its context fills.
+    #[serde(default = "default_max_output_tokens")]
+    pub max_output_tokens: u64,
 }
 
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             max_iterations: default_max_iterations(),
+            max_output_tokens: default_max_output_tokens(),
         }
     }
 }
 
 fn default_max_iterations() -> usize {
     1_000
+}
+
+fn default_max_output_tokens() -> u64 {
+    32_768
 }
 
 #[derive(Debug, Clone, Deserialize)]
