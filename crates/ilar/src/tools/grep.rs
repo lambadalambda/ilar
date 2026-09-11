@@ -585,7 +585,9 @@ mod tests {
         );
         // The match-cap notice survives the cut.
         assert!(
-            out.content.trim_end().ends_with("…(truncated)"),
+            out.content
+                .trim_end()
+                .ends_with("raise limit or narrow the pattern)"),
             "{}",
             out.content
         );
