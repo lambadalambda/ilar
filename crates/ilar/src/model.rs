@@ -1943,7 +1943,14 @@ pub fn with_output_cap(
     let Some(cap) = cap else {
         return options;
     };
-    let key = match find(full_id).map(|model| model.access) {
+    let model = find(full_id);
+    // Never above what the model can produce: a server refuses a cap
+    // past its limit rather than clamping it.
+    let cap = match model {
+        Some(model) if model.output_limit > 0 => cap.min(model.output_limit),
+        _ => cap,
+    };
+    let key = match model.map(|model| model.access) {
         Some(ModelAccess::OpenAi | ModelAccess::OpenAiBoth | ModelAccess::OpenCodeResponses) => {
             "max_output_tokens"
         }
@@ -2011,6 +2018,12 @@ mod tests {
         assert_eq!(
             with_output_cap(serde_json::json!({"a": 1}), "custom/anything", None),
             serde_json::json!({"a": 1})
+        );
+        // Clamped to what the model can produce.
+        let limited = find("zai/glm-4.7").unwrap().output_limit;
+        assert_eq!(
+            with_output_cap(serde_json::Value::Null, "zai/glm-4.7", Some(limited * 4)),
+            serde_json::json!({"max_tokens": limited})
         );
     }
 

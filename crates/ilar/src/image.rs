@@ -14,7 +14,7 @@ pub const MAX_IMAGE_DIM: usize = 2048;
 /// Longest edge an image is stored at on its way in. Vision models
 /// see about this much; a full-size PNG of a generated picture is a
 /// megabyte or three of base64 that every later request re-uploads.
-pub const INGEST_MAX_DIM: usize = 1024;
+pub const INGEST_MAX_DIM: usize = 1568;
 const JPEG_QUALITY: u8 = 85;
 
 /// What stands where an image was once a cutoff dropped it from the
@@ -69,7 +69,8 @@ pub fn cutoff_before(
     events: &[crate::session::SessionEvent],
     budget: ImageBudget,
 ) -> Option<usize> {
-    let cut = image_cut(events);
+    // Pictures a compaction already summarised away do not count.
+    let cut = image_cut(events).max(crate::session::compaction_cut(events));
     let carried: usize = events[cut.min(events.len())..]
         .iter()
         .flat_map(|event| images_in(event).iter().map(|image| image.data.len()))
@@ -227,7 +228,11 @@ pub fn encode_jpeg(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>> {
         .flat_map(|&[r, g, b, _]| [r, g, b])
         .collect();
     let mut out = Vec::new();
-    jpeg_encoder::Encoder::new(&mut out, JPEG_QUALITY).encode(
+    let mut encoder = jpeg_encoder::Encoder::new(&mut out, JPEG_QUALITY);
+    // No chroma subsampling: text and thin coloured edges, which a
+    // screenshot is made of, smear under 4:2:0.
+    encoder.set_sampling_factor(jpeg_encoder::SamplingFactor::F_1_1);
+    encoder.encode(
         &rgb,
         u16::try_from(width)?,
         u16::try_from(height)?,
@@ -466,7 +471,7 @@ mod tests {
         let big = encode_png(3000, 1000, &noisy).unwrap();
         let content = from_file_bytes(&big).unwrap();
         assert_eq!(content.media_type, "image/jpeg");
-        assert_eq!(header_dimensions(&content.data), Some((1024, 341)));
+        assert_eq!(header_dimensions(&content.data), Some((1568, 522)));
         assert!(content.byte_len() < big.len() / 4, "{}", content.byte_len());
 
         // A transparent one stays a PNG, fitted.
@@ -475,7 +480,7 @@ mod tests {
         let big = encode_png(3000, 1000, &see_through).unwrap();
         let content = from_file_bytes(&big).unwrap();
         assert_eq!(content.media_type, "image/png");
-        assert_eq!(header_dimensions(&content.data), Some((1024, 341)));
+        assert_eq!(header_dimensions(&content.data), Some((1568, 522)));
     }
 
     #[test]

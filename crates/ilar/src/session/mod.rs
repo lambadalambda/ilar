@@ -17,6 +17,6 @@ pub use model::{
 };
 pub use store::{
     ChildSummary, PendingQuestion, RewindOutcome, Session, SessionHead, SessionId, SessionReader,
-    SessionStore, SessionSummary, SessionWriter, transcript_of,
+    SessionStore, SessionSummary, SessionWriter, compaction_cut, transcript_of,
 };
 pub use tail::{SessionTail, TailUpdate};

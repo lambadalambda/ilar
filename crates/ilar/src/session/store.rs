@@ -1010,8 +1010,15 @@ fn active_replay_window(events: &[SessionEvent]) -> (Vec<SessionEvent>, usize) {
     active.push(events[0].clone());
     active.extend(events[base..].iter().cloned());
     for event in &mut active {
-        if let SessionEvent::Compaction { kept_from, .. } = event {
-            *kept_from = kept_from.saturating_sub(base).saturating_add(1);
+        match event {
+            SessionEvent::Compaction { kept_from, .. } => {
+                *kept_from = kept_from.saturating_sub(base).saturating_add(1);
+            }
+            // The same re-basing: a cutoff is a canonical index too.
+            SessionEvent::ImageCutoff { before, .. } => {
+                *before = before.saturating_sub(base).saturating_add(1);
+            }
+            _ => {}
         }
     }
     (active, base)
@@ -1295,6 +1302,11 @@ impl Session {
                 kept_from: self.canonical_index(*kept_from)?,
                 ts: *ts,
             },
+            SessionEvent::ImageCutoff { id, before, ts } => SessionEvent::ImageCutoff {
+                id: id.clone(),
+                before: self.canonical_index(*before)?,
+                ts: *ts,
+            },
             _ => event.clone(),
         };
         let mut line = serde_json::to_string(&canonical_event).map_err(std::io::Error::other)?;
@@ -1465,6 +1477,12 @@ impl Session {
         };
         if let SessionEvent::Compaction { kept_from, .. } = compaction {
             *kept_from = 1;
+        }
+        // A cutoff in the window moves with it, like the compaction did.
+        for event in &mut events {
+            if let SessionEvent::ImageCutoff { before, .. } = event {
+                *before = before.saturating_sub(local_cut).saturating_add(1);
+            }
         }
         validate_replay(&self.events, self.session_id())?;
         validate_replay(&events, self.session_id())?;
@@ -1735,7 +1753,7 @@ pub fn transcript_of(events: &[SessionEvent]) -> Vec<ChatMessage> {
     messages
 }
 
-fn compaction_cut(events: &[SessionEvent]) -> usize {
+pub fn compaction_cut(events: &[SessionEvent]) -> usize {
     events
         .iter()
         .enumerate()
@@ -1749,6 +1767,57 @@ fn compaction_cut(events: &[SessionEvent]) -> usize {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_cutoff_is_re_based_with_the_compaction_it_follows() {
+        use super::*;
+        let now = chrono::Utc::now();
+        let user = |id: &str| SessionEvent::UserMessage {
+            id: id.into(),
+            text: id.into(),
+            images: vec![],
+            ts: now,
+        };
+        let events = vec![
+            SessionEvent::Meta {
+                meta: crate::session::SessionMeta {
+                    session_id: "s".into(),
+                    parent_id: None,
+                    agent: "build".into(),
+                    model: "m".into(),
+                    workspace: None,
+                    cwd: None,
+                },
+                ts: now,
+            },
+            user("u1"),
+            user("u2"),
+            SessionEvent::Compaction {
+                id: "c".into(),
+                summary: "sum".into(),
+                kept_from: 2,
+                ts: now,
+            },
+            SessionEvent::ImageCutoff {
+                id: "x".into(),
+                before: 4,
+                ts: now,
+            },
+            user("u3"),
+        ];
+        let (active, base) = active_replay_window(&events);
+        assert_eq!(base, 2);
+        let before = active
+            .iter()
+            .find_map(|event| match event {
+                SessionEvent::ImageCutoff { before, .. } => Some(*before),
+                _ => None,
+            })
+            .unwrap();
+        // Canonical 4 (the cutoff's own slot) becomes local 3: meta at
+        // 0, then u2, compaction, cutoff.
+        assert_eq!(before, 3);
+    }
+
     #[test]
     fn an_image_cutoff_keeps_the_words_and_drops_the_pictures_before_it() {
         use super::*;

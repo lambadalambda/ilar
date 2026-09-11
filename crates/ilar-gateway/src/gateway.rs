@@ -666,6 +666,16 @@ impl Gateway {
         // read must not wait for the next one.
         let seat_for_leftovers = seat.clone();
         match outcome {
+            // Cancelled from the chat: the report was not delivered, so
+            // its outbox entry stays for the next start.
+            Ok(report) if report.outcome == ilar::agent::TurnOutcome::Aborted => {
+                log(&format!("{key}: follow-up aborted"));
+                self.keep_handovers(&seat, &report);
+                if !seat.background {
+                    self.deliver(&seat.channel, &seat.chat_id, ABORTED_REPLY)
+                        .await;
+                }
+            }
             Ok(report) => {
                 ilar::outbox::retire(&self.driver.outbox_dir(), &follow_up.retire);
                 self.keep_handovers(&seat, &report);
