@@ -803,6 +803,57 @@ async fn a_message_during_a_turn_steers_it_and_one_reply_covers_both() {
 }
 
 #[tokio::test]
+async fn slash_compact_replaces_the_conversation_with_a_handover() {
+    let dir = tempfile::tempdir().unwrap();
+    let (gateway, fake) = gateway(
+        dir.path(),
+        vec![says("one"), says("HANDOVER: we said hello"), says("two")],
+    );
+    fake.inject("/compact", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(1, WAIT).await;
+    assert_eq!(sent[0].text, "Nothing to compact yet.");
+
+    fake.inject("hi", "chat-1", "alice").await;
+    fake.wait_for_sent(2, WAIT).await;
+    fake.inject("/compact", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(3, WAIT).await;
+    assert!(
+        sent[2]
+            .text
+            .starts_with("Compacted. The conversation is now one handover of"),
+        "{}",
+        sent[2].text
+    );
+    let routes = RouteStore::open(dir.path().join("state/gateway/routes.json"))
+        .unwrap()
+        .snapshot();
+    let session_id = routes.session_for("fake:chat-1").unwrap().to_string();
+    let store = ilar::runtime::session_store(&config(dir.path()));
+    let compacted = store
+        .load(&session_id)
+        .unwrap()
+        .events()
+        .iter()
+        .any(|event| {
+            matches!(event, ilar::session::SessionEvent::Compaction { summary, .. } if summary.contains("HANDOVER"))
+        });
+    assert!(compacted);
+    let daily = std::fs::read_dir(dir.path().join("state/gateway/memory/daily"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let note = std::fs::read_to_string(daily).unwrap();
+    assert!(note.contains("handover in fake:chat-1"), "{note}");
+    // The chat goes on from the handover.
+    fake.inject("and now?", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(4, WAIT).await;
+    assert_eq!(sent[3].text, "two");
+    gateway.cancel();
+}
+
+#[tokio::test]
 async fn slash_abort_ends_the_turn_and_the_waiting_message_runs_after() {
     let dir = tempfile::tempdir().unwrap();
     let (gateway, fake) = gateway(

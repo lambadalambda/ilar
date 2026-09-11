@@ -461,6 +461,25 @@ impl Driver {
         true
     }
 
+    /// Replace the seat's conversation with one handover summary, the
+    /// way the context filling would. Waits for a running turn.
+    pub async fn compact(&self, seat: &Seat) -> Result<ilar::compaction::ManualCompactionOutcome> {
+        let _turn = seat.turn.lock().await;
+        let runtime = &seat.runtime;
+        let tools = runtime.registry.definitions();
+        let services = runtime.registry.running_services();
+        ilar::compaction::compact_session(
+            runtime.resolver.as_ref(),
+            &runtime.store,
+            &runtime.session_id,
+            Some(&runtime.system_prompt),
+            &tools,
+            &services,
+            &self.cancel.child_token(),
+        )
+        .await
+    }
+
     /// Cancel the turn running on the seat; `false` when none is.
     pub fn abort(&self, seat: &Seat) -> bool {
         match seat.turn_cancel.lock().unwrap().as_ref() {

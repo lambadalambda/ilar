@@ -550,6 +550,40 @@ impl Gateway {
                 Err(error) => failed_reply("/reject", &error),
             },
             Command::Unknown(name) => format!("No command /{name}.\n{}", commands::HELP),
+            Command::Compact => {
+                use ilar::compaction::ManualCompactionOutcome as Outcome;
+                let seat = match self
+                    .driver
+                    .seat(key, &message.channel, &message.chat_id, message.is_group)
+                    .await
+                {
+                    Ok(seat) => seat,
+                    Err(error) => {
+                        log(&format!("{key}: /compact failed: {error:#}"));
+                        return failed_reply("/compact", &error);
+                    }
+                };
+                match self.driver.compact(&seat).await {
+                    Ok(Outcome::Compacted {
+                        summary,
+                        context_tokens,
+                    }) => {
+                        log(&format!("{key}: compacted from the chat"));
+                        self.note_handover(&seat, &summary);
+                        format!(
+                            "Compacted. The conversation is now one handover of {} characters, \
+                             about {context_tokens} tokens of context.",
+                            summary.chars().count()
+                        )
+                    }
+                    Ok(Outcome::NothingToCompact) => "Nothing to compact yet.".to_string(),
+                    Ok(Outcome::Aborted) => "Compaction aborted.".to_string(),
+                    Err(error) => {
+                        log(&format!("{key}: /compact failed: {error:#}"));
+                        failed_reply("/compact", &error)
+                    }
+                }
+            }
             Command::Abort => match self.driver.seat_by_key(key) {
                 Some(seat) if self.driver.abort(&seat) => {
                     log(&format!("{key}: turn aborted from the chat"));
@@ -901,14 +935,19 @@ impl Gateway {
     /// was doing; the daily note keeps it, since the session log it
     /// came from is not what a future session reads.
     fn keep_handovers(&self, seat: &crate::driver::Seat, report: &TurnReport) {
+        for summary in &report.compactions {
+            self.note_handover(seat, summary);
+        }
+    }
+
+    /// One handover into the daily note, when memory is on.
+    fn note_handover(&self, seat: &crate::driver::Seat, summary: &str) {
         if !self.settings.memory.enabled {
             return;
         }
-        for summary in &report.compactions {
-            let heading = format!("handover in {}", seat.key);
-            if let Err(error) = self.memory.daily(chrono::Utc::now(), &heading, summary) {
-                log(&format!("{}: daily note not written: {error:#}", seat.key));
-            }
+        let heading = format!("handover in {}", seat.key);
+        if let Err(error) = self.memory.daily(chrono::Utc::now(), &heading, summary) {
+            log(&format!("{}: daily note not written: {error:#}", seat.key));
         }
     }
 

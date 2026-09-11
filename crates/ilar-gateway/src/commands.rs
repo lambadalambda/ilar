@@ -13,6 +13,8 @@ pub enum Command {
     },
     /// Cancel the turn running on this chat.
     Abort,
+    /// Replace this chat's conversation with one handover summary.
+    Compact,
     Help,
     /// What the review staged and has not been approved.
     Pending,
@@ -47,6 +49,7 @@ pub fn parse(text: &str) -> Option<Command> {
             }
         }
         ("abort" | "stop", _) => Command::Abort,
+        ("compact", _) => Command::Compact,
         ("help", _) => Command::Help,
         ("pending", _) => Command::Pending,
         ("approve", argument) => Command::Approve(argument.unwrap_or("all").to_string()),
@@ -58,6 +61,7 @@ pub fn parse(text: &str) -> Option<Command> {
 pub const HELP: &str = "/new — start a fresh chat (memory stays)\n\
 /model — list the models; /model <provider/model> switches; add --save to make it the default for new chats\n\
 /abort — cancel the turn running now; messages that were waiting run after it\n\
+/compact — replace the conversation with one handover summary; memory stays\n\
 /pending — what the review wants to remember, when approval is on\n\
 /approve [id|all], /reject [id|all] — decide on it\n\
 /help — this";
@@ -107,6 +111,7 @@ mod tests {
         );
         assert_eq!(parse("/help"), Some(Command::Help));
         assert_eq!(parse("/abort"), Some(Command::Abort));
+        assert_eq!(parse("/compact"), Some(Command::Compact));
         assert_eq!(parse("/stop now"), Some(Command::Abort));
         assert_eq!(parse("/pending"), Some(Command::Pending));
         assert_eq!(parse("/approve"), Some(Command::Approve("all".into())));
