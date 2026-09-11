@@ -11,7 +11,8 @@ use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, 
 use ilar::config::Config;
 use ilar::session::{SessionStore, SessionTail};
 
-use crate::app::{App, NoticeLevel};
+use crate::NoticeLevel;
+use crate::app::App;
 use crate::session_view::{Liveness, restored_session_view_with_store};
 use crate::transcript::Line_;
 
