@@ -389,6 +389,10 @@ fn grep_files(
     // Parallel walking loses walk order; make the output reproducible.
     hits.sort_by(|left, right| left.path.cmp(&right.path).then(left.line.cmp(&right.line)));
     let mut truncated = clipped.load(Ordering::Acquire);
+    // The walk stops once the cap is met, so whether a match past it
+    // was ever seen is timing; what is known is that the cap was
+    // reached, and that is what the notice says.
+    let limit_reached = hits.iter().filter(|hit| hit.is_match).count() >= limit;
     // The cap counts matches; a match's own context rides along with it,
     // and everything past the last admitted match is dropped — including
     // the context that was leading up to the next one.
@@ -434,6 +438,12 @@ fn grep_files(
             &format!(
                 "…(truncated: scanned {max_entries} files without finishing; narrow the path)"
             ),
+            MAX_OUTPUT_BYTES,
+        );
+    } else if limit_reached {
+        close_with(
+            &mut out,
+            &format!("…(limit {limit} reached; raise limit or narrow the pattern)"),
             MAX_OUTPUT_BYTES,
         );
     } else if truncated {

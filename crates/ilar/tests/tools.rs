@@ -1985,7 +1985,10 @@ async fn grep_context_separates_files_and_drops_context_past_the_limit() {
         &ctx(dir.path()),
     )
     .await;
-    assert_eq!(out.content, "a.txt:1:NEEDLE\na.txt-2-after\n…(truncated)\n");
+    assert_eq!(
+        out.content,
+        "a.txt:1:NEEDLE\na.txt-2-after\n…(limit 1 reached; raise limit or narrow the pattern)\n"
+    );
 }
 
 #[tokio::test]
@@ -1999,7 +2002,10 @@ async fn grep_limit_caps_the_matches_and_says_so() {
         &ctx(dir.path()),
     )
     .await;
-    assert_eq!(out.content, "a.txt:1:x\na.txt:2:x\n…(truncated)\n");
+    assert_eq!(
+        out.content,
+        "a.txt:1:x\na.txt:2:x\n…(limit 2 reached; raise limit or narrow the pattern)\n"
+    );
 }
 
 #[tokio::test]
