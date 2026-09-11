@@ -54,8 +54,12 @@ response cut there says so in its text, where the reader is. And one
 tool call's arguments are cut at 1 MiB whatever the cap allows, since
 no call is legitimately that large and this one was exactly that.
 
-Noted and parked: Qwen's presence penalty for thinking mode. DRY is
-the first sampler to reach for if loops recur on Lemonade.
+Noted and parked: Qwen's presence penalty for thinking mode. DRY went
+on instead, as `options` on the Lemonade endpoint, after a probe
+showed the router forwards it ("echo" forty times asked: 36 without,
+5 with). And `/compact` joined the chat's commands: the core's manual
+compaction under the seat's turn lock, the handover into the daily
+note, the chat told its size.
 
 ## 2026-09-11 — Pictures, bounded twice
 

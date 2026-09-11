@@ -347,3 +347,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [A turn can be aborted from the chat](issues/a-turn-can-be-aborted-from-the-chat.md)
 - [x] [A response has an output cap](issues/a-response-has-an-output-cap.md)
 - [x] [A tool call has an argument cap](issues/a-tool-call-has-an-argument-cap.md)
+- [x] [The chat can compact its conversation](issues/the-chat-can-compact-its-conversation.md)
