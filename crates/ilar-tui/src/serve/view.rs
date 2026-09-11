@@ -267,6 +267,12 @@ pub(crate) fn project_event_with(
             "to": to,
             "ts": ts,
         }),
+        SessionEvent::ImageCutoff { id, before, .. } => json!({
+            "type": "image_cutoff",
+            "id": id,
+            "before": before,
+            "ts": ts,
+        }),
     }
 }
 

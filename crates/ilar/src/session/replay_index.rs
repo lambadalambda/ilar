@@ -155,6 +155,7 @@ pub(super) fn id_records(events: &[SessionEvent]) -> Vec<IdRecord> {
             | SessionEvent::ModelChange { id, .. }
             | SessionEvent::Compaction { id, .. }
             | SessionEvent::Topic { id, .. }
+            | SessionEvent::ImageCutoff { id, .. }
             | SessionEvent::Rewind { id, .. } => Some(id.as_str()),
         };
         if let Some(id) = event_id {

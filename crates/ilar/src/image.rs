@@ -11,6 +11,88 @@ use anyhow::Result;
 /// Longest edge providers keep before tiling; larger is waste.
 pub const MAX_IMAGE_DIM: usize = 2048;
 
+/// Longest edge an image is stored at on its way in. Vision models
+/// see about this much; a full-size PNG of a generated picture is a
+/// megabyte or three of base64 that every later request re-uploads.
+pub const INGEST_MAX_DIM: usize = 1024;
+const JPEG_QUALITY: u8 = 85;
+
+/// What stands where an image was once a cutoff dropped it from the
+/// request. The text around it still names the file.
+pub const IMAGE_ELIDED: &str =
+    "[image omitted to keep the request small; read the file again to see it]";
+
+/// How many image bytes a request may carry before older images are
+/// dropped from it, and how many of the newest survive the drop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageBudget {
+    /// Base64 characters, summed over the images still in the request.
+    pub max_bytes: usize,
+    /// Images kept, newest first, when the cap is crossed.
+    pub keep: usize,
+}
+
+/// The budget the turn loop applies. Lemonade's router refuses a body
+/// of 100 MB; llama.cpp's own server had a cap of the same order.
+pub const REQUEST_IMAGE_BUDGET: ImageBudget = ImageBudget {
+    max_bytes: 24 * 1024 * 1024,
+    keep: 4,
+};
+
+/// The canonical index images are dropped before: the latest cutoff
+/// the log records, or zero.
+pub fn image_cut(events: &[crate::session::SessionEvent]) -> usize {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            crate::session::SessionEvent::ImageCutoff { before, .. } => Some(*before),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+fn images_in(event: &crate::session::SessionEvent) -> &[ImageContent] {
+    match event {
+        crate::session::SessionEvent::UserMessage { images, .. }
+        | crate::session::SessionEvent::ToolResult { images, .. } => images,
+        _ => &[],
+    }
+}
+
+/// Where the next cutoff goes, if the images past the current one
+/// outweigh the budget: the index of the event holding the oldest of
+/// the `keep` newest images, so everything before it loses its
+/// pictures in one rewrite and the prefix then stays put. `None`
+/// while the budget holds.
+pub fn cutoff_before(
+    events: &[crate::session::SessionEvent],
+    budget: ImageBudget,
+) -> Option<usize> {
+    let cut = image_cut(events);
+    let carried: usize = events[cut.min(events.len())..]
+        .iter()
+        .flat_map(|event| images_in(event).iter().map(|image| image.data.len()))
+        .sum();
+    if carried <= budget.max_bytes {
+        return None;
+    }
+    let mut kept = 0;
+    let mut before = events.len();
+    for (index, event) in events.iter().enumerate().rev() {
+        let here = images_in(event).len();
+        if here == 0 {
+            continue;
+        }
+        kept += here;
+        before = index;
+        if kept >= budget.keep {
+            break;
+        }
+    }
+    (before > cut).then_some(before)
+}
+
 /// One line per image, naming what the transcript will not show: the
 /// kind and the decoded size. This is the tool-result wording; user
 /// attachments use [`attachment_markers`]. Both formats sizes the same
@@ -67,22 +149,47 @@ pub fn format_name(bytes: &[u8]) -> Option<&'static str> {
     sniff(bytes).map(|(_, name)| name)
 }
 
-/// File bytes → attachment. Formats pass through as themselves (every
-/// provider takes png/jpeg/webp/gif); only an oversized PNG — the
-/// retina-screenshot case — is decoded, downscaled and re-encoded.
+/// File bytes → attachment. JPEG, WebP and GIF pass through as
+/// themselves (every provider takes them). A PNG is decoded, fitted to
+/// [`INGEST_MAX_DIM`], and stored as whichever is smaller: itself, or
+/// a JPEG of it when it has no transparency. A PNG that fails to
+/// decode passes through untouched.
 pub fn from_file_bytes(bytes: &[u8]) -> Option<ImageContent> {
     let media_type = media_type(bytes)?;
     if media_type == "image/png"
-        && let Some(downscaled) = downscaled_png(bytes)
+        && let Some(shrunk) = shrunk_png(bytes)
     {
-        return Some(downscaled);
+        return Some(shrunk);
     }
     Some(ImageContent::new(media_type, bytes))
 }
 
-/// `Some` only when the PNG decodes cleanly and needed shrinking;
-/// anything else falls back to the original bytes.
-fn downscaled_png(bytes: &[u8]) -> Option<ImageContent> {
+/// The smaller of the PNG fitted to the ingest size and its JPEG;
+/// `None` when the original bytes are the thing to keep.
+fn shrunk_png(bytes: &[u8]) -> Option<ImageContent> {
+    let (width, height, rgba) = decode_png(bytes)?;
+    let fitted = downscale_rgba(width, height, &rgba, INGEST_MAX_DIM);
+    let (width, height, rgba) = match &fitted {
+        Some((w, h, small)) => (*w, *h, small.as_slice()),
+        None => (width, height, rgba.as_slice()),
+    };
+    let opaque = rgba.chunks_exact(4).all(|pixel| pixel[3] == 255);
+    let png_bytes = match &fitted {
+        Some(_) => encode_png(width as u32, height as u32, rgba).ok()?,
+        None => bytes.to_vec(),
+    };
+    let jpeg_bytes = opaque
+        .then(|| encode_jpeg(width as u32, height as u32, rgba).ok())
+        .flatten();
+    match jpeg_bytes {
+        Some(jpeg) if jpeg.len() < png_bytes.len() => Some(ImageContent::new("image/jpeg", &jpeg)),
+        _ if fitted.is_some() => Some(ImageContent::png(&png_bytes)),
+        _ => None,
+    }
+}
+
+/// A PNG's pixels as RGBA8, when it decodes.
+fn decode_png(bytes: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     decoder.set_transformations(png::Transformations::normalize_to_color8());
     let mut reader = decoder.read_info().ok()?;
@@ -107,9 +214,24 @@ fn downscaled_png(bytes: &[u8]) -> Option<ImageContent> {
             .collect(),
         png::ColorType::Indexed => return None,
     };
-    let (out_width, out_height, small) = downscale_rgba(width, height, &rgba, MAX_IMAGE_DIM)?;
-    let png = encode_png(out_width as u32, out_height as u32, &small).ok()?;
-    Some(ImageContent::png(&png))
+    Some((width, height, rgba))
+}
+
+/// RGBA8 rows → JPEG bytes, alpha dropped: for opaque pictures on
+/// their way to a model, where a PNG's exactness buys nothing.
+pub fn encode_jpeg(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>> {
+    let rgb: Vec<u8> = rgba
+        .chunks_exact(4)
+        .flat_map(|pixel| [pixel[0], pixel[1], pixel[2]])
+        .collect();
+    let mut out = Vec::new();
+    jpeg_encoder::Encoder::new(&mut out, JPEG_QUALITY).encode(
+        &rgb,
+        u16::try_from(width)?,
+        u16::try_from(height)?,
+        jpeg_encoder::ColorType::Rgb,
+    )?;
+    Ok(out)
 }
 
 /// Fit RGBA inside `max_dim` on the longest edge with an area-average
@@ -195,14 +317,48 @@ pub fn estimated_tokens(image: &ImageContent) -> u64 {
 fn header_dimensions(data: &str) -> Option<(u32, u32)> {
     use base64::Engine as _;
 
-    // 64 base64 characters decode to 48 bytes: past PNG's IHDR, and a
-    // whole number of quantums so the engine takes the slice as-is.
-    let head = data.get(..64).unwrap_or(data);
+    // Enough for PNG's IHDR, which comes first, and for a JPEG's
+    // frame header, which sits behind its metadata segments; a whole
+    // number of quantums so the engine takes the slice as-is.
+    let head = data.get(..16_384).unwrap_or(data);
     let head = head.get(..head.len() - head.len() % 4)?;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(head)
         .ok()?;
-    png_dimensions(&bytes)
+    png_dimensions(&bytes).or_else(|| jpeg_dimensions(&bytes))
+}
+
+/// A JPEG's size is in its first start-of-frame segment: height then
+/// width, big-endian u16, five bytes past the marker.
+pub fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    if !bytes.starts_with(b"\xFF\xD8") {
+        return None;
+    }
+    let mut at = 2;
+    while at + 4 <= bytes.len() {
+        if bytes[at] != 0xFF {
+            return None;
+        }
+        let marker = bytes[at + 1];
+        if marker == 0xFF {
+            at += 1;
+            continue;
+        }
+        let length = usize::from(u16::from_be_bytes([bytes[at + 2], bytes[at + 3]]));
+        if matches!(marker, 0xC0..=0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF) {
+            let height = u32::from(u16::from_be_bytes([
+                *bytes.get(at + 5)?,
+                *bytes.get(at + 6)?,
+            ]));
+            let width = u32::from(u16::from_be_bytes([
+                *bytes.get(at + 7)?,
+                *bytes.get(at + 8)?,
+            ]));
+            return (width > 0 && height > 0).then_some((width, height));
+        }
+        at += 2 + length;
+    }
+    None
 }
 
 /// PNG puts IHDR first: width and height are big-endian u32 at 16..24.
@@ -290,18 +446,68 @@ mod tests {
         let content = from_file_bytes(jpeg).unwrap();
         assert_eq!(content, ImageContent::new("image/jpeg", jpeg));
 
-        // A small png passes through untouched.
+        // A small png passes through untouched: its JPEG would be bigger.
         let small = encode_png(4, 4, &[9u8; 4 * 4 * 4]).unwrap();
         let content = from_file_bytes(&small).unwrap();
         assert_eq!(content, ImageContent::png(&small));
 
-        // An oversized png is decoded, downscaled and re-encoded.
+        // An oversized opaque png is fitted to the ingest size and
+        // stored as a JPEG, since that is smaller.
         let pixels = vec![7u8; 3000 * 1000 * 4];
         let big = encode_png(3000, 1000, &pixels).unwrap();
         let content = from_file_bytes(&big).unwrap();
-        let (width, height, downscaled) = downscale_rgba(3000, 1000, &pixels, 2048).unwrap();
-        let expected = encode_png(width as u32, height as u32, &downscaled).unwrap();
-        assert_eq!(content, ImageContent::png(&expected));
+        assert_eq!(content.media_type, "image/jpeg");
+        assert_eq!(header_dimensions(&content.data), Some((1024, 341)));
+        assert!(
+            content.byte_len() < big.len() / 10,
+            "{}",
+            content.byte_len()
+        );
+
+        // A transparent one stays a PNG, fitted.
+        let mut see_through = vec![7u8; 3000 * 1000 * 4];
+        see_through[3] = 0;
+        let big = encode_png(3000, 1000, &see_through).unwrap();
+        let content = from_file_bytes(&big).unwrap();
+        assert_eq!(content.media_type, "image/png");
+        assert_eq!(header_dimensions(&content.data), Some((1024, 341)));
+    }
+
+    #[test]
+    fn a_cutoff_lands_before_the_newest_few_images_once_the_budget_is_crossed() {
+        use crate::session::SessionEvent;
+        let image = |bytes: usize| ImageContent::new("image/png", &vec![0u8; bytes]);
+        let user = |images: Vec<ImageContent>| SessionEvent::UserMessage {
+            id: crate::session::new_id(),
+            text: "look".into(),
+            images,
+            ts: chrono::Utc::now(),
+        };
+        let budget = ImageBudget {
+            max_bytes: 1_000,
+            keep: 2,
+        };
+        // Four images of 300 bytes each: 1,600 characters of base64.
+        let events = vec![
+            user(vec![image(300)]),
+            user(vec![]),
+            user(vec![image(300)]),
+            user(vec![image(300)]),
+            user(vec![image(300)]),
+        ];
+        // The newest two live in events 3 and 4: the cut goes before 3.
+        assert_eq!(cutoff_before(&events, budget), Some(3));
+        let mut with_cut = events.clone();
+        with_cut.push(SessionEvent::ImageCutoff {
+            id: crate::session::new_id(),
+            before: 3,
+            ts: chrono::Utc::now(),
+        });
+        assert_eq!(image_cut(&with_cut), 3);
+        // Two images past the cut fit the budget: nothing more to do.
+        assert_eq!(cutoff_before(&with_cut, budget), None);
+        // Under budget from the start: nothing either.
+        assert_eq!(cutoff_before(&events[..2], budget), None);
     }
 
     #[test]

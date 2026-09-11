@@ -112,6 +112,7 @@ pub fn entries(events: &[SessionEvent]) -> Vec<Entry> {
             | SessionEvent::SubagentInvocation { .. }
             | SessionEvent::Checkpoint { .. }
             | SessionEvent::ModelChange { .. }
+            | SessionEvent::ImageCutoff { .. }
             | SessionEvent::Rewind { .. } => {}
         }
     }

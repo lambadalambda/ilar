@@ -1072,6 +1072,7 @@ fn validate_replay(events: &[SessionEvent], id: &str) -> std::io::Result<Vec<Str
             | SessionEvent::ModelChange { id, .. }
             | SessionEvent::Compaction { id, .. }
             | SessionEvent::Topic { id, .. }
+            | SessionEvent::ImageCutoff { id, .. }
             | SessionEvent::Rewind { id, .. } => Some(id),
         };
         if let Some(event_id) = event_id
@@ -1663,22 +1664,33 @@ pub fn transcript_of(events: &[SessionEvent]) -> Vec<ChatMessage> {
         });
     }
 
+    // Pictures before the latest image cutoff do not travel; a note
+    // stands where each was.
+    let image_cut = crate::image::image_cut(events);
     let mut pending_results: Vec<ContentBlock> = Vec::new();
-    for event in &events[cut..] {
+    for (index, event) in events.iter().enumerate().skip(cut) {
+        let pictures_travel = index >= image_cut;
         match event {
             SessionEvent::Meta { .. }
             | SessionEvent::SubagentInvocation { .. }
             | SessionEvent::Checkpoint { .. }
             | SessionEvent::Topic { .. }
+            | SessionEvent::ImageCutoff { .. }
             | SessionEvent::Rewind { .. } => {}
             SessionEvent::UserMessage { text, images, .. } => {
                 if !pending_results.is_empty() {
                     push_user_blocks(&mut messages, std::mem::take(&mut pending_results));
                 }
                 let mut blocks = vec![ContentBlock::Text { text: text.clone() }];
-                blocks.extend(images.iter().map(|image| ContentBlock::Image {
-                    image: image.clone(),
-                }));
+                if pictures_travel {
+                    blocks.extend(images.iter().map(|image| ContentBlock::Image {
+                        image: image.clone(),
+                    }));
+                } else if !images.is_empty() {
+                    blocks.push(ContentBlock::Text {
+                        text: crate::image::IMAGE_ELIDED.to_string(),
+                    });
+                }
                 push_user_blocks(&mut messages, blocks);
             }
             SessionEvent::AssistantMessage { content, .. } => {
@@ -1699,11 +1711,19 @@ pub fn transcript_of(events: &[SessionEvent]) -> Vec<ChatMessage> {
                 images,
                 ..
             } => {
+                let (content, images) = if pictures_travel || images.is_empty() {
+                    (content.clone(), images.clone())
+                } else {
+                    (
+                        format!("{content}\n{}", crate::image::IMAGE_ELIDED),
+                        Vec::new(),
+                    )
+                };
                 pending_results.push(ContentBlock::ToolResult {
                     tool_use_id: tool_use_id.clone(),
-                    content: content.clone(),
+                    content,
                     is_error: *is_error,
-                    images: images.clone(),
+                    images,
                 });
             }
             SessionEvent::ModelChange { .. } | SessionEvent::Compaction { .. } => {}
@@ -1729,6 +1749,74 @@ fn compaction_cut(events: &[SessionEvent]) -> usize {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_image_cutoff_keeps_the_words_and_drops_the_pictures_before_it() {
+        use super::*;
+        let image = ImageContent::new("image/png", b"pix");
+        let now = chrono::Utc::now();
+        let events = vec![
+            SessionEvent::UserMessage {
+                id: "u1".into(),
+                text: "first".into(),
+                images: vec![image.clone()],
+                ts: now,
+            },
+            SessionEvent::AssistantMessage {
+                id: "a1".into(),
+                model: "m".into(),
+                content: vec![ContentBlock::ToolCall {
+                    id: "c1".into(),
+                    name: "read".into(),
+                    input: serde_json::json!({}),
+                    item_id: None,
+                }],
+                usage: Usage::default(),
+                stop_reason: "tool_use".into(),
+                ts: now,
+            },
+            SessionEvent::ToolResult {
+                id: "r1".into(),
+                tool_use_id: "c1".into(),
+                content: "(binary file: a.png)".into(),
+                is_error: false,
+                images: vec![image.clone()],
+                child_session_id: None,
+                state: None,
+                ts: now,
+            },
+            SessionEvent::ImageCutoff {
+                id: "x1".into(),
+                before: 3,
+                ts: now,
+            },
+            SessionEvent::UserMessage {
+                id: "u2".into(),
+                text: "second".into(),
+                images: vec![image.clone()],
+                ts: now,
+            },
+        ];
+        let messages = transcript_of(&events);
+        let user_blocks = |index: usize| messages[index].content.clone();
+        assert!(matches!(
+            &user_blocks(0)[..],
+            [ContentBlock::Text { text }, ContentBlock::Text { text: note }]
+                if text == "first" && note == crate::image::IMAGE_ELIDED
+        ));
+        let ContentBlock::ToolResult {
+            content, images, ..
+        } = &user_blocks(2)[0]
+        else {
+            panic!("{messages:?}");
+        };
+        assert!(images.is_empty());
+        assert!(content.ends_with(crate::image::IMAGE_ELIDED), "{content}");
+        assert!(matches!(
+            &user_blocks(3)[..],
+            [ContentBlock::Text { .. }, ContentBlock::Image { .. }]
+        ));
+    }
+
     use super::*;
 
     fn user_message(text: &str) -> SessionEvent {

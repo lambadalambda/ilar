@@ -136,6 +136,17 @@ pub enum SessionEvent {
         text: String,
         ts: DateTime<Utc>,
     },
+    /// Images in events before canonical index `before` no longer
+    /// travel to the provider: the text that named them stays, a note
+    /// stands where each picture was. Written by the turn loop when
+    /// the pictures in a request outgrow their budget, so the rewrite
+    /// happens once and the cached prefix then holds. The images stay
+    /// in the log for the transcript view.
+    ImageCutoff {
+        id: String,
+        before: usize,
+        ts: DateTime<Utc>,
+    },
     /// Rewind boundary: replay behaves as if the log ended just before
     /// canonical event `to` (a `UserMessage`, which becomes unsent).
     /// The log stays append-only — the discarded tail and this marker
@@ -167,6 +178,7 @@ impl SessionEvent {
             | SessionEvent::ModelChange { ts, .. }
             | SessionEvent::Compaction { ts, .. }
             | SessionEvent::Topic { ts, .. }
+            | SessionEvent::ImageCutoff { ts, .. }
             | SessionEvent::Rewind { ts, .. } => *ts,
         }
     }

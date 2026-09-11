@@ -1808,6 +1808,18 @@ async fn run_turn_inner(
                 .await;
         }
 
+        // Pictures outgrowing their budget are dropped from the request
+        // in one recorded cutoff, so the prefix a provider caches then
+        // stays put until the next.
+        if let Some(before) =
+            crate::image::cutoff_before(session.events(), crate::image::REQUEST_IMAGE_BUDGET)
+        {
+            session.append(SessionEvent::ImageCutoff {
+                id: new_id(),
+                before,
+                ts: Utc::now(),
+            })?;
+        }
         let request = Request {
             model: model.clone(),
             system_prompt: system_prompt.map(String::from),

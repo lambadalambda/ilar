@@ -319,6 +319,9 @@ fn restored_session_invocation_view(
             // Folded out of replay before the view ever sees one; kept
             // total so a raw event stream renders as nothing.
             ilar::session::SessionEvent::Rewind { .. } => {}
+            // The pictures stay in the log and in this view; only the
+            // provider stops seeing them.
+            ilar::session::SessionEvent::ImageCutoff { .. } => {}
             ilar::session::SessionEvent::UserMessage { text, images, .. } => {
                 match task_notification_display(text) {
                     Some(text) => lines.push(Line_::Task {
