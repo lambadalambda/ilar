@@ -148,6 +148,13 @@ impl OpenAIProvider {
                 "stream",
             ],
         )?;
+        // The Codex backend behind a ChatGPT login refuses an output
+        // cap outright ("unsupported parameter"); the public API takes
+        // it. The loop's cap is dropped here rather than never sent,
+        // so the API keeps it.
+        if matches!(self.auth, Auth::ChatGpt { .. }) {
+            body.remove("max_output_tokens");
+        }
         if reasoning_summaries {
             let reasoning = body
                 .entry("reasoning")
@@ -976,6 +983,22 @@ mod tests {
     /// Codex backend takes the conversation's identity from headers, and
     /// without them a request lands wherever — measured at 2/10 follow-up
     /// steps reading a cache, against 10/10 with them.
+    #[test]
+    fn the_codex_backend_never_sees_an_output_cap_and_the_api_does() {
+        let mut request = Request::with_model("openai/gpt-5.6-sol");
+        request.messages = vec![ChatMessage::user_text("hi")];
+        request.options = serde_json::json!({"max_output_tokens": 32768});
+        let chatgpt = OpenAIProvider::with_chatgpt_auth(
+            crate::auth::AuthStore::open(std::path::PathBuf::from("unused")),
+            None,
+        );
+        let body = chatgpt.wire_body(&request).unwrap();
+        assert!(body.get("max_output_tokens").is_none(), "{body}");
+        let api_key = OpenAIProvider::new("test".into(), None);
+        let body = api_key.wire_body(&request).unwrap();
+        assert_eq!(body["max_output_tokens"], 32768, "{body}");
+    }
+
     #[test]
     fn the_codex_backend_gets_the_conversation_identity_as_headers() {
         let chatgpt = OpenAIProvider::with_chatgpt_auth(
