@@ -30,8 +30,12 @@ pub struct Endpoint {
     /// Sent as `Authorization: Bearer …` on the listing and every
     /// request; none for a local server.
     pub api_key: Option<String>,
-    /// The window for a model whose listing does not say; Lemonade's
-    /// does (`context_length`), llama.cpp's does not.
+    /// The window for a model whose listing does not say. A listing
+    /// may say twice — `context_length` and `max_context_window` — and
+    /// the two disagree in both directions: Lemonade configures a
+    /// window below the model's maximum, llama.cpp reports the total
+    /// across its parallel slots above one request's share. The
+    /// smaller of the two is the one a request can use.
     pub context: Option<u64>,
     /// Reply budget carved out of the window; a quarter when unstated.
     pub output: Option<u64>,
@@ -114,12 +118,12 @@ pub(crate) fn discovered_rows(
         {
             continue;
         }
-        let context = model
-            .context_length
-            .or(model.max_context_window)
+        let stated = [model.context_length, model.max_context_window]
+            .into_iter()
+            .flatten()
             .filter(|context| *context > 0)
-            .or(endpoint.context)
-            .unwrap_or(DEFAULT_CONTEXT);
+            .min();
+        let context = stated.or(endpoint.context).unwrap_or(DEFAULT_CONTEXT);
         let vision = model
             .labels
             .as_ref()
@@ -239,6 +243,7 @@ mod tests {
 
     const LEMONADE: &str = r#"{"object":"list","data":[
         {"id":"Qwen3.8-27B-GGUF","labels":["chat","reasoning","vision"],"downloaded":true,"context_length":131072,"max_context_window":262144},
+        {"id":"Two-Slots","labels":["chat"],"downloaded":true,"context_length":524288,"max_context_window":262144},
         {"id":"Z-Image-Turbo","labels":["image"],"downloaded":true},
         {"id":"RPG-HaloTales-V2","labels":["chat"],"downloaded":true},
         {"id":"Not-Here","labels":["chat"],"downloaded":false}
@@ -248,14 +253,16 @@ mod tests {
     fn a_labelled_listing_keeps_the_downloaded_chat_models_with_their_own_window() {
         let rows = discovered_rows("lemon", &endpoint(), LEMONADE).unwrap();
         let ids: Vec<&str> = rows.iter().map(|row| row.id.as_str()).collect();
-        assert_eq!(ids, ["Qwen3.8-27B-GGUF", "RPG-HaloTales-V2"]);
+        assert_eq!(ids, ["Qwen3.8-27B-GGUF", "Two-Slots", "RPG-HaloTales-V2"]);
         let qwen = &rows[0];
         assert_eq!(qwen.provider, "lemon");
         assert_eq!(qwen.context_limit, 131_072);
         assert_eq!(qwen.output_limit, 131_072 / 4);
         assert!(qwen.vision);
         assert_eq!(qwen.origin, "127.0.0.1:13305");
-        let rpg = &rows[1];
+        // llama.cpp's total across two slots is not one request's window.
+        assert_eq!(rows[1].context_limit, 262_144);
+        let rpg = &rows[2];
         assert_eq!(rpg.context_limit, 65_536);
         assert!(!rpg.vision);
     }
