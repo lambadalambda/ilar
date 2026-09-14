@@ -212,6 +212,9 @@ input.
 
 ## Talking to a focused agent
 
+A background job — `bash` with `run_in_background` — sits in the same
+panel while it runs, as a ⚙ row with its command and elapsed time, so a
+long render never reads as a hang; it has no transcript to open.
 Click an agents-panel row and the child's transcript fills the screen.
 The prompt is then that agent's: the input title reads `to explorer ·
 survey the API`, and Enter sends what you typed the way the model's own

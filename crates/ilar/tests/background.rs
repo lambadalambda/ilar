@@ -1436,6 +1436,58 @@ async fn background_bash_timeout_is_overridable() {
 }
 
 #[tokio::test]
+async fn a_background_job_sits_in_the_running_registry_while_it_runs() {
+    let (store, session_id) = temp_store();
+    let spawner = spawner(Arc::new(MockProvider::new(vec![])), &store);
+    let mut notifications = spawner.subscribe();
+    let registry = ToolRegistry::builtin()
+        .with_subagents(spawner.clone())
+        .unwrap();
+    let ctx = background_tool_context(
+        session_id.clone(),
+        spawner.clone(),
+        std::env::temp_dir().as_ref(),
+    );
+    let output = registry
+        .get("bash")
+        .unwrap()
+        .run(
+            serde_json::json!({"command": "sleep 1", "run_in_background": true}),
+            ctx,
+        )
+        .await;
+    assert!(!output.is_error, "{}", output.content);
+    // On the panel from the start, as a job of this session.
+    let mut listed = false;
+    for _ in 0..100 {
+        if spawner.running_tasks().iter().any(|task| {
+            task.agent == "job"
+                && task.description.starts_with("bash: sleep 1")
+                && task.session_id == session_id
+                && task.background
+                && !task.delivering
+        }) {
+            listed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(listed, "{:?}", spawner.running_tasks());
+    // And gone once it has reported.
+    tokio::time::timeout(Duration::from_secs(5), notifications.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    for _ in 0..100 {
+        if spawner.running_tasks().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(spawner.running_tasks().is_empty());
+}
+
+#[tokio::test]
 async fn cancelling_background_bash_kills_work_and_notifies() {
     let (store, session_id) = temp_store();
     let spawner = spawner(Arc::new(MockProvider::new(vec![])), &store);

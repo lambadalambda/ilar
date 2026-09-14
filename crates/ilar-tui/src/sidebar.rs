@@ -152,13 +152,26 @@ pub(crate) fn agent_panel(
         // Truncate the marker too: at absurd widths it is the overflow.
         // Mail for a delivery: a result on its way to this agent, not
         // work the model started.
+        let job = agent.agent == "job";
         let marker = truncate_display(
-            if agent.delivering { "✉ " } else { "▸ " },
+            if agent.delivering {
+                "✉ "
+            } else if job {
+                "⚙ "
+            } else {
+                "▸ "
+            },
             width,
             Truncation::Right,
         );
         let remaining = width.saturating_sub(UnicodeWidthStr::width(marker.as_str()));
-        row_hits.push((lines.len(), AgentTarget::Focus(agent.session_id.clone())));
+        // A job has no session of its own to focus.
+        let target = if job {
+            AgentTarget::Main
+        } else {
+            AgentTarget::Focus(agent.session_id.clone())
+        };
+        row_hits.push((lines.len(), target.clone()));
         lines.push(Line::from(vec![
             Span::styled(marker, Style::default().fg(TOOL_ACTIVE)),
             Span::styled(
@@ -172,7 +185,7 @@ pub(crate) fn agent_panel(
         ]));
         let background = if agent.delivering {
             " · delivering"
-        } else if agent.background {
+        } else if agent.background && !job {
             " · bg"
         } else {
             ""
@@ -181,7 +194,7 @@ pub(crate) fn agent_panel(
             Some(parent) => format!(" · for {}", safe_text(parent)),
             None => String::new(),
         };
-        row_hits.push((lines.len(), AgentTarget::Focus(agent.session_id.clone())));
+        row_hits.push((lines.len(), target));
         lines.push(Line::styled(
             truncate_display(
                 &format!(
@@ -848,6 +861,26 @@ mod tests {
     /// their parent after the marker column, and every drawn line of
     /// an agent — both of them — names where a click goes. The toggle
     /// row belongs to the disclosure, not the map.
+    #[test]
+    fn a_background_job_is_a_row_with_a_gear_and_no_focus() {
+        let mut agents = plain_agent_rows(1);
+        agents[0].agent = "job".into();
+        agents[0].description = "bash: blender -b scene.blend".into();
+        agents[0].background = true;
+        let panel = agent_panel(&agents, false, 40, 12);
+        let text = panel.lines.iter().map(rendered_text).collect::<Vec<_>>();
+        assert!(text[1].starts_with("⚙ bash: blender"), "{text:?}");
+        assert_eq!(text[2], "  job · 30s");
+        assert!(
+            panel
+                .row_hits
+                .iter()
+                .all(|(_, target)| *target == AgentTarget::Main),
+            "{:?}",
+            panel.row_hits
+        );
+    }
+
     #[test]
     fn the_agent_panel_leads_with_main_and_indents_the_tree() {
         let mut agents = plain_agent_rows(3);

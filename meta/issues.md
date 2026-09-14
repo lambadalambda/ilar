@@ -132,3 +132,4 @@ milestones 15–17 stay filed — they come back when the feature does.*
 - [ ] [Test repositories never sign](issues/test-repositories-never-sign.md)
 - [ ] [Provider URLs are structural](issues/provider-urls-are-structural.md)
 
+- [ ] [Background jobs show in the sidebar](issues/background-jobs-show-in-the-sidebar.md)

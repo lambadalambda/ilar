@@ -1561,6 +1561,7 @@ task's scope yourself; continue only clearly disjoint work."
         };
         let job_id = new_id();
         let notification_id = job_id.clone();
+        let panel = self.clone();
         // Same shape as a background task: a child of the caller's
         // token, so one token stands for "this job should stop" — an
         // interrupted turn takes the job with it, and
@@ -1600,6 +1601,18 @@ task's scope yourself; continue only clearly disjoint work."
                     id: task_registry_id,
                     registry: task_registry,
                 };
+                // On the panel while it runs, like a task: a job that
+                // shows only when it ends reads as a hang.
+                let _running = panel.register_running(RunningTask {
+                    session_id: parent_session_id.clone(),
+                    parent_session_id: String::new(),
+                    description: description.clone(),
+                    agent: "job".into(),
+                    background: true,
+                    delivering: false,
+                    started: std::time::Instant::now(),
+                    row: 0,
+                });
                 let outcome = tokio::select! {
                     outcome = tokio::time::timeout(timeout, async move {
                         let _permit = workspace.acquire(access).await;
