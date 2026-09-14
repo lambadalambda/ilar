@@ -19,10 +19,10 @@ use unicode_width::UnicodeWidthStr;
 use crate::app::App;
 use crate::input::{input_accepts_keys, slash_candidates};
 use crate::modals::{
-    Modal, render_aside, render_command_palette, render_help, render_link_picker,
-    render_model_picker, render_pending_manager, render_session_picker, render_session_search,
-    render_skill_picker, render_theme_picker, render_todos, render_turn_picker,
-    render_variant_picker,
+    Modal, render_aside, render_command_palette, render_context_picker, render_help,
+    render_link_picker, render_model_picker, render_pending_manager, render_session_picker,
+    render_session_search, render_skill_picker, render_theme_picker, render_todos,
+    render_turn_picker, render_variant_picker,
 };
 use crate::selection::{highlight_transcript_selection, selected_rows_unchanged, transcript_cells};
 use crate::sidebar::{
@@ -1188,6 +1188,10 @@ impl App {
             Some(Modal::VariantPicker) => Some(render_variant_picker(
                 frame,
                 self.variant_picker.as_ref().expect("variant picker"),
+            )),
+            Some(Modal::ContextPicker) => Some(render_context_picker(
+                frame,
+                self.context_picker.as_ref().expect("context picker"),
             )),
             // Search renders into the status line, not an overlay.
             Some(Modal::Search) => None,

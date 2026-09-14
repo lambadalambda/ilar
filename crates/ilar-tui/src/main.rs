@@ -26,7 +26,10 @@ mod watch;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use app::{App, FocusView, activate_palette_command, apply_theme_picker_action};
+use app::{
+    App, FocusView, activate_palette_command, apply_context_picker_action,
+    apply_theme_picker_action,
+};
 use clap::Parser;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
@@ -457,6 +460,14 @@ fn apply_intent(
             app.push_transcript_line(Line_::System(text));
             None
         }
+        Intent::OpenContextPicker => {
+            app.open_context_picker();
+            None
+        }
+        Intent::SetContextWindow(choice) => {
+            app.set_context_override(choice);
+            None
+        }
         Intent::ClearGoal => {
             app.goal = None;
             None
@@ -699,6 +710,10 @@ const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
         "btw",
         "ask a quick aside about the session; nothing is recorded",
     ),
+    (
+        "context",
+        "override the context window this session assumes (32k…1M, default)",
+    ),
 ];
 const MAX_GOAL_ROUNDS: u32 = 25;
 const GOAL_SENTINEL: &str = "GOAL_ACHIEVED";
@@ -905,7 +920,7 @@ fn close_skill_matches(inventory: &[(String, String)], name: &str) -> Vec<String
             .map(|(candidate, _)| candidate.clone())
             .collect();
         // Nothing looked like it, so this is a bare listing — and the
-        // inventory leads with the six built-ins, which would fill the
+        // inventory leads with the built-ins, which would fill the
         // whole list and hide every command and skill the user has. They
         // are in the help; what the typo was aiming at probably is not.
         matches.sort_by_key(|candidate| {
@@ -933,7 +948,7 @@ fn adopt_model_selection(
     let session = persist_model_change(resolver, store, session_id, &model, variant.as_deref())?;
     app.current_model = model.clone();
     app.current_variant = variant.clone();
-    app.context_limit = display_context_limit(resolver, &model);
+    app.set_model_context_limit(display_context_limit(resolver, &model));
     app.context_used = ilar::compaction::estimate_tokens_with_request(
         &session,
         Some(system_prompt),
@@ -1724,7 +1739,13 @@ fn spawn_root_turn(
     let system_prompt = deps.system_prompt.to_string();
     let registry = deps.registry.clone();
     let turn_ctx = deps.tool_ctx.clone();
-    let loop_config = deps.loop_config.clone();
+    let mut loop_config = deps.loop_config.clone();
+    // `/context`: the session's window beats whatever the resolver
+    // reports, for this turn's compaction threshold. Read at spawn, so
+    // a change mid-turn lands on the next one.
+    if let Some(limit) = app.context_override {
+        loop_config.context_limit = Some(limit);
+    }
     *slots.handle = Some(tokio::spawn(async move {
         let result = match entry {
             RootTurn::New(text, images) => {
@@ -2090,7 +2111,7 @@ impl schedule::Runtime for LoopRuntime<'_> {
             Ok(_) => {
                 app.current_model = model.clone();
                 app.current_variant = variant;
-                app.context_limit = display_context_limit(self.resolver.as_ref(), &model);
+                app.set_model_context_limit(display_context_limit(self.resolver.as_ref(), &model));
                 app.push_transcript_line(Line_::System(format!("model reverted to {model}")));
             }
             Err(error) => app.set_notice(
@@ -3632,6 +3653,13 @@ async fn run_app(
                             apply_theme_picker_action(app, action, |selected| {
                                 ilar::config::persist_general_theme(user_config_path, selected.id())
                             });
+                        }
+                        Modal::ContextPicker => {
+                            let action = {
+                                let picker = app.context_picker.as_mut().unwrap();
+                                picker.handle_key(code, control)
+                            };
+                            apply_context_picker_action(app, action);
                         }
                         Modal::SkillPicker => {
                             let picker = app.skill_picker.as_mut().unwrap();

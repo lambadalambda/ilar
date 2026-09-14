@@ -526,6 +526,7 @@ pub(crate) enum Modal {
     LinkPicker,
     ModelPicker,
     VariantPicker,
+    ContextPicker,
     Search,
     CommandPalette,
 }
@@ -540,6 +541,7 @@ pub(crate) enum PaletteCommand {
     Links,
     Usage,
     Compact,
+    Context,
     Export,
     Skills,
     Pending,
@@ -611,6 +613,13 @@ pub(crate) static PALETTE_COMMANDS: &[PaletteCommandDefinition] = &[
         label: "Compact session",
         shortcut: "",
         search_terms: "compact summarize context shrink history",
+    },
+    PaletteCommandDefinition {
+        id: PaletteCommand::Context,
+        section: "General",
+        label: "Set context window",
+        shortcut: "",
+        search_terms: "context window limit tokens size",
     },
     PaletteCommandDefinition {
         id: PaletteCommand::Export,
@@ -865,6 +874,10 @@ static HELP_SECTIONS: &[HelpSection] = &[
             ),
             binding!("/btw <question>", "quick aside; answered, never recorded"),
             binding!("palette: Session usage", "token and cost totals"),
+            binding!(
+                "/context [size]",
+                "override the model's context window this session"
+            ),
             binding!("/rewind", "pick a turn: Enter ×2 rewinds chat + tree"),
             binding!(
                 "Enter (focus view)",
@@ -2601,6 +2614,138 @@ impl Picker for VariantPicker {
     }
 }
 
+/// The window sizes `/context` offers, smallest first. Powers of two
+/// because that is how local runtimes are configured; 200k is the one
+/// round number a hosted provider uses.
+pub(crate) const CONTEXT_CHOICES: &[(&str, u64)] = &[
+    ("32k", 32_768),
+    ("64k", 65_536),
+    ("128k", 131_072),
+    ("200k", 200_000),
+    ("256k", 262_144),
+    ("512k", 524_288),
+    ("1M", 1_048_576),
+];
+
+/// What a context choice is called in the picker and the transcript:
+/// the list's own label for a listed size, the rounded token count
+/// for anything else (a typed `/context 150000`).
+pub(crate) fn context_choice_label(choice: Option<u64>) -> String {
+    match choice {
+        None => "model default".into(),
+        Some(limit) => CONTEXT_CHOICES
+            .iter()
+            .find(|(_, size)| *size == limit)
+            .map(|(label, _)| (*label).to_string())
+            .unwrap_or_else(|| format_tokens_compact(limit)),
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ContextPickerAction {
+    Stay,
+    Dismiss,
+    /// `None` is the "model default" row: drop the override.
+    Choose(Option<u64>),
+}
+
+/// The context-window override picker: the model's own limit and the
+/// fixed sizes of `CONTEXT_CHOICES`. No query — eight rows need no
+/// narrowing.
+pub(crate) struct ContextPicker {
+    /// What the model reports, shown on the "model default" row so the
+    /// override reads against it.
+    pub(crate) model_limit: Option<u64>,
+    active: Option<u64>,
+    nav: ListNav,
+}
+
+impl ContextPicker {
+    pub(crate) fn new(model_limit: Option<u64>, active: Option<u64>) -> Self {
+        // A typed size that is not in the list marks no row; the cursor
+        // then opens on the default like a fresh picker.
+        let selected = active
+            .and_then(|limit| CONTEXT_CHOICES.iter().position(|(_, size)| *size == limit))
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        Self {
+            model_limit,
+            active,
+            nav: ListNav { selected },
+        }
+    }
+
+    /// The list is the sizes plus the synthetic "model default" row at
+    /// index 0.
+    fn choice_count(&self) -> usize {
+        CONTEXT_CHOICES.len() + 1
+    }
+
+    fn choice_at(index: usize) -> Option<u64> {
+        index
+            .checked_sub(1)
+            .and_then(|index| CONTEXT_CHOICES.get(index))
+            .map(|(_, size)| *size)
+    }
+
+    fn selected_choice(&self) -> Option<u64> {
+        Self::choice_at(self.nav.selected)
+    }
+
+    pub(crate) fn select(&mut self, index: usize) {
+        self.nav_to(index);
+    }
+
+    pub(crate) fn move_selection(&mut self, delta: isize) {
+        self.nav_by(delta);
+    }
+
+    pub(crate) fn handle_key(&mut self, code: KeyCode, control: bool) -> ContextPickerAction {
+        match (code, control) {
+            (KeyCode::Home, _) => {
+                self.nav.reset();
+                ContextPickerAction::Stay
+            }
+            (KeyCode::End, _) => {
+                self.nav.selected = CONTEXT_CHOICES.len();
+                ContextPickerAction::Stay
+            }
+            _ => self.skeleton_key(code, control),
+        }
+    }
+}
+
+impl Picker for ContextPicker {
+    type Action = ContextPickerAction;
+
+    fn nav(&mut self) -> &mut ListNav {
+        &mut self.nav
+    }
+
+    fn row_count(&self) -> usize {
+        self.choice_count()
+    }
+
+    fn stay(&self) -> Self::Action {
+        ContextPickerAction::Stay
+    }
+
+    fn dismiss(&self) -> Self::Action {
+        ContextPickerAction::Dismiss
+    }
+
+    /// Re-choosing what is in force is a no-op: no transcript line for
+    /// a change that did not happen.
+    fn choose(&mut self) -> Self::Action {
+        let selected = self.selected_choice();
+        if selected == self.active {
+            ContextPickerAction::Dismiss
+        } else {
+            ContextPickerAction::Choose(selected)
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ThemePickerAction {
     Preview(theme::ThemeId),
@@ -2930,6 +3075,66 @@ pub(crate) fn render_variant_picker(frame: &mut Frame, picker: &VariantPicker) -
                 && picker.active_variant.as_deref() == (index > 0).then_some(id);
             (
                 marked_row(width, is_selected, active, name, &format!("  {id}")),
+                choice_style(is_selected, active),
+            )
+        },
+    );
+    body.finish(frame, inner)
+}
+
+pub(crate) fn render_context_picker(frame: &mut Frame, picker: &ContextPicker) -> ModalHit {
+    let area = centered_rect(frame.area(), 48, 12);
+    let footer = if area.width < 38 {
+        " Enter select · Esc close "
+    } else {
+        " ↑↓ move · Enter select · Esc close "
+    };
+    let Some(inner) = modal_frame(frame, area, " context window ", theme::WAITING, footer) else {
+        return ModalHit::default();
+    };
+
+    let width = inner.width as usize;
+    let mut body = ModalRows::default();
+    if inner.height >= 6 {
+        body.push(
+            muted_line(&truncate_display(
+                "this session only · sets ctx % and when compaction fires",
+                width,
+                Truncation::Right,
+            )),
+            None,
+        );
+    }
+
+    let row_count = inner.height.saturating_sub(body.line_count() as u16) as usize;
+    let choice_count = picker.choice_count();
+    let selected = picker.nav.selected.min(choice_count.saturating_sub(1));
+    push_row_window(
+        &mut body,
+        width,
+        visible_rows(selected, choice_count, row_count),
+        selected,
+        |index, is_selected| {
+            let choice = ContextPicker::choice_at(index);
+            let active = choice == picker.active;
+            // The default row shows what the model reports, so the
+            // override is read against it; the sizes show their exact
+            // token count.
+            let suffix = match choice {
+                None => picker
+                    .model_limit
+                    .map(format_tokens_compact)
+                    .unwrap_or_else(|| "unknown".into()),
+                Some(limit) => limit.to_string(),
+            };
+            (
+                marked_row(
+                    width,
+                    is_selected,
+                    active,
+                    &context_choice_label(choice),
+                    &format!("  {suffix}"),
+                ),
                 choice_style(is_selected, active),
             )
         },
@@ -4105,6 +4310,61 @@ mod tests {
             picker.handle_key(KeyCode::Esc, false),
             VariantPickerAction::Dismiss
         );
+    }
+
+    #[test]
+    fn context_picker_opens_on_the_active_choice_and_reports_changes_only() {
+        // No override: the default row is in force, so Enter there is
+        // a dismiss, and the first size down is a real choice.
+        let mut picker = ContextPicker::new(Some(262_144), None);
+        assert_eq!(picker.nav.selected, 0);
+        assert_eq!(
+            picker.handle_key(KeyCode::Enter, false),
+            ContextPickerAction::Dismiss
+        );
+        assert_eq!(
+            picker.handle_key(KeyCode::Down, false),
+            ContextPickerAction::Stay
+        );
+        assert_eq!(
+            picker.handle_key(KeyCode::Enter, false),
+            ContextPickerAction::Choose(Some(32_768))
+        );
+
+        // A listed override opens on its row; Home then Enter drops it.
+        let mut picker = ContextPicker::new(Some(262_144), Some(131_072));
+        assert_eq!(picker.nav.selected, 3);
+        assert_eq!(
+            picker.handle_key(KeyCode::Enter, false),
+            ContextPickerAction::Dismiss
+        );
+        picker.handle_key(KeyCode::Home, false);
+        assert_eq!(
+            picker.handle_key(KeyCode::Enter, false),
+            ContextPickerAction::Choose(None)
+        );
+        assert_eq!(
+            picker.handle_key(KeyCode::Esc, false),
+            ContextPickerAction::Dismiss
+        );
+
+        // A typed size outside the list marks nothing and opens at the top;
+        // End lands on the largest size.
+        let mut picker = ContextPicker::new(None, Some(150_000));
+        assert_eq!(picker.nav.selected, 0);
+        picker.handle_key(KeyCode::End, false);
+        assert_eq!(
+            picker.handle_key(KeyCode::Enter, false),
+            ContextPickerAction::Choose(Some(1_048_576))
+        );
+    }
+
+    #[test]
+    fn context_choice_labels_use_the_list_and_fall_back_to_token_counts() {
+        assert_eq!(context_choice_label(None), "model default");
+        assert_eq!(context_choice_label(Some(131_072)), "128k");
+        assert_eq!(context_choice_label(Some(1_048_576)), "1M");
+        assert_eq!(context_choice_label(Some(150_000)), "150k");
     }
 
     /// Render one modal into a test terminal: the buffer text joined by

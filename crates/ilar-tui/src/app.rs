@@ -16,9 +16,10 @@ use ilar::session::SessionStore;
 
 use crate::input::{InputBuffer, slash_candidates};
 use crate::modals::{
-    AsideModal, CommandPalette, LinkPicker, Modal, ModelPicker, PaletteCommand, PendingAction,
-    PendingItem, PendingManager, SessionPicker, SessionSearch, SkillPicker, ThemePicker,
-    ThemePickerAction, TurnPicker, VariantPicker, palette_items,
+    AsideModal, CommandPalette, ContextPicker, ContextPickerAction, LinkPicker, Modal, ModelPicker,
+    PaletteCommand, PendingAction, PendingItem, PendingManager, SessionPicker, SessionSearch,
+    SkillPicker, ThemePicker, ThemePickerAction, TurnPicker, VariantPicker, context_choice_label,
+    palette_items,
 };
 use crate::questions::QuestionModal;
 use crate::selection::{
@@ -28,7 +29,7 @@ use crate::session_view::{
     accrue_usage, add_costs, task_notification_display, tool_notification_display,
 };
 use crate::sidebar::{AgentRow, AgentTarget};
-use crate::text::{cache_share, format_cost, safe_text};
+use crate::text::{cache_share, format_cost, format_tokens_compact, safe_text};
 use crate::transcript::{
     Line_, ToolState, TranscriptHitTarget, TranscriptRenderCache, append_text_delta,
     append_thought_delta, apply_child_loop_event, apply_subagent_activity, complete_open_thought,
@@ -244,7 +245,16 @@ pub(crate) struct App {
     pub(crate) session_id: String,
     pub(crate) cwd: std::path::PathBuf,
     pub(crate) context_used: u64,
+    /// The window the footer measures against: the override when one
+    /// is set, the model's own limit otherwise.
     pub(crate) context_limit: Option<u64>,
+    /// What the model reports, kept apart from `context_limit` so the
+    /// override can be dropped again and the picker can show both.
+    pub(crate) model_context_limit: Option<u64>,
+    /// `/context`: the window this session assumes instead of the
+    /// model's. Session-only — a wrong catalog row is fixed in config,
+    /// this is for the one-off.
+    pub(crate) context_override: Option<u64>,
     pub(crate) context_estimated: bool,
     pub(crate) latest_usage: Option<ilar::session::Usage>,
     pub(crate) session_usage: ilar::session::Usage,
@@ -370,6 +380,7 @@ pub(crate) struct App {
     pub(crate) command_palette: Option<CommandPalette>,
     pub(crate) model_picker: Option<ModelPicker>,
     pub(crate) variant_picker: Option<VariantPicker>,
+    pub(crate) context_picker: Option<ContextPicker>,
     pub(crate) session_picker: Option<SessionPicker>,
     /// The cross-session content search, reached from the picker.
     pub(crate) session_search: Option<SessionSearch>,
@@ -489,6 +500,8 @@ impl App {
             cwd: std::path::PathBuf::from("."),
             context_used: 0,
             context_limit: None,
+            model_context_limit: None,
+            context_override: None,
             context_estimated: true,
             latest_usage: None,
             session_usage: ilar::session::Usage::default(),
@@ -546,6 +559,7 @@ impl App {
             command_palette: None,
             model_picker: None,
             variant_picker: None,
+            context_picker: None,
             session_picker: None,
             session_search: None,
             turn_picker: None,
@@ -633,6 +647,8 @@ impl App {
             Some(Modal::ModelPicker)
         } else if self.variant_picker.is_some() {
             Some(Modal::VariantPicker)
+        } else if self.context_picker.is_some() {
+            Some(Modal::ContextPicker)
         } else if self.search_active {
             Some(Modal::Search)
         } else if self.command_palette.is_some() {
@@ -776,6 +792,9 @@ impl App {
             Some(Modal::VariantPicker) => {
                 self.variant_picker.as_mut().unwrap().move_selection(rows);
             }
+            Some(Modal::ContextPicker) => {
+                self.context_picker.as_mut().unwrap().move_selection(rows);
+            }
             Some(Modal::ThemePicker) => {
                 self.theme_picker.as_mut().unwrap().move_selection(rows);
                 // The picker previews the highlighted theme live and its
@@ -847,6 +866,7 @@ impl App {
             match modal {
                 Modal::ModelPicker => self.model_picker.as_mut().unwrap().select(index),
                 Modal::VariantPicker => self.variant_picker.as_mut().unwrap().select(index),
+                Modal::ContextPicker => self.context_picker.as_mut().unwrap().select(index),
                 Modal::ThemePicker => {
                     // Like the wheel: the highlighted theme previews live.
                     self.theme_picker.as_mut().unwrap().select(index);
@@ -890,10 +910,49 @@ impl App {
         self.current_variant = variant;
         self.cwd = cwd;
         self.context_used = context_used;
-        self.context_limit = context_limit;
+        self.set_model_context_limit(context_limit);
         self.context_estimated = context_estimated;
         self.status = "ready".into();
         self.notice = None;
+    }
+
+    /// The window the footer measures against: the session's override
+    /// when one is set, the model's own limit otherwise.
+    pub(crate) fn effective_context_limit(&self, model_limit: Option<u64>) -> Option<u64> {
+        self.context_override.or(model_limit)
+    }
+
+    /// Record what the model reports and refresh the footer from it.
+    /// Every site that learns a model's limit goes through here, so a
+    /// model switch cannot show the new model's window over an override.
+    pub(crate) fn set_model_context_limit(&mut self, model_limit: Option<u64>) {
+        self.model_context_limit = model_limit;
+        self.context_limit = self.effective_context_limit(model_limit);
+    }
+
+    pub(crate) fn open_context_picker(&mut self) {
+        self.context_picker = Some(ContextPicker::new(
+            self.model_context_limit,
+            self.context_override,
+        ));
+    }
+
+    /// Apply a `/context` choice (`None` drops the override) and say so
+    /// in the transcript, against what the model itself reports. Takes
+    /// effect in the footer at once and in the loop from the next turn.
+    pub(crate) fn set_context_override(&mut self, choice: Option<u64>) {
+        self.context_override = choice;
+        self.context_limit = self.effective_context_limit(self.model_context_limit);
+        let label = context_choice_label(choice);
+        let model_says = self
+            .model_context_limit
+            .map(format_tokens_compact)
+            .unwrap_or_else(|| "unknown".into());
+        self.push_transcript_line(Line_::System(format!(
+            "context window: {label} (model says {model_says})"
+        )));
+        self.follow_tail = true;
+        self.status = format!("context window: {label}");
     }
 
     /// Land a restored view built elsewhere — a blocking worker,
@@ -2373,6 +2432,20 @@ pub(crate) fn apply_theme_picker_action(
     }
 }
 
+pub(crate) fn apply_context_picker_action(app: &mut App, action: ContextPickerAction) {
+    match action {
+        ContextPickerAction::Stay => {}
+        ContextPickerAction::Dismiss => {
+            app.context_picker = None;
+            app.clear_transient_notice();
+        }
+        ContextPickerAction::Choose(choice) => {
+            app.context_picker = None;
+            app.set_context_override(choice);
+        }
+    }
+}
+
 pub(crate) fn activate_palette_command(
     app: &mut App,
     command: PaletteCommand,
@@ -2444,6 +2517,7 @@ pub(crate) fn activate_palette_command(
             app.compact_requested = true;
             app.set_notice("compaction starting", NoticeLevel::Info);
         }
+        PaletteCommand::Context => app.open_context_picker(),
         PaletteCommand::Export => {
             // Named after the topic when there is one: a file called by
             // what the session was about, not by eight hex digits.
@@ -2590,6 +2664,58 @@ mod tests {
     use crate::selection::{RenderedCell, highlight_transcript_selection, transcript_cells};
     use crate::text::wrap_styled_line;
     use crate::view::{activity_line, stream_liveness};
+
+    #[test]
+    fn context_override_wins_over_the_model_limit_until_dropped() {
+        let mut app = App::new();
+        assert_eq!(app.effective_context_limit(Some(262_144)), Some(262_144));
+        assert_eq!(app.effective_context_limit(None), None);
+
+        app.set_model_context_limit(Some(262_144));
+        app.set_context_override(Some(131_072));
+        assert_eq!(app.context_limit, Some(131_072));
+        assert_eq!(app.effective_context_limit(None), Some(131_072));
+        assert!(matches!(
+            app.lines.last(),
+            Some(Line_::System(text)) if text == "context window: 128k (model says 262k)"
+        ));
+        assert_eq!(app.status, "context window: 128k");
+
+        // A model switch relearns the model's limit; the override holds.
+        app.set_model_context_limit(Some(1_048_576));
+        assert_eq!(app.context_limit, Some(131_072));
+
+        app.set_context_override(None);
+        assert_eq!(app.context_limit, Some(1_048_576));
+        assert!(matches!(
+            app.lines.last(),
+            Some(Line_::System(text)) if text == "context window: model default (model says 1m)"
+        ));
+    }
+
+    #[test]
+    fn context_picker_actions_close_the_picker_and_apply_the_choice() {
+        let mut app = App::new();
+        app.set_model_context_limit(None);
+        activate_palette_command(&mut app, PaletteCommand::Context, Vec::new());
+        assert_eq!(app.active_modal(), Some(Modal::ContextPicker));
+
+        apply_context_picker_action(&mut app, ContextPickerAction::Stay);
+        assert_eq!(app.active_modal(), Some(Modal::ContextPicker));
+        apply_context_picker_action(&mut app, ContextPickerAction::Dismiss);
+        assert_eq!(app.active_modal(), None);
+        assert_eq!(app.context_override, None);
+
+        app.open_context_picker();
+        apply_context_picker_action(&mut app, ContextPickerAction::Choose(Some(32_768)));
+        assert_eq!(app.active_modal(), None);
+        assert_eq!(app.context_override, Some(32_768));
+        assert_eq!(app.context_limit, Some(32_768));
+        assert!(matches!(
+            app.lines.last(),
+            Some(Line_::System(text)) if text == "context window: 32k (model says unknown)"
+        ));
+    }
 
     #[test]
     fn ctrl_s_stashes_the_prompt_and_pops_it_back_newest_first() {
@@ -3635,8 +3761,10 @@ mod tests {
 
         // All candidates on bare slash, fuzzy-filtered as the name grows.
         let all = slash_candidates("/", &inventory);
-        assert_eq!(all.len(), 8);
-        for builtin in ["goal", "compact", "rewind", "fork", "sessions", "btw"] {
+        assert_eq!(all.len(), 9);
+        for builtin in [
+            "goal", "compact", "rewind", "fork", "sessions", "btw", "context",
+        ] {
             assert_eq!(
                 all.iter().filter(|(name, _)| name == builtin).count(),
                 1,

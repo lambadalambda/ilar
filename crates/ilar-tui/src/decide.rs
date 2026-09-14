@@ -81,6 +81,10 @@ pub(crate) enum Intent {
     /// A line in the transcript.
     SystemLine(String),
     Notice(String, NoticeLevel),
+    /// Bare `/context`: pick the session's context window from a list.
+    OpenContextPicker,
+    /// `/context <size>`: set it directly; `None` restores the model's.
+    SetContextWindow(Option<u64>),
 }
 
 /// Where pasted text goes.
@@ -122,7 +126,8 @@ pub(crate) fn paste_target(state: &LoopState) -> PasteTarget {
             | Modal::Aside
             | Modal::PendingManager
             | Modal::SkillPicker
-            | Modal::VariantPicker,
+            | Modal::VariantPicker
+            | Modal::ContextPicker,
         ) => PasteTarget::Discard,
         None => PasteTarget::Input,
     }
@@ -279,6 +284,42 @@ pub(crate) fn maintenance_usage(name: &str) -> String {
 /// The same, for the aside command, which does take an argument.
 pub(crate) const ASIDE_USAGE: &str = "usage: /btw <question>";
 
+pub(crate) const CONTEXT_USAGE: &str = "usage: /context [default|32k|128k|200000|1m]";
+
+/// A context window size as typed: a token count, or one with a `k`
+/// (×1024) or `m` (×1024²) suffix, case-insensitive. Zero is refused —
+/// it would make every turn compact — and so is anything that
+/// overflows.
+pub(crate) fn parse_context_size(text: &str) -> Option<u64> {
+    let text = text.trim();
+    let (digits, factor) = match text.char_indices().last()? {
+        (index, 'k' | 'K') => (&text[..index], 1024),
+        (index, 'm' | 'M') => (&text[..index], 1024 * 1024),
+        _ => (text, 1),
+    };
+    digits
+        .parse::<u64>()
+        .ok()?
+        .checked_mul(factor)
+        .filter(|size| *size > 0)
+}
+
+/// `/context` alone opens the picker; with a size it applies at once.
+/// Allowed mid-turn: the override is read when the next turn spawns,
+/// so there is nothing running to wait for.
+fn context_command(size: &str) -> Intent {
+    if size.is_empty() {
+        Intent::OpenContextPicker
+    } else if size.eq_ignore_ascii_case("default") {
+        Intent::SetContextWindow(None)
+    } else {
+        match parse_context_size(size) {
+            Some(limit) => Intent::SetContextWindow(Some(limit)),
+            None => Intent::Notice(CONTEXT_USAGE.into(), NoticeLevel::Warning),
+        }
+    }
+}
+
 /// What a submitted prompt becomes. The decision (`submit_target`) and
 /// the payload travel together, so a call site cannot route the text
 /// one way while believing it decided another.
@@ -296,6 +337,11 @@ pub(crate) fn submit(state: &LoopState, busy: bool, text: String) -> Vec<Intent>
             return vec![Intent::Notice(ASIDE_USAGE.into(), NoticeLevel::Warning)];
         }
         return vec![Intent::Aside(question.to_string())];
+    }
+    // Like the aside, never steering text: a window size is nothing
+    // the model can act on.
+    if let Some(("context", size)) = crate::parse_slash_invocation(&text) {
+        return vec![context_command(size)];
     }
     if let Some((name, args)) = crate::parse_slash_invocation(&text)
         && MAINTENANCE_COMMANDS.contains(&name)
@@ -523,6 +569,7 @@ mod tests {
             Modal::PendingManager,
             Modal::SkillPicker,
             Modal::VariantPicker,
+            Modal::ContextPicker,
         ] {
             let state = LoopState {
                 modal: Some(modal),
@@ -531,6 +578,45 @@ mod tests {
             assert_eq!(paste_target(&state), PasteTarget::Discard, "{modal:?}");
             assert_eq!(paste(&state, "needle".into()), Vec::new(), "{modal:?}");
         }
+    }
+
+    #[test]
+    fn context_sizes_parse_plain_counts_and_binary_suffixes() {
+        assert_eq!(parse_context_size("200000"), Some(200_000));
+        assert_eq!(parse_context_size(" 128k "), Some(131_072));
+        assert_eq!(parse_context_size("32K"), Some(32_768));
+        assert_eq!(parse_context_size("1m"), Some(1_048_576));
+        assert_eq!(parse_context_size("1M"), Some(1_048_576));
+        for rejected in ["", "k", "0", "0k", "1.5m", "128kb", "lots", "default"] {
+            assert_eq!(parse_context_size(rejected), None, "{rejected:?}");
+        }
+        // ×1024² on a count near u64::MAX must fail rather than wrap.
+        assert_eq!(parse_context_size("18446744073709551615m"), None);
+    }
+
+    #[test]
+    fn context_command_picks_sets_or_complains_and_never_waits_for_a_turn() {
+        let running = LoopState {
+            turn_running: true,
+            steerable: true,
+            ..idle()
+        };
+        assert_eq!(
+            submit(&idle(), false, "/context".into()),
+            vec![Intent::OpenContextPicker]
+        );
+        assert_eq!(
+            submit(&running, true, "/context 128k".into()),
+            vec![Intent::SetContextWindow(Some(131_072))]
+        );
+        assert_eq!(
+            submit(&running, true, "/context DEFAULT".into()),
+            vec![Intent::SetContextWindow(None)]
+        );
+        assert_eq!(
+            submit(&idle(), false, "/context lots".into()),
+            vec![Intent::Notice(CONTEXT_USAGE.into(), NoticeLevel::Warning)]
+        );
     }
 
     #[test]

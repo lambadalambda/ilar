@@ -34,6 +34,18 @@ foreground children inherit it and touch it on every event at any
 depth, a background child starts its own. The test reproduces the
 production shape (mutable task, read-only foreground child).
 
+## 2026-09-14 — The window a request can use
+
+Two listings say two things about a model's window and disagree in
+both directions: Lemonade configures `context_length` below the
+model's `max_context_window`, llama.cpp reports `context_length` as
+the total across its parallel slots, twice one request's share.
+Discovery took the first and fell back to the second; it takes the
+smaller now. And for the cases no listing gets right, `/context` in
+the TUI: a picker of common sizes, or `/context 128k` typed, a
+session-only override that drives the ctx meter and the compaction
+threshold and survives a model switch.
+
 ## 2026-09-14 — A job on the panel
 
 A background bash job showed itself only when its notification

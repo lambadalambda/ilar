@@ -34,6 +34,11 @@ During a turn the status line reads like:
   full breakdown.
 - **`ctx …%`** — estimated context usage against the model's window
   (`~` marks estimates); compaction triggers at `compaction.threshold`.
+  `/context` (or the palette's "Set context window") overrides that
+  window for this session only — `/context 128k`, `/context 200000`,
+  `/context default`, or bare `/context` for a picker — and drives both
+  the `ctx` percentage and when compaction fires; for discovered or local
+  models that report the wrong window.
 
 ## Steering and the queue
 
