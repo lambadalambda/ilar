@@ -349,3 +349,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [A tool call has an argument cap](issues/a-tool-call-has-an-argument-cap.md)
 - [x] [The chat can compact its conversation](issues/the-chat-can-compact-its-conversation.md)
 - [x] [A session can be watched read-only](issues/a-session-can-be-watched-read-only.md)
+- [x] [Background jobs show in the sidebar](issues/background-jobs-show-in-the-sidebar.md)

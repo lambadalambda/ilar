@@ -34,6 +34,18 @@ foreground children inherit it and touch it on every event at any
 depth, a background child starts its own. The test reproduces the
 production shape (mutable task, read-only foreground child).
 
+## 2026-09-14 — A job on the panel
+
+A background bash job showed itself only when its notification
+landed, so a long render read as a hung session. The job now
+registers itself in the spawner's running registry for as long as it
+runs — session: its owner, agent: "job", the command as description
+— which is the registry the agents panel and the `tasks` tool already
+read. The panel draws it as a ⚙ row with elapsed time and gives it no
+focus target, since a job has no transcript. Also caught on the way:
+the ChatGPT backend refuses `max_output_tokens`, so the OpenAI
+provider drops the cap on that login and keeps it for an API key.
+
 ## 2026-09-11 — Watching a session
 
 Opening a gateway chat in the TUI took its writer lease, so the chat
