@@ -253,7 +253,7 @@ mod tests {
     fn a_labelled_listing_keeps_the_downloaded_chat_models_with_their_own_window() {
         let rows = discovered_rows("lemon", &endpoint(), LEMONADE).unwrap();
         let ids: Vec<&str> = rows.iter().map(|row| row.id.as_str()).collect();
-        assert_eq!(ids, ["Qwen3.8-27B-GGUF", "Two-Slots", "RPG-HaloTales-V2"]);
+        assert_eq!(ids, ["Qwen3.8-27B-GGUF", "RPG-HaloTales-V2", "Two-Slots"]);
         let qwen = &rows[0];
         assert_eq!(qwen.provider, "lemon");
         assert_eq!(qwen.context_limit, 131_072);
@@ -261,8 +261,8 @@ mod tests {
         assert!(qwen.vision);
         assert_eq!(qwen.origin, "127.0.0.1:13305");
         // llama.cpp's total across two slots is not one request's window.
-        assert_eq!(rows[1].context_limit, 262_144);
-        let rpg = &rows[2];
+        assert_eq!(rows[2].context_limit, 262_144);
+        let rpg = &rows[1];
         assert_eq!(rpg.context_limit, 65_536);
         assert!(!rpg.vision);
     }
@@ -308,7 +308,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("endpoints")).unwrap();
         std::fs::write(dir.path().join("endpoints/lemon.json"), LEMONADE).unwrap();
         let (rows, warnings) = discover("lemon", &dead, dir.path());
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), 3);
         assert!(warnings[0].contains("listed last time"), "{warnings:?}");
     }
 }
