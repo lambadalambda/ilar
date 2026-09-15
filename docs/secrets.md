@@ -19,10 +19,9 @@ The value is read from stdin, never from the command line, so it stays
 out of shell history and process listings. Names are environment
 variable names (`[A-Za-z_][A-Za-z0-9_]*`, up to 64 characters); values
 are at least four characters. The store is `<state dir>/secrets.json`,
-mode 0600, written whole under a lock. Values are stored in plain text:
-the file is as safe as your user account, no more. That is the
-deliberate trade: ilar and its gateway run unattended, so a passphrase
-would have to sit next to the file anyway.
+mode 0600, written whole under a lock. In the clear, the file is as
+safe as your user account; [a master password](#a-master-password)
+seals it, at the cost of typing that password once per session.
 
 ## Using one
 
@@ -81,6 +80,62 @@ ilar secret revoke GITHUB_TOKEN          # every tool asks again
 
 Storing a secret again under the same name keeps its grants: a rotated
 key is the same secret.
+
+## sudo
+
+With `agent.sudo = true` the model gets a `sudo` tool: one command as
+root, with a reason. The ask is the same prompt, for the pseudo-secret
+`root`: "sudo wants root (reason) to run: <command>", once, this
+session, always or deny. Nobody to ask means refused, with the line
+that grants standing approval headless:
+
+```sh
+ilar secret grant root --tool sudo
+ilar secret revoke root
+```
+
+`root` shows in `ilar secret list` while a tool holds standing
+approval; it cannot be stored as a value.
+
+When sudo needs a password, the prompt has a row for it: type it there,
+or leave it empty on a system with passwordless sudo. What you type is
+held in memory for the session, injected on sudo's stdin (never the
+command line), redacted from output like any secret, and forgotten when
+ilar exits. If you would rather not type it each session, store it
+under the name `SUDO_PASSWORD`; the command's approval covers its use,
+there is no second prompt. Even a standing grant asks when no password
+is known, since the prompt is where one gets typed. In the chat the
+password goes last: `/grant session hunter2`.
+
+Systems whose sudoers sets `requiretty` refuse a sudo with no terminal;
+the error is sudo's own. And the tool is the ask, not a cage: once
+approved, the command runs as root.
+
+## A master password
+
+The store can be sealed under a master password:
+
+```sh
+ilar secret encrypt     # asks twice, seals the file
+ilar secret decrypt     # asks once, writes it back in the clear
+```
+
+Sealed, the file holds a salt, a nonce and ciphertext: the key comes
+from the password with Argon2id, the JSON is XChaCha20-Poly1305 under a
+fresh nonce every write. Nothing about the secrets, not even their
+names, is readable without the password.
+
+The password is asked for once per process. The TUI and `ilar exec`
+ask on the plain terminal at start, before the screen is taken over;
+Enter without a password leaves the store locked for that session,
+and every use of a secret is then refused with a note saying so.
+`ilar secret …` asks when it needs to. The gateway cannot ask: it logs
+that the store is locked, and `/unlock <master password>` from a chat
+opens it for the life of the process. The gateway reads provider keys
+at start, when a sealed store is still locked, so a provider key kept
+there is never seen by it: on a box that runs the gateway keep provider
+keys in `ilar.toml`, and weigh whether sealing buys anything there at
+all, since the password has to be typed after every restart.
 
 ## What a child shell no longer sees
 

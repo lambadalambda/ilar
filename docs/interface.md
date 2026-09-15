@@ -245,8 +245,12 @@ value in its environment, so read it before saying yes. Four answers:
 - **Deny** (`d` or Esc): the tool gets a refusal and the model learns
   the secret is unavailable.
 
-The answer is noted in the transcript (`NAME allowed for bash (once)`,
-`NAME denied for bash`). A subagent's tool asks through the same
+When the asker is the `sudo` tool and no password is known, the prompt
+has a password row: type it there (masked), leave it empty if sudo
+needs none. With that row the letters type, so the choice comes from
+the arrows and Enter. The password is held in memory for the session
+and never written. The answer is noted in the transcript (`NAME allowed
+for bash (once)`, `NAME denied for bash`). A subagent's tool asks through the same
 prompt, titled `bash (subagent) wants NAME`. Ctrl-C under the prompt is
 a deny; if the turn ends or is cancelled underneath it, the prompt
 closes without an answer, which the tool reads as a refusal. Standing

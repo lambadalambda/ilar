@@ -1,5 +1,34 @@
 # DEVLOG
 
+## 2026-09-15 — Root, and a password for the passwords
+
+Two follow-ups the same day. A `sudo` tool: one command as root after
+the person has read it. It fell out of the grant protocol almost for
+free: root is a pseudo-secret with no value, the prompt reads "sudo
+wants root to run: …", and the same once/session/always answers apply.
+The part that was not free was the password. sudo under the bash tool
+fails fast on purpose (no controlling terminal), so the tool feeds a
+password on `sudo -S`'s stdin; and the person wanted to type it into
+the prompt rather than store it, so the grant reply grew an optional
+password, held in memory for the session and never written. A stored
+`SUDO_PASSWORD` serves the unattended case.
+
+Then a master password for the store. Argon2id to a key, XChaCha20-
+Poly1305 over the JSON, a fresh nonce per write, and one unlock per
+process held in a map keyed by the store's path (so tests with their
+own stores do not trip over each other). The TUI asks on the plain
+terminal before it takes the screen, then reads the configuration
+again so a provider key in the store is seen; the gateway logs that it
+is locked and takes `/unlock` from a chat. The honest note in the docs
+stayed: on a box that runs the gateway unattended, sealing means typing
+the password after every restart, and a provider key in a sealed store
+is only read after that.
+
+The bug worth writing down: `run_command` took the stdin bytes out of
+the environment struct before spawning, and the spawn decided piped
+versus `/dev/null` by looking at that same field. The fake-sudo test
+printed an empty password and caught it.
+
 ## 2026-09-15 — A key the model never sees
 
 The ask was simple: hand ilar an API key without it ending up in the

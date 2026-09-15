@@ -52,7 +52,7 @@ declares them is warned about and ignored.
 | `gateway.notify_interval_secs` | `60` | One inbox message per source per interval. |
 | `gateway.tools.allow` | all | Only these tools. |
 | `gateway.tools.deny` | `[]` | Never these. |
-| `gateway.tools.safe_mode` | `false` | Also deny `bash`, `write`, `edit`, `service`, `image_gen`. |
+| `gateway.tools.safe_mode` | `false` | Also deny `bash`, `write`, `edit`, `service`, `image_gen`, `sudo`. |
 | `gateway.heartbeat.every_secs` | `0` (off) | A periodic turn on each listed chat. |
 | `gateway.heartbeat.prompt` | a short "anything to say?" | What the heartbeat turn is asked. |
 | `gateway.heartbeat.chats` | `[]` | Session keys to beat on, e.g. `deltachat:12`. |
@@ -146,7 +146,8 @@ A message that is a slash command is answered by the gateway itself:
 | `/pending` | What the review staged, when approval is on. |
 | `/approve [id\|all]`, `/reject [id\|all]` | Decide on it. |
 | `/abort` (or `/stop`) | Cancel the turn running on this chat. The chat gets "Aborted."; messages that arrived meanwhile run as a turn of their own. |
-| `/grant [session\|always]`, `/deny` | Answer a tool's ask for a [stored secret](secrets.md): the chat was shown the tool, the secret and the command verbatim. Bare `/grant` is once; ten minutes without an answer is a no. |
+| `/grant [session\|always] [password]`, `/deny` | Answer a tool's ask for a [stored secret](secrets.md) or for root: the chat was shown the tool, the secret and the command verbatim. Bare `/grant` is once; ten minutes without an answer is a no. When the ask was sudo's and it wanted a password, the password goes last and is held in memory until the gateway stops. |
+| `/unlock <master password>` | Open a [sealed secret store](secrets.md#a-master-password) for this gateway process. The gateway reads provider keys at start, while the store is still locked, so keep provider keys in `ilar.toml` on that box. |
 | `/compact` | Replace this chat's conversation with one handover summary, as the context filling would; waits for a running turn. The summary goes to the daily note, the chat gets its size. |
 | `/help` | The list above. |
 

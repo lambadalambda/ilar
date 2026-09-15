@@ -119,10 +119,6 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 - [ ] [The assistant — index](issues/the-assistant-index.md) — index
 
-## Milestone 22 — Secrets
-
-- [ ] [A sudo tool asks before running as root](issues/a-sudo-tool-asks-before-running-as-root.md)
-
 ## Review follow-ups
 
 - [ ] [Images are bounded before decoding](issues/images-are-bounded-before-decoding.md)

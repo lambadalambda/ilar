@@ -29,6 +29,7 @@ key — is sent, which is never a cloned repository's call to make.
 | `models.<name>.*` | — | Your own OpenAI-compatible endpoint, used as `custom/<name>`. See [Bring your own model](#bring-your-own-model). |
 | `endpoints.<name>.*` | — | An OpenAI-compatible server whose models are discovered from its listing, each used as `<name>/<id>`. See [Discover an endpoint's models](#discover-an-endpoints-models). |
 | `agent.max_iterations` | `1000` | Max provider calls per user turn (runaway-loop backstop). |
+| `agent.sudo` | `false` | Install the `sudo` tool: one command as root after the person has read it and said yes. See [Secrets](secrets.md#sudo). |
 | `agent.max_output_tokens` | `32768` | Most tokens one response may produce, sent as the wire's cap (`max_tokens` or `max_output_tokens`); `0` sends none. A response cut at the cap says so in its text. One tool call's arguments are cut at 1 MiB regardless. |
 | `compaction.threshold` | `0.85` | Context fraction at which history is handed over; must be between 0 and 1. |
 | `cache_compact.enabled` | `false` | Compact an idle session once, just before its last request leaves the provider's prompt cache. See [Compacting while the cache is warm](#compacting-while-the-cache-is-warm). User-scoped. |

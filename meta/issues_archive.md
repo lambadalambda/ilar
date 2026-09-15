@@ -356,3 +356,5 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 ## Milestone 22 — Secrets
 
 - [x] [Secrets are stored once and granted per use](issues/secrets-are-stored-once-and-granted-per-use.md)
+- [x] [A sudo tool asks before running as root](issues/a-sudo-tool-asks-before-running-as-root.md)
+- [x] [The secret store can be sealed under a master password](issues/the-secret-store-can-be-sealed-under-a-master-password.md)
