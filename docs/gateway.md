@@ -144,7 +144,7 @@ A message that is a slash command is answered by the gateway itself:
 
 | | |
 |---|---|
-| `/new` | A fresh session for this chat, on the default for new chats. A turn running here is cancelled first and the chat gets "Aborted.", so nothing of the old conversation — its answer, its failure, its standing secret ask — lands in the new one. The old session stays on disk; memory stays. |
+| `/new` | A fresh session for this chat, on the default for new chats. A turn running here is cancelled first: the old conversation closes out with its own lines ("Aborted.", and "That ask is over" for a secret ask that was standing), and nothing of it — no answer, no failure, no verdict — arrives after that. A turn queued behind it, such as a subagent's report, is dropped to the log. The old session stays on disk; memory stays. |
 | `/model` | The current model, then the models this configuration can reach by provider. |
 | `/model <provider/model>` | Switch this chat. Recorded at once when the chat is idle, or as the running turn ends; the reply says which. The switch is the session's and outlives a restart; a session whose model is no longer configured cannot be resumed, and the chat starts over on the default. |
 | `/model <provider/model> --save`, `/model --save` | Also make it, or the chat's current model, the default for new chats: kept as `<home>/model`, above `gateway.model`. |

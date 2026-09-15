@@ -49,6 +49,9 @@ pub struct TurnReport {
 pub enum TurnError {
     /// The session's writer is held elsewhere — a TUI has it open.
     Busy(String),
+    /// The seat was closed before this turn could take it: the chat
+    /// started over, and the old conversation runs no further.
+    Closed,
     Failed(anyhow::Error),
 }
 
@@ -56,6 +59,7 @@ impl std::fmt::Display for TurnError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Busy(why) => write!(f, "session busy: {why}"),
+            Self::Closed => write!(f, "the chat started over"),
             Self::Failed(error) => write!(f, "{error:#}"),
         }
     }
@@ -117,6 +121,10 @@ pub struct Seat {
     undelivered: Mutex<Vec<Steer>>,
     /// A tool's ask for a secret that the chat has not answered.
     grants: crate::grants::PendingSlot,
+    /// Everything this seat does hangs off this token — its turns, its
+    /// asks, its notification watch — and it is cancelled when the
+    /// seat is closed. A child of the gateway's, so a stop ends it too.
+    cancel: CancellationToken,
 }
 
 /// The channels a driver talks through, and what it knows about the
@@ -257,6 +265,7 @@ impl Driver {
             }
         })?;
         let sent = self.seat_tools(&mut runtime.registry, channel, chat_id)?;
+        let cancel = self.cancel.child_token();
         let grants: crate::grants::PendingSlot = Arc::new(Mutex::new(None));
         if let Some(prompts) = runtime.grants.take() {
             tokio::spawn(crate::grants::watch(
@@ -269,7 +278,7 @@ impl Driver {
                     session_id: runtime.session_id.clone(),
                 },
                 crate::grants::GRANT_TIMEOUT,
-                self.cancel.child_token(),
+                cancel.child_token(),
             ));
         }
         let seat = Arc::new(Seat {
@@ -288,6 +297,7 @@ impl Driver {
             turn_cancel: Mutex::new(None),
             undelivered: Mutex::new(Vec::new()),
             grants,
+            cancel: cancel.clone(),
         });
         tokio::spawn(watch_notifications(
             seat.runtime.spawner.clone(),
@@ -296,7 +306,7 @@ impl Driver {
             seat.runtime.session_id.clone(),
             key.to_string(),
             self.wiring.follow_ups.clone(),
-            self.cancel.child_token(),
+            cancel.child_token(),
         ));
         self.seats
             .lock()
@@ -417,6 +427,12 @@ impl Driver {
         status: Option<mpsc::UnboundedSender<String>>,
     ) -> std::result::Result<TurnReport, TurnError> {
         let _turn = seat.turn.lock().await;
+        // A turn queued behind the one `/new` cancelled — a subagent's
+        // report, most often — belongs to the conversation that was
+        // left behind: it does not run, and says nothing to the chat.
+        if seat.cancel.is_cancelled() {
+            return Err(TurnError::Closed);
+        }
         let pending = seat.pending_model.lock().unwrap().take();
         if let Some(model) = pending {
             self.persist_model(seat, &model)
@@ -447,7 +463,7 @@ impl Driver {
         };
         let (steer_tx, steer_rx) = steer_channel();
         *seat.steer.lock().unwrap() = Some(steer_tx);
-        let cancel = self.cancel.child_token();
+        let cancel = seat.cancel.child_token();
         *seat.turn_cancel.lock().unwrap() = Some(cancel.clone());
         let outcome = turn(
             &seat.runtime,
@@ -505,7 +521,9 @@ impl Driver {
             Some(&runtime.system_prompt),
             &tools,
             &services,
-            &self.cancel.child_token(),
+            // The seat's, so `/new` does not wait out a compaction it
+            // is throwing away.
+            &seat.cancel.child_token(),
         )
         .await
     }
@@ -541,13 +559,17 @@ impl Driver {
 
     /// Close a chat's seat and forget its route: the next message
     /// opens a fresh session. The old session stays on disk. Whatever
-    /// the seat was running is stopped first: the turn is cancelled and
-    /// waited out, so its answer, its failure or its standing secret
-    /// ask cannot land in the fresh chat minutes later.
+    /// the seat was doing is stopped first — its turn, the turns queued
+    /// behind it, its standing ask — so none of the old conversation
+    /// can land in the fresh chat minutes later.
     pub async fn close(&self, key: &str) -> Result<()> {
         let seat = self.seats.lock().unwrap().remove(key);
+        // The route goes before the wait: a message arriving while the
+        // old turn winds down must open a fresh session, not resume the
+        // one being left behind.
+        let unbound = self.routes.update(|routes| routes.unbind(key));
         if let Some(seat) = seat {
-            self.abort(&seat);
+            seat.cancel.cancel();
             // The turn's own lock: taken once the cancelled turn has
             // wound down and let its ask go. A turn that will not stop
             // must not hold the reply hostage, so the wait is bounded.
@@ -560,7 +582,7 @@ impl Driver {
             seat.runtime.spawner.shutdown().await;
             seat.runtime.services.stop_all();
         }
-        self.routes.update(|routes| routes.unbind(key))
+        unbound
     }
 
     /// Every model this configuration can reach, as `provider/id`.
@@ -612,7 +634,7 @@ impl Driver {
             Some(&seat.runtime.system_prompt),
             &seat.runtime.registry.definitions(),
             question,
-            &self.cancel.child_token(),
+            &seat.cancel.child_token(),
         )
         .await
     }

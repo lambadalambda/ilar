@@ -545,6 +545,9 @@ impl Gateway {
                 log(&format!("{key}: {why}"));
                 self.deliver(&seat.channel, &seat.chat_id, BUSY_REPLY).await;
             }
+            // The chat started over while this waited: the fresh chat
+            // hears nothing about a conversation it did not have.
+            Err(TurnError::Closed) => log(&format!("{key}: turn dropped, the chat started over")),
             Err(TurnError::Failed(error)) => {
                 log(&format!("{key}: turn failed: {error:#}"));
                 self.deliver(
@@ -839,6 +842,11 @@ impl Gateway {
                         .await;
                 }
                 self.driver.requeue(follow_up);
+            }
+            // The chat started over: nowhere to deliver it any more,
+            // and the outbox entry keeps it for the next start.
+            Err(TurnError::Closed) => {
+                log(&format!("{key}: follow-up dropped, the chat started over"));
             }
             Err(TurnError::Failed(error)) => {
                 log(&format!("{key}: follow-up failed: {error:#}"));
