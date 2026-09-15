@@ -373,6 +373,30 @@ fn chatgpt_auth(settings: &ProviderConfigResolved) -> bool {
     settings.auth.as_deref() == Some("chatgpt")
 }
 
+/// Whether a provider has a credential at all: a key, or the OAuth mode
+/// whose tokens live in the store instead.
+fn configured(settings: &ProviderConfigResolved) -> bool {
+    settings.api_key.is_some() || chatgpt_auth(settings)
+}
+
+/// Which of the three routes serves a model id, with what it needs.
+enum Route<'a> {
+    /// A `[models.<name>]` entry, addressed as `custom/<name>`.
+    Configured(&'a CustomModel, &'a str),
+    /// A row discovered from an `[endpoints.<name>]` listing.
+    Discovered(
+        &'a super::endpoints::Endpoint,
+        &'static crate::model::ModelInfo,
+        &'a str,
+    ),
+    /// A catalog row served by one of the built-in providers.
+    Builtin(
+        &'static ProviderKind,
+        &'static crate::model::ModelInfo,
+        &'a str,
+    ),
+}
+
 fn openai_reaches(settings: &ProviderConfigResolved, access: crate::model::ModelAccess) -> bool {
     use crate::model::ModelAccess;
     match access {
@@ -563,6 +587,10 @@ impl Loader {
         self
     }
 
+    /// An empty variable reads as unset: `HOME=""` would resolve the
+    /// directories under the working directory just as an absent one
+    /// does, and an empty key would send a blank Authorization header
+    /// rather than say a credential is missing.
     fn env_lookup(&self, key: &str) -> Option<String> {
         if let Some(v) = self
             .env
@@ -570,26 +598,48 @@ impl Loader {
             .find(|(k, _)| k == key)
             .map(|(_, v)| v.clone())
         {
-            return Some(v);
+            return Some(v).filter(|value| !value.is_empty());
         }
         if self.ignore_process_env {
             return None;
         }
-        std::env::var(key).ok()
+        std::env::var(key).ok().filter(|value| !value.is_empty())
+    }
+
+    /// The directories, and nothing else: no config file is read and no
+    /// endpoint is probed. What a subcommand that only touches the
+    /// state directory needs — a broken `ilar.toml`, or an endpoint
+    /// that takes three seconds to refuse, must not stand between
+    /// someone and `ilar secret set`.
+    pub fn resolve_dirs(&self) -> Dirs {
+        let home = self.env_lookup("HOME");
+        let under_home =
+            |suffix: &str| PathBuf::from(home.clone().unwrap_or_else(|| ".".into())).join(suffix);
+        let config = self
+            .config_dir
+            .clone()
+            .or_else(|| self.env_lookup("ILAR_CONFIG_DIR").map(PathBuf::from));
+        let state = self
+            .state_dir
+            .clone()
+            .or_else(|| self.env_lookup("ILAR_STATE_DIR").map(PathBuf::from));
+        Dirs {
+            // A default that needed `HOME` and did not get it resolves
+            // under the working directory; the flag is how a frontend
+            // gets to refuse that instead of scattering state into
+            // whatever project happens to be current.
+            homeless: home.is_none() && (config.is_none() || state.is_none()),
+            config: config.unwrap_or_else(|| under_home(".config/ilar")),
+            state: state.unwrap_or_else(|| under_home(".local/state/ilar")),
+        }
     }
 
     pub fn resolve(self) -> anyhow::Result<Config> {
-        let home = || PathBuf::from(self.env_lookup("HOME").unwrap_or_else(|| ".".into()));
-        let user_dir = self
-            .config_dir
-            .clone()
-            .or_else(|| self.env_lookup("ILAR_CONFIG_DIR").map(PathBuf::from))
-            .unwrap_or_else(|| home().join(".config/ilar"));
-        let state_dir = self
-            .state_dir
-            .clone()
-            .or_else(|| self.env_lookup("ILAR_STATE_DIR").map(PathBuf::from))
-            .unwrap_or_else(|| home().join(".local/state/ilar"));
+        let Dirs {
+            config: user_dir,
+            state: state_dir,
+            ..
+        } = self.resolve_dirs();
         let project_dir = match self.project_dir.clone() {
             Some(project_dir) => project_dir,
             None => std::env::current_dir().context("resolving current project directory")?,
@@ -601,6 +651,34 @@ impl Loader {
 impl Default for Loader {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Where configuration and state live, resolved from the environment
+/// alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Dirs {
+    /// `${ILAR_CONFIG_DIR:-~/.config/ilar}`.
+    pub config: PathBuf,
+    /// `${ILAR_STATE_DIR:-~/.local/state/ilar}`.
+    pub state: PathBuf,
+    /// A default fell back to the working directory because `HOME` was
+    /// unset. See [`Self::require_home`].
+    pub homeless: bool,
+}
+
+impl Dirs {
+    /// Refuse the homeless case. With `HOME` unset and neither variable
+    /// set, `~/.local/state/ilar` resolves to `./.local/state/ilar`:
+    /// sessions, prompt history and the secret store land in whatever
+    /// project happens to be current, silently, a different set per
+    /// directory. A frontend says so instead.
+    pub fn require_home(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.homeless,
+            "HOME is not set, so config and state would land in the working directory: set HOME, or set ILAR_CONFIG_DIR and ILAR_STATE_DIR"
+        );
+        Ok(())
     }
 }
 
@@ -860,29 +938,138 @@ impl Config {
     }
 
     /// Build a concrete provider for "provider/model-id", or None if the
-    /// provider name is unknown.
+    /// model cannot be reached. [`Self::provider_result`] says why.
     pub fn provider_for(&self, model: &str) -> Option<Box<dyn crate::provider::Provider>> {
-        let (provider_name, model_id) = crate::provider::resolve_model(model).ok()?;
-        // A configured entry carries its own endpoint, so it needs no
-        // row in the provider table to be reachable.
+        self.provider_result(model).ok()
+    }
+
+    /// The provider for "provider/model-id", or what to do about it.
+    /// A malformed id, a provider nobody knows, an id that provider does
+    /// not serve, a provider with no credential and a row that
+    /// credential cannot reach are five different next steps, so they
+    /// are five different messages — "no provider configured" answered
+    /// all of them and diagnosed none.
+    pub fn provider_result(
+        &self,
+        model: &str,
+    ) -> anyhow::Result<Box<dyn crate::provider::Provider>> {
+        match self.route(model)? {
+            // A configured entry carries its own endpoint, so it needs
+            // no row in the provider table to be reachable.
+            Route::Configured(entry, model_id) => Ok(Box::new(
+                crate::provider::chat::ChatProvider::new(entry.dialect(model_id)),
+            )),
+            // A discovered model: the endpoint is the provider, and the
+            // row registered at load is what says whether it sees
+            // images.
+            Route::Discovered(endpoint, row, model_id) => {
+                Ok(Box::new(crate::provider::chat::ChatProvider::new(
+                    endpoint.dialect(model_id, row.provider, row.supports_vision()),
+                )))
+            }
+            Route::Builtin(kind, row, model_id) => {
+                let settings = self
+                    .providers
+                    .get(kind.name)
+                    .filter(|settings| configured(settings))
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(missing_credential_message(model, kind, &self.keyed()))
+                    })?;
+                // A credential the model's access does not accept — an
+                // API-key row under `auth = "chatgpt"`, a model outside
+                // the plan this key buys. The model picker never offers
+                // these; a `--model` or a `general.model` can still name
+                // one, and the request died on the wire.
+                anyhow::ensure!(
+                    (kind.reaches)(settings, row.access),
+                    "{} cannot reach {model_id:?} with the credential it is configured with{}",
+                    kind.name,
+                    offered(&self.reachable_ids(kind.name))
+                );
+                (kind.build)(self, settings).ok_or_else(|| {
+                    anyhow::anyhow!(missing_credential_message(model, kind, &self.keyed()))
+                })
+            }
+        }
+    }
+
+    /// Refuse a model id this configuration cannot name: not
+    /// `provider/model-id`, a provider nobody knows, or an id that is
+    /// in no catalog row and no entry of its own. Asked where a session
+    /// is decided as well as where its client is built — unknown ids
+    /// used to be fatal only when a reasoning variant happened to be
+    /// set, and otherwise got a client, the provider's fallback window
+    /// on the meter, and a raw HTTP 400 on the first turn.
+    pub fn ensure_model_known(&self, model: &str) -> anyhow::Result<()> {
+        self.route(model).map(|_| ())
+    }
+
+    /// Which of the three routes serves a model id, or why none does.
+    /// One decision: what says the id is resolvable is the same thing
+    /// that hands back what resolves it, so the two cannot drift.
+    fn route<'a>(&'a self, model: &'a str) -> anyhow::Result<Route<'a>> {
+        let (provider_name, model_id) = crate::provider::resolve_model(model)?;
         if provider_name == crate::model::CUSTOM_PROVIDER {
-            let entry = self.models.get(model_id)?;
-            return Some(Box::new(crate::provider::chat::ChatProvider::new(
-                entry.dialect(model_id),
-            )));
+            let entry = self.models.get(model_id).with_context(|| {
+                format!("no [models.{model_id}] entry in your ilar.toml for model {model:?}")
+            })?;
+            return Ok(Route::Configured(entry, model_id));
         }
-        // A discovered model: the endpoint is the provider, and only
-        // an id the listing had is reachable — the row registered at
-        // load is what says whether it sees images.
         if let Some(endpoint) = self.endpoints.get(provider_name) {
-            let row = crate::model::find(model)?;
-            return Some(Box::new(crate::provider::chat::ChatProvider::new(
-                endpoint.dialect(model_id, row.provider, row.supports_vision()),
-            )));
+            let row = crate::model::find(model).with_context(|| {
+                format!(
+                    "endpoint {provider_name:?} does not serve a model {model_id:?}{}",
+                    offered(&self.reachable_ids(provider_name))
+                )
+            })?;
+            return Ok(Route::Discovered(endpoint, row, model_id));
         }
-        let settings = self.providers.get(provider_name)?;
-        let kind = provider_kind(provider_name, PROVIDERS)?;
-        (kind.build)(self, settings)
+        let kind = provider_kind(provider_name, PROVIDERS)
+            .ok_or_else(|| anyhow::anyhow!(self.unknown_provider_message(model, provider_name)))?;
+        let row = crate::model::find(model).with_context(|| {
+            format!(
+                "{provider_name} has no model {model_id:?}: it is in no catalog row{}",
+                offered(&self.reachable_ids(provider_name))
+            )
+        })?;
+        Ok(Route::Builtin(kind, row, model_id))
+    }
+
+    /// Provider names a model id may carry: the built-in table, the
+    /// prefix `[models.*]` publishes under, and every declared endpoint.
+    fn unknown_provider_message(&self, model: &str, provider: &str) -> String {
+        let mut known = PROVIDERS
+            .iter()
+            .map(|kind| kind.name.to_string())
+            .collect::<Vec<_>>();
+        if !self.models.is_empty() {
+            known.push(crate::model::CUSTOM_PROVIDER.to_string());
+        }
+        known.extend(self.endpoints.keys().cloned());
+        known.sort();
+        format!(
+            "no provider named {provider:?} (from model {model:?}); known providers: {}",
+            known.join(", ")
+        )
+    }
+
+    /// Providers this configuration has a credential for, in table order.
+    fn keyed(&self) -> Vec<&'static str> {
+        PROVIDERS
+            .iter()
+            .filter(|kind| self.providers.get(kind.name).is_some_and(configured))
+            .map(|kind| kind.name)
+            .collect()
+    }
+
+    /// Model ids this configuration can reach under one provider — what
+    /// to offer when the id it was handed turns out not to exist.
+    fn reachable_ids(&self, provider: &str) -> Vec<&'static str> {
+        self.available_models()
+            .into_iter()
+            .filter(|model| model.provider == provider)
+            .map(|model| model.id)
+            .collect()
     }
 
     /// Chat-capable models this configuration can reach: the catalog rows
@@ -950,9 +1137,8 @@ impl Config {
 
 impl crate::provider::ProviderResolver for Config {
     fn resolve_provider(&self, model: &str) -> anyhow::Result<crate::provider::ProviderHandle<'_>> {
-        self.provider_for(model)
+        self.provider_result(model)
             .map(crate::provider::ProviderHandle::Owned)
-            .ok_or_else(|| anyhow::anyhow!("no configured provider for model {model:?}"))
     }
 
     fn context_limit(&self, model: &str) -> Option<u64> {
@@ -1026,6 +1212,72 @@ fn available_models_in(
                 .is_some_and(|(settings, kind)| (kind.reaches)(settings, model.access))
         })
         .collect()
+}
+
+/// Where a provider's credential can come from, for an error that has
+/// to tell someone which one a server refused. The candidates, not the
+/// one that won: a resolved key is a secret, and its provenance is not
+/// carried down to the wire alongside it.
+pub(crate) fn credential_sources(provider: &str) -> String {
+    if provider == crate::model::CUSTOM_PROVIDER {
+        return "the api_key of the [models.*] entry that serves it".to_string();
+    }
+    match provider_kind(provider, PROVIDERS) {
+        Some(kind) => format!(
+            "{} (environment or secret store) or providers.{}.api_key in your ilar.toml",
+            kind.api_key_env, kind.name
+        ),
+        None => format!("the api_key of the [endpoints.{provider}] entry that serves it"),
+    }
+}
+
+/// Ids to try instead, as the tail of a sentence: at most a handful,
+/// and nothing at all when the configuration can reach none of them —
+/// "available: " followed by silence reads as a second failure.
+const MAX_OFFERED_IDS: usize = 6;
+
+fn offered(ids: &[&str]) -> String {
+    if ids.is_empty() {
+        return String::new();
+    }
+    let listed = ids
+        .iter()
+        .take(MAX_OFFERED_IDS)
+        .copied()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let more = if ids.len() > MAX_OFFERED_IDS {
+        ", …"
+    } else {
+        ""
+    };
+    format!(". Available now: {listed}{more}")
+}
+
+/// A provider the program knows, configured without a credential: the
+/// variable to set, the file key that overrides it, and — because the
+/// default model is not always the provider a fresh box has a key for —
+/// which providers *are* configured.
+fn missing_credential_message(model: &str, kind: &ProviderKind, keyed: &[&str]) -> String {
+    let provider = kind.name;
+    // The same candidates a refused credential names, spelled once.
+    let mut message = format!(
+        "model {model:?} needs the {provider} provider, which has no credential: set {}",
+        credential_sources(provider)
+    );
+    if kind.auth_values.contains(&"chatgpt") {
+        message.push_str(&format!(
+            ", or run `ilar login` and set providers.{provider}.auth = \"chatgpt\""
+        ));
+    }
+    match keyed {
+        [] => message.push_str(". No provider is configured yet"),
+        keyed => message.push_str(&format!(
+            ". Configured now: {} — point general.model or --model at one of those",
+            keyed.join(", ")
+        )),
+    }
+    message
 }
 
 fn fallback_context_limit(model: &str, kinds: &[ProviderKind]) -> Option<u64> {
@@ -1670,6 +1922,148 @@ mod tests {
                 .to_string(),
             "ilar.toml: providers.acme.image_gen: only the openai provider generates images"
         );
+    }
+
+    /// Five ways a model id fails to reach a provider, five next steps.
+    /// One message for all of them is what made `ilar --model glm-4.7`
+    /// report a missing API key.
+    #[test]
+    fn an_unreachable_model_says_which_of_the_five_things_is_wrong() {
+        // `Box<dyn Provider>` is not Debug, so the refusal is read as
+        // its message rather than through unwrap_err.
+        let refusal = |config: &Config, model: &str| {
+            config
+                .provider_result(model)
+                .err()
+                .unwrap_or_else(|| panic!("{model} should not resolve"))
+                .to_string()
+        };
+        let config = Config::default_for_tests();
+
+        // Not "provider/model-id" at all.
+        let error = refusal(&config, "glm-4.7");
+        assert!(error.contains("expected \"provider/model-id\""), "{error}");
+
+        // A provider nobody knows, with the ones that are known named.
+        let error = refusal(&config, "anthropic/claude");
+        assert!(error.contains("no provider named \"anthropic\""), "{error}");
+        assert!(error.contains("zai"), "{error}");
+
+        // A known provider, no credential: the variable, the file key,
+        // and the provider that *is* configured.
+        let mut unkeyed = Config::default_for_tests();
+        unkeyed.providers.remove("zai");
+        let error = refusal(&unkeyed, "zai/glm-4.7");
+        assert!(error.contains("ILAR_ZAI_API_KEY"), "{error}");
+        assert!(error.contains("providers.zai.api_key"), "{error}");
+        assert!(error.contains("Configured now: openai"), "{error}");
+
+        // A credential with nothing configured at all says so instead.
+        let bare = Config {
+            providers: HashMap::new(),
+            ..Config::default_for_tests()
+        };
+        let error = refusal(&bare, "zai/glm-4.7");
+        assert!(error.contains("No provider is configured yet"), "{error}");
+
+        // A keyed provider that does not serve that id, with ids it does.
+        let error = refusal(&config, "zai/glm-9.9");
+        assert!(error.contains("no model \"glm-9.9\""), "{error}");
+        assert!(error.contains("Available now: glm-"), "{error}");
+
+        // A credential the row's access does not accept: the ChatGPT
+        // backend serves the Codex catalog, not the API-key one. The
+        // picker never offers these, but a `--model` can still name one,
+        // and the request used to die on the wire.
+        let mut oauth = Config::default_for_tests();
+        oauth.providers.insert(
+            "openai".to_string(),
+            ProviderConfigResolved {
+                base_url: None,
+                api_key: None,
+                auth: Some("chatgpt".into()),
+                image_gen: true,
+            },
+        );
+        let error = refusal(&oauth, "openai/gpt-5.2");
+        assert!(
+            error.contains("cannot reach \"gpt-5.2\" with the credential"),
+            "{error}"
+        );
+        // The same account reaches the Codex rows.
+        assert!(
+            oauth
+                .provider_result(crate::model::CHATGPT_SUGGESTED_MODEL)
+                .is_ok()
+        );
+
+        // And the reachable model still resolves.
+        assert!(config.provider_result("zai/glm-4.7").is_ok());
+    }
+
+    /// A subcommand that only writes to the state directory resolves
+    /// the directories and stops: no `ilar.toml` is parsed, so a broken
+    /// one cannot stand between someone and `ilar secret set`.
+    #[test]
+    fn the_directories_resolve_without_reading_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("ilar.toml"), "this is not toml {{{").unwrap();
+        let loader = Loader::with_env(vec![("HOME", dir.path().display().to_string())])
+            .config_dir(dir.path().to_path_buf());
+        let dirs = loader.resolve_dirs();
+        assert_eq!(dirs.config, dir.path());
+        assert_eq!(dirs.state, dir.path().join(".local/state/ilar"));
+        assert!(!dirs.homeless);
+        dirs.require_home().unwrap();
+        // The same loader reading the file is the thing that fails.
+        assert!(loader.resolve().is_err());
+
+        // Explicit variables need no home at all.
+        let told = Loader::with_env(vec![
+            ("ILAR_CONFIG_DIR", "/etc/ilar".into()),
+            ("ILAR_STATE_DIR", "/var/ilar".into()),
+        ])
+        .resolve_dirs();
+        assert_eq!(told.config, PathBuf::from("/etc/ilar"));
+        assert!(!told.homeless);
+        told.require_home().unwrap();
+
+        // Without either, the defaults would land in the working
+        // directory: refused rather than scattered per project.
+        let homeless = Loader::with_env(Vec::new()).resolve_dirs();
+        assert!(homeless.homeless);
+        let error = homeless.require_home().unwrap_err().to_string();
+        assert!(error.contains("HOME is not set"), "{error}");
+        assert!(error.contains("ILAR_STATE_DIR"), "{error}");
+    }
+
+    /// `ilar login` is a next step, not a wall of variables: the openai
+    /// row offers it, the others cannot.
+    #[test]
+    fn only_a_provider_with_oauth_offers_the_login_flow() {
+        let openai = provider_kind("openai", PROVIDERS).expect("openai is a known provider");
+        let zai = provider_kind("zai", PROVIDERS).expect("z.ai is a known provider");
+        assert!(
+            missing_credential_message("openai/gpt-5.2", openai, &["zai"]).contains("ilar login")
+        );
+        assert!(!missing_credential_message("zai/glm-4.7", zai, &[]).contains("ilar login"));
+
+        // The same table answers "which key did the server refuse".
+        assert_eq!(
+            credential_sources("zai"),
+            "ILAR_ZAI_API_KEY (environment or secret store) or providers.zai.api_key in your ilar.toml"
+        );
+        assert!(credential_sources("lemon").contains("[endpoints.lemon]"));
+    }
+
+    /// An empty list of alternatives says nothing rather than trailing
+    /// off, and a long one is cut.
+    #[test]
+    fn offered_ids_are_a_handful_or_nothing() {
+        assert_eq!(offered(&[]), "");
+        assert_eq!(offered(&["a", "b"]), ". Available now: a, b");
+        let many = ["a", "b", "c", "d", "e", "f", "g"];
+        assert_eq!(offered(&many), ". Available now: a, b, c, d, e, f, …");
     }
 
     #[test]

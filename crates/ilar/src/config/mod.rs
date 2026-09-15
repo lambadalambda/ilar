@@ -13,11 +13,11 @@ pub use agents_md::{
     system_prompt_with,
 };
 pub(crate) use frontmatter::parse as parse_frontmatter;
-pub(crate) use toml::markdown_files;
 pub use toml::{
-    CacheCompactConfig, CompactionConfig, Config, Loader, ProviderConfig, SubagentConfig,
+    CacheCompactConfig, CompactionConfig, Config, Dirs, Loader, ProviderConfig, SubagentConfig,
     ThemePersistOutcome, load, persist_general_theme,
 };
+pub(crate) use toml::{credential_sources, markdown_files};
 
 pub(crate) fn split_frontmatter(text: &str) -> anyhow::Result<(String, String)> {
     let text = text.trim_start_matches('\u{feff}').replace("\r\n", "\n");

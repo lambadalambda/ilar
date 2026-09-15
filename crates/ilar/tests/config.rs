@@ -901,7 +901,19 @@ fn project_cannot_reset_chatgpt_auth_or_inject_a_key() {
     assert_eq!(config.providers["openai"].auth.as_deref(), Some("chatgpt"));
     assert_eq!(config.providers["openai"].api_key, None);
     assert_eq!(config.warnings.len(), 1, "{:?}", config.warnings);
-    assert!(config.provider_for("openai/gpt-5.2").is_some());
+    // The user's OAuth mode still builds a client — for the Codex
+    // catalog it serves. An API-key-only row is refused by name rather
+    // than sent and answered with model_not_found.
+    assert!(config.provider_for("openai/gpt-5.6-sol").is_some());
+    let refused = config
+        .provider_result("openai/gpt-5.2")
+        .err()
+        .expect("an api-key model is not reachable through chatgpt auth")
+        .to_string();
+    assert!(
+        refused.contains("cannot reach \"gpt-5.2\" with the credential"),
+        "{refused}"
+    );
 }
 
 #[test]
