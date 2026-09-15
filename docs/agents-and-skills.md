@@ -34,6 +34,13 @@ background task that cannot detach because background capacity is full runs in
 the foreground instead of failing, and its result says so; an explicit
 `background: true` there is still an error.
 
+"Free to keep working" lasts as long as the turn does: a detached task's
+cancellation is a child of the turn that spawned it, so aborting that turn
+(Esc, or cancel-all in the pending manager) stops its detached tasks too. The
+abort pauses notification delivery, so their `was cancelled` results are held
+until the next message instead of starting a turn on the spot. Tasks spawned by
+an earlier turn are not affected.
+
 Workspace rule, one sentence: mutable work runs in worktrees and never
 collides; read-only work runs in place, sees everything (uncommitted changes
 included), blocks nothing, and accepts that the tree may shift while it looks.

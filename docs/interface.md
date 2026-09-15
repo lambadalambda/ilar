@@ -72,12 +72,20 @@ Standing state — queued messages, the goal, background jobs, a retry
 offer — is managed in the pending manager (**Ctrl-Q** or the palette):
 delete one queued message, pull it back into the input for editing,
 abort the goal or cancel background jobs (both confirmed with a second
-press). Enter on the jobs or services row acts on it — the same
+press). Enter on the tasks or services row acts on it — the same
 confirmed cancel `d` gives — since there is nothing there to edit.
 **Esc is strictly immediate-scope**: it aborts the running turn or
 clears the input, and never touches the queue or the goal. A one-line
 draft it clears; a multi-line one — a paste, or a paragraph — goes to
 the stash instead, because Esc has no undo.
+
+One thing does follow the turn down: the detached tasks *that turn*
+started, whose cancellation rides on the turn's own. Aborting therefore
+pauses notification delivery the way cancel-all does — the dying
+children's results are held, not delivered, so the abort does not
+immediately start a follow-up turn nobody asked for. They go out with
+your next message, and tasks from an earlier turn keep running
+untouched.
 
 The palette (**Ctrl-P**) opens during a turn as well: the pending
 manager, help, the link picker, an export and the usage line all work

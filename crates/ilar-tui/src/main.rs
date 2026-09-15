@@ -2619,6 +2619,23 @@ fn drain_motion_batch(
     })
 }
 
+/// What Esc says when it aborts a turn. A detached task's cancellation
+/// token is a child of the turn's, so aborting the turn stops the tasks
+/// that turn started; their results are held rather than delivered,
+/// because the abort pauses notifications the way cancel-all does.
+/// `detached` is the count of background tasks running at all — a
+/// superset of the ones this turn owns — so the notice never names a
+/// number, only the rule.
+fn abort_notice(detached: usize) -> String {
+    if detached == 0 {
+        "aborting current operation…".into()
+    } else {
+        "aborting current operation… — detached tasks this turn started stop with it; \
+         their results are held until your next message"
+            .into()
+    }
+}
+
 /// The reasons a session switch (resume, fork, rewind) must wait; the
 /// same set guards every path that tears the runtime down. The stash is
 /// not among them: it rides along into the rebuilt app, so there is
@@ -4510,7 +4527,16 @@ async fn run_app(
                         } else if let Some(cancel) = cancel.as_ref().filter(|_| app.busy) {
                             cancel.cancel();
                             app.status = "aborting…".into();
-                            app.set_notice("aborting current operation…", NoticeLevel::Warning);
+                            // Cancel-all pauses notifications for
+                            // exactly this reason: the dying children's
+                            // completions would otherwise start a fresh
+                            // turn nobody asked for, moments after the
+                            // user said stop.
+                            notifications_paused = true;
+                            let detached = app
+                                .background_running
+                                .saturating_sub(app.deliveries_in_flight);
+                            app.set_notice(abort_notice(detached), NoticeLevel::Warning);
                             app.set_activity(Activity::Aborting);
                         } else {
                             // Busy with nothing to cancel — the restore
@@ -4912,6 +4938,22 @@ mod tests {
             switch_blocked(false, 0, 0, false, true).as_deref(),
             Some("a goal is active — /goal abort before leaving its context")
         );
+    }
+
+    /// Aborting a turn stops the detached tasks that turn started —
+    /// their token is a child of its token — so the notice says so
+    /// instead of letting the panel's `bg` rows vanish wordlessly.
+    /// With nothing detached there is nothing extra to say.
+    #[test]
+    fn aborting_a_turn_says_what_happens_to_its_detached_tasks() {
+        assert_eq!(abort_notice(0), "aborting current operation…");
+        let with_tasks = abort_notice(2);
+        assert!(
+            with_tasks.starts_with("aborting current operation…"),
+            "{with_tasks}"
+        );
+        assert!(with_tasks.contains("detached task"), "{with_tasks}");
+        assert!(with_tasks.contains("held"), "{with_tasks}");
     }
 
     /// The switch carries the stash, so the pops still work on the
