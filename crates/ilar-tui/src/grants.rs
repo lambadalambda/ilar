@@ -59,6 +59,24 @@ impl GrantModal {
         }
     }
 
+    /// Whether a password field is up: the letters type instead of
+    /// picking, and a paste has somewhere to land.
+    pub(crate) fn wants_password(&self) -> bool {
+        self.password.is_some()
+    }
+
+    /// Pasted text into the password field. A password manager copies a
+    /// trailing newline as often as not, and a multi-line clipboard is
+    /// never one password, so the newlines are the separator that ends
+    /// the paste rather than characters of it.
+    pub(crate) fn paste(&mut self, text: &str) {
+        let Some(password) = &mut self.password else {
+            return;
+        };
+        let first = text.lines().next().unwrap_or_default();
+        password.extend(first.chars().filter(|c| !c.is_control()));
+    }
+
     fn answer(&self, choice: Option<Grant>) -> GrantAction {
         GrantAction::Answer(choice.map(|grant| Approval {
             grant,
@@ -125,6 +143,16 @@ impl GrantModal {
         }
     }
 
+    /// The transcript's record of a prompt nobody is waiting on any
+    /// more: the turn ended or was aborted under the modal, so the
+    /// answer has nowhere to go.
+    pub(crate) fn withdrawn_line(&self) -> String {
+        format!(
+            "grant prompt for {} withdrawn — the tool stopped waiting",
+            self.secret
+        )
+    }
+
     /// The transcript's one-line record of the answer.
     pub(crate) fn outcome_line(&self, answer: Option<Grant>) -> String {
         match answer {
@@ -138,12 +166,22 @@ impl GrantModal {
         }
     }
 
+    /// A row's text. The `(o)`/`(s)`/`(a)`/`(d)` prefixes are dropped
+    /// while a password field is up: there those letters type into the
+    /// password, so offering them as picks would be a lie.
     fn choice_label(&self, choice: Option<Grant>) -> String {
+        let hotkey = |letter: char| {
+            if self.password.is_some() {
+                String::new()
+            } else {
+                format!("({letter}) ")
+            }
+        };
         match choice {
-            Some(Grant::Once) => "(o) Allow once".into(),
-            Some(Grant::Session) => "(s) Allow for this session".into(),
-            Some(Grant::Always) => format!("(a) Always allow for {}", self.tool),
-            None => "(d) Deny".into(),
+            Some(Grant::Once) => format!("{}Allow once", hotkey('o')),
+            Some(Grant::Session) => format!("{}Allow for this session", hotkey('s')),
+            Some(Grant::Always) => format!("{}Always allow for {}", hotkey('a'), self.tool),
+            None => format!("{}Deny", hotkey('d')),
         }
     }
 
@@ -171,20 +209,37 @@ impl GrantModal {
         lines
     }
 
-    /// The password row, when the prompt asked for one: masked, with
-    /// the hint that empty means the system needs none.
-    fn password_line(&self) -> Option<Line<'_>> {
+    /// The password row, when the prompt asked for one: masked, with a
+    /// cursor at the end and, once the mask outgrows the row, a window
+    /// on its tail. The row used to be an unwrapped paragraph that the
+    /// frame simply clipped, so a long password looked like a short one
+    /// and nothing said otherwise.
+    fn password_line(&self, width: usize) -> Option<Line<'static>> {
+        const LABEL: &str = "Password: ";
+        const CURSOR: char = '▌';
         let password = self.password.as_ref()?;
-        let text = if password.is_empty() {
-            "Password: (type it here; leave empty if sudo needs none)".to_string()
+        if password.is_empty() {
+            return Some(Line::styled(
+                format!("{LABEL}{CURSOR} (type or paste it; leave empty if sudo needs none)"),
+                Style::default().fg(theme::WAITING),
+            ));
+        }
+        // The label and the cursor hold their places; what is left of
+        // the row is the window on the mask.
+        let room = width.saturating_sub(LABEL.chars().count() + 1).max(1);
+        let typed = password.chars().count();
+        let text = if typed <= room {
+            format!("{LABEL}{}{CURSOR}", "•".repeat(typed))
         } else {
-            format!("Password: {}", "•".repeat(password.chars().count()))
+            // The leader says this is the tail of a longer password,
+            // not the whole of it.
+            format!("{LABEL}…{}{CURSOR}", "•".repeat(room - 1))
         };
         Some(Line::styled(text, Style::default().fg(theme::WAITING)))
     }
 
-    fn choice_lines(&self) -> Vec<Line<'_>> {
-        self.password_line()
+    fn choice_lines(&self, width: usize) -> Vec<Line<'_>> {
+        self.password_line(width)
             .into_iter()
             .chain(CHOICES.iter().enumerate().map(|(index, choice)| {
                 let pointer = if index == self.cursor { ">" } else { " " };
@@ -240,7 +295,7 @@ impl GrantModal {
             }
         }
         frame.render_widget(
-            Paragraph::new(self.choice_lines()),
+            Paragraph::new(self.choice_lines(inner.width as usize)),
             Rect::new(inner.x, body.bottom(), inner.width, choices_height),
         );
     }
@@ -429,6 +484,65 @@ mod tests {
         );
     }
 
+    /// While the letters type, the rows must not advertise them as
+    /// picks — and a mask longer than the row says so rather than being
+    /// clipped at the frame.
+    #[test]
+    fn a_password_row_drops_the_hotkeys_and_windows_the_mask() {
+        let mut asking = prompt();
+        asking.password_wanted = true;
+        let mut modal = GrantModal::new(&asking, false);
+        let shown = screen(&modal, 80, 24);
+        for prefix in ["(o)", "(s)", "(a)", "(d)"] {
+            assert!(!shown.contains(prefix), "{prefix} in {shown}");
+        }
+        assert!(shown.contains("> Allow once"), "{shown}");
+        assert!(shown.contains("  Deny"), "{shown}");
+        assert!(shown.contains("type or paste it"), "{shown}");
+        // A password wider than the row shows its tail behind a leader.
+        modal.paste(&"x".repeat(200));
+        let shown = screen(&modal, 40, 12);
+        assert!(shown.contains("Password: …"), "{shown}");
+        assert!(shown.contains('▌'), "{shown}");
+        let masked = shown
+            .lines()
+            .find(|line| line.contains("Password:"))
+            .expect("the password row")
+            .chars()
+            .filter(|c| *c == '•')
+            .count();
+        assert!(
+            (1..40).contains(&masked),
+            "the mask is a window on the row, not 200 bullets: {masked}"
+        );
+    }
+
+    /// The password usually arrives from a manager, so a paste lands in
+    /// the field; a prompt without one has nowhere to put it.
+    #[test]
+    fn a_pasted_password_lands_in_the_field() {
+        let mut asking = prompt();
+        asking.password_wanted = true;
+        let mut asked = GrantModal::new(&asking, false);
+        assert!(asked.wants_password());
+        asked.paste("s3cret\n");
+        asked.paste("more\nignored");
+        assert_eq!(
+            asked.handle_key(key(KeyCode::Enter)),
+            GrantAction::Answer(Some(Approval {
+                grant: Grant::Once,
+                password: Some("s3cretmore".into()),
+            }))
+        );
+        let mut plain = modal();
+        assert!(!plain.wants_password());
+        plain.paste("s3cret");
+        assert_eq!(
+            plain.handle_key(key(KeyCode::Enter)),
+            GrantAction::Answer(Some(Approval::from(Grant::Once)))
+        );
+    }
+
     #[test]
     fn a_subagent_asker_is_named_in_the_title_and_the_outcome() {
         let modal = GrantModal::new(&prompt(), true);
@@ -459,6 +573,10 @@ mod tests {
             "GITHUB_TOKEN allowed for bash (always)"
         );
         assert_eq!(modal.outcome_line(None), "GITHUB_TOKEN denied for bash");
+        assert_eq!(
+            modal.withdrawn_line(),
+            "grant prompt for GITHUB_TOKEN withdrawn — the tool stopped waiting"
+        );
     }
 
     fn screen(modal: &GrantModal, width: u16, height: u16) -> String {

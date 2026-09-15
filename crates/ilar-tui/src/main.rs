@@ -617,6 +617,12 @@ fn apply_intent(
             }
             None
         }
+        Intent::PasteGrantPassword(text) => {
+            if let Some(modal) = app.grant_modal.as_mut() {
+                modal.paste(&text);
+            }
+            None
+        }
         Intent::PasteModalQuery(text) => {
             // Whichever picker owns the keyboard filters on it, exactly
             // as if the text had been typed. The modal decided this, so
@@ -873,6 +879,10 @@ fn observe(
         steerable: steer_tx.as_ref().is_some_and(|tx| !tx.is_closed()),
         notifications_paused,
         retry_available: app.retry_available,
+        grant_password: app
+            .grant_modal
+            .as_ref()
+            .is_some_and(grants::GrantModal::wants_password),
     }
 }
 
@@ -3273,10 +3283,21 @@ async fn run_app(
         }
         // A grant whose asker stopped listening — the turn ended or
         // was aborted under the modal — closes without an answer; the
-        // prompt must not outlive the command it named.
+        // prompt must not outlive the command it named. It leaves a
+        // line behind: a modal that simply vanished looked like a
+        // keystroke of the user's had answered it, and the status stayed
+        // on "waiting for your grant" until the next event.
         if app.grant_modal.is_some() && grant_reply.as_ref().is_none_or(|reply| reply.is_closed()) {
-            app.grant_modal = None;
+            let withdrawn = app.grant_modal.take().expect("checked above");
             grant_reply = None;
+            app.push_transcript_line(Line_::System(withdrawn.withdrawn_line()));
+            if turn_handle.is_some() {
+                app.status = "thinking".into();
+                app.set_activity(Activity::Thinking);
+            } else {
+                app.status = "ready".into();
+                app.set_activity(Activity::Ready);
+            }
         }
         // One prompt at a time: a second asker waits in the channel
         // until this one is answered, so no reply is dropped unread.
