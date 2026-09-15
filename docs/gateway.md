@@ -158,6 +158,11 @@ A message that is a slash command is answered by the gateway itself:
 | `/compact` | Replace this chat's conversation with one handover summary, as the context filling would; waits for a running turn. The summary goes to the daily note, the chat gets its size. |
 | `/help` | The list above. |
 
+The name is matched case-blind, so a phone that capitalises the first
+word still gets `/Help`. Only what a person types is read as a
+command: text arriving through `ilar-gateway notify` reaches the model
+as it is, so a script reporting "/new" does not reset a chat.
+
 ## The home
 
 Everything of the assistant's lives in one directory, `gateway.home`,

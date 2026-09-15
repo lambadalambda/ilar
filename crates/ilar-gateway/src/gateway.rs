@@ -415,7 +415,11 @@ impl Gateway {
 
     async fn handle_inbound(&self, message: Inbound) {
         let key = message.session_key();
-        if let Some(command) = commands::parse(&message.text) {
+        // Only a person types commands: a script reporting "/new" is
+        // reporting, not asking for a fresh session.
+        if !inbox::is_script(&message.sender_id)
+            && let Some(command) = commands::parse(&message.text)
+        {
             let reply = self.command(&key, &message, command).await;
             self.deliver(&message.channel, &message.chat_id, &reply)
                 .await;
@@ -1343,7 +1347,7 @@ impl Gateway {
                 .send(Inbound {
                     channel: channel.to_string(),
                     chat_id: chat_id.to_string(),
-                    sender_id: format!("notify:{}", message.source),
+                    sender_id: inbox::sender(&message.source),
                     // Nothing in a chat to delete: the gateway wrote it.
                     message_id: None,
                     text: message.text,

@@ -53,7 +53,10 @@ pub fn parse(text: &str) -> Option<Command> {
     if name.is_empty() {
         return None;
     }
-    Some(match (name, argument) {
+    // Case-blind: a phone capitalises the first word of a message, and
+    // "/Help" is the same ask as "/help".
+    let lowercase = name.to_ascii_lowercase();
+    Some(match (lowercase.as_str(), argument) {
         ("new", _) => Command::New,
         ("model", argument) => {
             let words: Vec<&str> = argument.unwrap_or_default().split_whitespace().collect();
@@ -78,7 +81,9 @@ pub fn parse(text: &str) -> Option<Command> {
         ("pending", _) => Command::Pending,
         ("approve", argument) => Command::Approve(argument.unwrap_or("all").to_string()),
         ("reject", argument) => Command::Reject(argument.unwrap_or("all").to_string()),
-        (other, _) => Command::Unknown(other.to_string()),
+        // Echoed as it was typed: the refusal is about a word the
+        // person wrote, not about our lowercasing of it.
+        (_, _) => Command::Unknown(name.to_string()),
     })
 }
 
@@ -277,7 +282,20 @@ mod tests {
             Some(Command::Approve("ab12".into()))
         );
         assert_eq!(parse("/reject all"), Some(Command::Reject("all".into())));
+        // A phone that capitalises the first word is understood; an
+        // unknown word is echoed as it was typed.
+        assert_eq!(parse("/Help"), Some(Command::Help));
+        assert_eq!(parse("/NEW"), Some(Command::New));
+        assert_eq!(parse("/Stop"), Some(Command::Abort));
+        assert_eq!(
+            parse("/Model zai/glm-4.7"),
+            Some(Command::Model {
+                model: Some("zai/glm-4.7".into()),
+                save: false
+            })
+        );
         assert_eq!(parse("/dance"), Some(Command::Unknown("dance".into())));
+        assert_eq!(parse("/Dance"), Some(Command::Unknown("Dance".into())));
         assert_eq!(parse("/"), None);
         assert_eq!(parse("what about /new?"), None);
         assert_eq!(parse("1/2 done"), None);

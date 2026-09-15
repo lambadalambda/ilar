@@ -8,6 +8,20 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
+/// What a message from a script is signed with, so the gateway can
+/// tell it from a person typing: a script's text is never a command.
+pub const SENDER_PREFIX: &str = "notify:";
+
+/// How a script's message is signed, for the sender field.
+pub fn sender(source: &str) -> String {
+    format!("{SENDER_PREFIX}{source}")
+}
+
+/// Whether a sender is a script rather than a person.
+pub fn is_script(sender_id: &str) -> bool {
+    sender_id.starts_with(SENDER_PREFIX)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InboxMessage {
     pub source: String,

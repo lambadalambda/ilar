@@ -179,6 +179,43 @@ async fn an_inbox_message_reaches_the_last_active_chat() {
     gateway.cancel();
 }
 
+/// The session a chat is bound to, for a test that nothing reset it.
+fn session_of(dir: &Path, key: &str) -> String {
+    RouteStore::open(dir.join("state/gateway/routes.json"))
+        .unwrap()
+        .snapshot()
+        .session_for(key)
+        .expect("a route")
+        .to_string()
+}
+
+#[tokio::test]
+async fn a_scripts_notification_is_never_a_command() {
+    let dir = tempfile::tempdir().unwrap();
+    let (gateway, fake) = gateway(
+        dir.path(),
+        vec![says("hi alice"), says("noted, the deploy is done")],
+    );
+
+    fake.inject("hi", "chat-1", "alice").await;
+    fake.wait_for_sent(1, WAIT).await;
+    let before = session_of(dir.path(), "fake:chat-1");
+    // A script's text goes to the model whatever it looks like.
+    ilar_gateway::inbox::write(
+        gateway.inbox_dir(),
+        &ilar_gateway::inbox::InboxMessage {
+            source: "deploy".into(),
+            text: "/new".into(),
+            to: None,
+        },
+    )
+    .unwrap();
+    let sent = fake.wait_for_sent(2, WAIT).await;
+    assert_eq!(sent[1].text, "noted, the deploy is done", "{sent:?}");
+    assert_eq!(session_of(dir.path(), "fake:chat-1"), before);
+    gateway.cancel();
+}
+
 #[tokio::test]
 async fn a_turn_that_only_thinks_is_reported_not_swallowed() {
     let dir = tempfile::tempdir().unwrap();
