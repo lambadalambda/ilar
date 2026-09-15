@@ -253,6 +253,42 @@ fn project_instructions_default_to_on_and_are_user_scoped() {
     );
 }
 
+/// The offer a bare launch makes is on unless somebody says otherwise,
+/// and a project directory may say so: what a launch in this directory
+/// opens with is the directory's business, not a security lever.
+#[test]
+fn the_resume_offer_is_on_by_default_and_can_be_turned_off() {
+    let (_g, empty) = tempdir();
+    assert!(
+        Loader::no_env()
+            .config_dir(empty)
+            .resolve()
+            .unwrap()
+            .general
+            .resume_offer
+    );
+
+    let (_user_guard, user) = tempdir();
+    write(&user.join("ilar.toml"), "[general]\nresume_offer = false\n");
+    let off = Loader::no_env().config_dir(user).resolve().unwrap();
+    assert!(!off.general.resume_offer);
+    assert!(off.warnings.is_empty(), "{:?}", off.warnings);
+
+    let (_project_guard, project) = tempdir();
+    write(
+        &project.join("ilar.toml"),
+        "[general]\nresume_offer = false\n",
+    );
+    let (_other_user_guard, other_user) = tempdir();
+    let by_project = Loader::no_env()
+        .config_dir(other_user)
+        .project_dir(project)
+        .resolve()
+        .unwrap();
+    assert!(!by_project.general.resume_offer);
+    assert!(by_project.warnings.is_empty(), "{:?}", by_project.warnings);
+}
+
 #[test]
 fn project_instructions_must_be_a_boolean() {
     let (_g, dir) = tempdir();

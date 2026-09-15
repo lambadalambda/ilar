@@ -26,6 +26,7 @@ as a `{"type":"notice"}` event under `ilar exec --json`.
 | `general.reasoning` | provider default | Default reasoning variant for new sessions (for example `low`, `high`, or `max`; model-specific). Set `default` in a higher config layer to clear an inherited value. It must be valid for `general.model`; a launch that runs some other model (`--model`, or an agent's own `model:`) drops it with a startup line rather than refusing to start. |
 | `general.theme` | `carbon` | See [themes](interface.md#themes). F3 opens the picker. |
 | `general.project_instructions` | `true` | Whether the working directory's `AGENTS.md`/`CLAUDE.md` is part of the system prompt. See [Project instructions](#project-instructions). User-scoped. |
+| `general.resume_offer` | `true` | Whether a bare `ilar` offers this directory's last session — its tail shown ghosted, Enter resumes it. See [Starting](interface.md#starting). |
 | `providers.openai.base_url` | API or ChatGPT endpoint | Override the Responses API base URL selected by `auth`. |
 | `providers.openai.api_key` | `ILAR_OPENAI_API_KEY` | OpenAI API key. |
 | `providers.openai.auth` | `api_key` | `api_key` or `chatgpt`; see [OpenAI ChatGPT OAuth](#openai-chatgpt-oauth). Either credential also enables the `image_gen` tool. |

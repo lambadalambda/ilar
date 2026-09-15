@@ -17,6 +17,10 @@ theme = "carbon"
 # --no-project-instructions for a single launch. User-scoped: a
 # project's own config cannot set it.
 # project_instructions = true
+# Whether a bare `ilar` offers this directory's last session: its tail
+# is shown ghosted and Enter resumes it. Set false to always start on a
+# blank session.
+# resume_offer = true
 
 [providers.openai]
 # api_key from ILAR_OPENAI_API_KEY (env) by default; can be set here.

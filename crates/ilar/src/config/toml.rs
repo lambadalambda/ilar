@@ -19,6 +19,10 @@ pub struct GeneralConfig {
     /// A project file is unauthenticated third-party input, so this can
     /// be turned off wholesale and opted into per launch instead.
     pub project_instructions: Option<bool>,
+    /// Whether a bare launch offers this directory's last session,
+    /// ghosted, for one key. On by default — continuing where you left
+    /// off is what nearly every launch wants.
+    pub resume_offer: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -515,6 +519,9 @@ pub struct GeneralConfigResolved {
     /// Trusting the working directory's context file is the default;
     /// `--no-project-instructions` overrides it for one launch.
     pub project_instructions: bool,
+    /// Whether a bare launch offers this directory's last session as a
+    /// ghost — see docs/interface.md ("Starting").
+    pub resume_offer: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -843,6 +850,11 @@ impl Config {
                 // User-scoped like the theme: a project may not vote on
                 // whether its own instructions are trusted.
                 project_instructions: user_project_instructions.unwrap_or(true),
+                resume_offer: merged
+                    .general
+                    .as_ref()
+                    .and_then(|general| general.resume_offer)
+                    .unwrap_or(true),
             },
             providers,
             models,
@@ -1116,6 +1128,7 @@ impl Config {
                 reasoning: None,
                 theme: "carbon".into(),
                 project_instructions: true,
+                resume_offer: true,
             },
             agent: AgentConfig::default(),
             providers,
@@ -1372,6 +1385,7 @@ fn merge_file(base: FileConfig, text: &str, origin: &Path) -> anyhow::Result<Fil
             reasoning,
             theme,
             project_instructions,
+            resume_offer,
         );
     }
     if parsed.gateway.is_some() {
