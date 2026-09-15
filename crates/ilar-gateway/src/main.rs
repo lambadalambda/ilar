@@ -71,6 +71,10 @@ enum Command {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    // Both default directories hang off HOME; without it they resolve
+    // under the working directory, and a long-lived gateway would put
+    // its sessions and auth.json wherever it happened to be started.
+    ilar::config::load().resolve_dirs().require_home()?;
     let config = ilar::config::load().resolve()?;
     let gateway = GatewayConfig::from_core(&config)?;
     match cli.command.unwrap_or(Command::Run) {

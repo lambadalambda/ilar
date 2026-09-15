@@ -51,6 +51,36 @@ pub(crate) fn exit_code(outcome: &Result<TurnOutcome>) -> i32 {
     }
 }
 
+/// A setting that parsed but was not honoured, as a line. Progress, not
+/// answer: stderr in text mode, where a pipe ignores it; an event under
+/// `--json`, where stdout carries events only.
+pub(crate) fn notice_line(text: &str, format: ExecFormat) -> ExecLine {
+    match format {
+        ExecFormat::Json => ExecLine {
+            stream: Stream::Out,
+            text: serde_json::json!({"type": "notice", "text": text}).to_string(),
+            newline: true,
+        },
+        ExecFormat::Text => ExecLine {
+            stream: Stream::Err,
+            text: format!("notice: {text}"),
+            newline: true,
+        },
+    }
+}
+
+pub(crate) fn emit_notices(
+    notices: &[String],
+    format: ExecFormat,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> std::io::Result<()> {
+    for notice in notices {
+        emit(notice_line(notice, format), out, err)?;
+    }
+    Ok(())
+}
+
 /// What one event prints, or nothing when it is noise for this format.
 pub(crate) fn render_event(event: &LoopEvent, format: ExecFormat) -> Option<ExecLine> {
     match format {
@@ -404,6 +434,44 @@ mod tests {
         assert_eq!(exit_code(&outcome), 1);
         assert!(out.is_empty(), "a failed turn wrote an answer: {out:?}");
         let _ = err;
+    }
+
+    /// A setting that was not honoured goes where the rest of the "how"
+    /// goes: stderr in text mode, an event under `--json`. `ilar exec`
+    /// read neither and a project `[providers]` table was dropped in
+    /// silence.
+    #[test]
+    fn a_notice_is_progress_in_text_and_an_event_in_json() {
+        let text = notice_line("ilar.toml: [providers] is ignored", ExecFormat::Text);
+        assert_eq!(text.stream, Stream::Err);
+        assert!(text.text.starts_with("notice: "), "{:?}", text.text);
+        assert!(text.newline);
+
+        let json = notice_line("ilar.toml: [providers] is ignored", ExecFormat::Json);
+        assert_eq!(json.stream, Stream::Out);
+        let parsed: serde_json::Value = serde_json::from_str(&json.text).unwrap();
+        assert_eq!(parsed["type"], "notice");
+        assert_eq!(parsed["text"], "ilar.toml: [providers] is ignored");
+
+        // Both sinks, in order, and nothing when there is nothing.
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        emit_notices(
+            &["first".to_string(), "second".to_string()],
+            ExecFormat::Text,
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        assert!(out.is_empty());
+        assert_eq!(
+            String::from_utf8(err).unwrap(),
+            "notice: first\nnotice: second\n"
+        );
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        emit_notices(&[], ExecFormat::Json, &mut out, &mut err).unwrap();
+        assert!(out.is_empty() && err.is_empty());
     }
 
     #[test]

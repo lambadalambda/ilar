@@ -1804,6 +1804,12 @@ pub fn catalog() -> &'static [ModelInfo] {
 /// Provider prefix every configured model is addressed under.
 pub const CUSTOM_PROVIDER: &str = "custom";
 
+/// The model `ilar login` points a fresh ChatGPT account at. Not simply
+/// the first row a ChatGPT account can reach: `gpt-6-astra` sits behind
+/// an access program, and lines that only work for some subscriptions
+/// are worse than none.
+pub const CHATGPT_SUGGESTED_MODEL: &str = "openai/gpt-5.6-sol";
+
 /// A `[models.<name>]` entry as the catalog needs to see it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RuntimeModel {
@@ -1999,6 +2005,15 @@ pub fn variant_options(full_id: &str, variant: Option<&str>) -> anyhow::Result<s
 
 #[cfg(test)]
 mod tests {
+    /// `ilar login` prints this id as a line to paste, so a catalog
+    /// that renames it must not leave the suggestion behind.
+    #[test]
+    fn the_model_login_suggests_is_a_row_a_chatgpt_account_reaches() {
+        use super::*;
+        let model = find(CHATGPT_SUGGESTED_MODEL).expect("the suggested model is in the catalog");
+        assert_eq!(model.access, ModelAccess::OpenAiBoth);
+    }
+
     #[test]
     fn the_output_cap_is_spelled_for_the_wire_and_yields_to_configuration() {
         use super::*;

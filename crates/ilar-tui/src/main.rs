@@ -215,8 +215,28 @@ struct ExecArgs {
     project_instructions: bool,
 }
 
+/// What a fresh box needs and `--help` never said: where configuration
+/// and state live, and which variable carries which provider's key.
+/// Printed under the flags so the first `ilar --help` names a next step.
+const AFTER_HELP: &str = "\
+Configuration:
+  ILAR_CONFIG_DIR   config directory (default ~/.config/ilar); ilar.toml lives here
+  ILAR_STATE_DIR    sessions, secret store, auth tokens (default ~/.local/state/ilar)
+
+Provider keys (or providers.<name>.api_key in ilar.toml, or `ilar secret set`):
+  ILAR_ZAI_API_KEY        zai/<model>, the default general.model
+  ILAR_OPENAI_API_KEY     openai/<model>; or `ilar login` for a ChatGPT account
+  ILAR_OPENCODE_API_KEY   opencode/<model> and opencode-go/<model>
+
+See docs/configuration.md; `ilar --print-prompt` shows what the model gets.";
+
 #[derive(Parser, Debug)]
-#[command(name = "ilar", version, about = "Personal coding agent")]
+#[command(
+    name = "ilar",
+    version,
+    about = "Personal coding agent",
+    after_help = AFTER_HELP
+)]
 struct Args {
     #[command(subcommand)]
     command: Option<Command>,
@@ -1036,16 +1056,11 @@ async fn run_exec(config: &ilar::config::Config, args: ExecArgs) -> Result<i32> 
 
     let store = ilar::runtime::session_store(config);
     let resume = if args.continue_last {
-        Some(
-            store
-                .latest()
-                .map(|session| session.id)
-                .context("no sessions to continue (session directory is empty)")?,
-        )
+        Some(ilar::runtime::latest_session_id(&store)?)
     } else {
         args.session
     };
-    let runtime = ilar::runtime::RuntimePlan::resolve(
+    let mut plan = ilar::runtime::RuntimePlan::resolve(
         config,
         &ilar::runtime::RuntimeOptions {
             model: args.model,
@@ -1065,8 +1080,14 @@ async fn run_exec(config: &ilar::config::Config, args: ExecArgs) -> Result<i32> 
             own_skills_only: false,
             unlock_hint: Some(UNLOCK_HINT.to_string()),
         },
-    )?
-    .start(config)?;
+    )?;
+    let notices = startup_notices(
+        config.warnings.clone(),
+        std::mem::take(&mut plan.notices),
+        plan.skipped_project_instructions,
+        args.no_project_instructions,
+    );
+    let runtime = plan.start(config)?;
 
     let format = if args.json {
         exec::ExecFormat::Json
@@ -1083,6 +1104,10 @@ async fn run_exec(config: &ilar::config::Config, args: ExecArgs) -> Result<i32> 
 
     let mut out = std::io::stdout();
     let mut err = std::io::stderr();
+    // Said before the turn, and said at all: a project `ilar.toml` with
+    // a `[providers]` table was ignored here in complete silence, which
+    // reads as the setting not existing.
+    exec::emit_notices(&notices, format, &mut out, &mut err)?;
     let outcome = exec::exec_turn(
         runtime.resolver.as_ref(),
         &runtime.registry,
@@ -1141,22 +1166,78 @@ fn project_instructions_notice(skipped: Option<&str>, by_flag: bool) -> Option<S
 }
 
 /// The system lines a session opens with: settings that parsed but were
-/// not honoured, then the project file that exists but was left out.
-/// Both say out loud that something the user wrote was not used —
-/// silence there reads as a bug in the program.
+/// not honoured, what this launch asked for and did not get, then the
+/// project file that exists but was left out. All three say out loud
+/// that something the user wrote was not used — silence there reads as
+/// a bug in the program.
 fn startup_notices(
     config_warnings: Vec<String>,
+    launch_notices: Vec<String>,
     skipped: Option<&str>,
     by_flag: bool,
 ) -> Vec<String> {
     let mut lines = config_warnings;
+    lines.extend(launch_notices);
     lines.extend(project_instructions_notice(skipped, by_flag));
     lines
+}
+
+/// What to put in `ilar.toml` for the tokens `ilar login` just stored
+/// to be used. Without it the login succeeds and the next `ilar` runs
+/// the default `zai/glm-4.7` and dies naming a key the person never
+/// had: the account is stored, nothing points at it.
+fn chatgpt_setup_hint(config_path: &std::path::Path) -> String {
+    format!(
+        "\nNothing points at that account yet. Add to {}:\n\n  \
+         [providers.openai]\n  auth = \"chatgpt\"\n\n  \
+         [general]\n  model = \"{}\"\n\n\
+         Any openai/… model works; `m` in the TUI lists the ones this account can reach.\n",
+        config_path.display(),
+        ilar::model::CHATGPT_SUGGESTED_MODEL,
+    )
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    // The directories come from the environment alone, before any file
+    // is read. A subcommand that touches nothing but the state
+    // directory stops here: a broken `ilar.toml` — or an endpoint that
+    // takes three seconds to refuse a listing — must not stand between
+    // someone and the credential they came to fix.
+    let dirs = Loader::new().resolve_dirs();
+    dirs.require_home()?;
+    if let Some(Command::Secret { command }) = args.command {
+        let store = ilar::secrets::SecretStore::open(&dirs.state);
+        // A piped value is read as it is; at a terminal it is asked
+        // for hidden and confirmed, so nothing is ever echoed.
+        use std::io::IsTerminal;
+        let mut stdin = std::io::stdin().lock();
+        let piped: Option<&mut dyn std::io::Read> = if stdin.is_terminal() {
+            None
+        } else {
+            Some(&mut stdin)
+        };
+        let text = secret_cli::run(&store, command, piped, &mut secret_cli::ask_on_terminal)?;
+        println!("{text}");
+        return Ok(());
+    }
+    if let Some(Command::Login) = args.command {
+        let store = ilar::auth::AuthStore::open(dirs.state.clone());
+        let tokens = ilar::auth::login_flow(&store, std::time::Duration::from_secs(300), true)
+            .await
+            .context("login failed")?;
+        println!(
+            "Logged in as ChatGPT account {}",
+            tokens
+                .account_id
+                .as_deref()
+                .unwrap_or("(account id unknown)")
+        );
+        println!("Tokens stored at {}", store.tokens_path().display());
+        print!("{}", chatgpt_setup_hint(&dirs.config.join("ilar.toml")));
+        return Ok(());
+    }
     let config = Loader::new().resolve().context("loading config")?;
     if let Some(Command::Exec(exec_args)) = args.command {
         let config = unlock_secrets(config)?;
@@ -1180,37 +1261,6 @@ async fn main() -> Result<()> {
         )
         .await;
     }
-    if let Some(Command::Secret { command }) = args.command {
-        let store = ilar::secrets::SecretStore::open(config.state_dir());
-        // A piped value is read as it is; at a terminal it is asked
-        // for hidden and confirmed, so nothing is ever echoed.
-        use std::io::IsTerminal;
-        let mut stdin = std::io::stdin().lock();
-        let piped: Option<&mut dyn std::io::Read> = if stdin.is_terminal() {
-            None
-        } else {
-            Some(&mut stdin)
-        };
-        let text = secret_cli::run(&store, command, piped, &mut secret_cli::ask_on_terminal)?;
-        println!("{text}");
-        return Ok(());
-    }
-    if let Some(Command::Login) = args.command {
-        let store = ilar::auth::AuthStore::open(config.state_dir().to_path_buf());
-        let tokens = ilar::auth::login_flow(&store, std::time::Duration::from_secs(300), true)
-            .await
-            .context("login failed")?;
-        println!(
-            "Logged in as ChatGPT account {}",
-            tokens
-                .account_id
-                .as_deref()
-                .unwrap_or("(account id unknown)")
-        );
-        println!("Tokens stored at {}", store.tokens_path().display());
-        return Ok(());
-    }
-
     let configured_theme = theme::ThemeId::parse(&config.general.theme).with_context(|| {
         format!(
             "unknown theme {:?}; expected one of: {}",
@@ -1250,12 +1300,7 @@ async fn main() -> Result<()> {
     loop {
         let resume_target = if first_run {
             if args.continue_last {
-                Some(
-                    store
-                        .latest()
-                        .map(|session| session.id)
-                        .context("no sessions to continue (session directory is empty)")?,
-                )
+                Some(ilar::runtime::latest_session_id(&store)?)
             } else {
                 args.session.clone()
             }
@@ -1276,7 +1321,7 @@ async fn main() -> Result<()> {
         first_run = false;
 
         let cwd = std::env::current_dir().context("no cwd")?;
-        let plan = ilar::runtime::RuntimePlan::resolve(
+        let mut plan = ilar::runtime::RuntimePlan::resolve(
             &config,
             &ilar::runtime::RuntimeOptions {
                 model: cli_model.map(str::to_string),
@@ -1305,6 +1350,7 @@ async fn main() -> Result<()> {
             return Ok(());
         }
         let skipped_project_instructions = plan.skipped_project_instructions;
+        let launch_notices = std::mem::take(&mut plan.notices);
         let model_for_session = plan.model.clone();
         let skill_inventory = plan.skills.clone();
         let command_inventory = plan.commands.clone();
@@ -1428,6 +1474,7 @@ async fn main() -> Result<()> {
         // session entered later through the picker says it again.
         for line in startup_notices(
             std::mem::take(&mut config_warnings),
+            launch_notices,
             skipped_project_instructions,
             args.no_project_instructions,
         ) {
@@ -4676,6 +4723,22 @@ mod tests {
     use ilar::runtime::{create_root_session, restored_todos};
     use ilar::session::{SessionMeta, new_id};
 
+    /// A login that stores tokens nothing points at is half a next
+    /// step: the following `ilar` runs the default zai model and dies
+    /// naming a key the person never had.
+    #[test]
+    fn login_ends_with_the_lines_that_make_the_account_usable() {
+        let hint = chatgpt_setup_hint(std::path::Path::new("/home/x/.config/ilar/ilar.toml"));
+        assert!(hint.contains("/home/x/.config/ilar/ilar.toml"), "{hint}");
+        assert!(hint.contains("[providers.openai]"), "{hint}");
+        assert!(hint.contains("auth = \"chatgpt\""), "{hint}");
+        assert!(hint.contains("[general]"), "{hint}");
+        assert!(
+            hint.contains(ilar::model::CHATGPT_SUGGESTED_MODEL),
+            "{hint}"
+        );
+    }
+
     /// A project file that exists but was refused is reported, after
     /// the config warnings and in the same transcript channel: a launch
     /// that quietly ignores the project's instructions is unreadable
@@ -4683,20 +4746,26 @@ mod tests {
     #[test]
     fn a_refused_project_file_is_announced_at_startup() {
         // Nothing to report when nothing was dropped.
-        assert!(startup_notices(Vec::new(), None, false).is_empty());
-        assert!(startup_notices(Vec::new(), None, true).is_empty());
+        assert!(startup_notices(Vec::new(), Vec::new(), None, false).is_empty());
+        assert!(startup_notices(Vec::new(), Vec::new(), None, true).is_empty());
 
-        // Named as written, after the config warnings, and blaming the
-        // knob that actually did it.
+        // Named as written, after the config warnings and this launch's
+        // own, and blaming the knob that actually did it.
         assert_eq!(
-            startup_notices(vec!["theme ignored".into()], Some("AGENTS.md"), true),
+            startup_notices(
+                vec!["theme ignored".into()],
+                vec!["variant dropped".into()],
+                Some("AGENTS.md"),
+                true
+            ),
             vec![
                 "theme ignored".to_string(),
+                "variant dropped".to_string(),
                 "project AGENTS.md present but skipped (--no-project-instructions)".to_string(),
             ]
         );
         assert_eq!(
-            startup_notices(Vec::new(), Some("CLAUDE.md"), false),
+            startup_notices(Vec::new(), Vec::new(), Some("CLAUDE.md"), false),
             vec![
                 "project CLAUDE.md present but skipped (general.project_instructions = false)"
                     .to_string()
