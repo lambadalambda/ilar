@@ -1724,6 +1724,19 @@ fn next_notification(
     })
 }
 
+/// Move everything the channel is holding into the backlog, in arrival
+/// order. The backlog is the queue every surface reads — the notice
+/// row, the pending manager, the quit cost — so a completion sitting
+/// unread in the channel is a completion nobody can see.
+fn drain_into_backlog(
+    held: &mut std::collections::VecDeque<ilar::delivery::Parcel>,
+    notifications: &mut tokio::sync::mpsc::Receiver<ilar::subagent::Notification>,
+) {
+    while let Ok(queued) = notifications.try_recv() {
+        held.push_back(ilar::delivery::Parcel::fresh(queued));
+    }
+}
+
 /// A propagated completion goes behind what was already queued when it
 /// landed: the channel is drained into the held queue first, then the
 /// propagated one takes the back seat. A bare push_back would let it
@@ -1733,9 +1746,7 @@ fn hold_propagate_behind_backlog(
     notifications: &mut tokio::sync::mpsc::Receiver<ilar::subagent::Notification>,
     parcel: ilar::delivery::Parcel,
 ) {
-    while let Ok(queued) = notifications.try_recv() {
-        held.push_back(ilar::delivery::Parcel::fresh(queued));
-    }
+    drain_into_backlog(held, notifications);
     held.push_back(parcel);
 }
 
@@ -2361,6 +2372,15 @@ impl schedule::Runtime for LoopRuntime<'_> {
         // cancel-all takes them too.
         app.background_running = self.spawner.running_background() + self.routed.len();
         app.deliveries_in_flight = self.routed.len();
+        // A pause stops the drain, so a completion that lands during
+        // one stays unread in the channel: invisible on the notice
+        // row, absent from the pending manager, uncounted by the quit
+        // warning — while the abort that paused things promised its
+        // result was held. Move it into the backlog that is actually
+        // shown.
+        if *self.notifications_paused {
+            drain_into_backlog(self.held_notifications, self.notifications);
+        }
         // Headlines, not a count: the pending manager lists which
         // results wait and offers to deliver them.
         app.held_results = self
@@ -2702,9 +2722,11 @@ fn switch_blocked(
     } else if background_agents > 0 {
         // Naming the keys: "abort them first" sent the user looking for
         // a cancel that was only reachable through Ctrl-Q's `d d`, and
-        // said nothing about stopping just the one in the way.
+        // said nothing about stopping just the one in the way. Kept
+        // short: this string is also used as a notice line, where an
+        // 80-column terminal would truncate the second key away.
         Some(format!(
-            "{background_agents} background agent(s) running; wait, cancel all in Ctrl-Q, or Ctrl-G in one agent's view"
+            "{background_agents} background task(s) running; Ctrl-Q cancels all, Ctrl-G one"
         ))
     } else if deliveries > 0 {
         Some("a task result is being delivered; wait a moment".into())
@@ -3693,9 +3715,16 @@ async fn run_app(
                     app.input.is_blank(),
                 );
                 // Any other key ends a pending quit confirmation, so the
-                // warning always describes the keypress before it.
+                // warning always describes the keypress before it. The
+                // focus view's cancel arms the same way and must expire
+                // the same way — here, not inside the focus branch,
+                // which several keys (Ctrl-L, an armed quit) never
+                // reach.
                 if !quitting {
                     app.quit_armed = false;
+                }
+                if !matches!((code, control), (KeyCode::Char('g'), true)) {
+                    app.disarm_focus_cancel();
                 }
                 if quitting {
                     // Quitting under a running rewind would kill git
@@ -4472,8 +4501,6 @@ async fn run_app(
                         }
                         continue;
                     }
-                    // Two presses in a row, not two presses ever.
-                    app.disarm_focus_cancel();
                     if code == KeyCode::Esc {
                         app.close_focus();
                         continue;
@@ -4634,15 +4661,21 @@ async fn run_app(
                         } else if let Some(cancel) = cancel.as_ref().filter(|_| app.busy) {
                             cancel.cancel();
                             app.status = "aborting…".into();
+                            let detached = app
+                                .background_running
+                                .saturating_sub(app.deliveries_in_flight);
                             // Cancel-all pauses notifications for
                             // exactly this reason: the dying children's
                             // completions would otherwise start a fresh
                             // turn nobody asked for, moments after the
-                            // user said stop.
-                            notifications_paused = true;
-                            let detached = app
-                                .background_running
-                                .saturating_sub(app.deliveries_in_flight);
+                            // user said stop. Only when something is
+                            // actually detached, though — a pause with
+                            // nothing to hold is an unexplained one,
+                            // and it would sit on every other session's
+                            // mail until the next completed turn.
+                            if detached > 0 {
+                                notifications_paused = true;
+                            }
                             app.set_notice(abort_notice(detached), NoticeLevel::Warning);
                             app.set_activity(Activity::Aborting);
                         } else {
@@ -5032,15 +5065,20 @@ mod tests {
             switch_blocked(true, 0, 0, false, false).as_deref(),
             Some("finish or abort the current turn before switching sessions")
         );
-        // The agent refusal names both keys and the count: a refusal
-        // that says "abort them first" without saying how is a dead end.
+        // The refusal names both keys and the count: one that says
+        // "abort them first" without saying how is a dead end. Short
+        // enough to survive an 80-column notice line, too.
         let agents = switch_blocked(false, 1, 0, false, false).expect("agents block the switch");
         assert!(
-            agents.starts_with("1 background agent(s) running"),
+            agents.starts_with("1 background task(s) running"),
             "{agents}"
         );
         assert!(agents.contains("Ctrl-Q"), "{agents}");
         assert!(agents.contains("Ctrl-G"), "{agents}");
+        assert!(
+            agents.len() <= 77,
+            "truncates on an 80-column line: {agents}"
+        );
         assert_eq!(
             switch_blocked(false, 0, 0, true, false).as_deref(),
             Some("input has an unsent draft; send or clear it first")

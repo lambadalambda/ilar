@@ -138,8 +138,9 @@ impl App {
             Some((text, color)) => (text.to_string(), color),
             None if self.notifications_paused && !self.held_results.is_empty() => (
                 format!(
-                    "{} task result(s) held — send a message, or Ctrl-Q to deliver",
-                    self.held_results.len()
+                    "{} task result(s) held — {}",
+                    self.held_results.len(),
+                    crate::schedule::HELD_RESULT_ACTION
                 ),
                 theme::PRIMARY,
             ),

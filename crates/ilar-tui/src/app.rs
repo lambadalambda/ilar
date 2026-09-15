@@ -1769,8 +1769,13 @@ impl App {
         }
         // Held results are standing state like any other: listed, and
         // actionable, rather than a count on the notice row that the
-        // user could only clear by spending a turn.
-        items.extend((0..self.held_results.len()).map(PendingItem::Held));
+        // user could only clear by spending a turn. Only while
+        // delivery is paused, though — the same backlog carries mail
+        // merely in transit during a normal climb, and offering to
+        // "deliver" that would clear a flag that is already clear.
+        if self.notifications_paused {
+            items.extend((0..self.held_results.len()).map(PendingItem::Held));
+        }
         if self.retry_available {
             items.push(PendingItem::Retry);
         }
@@ -4384,6 +4389,12 @@ mod tests {
             app.pending_manager_key(KeyCode::Char('d'), false),
             PendingAction::Stay
         );
+
+        // The same backlog carries mail merely in transit during a
+        // normal climb. Nothing is held then, so nothing is listed:
+        // offering to "deliver" it would clear a flag already clear.
+        app.notifications_paused = false;
+        assert_eq!(app.pending_items(), Vec::new());
     }
 
     /// The footer promises "Enter edit/act"; a jobs or services row

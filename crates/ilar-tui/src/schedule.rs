@@ -338,24 +338,35 @@ fn complete<R: Runtime>(app: &mut App, completion: Completion, runtime: &mut R) 
     intents
 }
 
-/// The status line a held result puts up, and the verb every other
-/// surface must use for the same state: `deliver`, not `retry`. The
-/// notice line in `view.rs` counts them; this one names the state.
+/// What every surface says to do about a held result: `deliver`, not
+/// `retry`, and the two ways to. The status line uses this verbatim;
+/// `view.rs` prefixes a count and `hold_notice` a reason.
+pub(crate) const HELD_RESULT_ACTION: &str = "send a message, or Ctrl-Q to deliver";
+
+/// The status line a held result puts up.
 pub(crate) const HELD_RESULT_STATUS: &str = "task result held — send a message to deliver";
 
 /// What a held delivery says on the notice line. A delivery the user
-/// just cancelled says *cancelled*: a cancelled attempt requeues, and
-/// the "cannot reach it while it is busy" wording then landed on the
-/// notice line moments after cancel-all — overwriting "background
-/// tasks cancelled" with a complaint about a wall nobody hit.
+/// just cancelled says *cancelled* — and says it of the delivery, not
+/// the result, which survives and still goes out. The "cannot reach it
+/// while it is busy" wording otherwise landed on the notice line
+/// moments after cancel-all, overwriting "background tasks cancelled"
+/// with a complaint about a wall nobody hit.
 fn hold_notice(target: &str, cancelled: bool) -> String {
-    if cancelled {
-        format!("the task result for {target} was cancelled — held; send a message to deliver")
+    let reason = if cancelled {
+        format!("the delivery of a task result for {target} was cancelled")
     } else {
-        format!(
-            "a task result for {target} cannot reach it while it is busy — held; send a message to deliver"
-        )
-    }
+        format!("a task result for {target} cannot reach it while it is busy")
+    };
+    format!("{reason} — held; {HELD_RESULT_ACTION}")
+}
+
+/// The transcript's one-line receipt for a delivery that moved: `✉
+/// "survey the API" delivered to explore · land the fix`. Quiet, in
+/// the transcript rather than the notice line, because it asks the
+/// user for nothing.
+fn envelope_line(description: &str, verb: &str, target: &str) -> String {
+    format!("✉ \"{description}\" {verb} {target}")
 }
 
 /// A delivery to another session finished: file its outcome. Nothing
@@ -379,25 +390,23 @@ fn routed_complete<R: Runtime>(
     // its own.
     match ilar::delivery::disposition(result, parcel) {
         Disposition::Delivered => {
-            // A quiet line in the transcript, not the notice: the
-            // delivery asks nothing of the user, and the notice line
-            // is for things that do.
             let target = runtime.session_label(app, &delivered.parent_session_id);
-            app.push_transcript_line(Line_::System(format!(
-                "✉ \"{}\" delivered to {target}",
-                delivered.description
+            app.push_transcript_line(Line_::System(envelope_line(
+                &delivered.description,
+                "delivered to",
+                &target,
             )));
         }
         Disposition::Propagate(propagated) => {
             // The ✉ row this delivery wore is about to vanish, and the
             // next hop's own completion can be minutes away: say where
-            // the result went, the way the steer path says where it
-            // landed. Quiet, because the user is not being asked for
-            // anything.
+            // the result went, the way the landing says where it
+            // landed.
             let next = runtime.session_label(app, &propagated.notification().parent_session_id);
-            app.push_transcript_line(Line_::System(format!(
-                "✉ \"{}\" passed on to {next}",
-                delivered.description
+            app.push_transcript_line(Line_::System(envelope_line(
+                &delivered.description,
+                "passed on to",
+                &next,
             )));
             runtime.hold_propagate(propagated);
         }

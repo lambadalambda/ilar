@@ -125,7 +125,7 @@ Four more keys change *where* the prompt runs:
 
 | Key | Effect |
 | --- | --- |
-| `subtask: true` | Run the body as a detached task instead of a turn in this session. Its result lands here as a completion notification, and the agents panel shows it while it works. |
+| `subtask: true` | Run the body as a detached task instead of a turn in this session, under `build` unless `agent:` says otherwise. Its result lands here as a completion notification, and the agents panel shows it while it works. |
 | `agent: <name>` | Which agent runs it — `build`, `explore`, or one of your own. Implies `subtask: true`, since an agent name means nothing anywhere else. Naming an agent that does not exist is refused when you invoke the command, listing the ones that do. |
 | `model: <id>` | Override the model for this invocation only; the previous model comes back when the turn (or task) ends. |
 | `variant: <name>` | The reasoning variant to go with `model`. |

@@ -44,15 +44,20 @@ const BACKGROUND_ABORT_GRACE: std::time::Duration = std::time::Duration::from_se
 /// the universe.
 const NOTIFICATION_LOCK_RETRY: std::time::Duration = std::time::Duration::from_millis(25);
 const NOTIFICATION_LOCK_ATTEMPTS: usize = 120;
-/// How long a delivery waits for the session's own turn to let go
-/// before handing the notification back. Same budget as the lock
-/// retries above, and for the same reason: a resume that runs for
-/// minutes held the delivery for all of them, which showed as two ✉
-/// rows for one session and refused every session switch with "a task
-/// result is being delivered; wait a moment" for the whole time. Held
-/// is honest and re-offered the moment the user moves; waiting
-/// forever is not.
+/// One round of waiting for a busy session to let go of its claim.
+/// Between rounds the result is re-offered as a *steer*, which is the
+/// point of the cap: the session that was mid-resume when this
+/// delivery started may now be running a turn that can take the
+/// result live, and taking it there beats queueing a second resume
+/// behind the first — the two ✉ rows for one session.
 const NOTIFICATION_CLAIM_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+/// How many of those rounds before the result goes back to the user.
+/// Generous on purpose: handing it back pauses delivery and asks for
+/// a keystroke, which an ordinary child turn must never provoke. What
+/// it rules out is the unbounded wait — a resume that runs for many
+/// minutes used to hold the ✉ row and the "a task result is being
+/// delivered; wait a moment" switch refusal for all of them.
+const NOTIFICATION_CLAIM_ROUNDS: usize = 20;
 /// The one wording for "make a worktree and name it here". Both refusals
 /// that send the model there quote it, and so does the schema: a
 /// corrective that drifts between sites is one the model has to learn
@@ -212,11 +217,13 @@ struct RunningTaskGuard {
 }
 
 impl RunningTaskGuard {
-    fn update(&self, change: impl Fn(&mut RunningTask)) {
-        for task in lock_unpoisoned(&self.registry).iter_mut() {
-            if task.row == self.row {
-                change(task);
-            }
+    fn update(&self, change: impl FnOnce(&mut RunningTask)) {
+        // `row` is unique, so the first hit is the only hit.
+        if let Some(task) = lock_unpoisoned(&self.registry)
+            .iter_mut()
+            .find(|task| task.row == self.row)
+        {
+            change(task);
         }
     }
 
@@ -619,8 +626,7 @@ impl SubagentSpawner {
     /// `was cancelled` notification, held rather than delivered while
     /// notifications are paused.
     pub fn cancel_task(&self, session_id: &str) -> bool {
-        let mut registry = lock_unpoisoned(&self.background_tasks);
-        registry.tasks.retain(|task| !task.handle.is_finished());
+        let registry = self.live_background_tasks();
         let mut cancelled = false;
         for task in &registry.tasks {
             if task.session_id.as_deref() == Some(session_id) {
@@ -629,6 +635,15 @@ impl SubagentSpawner {
             }
         }
         cancelled
+    }
+
+    /// The background registry with the finished tasks swept out. Every
+    /// reader wants that — a finished handle is a task that is gone,
+    /// and counting or cancelling one is a lie either way.
+    fn live_background_tasks(&self) -> std::sync::MutexGuard<'_, BackgroundRegistry> {
+        let mut registry = lock_unpoisoned(&self.background_tasks);
+        registry.tasks.retain(|task| !task.handle.is_finished());
+        registry
     }
 
     pub async fn shutdown(&self) {
@@ -652,9 +667,7 @@ impl SubagentSpawner {
 
     /// Number of live detached background tasks.
     pub fn running_background(&self) -> usize {
-        let mut registry = lock_unpoisoned(&self.background_tasks);
-        registry.tasks.retain(|task| !task.handle.is_finished());
-        registry.tasks.len()
+        self.live_background_tasks().tasks.len()
     }
 
     pub fn resolver(&self) -> Arc<dyn ProviderResolver> {
@@ -1079,7 +1092,7 @@ impl SubagentSpawner {
         let _active_session = active_session.expect("new session id must be unique");
         // From here the child is working: everything below either runs
         // it or moves the guard into the task that will.
-        let _running_task = self.register_running(RunningTask {
+        let running_task = self.register_running(RunningTask {
             session_id: session_id.clone(),
             parent_session_id: ctx.session_id.clone(),
             description: input.description.clone(),
@@ -1216,7 +1229,9 @@ impl SubagentSpawner {
                     registry: task_registry,
                 };
                 let _active_session = _active_session;
-                let _running_task = _running_task; // deregisters when the task ends
+                // Deregisters the panel row when the task ends, and
+                // until then it is how the task talks to that row.
+                let running_task = running_task;
                 // Declared with the other guards so it drops before
                 // them: the channel is gone before the session can be
                 // claimed again.
@@ -1237,7 +1252,7 @@ impl SubagentSpawner {
                         // A detached task has no tool row, but it has a
                         // panel row, and a mutable one queued behind
                         // another read there as working.
-                        WaitAnnouncement::Panel(&_running_task),
+                        WaitAnnouncement::Panel(&running_task),
                     ) => outcome,
                     () = task_cancel.cancelled() => LeaseOutcome::Cancelled,
                 };
@@ -1283,7 +1298,7 @@ impl SubagentSpawner {
                 // The panel reads the same clock the watchdog does, so
                 // a task going quiet shows as `quiet 45s` long before
                 // the watchdog decides it is dead.
-                _running_task.watch(&heartbeat);
+                running_task.watch(&heartbeat);
                 let watcher_heartbeat = heartbeat.clone();
                 let watcher_activity = activity.clone();
                 let watcher = tokio::spawn(async move {
@@ -1863,11 +1878,12 @@ task's scope yourself; continue only clearly disjoint work."
         };
         let workspace = self.workspace.scoped(&workspace_location);
         let runtime = self.derived(workspace_location.clone(), workspace.clone(), depth);
-        let Some(_active_session) = self
-            .wait_for_session_claim(&notification.parent_session_id, &cancel)
-            .await
-        else {
-            return Ok(RouteOutcome::Requeue(notification));
+        let _active_session = match self.claim_for_delivery(&notification, &cancel).await {
+            ClaimOutcome::Claimed(claim) => claim,
+            // A live turn took it: that turn reports its own outcome
+            // upward, so nothing here owes the grandparent a word.
+            ClaimOutcome::Steered => return Ok(RouteOutcome::Complete),
+            ClaimOutcome::Busy => return Ok(RouteOutcome::Requeue(notification)),
         };
         let workspace_access = match agent.workspace_mode {
             AgentWorkspaceMode::Mutable => WorkspaceAccess::Mutating,
@@ -2023,9 +2039,14 @@ task's scope yourself; continue only clearly disjoint work."
         let Some(grandparent_id) = meta.parent_id else {
             return match outcome {
                 Ok(TurnOutcome::Completed) => Ok(RouteOutcome::Complete),
-                Ok(TurnOutcome::Aborted) => {
-                    Err(anyhow::anyhow!("notification parent turn was aborted"))
-                }
+                // Cancelled, not failed. An error here reaches the
+                // driver as a salvage: the result is dumped in front
+                // of the user and *retired from the outbox*, so a turn
+                // the user stopped would cost the result its last
+                // durable copy. Hand it back instead — the log check
+                // at the top of this function catches the case where
+                // the aborted turn had already appended it.
+                Ok(TurnOutcome::Aborted) => Ok(RouteOutcome::Requeue(notification)),
                 Ok(TurnOutcome::MaxIterations) => Err(anyhow::anyhow!(
                     "notification parent reached its iteration limit"
                 )),
@@ -2119,12 +2140,47 @@ task's scope yourself; continue only clearly disjoint work."
         })
     }
 
-    /// Claim the session, waiting a bounded while for whoever holds it.
-    /// `None` means "not now" — cancelled, or the wait ran out — and
-    /// the caller requeues, exactly as it does for a held writer lock.
-    /// The cap is the point: without it a delivery behind a long resume
-    /// waited for the whole resume, holding a ✉ row and a session-
-    /// switch refusal open for minutes.
+    /// Take the session for this delivery's own turn, or get the result
+    /// into a turn that can take it live. Either is a delivery;
+    /// `Busy` is the only answer that owes the user anything.
+    ///
+    /// The rounds are what make the wait both bounded and self-healing.
+    /// Waiting on the claim alone waited out whatever held it, however
+    /// long that was; giving up after one round would hand an ordinary
+    /// child turn back to the user. Between rounds the result is
+    /// re-offered as a steer, so a session that has moved on to a
+    /// steerable turn takes it at its next step.
+    async fn claim_for_delivery(
+        &self,
+        notification: &Notification,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> ClaimOutcome {
+        for _ in 0..NOTIFICATION_CLAIM_ROUNDS {
+            if let Some(claim) = self
+                .wait_for_session_claim(&notification.parent_session_id, cancel)
+                .await
+            {
+                return ClaimOutcome::Claimed(claim);
+            }
+            if cancel.is_cancelled() {
+                return ClaimOutcome::Busy;
+            }
+            // Same promise as the steer at the top of `route_notification`:
+            // ChildSteers keeps it exactly-once, so an accepted steer is
+            // a delivery and whoever drives that turn reports it upward.
+            if self
+                .child_steers
+                .steer(&notification.parent_session_id, notification.text.clone())
+            {
+                return ClaimOutcome::Steered;
+            }
+        }
+        ClaimOutcome::Busy
+    }
+
+    /// One round of the above: claim the session, or give up when the
+    /// round's deadline passes. `None` also covers cancellation — the
+    /// caller tells them apart by asking the token.
     async fn wait_for_session_claim(
         &self,
         session_id: &str,
@@ -2584,6 +2640,18 @@ fn task_notification(
 
 /// The one way a background task reports that it was stopped — it is
 /// reachable from the lease wait, the revalidation and the run itself.
+/// How a delivery got hold of the session it is for.
+enum ClaimOutcome {
+    /// It is ours to resume: the guard holds the claim.
+    Claimed(ActiveSessionGuard),
+    /// A turn that was already running took the result as a steer —
+    /// delivered, with nothing left to do here.
+    Steered,
+    /// Still busy after the whole budget, or the delivery was
+    /// cancelled. The result goes back for a later attempt.
+    Busy,
+}
+
 /// How a nested hop reports the parent turn it just ran to the
 /// grandparent: the verb for the headline, the body, and whether it
 /// reads as an error. `None` for a clean finish, whose body is the
