@@ -104,48 +104,64 @@ pub fn answer(slot: &PendingSlot, approval: Option<Approval>) -> Result<String, 
         .map_err(|_| "The tool stopped waiting for that.")
 }
 
-/// The most of a command one ask shows: Delta Chat folds a bubble past
-/// 34 display lines of 100 characters, and the ask's own words have to
-/// fit beside the command. Past this the command gets a tail naming
-/// what is not shown, instead of the header, the command and the
-/// instructions arriving as separate bubbles.
+/// The most of a command one ask shows, counted the way Delta Chat
+/// folds a bubble: a display line is 100 characters or a line break,
+/// and past 34 of them the message is cut behind "show full message".
+/// The ask's own words take a handful, so the command gets these, and
+/// a tail naming what is not shown — better than the header, the
+/// command and the instructions arriving as separate bubbles.
 const ASK_COMMAND_LINES: usize = 20;
-const ASK_COMMAND_CHARS: usize = 1200;
+const ASK_LINE_CHARS: usize = 100;
+/// The indent every line of the command wears.
+const ASK_INDENT: &str = "    ";
+
+/// How many display lines a line of the command takes, indent and all.
+fn display_lines(line: &str) -> usize {
+    (ASK_INDENT.len() + line.chars().count())
+        .max(1)
+        .div_ceil(ASK_LINE_CHARS)
+}
 
 /// The command as the ask shows it: verbatim, every line indented, so
 /// its last line cannot be read as part of the instructions, and
 /// clipped with a tail when it is longer than one message can hold.
 fn shown_command(detail: &str) -> String {
+    if detail.trim().is_empty() {
+        return format!("{ASK_INDENT}(no command)\n");
+    }
     let lines: Vec<&str> = detail.lines().collect();
     let mut shown = String::new();
-    let mut chars = 0;
+    let mut used = 0;
     let mut whole = 0;
-    for line in lines.iter().take(ASK_COMMAND_LINES) {
-        let room = ASK_COMMAND_CHARS - chars;
-        if line.chars().count() > room {
-            // Cut, and marked as cut where the cut is.
-            let cut: String = line.chars().take(room).collect();
-            shown.push_str(&format!("    {cut}…\n"));
-            whole += 1;
+    for line in &lines {
+        let needed = display_lines(line);
+        if used + needed > ASK_COMMAND_LINES {
+            // Cut to what the lines left over hold, and marked as cut
+            // where the cut is.
+            let room = (ASK_COMMAND_LINES - used) * ASK_LINE_CHARS;
+            if room > ASK_INDENT.len() + 1 {
+                let cut: String = line.chars().take(room - ASK_INDENT.len() - 1).collect();
+                shown.push_str(&format!("{ASK_INDENT}{cut}…\n"));
+                whole += 1;
+            }
             break;
         }
-        shown.push_str(&format!("    {line}\n"));
-        chars += line.chars().count();
+        shown.push_str(&format!("{ASK_INDENT}{line}\n"));
+        used += needed;
         whole += 1;
     }
     let hidden = lines.len() - whole;
     if hidden > 0 {
         shown.push_str(&format!(
-            "    … {hidden} more line{} not shown\n",
+            "{ASK_INDENT}… {hidden} more line{} not shown\n",
             if hidden == 1 { "" } else { "s" }
         ));
     }
     shown
 }
 
-/// The message the chat gets. `session_id` is the seat's own session:
-/// an ask from another one is a subagent's, and says so.
-pub fn ask_text(prompt: &GrantPrompt, session_id: &str) -> String {
+/// The message the chat gets.
+pub fn ask_text(prompt: &GrantPrompt, asker: &Asker) -> String {
     let purpose = if prompt.description.is_empty() {
         String::new()
     } else {
@@ -160,7 +176,7 @@ pub fn ask_text(prompt: &GrantPrompt, session_id: &str) -> String {
     format!(
         "🔑 {} wants {}{purpose} to run:\n\n{}\n/grant allows it this once, /grant session or \
          /grant always for longer, /deny refuses. Unanswered in {} minutes, it is a no.{password}",
-        Asker::of(prompt, session_id).shown,
+        asker.shown,
         prompt.secret,
         shown_command(&prompt.detail),
         GRANT_TIMEOUT.as_secs() / 60
@@ -214,8 +230,8 @@ pub async fn watch(
                     .await;
             }
         };
-        post(ask_text(&prompt, &session_id)).await;
         let asker = Asker::of(&prompt, &session_id);
+        post(ask_text(&prompt, &asker)).await;
         let (answer_tx, answer_rx) = oneshot::channel();
         *slot.lock().unwrap() = Some(PendingGrant {
             secret: prompt.secret.clone(),
@@ -373,9 +389,9 @@ mod tests {
         assert_eq!(child.shown, "bash (subagent)");
         assert_eq!(child.tool, "bash");
         assert!(
-            ask_text(&prompt, "another-session").contains("bash (subagent) wants GITHUB_TOKEN"),
+            ask_text(&prompt, &child).contains("bash (subagent) wants GITHUB_TOKEN"),
             "{}",
-            ask_text(&prompt, "another-session")
+            ask_text(&prompt, &child)
         );
         // The revoke line names the tool, not the mark, and only that
         // tool: `ilar secret revoke NAME` alone revokes every one.
@@ -394,10 +410,19 @@ mod tests {
         );
     }
 
+    /// A bubble as Delta Chat counts it: a display line per 100
+    /// characters or line break, folded past 34.
+    fn bubble_lines(text: &str) -> usize {
+        text.lines()
+            .map(|line| line.chars().count().max(1).div_ceil(ASK_LINE_CHARS))
+            .sum()
+    }
+
     #[test]
     fn a_long_command_is_clipped_with_a_tail_so_the_ask_stays_one_message() {
         // Short and multi-line: shown whole, every line indented.
         assert_eq!(shown_command("one\ntwo"), "    one\n    two\n");
+        assert_eq!(shown_command("  "), "    (no command)\n");
         let many = (1..=25)
             .map(|n| format!("line {n}"))
             .collect::<Vec<_>>()
@@ -409,17 +434,23 @@ mod tests {
         // One line longer than any message: cut where it is cut.
         let long = "x".repeat(2000);
         let shown = shown_command(&long);
-        assert_eq!(shown, format!("    {}…\n", "x".repeat(ASK_COMMAND_CHARS)));
-        // The whole ask fits one Delta Chat bubble, header and all.
-        let (reply, _receive) = oneshot::channel();
-        let mut prompt = prompt(reply);
-        prompt.detail = many;
-        let text = ask_text(&prompt, "s");
-        let display_lines: usize = text
-            .lines()
-            .map(|line| line.chars().count().max(1).div_ceil(100))
-            .sum();
-        assert!(display_lines <= 34, "{display_lines}");
+        assert!(shown.starts_with("    xxx"), "{shown}");
+        assert!(shown.ends_with("…\n"), "{shown}");
+        assert_eq!(bubble_lines(&shown), ASK_COMMAND_LINES);
+        // Short lines cost a display line each: what is left over is
+        // what the long last line may take, not a fresh budget.
+        let mixed = format!("{}\n{long}", "x\n".repeat(18));
+        assert_eq!(bubble_lines(&shown_command(&mixed)), ASK_COMMAND_LINES);
+        // The whole ask fits one bubble, header, tail, password and all.
+        for detail in [many, long, mixed] {
+            let (reply, _receive) = oneshot::channel();
+            let mut prompt = prompt(reply);
+            prompt.detail = detail;
+            prompt.password_wanted = true;
+            let asker = Asker::of(&prompt, "s");
+            let lines = bubble_lines(&ask_text(&prompt, &asker));
+            assert!(lines <= 34, "{lines}");
+        }
     }
 
     #[tokio::test]
