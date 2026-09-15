@@ -82,3 +82,11 @@ Structure:
   ilar-tui/src/grants.rs and ilar-gateway/src/grants.rs.
 
 Size: S each. Source: stream reviews, UX sweep 2026-09-15.
+
+From stream C:
+- sidebar.rs still prints `job` in a ⚙ row\x27s agent-name slot (the
+  count half of the panel-title item is done, the label half is not).
+- docs/interface.md opens with "Press F1 any time", false under a
+  grant prompt and a question modal, which outrank Help.
+- docs/assets/sessions.svg still shows `↵ resume`; a generated
+  screenshot to regenerate.

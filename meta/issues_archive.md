@@ -390,3 +390,6 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [One child can be cancelled](issues/one-child-can-be-cancelled.md)
 - [x] [Agent endings use one vocabulary](issues/agent-endings-use-one-vocabulary.md)
 - [x] [Delivery: small frictions](issues/delivery-small-frictions.md)
+- [x] [The grant prompt takes paste and names its keys](issues/the-grant-prompt-takes-paste-and-names-its-keys.md)
+- [x] [Talking to a focused agent: polish](issues/talking-to-a-focused-agent-polish.md)
+- [x] [--view looks read-only](issues/view-looks-read-only.md)

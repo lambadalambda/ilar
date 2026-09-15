@@ -44,3 +44,7 @@ confirms)` and `d delete (×2 for goal/jobs)`; Esc is
 close/cancel/undo/deny/back/returns. Pick `Enter` or `↵`, one
 double-press phrasing, and `Esc close` everywhere it is not truly
 undo or deny.
+
+Done 2026-09-15 (stream C of the sweep): Enter everywhere, one
+double-press phrasing, Esc close where it is not undo or deny. The
+original list above is still open.
