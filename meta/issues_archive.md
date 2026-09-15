@@ -386,3 +386,7 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Compaction points somewhere safe](issues/compaction-points-somewhere-safe.md)
 - [x] [A goal survives or ends aloud](issues/a-goal-survives-or-ends-aloud.md)
 - [x] [Session: small frictions](issues/session-small-frictions.md)
+- [x] [Esc spares detached children](issues/esc-spares-detached-children.md)
+- [x] [One child can be cancelled](issues/one-child-can-be-cancelled.md)
+- [x] [Agent endings use one vocabulary](issues/agent-endings-use-one-vocabulary.md)
+- [x] [Delivery: small frictions](issues/delivery-small-frictions.md)

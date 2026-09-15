@@ -118,10 +118,6 @@ milestones 15–17 stay filed — they come back when the feature does.*
 - [ ] [The grant prompt takes paste and names its keys](issues/the-grant-prompt-takes-paste-and-names-its-keys.md)
 - [ ] [Talking to a focused agent: polish](issues/talking-to-a-focused-agent-polish.md)
 - [ ] [--view looks read-only](issues/view-looks-read-only.md)
-- [ ] [Esc spares detached children](issues/esc-spares-detached-children.md)
-- [ ] [One child can be cancelled](issues/one-child-can-be-cancelled.md)
-- [ ] [Agent endings use one vocabulary](issues/agent-endings-use-one-vocabulary.md)
-- [ ] [Delivery: small frictions](issues/delivery-small-frictions.md)
 
 ## Milestone 21 — The assistant
 
