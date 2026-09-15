@@ -2589,11 +2589,37 @@ async fn a_spilled_output_holds_no_secret_value() {
 
 /// A stand-in for sudo: says what it was asked to run, reads the
 /// password when told to, then runs the command as itself.
+///
+/// It answers the `-n true` probe both ways, like the real one. With no
+/// marker file beside it, the system is passwordless: `-n` succeeds.
+/// Write the accepted password into `<path>.needs-password` — see
+/// [`sudo_wants_a_password`] — and `-n` fails the way sudo does, while
+/// `-S` refuses anything but that password with sudo's own wording.
 fn fake_sudo(dir: &std::path::Path) -> std::path::PathBuf {
     let path = dir.join("fake-sudo");
     std::fs::write(
         &path,
-        "#!/bin/sh\nwhile [ $# -gt 0 ]; do case \"$1\" in\n  -S) read pw; echo \"pw=$pw\"; shift;;\n  -p) shift 2;;\n  -n) echo \"noninteractive\"; shift;;\n  --) shift; break;;\n  *) break;;\nesac; done\necho \"root: $*\"\nexec \"$@\"\n",
+        r#"#!/bin/sh
+mode=n
+pw=
+while [ $# -gt 0 ]; do case "$1" in
+  -S) read pw; mode=S; shift;;
+  -p) shift 2;;
+  -n) mode=n; shift;;
+  --) shift; break;;
+  *) break;;
+esac; done
+wanted="$0.needs-password"
+if [ -f "$wanted" ]; then
+  if [ "$mode" = n ]; then echo "sudo: a password is required" >&2; exit 1; fi
+  if [ "$pw" != "$(cat "$wanted")" ]; then
+    echo "sudo: 1 incorrect password attempt" >&2; exit 1
+  fi
+fi
+if [ "$mode" = S ]; then echo "pw=$pw"; else echo "noninteractive"; fi
+echo "root: $*"
+exec "$@"
+"#,
     )
     .unwrap();
     #[cfg(unix)]
@@ -2602,6 +2628,14 @@ fn fake_sudo(dir: &std::path::Path) -> std::path::PathBuf {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
     path
+}
+
+/// Make the fake sudo want `password`, the way a system with no
+/// NOPASSWD rule does.
+fn sudo_wants_a_password(binary: &std::path::Path, password: &str) {
+    let mut marker = binary.as_os_str().to_os_string();
+    marker.push(".needs-password");
+    std::fs::write(std::path::PathBuf::from(marker), password).unwrap();
 }
 
 /// The sudo tool runs one approved command through the binary, feeds a
@@ -2635,8 +2669,8 @@ async fn sudo_runs_an_approved_command_and_feeds_the_password_unseen() {
         out.content
     );
 
-    // Standing grant, no password anywhere, nobody to ask: runs on
-    // what is known, which is sudo -n.
+    // Standing grant, no password anywhere, nobody to ask: the probe
+    // passes on this system, so it runs with sudo -n and asks nothing.
     store.grant_always("root", "sudo").unwrap();
     let out = sudo
         .run(call.clone(), ctx(dir.path()).with_secrets(secrets.clone()))
@@ -2669,71 +2703,153 @@ async fn sudo_runs_an_approved_command_and_feeds_the_password_unseen() {
     assert!(!out.content.contains("hunter22"), "{}", out.content);
 }
 
-/// A sudo that refuses everything: `-n` says a password is required,
-/// `-S` says the one it read is wrong.
-fn refusing_sudo(dir: &std::path::Path) -> std::path::PathBuf {
-    let path = dir.join("refusing-sudo");
-    std::fs::write(
-        &path,
-        "#!/bin/sh\nmode=n\nwhile [ $# -gt 0 ]; do case \"$1\" in\n  -S) read pw; mode=S; shift;;\n  -p) shift 2;;\n  -n) shift;;\n  --) shift; break;;\n  *) break;;\nesac; done\nif [ \"$mode\" = S ]; then echo \"sudo: 1 incorrect password attempt\" >&2; else echo \"sudo: a password is required\" >&2; fi\nexit 1\n",
-    )
-    .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
-    }
-    path
-}
-
-/// What sudo could not use is not kept: an empty answer the system
-/// needed something for is dropped, so the next ask has a row again,
-/// and a stored password it refused is named as the thing to replace.
+/// The password comes after the yes, and only when the probe says the
+/// system wants one: the grant ask is answered first, then the password
+/// ask carries the command, a wrong one is forgotten and asked for
+/// again saying so, and the second try runs.
 #[tokio::test]
-async fn sudo_forgets_a_password_it_could_not_use() {
+async fn sudo_asks_for_the_password_after_the_yes_and_only_when_it_is_wanted() {
+    use ilar::secrets::Ask;
     use ilar::tools::Tool;
     let dir = tempfile::tempdir().unwrap();
-    let sudo =
-        ilar::tools::sudo::SudoTool::with_binary(&refusing_sudo(dir.path()).to_string_lossy());
+    let binary = fake_sudo(dir.path());
+    sudo_wants_a_password(&binary, "hunter22");
+    let sudo = ilar::tools::sudo::SudoTool::with_binary(&binary.to_string_lossy());
     let store = ilar::secrets::SecretStore::open(&dir.path().join("state"));
     let call = serde_json::json!({"command": "id", "reason": "a test"});
-
-    // Approved with an empty password — "this system needs none" — and
-    // the system needs one after all.
-    let (tx, mut rx) = ilar::secrets::grant_channel(1);
+    let (tx, mut rx) = ilar::secrets::ask_channel(1);
     let secrets = ilar::secrets::Secrets::new(store.clone()).with_prompts(tx);
-    let (out, wanted) = tokio::join!(
+
+    let (out, asks) = tokio::join!(
         sudo.run(call.clone(), ctx(dir.path()).with_secrets(secrets.clone())),
         async {
-            let prompt = rx.recv().await.unwrap();
-            let wanted = prompt.password_wanted;
-            prompt
+            let mut asks = Vec::new();
+            // The grant ask first, and approval only.
+            let Some(Ask::Grant(grant)) = rx.recv().await else {
+                panic!("the first ask was not the grant ask");
+            };
+            asks.push(format!("grant {} {}", grant.tool, grant.secret));
+            grant
                 .reply
-                .send(Some(ilar::secrets::Approval {
-                    grant: ilar::secrets::Grant::Always,
-                    password: Some(String::new()),
-                }))
+                .send(Some(ilar::secrets::Grant::Session))
                 .unwrap();
-            wanted
+            // Then the password, twice: the first one is wrong.
+            for password in ["wrong-one", "hunter22"] {
+                let Some(Ask::Password(prompt)) = rx.recv().await else {
+                    panic!("the password ask never came");
+                };
+                asks.push(format!(
+                    "password refused={} {}",
+                    prompt.refused, prompt.detail
+                ));
+                prompt.reply.send(Some(password.to_string())).unwrap();
+            }
+            asks
         }
     );
-    assert!(wanted, "the prompt had no row for a password");
-    assert!(out.is_error, "{}", out.content);
-    assert!(out.content.contains("has a row for it"), "{}", out.content);
+    assert_eq!(
+        asks,
+        [
+            "grant sudo root".to_string(),
+            "password refused=false id".to_string(),
+            "password refused=true id".to_string(),
+        ]
+    );
+    assert!(!out.is_error, "{}", out.content);
     assert!(
+        out.content.contains("pw=<secret:SUDO_PASSWORD>"),
+        "{}",
+        out.content
+    );
+    assert!(!out.content.contains("hunter22"), "{}", out.content);
+    // The one sudo took is held for the session; the refused one is not.
+    assert_eq!(
         secrets
             .held_or_stored(ilar::secrets::SUDO_PASSWORD)
             .unwrap()
-            .is_none(),
-        "the empty answer was kept, so the next ask has no row"
+            .as_deref(),
+        Some("hunter22")
     );
 
-    // A stored password sudo refuses stays stored: say how to replace it.
-    store
-        .set(ilar::secrets::SUDO_PASSWORD, "", "hunter22")
-        .unwrap();
+    // Held now, so the next call runs with no prompt at all.
     let out = sudo
         .run(call.clone(), ctx(dir.path()).with_secrets(secrets.clone()))
+        .await;
+    assert!(!out.is_error, "{}", out.content);
+    assert!(
+        rx.try_recv().is_err(),
+        "a held password was asked for again"
+    );
+}
+
+/// Cancelling the password prompt fails the call rather than running
+/// sudo on a guess; a stored password sudo refuses stays stored and
+/// says what replaces it.
+#[tokio::test]
+async fn a_cancelled_password_fails_and_a_refused_stored_one_says_so() {
+    use ilar::secrets::Ask;
+    use ilar::tools::Tool;
+    let dir = tempfile::tempdir().unwrap();
+    let binary = fake_sudo(dir.path());
+    sudo_wants_a_password(&binary, "hunter22");
+    let sudo = ilar::tools::sudo::SudoTool::with_binary(&binary.to_string_lossy());
+    let store = ilar::secrets::SecretStore::open(&dir.path().join("state"));
+    store.grant_always("root", "sudo").unwrap();
+    let call = serde_json::json!({"command": "id", "reason": "a test"});
+    let (tx, mut rx) = ilar::secrets::ask_channel(1);
+    let secrets = ilar::secrets::Secrets::new(store.clone()).with_prompts(tx);
+
+    // Esc at the prompt: no password, no sudo.
+    let (out, _) = tokio::join!(
+        sudo.run(call.clone(), ctx(dir.path()).with_secrets(secrets.clone())),
+        async {
+            let Some(Ask::Password(prompt)) = rx.recv().await else {
+                panic!("the password ask never came");
+            };
+            prompt.reply.send(None).unwrap();
+        }
+    );
+    assert!(out.is_error, "{}", out.content);
+    assert_eq!(out.content, "sudo: no password given");
+
+    // A stored password sudo refuses: still stored, and the line that
+    // replaces it. Nobody is asked for another — this one was the
+    // person's own answer already, and the next attempt asks.
+    store
+        .set(ilar::secrets::SUDO_PASSWORD, "", "wrong-one")
+        .unwrap();
+    let (out, _) = tokio::join!(
+        sudo.run(call.clone(), ctx(dir.path()).with_secrets(secrets.clone())),
+        async {
+            let Some(Ask::Password(prompt)) = rx.recv().await else {
+                panic!("the re-ask never came");
+            };
+            assert!(prompt.refused, "the re-ask did not say it was refused");
+            prompt.reply.send(None).unwrap();
+        }
+    );
+    assert!(out.is_error, "{}", out.content);
+    assert!(
+        out.content.contains("no password given")
+            && out.content.contains("ilar secret set SUDO_PASSWORD"),
+        "{}",
+        out.content
+    );
+    assert_eq!(
+        secrets
+            .held_or_stored(ilar::secrets::SUDO_PASSWORD)
+            .unwrap()
+            .as_deref(),
+        Some("wrong-one"),
+        "a stored password is not ours to drop"
+    );
+
+    // Headless: the probe fails, nobody can type one, and the refusal
+    // names the line that stores one — without running sudo to fail.
+    let headless = ilar::secrets::Secrets::new(store.clone());
+    store.remove(ilar::secrets::SUDO_PASSWORD).unwrap();
+    let out = sudo
+        .run(call.clone(), ctx(dir.path()).with_secrets(headless))
         .await;
     assert!(out.is_error, "{}", out.content);
     assert!(
@@ -2741,12 +2857,9 @@ async fn sudo_forgets_a_password_it_could_not_use() {
         "{}",
         out.content
     );
-    assert!(!out.content.contains("it is forgotten"), "{}", out.content);
-    assert_eq!(
-        secrets
-            .held_or_stored(ilar::secrets::SUDO_PASSWORD)
-            .unwrap()
-            .as_deref(),
-        Some("hunter22")
+    assert!(
+        !out.content.contains("incorrect password"),
+        "{}",
+        out.content
     );
 }

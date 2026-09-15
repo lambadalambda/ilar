@@ -4,10 +4,12 @@
 //! person has said yes to that use.
 //!
 //! Three parts. [`SecretStore`] is the file. [`Secrets`] is what a tool
-//! holds: it resolves names to values, asking through a
-//! [`GrantSender`] when a use is not yet granted. The grant protocol is
-//! shaped like the question protocol: a prompt over a channel with a
-//! one-shot reply, so any driver with somebody to ask can answer it.
+//! holds: it resolves names to values, asking through an
+//! [`AskSender`] when a use is not yet granted. The protocol is shaped
+//! like the question protocol: a prompt over a channel with a one-shot
+//! reply, so any driver with somebody to ask can answer it. One channel
+//! carries both asks ([`Ask`]): the approval question, and the sudo
+//! password question that may follow a yes.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -33,7 +35,7 @@ pub const ROOT: &str = "root";
 /// What the `root` row says it is for.
 pub const ROOT_DESCRIPTION: &str = "superuser, for the sudo tool";
 /// The secret that answers sudo's password prompt: typed into the
-/// grant prompt and held for the session, or stored under this name.
+/// password prompt and held for the session, or stored under this name.
 pub const SUDO_PASSWORD: &str = "SUDO_PASSWORD";
 /// A value shorter than this is refused at the door: replacing "ab"
 /// wherever it appears in output, or hiding every variable that
@@ -596,26 +598,10 @@ pub enum Grant {
     Always,
 }
 
-/// The person's answer to a prompt: how long, and what they typed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Approval {
-    pub grant: Grant,
-    /// Typed into the prompt when it asked for one: sudo's password.
-    /// Held in memory for the session, never written anywhere.
-    pub password: Option<String>,
-}
-
-impl From<Grant> for Approval {
-    fn from(grant: Grant) -> Self {
-        Self {
-            grant,
-            password: None,
-        }
-    }
-}
-
-/// A request to use a secret, delivered over [`GrantSender`] with its
-/// one-shot reply path. `None` in the reply is a refusal.
+/// A request to use a secret, delivered as [`Ask::Grant`] with its
+/// one-shot reply path. `None` in the reply is a refusal. Approval
+/// only: sudo's password is a separate ask, put after the yes and only
+/// when sudo turns out to want one.
 #[derive(Debug)]
 pub struct GrantPrompt {
     pub session_id: String,
@@ -631,16 +617,49 @@ pub struct GrantPrompt {
     /// What the tool is about to run with it: the command, verbatim.
     /// The person reads this before saying yes; it is the whole safety.
     pub detail: String,
-    /// The prompt should take a password along with the answer: root,
-    /// when none is held or stored. Empty means the system needs none.
-    pub password_wanted: bool,
-    pub reply: oneshot::Sender<Option<Approval>>,
+    pub reply: oneshot::Sender<Option<Grant>>,
 }
 
-pub type GrantSender = mpsc::Sender<GrantPrompt>;
-pub type GrantReceiver = mpsc::Receiver<GrantPrompt>;
+/// sudo wants a password for a command the person has already approved.
+/// `None` in the reply cancels: the tool then fails rather than running
+/// as root on a guess.
+#[derive(Debug)]
+pub struct PasswordPrompt {
+    pub session_id: String,
+    pub tool_call_id: Option<String>,
+    /// The subagent whose sudo is asking, as in [`GrantPrompt`].
+    pub agent: Option<String>,
+    /// The command it is for, verbatim.
+    pub detail: String,
+    /// sudo refused the password given last time, so this is a re-ask.
+    pub refused: bool,
+    pub reply: oneshot::Sender<Option<String>>,
+}
 
-pub fn grant_channel(capacity: usize) -> (GrantSender, GrantReceiver) {
+/// What one channel carries: the approval question, and the password
+/// question that may follow a yes. One channel, so a driver keeps one
+/// watch loop and the two can never be answered out of order.
+#[derive(Debug)]
+pub enum Ask {
+    Grant(GrantPrompt),
+    Password(PasswordPrompt),
+}
+
+impl Ask {
+    /// Whose session the ask came from: what tells a driver's own tool
+    /// from a child's.
+    pub fn session_id(&self) -> &str {
+        match self {
+            Ask::Grant(prompt) => &prompt.session_id,
+            Ask::Password(prompt) => &prompt.session_id,
+        }
+    }
+}
+
+pub type AskSender = mpsc::Sender<Ask>;
+pub type AskReceiver = mpsc::Receiver<Ask>;
+
+pub fn ask_channel(capacity: usize) -> (AskSender, AskReceiver) {
     mpsc::channel(capacity)
 }
 
@@ -694,7 +713,7 @@ pub struct Secrets {
     /// Values typed into a prompt for this session: sudo's password.
     /// Shielded and redacted like stored ones, never written.
     held: Arc<Mutex<BTreeMap<String, String>>>,
-    prompts: Option<GrantSender>,
+    prompts: Option<AskSender>,
     /// The subagent this handle belongs to, set on the clone a child
     /// runs with. Every other field is shared through an `Arc`; this
     /// one is per-child on purpose, so an ask can name who made it.
@@ -731,6 +750,40 @@ fn grant_hint(name: &str, tool: &str) -> String {
     format!("the user can allow it with: ilar secret grant {name} --tool {tool}")
 }
 
+/// The CLI line a sudo that wants a password nobody can type points at.
+pub const STORE_PASSWORD: &str = "the user can store one with: ilar secret set SUDO_PASSWORD";
+
+/// Why an ask came back with no answer, for the caller to word: the
+/// two asks say different things about it.
+enum NoAnswer {
+    /// Nobody took the prompt, or the driver dropped it unanswered.
+    Nobody,
+    /// The tool call was cancelled while it waited.
+    Cancelled,
+}
+
+/// Put an ask on the channel and wait for its one-shot reply, with the
+/// call's cancellation watched at both steps: a prompt outlives an
+/// abort, so only the token ends the wait.
+async fn deliver<T>(
+    sender: &AskSender,
+    ask: Ask,
+    receive: oneshot::Receiver<Option<T>>,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<Option<T>, NoAnswer> {
+    let delivered = tokio::select! {
+        delivered = sender.send(ask) => delivered,
+        _ = cancel.cancelled() => return Err(NoAnswer::Cancelled),
+    };
+    if delivered.is_err() {
+        return Err(NoAnswer::Nobody);
+    }
+    tokio::select! {
+        answer = receive => answer.map_err(|_| NoAnswer::Nobody),
+        _ = cancel.cancelled() => Err(NoAnswer::Cancelled),
+    }
+}
+
 impl Secrets {
     pub fn new(store: SecretStore) -> Self {
         Self {
@@ -745,7 +798,7 @@ impl Secrets {
         }
     }
 
-    pub fn with_prompts(mut self, sender: GrantSender) -> Self {
+    pub fn with_prompts(mut self, sender: AskSender) -> Self {
         self.prompts = Some(sender);
         self
     }
@@ -944,7 +997,7 @@ impl Secrets {
         let mut granted = Vec::new();
         for (name, entry) in entries {
             if !entry.always.contains(request.tool) && !self.session_granted(name, request.tool) {
-                self.ask(&request, name, &entry.description, false).await?;
+                self.ask(&request, name, &entry.description).await?;
             }
             granted.push(Granted {
                 name: name.clone(),
@@ -956,29 +1009,63 @@ impl Secrets {
 
     /// Approval to run `request.detail` as root, for the sudo tool:
     /// standing, given this session, or asked for now. `reason` is
-    /// what the model said it is for.
+    /// what the model said it is for. Approval only — whether sudo
+    /// wants a password is the tool's business, after the yes.
     pub async fn approve_root(&self, request: Request<'_>, reason: &str) -> Result<(), String> {
-        // Known includes "none needed": an empty answer to the prompt
-        // is held too, so a passwordless system is asked once.
-        let password_known = self
-            .held_or_stored(SUDO_PASSWORD)
-            .map_err(|error| self.store_error(error))?
-            .is_some();
-        let granted =
-            self.store.root_granted(request.tool) || self.session_granted(ROOT, request.tool);
-        // A standing grant with nobody to ask runs on what is known: a
-        // stored password, or none, and sudo says if that was wrong.
-        if granted && (password_known || !self.can_ask()) {
+        if self.store.root_granted(request.tool) || self.session_granted(ROOT, request.tool) {
             return Ok(());
         }
-        self.ask(&request, ROOT, reason, !password_known).await
+        self.ask(&request, ROOT, reason).await
     }
 
-    /// Drop a value typed this session: a sudo password that was
-    /// refused, or an empty answer the system turned out to need
-    /// something for, so the next ask takes a new one. Returns whether
-    /// one was held — a stored value is not this function's to drop,
-    /// and the caller says so differently.
+    /// The sudo password for an already-approved command: asked for in
+    /// its own prompt, because sudo turned out to want one. `Ok(None)`
+    /// is the person cancelling; `refused` says sudo rejected the last
+    /// one, so the prompt can say so. The value is not held here — the
+    /// caller holds it with [`Self::hold`] once it has one, and drops
+    /// it again if sudo refuses it.
+    pub async fn ask_password(
+        &self,
+        request: Request<'_>,
+        refused: bool,
+    ) -> Result<Option<String>, String> {
+        let Some(sender) = &self.prompts else {
+            return Err(format!(
+                "sudo wants a password and nobody is here to type one; {STORE_PASSWORD}"
+            ));
+        };
+        let (reply, receive) = oneshot::channel();
+        let ask = Ask::Password(PasswordPrompt {
+            session_id: request.session_id.to_string(),
+            tool_call_id: request.tool_call_id.map(str::to_string),
+            agent: self.agent.clone(),
+            detail: request.detail.to_string(),
+            refused,
+            reply,
+        });
+        match deliver(sender, ask, receive, request.cancel).await {
+            Ok(answer) => Ok(answer),
+            Err(NoAnswer::Nobody) => Err(format!(
+                "sudo wants a password and nobody answered; {STORE_PASSWORD}"
+            )),
+            Err(NoAnswer::Cancelled) => Err("cancelled while asking for the sudo password".into()),
+        }
+    }
+
+    /// Keep a value for this session, under a name no store row has to
+    /// exist for: the sudo password the person just typed. Held in
+    /// memory, shielded and redacted like a stored one, never written.
+    pub fn hold(&self, name: &str, value: &str) {
+        self.held
+            .lock()
+            .unwrap()
+            .insert(name.to_string(), value.to_string());
+    }
+
+    /// Drop a value typed this session: a sudo password sudo refused,
+    /// so the next ask takes a new one. Returns whether one was held —
+    /// a stored value is not this function's to drop, and the caller
+    /// says so differently.
     pub fn forget_held(&self, name: &str) -> bool {
         self.held.lock().unwrap().remove(name).is_some()
     }
@@ -1027,7 +1114,6 @@ impl Secrets {
         request: &Request<'_>,
         name: &str,
         description: &str,
-        password_wanted: bool,
     ) -> Result<(), String> {
         let Some(sender) = &self.prompts else {
             return Err(format!(
@@ -1037,7 +1123,7 @@ impl Secrets {
             ));
         };
         let (reply, receive) = oneshot::channel();
-        let prompt = GrantPrompt {
+        let ask = Ask::Grant(GrantPrompt {
             session_id: request.session_id.to_string(),
             agent: self.agent.clone(),
             tool_call_id: request.tool_call_id.map(str::to_string),
@@ -1045,9 +1131,8 @@ impl Secrets {
             secret: name.to_string(),
             description: description.to_string(),
             detail: request.detail.to_string(),
-            password_wanted,
             reply,
-        };
+        });
         let unavailable = || {
             format!(
                 "{name} is not granted to {}, and nobody answered; {}",
@@ -1055,36 +1140,20 @@ impl Secrets {
                 grant_hint(name, request.tool)
             )
         };
-        let delivered = tokio::select! {
-            delivered = sender.send(prompt) => delivered,
-            _ = request.cancel.cancelled() => return Err("cancelled while asking for a secret".into()),
-        };
-        if delivered.is_err() {
-            return Err(unavailable());
-        }
-        let answer = tokio::select! {
-            answer = receive => answer,
-            _ = request.cancel.cancelled() => return Err("cancelled while asking for a secret".into()),
-        };
-        let approval = match answer {
-            Ok(Some(approval)) => approval,
+        let grant = match deliver(sender, ask, receive, request.cancel).await {
+            Ok(Some(grant)) => grant,
             Ok(None) => {
                 return Err(format!(
                     "the user denied {name} for this {} call",
                     request.tool
                 ));
             }
-            Err(_) => return Err(unavailable()),
+            Err(NoAnswer::Nobody) => return Err(unavailable()),
+            Err(NoAnswer::Cancelled) => {
+                return Err("cancelled while asking for a secret".into());
+            }
         };
-        // Only what was asked for; and an empty answer is an answer,
-        // "none needed", held so the question is not put again.
-        if password_wanted {
-            self.held.lock().unwrap().insert(
-                SUDO_PASSWORD.to_string(),
-                approval.password.unwrap_or_default(),
-            );
-        }
-        match approval.grant {
+        match grant {
             Grant::Once => {}
             Grant::Session => {
                 self.session
@@ -1445,13 +1514,14 @@ mod tests {
     }
 
     /// Root is a pseudo-secret: nothing to store, a standing grant to
-    /// keep, listed last, revoked by name.
+    /// keep, listed last, revoked by name. The ask is approval only —
+    /// no password rides on it.
     #[tokio::test]
     async fn root_is_approved_not_stored() {
         let (_dir, store) = store();
         assert!(store.set(ROOT, "", "hunter22").is_err());
         assert!(!store.root_granted("sudo"));
-        let (tx, mut rx) = grant_channel(1);
+        let (tx, mut rx) = ask_channel(1);
         let secrets = Secrets::new(store.clone()).with_prompts(tx);
         let cancel = cancel();
         let ask = Request {
@@ -1469,61 +1539,20 @@ mod tests {
         assert!(outcome.unwrap_err().contains("denied root"));
         assert_eq!((asked.tool.as_str(), asked.secret.as_str()), ("sudo", ROOT));
         assert_eq!(asked.description, "to install ripgrep");
-        assert!(asked.password_wanted, "no password is known yet");
-        // A typed password is held for the session and covers the
-        // next asks; with a standing grant nothing is asked again.
+        // An "always" is written, and nothing is asked again — not even
+        // in a fresh runtime, which holds no password either way: the
+        // password is the tool's own question now.
         let (outcome, _) = tokio::join!(
             secrets.approve_root(ask, ""),
-            answer_with(
-                &mut rx,
-                Some(Approval {
-                    grant: Grant::Always,
-                    password: Some("hunter22".into()),
-                })
-            )
+            answer(&mut rx, Some(Grant::Always))
         );
         assert!(outcome.is_ok());
         assert!(store.root_granted("sudo"));
-        assert_eq!(
-            secrets.held_or_stored(SUDO_PASSWORD).unwrap().as_deref(),
-            Some("hunter22")
-        );
-        assert!(
-            store.value(SUDO_PASSWORD).unwrap().is_none(),
-            "written to disk"
-        );
-        assert!(secrets.all().iter().any(|held| held.name == SUDO_PASSWORD));
         assert!(secrets.approve_root(ask, "").await.is_ok());
-        // A fresh runtime holds no password: the standing grant still
-        // asks, for the password alone — and an empty answer is held
-        // as "none needed", so it asks once.
-        let (tx2, mut rx2) = grant_channel(1);
+        let (tx2, mut rx2) = ask_channel(1);
         let fresh = Secrets::new(store.clone()).with_prompts(tx2);
-        let (outcome, asked) = tokio::join!(
-            fresh.approve_root(ask, ""),
-            answer_with(
-                &mut rx2,
-                Some(Approval {
-                    grant: Grant::Once,
-                    password: Some(String::new()),
-                })
-            )
-        );
-        assert!(outcome.is_ok());
-        assert!(asked.password_wanted);
-        assert_eq!(
-            fresh.held_or_stored(SUDO_PASSWORD).unwrap().as_deref(),
-            Some("")
-        );
-        assert!(fresh.approve_root(ask, "").await.is_ok(), "asked again");
-        // A refused password is forgotten, and the next ask wants one.
-        fresh.forget_held(SUDO_PASSWORD);
-        let (outcome, asked) = tokio::join!(
-            fresh.approve_root(ask, ""),
-            answer(&mut rx2, Some(Grant::Once))
-        );
-        assert!(outcome.is_ok());
-        assert!(asked.password_wanted);
+        assert!(fresh.approve_root(ask, "").await.is_ok());
+        assert!(rx2.try_recv().is_err(), "a standing grant asked again");
         // Headless with a standing grant: runs on what is known.
         assert!(
             Secrets::new(store.clone())
@@ -1544,6 +1573,72 @@ mod tests {
         );
     }
 
+    /// The password is its own ask: it carries the command, says when
+    /// sudo refused the last one, cancels to `None`, and with nobody to
+    /// ask it names the line that stores one.
+    #[tokio::test]
+    async fn the_sudo_password_is_asked_for_on_its_own() {
+        let (_dir, store) = store();
+        let (tx, mut rx) = ask_channel(1);
+        let secrets = Secrets::new(store.clone()).with_prompts(tx);
+        let cancel = cancel();
+        let request = Request {
+            tool: "sudo",
+            names: &[],
+            detail: "apt install ripgrep",
+            session_id: "s1",
+            tool_call_id: Some("c1"),
+            cancel: &cancel,
+        };
+        let (answered, asked) = tokio::join!(
+            secrets.ask_password(request, false),
+            answer_password(&mut rx, Some("hunter22"))
+        );
+        assert_eq!(answered.unwrap().as_deref(), Some("hunter22"));
+        assert_eq!(asked.detail, "apt install ripgrep");
+        assert_eq!(asked.tool_call_id.as_deref(), Some("c1"));
+        assert!(!asked.refused);
+        // Nothing is held until the caller holds it; then it is one of
+        // the values output is scrubbed of.
+        assert!(secrets.held_or_stored(SUDO_PASSWORD).unwrap().is_none());
+        secrets.hold(SUDO_PASSWORD, "hunter22");
+        assert_eq!(
+            secrets.held_or_stored(SUDO_PASSWORD).unwrap().as_deref(),
+            Some("hunter22")
+        );
+        assert!(secrets.all().iter().any(|held| held.name == SUDO_PASSWORD));
+        assert!(
+            store.value(SUDO_PASSWORD).unwrap().is_none(),
+            "written to disk"
+        );
+        assert!(secrets.forget_held(SUDO_PASSWORD));
+        assert!(!secrets.forget_held(SUDO_PASSWORD));
+
+        // A re-ask says sudo refused the last one; Esc is a cancel, not
+        // a password.
+        let (answered, asked) = tokio::join!(
+            secrets.ask_password(request, true),
+            answer_password(&mut rx, None)
+        );
+        assert_eq!(answered.unwrap(), None);
+        assert!(asked.refused);
+
+        // A child's ask says which child; the driver's own says none.
+        let child = secrets.clone().for_agent("reviewer");
+        let (_, asked) = tokio::join!(
+            child.ask_password(request, false),
+            answer_password(&mut rx, Some("hunter22"))
+        );
+        assert_eq!(asked.agent.as_deref(), Some("reviewer"));
+
+        // Headless: no prompt, and the line that stores one.
+        let error = Secrets::new(store.clone())
+            .ask_password(request, false)
+            .await
+            .unwrap_err();
+        assert!(error.contains("ilar secret set SUDO_PASSWORD"), "{error}");
+    }
+
     /// One unknown name fails the call before anyone is asked about
     /// the known ones.
     /// The `root` row is the sudo tool's: it shows a grant given this
@@ -1552,7 +1647,7 @@ mod tests {
     #[tokio::test]
     async fn the_root_row_follows_the_sudo_tool() {
         let (_dir, store) = store();
-        let (tx, mut rx) = grant_channel(1);
+        let (tx, mut rx) = ask_channel(1);
         let secrets = Secrets::new(store.clone()).with_prompts(tx).with_sudo(true);
         let cancel = cancel();
         let ask = Request {
@@ -1604,7 +1699,7 @@ mod tests {
 
         let (_dir, store) = store();
         store.set("KEY", "", "value-one").unwrap();
-        let (tx, mut rx) = grant_channel(1);
+        let (tx, mut rx) = ask_channel(1);
         let secrets = Secrets::new(store.clone()).with_prompts(tx);
         // The state directory read-only: the file still reads, no
         // replacement can be written beside it.
@@ -1671,7 +1766,7 @@ mod tests {
     async fn an_unknown_name_fails_before_any_question() {
         let (_dir, store) = store();
         store.set("KEY", "", "value1").unwrap();
-        let (tx, mut rx) = grant_channel(1);
+        let (tx, mut rx) = ask_channel(1);
         let secrets = Secrets::new(store).with_prompts(tx);
         let cancel = cancel();
         let names = ["KEY".to_string(), "NOPE".to_string()];
@@ -1713,40 +1808,42 @@ mod tests {
         assert_eq!(format!("{granted:?}"), "[Granted(KEY)]");
     }
 
-    /// Answer the next prompt, returning what it asked.
-    async fn answer(rx: &mut GrantReceiver, grant: Option<Grant>) -> GrantPrompt {
-        answer_with(rx, grant.map(Approval::from)).await
+    /// Answer the next grant ask, returning what it asked.
+    async fn answer(rx: &mut AskReceiver, grant: Option<Grant>) -> GrantPrompt {
+        let Ask::Grant(prompt) = rx.recv().await.unwrap() else {
+            panic!("a password ask where a grant ask was expected");
+        };
+        let (dead, _) = oneshot::channel();
+        let echo = GrantPrompt {
+            session_id: prompt.session_id.clone(),
+            agent: prompt.agent.clone(),
+            tool_call_id: prompt.tool_call_id.clone(),
+            tool: prompt.tool.clone(),
+            secret: prompt.secret.clone(),
+            description: prompt.description.clone(),
+            detail: prompt.detail.clone(),
+            reply: dead,
+        };
+        prompt.reply.send(grant).unwrap();
+        echo
     }
 
-    async fn answer_with(rx: &mut GrantReceiver, approval: Option<Approval>) -> GrantPrompt {
-        let prompt = rx.recv().await.unwrap();
-        let (tool, secret, detail) = (
-            prompt.tool.clone(),
-            prompt.secret.clone(),
-            prompt.detail.clone(),
-        );
-        let GrantPrompt {
-            reply,
-            session_id,
-            agent,
-            tool_call_id,
-            description,
-            password_wanted,
-            ..
-        } = prompt;
-        reply.send(approval).unwrap();
+    /// Answer the next password ask, returning what it asked.
+    async fn answer_password(rx: &mut AskReceiver, password: Option<&str>) -> PasswordPrompt {
+        let Ask::Password(prompt) = rx.recv().await.unwrap() else {
+            panic!("a grant ask where a password ask was expected");
+        };
         let (dead, _) = oneshot::channel();
-        GrantPrompt {
-            session_id,
-            agent,
-            tool_call_id,
-            tool,
-            secret,
-            description,
-            detail,
-            password_wanted,
+        let echo = PasswordPrompt {
+            session_id: prompt.session_id.clone(),
+            tool_call_id: prompt.tool_call_id.clone(),
+            agent: prompt.agent.clone(),
+            detail: prompt.detail.clone(),
+            refused: prompt.refused,
             reply: dead,
-        }
+        };
+        prompt.reply.send(password.map(str::to_string)).unwrap();
+        echo
     }
 
     /// A child's handle is the same store and the same prompt channel,
@@ -1756,7 +1853,7 @@ mod tests {
     async fn a_childs_ask_names_the_agent_behind_it() {
         let (_dir, store) = store();
         store.set("KEY", "the key", "value1").unwrap();
-        let (tx, mut rx) = grant_channel(1);
+        let (tx, mut rx) = ask_channel(1);
         let secrets = Secrets::new(store.clone()).with_prompts(tx);
         let cancel = cancel();
         let names = ["KEY".to_string()];
@@ -1786,7 +1883,7 @@ mod tests {
     async fn each_answer_grants_as_far_as_it_says() {
         let (_dir, store) = store();
         store.set("KEY", "the key", "value1").unwrap();
-        let (tx, mut rx) = grant_channel(1);
+        let (tx, mut rx) = ask_channel(1);
         let secrets = Secrets::new(store.clone()).with_prompts(tx);
         let cancel = cancel();
         let names = ["KEY".to_string(), "KEY".to_string()];
@@ -1841,7 +1938,7 @@ mod tests {
     async fn a_dropped_frontend_is_a_no_and_a_cancel_stops_the_wait() {
         let (_dir, store) = store();
         store.set("KEY", "", "value1").unwrap();
-        let (tx, mut rx) = grant_channel(1);
+        let (tx, mut rx) = ask_channel(1);
         let secrets = Secrets::new(store.clone()).with_prompts(tx);
         let cancel = cancel();
         let names = ["KEY".to_string()];

@@ -113,8 +113,9 @@ pub struct SessionRuntime {
     pub resolver: Arc<dyn ProviderResolver>,
     /// `None` when the driver did not ask for questions.
     pub questions: Option<QuestionReceiver>,
-    /// `None` when the driver did not offer to answer grant prompts.
-    pub grants: Option<crate::secrets::GrantReceiver>,
+    /// `None` when the driver did not offer to answer a tool's asks
+    /// for a secret — the grant question and sudo's password question.
+    pub grants: Option<crate::secrets::AskReceiver>,
     pub skills: Vec<(String, String)>,
     pub commands: Vec<crate::command::Command>,
     /// The resumed session's replay, for drivers that rebuild a view.
@@ -655,7 +656,7 @@ impl RuntimePlan {
         // listing says so only where the sudo tool exists.
         let secrets = secrets.with_sudo(config.agent.sudo);
         let (secrets, grants) = if self.grants {
-            let (sender, receiver) = crate::secrets::grant_channel(1);
+            let (sender, receiver) = crate::secrets::ask_channel(1);
             (secrets.with_prompts(sender), Some(receiver))
         } else {
             (secrets, None)
@@ -751,7 +752,7 @@ struct Tooling {
     tool_ctx: ToolContext,
     loop_config: LoopConfig,
     questions: Option<QuestionReceiver>,
-    grants: Option<crate::secrets::GrantReceiver>,
+    grants: Option<crate::secrets::AskReceiver>,
 }
 
 /// What the first request of a session would carry, for reading.
