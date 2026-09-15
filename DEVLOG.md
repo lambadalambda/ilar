@@ -1,5 +1,47 @@
 # DEVLOG
 
+## 2026-09-15 — Four more from the evening: sudo's order, the session list, a ghost, a phantom
+
+The user tried the sudo tool and hit the sweep's own bug before the
+fix was installed: a "type the password" prompt with no visible field,
+an empty answer taken as "none needed", and a second prompt with no
+field at all. The redesign that followed is the right order rather
+than a patch: approval first, then `sudo -n true` to learn whether a
+password is wanted at all, and only then a prompt of its own, re-asked
+on a wrong password. The chat got `/password`, which deletes its own
+message.
+
+Then the session list. Measured on the Mac: 5,593 directory entries,
+2,148 of the 2,421 session files subagent children that every listing
+opened and threw away, 2,414 lock files nobody removed, and 104 of the
+273 root sessions empty because the file is created at launch. The
+worst of it was a cap applied before the directory grouping, so this
+directory's last session fell off the list once 200 others were newer.
+A summary cache keyed by file stamp, lock removal on lease drop, empty
+sessions removed on quit, and, because "continue the last session
+here" is the 99% case, a per-directory pointer that answers
+`--continue` without a scan. On that pointer, a bare `ilar` now offers
+the last session here with its tail ghosted in the transcript pane:
+Enter resumes, typing starts fresh, Esc dismisses.
+
+The phantom task result was the satisfying one. A notification
+delivered six times to one root, once per open, and the model saying
+each time that it had dealt with it. Not a stale entry being re-read:
+a grandchild's result addressed to a task whose worktree was gone,
+re-adopted at every open, failing to route, and turned into a fresh
+failure note for the root by a path that carried the note upward but
+never retired the origin. The note did not even carry the result, so
+the work was lost each time. Now a terminal target failure is its own
+outcome, the note embeds the result, and the retire is a field on the
+disposition that no driver can leave unread.
+
+Each of the four ran as one Opus agent in its own worktree with the
+tenco gate, the way the sweep did; two at a time, rebased as main
+moved. One agent found this Mac's disk full and deleted the local
+debug target to keep working — right call for a build cache the rules
+forbid using here, but a deletion nobody asked for, so it is written
+down.
+
 ## 2026-09-15 — The sweep, and eight agents in worktrees
 
 A UX sweep, asked for as "weird things, inconsistencies, bad states".
