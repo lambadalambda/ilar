@@ -81,6 +81,11 @@ pub struct RuntimePlan {
     /// and this launch left it out; the driver says so rather than
     /// dropping it in silence.
     pub skipped_project_instructions: Option<&'static str>,
+    /// What this launch asked for and did not get, one line each: a
+    /// reasoning variant the model does not have, an agent override the
+    /// session will not remember. A driver shows them; silence here
+    /// reads as a bug in the program rather than a rule about the flag.
+    pub notices: Vec<String>,
     skill_store: Arc<crate::skill::SkillStore>,
     persisted_model: Option<String>,
     user_dir: PathBuf,
@@ -164,6 +169,63 @@ pub fn selected_reasoning(
     }
 }
 
+/// A reasoning variant the model does not have is dropped with a line
+/// saying so, not refused: `general.reasoning` is validated once against
+/// `general.model` and then applied to every model this launch runs, so
+/// a `--model` or an agent's own `model:` would otherwise refuse to
+/// start over a default that has nothing to do with it.
+pub fn usable_reasoning(
+    model: &str,
+    reasoning: Option<String>,
+) -> (Option<String>, Option<String>) {
+    match reasoning {
+        Some(variant) if crate::model::variant_options(model, Some(&variant)).is_err() => (
+            None,
+            Some(format!(
+                "{model} has no {variant:?} reasoning variant (general.reasoning): running it without one"
+            )),
+        ),
+        reasoning => (reasoning, None),
+    }
+}
+
+/// The session `--continue` resumes. An empty store and a store whose
+/// sessions all belong to somebody else are different situations: a
+/// subagent task's session is resumed through its parent, and a session
+/// whose head will not parse is skipped, so "the directory is empty"
+/// was a guess in both cases.
+pub fn latest_session_id(store: &SessionStore) -> Result<String> {
+    if let Some(session) = store.latest() {
+        return Ok(session.id);
+    }
+    let dir = store.root();
+    let files = match std::fs::read_dir(dir) {
+        Ok(entries) => entries
+            .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "jsonl"))
+            .count(),
+        // A directory that cannot be read is neither of the two
+        // situations below, and saying it holds nothing would be a
+        // guess about a directory nobody looked in.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "no sessions to continue: reading {} (set ILAR_STATE_DIR to keep sessions elsewhere)",
+                    dir.display()
+                )
+            });
+        }
+    };
+    match files {
+        0 => anyhow::bail!("no sessions to continue: {} holds none", dir.display()),
+        files => anyhow::bail!(
+            "no sessions to continue: none of the {files} session(s) in {} can be resumed on its own (a subagent task's session is resumed through its parent, and an unreadable one is skipped)",
+            dir.display()
+        ),
+    }
+}
+
 /// A base system prompt with the agent definition's own prompt hung off
 /// it. Every path that runs an agent — the root session here, a
 /// foreground or background task, a routed notification — assembles it
@@ -216,7 +278,12 @@ pub fn create_root_session(
     crate::model::variant_options(&meta.model, reasoning)?;
     let session_id = meta.session_id.clone();
     let model = meta.model.clone();
-    let mut session = store.create(meta).context("creating session")?;
+    let mut session = store.create(meta).with_context(|| {
+        format!(
+            "creating a session in {} (set ILAR_STATE_DIR to keep sessions elsewhere)",
+            store.root().display()
+        )
+    })?;
     let Some(reasoning) = reasoning else {
         return Ok(());
     };
@@ -301,7 +368,29 @@ impl RuntimePlan {
             .iter()
             .find(|candidate| candidate.name == agent_name)
             .cloned()
-            .with_context(|| format!("unknown agent {agent_name:?}"))?;
+            .ok_or_else(|| {
+                let mut known = agents
+                    .iter()
+                    .map(|agent| agent.name.as_str())
+                    .collect::<Vec<_>>();
+                known.sort_unstable();
+                anyhow::anyhow!(
+                    "unknown agent {agent_name:?}; known agents: {}",
+                    known.join(", ")
+                )
+            })?;
+        let mut notices = Vec::new();
+        // The session records the agent it was created with and nothing
+        // records a change, so a `--agent` on a resumed session is this
+        // launch only. Better said out loud than discovered on the next
+        // `--continue`.
+        if let (Some(cli), Some(persisted)) = (options.agent.as_deref(), persisted_agent.as_deref())
+            && cli != persisted
+        {
+            notices.push(format!(
+                "agent {cli:?} applies to this launch only: the session is recorded as {persisted:?} and --continue will use that again"
+            ));
+        }
 
         let persisted_model = resumed.as_ref().map(|session| session.effective_model());
         let persisted_variant = resumed
@@ -320,8 +409,12 @@ impl RuntimePlan {
             persisted_variant.as_deref(),
             config.general.reasoning.as_deref(),
         );
-        crate::model::variant_options(&model, reasoning.as_deref())
-            .with_context(|| format!("invalid reasoning for {model}"))?;
+        // Before anything is built: an id nothing knows is not a
+        // session to plan, and the variant check below would otherwise
+        // be the only thing that noticed.
+        config.ensure_model_known(&model)?;
+        let (reasoning, dropped_reasoning) = usable_reasoning(&model, reasoning);
+        notices.extend(dropped_reasoning);
 
         let skill_store = Arc::new(if options.own_skills_only {
             crate::skill::SkillStore::own_only(user_dir.clone())
@@ -375,6 +468,7 @@ impl RuntimePlan {
             commands,
             resumed,
             skipped_project_instructions,
+            notices,
             skill_store,
             persisted_model,
             user_dir,
@@ -401,19 +495,19 @@ impl RuntimePlan {
         resolver: Arc<dyn ProviderResolver>,
     ) -> Result<SessionRuntime> {
         let store = session_store(config);
-        drop(resolver.resolve_provider(&self.model).with_context(|| {
-            // A key kept in a sealed store is read at startup, when the
-            // store may still be locked: say so, or the person who put
-            // it there reads this as "the key is gone".
-            let locked = if crate::secrets::SecretStore::open(config.state_dir()).is_locked() {
-                "; a key kept in the secret store is unreadable while the store is locked"
+        // The resolver's own message names the provider this model
+        // needs and what to set, so nothing wraps it: the wrapper
+        // printed the same fact twice, its copy naming every key
+        // variable including the one already exported. The one thing
+        // the resolver cannot know is that a key kept in a sealed store
+        // is unreadable while the store is locked — without that, the
+        // person who put it there reads this as "the key is gone".
+        drop(resolver.resolve_provider(&self.model).map_err(|error| {
+            if crate::secrets::SecretStore::open(config.state_dir()).is_locked() {
+                error.context("a key kept in the secret store is unreadable while it is locked")
             } else {
-                ""
-            };
-            format!(
-                "no provider configured for {} (set ILAR_ZAI_API_KEY, ILAR_OPENAI_API_KEY or ILAR_OPENCODE_API_KEY){locked}",
-                self.model
-            )
+                error
+            }
         })?);
 
         let session_id = match &self.session_id {
@@ -705,6 +799,152 @@ fn image_gen_backend(config: &Config) -> Option<crate::tools::image_gen::ImageGe
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `general.reasoning` is checked against `general.model` once and
+    /// then applied to whatever this launch runs, so a `--model` or an
+    /// agent's own model must not be refused over it.
+    #[test]
+    fn a_variant_the_model_lacks_is_dropped_with_a_line_not_refused() {
+        assert_eq!(
+            usable_reasoning("zai/glm-4.7", None),
+            (None, None),
+            "no variant, nothing to say"
+        );
+        let (kept, notice) = usable_reasoning("openai/gpt-5.6", Some("high".into()));
+        assert_eq!(kept.as_deref(), Some("high"));
+        assert_eq!(notice, None);
+
+        let (dropped, notice) = usable_reasoning("zai/glm-4.7", Some("high".into()));
+        assert_eq!(dropped, None, "an unsupported variant is not sent");
+        let notice = notice.expect("dropping a variant is announced");
+        assert!(notice.contains("zai/glm-4.7"), "{notice}");
+        assert!(notice.contains("\"high\""), "{notice}");
+        assert!(notice.contains("general.reasoning"), "{notice}");
+    }
+
+    /// "the session directory is empty" was printed for an empty store
+    /// and for a store full of sessions that simply cannot be resumed
+    /// on their own. Two situations, two next steps.
+    #[test]
+    fn nothing_to_continue_says_which_kind_of_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().join("sessions"));
+        let error = latest_session_id(&store).unwrap_err().to_string();
+        assert!(error.contains("holds none"), "{error}");
+
+        // A workspace-bound child: listed nowhere, resumable only
+        // through its parent.
+        let child = new_id();
+        drop(
+            store
+                .create(SessionMeta {
+                    session_id: child.clone(),
+                    parent_id: Some(new_id()),
+                    agent: "build".into(),
+                    model: "zai/glm-4.7".into(),
+                    workspace: None,
+                    cwd: None,
+                })
+                .unwrap(),
+        );
+        let error = latest_session_id(&store).unwrap_err().to_string();
+        assert!(error.contains("1 session(s)"), "{error}");
+        assert!(error.contains("resumed through its parent"), "{error}");
+
+        // A session of one's own is found again.
+        let own = new_id();
+        drop(
+            store
+                .create(SessionMeta {
+                    session_id: own.clone(),
+                    parent_id: None,
+                    agent: "build".into(),
+                    model: "zai/glm-4.7".into(),
+                    workspace: None,
+                    cwd: None,
+                })
+                .unwrap(),
+        );
+        assert_eq!(latest_session_id(&store).unwrap(), own);
+    }
+
+    /// A name the program does not know, answered with the names it
+    /// does: an agent list is three words long and was left out.
+    #[test]
+    fn an_unknown_agent_names_the_agents_that_exist() {
+        let guard = tempfile::tempdir().unwrap();
+        let cwd = guard.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let config = crate::config::Loader::with_env(vec![("ILAR_ZAI_API_KEY", "zk".to_string())])
+            .config_dir(guard.path().join("config"))
+            .state_dir(guard.path().join("state"))
+            .resolve()
+            .unwrap();
+        let error = RuntimePlan::resolve(
+            &config,
+            &RuntimeOptions {
+                cwd,
+                agent: Some("explorer".into()),
+                ..RuntimeOptions::default()
+            },
+        )
+        .map(|_| ())
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("unknown agent \"explorer\""), "{error}");
+        assert!(error.contains("build, explore"), "{error}");
+    }
+
+    /// Nothing records an agent change, so `--agent` on a resumed
+    /// session lasts exactly one launch. The next `--continue` reverted
+    /// to the recorded agent without a word.
+    #[test]
+    fn an_agent_override_on_a_resumed_session_says_it_is_not_recorded() {
+        let guard = tempfile::tempdir().unwrap();
+        let cwd = guard.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let config = crate::config::Loader::with_env(vec![("ILAR_ZAI_API_KEY", "zk".to_string())])
+            .config_dir(guard.path().join("config"))
+            .state_dir(guard.path().join("state"))
+            .resolve()
+            .unwrap();
+        let store = session_store(&config);
+        let id = new_id();
+        create_root_session(
+            &store,
+            SessionMeta {
+                session_id: id.clone(),
+                parent_id: None,
+                agent: "build".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+                cwd: None,
+            },
+            None,
+        )
+        .unwrap();
+        let plan = |agent: Option<&str>| {
+            RuntimePlan::resolve(
+                &config,
+                &RuntimeOptions {
+                    cwd: cwd.clone(),
+                    agent: agent.map(str::to_string),
+                    resume: Some(id.clone()),
+                    ..RuntimeOptions::default()
+                },
+            )
+            .unwrap()
+            .notices
+        };
+        let notices = plan(Some("explore"));
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].contains("this launch only"), "{notices:?}");
+        assert!(notices[0].contains("\"build\""), "{notices:?}");
+
+        // The recorded agent, asked for again, is not news.
+        assert!(plan(Some("build")).is_empty());
+        assert!(plan(None).is_empty());
+    }
 
     #[test]
     fn a_preview_renders_the_request_and_creates_no_session() {

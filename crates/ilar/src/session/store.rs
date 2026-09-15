@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use fs2::FileExt;
 
@@ -291,6 +291,12 @@ fn last_topic_in_tail(path: &std::path::Path) -> Option<String> {
 impl SessionStore {
     pub fn new(root: PathBuf) -> Self {
         Self { root }
+    }
+
+    /// The directory the store lives in, for an error that has to name
+    /// the place it could not write to.
+    pub fn root(&self) -> &Path {
+        &self.root
     }
 
     pub fn session_path(&self, id: &str) -> std::io::Result<PathBuf> {
