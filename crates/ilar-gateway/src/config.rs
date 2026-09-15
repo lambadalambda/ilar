@@ -51,6 +51,11 @@ pub struct GatewayConfig {
     /// every edit is a message on the wire.
     #[serde(default = "default_status_interval_secs")]
     pub status_interval_secs: u64,
+    /// Seconds between two tries at a send the channel refused. Four
+    /// tries, enough to outlast a channel that is reconnecting; then
+    /// the chat and the model are told it never went.
+    #[serde(default = "default_send_retry_secs")]
+    pub send_retry_secs: u64,
     /// The review after a turn: once per idle episode, what was worth
     /// keeping.
     #[serde(default)]
@@ -62,6 +67,10 @@ pub struct GatewayConfig {
 
 fn default_status_interval_secs() -> u64 {
     4
+}
+
+fn default_send_retry_secs() -> u64 {
+    2
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -88,6 +97,7 @@ impl Default for GatewayConfig {
             status: true,
             announce: true,
             status_interval_secs: default_status_interval_secs(),
+            send_retry_secs: default_send_retry_secs(),
             review: Default::default(),
             weekly: Default::default(),
         }
@@ -194,6 +204,7 @@ mod tests {
         assert!(parsed.model.is_none());
         assert!(parsed.status);
         assert_eq!(parsed.status_interval_secs, 4);
+        assert_eq!(parsed.send_retry_secs, 2);
         let table: toml::Table = toml::from_str("model = \"zai/glm-4.7\"").unwrap();
         let parsed: GatewayConfig = table.try_into().unwrap();
         assert_eq!(parsed.model.as_deref(), Some("zai/glm-4.7"));

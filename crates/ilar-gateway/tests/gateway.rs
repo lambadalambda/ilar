@@ -217,6 +217,65 @@ async fn a_scripts_notification_is_never_a_command() {
 }
 
 #[tokio::test]
+async fn a_send_the_channel_refuses_is_tried_again_and_then_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = GatewayConfig {
+        announce: false,
+        send_retry_secs: 0,
+        ..GatewayConfig::default()
+    };
+    let (gateway, fake) = gateway_with(
+        dir.path(),
+        vec![
+            calls("message", serde_json::json!({"text": "first try fails"})),
+            says("(nothing more)"),
+            calls(
+                "message",
+                serde_json::json!({"text": "this one never lands"}),
+            ),
+            says("(nothing more)"),
+            says("so what happened?"),
+        ],
+        settings,
+    );
+    // One refusal: the retry gets the reply through.
+    fake.fail_next_sends(1);
+    fake.inject("hi", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(1, WAIT).await;
+    assert_eq!(sent[0].text, "first try fails", "{sent:?}");
+
+    // Every try refused: the chat is told, with the text it never got.
+    fake.fail_next_sends(4);
+    fake.inject("again", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(2, WAIT).await;
+    assert!(
+        sent[1].text.starts_with("⚠ Delivering a message failed:"),
+        "{sent:?}"
+    );
+    assert!(
+        sent[1].text.contains("What it said: this one never lands"),
+        "{sent:?}"
+    );
+
+    // And the model, which was told "sent", hears it on its next turn.
+    fake.inject("did that arrive?", "chat-1", "alice").await;
+    fake.wait_for_sent(3, WAIT).await;
+    let session_id = session_of(dir.path(), "fake:chat-1");
+    let store = ilar::runtime::session_store(&config(dir.path()));
+    let told = store
+        .load(&session_id)
+        .unwrap()
+        .events()
+        .iter()
+        .any(|event| {
+            matches!(event, ilar::session::SessionEvent::UserMessage { text, .. }
+                if text.contains("<delivery-failure>") && text.contains("did that arrive?"))
+        });
+    assert!(told, "the model was never told the message did not go");
+    gateway.cancel();
+}
+
+#[tokio::test]
 async fn a_turn_that_only_thinks_is_reported_not_swallowed() {
     let dir = tempfile::tempdir().unwrap();
     let (gateway, fake) = gateway(

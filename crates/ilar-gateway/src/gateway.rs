@@ -113,6 +113,9 @@ pub fn password_advice(taken_back: bool) -> &'static str {
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(15);
 /// The pause before a channel that stopped is started again.
 const CHANNEL_RESTART: Duration = Duration::from_secs(5);
+/// How many times a refused send is tried; the pause between them is
+/// `gateway.send_retry_secs`.
+const SEND_TRIES: u32 = 4;
 /// How long the start announcement keeps trying while the channel
 /// connects, and how long the stop announcement may take.
 const ANNOUNCE_RETRY: Duration = Duration::from_secs(2);
@@ -1185,8 +1188,55 @@ impl Gateway {
             log(&format!("{key}: no such channel; dropping a message"));
             return;
         };
-        if let Err(error) = target.send(message).await {
-            log(&format!("{key}: send failed: {error:#}"));
+        let retry = Duration::from_secs(self.settings.send_retry_secs);
+        for attempt in 1..=SEND_TRIES {
+            // A channel whose server just died is back in a few
+            // seconds; a message it refused is worth another try
+            // before anyone is told it did not go.
+            match target.send(message.clone()).await {
+                Ok(()) => return,
+                Err(error) if attempt == SEND_TRIES => {
+                    log(&format!(
+                        "{key}: send failed after {attempt} tries: {error:#}"
+                    ));
+                    self.undelivered(&key, target, &message, &error).await;
+                }
+                Err(error) => {
+                    log(&format!("{key}: send failed ({error:#}); trying again"));
+                    tokio::select! {
+                        () = self.cancel.cancelled() => return,
+                        () = tokio::time::sleep(retry) => {}
+                    }
+                }
+            }
+        }
+    }
+
+    /// A message the channel would not take, once the tries are spent.
+    /// The model was told "sent to …" the moment it queued it, and the
+    /// chat is silent, so both are told: the chat directly, with the
+    /// text it never got, and the seat's next turn through its prompt.
+    async fn undelivered(
+        &self,
+        key: &str,
+        target: &Arc<dyn Channel>,
+        message: &Outbound,
+        error: &anyhow::Error,
+    ) {
+        let what = failed_reply("Delivering a message", error);
+        self.driver.note_undelivered(key, &what);
+        // Sent straight, once, and without the media that may be what
+        // the channel refused: the queue is where we already are.
+        let notice = Outbound {
+            channel: message.channel.clone(),
+            chat_id: message.chat_id.clone(),
+            text: format!("⚠ {what}\nWhat it said: {}", message.text),
+            media: Vec::new(),
+        };
+        if let Err(error) = target.send(notice).await {
+            log(&format!(
+                "{key}: the chat could not be told either: {error:#}"
+            ));
         }
     }
 

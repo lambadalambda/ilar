@@ -75,6 +75,7 @@ declares them is warned about and ignored.
 | `gateway.weekly.archive_after_days` | `90` | Unused this long, it is moved to `skills/.archive/`. |
 | `gateway.status` | `true` | A status line in the chat while a turn runs. |
 | `gateway.status_interval_secs` | `4` | The least time between two edits of it. |
+| `gateway.send_retry_secs` | `2` | Between two tries at a send the channel refused; four tries, then the chat and the model are told. |
 | `gateway.announce` | `true` | A line to the last active chat when the gateway starts and stops. |
 | `channels.deltachat.*` | — | The Delta Chat adapter; see below. |
 
@@ -332,6 +333,12 @@ split at line breaks; the model writes it whole. A text that fits one
 bubble rides along as the first attachment's caption; a longer one
 goes out as its own bubbles before the files, since a folded caption
 would hide the answer behind the picture.
+A send the channel refuses is tried again, four times over
+`gateway.send_retry_secs` each, which outlasts a channel that is
+reconnecting. If it still will not go, the chat is told what was lost
+along with the text of it, and the seat's next turn is handed the same
+news before its prompt: the tool answered "sent to …" when it queued
+the message, and only that corrects it.
 The tool refuses what cannot be meant: a chat that has
 never written (it names the ones that have), a file that is not there,
 and a text that speaks of an attachment while `media` is empty — the

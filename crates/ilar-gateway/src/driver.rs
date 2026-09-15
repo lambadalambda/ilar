@@ -125,6 +125,9 @@ pub struct Seat {
     /// asks, its notification watch — and it is cancelled when the
     /// seat is closed. A child of the gateway's, so a stop ends it too.
     cancel: CancellationToken,
+    /// Messages to this chat the channel would not take. The tool said
+    /// "sent to …" when it queued them, so the next turn is told.
+    undeliverable: Mutex<Vec<String>>,
 }
 
 /// The chat a seat's own tools are built for: where it answers, and
@@ -320,6 +323,7 @@ impl Driver {
             undelivered: Mutex::new(Vec::new()),
             grants,
             cancel: cancel.clone(),
+            undeliverable: Mutex::new(Vec::new()),
         });
         tokio::spawn(watch_notifications(
             seat.runtime.spawner.clone(),
@@ -475,6 +479,7 @@ impl Driver {
         if seat.cancel.is_cancelled() {
             return Err(TurnError::Closed);
         }
+        let prompt = &with_undelivered(seat, prompt);
         let pending = seat.pending_model.lock().unwrap().take();
         if let Some(model) = pending {
             self.persist_model(seat, &model)
@@ -593,6 +598,15 @@ impl Driver {
     /// Steers the last turn on the seat never delivered.
     pub fn take_undelivered(&self, seat: &Seat) -> Vec<Steer> {
         std::mem::take(&mut *seat.undelivered.lock().unwrap())
+    }
+
+    /// A message to this chat the channel refused for good. Kept for
+    /// the seat's next turn: the message tool answered "sent to …",
+    /// and only this corrects that.
+    pub fn note_undelivered(&self, key: &str, what: &str) {
+        if let Some(seat) = self.seat_by_key(key) {
+            seat.undeliverable.lock().unwrap().push(what.to_string());
+        }
     }
 
     pub fn seats(&self) -> Vec<Arc<Seat>> {
@@ -863,6 +877,22 @@ pub fn plan(
         plan.system_prompt.push_str(&block);
     }
     Ok(plan)
+}
+
+/// The prompt a turn actually gets: what it was asked, after the news
+/// of anything the chat never received. A model that was told "sent
+/// to …" learns here that the message never went, before it acts as
+/// if it had answered.
+fn with_undelivered(seat: &Seat, prompt: &str) -> String {
+    let news = std::mem::take(&mut *seat.undeliverable.lock().unwrap());
+    if news.is_empty() {
+        return prompt.to_string();
+    }
+    format!(
+        "<delivery-failure>\nThese messages of yours never reached the chat, though the message \
+         tool reported them sent:\n{}\n</delivery-failure>\n\n{prompt}",
+        news.join("\n")
+    )
 }
 
 /// Run one turn and keep its text. The events are the loop's own; this

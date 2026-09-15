@@ -95,6 +95,8 @@ pub struct FakeChannel {
     runs: std::sync::atomic::AtomicUsize,
     /// Injected messages, for the ids they carry.
     injections: std::sync::atomic::AtomicUsize,
+    /// Sends left that the channel refuses, for a test of the retry.
+    failing_sends: std::sync::atomic::AtomicUsize,
 }
 
 impl FakeChannel {
@@ -110,12 +112,19 @@ impl FakeChannel {
             failing_runs: std::sync::atomic::AtomicUsize::new(0),
             runs: std::sync::atomic::AtomicUsize::new(0),
             injections: std::sync::atomic::AtomicUsize::new(0),
+            failing_sends: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
     /// Make the next `count` runs fail at once, as a dead server would.
     pub fn fail_next_runs(&self, count: usize) {
         self.failing_runs
+            .store(count, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Refuse the next `count` sends, as a channel that is down does.
+    pub fn fail_next_sends(&self, count: usize) {
+        self.failing_sends
             .store(count, std::sync::atomic::Ordering::Release);
     }
 
@@ -245,6 +254,14 @@ impl Channel for FakeChannel {
 
     fn send<'a>(&'a self, message: Outbound) -> ChannelFuture<'a, anyhow::Result<()>> {
         Box::pin(async move {
+            let refusing = self
+                .failing_sends
+                .load(std::sync::atomic::Ordering::Acquire);
+            if refusing > 0 {
+                self.failing_sends
+                    .store(refusing - 1, std::sync::atomic::Ordering::Release);
+                anyhow::bail!("fake channel {}: the wire is down", self.name);
+            }
             self.seen
                 .lock()
                 .unwrap()
