@@ -3653,8 +3653,12 @@ async fn run_app(
                             + app.undelivered_queued_results(),
                         // `spawner.shutdown()` below cancels every one
                         // of these, and each cancelled task mails a
-                        // "was cancelled" result to its parent.
-                        background: spawner.running_background() + routed.len(),
+                        // "was cancelled" result to its parent. The
+                        // deliveries are not counted twice: they are
+                        // cancelled too, and what that costs — mail
+                        // that waits for the next open — is exactly
+                        // what the undelivered line already says.
+                        background: spawner.running_background(),
                         focus_messages: focus_messages.len(),
                     };
                     if let Some(warning) = app.quit_warning(cost) {
