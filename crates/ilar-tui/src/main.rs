@@ -2293,6 +2293,22 @@ impl schedule::Runtime for LoopRuntime<'_> {
 
     async fn start_subtask(&mut self, app: &mut App, request: crate::app::SubtaskRequest) {
         let description = request.description.clone();
+        // Checked here rather than left to the task tool, whose
+        // refusal is addressed to a model: it names `subagent_type`,
+        // a JSON field nobody typed, instead of the `agent:` line in
+        // the file the user wrote.
+        let available: Vec<&str> = self
+            .spawner
+            .agents()
+            .iter()
+            .map(|agent| agent.name.as_str())
+            .collect();
+        if let Some(refusal) = unknown_subtask_agent(&request.agent, &available) {
+            let message = format!("{description}: {refusal}");
+            app.set_notice(message.clone(), NoticeLevel::Error);
+            app.push_transcript_line(Line_::System(message));
+            return;
+        }
         // The root ToolContext carries no session id — run_turn fills
         // it per turn, and this call bypasses run_turn. An empty id
         // here creates an unroutable completion notification that
@@ -2629,6 +2645,21 @@ fn drain_motion_batch(
         row,
         deferred,
     })
+}
+
+/// Whether a command's `agent:` names an agent that exists, and what
+/// to say when it does not. The task tool's own refusal is written for
+/// a model — `unknown subagent_type "nope"; available: build, explore`
+/// — and naming a JSON field the user never typed leaves them looking
+/// for it. This names the frontmatter key they did write.
+fn unknown_subtask_agent(agent: &str, available: &[&str]) -> Option<String> {
+    if available.contains(&agent) {
+        return None;
+    }
+    Some(format!(
+        "no agent named {agent:?} — this command's `agent:` must be one of: {}",
+        available.join(", ")
+    ))
 }
 
 /// What Esc says when it aborts a turn. A detached task's cancellation
@@ -5021,6 +5052,23 @@ mod tests {
             switch_blocked(false, 0, 0, false, true).as_deref(),
             Some("a goal is active — /goal abort before leaving its context")
         );
+    }
+
+    /// A command whose `agent:` names nothing is the user's typo, so
+    /// the refusal is addressed to the user: it names the frontmatter
+    /// key they wrote, not the `subagent_type` JSON field the task
+    /// tool would have complained about.
+    #[test]
+    fn a_command_naming_no_agent_is_refused_in_the_users_own_words() {
+        let available = ["build", "explore"];
+        assert_eq!(unknown_subtask_agent("explore", &available), None);
+
+        let refusal =
+            unknown_subtask_agent("nope", &available).expect("an unknown agent is refused");
+        assert!(refusal.contains("no agent named \"nope\""), "{refusal}");
+        assert!(refusal.contains("`agent:`"), "{refusal}");
+        assert!(refusal.contains("build, explore"), "{refusal}");
+        assert!(!refusal.contains("subagent_type"), "{refusal}");
     }
 
     /// Aborting a turn stops the detached tasks that turn started —
