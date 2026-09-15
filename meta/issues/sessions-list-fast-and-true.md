@@ -38,8 +38,23 @@ session is not shown at all.
 - The content search streams newest-first, reads each file's raw bytes
   for a case-insensitive substring before parsing it as JSON, lists
   once (not twice), and stays cancellable; children are not searched.
+- Continuing this directory's last session costs no directory scan: in
+  99% of cases that session is what the user wants, so a pointer file
+  beside the summary cache (`last-by-dir.json`, canonical launch cwd →
+  session id plus the id's mtime for staleness) is written atomically
+  whenever a root session is created, resumed, or its runtime ends (TUI
+  quit, exec end), and cleared when the empty-session removal takes the
+  session it named. `latest_session_in`/`--continue` read the pointer
+  first and open that session when its file is still there and still a
+  root session launched here; a missing or stale pointer falls back to
+  the cached listing and repairs the pointer. The picker's empty-query
+  listing uses the same pointer to lead with this directory's last
+  session even before the cache is warm.
 - A test for each: cache hit vs reread, lock removal, empty-session
   removal and the child/outbox exceptions, here-first-before-cap,
-  search skipping non-matching files without parsing.
+  search skipping non-matching files without parsing, the pointer
+  written on create and on quit, `--continue` not listing the directory
+  while the pointer is good, a stale pointer falling back and repairing
+  itself, and removal clearing it.
 
 Size: M. Source: user report 2026-09-15.
