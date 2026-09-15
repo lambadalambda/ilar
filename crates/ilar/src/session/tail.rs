@@ -224,6 +224,59 @@ fn file_identity(_metadata: &std::fs::Metadata) -> FileIdentity {
     (0, 0)
 }
 
+/// The end of a session's log, read from the end: at most `max_bytes`
+/// of file and at most `max_events` of what parses out of them, in file
+/// order. One read, whatever the log weighs — which is what makes a
+/// preview of an 80 MB session cost nothing noticeable.
+///
+/// A window is not the log, and this is a preview rather than a replay:
+///
+/// - the first line of a window that does not start at byte 0 is
+///   dropped, since its beginning was never read;
+/// - a rewind marker in the window drops everything before it, because
+///   the lines it truncated are behind the window and cannot be
+///   counted. Showing less than the rewind left is the safe error;
+/// - a line that will not parse is skipped, not fatal. A preview shows
+///   less; it never refuses.
+///
+/// Compaction is not applied, exactly as [`SessionTail`] does not apply
+/// it: what to cut is the renderer's decision.
+pub fn tail_events(
+    store: &SessionStore,
+    id: &str,
+    max_bytes: u64,
+    max_events: usize,
+) -> std::io::Result<Vec<SessionEvent>> {
+    let path = store.session_path(id)?;
+    let size = std::fs::metadata(&path)?.len();
+    let from = size.saturating_sub(max_bytes);
+    let bytes = read_at(&path, from, size - from)?;
+    let committed = &bytes[..committed_len(&bytes)];
+    let start = if from == 0 {
+        0
+    } else {
+        match committed.iter().position(|byte| *byte == b'\n') {
+            Some(newline) => newline + 1,
+            // The whole window is one unfinished line: nothing in it is
+            // a record this reader may show.
+            None => return Ok(Vec::new()),
+        }
+    };
+    let mut events = Vec::new();
+    for line in committed[start..].split(|byte| *byte == b'\n') {
+        let parsed = std::str::from_utf8(line)
+            .ok()
+            .and_then(|line| serde_json::from_str::<SessionEvent>(line).ok());
+        match parsed {
+            Some(SessionEvent::Rewind { .. }) => events.clear(),
+            Some(event) => events.push(event),
+            None => continue,
+        }
+    }
+    let excess = events.len().saturating_sub(max_events);
+    Ok(events.split_off(excess))
+}
+
 /// Byte offset just past the `count`-th newline, or `None` when the
 /// slice holds fewer lines than that.
 fn nth_line_end(bytes: &[u8], count: usize) -> Option<usize> {
@@ -723,5 +776,94 @@ mod tests {
         );
         assert_eq!(tail.line(), audit.len());
         assert_eq!(tail.events(), folded);
+    }
+
+    /// A log smaller than the window is the whole log: no line is
+    /// dropped when the window starts at byte 0.
+    #[test]
+    fn a_bounded_tail_of_a_short_log_is_the_whole_log() {
+        let (store, _dir) = temp_store();
+        let (id, mut session) = start(&store);
+        session.append(user("first")).unwrap();
+        session.append(assistant("did first")).unwrap();
+        drop(session);
+
+        assert_eq!(
+            tail_events(&store, &id, 1 << 20, 100).unwrap(),
+            store.audit_events(&id).unwrap()
+        );
+    }
+
+    /// The end of a long log, read from the end: a suffix of the real
+    /// events, bounded by both limits, and the byte bound is what keeps
+    /// the read off the rest of the file.
+    #[test]
+    fn a_bounded_tail_reads_the_end_of_a_long_log() {
+        let (store, _dir) = temp_store();
+        let (id, mut session) = start(&store);
+        for turn in 0..60 {
+            session
+                .append(user(&format!("ask {turn} {}", "x".repeat(400))))
+                .unwrap();
+            session
+                .append(assistant(&format!("answer {turn}")))
+                .unwrap();
+        }
+        drop(session);
+        let audit = store.audit_events(&id).unwrap();
+
+        let bounded = tail_events(&store, &id, 8 * 1024, 6).unwrap();
+
+        assert_eq!(bounded.len(), 6, "the event bound holds");
+        assert_eq!(
+            bounded,
+            audit[audit.len() - 6..],
+            "and what it kept is the log's own ending"
+        );
+
+        // The byte bound, seen from the other side: a window of two
+        // records cannot yield more than two events however high the
+        // event bound is.
+        let tiny = tail_events(&store, &id, 700, 100).unwrap();
+        assert!(
+            tiny.len() <= 2,
+            "a small window reads a small number of records, got {}",
+            tiny.len()
+        );
+        assert_eq!(
+            tiny.last(),
+            audit.last(),
+            "and it still ends where the log does"
+        );
+    }
+
+    /// A rewind marker inside the window cannot be folded against lines
+    /// the window never saw, so it takes everything before it: less
+    /// than the rewind left, never more.
+    #[test]
+    fn a_rewind_in_the_window_drops_what_precedes_it() {
+        let (store, _dir) = temp_store();
+        let (id, mut session) = start(&store);
+        session.append(user("first")).unwrap();
+        session.append(assistant("did first")).unwrap();
+        session.rewind_to(1, None, None).unwrap();
+        let mut session = store.acquire_writer(&id).unwrap().load().unwrap();
+        session.append(user("second")).unwrap();
+        drop(session);
+
+        let bounded = tail_events(&store, &id, 1 << 20, 100).unwrap();
+
+        assert_eq!(
+            bounded,
+            vec![store.audit_events(&id).unwrap().pop().unwrap()]
+        );
+    }
+
+    /// A session that is not there is an error, not an empty preview:
+    /// the caller offering a session has to know it is gone.
+    #[test]
+    fn a_bounded_tail_of_a_missing_session_fails() {
+        let (store, _dir) = temp_store();
+        assert!(tail_events(&store, &new_id(), 1024, 10).is_err());
     }
 }
