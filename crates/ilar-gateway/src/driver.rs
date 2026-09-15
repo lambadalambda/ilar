@@ -127,7 +127,7 @@ pub struct Seat {
     cancel: CancellationToken,
     /// Messages to this chat the channel would not take. The tool said
     /// "sent to …" when it queued them, so the next turn is told.
-    undeliverable: Mutex<Vec<String>>,
+    failed_sends: Mutex<Vec<String>>,
 }
 
 /// The chat a seat's own tools are built for: where it answers, and
@@ -323,7 +323,7 @@ impl Driver {
             undelivered: Mutex::new(Vec::new()),
             grants,
             cancel: cancel.clone(),
-            undeliverable: Mutex::new(Vec::new()),
+            failed_sends: Mutex::new(Vec::new()),
         });
         tokio::spawn(watch_notifications(
             seat.runtime.spawner.clone(),
@@ -421,11 +421,11 @@ impl Driver {
             ))?;
         }
         if self.gateway.tools.admits("cron") {
-            let home = crate::bus::session_key(channel, chat_id);
+            let home_chat = crate::bus::session_key(channel, chat_id);
             registry.add(CronTool::new(
                 self.wiring.cron.clone(),
                 self.routes.clone(),
-                &home,
+                &home_chat,
             ))?;
         }
         Ok(sent)
@@ -463,14 +463,15 @@ impl Driver {
         Ok(preview)
     }
 
-    /// One turn on a seat; a second caller waits for the first. Status
-    /// lines, when wanted, go to `status` as the turn moves.
+    /// One turn on a seat; a second caller waits for the first. The
+    /// chat's status line is claimed once this turn holds the seat and
+    /// given up as it ends, so a turn that waited gets a line of its
+    /// own rather than writing to one that is already gone.
     pub async fn run(
         &self,
         seat: &Seat,
         prompt: &str,
         images: &[ImageContent],
-        status: Option<mpsc::UnboundedSender<String>>,
     ) -> std::result::Result<TurnReport, TurnError> {
         let _turn = seat.turn.lock().await;
         // A turn queued behind the one `/new` cancelled — a subagent's
@@ -488,6 +489,16 @@ impl Driver {
         let sent_before = seat.sent.load(std::sync::atomic::Ordering::Acquire);
         seat.review_generation
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        // A background turn is nobody's wait: it shows no line.
+        let claim = if seat.background {
+            None
+        } else {
+            self.wiring
+                .status
+                .begin(&seat.key, &seat.channel, &seat.chat_id)
+                .await
+        };
+        let status = claim.as_ref().map(crate::status::Claim::lines);
         let mut narrator = crate::status::Narrator::default();
         let mut watch = crate::skills::SkillWatch::default();
         let skills = self.wiring.skills.clone();
@@ -523,6 +534,9 @@ impl Driver {
         .await;
         *seat.turn_cancel.lock().unwrap() = None;
         *seat.steer.lock().unwrap() = None;
+        // Before the caller says anything: the line comes down first,
+        // however the turn ended.
+        self.wiring.status.end(claim).await;
         let mut report = outcome?;
         report.sent = seat.sent.load(std::sync::atomic::Ordering::Acquire) - sent_before;
         Ok(report)
@@ -601,11 +615,14 @@ impl Driver {
     }
 
     /// A message to this chat the channel refused for good. Kept for
-    /// the seat's next turn: the message tool answered "sent to …",
-    /// and only this corrects that.
+    /// the next turn on the chat's own seat: the message tool answered
+    /// "sent to …", and only this corrects that.
     pub fn note_undelivered(&self, key: &str, what: &str) {
-        if let Some(seat) = self.seat_by_key(key) {
-            seat.undeliverable.lock().unwrap().push(what.to_string());
+        match self.seat_by_key(key) {
+            Some(seat) => seat.failed_sends.lock().unwrap().push(what.to_string()),
+            // A chat with no seat open has no model to tell; the log
+            // and the chat's own notice are all there is.
+            None => log(&format!("{key}: no seat to tell about {what}")),
         }
     }
 
@@ -885,15 +902,17 @@ pub fn plan(
 /// The prompt a turn actually gets: what it was asked, after the news
 /// of anything the chat never received. A model that was told "sent
 /// to …" learns here that the message never went, before it acts as
-/// if it had answered.
+/// if the person had it. The sender may have been another seat — a
+/// scheduled job speaking to this chat — so the news names the chat,
+/// not the author.
 fn with_undelivered(seat: &Seat, prompt: &str) -> String {
-    let news = std::mem::take(&mut *seat.undeliverable.lock().unwrap());
+    let news = std::mem::take(&mut *seat.failed_sends.lock().unwrap());
     if news.is_empty() {
         return prompt.to_string();
     }
     format!(
-        "<delivery-failure>\nThese messages of yours never reached the chat, though the message \
-         tool reported them sent:\n{}\n</delivery-failure>\n\n{prompt}",
+        "<delivery-failure>\nThese messages never reached this chat, though the message tool \
+         reported them sent:\n{}\n</delivery-failure>\n\n{prompt}",
         news.join("\n")
     )
 }

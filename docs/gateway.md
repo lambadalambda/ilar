@@ -140,12 +140,15 @@ undelivered.
 While a turn runs for a chat, the bot posts "working…" and edits that
 line as things move: "thinking — <topic>" from the reasoning summary,
 "running bash: <command>", "delegating to explore: …", "writing…".
-There is one line per chat: a second turn starting there — a
-subagent's report while the person's turn runs — writes to the same
-line instead of posting another, and only the turn that put it up
-takes it down. It is deleted the moment that chat's own reply goes
-out, or when the turn ends without one; a message from somewhere else,
-a scheduled job's or another chat's, leaves it standing. On Delta Chat
+There is one line per chat. A turn claims it once it holds the chat's
+seat, so a turn that had to wait — a subagent's report arriving while
+the person's turn runs — gets a line of its own rather than writing to
+one that is already gone; a line that is somehow still up is shared,
+never replaced, and only the turn that put it up takes it down. It is
+deleted the moment that chat's own reply goes out, or when the turn
+ends without one; a message from somewhere else — a scheduled job's, a
+command's reply, a 🔑 grant ask — leaves it standing, since the person
+is still waiting for the turn itself. On Delta Chat
 every edit and the deletion are messages on the wire, so edits are
 spaced by `status_interval_secs`. Background turns, cron and
 heartbeat, show nothing.
@@ -345,9 +348,9 @@ split at line breaks; the model writes it whole. A text that fits one
 bubble rides along as the first attachment's caption; a longer one
 goes out as its own bubbles before the files, since a folded caption
 would hide the answer behind the picture.
-A send the channel refuses is tried again, four times over
-`gateway.send_retry_secs` each, which outlasts a channel that is
-reconnecting. If it still will not go, the chat is told what was lost
+A send the channel refuses is tried again: four attempts, waiting
+`gateway.send_retry_secs` between them, which outlasts a channel that
+is reconnecting. If it still will not go, the chat is told what was lost
 along with the text of it, and the seat's next turn is handed the same
 news before its prompt: the tool answered "sent to …" when it queued
 the message, and only that corrects it.

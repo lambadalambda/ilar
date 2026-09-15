@@ -490,7 +490,8 @@ impl Gateway {
             // With none — the setting is off, or the line came down
             // with a reply already sent this turn — a folded-in
             // correction would look exactly like a dropped message.
-            if !self.status.is_up(&key) {
+            // A script is not waiting for an answer, so it gets none.
+            if !inbox::is_script(&message.sender_id) && !self.status.is_up(&key) {
                 self.deliver(&message.channel, &message.chat_id, STEER_ACK)
                     .await;
             }
@@ -567,12 +568,7 @@ impl Gateway {
         images: &[ImageContent],
     ) {
         let key = &seat.key;
-        let claim = self.begin_status(seat).await;
-        let outcome = self
-            .driver
-            .run(seat, prompt, images, claim.as_ref().map(|c| c.lines()))
-            .await;
-        self.status.end(claim).await;
+        let outcome = self.driver.run(seat, prompt, images).await;
         match outcome {
             Ok(report) if report.outcome == ilar::agent::TurnOutcome::Aborted => {
                 log(&format!("{key}: turn aborted"));
@@ -872,17 +868,7 @@ impl Gateway {
             log(&format!("{key}: follow-up for a chat with no seat"));
             return;
         };
-        let claim = self.begin_status(&seat).await;
-        let outcome = self
-            .driver
-            .run(
-                &seat,
-                &follow_up.prompt,
-                &[],
-                claim.as_ref().map(|c| c.lines()),
-            )
-            .await;
-        self.status.end(claim).await;
+        let outcome = self.driver.run(&seat, &follow_up.prompt, &[]).await;
         // A message may have steered this turn too; whatever it never
         // read must not wait for the next one.
         let seat_for_leftovers = seat.clone();
@@ -1036,11 +1022,13 @@ impl Gateway {
             Ok(seat) => seat,
             Err(error) => {
                 log(&format!("{key}: cannot open a session: {error:#}"));
+                self.job_failed(&key, &name, channel, chat_id, &format!("{error:#}"), job)
+                    .await;
                 return;
             }
         };
         log(&format!("{key}: scheduled turn for {target}"));
-        match self.driver.run(&seat, &prompt, &[], None).await {
+        match self.driver.run(&seat, &prompt, &[]).await {
             Ok(report) => {
                 self.keep_handovers(&seat, &report);
                 if report.sent == 0 {
@@ -1051,21 +1039,35 @@ impl Gateway {
             }
             Err(error) => {
                 log(&format!("{key}: scheduled turn failed: {error}"));
-                // A job is somebody's reminder: silence is the wrong
-                // answer, and a one-shot has already been retired, so
-                // it gets one more go. A heartbeat is silent by
-                // design and says nothing about its troubles.
-                if let Some(job) = job {
-                    self.deliver(
-                        channel,
-                        chat_id,
-                        &failed_line(&format!("Job {name}"), &error.to_string()),
-                    )
+                self.job_failed(&key, &name, channel, chat_id, &error.to_string(), job)
                     .await;
-                    self.retry_once(&key, job);
-                }
             }
         }
+    }
+
+    /// A job that could not run: silence is the wrong answer to
+    /// somebody's reminder, so the chat is told, and a one-shot —
+    /// which `take_due` has already retired — gets one more go. A
+    /// heartbeat has no job and stays silent: nobody asked for it.
+    async fn job_failed(
+        &self,
+        key: &str,
+        name: &str,
+        channel: &str,
+        chat_id: &str,
+        cause: &str,
+        job: Option<crate::cron::Job>,
+    ) {
+        let Some(job) = job else {
+            return;
+        };
+        self.deliver(
+            channel,
+            chat_id,
+            &failed_line(&format!("Job {name}"), cause),
+        )
+        .await;
+        self.retry_once(key, job);
     }
 
     /// A one-shot that failed never fired at all: it is scheduled once
@@ -1178,10 +1180,9 @@ impl Gateway {
             }
             return;
         }
-        let outcome = plan.apply(&self.memory, &self.skills);
-        log(&format!("{}: review: {}", seat.key, outcome.report()));
-        self.deliver(&seat.channel, &seat.chat_id, &outcome.report())
-            .await;
+        let report = plan.apply(&self.memory, &self.skills).report();
+        log(&format!("{}: review: {report}", seat.key));
+        self.deliver(&seat.channel, &seat.chat_id, &report).await;
     }
 
     /// A compaction's handover is the turn's own summary of what it
@@ -1235,19 +1236,6 @@ impl Gateway {
             .await;
     }
 
-    /// A status line in the chat for the turn about to run, shared
-    /// with whatever turn already has one up on this seat. `None` when
-    /// the channel has no such thing, the setting is off, or the seat
-    /// is a background one.
-    async fn begin_status(&self, seat: &crate::driver::Seat) -> Option<crate::status::Claim> {
-        if seat.background {
-            return None;
-        }
-        self.status
-            .begin(&seat.key, &seat.channel, &seat.chat_id)
-            .await
-    }
-
     /// One outbound message, to its channel. Only the dispatcher calls
     /// this, one message at a time. The status line is not touched
     /// here: the turn that owns it takes it down when it ends, and the
@@ -1276,7 +1264,10 @@ impl Gateway {
                 Err(error) => {
                     log(&format!("{key}: send failed ({error:#}); trying again"));
                     tokio::select! {
-                        () = self.cancel.cancelled() => return,
+                        () = self.cancel.cancelled() => {
+                            log(&format!("{key}: stopping; that message went nowhere"));
+                            return;
+                        }
                         () = tokio::time::sleep(retry) => {}
                     }
                 }

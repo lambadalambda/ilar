@@ -1006,6 +1006,48 @@ async fn a_message_during_a_turn_steers_it_and_one_reply_covers_both() {
 }
 
 #[tokio::test]
+async fn a_message_posted_mid_turn_leaves_the_status_line_standing() {
+    use ilar_gateway::channel::Seen;
+    let dir = tempfile::tempdir().unwrap();
+    let settings = GatewayConfig {
+        status_interval_secs: 0,
+        announce: false,
+        ..GatewayConfig::default()
+    };
+    let (gateway, fake) = gateway_with(
+        dir.path(),
+        vec![
+            calls("bash", serde_json::json!({"command": "sleep 4"})),
+            says("done"),
+        ],
+        settings,
+    );
+    fake.inject("run something slow", "chat-1", "alice").await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    // A command's reply — like a 🔑 grant ask or a cron job's message
+    // — goes out while the turn runs. The line is not its to take
+    // down: the person is still waiting for the turn's own answer.
+    fake.inject("/help", "chat-1", "alice").await;
+    fake.wait_for_sent(1, WAIT).await;
+    let seen = fake.seen();
+    assert!(
+        seen.iter().any(|s| matches!(s, Seen::StatusPosted(_))),
+        "{seen:?}"
+    );
+    assert!(!seen.contains(&Seen::StatusCleared), "{seen:?}");
+    // The turn's own reply takes it down, once.
+    let sent = fake.wait_for_sent(2, Duration::from_secs(15)).await;
+    assert_eq!(sent[1].text, "done", "{sent:?}");
+    let seen = fake.seen();
+    assert_eq!(
+        seen.iter().filter(|s| **s == Seen::StatusCleared).count(),
+        1,
+        "{seen:?}"
+    );
+    gateway.cancel();
+}
+
+#[tokio::test]
 async fn a_steer_with_no_status_line_is_acknowledged() {
     let dir = tempfile::tempdir().unwrap();
     // No status line to show "steered: …" on: a folded-in correction
@@ -1018,13 +1060,15 @@ async fn a_steer_with_no_status_line_is_acknowledged() {
     let (gateway, fake) = gateway_with(
         dir.path(),
         vec![
-            calls("bash", serde_json::json!({"command": "sleep 1"})),
+            // Long enough that a loaded machine still lands the steer
+            // inside the running turn.
+            calls("bash", serde_json::json!({"command": "sleep 4"})),
             says("done, and noted"),
         ],
         settings,
     );
     fake.inject("run something slow", "chat-1", "alice").await;
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
     fake.inject("also this", "chat-1", "alice").await;
     let sent = fake.wait_for_sent(2, Duration::from_secs(15)).await;
     let texts: Vec<&str> = sent.iter().map(|m| m.text.as_str()).collect();

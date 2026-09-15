@@ -372,6 +372,19 @@ mod tests {
             fake.seen(),
             [Seen::StatusPosted(WORKING.into()), Seen::StatusCleared]
         );
+        // The next turn on the seat gets a line of its own: a turn
+        // that waited its way through the seat is not left writing
+        // into the line that came down with the last reply.
+        let next = board.begin("fake:1", "fake", "1").await.expect("a line");
+        assert!(board.is_up("fake:1"));
+        board.end(Some(next)).await;
+        assert_eq!(
+            fake.seen()
+                .iter()
+                .filter(|s| matches!(s, Seen::StatusPosted(_)))
+                .count(),
+            2
+        );
     }
 
     #[tokio::test]

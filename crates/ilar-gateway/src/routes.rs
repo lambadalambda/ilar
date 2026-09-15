@@ -72,6 +72,10 @@ impl Routes {
     pub fn last_private_chat(&self) -> Option<&str> {
         self.last_private
             .as_deref()
+            // Routes written before this field existed name no private
+            // chat: the last active one stands in, as long as it is
+            // not a room.
+            .or(self.last_active.as_deref())
             .filter(|key| !self.is_group(key))
     }
 
@@ -176,5 +180,18 @@ mod tests {
         routes.touch("fake:g2", true);
         assert_eq!(routes.last_private_chat(), None);
         assert!(Routes::default().last_private_chat().is_none());
+        // Routes from before the field existed: the last active chat
+        // stands in for it, unless it is a room.
+        let older = Routes {
+            last_active: Some("fake:1".into()),
+            ..Routes::default()
+        };
+        assert_eq!(older.last_private_chat(), Some("fake:1"));
+        let older_room = Routes {
+            last_active: Some("fake:g".into()),
+            groups: vec!["fake:g".into()],
+            ..Routes::default()
+        };
+        assert_eq!(older_room.last_private_chat(), None);
     }
 }
