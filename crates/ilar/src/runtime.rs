@@ -571,8 +571,10 @@ impl RuntimePlan {
         // cannot be read simply has nothing to clean.
         crate::tools::bash::clean_spills(&crate::tools::bash::spill_dir(config.state_dir()));
         // Same errand, same indifference to failure: live-turn scratches
-        // whose process died before its drop guard ran.
+        // whose process died before its drop guard ran, and the writer
+        // locks nobody holds any more.
         crate::session::sweep_live_scratches(&sessions_dir(config));
+        crate::session::sweep_stale_locks(&sessions_dir(config));
         let Tooling {
             registry,
             spawner,

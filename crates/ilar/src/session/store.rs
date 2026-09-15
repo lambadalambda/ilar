@@ -104,13 +104,17 @@ pub struct Session {
     observed_stamp: FileStamp,
 }
 
-/// Exclusive OS-backed writer ownership for one session. The lock file is
-/// persistent, but the lock itself is released by the OS on drop or crash.
+/// Exclusive OS-backed writer ownership for one session. The lock
+/// itself is released by the OS on drop or crash; the file that carried
+/// it goes with the lease, so the sessions directory does not collect
+/// one `.lock` per session ever opened (2,414 of them, measured — see
+/// meta/issues/sessions-list-fast-and-true.md).
 pub struct SessionWriter {
     _file: File,
     id: SessionId,
     session_path: PathBuf,
     replay_index_path: PathBuf,
+    lock_path: PathBuf,
 }
 
 struct ReplayData {
@@ -130,6 +134,12 @@ struct ReplayData {
 
 impl Drop for SessionWriter {
     fn drop(&mut self) {
+        // Unlinked *before* the release, the order `delete` documents:
+        // a waiter that wins the lock on this now-nameless inode
+        // re-stats the path, finds it gone and starts over, while
+        // unlinking after the release could strand a holder that had
+        // already passed that check.
+        let _ = std::fs::remove_file(&self.lock_path);
         let _ = FileExt::unlock(&self._file);
     }
 }
@@ -193,6 +203,44 @@ const SUMMARY_TITLE_CHARS: usize = 80;
 fn summary_title(text: &str) -> String {
     let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
     truncate_chars_ellipsis(&collapsed, SUMMARY_TITLE_CHARS)
+}
+
+/// Remove the lock files nobody holds, the way the live-turn scratches
+/// are swept: every `<id>.lock` in the sessions directory is offered a
+/// non-blocking flock, and winning it is the proof that the process it
+/// belonged to is gone. A lock somebody does hold refuses the flock and
+/// is left exactly alone.
+///
+/// Writers unlink their own lock on release, so this is only for the
+/// ones a crash — or a version that never removed them — left behind.
+pub fn sweep_stale_locks(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Some(id) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.strip_suffix(".lock").map(str::to_string))
+        else {
+            continue;
+        };
+        if SessionId::parse(&id).is_err() {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(file) = OpenOptions::new().read(true).write(true).open(&path) else {
+            continue;
+        };
+        if FileExt::try_lock_exclusive(&file).is_err() {
+            // Held: a turn is running in this or another process.
+            continue;
+        }
+        // Unlinked while held, then released — the same order
+        // `SessionWriter`'s drop uses, and for the same reason.
+        let _ = std::fs::remove_file(&path);
+        let _ = FileExt::unlock(&file);
+    }
 }
 
 /// A directory entry as a session file, or `None` for anything that is
@@ -324,9 +372,13 @@ impl SessionStore {
         self.root.join(format!("{id}.replay.json"))
     }
 
+    fn lock_path_for(&self, id: &SessionId) -> PathBuf {
+        self.root.join(format!("{id}.lock"))
+    }
+
     fn acquire_writer_id(&self, id: SessionId) -> std::io::Result<SessionWriter> {
         std::fs::create_dir_all(&self.root)?;
-        let lock_path = self.root.join(format!("{id}.lock"));
+        let lock_path = self.lock_path_for(&id);
         // A lock is an inode, not a path. `delete()` unlinks the lock
         // while holding it, so a waiter can win the lock on an inode
         // that no longer has a name while a third process locks a fresh
@@ -369,6 +421,7 @@ impl SessionStore {
                 _file: file,
                 session_path: self.session_path_for(&id),
                 replay_index_path: self.replay_index_path_for(&id),
+                lock_path,
                 id,
             });
         }
@@ -534,7 +587,7 @@ impl SessionStore {
     /// held (active in some turn) with `WouldBlock`.
     pub fn delete(&self, id: &str) -> std::io::Result<()> {
         let parsed = SessionId::parse(id)?;
-        let lock_path = self.root.join(format!("{parsed}.lock"));
+        let lock_path = self.lock_path_for(&parsed);
         // Unlink everything while the lease is held: removing the lock
         // after release would race a new holder of the same path.
         let _writer = self.acquire_writer_id(parsed.clone())?;
@@ -2038,6 +2091,70 @@ mod tests {
         );
         assert!(store.children_of(&id).is_empty());
         assert!(scratch.exists(), "the store did not touch the scratch");
+    }
+
+    /// A lease that ends takes its lock file with it, and a lease that
+    /// is held keeps it — otherwise every session ever opened leaves a
+    /// `.lock` in the directory for ever (2,414 of them, measured).
+    #[test]
+    fn a_lock_file_lives_exactly_as_long_as_the_lease() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf());
+        let id = new_id();
+        let session = store
+            .create(SessionMeta {
+                session_id: id.clone(),
+                parent_id: None,
+                agent: "build".into(),
+                model: "test/model".into(),
+                workspace: None,
+                cwd: None,
+            })
+            .unwrap();
+        let lock = dir.path().join(format!("{id}.lock"));
+        assert!(lock.exists(), "a live lease has no lock file");
+
+        drop(session);
+        assert!(!lock.exists(), "the lock outlived its lease");
+
+        // And a fresh writer makes one again: the lease, not the file,
+        // is what exclusion is built on.
+        let writer = store.acquire_writer(&id).unwrap();
+        assert!(lock.exists());
+        let Err(error) = store.acquire_writer(&id) else {
+            panic!("a second writer got in");
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        drop(writer);
+        assert!(!lock.exists());
+    }
+
+    /// The startup sweep takes the locks a crash left behind and leaves
+    /// the one a running turn holds.
+    #[test]
+    fn the_startup_sweep_removes_only_the_locks_nobody_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf());
+        let held = new_id();
+        let writer = store.acquire_writer(&held).unwrap();
+        // What a killed process leaves: the file, with no lock on it.
+        let abandoned = new_id();
+        std::fs::write(dir.path().join(format!("{abandoned}.lock")), b"").unwrap();
+        // Not a session's lock at all, and not the sweep's business.
+        std::fs::write(dir.path().join("outbox.lock"), b"").unwrap();
+
+        sweep_stale_locks(dir.path());
+
+        assert!(
+            !dir.path().join(format!("{abandoned}.lock")).exists(),
+            "a stale lock survived the sweep"
+        );
+        assert!(
+            dir.path().join(format!("{held}.lock")).exists(),
+            "the sweep took a lock a turn was holding"
+        );
+        assert!(dir.path().join("outbox.lock").exists());
+        drop(writer);
     }
 
     /// The listing answers out of the summary cache while a file's
