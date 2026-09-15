@@ -2582,11 +2582,19 @@ fn drain_motion_batch(
 /// same set guards every path that tears the runtime down. The stash is
 /// not among them: it rides along into the rebuilt app, so there is
 /// nothing to lose by leaving.
+///
+/// A goal is among them. It lives in the running app and in nothing
+/// else — no event records it, and neither `App::new` nor a switch
+/// carries it — so leaving would drop the goal, its round budget and
+/// its badge without a word. `/rewind` refused for that reason; every
+/// other way out refused for none, so the refusal lives here and the
+/// user ends the goal deliberately (which says so in the transcript).
 fn switch_blocked(
     turn_running: bool,
     background_agents: usize,
     deliveries: usize,
     has_draft: bool,
+    goal_active: bool,
 ) -> Option<String> {
     if turn_running {
         Some("finish or abort the current turn before switching sessions".into())
@@ -2596,6 +2604,8 @@ fn switch_blocked(
         Some("a task result is being delivered; wait a moment".into())
     } else if has_draft {
         Some("input has an unsent draft; send or clear it first".into())
+    } else if goal_active {
+        Some("a goal is active — /goal abort before leaving its context".into())
     } else {
         None
     }
@@ -3163,13 +3173,9 @@ async fn run_app(
                 spawner.running_background(),
                 routed.len(),
                 !app.input.is_blank(),
+                app.goal.is_some(),
             ) {
                 app.set_notice(reason, NoticeLevel::Warning);
-            } else if app.goal.is_some() {
-                app.set_notice(
-                    "a goal is active — /goal abort before rewinding away its context",
-                    NoticeLevel::Warning,
-                );
             } else {
                 match store.load(session_id) {
                     Ok(reader) => {
@@ -3187,6 +3193,7 @@ async fn run_app(
                 spawner.running_background(),
                 routed.len(),
                 !app.input.is_blank(),
+                app.goal.is_some(),
             ) {
                 app.set_notice(reason, NoticeLevel::Warning);
             } else {
@@ -3912,6 +3919,7 @@ async fn run_app(
                                         spawner.running_background(),
                                         routed.len(),
                                         !app.input.is_blank(),
+                                        app.goal.is_some(),
                                     );
                                     if let Some(reason) = blocked {
                                         app.set_notice(reason, NoticeLevel::Warning);
@@ -3950,6 +3958,7 @@ async fn run_app(
                                         spawner.running_background(),
                                         routed.len(),
                                         !app.input.is_blank(),
+                                        app.goal.is_some(),
                                     );
                                     if let Some(reason) = blocked {
                                         app.set_notice(reason, NoticeLevel::Warning);
@@ -4015,6 +4024,7 @@ async fn run_app(
                                         spawner.running_background(),
                                         routed.len(),
                                         !app.input.is_blank(),
+                                        app.goal.is_some(),
                                     );
                                     if let Some(reason) = blocked {
                                         app.set_notice(reason, NoticeLevel::Warning);
@@ -4060,6 +4070,7 @@ async fn run_app(
                                         spawner.running_background(),
                                         routed.len(),
                                         false,
+                                        app.goal.is_some(),
                                     ) {
                                         app.set_notice(reason, NoticeLevel::Warning);
                                         continue;
@@ -4099,6 +4110,7 @@ async fn run_app(
                                         spawner.running_background(),
                                         routed.len(),
                                         false,
+                                        app.goal.is_some(),
                                     ) {
                                         app.set_notice(reason, NoticeLevel::Warning);
                                         continue;
@@ -4802,19 +4814,26 @@ mod tests {
     /// that do block still do, in the same order.
     #[test]
     fn a_waiting_stash_does_not_block_a_session_switch() {
-        assert_eq!(switch_blocked(false, 0, 0, false), None);
+        assert_eq!(switch_blocked(false, 0, 0, false, false), None);
 
         assert_eq!(
-            switch_blocked(true, 0, 0, false).as_deref(),
+            switch_blocked(true, 0, 0, false, false).as_deref(),
             Some("finish or abort the current turn before switching sessions")
         );
         assert_eq!(
-            switch_blocked(false, 1, 0, false).as_deref(),
+            switch_blocked(false, 1, 0, false, false).as_deref(),
             Some("background agents are running; wait or abort them first")
         );
         assert_eq!(
-            switch_blocked(false, 0, 0, true).as_deref(),
+            switch_blocked(false, 0, 0, true, false).as_deref(),
             Some("input has an unsent draft; send or clear it first")
+        );
+        // A goal lives in the app and nowhere else: leaving would drop
+        // it, its rounds and its badge silently. /rewind refused
+        // already; every other way out now refuses the same way.
+        assert_eq!(
+            switch_blocked(false, 0, 0, false, true).as_deref(),
+            Some("a goal is active — /goal abort before leaving its context")
         );
     }
 

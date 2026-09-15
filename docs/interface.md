@@ -212,6 +212,12 @@ the pending manager). `/goal` alone prefills the input for editing the
 goal in place, keeping the round budget. Aborting a running turn pauses
 the loop; it resumes after your next completed turn.
 
+The goal lives in the running app and nowhere else, so leaving the
+session it belongs to is refused while it stands — a rewind, a fork, the
+picker's `^Y`, resuming another session — with `a goal is active — /goal
+abort before leaving its context`. Ending it deliberately puts a line in
+the transcript saying how many rounds it ran.
+
 ## The sidebar
 
 On wide terminals the right column tracks session state: the todo list
