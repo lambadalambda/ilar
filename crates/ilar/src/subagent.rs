@@ -44,6 +44,15 @@ const BACKGROUND_ABORT_GRACE: std::time::Duration = std::time::Duration::from_se
 /// the universe.
 const NOTIFICATION_LOCK_RETRY: std::time::Duration = std::time::Duration::from_millis(25);
 const NOTIFICATION_LOCK_ATTEMPTS: usize = 120;
+/// How long a delivery waits for the session's own turn to let go
+/// before handing the notification back. Same budget as the lock
+/// retries above, and for the same reason: a resume that runs for
+/// minutes held the delivery for all of them, which showed as two ✉
+/// rows for one session and refused every session switch with "a task
+/// result is being delivered; wait a moment" for the whole time. Held
+/// is honest and re-offered the moment the user moves; waiting
+/// forever is not.
+const NOTIFICATION_CLAIM_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 /// The one wording for "make a worktree and name it here". Both refusals
 /// that send the model there quote it, and so does the schema: a
 /// corrective that drifts between sites is one the model has to learn
@@ -2036,12 +2045,19 @@ task's scope yourself; continue only clearly disjoint work."
         })
     }
 
+    /// Claim the session, waiting a bounded while for whoever holds it.
+    /// `None` means "not now" — cancelled, or the wait ran out — and
+    /// the caller requeues, exactly as it does for a held writer lock.
+    /// The cap is the point: without it a delivery behind a long resume
+    /// waited for the whole resume, holding a ✉ row and a session-
+    /// switch refusal open for minutes.
     async fn wait_for_session_claim(
         &self,
         session_id: &str,
         cancel: &tokio_util::sync::CancellationToken,
     ) -> Option<ActiveSessionGuard> {
         let mut changed = self.active_sessions_changed.subscribe();
+        let deadline = tokio::time::Instant::now() + NOTIFICATION_CLAIM_WAIT;
         loop {
             if let Some(claim) = self.claim_session(session_id) {
                 return Some(claim);
@@ -2049,6 +2065,7 @@ task's scope yourself; continue only clearly disjoint work."
             tokio::select! {
                 result = changed.changed() => result.ok()?,
                 () = cancel.cancelled() => return None,
+                () = tokio::time::sleep_until(deadline) => return None,
             }
         }
     }

@@ -2137,6 +2137,80 @@ async fn stall_watchdog_counts_a_busy_foreground_child_as_progress() {
     );
 }
 
+/// A resume turn is not steerable — it carries no channel — so a
+/// second result for the same session falls through to the claim wait.
+/// That wait had no cap: the delivery held a ✉ row and refused every
+/// session switch with "a task result is being delivered; wait a
+/// moment" for as long as the resume ran, which can be minutes. It
+/// gives up and requeues instead, the way a held writer lock does; the
+/// backlog re-offers it the moment something moves.
+#[tokio::test]
+async fn a_result_waiting_on_a_resume_requeues_instead_of_waiting_it_out() {
+    let (store, root_id) = temp_store();
+    let child_id = new_id();
+    drop(
+        store
+            .create(SessionMeta {
+                session_id: child_id.clone(),
+                parent_id: Some(root_id.clone()),
+                agent: "explore".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+                cwd: None,
+            })
+            .unwrap(),
+    );
+    let started = Arc::new(tokio::sync::Notify::new());
+    // Hangs after its first delta: the resume turn holds the claim for
+    // the rest of the test.
+    let spawner = patient_spawner(
+        Arc::new(NotifyingPartialText {
+            started: started.clone(),
+        }),
+        &store,
+    );
+
+    let resuming = {
+        let spawner = spawner.clone();
+        let child_id = child_id.clone();
+        tokio::spawn(async move {
+            spawner
+                .route_notification(
+                    ilar::subagent::Notification {
+                        parent_session_id: child_id,
+                        description: "the first result".into(),
+                        text: "<task-notification>\nfirst\n</task-notification>".into(),
+                        is_error: false,
+                    },
+                    tokio_util::sync::CancellationToken::new(),
+                )
+                .await
+        })
+    };
+    started.notified().await;
+
+    let second = ilar::subagent::Notification {
+        parent_session_id: child_id.clone(),
+        description: "the second result".into(),
+        text: "<task-notification>\nsecond\n</task-notification>".into(),
+        is_error: false,
+    };
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(20),
+        spawner.route_notification(second.clone(), tokio_util::sync::CancellationToken::new()),
+    )
+    .await
+    .expect("the claim wait must be bounded")
+    .unwrap();
+    let ilar::subagent::RouteOutcome::Requeue(requeued) = outcome else {
+        panic!("expected the result to be handed back for a later attempt");
+    };
+    assert_eq!(requeued.text, second.text, "the result itself comes back");
+
+    resuming.abort();
+    spawner.shutdown().await;
+}
+
 #[tokio::test]
 async fn nested_notification_runs_declared_parent_and_propagates_once() {
     let (store, root_id) = temp_store();
