@@ -493,10 +493,16 @@ impl Tool for BashTool {
                 Ok(granted) => granted,
                 Err(error) => return ToolOutput::error(error),
             };
-            let env = ChildEnv::shielded(ctx.secrets.as_ref(), &granted);
             // What the environment gets is what was granted; what the
-            // output is scrubbed of is every value the store holds.
-            let granted = crate::secrets::redaction_set(ctx.secrets.as_ref(), &granted);
+            // output is scrubbed of is every value the store holds,
+            // read once for both.
+            let stored = ctx
+                .secrets
+                .as_ref()
+                .map(|secrets| secrets.all())
+                .unwrap_or_default();
+            let env = ChildEnv::shielded_from(&stored, &granted);
+            let granted = crate::secrets::redaction_set(stored, &granted);
             if input.run_in_background {
                 if ctx.has_workspace_lease() {
                     return ToolOutput::error(

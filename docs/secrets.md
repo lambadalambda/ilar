@@ -45,20 +45,23 @@ or `service start`:
 Each named secret becomes an environment variable of that one command.
 It is not in ilar's own environment, not in any other command's, and
 not in the tool's arguments. What the command prints of it comes back
-as `<secret:GITHUB_TOKEN>`: the captured output is redacted before the
-spill file, the live tail, the service log or the transcript sees a
-byte of it, and not only of the values that call was granted — every
-value the store holds, so a command that echoes somebody else's token
-is marked at the source too. On top of that, every tool result that
-leaves the executor, whatever tool produced it, has every stored value
+as `<secret:GITHUB_TOKEN>`: a command's captured output is redacted
+before the spill file, the live tail or the transcript sees a byte of
+it, and not only of the values that call was granted — every value the
+store holds, so a command that echoes somebody else's token is marked
+at the source too. A service's log is held as it came and redacted the
+same way when it is read. On top of that, every tool result that leaves
+the executor, whatever tool produced it, has every stored value
 replaced, so a `read` of the store file or a `grep` that crosses it
 shows marks, not values.
 
-Two limits are worth knowing. A value the command transforms (base64,
-a hash, a substring) is not recognised. And once a command runs with
-the value, it can do anything with it, including sending it somewhere:
-the prompt showing the exact command is the whole safety, which is why
-the default answer is once.
+Three limits are worth knowing. A value the command transforms (base64,
+a hash, a substring) is not recognised. A stored value that also occurs
+as ordinary text is replaced wherever it appears, output included, which
+is why a value under four characters is refused at the door. And once a
+command runs with the value, it can do anything with it, including
+sending it somewhere: the prompt showing the exact command is the whole
+safety, which is why the default answer is once.
 
 ## Granting a use
 

@@ -89,8 +89,18 @@ impl ChildEnv {
         granted: &[crate::secrets::Granted],
     ) -> Self {
         let stored = secrets.map(|secrets| secrets.all()).unwrap_or_default();
+        Self::shielded_from(&stored, granted)
+    }
+
+    /// [`Self::shielded`] with the store's values already in hand: a
+    /// caller that also redacts output with them
+    /// ([`crate::secrets::redaction_set`]) reads the store once.
+    pub fn shielded_from(
+        stored: &[crate::secrets::Granted],
+        granted: &[crate::secrets::Granted],
+    ) -> Self {
         Self {
-            remove: crate::secrets::shielded_env(&stored),
+            remove: crate::secrets::shielded_env(stored),
             set: granted
                 .iter()
                 .map(|secret| (secret.name.clone(), secret.value().to_string()))

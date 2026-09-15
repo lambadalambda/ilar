@@ -158,7 +158,8 @@ impl Tool for SudoTool {
                 })
                 .into_iter()
                 .collect();
-            let mut env = ChildEnv::shielded(Some(secrets), &[]);
+            let stored = secrets.all();
+            let mut env = ChildEnv::shielded_from(&stored, &[]);
             env.stdin = stdin;
             let timeout =
                 std::time::Duration::from_millis(input.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
@@ -166,7 +167,7 @@ impl Tool for SudoTool {
             let wanted_password = granted.is_empty();
             // The password rides stdin; the output is scrubbed of it and
             // of every other value the store holds.
-            let granted = crate::secrets::redaction_set(Some(secrets), &granted);
+            let granted = crate::secrets::redaction_set(stored, &granted);
             let spill = SpillTarget::from_context(&ctx);
             let mut output = run_command(
                 "sudo",

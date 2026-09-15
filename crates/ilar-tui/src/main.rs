@@ -132,7 +132,8 @@ fn unlock_secrets(config: ilar::config::Config) -> Result<ilar::config::Config> 
         // session with no stored secrets, not a reason to refuse to run.
         Ok(false) => {
             eprintln!(
-                "The secret store stays locked this session: no stored secret can be used ({UNLOCK_HINT})."
+                "The secret store stays locked this session: no stored secret can be used. \
+                 Restart ilar to type the master password again."
             );
             Ok(config)
         }

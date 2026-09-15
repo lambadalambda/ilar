@@ -155,6 +155,8 @@ where
             let on_start = on_start.clone();
             let started_id = call.id.clone();
             let started_name = call.name.clone();
+            // This call's own id, for the notes its asks left behind.
+            let scrub_id = call.id.clone();
             running.push(Box::pin(async move {
                 let started = Arc::new(AtomicBool::new(false));
                 let observed_start = started.clone();
@@ -223,7 +225,7 @@ where
                 // crosses it, a shell that prints one. The one place
                 // all results pass, so the one place to hold the line.
                 let output = match &secrets {
-                    Some(secrets) => output.scrubbed(secrets),
+                    Some(secrets) => output.scrubbed(secrets, Some(&scrub_id)),
                     None => output,
                 };
                 (idx, output, started.load(Ordering::SeqCst))

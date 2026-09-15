@@ -1,6 +1,8 @@
 //! The `secrets` tool: what is stored, by name and purpose, and which
-//! tool may already use it. Never a value. Installed only while the
-//! store has something in it, so an empty store costs no tool.
+//! tool may already use it. Never a value. Installed wherever a store
+//! file exists — what it holds changes while a session runs, so the
+//! file, not its contents, decides — and absent on a machine that has
+//! never stored a secret.
 
 use super::{Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, WorkspaceAccess};
 

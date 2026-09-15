@@ -554,8 +554,9 @@ impl SecretStore {
     }
 
     /// Whether there is nothing to list. A store that cannot be read,
-    /// locked or damaged, is not: what it holds is worth a tool that
-    /// says so, and the resolve path is where the cause is reported.
+    /// locked or damaged, is not: what it holds is worth reporting, and
+    /// the resolve path is where the cause is reported. What installs
+    /// the `secrets` tool is [`Self::exists`], not this.
     pub fn is_empty(&self) -> bool {
         self.list().map(|listed| listed.is_empty()).unwrap_or(false)
     }
@@ -698,10 +699,17 @@ pub struct Secrets {
     /// row in the listing describes something the model cannot do.
     sudo: bool,
     /// What an ask had to admit, for the result of the call that asked:
-    /// an Always the store would not keep. Drained by
-    /// [`Self::take_notes`].
-    notes: Arc<Mutex<Vec<String>>>,
+    /// an Always the store would not keep. Keyed by tool call, since
+    /// calls run concurrently and this is shared with every child —
+    /// a note must not surface on somebody else's result. Drained by
+    /// [`Self::take_notes`]; a call that never came back to collect
+    /// its note loses it to [`MAX_NOTES`].
+    notes: Arc<Mutex<Vec<(Option<String>, String)>>>,
 }
+
+/// Notes kept for calls that have not collected them. A cancelled call
+/// never collects, so the oldest is dropped rather than kept for ever.
+const MAX_NOTES: usize = 8;
 
 /// What a driver that never said how to unlock the store falls back to.
 const UNLOCK_HINT: &str = "the user unlocks it with the master password";
@@ -738,10 +746,27 @@ impl Secrets {
         self
     }
 
-    /// What the asks in this call had to admit, dropped as it is taken:
-    /// the result of the call carries it.
-    pub fn take_notes(&self) -> Vec<String> {
-        std::mem::take(&mut self.notes.lock().unwrap())
+    /// What the asks in one tool call had to admit, dropped as it is
+    /// taken: the result of that call carries it.
+    pub fn take_notes(&self, call_id: Option<&str>) -> Vec<String> {
+        let mut notes = self.notes.lock().unwrap();
+        let mut mine = Vec::new();
+        notes.retain(|(id, note)| {
+            let ours = id.as_deref() == call_id;
+            if ours {
+                mine.push(note.clone());
+            }
+            !ours
+        });
+        mine
+    }
+
+    fn note(&self, call_id: Option<&str>, note: String) {
+        let mut notes = self.notes.lock().unwrap();
+        if notes.len() >= MAX_NOTES {
+            notes.remove(0);
+        }
+        notes.push((call_id.map(str::to_string), note));
     }
 
     /// What the driver's user does to unlock a sealed store: "restart
@@ -780,7 +805,14 @@ impl Secrets {
     pub fn listing(&self) -> Result<String> {
         let mut listed = match self.store.list() {
             Ok(listed) => listed,
-            Err(error) if error.is::<Locked>() || error.is::<Resealed>() => {
+            Err(error) if error.is::<Resealed>() => {
+                return Ok(format!(
+                    "The secret store was sealed again under another master password since this \
+                     session started, so it is locked; {}.",
+                    self.unlock_hint()
+                ));
+            }
+            Err(error) if error.is::<Locked>() => {
                 return Ok(format!(
                     "The secret store is sealed and locked for this session; {}.",
                     self.unlock_hint()
@@ -1049,11 +1081,14 @@ impl Secrets {
                         .lock()
                         .unwrap()
                         .insert((name.to_string(), request.tool.to_string()));
-                    self.notes.lock().unwrap().push(format!(
-                        "{name} for {}: the store is unwritable, so it is granted for this \
-                         session only",
-                        request.tool
-                    ));
+                    self.note(
+                        request.tool_call_id,
+                        format!(
+                            "{name} for {}: the store is unwritable, so it is granted for this \
+                             session only",
+                            request.tool
+                        ),
+                    );
                 }
             }
         }
@@ -1066,14 +1101,12 @@ impl Secrets {
 /// A command that echoes a secret it never asked for — a `cat` of a
 /// config file, a `env` — must not reach the spill file or the live
 /// tail in the clear either.
-pub fn redaction_set(secrets: Option<&Secrets>, granted: &[Granted]) -> Vec<Granted> {
-    let Some(secrets) = secrets else {
-        return granted.to_vec();
-    };
+/// `stored` is [`Secrets::all`], which the caller has just read for the
+/// child's environment: one read of the store file, not two.
+pub fn redaction_set(stored: Vec<Granted>, granted: &[Granted]) -> Vec<Granted> {
     let mut values = granted.to_vec();
     values.extend(
-        secrets
-            .all()
+        stored
             .into_iter()
             .filter(|secret| !granted.iter().any(|one| one.name == secret.name)),
     );
@@ -1565,14 +1598,23 @@ mod tests {
         );
         std::fs::set_permissions(&state, was).unwrap();
         assert!(outcome.is_ok(), "{:?}", outcome.err());
-        let notes = secrets.take_notes();
+        // The note belongs to the call that asked, not to whichever
+        // call happens to finish first.
+        assert!(
+            secrets.take_notes(Some("other-call")).is_empty(),
+            "another call took this one's note"
+        );
+        let notes = secrets.take_notes(Some("c1"));
         assert_eq!(notes.len(), 1, "{notes:?}");
         assert!(notes[0].contains("KEY for bash"), "{notes:?}");
         assert!(
             notes[0].contains("granted for this session only"),
             "{notes:?}"
         );
-        assert!(secrets.take_notes().is_empty(), "a note was said twice");
+        assert!(
+            secrets.take_notes(Some("c1")).is_empty(),
+            "a note was said twice"
+        );
         assert!(
             store.list().unwrap()[0].always.is_empty(),
             "the store took it after all"
@@ -1594,14 +1636,14 @@ mod tests {
             name: "A".into(),
             value: "aaaa-value".into(),
         }];
-        let values = redaction_set(Some(&secrets), &granted);
+        let values = redaction_set(secrets.all(), &granted);
         assert_eq!(values.len(), 2);
         assert_eq!(
             redact("aaaa-value bbbb-value", &values),
             "<secret:A> <secret:B>"
         );
         // No store at all: only what the call was handed.
-        assert_eq!(redaction_set(None, &granted).len(), 1);
+        assert_eq!(redaction_set(Vec::new(), &granted).len(), 1);
     }
 
     #[tokio::test]

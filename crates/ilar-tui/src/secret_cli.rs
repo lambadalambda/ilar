@@ -97,19 +97,23 @@ pub(crate) fn unlock_if_sealed(
     Ok(false)
 }
 
-/// What the store has, for an error that lists it. An unreadable store
-/// lists nothing: the failure itself is reported by the command.
-fn stored_names(store: &SecretStore) -> Vec<String> {
-    store
-        .list()
-        .map(|listed| listed.into_iter().map(|secret| secret.name).collect())
-        .unwrap_or_default()
+/// The names the store holds, without the `root` row: root is not
+/// stored, and a line that lists it among stored names suggests
+/// `ilar secret set root`, which is refused.
+fn stored_names(store: &SecretStore) -> Result<Vec<String>> {
+    Ok(store
+        .list()?
+        .into_iter()
+        .map(|secret| secret.name)
+        .filter(|name| name != ilar::secrets::ROOT)
+        .collect())
 }
 
 /// A name the store does not have is an error, whatever the command:
-/// exit 0 on a typo reads as "done".
+/// exit 0 on a typo reads as "done". A store that cannot be read is
+/// reported by the command that read it, not guessed at here.
 fn unknown_name(store: &SecretStore, name: &str) -> anyhow::Error {
-    let names = stored_names(store);
+    let names = stored_names(store).unwrap_or_default();
     if names.is_empty() {
         anyhow::anyhow!("no secret named {name}; the store is empty")
     } else {
@@ -278,11 +282,7 @@ pub(crate) fn run(
             // typo, the other is already the way it was asked for. The
             // listing is read here rather than guessed at, so a store
             // that cannot be read says that instead of "no such name".
-            let names: Vec<String> = store
-                .list()?
-                .into_iter()
-                .map(|secret| secret.name)
-                .collect();
+            let names = stored_names(store)?;
             if name != ilar::secrets::ROOT && !names.contains(&name) {
                 return Err(unknown_name(store, &name));
             }
