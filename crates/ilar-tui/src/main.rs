@@ -1396,7 +1396,13 @@ async fn main() -> Result<()> {
         // conversation this is — and read here, before the fresh
         // session is created, because creating one moves the pointer
         // the offer comes from.
-        let offer = if first_run && resume_target.is_none() && config.general.resume_offer {
+        let offer = if first_run
+            && resume_target.is_none()
+            && config.general.resume_offer
+            // `--print-prompt` prints and exits; there is no screen to
+            // offer anything on.
+            && !args.print_prompt
+        {
             let here = std::env::current_dir().context("no cwd")?;
             session_view::ghost_offer(&store, &here, std::time::SystemTime::now())
         } else {
