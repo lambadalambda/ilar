@@ -50,6 +50,11 @@ Environment variables:
 | `ILAR_OPENAI_API_KEY` | Fallback OpenAI API key. |
 | `ILAR_ZAI_API_KEY` | Fallback z.ai API key. |
 | `ILAR_OPENCODE_API_KEY` | Fallback OpenCode key, for both Zen and Go. |
+
+A provider key may also live in the [secret store](secrets.md) under
+its variable's name (`ilar secret set ILAR_OPENAI_API_KEY`); the TOML
+field wins, then the environment, then the store. None of these
+reach a shell the model runs.
 | `ILAR_TAVILY_API_KEY` | Switches web search to the Tavily API (recommended). |
 | `ILAR_EXA_API_KEY` | Authenticates the default Exa web search backend. |
 

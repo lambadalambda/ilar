@@ -352,3 +352,7 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Background jobs show in the sidebar](issues/background-jobs-show-in-the-sidebar.md)
 - [x] [A listing with two windows uses the smaller](issues/a-listing-with-two-windows-uses-the-smaller.md)
 - [x] [The context window can be overridden in the TUI](issues/the-context-window-can-be-overridden-in-the-tui.md)
+
+## Milestone 22 — Secrets
+
+- [x] [Secrets are stored once and granted per use](issues/secrets-are-stored-once-and-granted-per-use.md)

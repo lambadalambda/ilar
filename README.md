@@ -20,7 +20,9 @@ filesystem, network, process, and credential access. Options include
 locked-down container, or a dedicated virtual machine.
 
 Git worktrees and ilar's read-only/mutating tool scheduling are coordination
-mechanisms, not security boundaries.
+mechanisms, not security boundaries. The [secret store](docs/secrets.md)
+keeps keys out of the model's context and asks before a command gets one,
+but a command that has a value can do anything with it.
 
 ## Highlights
 
@@ -108,6 +110,7 @@ ilar-gateway                     # the assistant, on the channels in ilar.toml
 | [ilar-gateway](docs/gateway.md) | The assistant: channels, routing, the message tool, memory, cron and heartbeat, the tool policy, Delta Chat. |
 | [ilar serve](docs/serve.md) | The web view — *stood down, behind `--features serve`*: routes, the SSE envelope, tokens and what they are not. |
 | [Configuration](docs/configuration.md) | `ilar.toml`, environment, web search, ChatGPT OAuth, project instructions. |
+| [Secrets](docs/secrets.md) | The store, `ilar secret`, how a command gets a value and who says yes. |
 | [Agents, skills, commands](docs/agents-and-skills.md) | Custom agents, subagent tasks, services, MCP. |
 | [Checkpoints and recovery](docs/checkpoints.md) | Inspecting the shadow ref, undoing a rewind, limitations. |
 | [System prompts](docs/system-prompts.md) | Exactly what the model sees, and when it changes. |

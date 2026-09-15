@@ -1,5 +1,37 @@
 # DEVLOG
 
+## 2026-09-15 — A key the model never sees
+
+The ask was simple: hand ilar an API key without it ending up in the
+transcript, and have ilar ask before using it. The survey said the
+opposite was true: keys sat in ilar.toml or the environment, the bash
+tool passed its whole environment to every child, redaction was
+display-only and the session store kept results raw, and nothing in
+ilar ever asked permission for anything.
+
+The shape that came out: a store of named values, a `secrets` argument
+on bash and service, and a grant protocol copied from the question
+protocol (a prompt over a channel, a one-shot reply) so each driver
+answers it its own way: a modal in the TUI, `/grant` and `/deny` in the
+chat, a refusal with the CLI line under `ilar exec`. The value reaches
+the command as an environment variable and nothing else.
+
+Two things the review caught before it shipped. The store file itself
+was a way around the grant (`cat secrets.json`), so every tool result
+now passes through one scrub of every stored value at the executor,
+the one place all results go. And `Command::env_remove` after `envs`
+also removes what was just set, which would have dropped exactly the
+common case: the person's own exported token, stored under the same
+name. Removals now go first, with a test that names the same variable
+on both sides.
+
+Left alone on purpose: encryption at rest (the gateway would need the
+passphrase next to the file anyway), values the command transforms
+before printing, and a value cut in half at a capture boundary. Not
+built: a masked input in the TUI (`ilar secret set` in another terminal
+does), setting a secret from Delta Chat (the message would be in the
+chat database first).
+
 ## 2026-09-07 — Where a weekend of tokens went
 
 A weekly ChatGPT allowance spent on two root sessions with gpt-6-astra.

@@ -146,6 +146,7 @@ A message that is a slash command is answered by the gateway itself:
 | `/pending` | What the review staged, when approval is on. |
 | `/approve [id\|all]`, `/reject [id\|all]` | Decide on it. |
 | `/abort` (or `/stop`) | Cancel the turn running on this chat. The chat gets "Aborted."; messages that arrived meanwhile run as a turn of their own. |
+| `/grant [session\|always]`, `/deny` | Answer a tool's ask for a [stored secret](secrets.md): the chat was shown the tool, the secret and the command verbatim. Bare `/grant` is once; ten minutes without an answer is a no. |
 | `/compact` | Replace this chat's conversation with one handover summary, as the context filling would; waits for a running turn. The summary goes to the daily note, the chat gets its size. |
 | `/help` | The list above. |
 
