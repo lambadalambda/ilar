@@ -120,11 +120,29 @@ fn unlock_secrets(config: ilar::config::Config) -> Result<ilar::config::Config> 
     if !store.is_locked() {
         return Ok(config);
     }
-    if !secret_cli::unlock_if_sealed(&store, &mut secret_cli::ask_on_terminal)? {
-        eprintln!("The secret store stays locked this session: no stored secret can be used.");
-        return Ok(config);
+    let unlocked = secret_cli::unlock_if_sealed(
+        &store,
+        secret_cli::STARTUP_PROMPT,
+        secret_cli::STARTUP_TRIES,
+        &mut secret_cli::ask_on_terminal,
+    );
+    match unlocked {
+        Ok(true) => Loader::new().resolve().context("loading config"),
+        // Enter, or the last of three typos: a locked store is a
+        // session with no stored secrets, not a reason to refuse to run.
+        Ok(false) => {
+            eprintln!(
+                "The secret store stays locked this session: no stored secret can be used ({UNLOCK_HINT})."
+            );
+            Ok(config)
+        }
+        // No terminal to ask on — cron, systemd, a pipe — is the same
+        // session, said once and carried on with.
+        Err(error) => {
+            eprintln!("The secret store stays locked this session: {error:#}.");
+            Ok(config)
+        }
     }
-    Loader::new().resolve().context("loading config")
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -1323,6 +1341,9 @@ async fn main() -> Result<()> {
         app.available_models = model_choices.iter().map(|model| model.full_id()).collect();
         app.session_id = session_id.clone();
         app.todos = todos;
+        // Said once on stderr before the screen came up; from here on it
+        // is the notice row's job to remember it.
+        app.secrets_locked = ilar::secrets::SecretStore::open(config.state_dir()).is_locked();
         // The reader in hand answers the pending-question check;
         // run_app takes the answer instead of re-reading the log for
         // it. A fresh session cannot have one.

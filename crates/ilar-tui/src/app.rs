@@ -343,6 +343,10 @@ pub(crate) struct App {
     /// frame so the notice row can say so without a notice.
     pub(crate) held_results: usize,
     pub(crate) notifications_paused: bool,
+    /// The secret store was left sealed and locked at startup: a
+    /// standing line on the notice row, since nothing else in the
+    /// session would say why every stored secret is refused.
+    pub(crate) secrets_locked: bool,
     /// `[cache_compact]` as configured; `enabled` is false by default.
     pub(crate) cache_compact: ilar::config::CacheCompactConfig,
     /// When the last provider request of this session ended, for the
@@ -538,6 +542,7 @@ impl App {
             deliveries_in_flight: 0,
             held_results: 0,
             notifications_paused: false,
+            secrets_locked: false,
             status_activity: Activity::Ready,
             status_seen: "ready".into(),
             cache_compact: ilar::config::CacheCompactConfig::default(),
@@ -4921,6 +4926,24 @@ mod tests {
         assert!(UnicodeWidthStr::width(narrow.as_str()) <= 48);
         let narrow_notice = rendered_text(&app.notice_line(48).expect("a notice"));
         assert!(UnicodeWidthStr::width(narrow_notice.as_str()) <= 48);
+    }
+
+    /// A store left locked at startup has to keep saying so: the notice
+    /// row carries it whenever nothing more urgent does, and a
+    /// transient notice only borrows the row.
+    #[test]
+    fn a_locked_secret_store_stands_on_the_notice_row() {
+        let mut app = App::new();
+        assert!(app.notice_line(80).is_none());
+        app.secrets_locked = true;
+        let notice = rendered_text(&app.notice_line(80).expect("a notice"));
+        assert!(notice.contains("secret store locked"), "{notice}");
+        app.set_notice("copied to clipboard", NoticeLevel::Info);
+        let borrowed = rendered_text(&app.notice_line(80).expect("a notice"));
+        assert!(borrowed.contains("copied"), "{borrowed}");
+        app.clear_transient_notice();
+        let back = rendered_text(&app.notice_line(80).expect("a notice"));
+        assert!(back.contains("secret store locked"), "{back}");
     }
 
     #[test]

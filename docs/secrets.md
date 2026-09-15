@@ -137,22 +137,31 @@ fresh nonce every write. Nothing about the secrets, not even their
 names, is readable without the password.
 
 The password is asked for once per process. The TUI and `ilar exec`
-ask on the plain terminal at start, before the screen is taken over;
-Enter without a password leaves the store locked for that session,
-and every use of a secret is then refused with a note saying so.
-`ilar secret …` asks when it needs to. The gateway cannot ask: it logs
-that the store is locked, and `/unlock <master password>` from a chat
-opens it for the life of the process. That message carries the master
-password into the chat's history on every device it syncs to, right
-password or wrong: the adapter takes it back out where the channel
-allows it — Delta Chat only deletes the bot's own messages for
+ask on the plain terminal at start, before the screen is taken over. A
+wrong password is asked again, three tries in all; Enter without a
+password, three typos, or no terminal to ask on at all (cron, systemd,
+a pipe) leaves the store locked for that session, said once on stderr.
+The TUI then keeps a line on the notice row while it runs, and every
+use of a secret is refused with the way out: restart and type the
+password at the start prompt. `ilar secret …` asks when it needs to,
+once, and a wrong password is an error there. The gateway cannot ask:
+it logs that the store is locked, and `/unlock <master password>` from
+a chat opens it for the life of the process. That message carries the
+master password into the chat's history on every device it syncs to,
+right password or wrong: the adapter takes it back out where the
+channel allows it — Delta Chat only deletes the bot's own messages for
 everyone, so a `/unlock` goes at least from the gateway's database —
-and the reply says whether there is still one for you to delete.
-The gateway reads provider keys
-at start, when a sealed store is still locked, so a provider key kept
-there is never seen by it: on a box that runs the gateway keep provider
-keys in `ilar.toml`, and weigh whether sealing buys anything there at
-all, since the password has to be typed after every restart.
+and the reply says whether there is still one for you to delete. The
+gateway reads provider keys at start, when a sealed store is still
+locked, so a provider key kept there is never seen by it: on a box that
+runs the gateway keep provider keys in `ilar.toml`, and weigh whether
+sealing buys anything there at all, since the password has to be typed
+after every restart.
+
+A second process that reseals the store under another password locks
+this one out: the password it holds no longer opens the file, so it
+drops it, says the store was resealed, and asks again the next time it
+can.
 
 ## What a child shell no longer sees
 

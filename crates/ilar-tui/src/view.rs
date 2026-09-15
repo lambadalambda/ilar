@@ -129,7 +129,9 @@ impl App {
     /// line and the pending strip — so a reminder never hides the model,
     /// the usage or the meter. With no notice standing, a held backlog
     /// still says so: the pause used to have no indicator at all once
-    /// its notice was cleared by an aborted turn.
+    /// its notice was cleared by an aborted turn. A locked secret store
+    /// is the last of these: it lasts the whole session, so it claims
+    /// the row whenever nothing more urgent wants it.
     pub(crate) fn notice_line(&self, width: u16) -> Option<Line<'static>> {
         let width = width as usize;
         let (text, color) = match self.operational_notice() {
@@ -140,6 +142,10 @@ impl App {
                     self.held_results
                 ),
                 theme::PRIMARY,
+            ),
+            None if self.secrets_locked => (
+                "secret store locked — stored secrets are unavailable this session".to_string(),
+                theme::WAITING,
             ),
             None => return None,
         };

@@ -47,18 +47,47 @@ pub(crate) fn ask_on_terminal(prompt: &str) -> Result<String> {
     rpassword::prompt_password(prompt).context("reading the master password")
 }
 
-/// Unlock a sealed store for this process, asking once. An empty
-/// answer leaves it locked; the caller says what that costs.
-pub(crate) fn unlock_if_sealed(store: &SecretStore, ask: AskPassword<'_>) -> Result<bool> {
+/// What a driver about to take over the terminal asks: an empty answer
+/// is a decision, so it is offered.
+pub(crate) const STARTUP_PROMPT: &str = "Secret store master password (Enter leaves it locked): ";
+/// What `ilar secret …` asks: it has nothing to do with the store
+/// locked, so leaving it locked is not offered as a choice.
+const CLI_PROMPT: &str = "Secret store master password: ";
+/// Tries a driver that carries on regardless gives a typo.
+pub(crate) const STARTUP_TRIES: usize = 3;
+
+/// Unlock a sealed store for this process, asking up to `tries` times.
+/// An empty answer leaves it locked, and so does the last wrong one
+/// when the caller allowed more than a single try — it means to run
+/// locked rather than exit. With one try, a wrong password is the
+/// error it is.
+pub(crate) fn unlock_if_sealed(
+    store: &SecretStore,
+    prompt: &str,
+    tries: usize,
+    ask: AskPassword<'_>,
+) -> Result<bool> {
     if !store.is_locked() {
         return Ok(true);
     }
-    let password = ask("Secret store master password (Enter leaves it locked): ")?;
-    if password.trim().is_empty() {
-        return Ok(false);
+    for asked in 1..=tries.max(1) {
+        let password = if asked == 1 {
+            ask(prompt)?
+        } else {
+            ask(&format!("Wrong master password. {prompt}"))?
+        };
+        if password.trim().is_empty() {
+            return Ok(false);
+        }
+        match store.unlock(&password) {
+            Ok(()) => return Ok(true),
+            Err(error) if asked >= tries.max(1) => {
+                return if tries > 1 { Ok(false) } else { Err(error) };
+            }
+            Err(_) => {}
+        }
     }
-    store.unlock(&password)?;
-    Ok(true)
+    Ok(false)
 }
 
 /// Run one command against the store; the text is what to print.
@@ -96,7 +125,7 @@ pub(crate) fn run(
             return Ok(format!("{} is in the clear again", store.path().display()));
         }
         _ => {
-            if !unlock_if_sealed(store, ask)? {
+            if !unlock_if_sealed(store, CLI_PROMPT, 1, ask)? {
                 anyhow::bail!(
                     "the store is sealed; nothing can be read or written without the master password"
                 );
@@ -362,5 +391,54 @@ mod tests {
         assert_eq!(out, "GITHUB_TOKEN");
         let out = run(&store, SecretCommand::Decrypt, Some(&mut none), &mut right).unwrap();
         assert!(out.contains("in the clear"), "{out}");
+    }
+
+    /// The startup prompt a driver puts up forgives typos — three
+    /// tries, then it runs locked — and never exits over one.
+    #[test]
+    fn the_startup_prompt_re_asks_and_then_runs_locked() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SecretStore::open(dir.path());
+        store.set("KEY", "", "value-one").unwrap();
+        store.encrypt("open sesame").unwrap();
+        ilar::secrets::forget_master(&store);
+
+        let mut prompts = Vec::new();
+        let mut wrong = |prompt: &str| {
+            prompts.push(prompt.to_string());
+            Ok("nope".to_string())
+        };
+        assert!(!unlock_if_sealed(&store, STARTUP_PROMPT, STARTUP_TRIES, &mut wrong).unwrap());
+        assert_eq!(prompts.len(), STARTUP_TRIES);
+        assert_eq!(prompts[0], STARTUP_PROMPT);
+        assert!(
+            prompts[1].starts_with("Wrong master password. "),
+            "{prompts:?}"
+        );
+        assert!(store.is_locked());
+
+        // Right on the second try: unlocked, and nothing else asks.
+        let mut answers = vec!["nope".to_string(), "open sesame".to_string()];
+        let mut second = |_: &str| Ok(answers.remove(0));
+        assert!(unlock_if_sealed(&store, STARTUP_PROMPT, STARTUP_TRIES, &mut second).unwrap());
+        assert!(!store.is_locked());
+        assert!(answers.is_empty());
+
+        // No terminal to ask on: the caller sees the failure and
+        // decides to run locked; nothing is unlocked behind its back.
+        ilar::secrets::forget_master(&store);
+        let mut no_tty = |_: &str| anyhow::bail!("reading the master password: no tty");
+        let error =
+            unlock_if_sealed(&store, STARTUP_PROMPT, STARTUP_TRIES, &mut no_tty).unwrap_err();
+        assert!(error.to_string().contains("no tty"), "{error}");
+        assert!(store.is_locked());
+
+        // Enter leaves it locked without spending a try.
+        let mut enter = |_: &str| Ok(String::new());
+        assert!(!unlock_if_sealed(&store, STARTUP_PROMPT, STARTUP_TRIES, &mut enter).unwrap());
+
+        // One try — `ilar secret …` — reports a wrong password as one.
+        let mut once = |_: &str| Ok("nope".to_string());
+        assert!(unlock_if_sealed(&store, CLI_PROMPT, 1, &mut once).is_err());
     }
 }
