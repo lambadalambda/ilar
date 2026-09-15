@@ -5,6 +5,7 @@ mod live;
 mod model;
 mod replay_index;
 mod store;
+mod summary_cache;
 mod tail;
 
 pub use event::{SessionEvent, SessionMeta, SessionState, new_id};

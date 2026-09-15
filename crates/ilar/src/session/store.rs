@@ -14,6 +14,7 @@ use super::replay_index::{
     committed_line_count, file_stamp, id_record, id_records, invalid_data, read_all_id_records,
     replay_ids_path, write_checkpoint, write_id_records,
 };
+use super::summary_cache::{CachedKind, Scanned, ScannedFile};
 use crate::question::{QUESTION_TOOL_NAME, QuestionRequest, validate_request};
 use crate::text::truncate_chars_ellipsis;
 
@@ -194,26 +195,18 @@ fn summary_title(text: &str) -> String {
     truncate_chars_ellipsis(&collapsed, SUMMARY_TITLE_CHARS)
 }
 
-/// A directory entry's head, or `None` for anything that is not a
-/// readable session file — the listing skips those by construction.
-fn scan_head(entry: &std::fs::DirEntry) -> Option<SessionHead> {
+/// A directory entry as a session file, or `None` for anything that is
+/// not named like one — the scan skips those without opening them.
+fn scan_file(entry: &std::fs::DirEntry) -> Option<ScannedFile> {
     let name = entry.file_name();
     let id = name.to_str()?.strip_suffix(".jsonl")?.to_string();
     SessionId::parse(&id).ok()?;
-    let modified = entry.metadata().ok()?.modified().ok()?;
-    read_head(&entry.path(), id, modified)
-}
-
-fn summarize_entry(entry: &std::fs::DirEntry) -> Option<SessionSummary> {
-    let head = scan_head(entry)?;
-    if head.meta.parent_id.is_some() {
-        return None;
-    }
-    Some(SessionSummary {
-        id: head.id,
-        title: head.title,
-        modified: head.modified,
-        cwd: head.meta.cwd,
+    let metadata = entry.metadata().ok()?;
+    Some(ScannedFile {
+        id,
+        path: entry.path(),
+        modified: metadata.modified().ok()?,
+        len: metadata.len(),
     })
 }
 
@@ -417,17 +410,46 @@ impl SessionStore {
         Ok(session)
     }
 
-    /// List root (non-subagent) sessions, most recently modified first.
-    /// Reads only each file's head; unreadable, foreign, headless, or
-    /// child-session files are skipped — see
-    /// meta/issues/session-list-and-resume-last.md.
-    pub fn list(&self) -> Vec<SessionSummary> {
+    /// Every session file in the root, resolved through the summary
+    /// cache: one cache read, a head read for the files whose stamp
+    /// moved, and one cache write when anything did. Children and
+    /// unreadable files are not opened once they are known — see
+    /// meta/issues/sessions-list-fast-and-true.md.
+    fn scan(&self) -> Vec<Scanned> {
         let Ok(entries) = std::fs::read_dir(&self.root) else {
             return Vec::new();
         };
-        let mut sessions: Vec<SessionSummary> = entries
+        let files: Vec<ScannedFile> = entries
             .flatten()
-            .filter_map(|entry| summarize_entry(&entry))
+            .filter_map(|entry| scan_file(&entry))
+            .collect();
+        let cache = super::summary_cache::load(&self.root);
+        let (scanned, fresh, changed) = super::summary_cache::resolve(files, &cache, |file| {
+            read_head(&file.path, file.id.clone(), file.modified)
+        });
+        if changed {
+            super::summary_cache::save(&self.root, &fresh);
+        }
+        scanned
+    }
+
+    /// List root (non-subagent) sessions, most recently modified first.
+    /// Reads only each file's head, and only when the cache cannot
+    /// answer; unreadable, foreign, headless, or child-session files are
+    /// skipped — see meta/issues/session-list-and-resume-last.md.
+    pub fn list(&self) -> Vec<SessionSummary> {
+        let mut sessions: Vec<SessionSummary> = self
+            .scan()
+            .into_iter()
+            .filter_map(|entry| match entry.kind {
+                CachedKind::Root { title, cwd } => Some(SessionSummary {
+                    id: entry.id,
+                    title,
+                    modified: entry.modified,
+                    cwd,
+                }),
+                CachedKind::Child { .. } | CachedKind::Unreadable => None,
+            })
             .collect();
         sessions.sort_by(|left, right| {
             right
@@ -461,13 +483,15 @@ impl SessionStore {
     /// [`Self::list`] hides children by construction — this is the other
     /// half, and it is scoped: a session sees its own tasks only.
     pub fn children_of(&self, parent_id: &str) -> Vec<ChildSummary> {
-        let Ok(entries) = std::fs::read_dir(&self.root) else {
-            return Vec::new();
-        };
-        let mut children: Vec<(std::time::SystemTime, ChildSummary)> = entries
-            .flatten()
-            .filter_map(|entry| scan_head(&entry))
-            .filter(|head| head.meta.parent_id.as_deref() == Some(parent_id))
+        let mut children: Vec<(std::time::SystemTime, ChildSummary)> = self
+            .scan()
+            .into_iter()
+            // Whose child a file is comes out of the cache, so only this
+            // session's own tasks are opened — not every log in the root.
+            .filter(
+                |entry| matches!(&entry.kind, CachedKind::Child { parent } if parent == parent_id),
+            )
+            .filter_map(|entry| read_head(&entry.path, entry.id, entry.modified))
             .map(|head| {
                 (
                     head.modified,
@@ -2014,6 +2038,113 @@ mod tests {
         );
         assert!(store.children_of(&id).is_empty());
         assert!(scratch.exists(), "the store did not touch the scratch");
+    }
+
+    /// The listing answers out of the summary cache while a file's
+    /// stamp holds, and rereads it when the stamp moves. Observed the
+    /// only way a caller can see it: content the cache cannot know
+    /// about, written under an unchanged stamp.
+    #[test]
+    fn the_listing_rereads_a_session_only_when_its_stamp_moved() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf());
+        let id = new_id();
+        let mut session = store
+            .create(SessionMeta {
+                session_id: id.clone(),
+                parent_id: None,
+                agent: "build".into(),
+                model: "test/model".into(),
+                workspace: None,
+                cwd: None,
+            })
+            .unwrap();
+        session.append(user_message("the first thing")).unwrap();
+        drop(session);
+
+        assert_eq!(
+            store.list().first().and_then(|row| row.title.clone()),
+            Some("the first thing".into())
+        );
+        assert!(
+            super::super::summary_cache::cache_path(dir.path()).exists(),
+            "the listing wrote no cache"
+        );
+
+        // Same length, same mtime, different words: only a reread could
+        // see this, and the cache's whole job is not to.
+        let path = store.session_path(&id).unwrap();
+        let before = std::fs::metadata(&path).unwrap();
+        let rewritten = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("the first thing", "the second thin");
+        std::fs::write(&path, &rewritten).unwrap();
+        File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(before.modified().unwrap())
+                    .set_accessed(before.modified().unwrap()),
+            )
+            .unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), before.len());
+        assert_eq!(
+            store.list().first().and_then(|row| row.title.clone()),
+            Some("the first thing".into()),
+            "the listing reopened a file whose stamp had not moved"
+        );
+
+        // The stamp moves the moment the log grows, and the reread
+        // catches up.
+        let mut session = store.acquire_writer(&id).unwrap().load().unwrap();
+        session
+            .append(SessionEvent::Topic {
+                id: new_id(),
+                text: "a name of its own".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        drop(session);
+        assert_eq!(
+            store.list().first().and_then(|row| row.title.clone()),
+            Some("a name of its own".into())
+        );
+    }
+
+    /// The cache remembers which files are children, so a roster opens
+    /// its own tasks and nothing else — and still finds a child whose
+    /// file appeared after the cache was written.
+    #[test]
+    fn a_roster_finds_its_children_through_the_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf());
+        let parent = new_id();
+        let meta = |session_id: &str, parent_id: Option<&str>| SessionMeta {
+            session_id: session_id.into(),
+            parent_id: parent_id.map(str::to_string),
+            agent: "build".into(),
+            model: "test/model".into(),
+            workspace: None,
+            cwd: None,
+        };
+        drop(store.create(meta(&parent, None)).unwrap());
+        let stranger = new_id();
+        drop(store.create(meta(&stranger, Some(&new_id()))).unwrap());
+        // Warm the cache.
+        assert_eq!(store.list().len(), 1);
+
+        let kid = new_id();
+        let mut child = store.create(meta(&kid, Some(&parent))).unwrap();
+        child.append(user_message("go and look")).unwrap();
+        drop(child);
+
+        let children = store.children_of(&parent);
+        assert_eq!(children.len(), 1, "{children:?}");
+        assert_eq!(children[0].id, kid);
+        assert_eq!(children[0].title.as_deref(), Some("go and look"));
+        assert!(store.children_of(&stranger).is_empty());
     }
 
     /// Tail-parse diagnostics name a line in the file, so the offset the
