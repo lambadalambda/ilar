@@ -393,3 +393,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [The grant prompt takes paste and names its keys](issues/the-grant-prompt-takes-paste-and-names-its-keys.md)
 - [x] [Talking to a focused agent: polish](issues/talking-to-a-focused-agent-polish.md)
 - [x] [--view looks read-only](issues/view-looks-read-only.md)
+- [x] [sudo asks for the password after the yes](issues/sudo-asks-for-the-password-after-the-yes.md)
