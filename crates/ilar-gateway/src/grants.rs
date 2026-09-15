@@ -124,10 +124,10 @@ pub fn answer(slot: &PendingSlot, answer: Answer) -> Result<String, &'static str
     };
     let text = match (pending.password, &answer) {
         (true, Answer::Password(_)) => {
-            format!("Sent the password to sudo for {}.", pending.asker.shown)
+            format!("Password sent to {}.", pending.asker.shown)
         }
         (true, Answer::No) => format!(
-            "No password given; the sudo command for {} does not run.",
+            "No password given; that {} command does not run.",
             pending.asker.shown
         ),
         (false, Answer::Grant(grant)) => decided(&pending.secret, &pending.asker, Some(*grant)),
@@ -549,7 +549,7 @@ mod tests {
             "the password ask took a grant"
         );
         let text = answer(&h.slot, Answer::Password("hunter22".into())).unwrap();
-        assert_eq!(text, "Sent the password to sudo for sudo.");
+        assert_eq!(text, "Password sent to sudo.");
         assert_eq!(receive.await.unwrap().as_deref(), Some("hunter22"));
 
         // /deny on a password ask cancels the sudo call.
