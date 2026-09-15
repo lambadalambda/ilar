@@ -275,8 +275,15 @@ pub(crate) fn run(
                 grantable(&name, tool)?;
             }
             // Told apart from a name with nothing to revoke: one is a
-            // typo, the other is already the way it was asked for.
-            if name != ilar::secrets::ROOT && !stored_names(store).contains(&name) {
+            // typo, the other is already the way it was asked for. The
+            // listing is read here rather than guessed at, so a store
+            // that cannot be read says that instead of "no such name".
+            let names: Vec<String> = store
+                .list()?
+                .into_iter()
+                .map(|secret| secret.name)
+                .collect();
+            if name != ilar::secrets::ROOT && !names.contains(&name) {
                 return Err(unknown_name(store, &name));
             }
             Ok(if store.revoke(&name, tool.as_deref())? {
