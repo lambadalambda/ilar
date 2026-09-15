@@ -91,7 +91,12 @@ and a live elapsed time — and disappears when nothing is running. A row that
 is not working says why: `· waiting for the workspace` while it queues for a
 mutable lease, `· quiet 45s` once a detached task has made no progress for a
 while (the [stall watchdog](configuration.md#the-stall-watchdog) stops it at
-600 s). **Ctrl-G** twice in a focused agent's view cancels that one agent.
+600 s). Two other kinds of row share the panel: ✉ a result being delivered to
+a session, and ⚙ a background `bash` job, which has no session to open. The
+title counts each kind separately (`agents (2) · 1 job · 1 delivering`).
+Clicking an agent's row opens its transcript over the screen, where Enter
+messages it and **Ctrl-G** twice cancels it; see
+[the interface](interface.md#talking-to-a-focused-agent).
 
 ## Skills
 

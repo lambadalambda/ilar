@@ -258,33 +258,48 @@ running services — every one that runs, with exited ones collapsed
 into a count that clicks open to show who died how — and, while subagents are in flight, an `agents` panel
 with each task's description, agent, a `bg` marker for detached work,
 and a live elapsed time. A result on its way to another session shows
-there too, as a `delivering` row, and when it lands the transcript gets
+there too, as a ✉ `delivering` row, and when it lands the transcript gets
 one quiet line — `✉ "review the diff" delivered to explore · survey the
 API` — naming the session by its agent and task rather than by id. A
 result that has to climb to another tree says so on its way — `✉
 "review the diff" passed on to build · land the fix` — and only a
 result that cannot be delivered at all claims the notice line above the
-input.
-
-A background job — `bash` with `run_in_background` — sits in the same
-panel while it runs, as a ⚙ row with its command and elapsed time, so a
-long render never reads as a hang; it has no transcript to open.
+input. A background job — `bash` with `run_in_background` — sits in the
+same panel while it runs, as a ⚙ row with its command and elapsed time,
+so a long render never reads as a hang; it has no transcript to open.
+The panel's title counts each kind for what it is — `agents (2) · 1 job
+· 1 delivering` — since a job is not an agent.
 
 ## Talking to a focused agent
 
 Click an agents-panel row and the child's transcript fills the screen.
 The prompt is then that agent's: the input title reads `to explore ·
-survey the API`, and Enter sends what you typed the way the model's own
-`task_message` does — a running agent takes it at its next step, a
-finished one is resumed with it as the prompt. The root's transcript
-records the send as `→ explore · survey the API: …` and the agent's
-answer or a failure when it lands; the root's own queue and stash are
-untouched. Arrow keys, PageUp/PageDown, Home and End scroll the view;
-**Ctrl-G** cancels the agent you are looking at — a second press
-confirms, since a cancel has no undo, and the cancelled task's result
-is held rather than delivered — and Esc leaves the view. It is the only
-cancel that takes one agent; Ctrl-Q's takes every background task and
-every in-flight delivery with it.
+survey the API`, the root's own draft is put aside until you leave, and
+Enter sends what you typed the way the model's own `task_message` does —
+a running agent takes it at its next step, a finished one is resumed
+with it as the prompt. The root's transcript shows the send as
+`→ explore · survey the API: …` and, when it lands, one line for what
+became of it: `… takes it at its next step`, `… gets the message at its
+next resume`, or `… answered: <the first line of its reply>` — the reply
+itself stays in that agent's own view, rendered. Neither is written to
+the session log, so a restart shows no trace of them.
+
+Three rows cannot be messaged, and Enter says so before anything is
+sent: an agent working inside the turn you are in (the turn is waiting
+for its result), another session's agent, and an agent started by
+another agent. Their footer offers no Enter. Slash commands are not
+offered here and are refused if typed — they belong to the session
+behind the view. So do the root's other chords (F1, Ctrl-P, Ctrl-Q,
+Ctrl-F, Ctrl-T, Ctrl-S, Ctrl-D, …): pressing one names it and says Esc
+leaves the view first.
+
+Arrow keys, PageUp/PageDown, Home and End scroll the view. **Ctrl-G**
+cancels the agent you are looking at — a second press confirms, since a
+cancel has no undo, and the cancelled task's result is held rather than
+delivered. It is the only cancel that takes one agent; Ctrl-Q's takes
+every background task and every in-flight delivery with it. Esc leaves
+the view, and anything typed at the agent and not sent goes to the stash
+rather than becoming the root's next message.
 
 ## Questions
 
