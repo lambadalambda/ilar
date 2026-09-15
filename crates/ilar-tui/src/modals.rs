@@ -808,7 +808,7 @@ static HELP_SECTIONS: &[HelpSection] = &[
             binding!("Shift-Enter / Ctrl-J", "insert newline"),
             binding!(
                 "Esc / Ctrl-C",
-                "dismiss overlay · abort turn · clear input (a multi-line draft stashes)"
+                "dismiss overlay · deny a grant · abort turn · clear input (a multi-line draft stashes)"
             ),
             binding!("Ctrl-D", "quit (blank input, nothing open)"),
             binding!("Ctrl-Q", "pending manager: queue, goal, tasks, held, retry"),
@@ -849,6 +849,21 @@ static HELP_SECTIONS: &[HelpSection] = &[
             binding!("F3", "switch theme"),
             binding!("Ctrl-X, M / T", "leader: models / themes"),
             binding!("↑↓ · Enter · Esc", "navigate · choose · dismiss"),
+        ],
+    },
+    HelpSection {
+        title: "Grant prompt",
+        bindings: &[
+            binding!("o / s / a / d", "allow once / this session / always · deny"),
+            binding!("↑↓ · Enter", "move · take the highlighted answer"),
+            binding!(
+                "Esc / Ctrl-C",
+                "deny; the turn carries on without the secret"
+            ),
+            binding!(
+                "",
+                "when it asks for a password the letters type it — and paste works"
+            ),
         ],
     },
     HelpSection {
