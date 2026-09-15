@@ -13,10 +13,11 @@ pub enum Command {
     },
     /// Cancel the turn running on this chat.
     Abort,
-    /// Answer a tool's ask for a secret: once, this session, or always,
-    /// with the sudo password when the ask wanted one.
-    Grant(ilar::secrets::Approval),
-    /// Refuse it.
+    /// Answer a tool's ask for a secret: once, this session, or always.
+    Grant(ilar::secrets::Grant),
+    /// The sudo password, for the ask that comes after the yes.
+    Password(String),
+    /// Refuse it — either ask.
     Deny,
     /// The secret store's master password, for this gateway process.
     Unlock(String),
@@ -70,10 +71,12 @@ pub fn parse(text: &str) -> Option<Command> {
         }
         ("abort" | "stop", _) => Command::Abort,
         ("grant", argument) => match parse_grant(argument.unwrap_or_default()) {
-            Ok(approval) => Command::Grant(approval),
+            Ok(grant) => Command::Grant(grant),
             Err(message) => Command::Misread(message),
         },
         ("deny", _) => Command::Deny,
+        ("password", Some(password)) => Command::Password(password.to_string()),
+        ("password", None) => Command::Usage(PASSWORD_USAGE),
         ("unlock", Some(password)) => Command::Unlock(password.to_string()),
         ("unlock", None) => Command::Usage(UNLOCK_USAGE),
         ("compact", _) => Command::Compact,
@@ -87,40 +90,44 @@ pub fn parse(text: &str) -> Option<Command> {
     })
 }
 
-/// `[once|session|always] [password]`: the span first, the password —
-/// sudo's, when the ask wanted one — as everything after it. A first
-/// word that reads like a misspelt span is refused rather than taken
-/// as the start of a password: `/grant sesion hunter2` used to grant
-/// once with the password "sesion hunter2".
-fn parse_grant(argument: &str) -> Result<ilar::secrets::Approval, String> {
-    use ilar::secrets::{Approval, Grant};
+/// `[once|session|always]`, and nothing else: the approval question
+/// takes a span and no password. A word that reads like a misspelt span
+/// says so — `/grant sesion hunter2` used to grant once with the
+/// password "sesion hunter2" — and anything else is pointed at the
+/// prompt the password belongs in.
+fn parse_grant(argument: &str) -> Result<ilar::secrets::Grant, String> {
+    use ilar::secrets::Grant;
     let argument = argument.trim();
     let (span, rest) = match argument.split_once(char::is_whitespace) {
         Some((span, rest)) => (span, rest.trim()),
         None => (argument, ""),
     };
     // Case-blind: a phone capitalises the first word.
-    let (grant, password) = match span.to_ascii_lowercase().as_str() {
-        "" | "once" => (Grant::Once, rest),
-        "session" => (Grant::Session, rest),
-        "always" => (Grant::Always, rest),
-        // No span word: the whole argument is the password — unless it
-        // was meant to be a span.
-        _ => match misspelt_span(span) {
-            Some(meant) => {
-                return Err(format!(
-                    "{span}? The spans are once, session and always — /grant {meant} … if that \
-                     is what you meant. A password goes after the span.",
-                ));
-            }
-            None => (Grant::Once, argument),
-        },
+    let grant = match span.to_ascii_lowercase().as_str() {
+        "" | "once" => Grant::Once,
+        "session" => Grant::Session,
+        "always" => Grant::Always,
+        _ => {
+            return Err(match misspelt_span(span) {
+                Some(meant) => format!(
+                    "{span}? The spans are once, session and always — /grant {meant} if that is \
+                     what you meant.",
+                ),
+                None => PASSWORD_AFTER_THE_YES.to_string(),
+            });
+        }
     };
-    Ok(Approval {
-        grant,
-        password: (!password.is_empty()).then(|| password.to_string()),
-    })
+    if !rest.is_empty() {
+        return Err(PASSWORD_AFTER_THE_YES.to_string());
+    }
+    Ok(grant)
 }
+
+/// What a password given with `/grant` is told. The ask it would answer
+/// is the approval question; sudo's password is asked for on its own,
+/// and only where sudo wants one.
+const PASSWORD_AFTER_THE_YES: &str = "/grant takes a span and nothing else: once, session or always. The password is asked for \
+     after the yes — /password <pw> when sudo asks for it.";
 
 /// The span a word was probably trying to be: within two edits of one,
 /// and long enough for that to mean something. A password is left
@@ -156,10 +163,15 @@ fn edits_within(a: &str, b: &str, limit: usize) -> bool {
 pub const UNLOCK_USAGE: &str =
     "/unlock <master password> — the password goes after the command, in the same message.";
 
+/// `/password` with nothing after it.
+pub const PASSWORD_USAGE: &str = "/password <pw> — the sudo password goes after the command, in \
+                                  the same message; it is deleted afterwards.";
+
 pub const HELP: &str = "/new — start a fresh chat (memory stays); a turn running here is cancelled\n\
 /model — list the models; /model <provider/model> switches; add --save to make it the default for new chats\n\
 /abort (or /stop) — cancel the turn running now; messages that were waiting run after it\n\
-/grant [session|always] [password], /deny — answer a tool's ask for a stored secret or for root\n\
+/grant [session|always], /deny — answer a tool's ask for a stored secret or for root\n\
+/password <pw> — the sudo password, when sudo asks for one after a yes; the message is deleted afterwards\n\
 /unlock <master password> — open a sealed secret store for this gateway process; the password is taken back out of the chat where the channel allows it\n\
 /compact — replace the conversation with one handover summary; memory stays\n\
 /pending — what the review wants to remember, when approval is on\n\
@@ -213,38 +225,24 @@ mod tests {
         assert_eq!(parse("/abort"), Some(Command::Abort));
         assert_eq!(parse("/compact"), Some(Command::Compact));
         assert_eq!(parse("/stop now"), Some(Command::Abort));
-        use ilar::secrets::{Approval, Grant};
-        assert_eq!(
-            parse("/grant"),
-            Some(Command::Grant(Approval::from(Grant::Once)))
-        );
-        assert_eq!(
-            parse("/grant always"),
-            Some(Command::Grant(Approval::from(Grant::Always)))
-        );
-        assert_eq!(
-            parse("/grant Always"),
-            Some(Command::Grant(Approval::from(Grant::Always)))
-        );
+        use ilar::secrets::Grant;
+        assert_eq!(parse("/grant"), Some(Command::Grant(Grant::Once)));
+        assert_eq!(parse("/grant always"), Some(Command::Grant(Grant::Always)));
+        assert_eq!(parse("/grant Always"), Some(Command::Grant(Grant::Always)));
         assert_eq!(
             parse("/grant session "),
-            Some(Command::Grant(Approval::from(Grant::Session)))
-        );
-        assert_eq!(
-            parse("/grant session hunter two"),
-            Some(Command::Grant(Approval {
-                grant: Grant::Session,
-                password: Some("hunter two".into())
-            }))
-        );
-        assert_eq!(
-            parse("/grant hunter2"),
-            Some(Command::Grant(Approval {
-                grant: Grant::Once,
-                password: Some("hunter2".into())
-            }))
+            Some(Command::Grant(Grant::Session))
         );
         assert_eq!(parse("/deny"), Some(Command::Deny));
+        assert_eq!(
+            parse("/password hunter two"),
+            Some(Command::Password("hunter two".into()))
+        );
+        assert_eq!(
+            parse("/Password hunter2"),
+            Some(Command::Password("hunter2".into()))
+        );
+        assert_eq!(parse("/password"), Some(Command::Usage(PASSWORD_USAGE)));
         assert_eq!(
             parse("/unlock open sesame"),
             Some(Command::Unlock("open sesame".into()))
@@ -254,10 +252,11 @@ mod tests {
         assert!(!UNLOCK_USAGE.starts_with("No command"));
     }
 
-    /// A misspelt span is said out loud: taken as a password it would
-    /// answer the ask with the typo in it and grant once.
+    /// `/grant` takes a span and nothing else: a password on it is
+    /// pointed at the prompt that asks for one, and a misspelt span is
+    /// still said out loud rather than read as a password.
     #[test]
-    fn a_misspelt_span_is_not_a_password() {
+    fn a_password_on_grant_is_refused_and_a_misspelt_span_is_named() {
         let Some(Command::Misread(message)) = parse("/grant sesion hunter2") else {
             panic!("a typo read as a password");
         };
@@ -265,14 +264,19 @@ mod tests {
         assert!(message.contains("/grant session"), "{message}");
         assert!(matches!(parse("/grant alwyas"), Some(Command::Misread(_))));
         assert!(matches!(parse("/grant onse"), Some(Command::Misread(_))));
-        // A password that is nothing like a span stays a password, and
-        // so does one too short to be a typo of anything.
-        assert!(matches!(parse("/grant hunter2"), Some(Command::Grant(_))));
-        assert!(matches!(
-            parse("/grant sessionkeyaddendum"),
-            Some(Command::Grant(_))
-        ));
-        assert!(matches!(parse("/grant abc"), Some(Command::Grant(_))));
+        // Anything else after the span, or instead of it, is the
+        // password — asked for on its own, after the yes.
+        for typed in [
+            "/grant hunter2",
+            "/grant session hunter2",
+            "/grant sessionkeyaddendum",
+            "/grant abc",
+        ] {
+            let Some(Command::Misread(message)) = parse(typed) else {
+                panic!("{typed} took a password");
+            };
+            assert!(message.contains("/password <pw>"), "{typed}: {message}");
+        }
         assert!(edits_within("sesion", "session", 2));
         assert!(!edits_within("hunter2", "session", 2));
         assert_eq!(parse("/pending"), Some(Command::Pending));
@@ -305,5 +309,6 @@ mod tests {
     #[test]
     fn the_help_names_the_aliases_too() {
         assert!(HELP.contains("/abort (or /stop)"), "{HELP}");
+        assert!(HELP.contains("/password <pw>"), "{HELP}");
     }
 }

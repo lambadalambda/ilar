@@ -600,13 +600,14 @@ impl Driver {
         }
     }
 
-    /// Answer the secret ask waiting on the seat, if any.
-    pub fn answer_grant(
+    /// Answer the secret ask waiting on the seat, if any: the grant
+    /// question or sudo's password question.
+    pub fn answer_ask(
         &self,
         seat: &Seat,
-        approval: Option<ilar::secrets::Approval>,
+        answer: crate::grants::Answer,
     ) -> Result<String, &'static str> {
-        crate::grants::answer(&seat.grants, approval)
+        crate::grants::answer(&seat.grants, answer)
     }
 
     /// Steers the last turn on the seat never delivered.

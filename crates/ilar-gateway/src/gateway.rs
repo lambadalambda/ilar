@@ -114,14 +114,14 @@ pub fn failed_line(what: &str, cause: &str) -> String {
 /// How much of a failure's cause goes into the chat.
 const FAILURE_CAUSE_CHARS: usize = 400;
 
-/// What to do about the master password now sitting in the chat: a
-/// `/unlock` is in the history of every device it synced to, and the
-/// channel may or may not be able to take it back.
+/// What to do about a password now sitting in the chat: a `/unlock` or
+/// a `/password` is in the history of every device it synced to, and
+/// the channel may or may not be able to take it back.
 pub fn password_advice(taken_back: bool) -> &'static str {
     if taken_back {
         "I deleted that message; check that the password is gone on your other devices too."
     } else {
-        "Delete that message: the master password stays in this chat's history otherwise."
+        "Delete that message: the password stays in this chat's history otherwise."
     }
 }
 
@@ -632,11 +632,11 @@ impl Gateway {
         }
     }
 
-    /// `/grant` or `/deny`: the ask standing on this chat's seat gets
-    /// the answer, and the chat hears what was decided.
-    fn answer_grant(&self, key: &str, approval: Option<ilar::secrets::Approval>) -> String {
+    /// `/grant`, `/password` or `/deny`: the ask standing on this
+    /// chat's seat gets the answer, and the chat hears what was decided.
+    fn answer_ask(&self, key: &str, answer: crate::grants::Answer) -> String {
         match self.driver.seat_by_key(key) {
-            Some(seat) => match self.driver.answer_grant(&seat, approval) {
+            Some(seat) => match self.driver.answer_ask(&seat, answer) {
                 Ok(text) => {
                     log(&format!("{key}: {text}"));
                     text
@@ -735,8 +735,16 @@ impl Gateway {
                     }
                 }
             }
-            Command::Grant(approval) => self.answer_grant(key, Some(approval)),
-            Command::Deny => self.answer_grant(key, None),
+            Command::Grant(grant) => self.answer_ask(key, crate::grants::Answer::Grant(grant)),
+            Command::Deny => self.answer_ask(key, crate::grants::Answer::No),
+            Command::Password(password) => {
+                // In the chat's history the moment it was sent, right
+                // ask or wrong: taken back out where the channel can,
+                // and said either way — as `/unlock` does.
+                let taken_back = self.delete_inbound(message).await;
+                let verdict = self.answer_ask(key, crate::grants::Answer::Password(password));
+                format!("{verdict} {}", password_advice(taken_back))
+            }
             Command::Usage(usage) => usage.to_string(),
             Command::Unlock(password) => {
                 // Right password or wrong, it is in the chat's history

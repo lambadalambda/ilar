@@ -2,26 +2,45 @@
 //! channel to fill in a form, but a yes or no fits in a message: the
 //! ask is posted to the chat the seat belongs to, and `/grant` or
 //! `/deny` answers it. Unanswered long enough, it is a no.
+//!
+//! sudo's password is a second ask of the same kind, put after the yes
+//! and only where sudo wants one; `/password <pw>` answers that, and
+//! the message it came in is deleted the way `/unlock`'s is.
 
 use std::sync::{Arc, Mutex};
 
-use ilar::secrets::{Approval, Grant, GrantPrompt, GrantReceiver};
+use ilar::secrets::{Ask, AskReceiver, Grant, GrantPrompt, PasswordPrompt};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::bus::Outbound;
 
-/// How long an ask waits for the chat before it is refused.
+/// How long an ask waits for the chat before it is refused. The same
+/// for either ask: a password nobody types is a no as much as a grant
+/// nobody gives.
 pub const GRANT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// What the chat said. The commands build these; the pending ask below
+/// says which of them it can take.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Answer {
+    /// `/grant [once|session|always]`.
+    Grant(Grant),
+    /// `/password <pw>`.
+    Password(String),
+    /// `/deny`, and what a timeout comes to.
+    No,
+}
 
 /// The ask the chat has not answered yet.
 pub struct PendingGrant {
     pub secret: String,
     pub asker: Asker,
-    /// The ask takes a password (sudo's); one sent to any other ask is
-    /// refused rather than held as the sudo password by mistake.
-    pub password_wanted: bool,
-    answer: oneshot::Sender<Option<Approval>>,
+    /// This is sudo's password ask, not a grant ask: `/password` answers
+    /// it and `/grant` is told so, rather than a password being held as
+    /// an approval or the other way round.
+    pub password: bool,
+    answer: oneshot::Sender<Answer>,
 }
 
 /// Who asked: what the chat is shown, and the bare tool name a CLI
@@ -38,16 +57,33 @@ impl Asker {
     /// The prompt's asker, judged against the seat's own session: an
     /// ask from another session came from a child of it.
     pub fn of(prompt: &GrantPrompt, session_id: &str) -> Self {
-        let shown = match (prompt.session_id == session_id, prompt.agent.as_deref()) {
-            (true, _) => prompt.tool.clone(),
+        Self::named(
+            &prompt.tool,
+            prompt.session_id == session_id,
+            prompt.agent.as_deref(),
+        )
+    }
+
+    /// The same for the password ask, which is always sudo's.
+    pub fn of_password(prompt: &PasswordPrompt, session_id: &str) -> Self {
+        Self::named(
+            "sudo",
+            prompt.session_id == session_id,
+            prompt.agent.as_deref(),
+        )
+    }
+
+    fn named(tool: &str, own_session: bool, agent: Option<&str>) -> Self {
+        let shown = match (own_session, agent) {
+            (true, _) => tool.to_string(),
             // Named where the name is known: several children can be
             // working, and only one of them wants this secret.
-            (false, Some(agent)) => format!("{} ({agent} subagent)", prompt.tool),
-            (false, None) => format!("{} (subagent)", prompt.tool),
+            (false, Some(agent)) => format!("{tool} ({agent} subagent)"),
+            (false, None) => format!("{tool} (subagent)"),
         };
         Self {
             shown,
-            tool: prompt.tool.clone(),
+            tool: tool.to_string(),
         }
     }
 }
@@ -79,29 +115,42 @@ pub fn no_answer(secret: &str, asker: &Asker) -> String {
 }
 
 /// Answer the ask waiting on `slot`, if any. `Err` says why nothing
-/// was answered.
-pub fn answer(slot: &PendingSlot, approval: Option<Approval>) -> Result<String, &'static str> {
+/// was answered; the ask then stands, so the right command still
+/// reaches it.
+pub fn answer(slot: &PendingSlot, answer: Answer) -> Result<String, &'static str> {
     let pending = slot.lock().unwrap().take();
     let Some(pending) = pending else {
         return Err("Nothing is waiting for a grant.");
     };
-    if !pending.password_wanted
-        && approval
-            .as_ref()
-            .is_some_and(|approval| approval.password.is_some())
-    {
-        // Back into the slot: the ask stands, the answer was not one.
-        *slot.lock().unwrap() = Some(pending);
-        return Err("That ask takes no password: /grant, /grant session or /grant always alone.");
-    }
-    let text = decided(
-        &pending.secret,
-        &pending.asker,
-        approval.as_ref().map(|approval| approval.grant),
-    );
+    let text = match (pending.password, &answer) {
+        (true, Answer::Password(_)) => {
+            format!("Sent the password to sudo for {}.", pending.asker.shown)
+        }
+        (true, Answer::No) => format!(
+            "No password given; the sudo command for {} does not run.",
+            pending.asker.shown
+        ),
+        (false, Answer::Grant(grant)) => decided(&pending.secret, &pending.asker, Some(*grant)),
+        (false, Answer::No) => decided(&pending.secret, &pending.asker, None),
+        // The wrong command for the ask in flight. Back into the slot:
+        // the ask stands, the answer was not one.
+        (true, Answer::Grant(_)) => {
+            *slot.lock().unwrap() = Some(pending);
+            return Err(
+                "That ask is for the sudo password, not the approval: /password <pw>, or /deny.",
+            );
+        }
+        (false, Answer::Password(_)) => {
+            *slot.lock().unwrap() = Some(pending);
+            return Err(
+                "That ask is the approval question: /grant, /grant session or /grant always, \
+                 or /deny. The password is asked for after the yes.",
+            );
+        }
+    };
     pending
         .answer
-        .send(approval)
+        .send(answer)
         .map(|()| text)
         .map_err(|_| "The tool stopped waiting for that.")
 }
@@ -162,25 +211,38 @@ fn shown_command(detail: &str) -> String {
     shown
 }
 
-/// The message the chat gets.
+/// The message the chat gets for a grant ask.
 pub fn ask_text(prompt: &GrantPrompt, asker: &Asker) -> String {
     let purpose = if prompt.description.is_empty() {
         String::new()
     } else {
         format!(" ({})", prompt.description)
     };
-    let password = if prompt.password_wanted {
-        " Put the sudo password last (/grant session <password>) if the system wants one; \
-         it is held in memory until this chat is restarted."
+    format!(
+        "🔑 {} wants {}{purpose} to run:\n\n{}\n/grant allows it this once, /grant session or \
+         /grant always for longer, /deny refuses. The turn waits for your answer; unanswered in \
+         {} minutes, it is a no.",
+        asker.shown,
+        prompt.secret,
+        shown_command(&prompt.detail),
+        GRANT_TIMEOUT.as_secs() / 60
+    )
+}
+
+/// The message the chat gets when sudo wants a password for a command
+/// it has already been allowed to run.
+pub fn password_ask_text(prompt: &PasswordPrompt, asker: &Asker) -> String {
+    let again = if prompt.refused {
+        "sudo refused the last password. "
     } else {
         ""
     };
     format!(
-        "🔑 {} wants {}{purpose} to run:\n\n{}\n/grant allows it this once, /grant session or \
-         /grant always for longer, /deny refuses. The turn waits for your answer; unanswered in \
-         {} minutes, it is a no.{password}",
+        "🔑 {again}{} needs the sudo password to run:\n\n{}\n/password <pw> answers it; the \
+         message is deleted afterwards where the channel allows it, and the password is held in \
+         memory until this chat is restarted. /deny refuses, and so does {} minutes without an \
+         answer.",
         asker.shown,
-        prompt.secret,
         shown_command(&prompt.detail),
         GRANT_TIMEOUT.as_secs() / 60
     )
@@ -195,10 +257,53 @@ pub struct Home {
     pub session_id: String,
 }
 
+/// The reply path of whichever ask is in flight: the two carry
+/// different answers, and only the command that matches the ask gets
+/// through [`answer`].
+enum Reply {
+    Grant(oneshot::Sender<Option<Grant>>),
+    Password(oneshot::Sender<Option<String>>),
+}
+
+impl Reply {
+    /// Resolves when the tool stops waiting: the turn ended under the
+    /// ask, so the slot is nobody's to answer any more.
+    async fn closed(&mut self) {
+        match self {
+            Reply::Grant(reply) => reply.closed().await,
+            Reply::Password(reply) => reply.closed().await,
+        }
+    }
+
+    /// Hand the chat's answer to the tool. A mismatch cannot arrive —
+    /// [`answer`] refuses the wrong command for the ask — and is a
+    /// refusal here rather than a panic in a gateway.
+    fn send(self, answer: Answer) {
+        match (self, answer) {
+            (Reply::Grant(reply), Answer::Grant(grant)) => {
+                let _ = reply.send(Some(grant));
+            }
+            (Reply::Password(reply), Answer::Password(password)) => {
+                let _ = reply.send(Some(password));
+            }
+            (Reply::Grant(reply), _) => {
+                let _ = reply.send(None);
+            }
+            (Reply::Password(reply), _) => {
+                let _ = reply.send(None);
+            }
+        }
+    }
+
+    fn deny(self) {
+        self.send(Answer::No);
+    }
+}
+
 /// Post every ask to the chat and relay the chat's answer. Ends with
 /// the runtime (the receiver closes) or the gateway (`cancel`).
 pub async fn watch(
-    mut prompts: GrantReceiver,
+    mut prompts: AskReceiver,
     slot: PendingSlot,
     outbound: mpsc::Sender<Outbound>,
     home: Home,
@@ -211,9 +316,9 @@ pub async fn watch(
         session_id,
     } = home;
     loop {
-        let prompt = tokio::select! {
-            prompt = prompts.recv() => match prompt {
-                Some(prompt) => prompt,
+        let ask = tokio::select! {
+            ask = prompts.recv() => match ask {
+                Some(ask) => ask,
                 None => return,
             },
             _ = cancel.cancelled() => return,
@@ -233,22 +338,47 @@ pub async fn watch(
                     .await;
             }
         };
-        let asker = Asker::of(&prompt, &session_id);
-        post(ask_text(&prompt, &asker)).await;
+        // Either ask, told apart once: the chat's text, what the slot
+        // says it takes, and where the answer goes.
+        let (text, pending_secret, password, asker, mut reply) = match ask {
+            Ask::Grant(prompt) => {
+                let asker = Asker::of(&prompt, &session_id);
+                (
+                    ask_text(&prompt, &asker),
+                    prompt.secret,
+                    false,
+                    asker,
+                    Reply::Grant(prompt.reply),
+                )
+            }
+            Ask::Password(prompt) => {
+                let asker = Asker::of_password(&prompt, &session_id);
+                (
+                    password_ask_text(&prompt, &asker),
+                    ilar::secrets::SUDO_PASSWORD.to_string(),
+                    true,
+                    asker,
+                    Reply::Password(prompt.reply),
+                )
+            }
+        };
+        post(text).await;
         let (answer_tx, answer_rx) = oneshot::channel();
         *slot.lock().unwrap() = Some(PendingGrant {
-            secret: prompt.secret.clone(),
+            secret: pending_secret.clone(),
             asker: asker.clone(),
-            password_wanted: prompt.password_wanted,
+            password,
             answer: answer_tx,
         });
-        let mut reply = prompt.reply;
         tokio::select! {
             answer = answer_rx => {
                 // The command took the slot and decided; the tool gets
                 // what the chat said, and a chat that already moved on
                 // (the sender dropped unanswered) gets a no.
-                let _ = reply.send(answer.unwrap_or(None));
+                match answer {
+                    Ok(answer) => reply.send(answer),
+                    Err(_) => reply.deny(),
+                }
             }
             _ = reply.closed() => {
                 // The turn ended (aborted, or the gateway is stopping)
@@ -259,12 +389,12 @@ pub async fn watch(
             }
             _ = tokio::time::sleep(timeout) => {
                 slot.lock().unwrap().take();
-                let _ = reply.send(None);
-                post(no_answer(&prompt.secret, &asker)).await;
+                reply.deny();
+                post(no_answer(&pending_secret, &asker)).await;
             }
             _ = cancel.cancelled() => {
                 slot.lock().unwrap().take();
-                let _ = reply.send(None);
+                reply.deny();
                 return;
             }
         }
@@ -275,7 +405,7 @@ pub async fn watch(
 mod tests {
     use super::*;
 
-    fn prompt(reply: oneshot::Sender<Option<Approval>>) -> GrantPrompt {
+    fn prompt(reply: oneshot::Sender<Option<Grant>>) -> GrantPrompt {
         GrantPrompt {
             session_id: "s".into(),
             agent: None,
@@ -284,20 +414,46 @@ mod tests {
             secret: "GITHUB_TOKEN".into(),
             description: "for gh".into(),
             detail: "gh pr list".into(),
-            password_wanted: false,
+            reply,
+        }
+    }
+
+    fn password_prompt(reply: oneshot::Sender<Option<String>>) -> PasswordPrompt {
+        PasswordPrompt {
+            session_id: "s".into(),
+            tool_call_id: None,
+            agent: None,
+            detail: "apt install ripgrep".into(),
+            refused: false,
             reply,
         }
     }
 
     struct Harness {
-        prompts: mpsc::Sender<GrantPrompt>,
+        prompts: mpsc::Sender<Ask>,
         slot: PendingSlot,
         outbound: mpsc::Receiver<Outbound>,
         cancel: CancellationToken,
     }
 
+    impl Harness {
+        /// Wait for the ask to be posted and the slot to be filled: the
+        /// commands read the slot, not the channel.
+        async fn asked(&mut self) -> Outbound {
+            let posted = self.outbound.recv().await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while self.slot.lock().unwrap().is_none() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            posted
+        }
+    }
+
     fn harness(timeout: std::time::Duration) -> Harness {
-        let (prompts, receiver) = ilar::secrets::grant_channel(1);
+        let (prompts, receiver) = ilar::secrets::ask_channel(1);
         let slot: PendingSlot = Arc::new(Mutex::new(None));
         let (outbound_tx, outbound) = mpsc::channel(8);
         let cancel = CancellationToken::new();
@@ -325,8 +481,8 @@ mod tests {
     async fn the_ask_is_posted_and_the_chats_answer_reaches_the_tool() {
         let mut h = harness(GRANT_TIMEOUT);
         let (reply, receive) = oneshot::channel();
-        h.prompts.send(prompt(reply)).await.unwrap();
-        let posted = h.outbound.recv().await.unwrap();
+        h.prompts.send(Ask::Grant(prompt(reply))).await.unwrap();
+        let posted = h.asked().await;
         assert_eq!(
             (posted.channel.as_str(), posted.chat_id.as_str()),
             ("deltachat", "12")
@@ -340,33 +496,113 @@ mod tests {
             "{}",
             posted.text
         );
-        // The slot is filled once the ask is posted.
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            while h.slot.lock().unwrap().is_none() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        // A password nobody asked for is refused and the ask stands.
-        let refused = answer(
-            &h.slot,
-            Some(Approval {
-                grant: Grant::Once,
-                password: Some("typo".into()),
-            }),
+        assert!(!posted.text.contains("/password"), "{}", posted.text);
+        // A password sent to the approval question is refused and the
+        // ask stands: it would otherwise be lost, and the turn would
+        // still be waiting for a yes.
+        let refused = answer(&h.slot, Answer::Password("typo".into()));
+        assert!(
+            refused.unwrap_err().contains("the approval question"),
+            "the approval ask took a password"
         );
-        assert!(refused.unwrap_err().contains("takes no password"));
-        let text = answer(&h.slot, Some(Approval::from(Grant::Session))).unwrap();
+        let text = answer(&h.slot, Answer::Grant(Grant::Session)).unwrap();
         assert!(
             text.starts_with("GITHUB_TOKEN allowed for bash until"),
             "{text}"
         );
-        assert_eq!(receive.await.unwrap(), Some(Approval::from(Grant::Session)));
+        assert_eq!(receive.await.unwrap(), Some(Grant::Session));
         assert_eq!(
-            answer(&h.slot, None),
+            answer(&h.slot, Answer::No),
             Err("Nothing is waiting for a grant.")
         );
+        h.cancel.cancel();
+    }
+
+    /// The password ask is the same protocol: posted to the chat, named
+    /// as sudo's, answered by `/password` — and `/grant` on it is told
+    /// what it is looking at rather than eaten.
+    #[tokio::test]
+    async fn the_password_ask_is_answered_by_password_and_not_by_grant() {
+        let mut h = harness(GRANT_TIMEOUT);
+        let (reply, receive) = oneshot::channel();
+        h.prompts
+            .send(Ask::Password(password_prompt(reply)))
+            .await
+            .unwrap();
+        let posted = h.asked().await;
+        assert!(
+            posted
+                .text
+                .contains("sudo needs the sudo password to run:\n\n    apt install ripgrep\n"),
+            "{}",
+            posted.text
+        );
+        assert!(posted.text.contains("/password <pw>"), "{}", posted.text);
+        assert!(
+            posted.text.contains("deleted afterwards"),
+            "{}",
+            posted.text
+        );
+        let refused = answer(&h.slot, Answer::Grant(Grant::Always));
+        assert!(
+            refused.unwrap_err().contains("/password <pw>"),
+            "the password ask took a grant"
+        );
+        let text = answer(&h.slot, Answer::Password("hunter22".into())).unwrap();
+        assert_eq!(text, "Sent the password to sudo for sudo.");
+        assert_eq!(receive.await.unwrap().as_deref(), Some("hunter22"));
+
+        // /deny on a password ask cancels the sudo call.
+        let (reply, receive) = oneshot::channel();
+        h.prompts
+            .send(Ask::Password(password_prompt(reply)))
+            .await
+            .unwrap();
+        h.asked().await;
+        let text = answer(&h.slot, Answer::No).unwrap();
+        assert!(text.contains("does not run"), "{text}");
+        assert_eq!(receive.await.unwrap(), None);
+
+        // A re-ask says sudo refused the last one, and a child's ask is
+        // named as the child's.
+        let (reply, _receive) = oneshot::channel();
+        h.prompts
+            .send(Ask::Password(PasswordPrompt {
+                refused: true,
+                session_id: "another-session".into(),
+                agent: Some("reviewer".into()),
+                ..password_prompt(reply)
+            }))
+            .await
+            .unwrap();
+        let posted = h.asked().await;
+        assert!(
+            posted.text.contains("refused the last password"),
+            "{}",
+            posted.text
+        );
+        assert!(
+            posted.text.contains("sudo (reviewer subagent) needs"),
+            "{}",
+            posted.text
+        );
+        h.cancel.cancel();
+    }
+
+    /// A password ask nobody answers times out like a grant ask.
+    #[tokio::test]
+    async fn a_password_nobody_types_is_a_no() {
+        let mut h = harness(std::time::Duration::from_millis(50));
+        let (reply, receive) = oneshot::channel();
+        h.prompts
+            .send(Ask::Password(password_prompt(reply)))
+            .await
+            .unwrap();
+        let _ask = h.outbound.recv().await.unwrap();
+        assert_eq!(receive.await.unwrap(), None);
+        let verdict = h.outbound.recv().await.unwrap();
+        assert!(verdict.text.contains("(no answer)"), "{}", verdict.text);
+        assert!(h.slot.lock().unwrap().is_none());
         h.cancel.cancel();
     }
 
@@ -374,7 +610,7 @@ mod tests {
     async fn no_answer_in_time_is_a_no_and_the_chat_hears_it() {
         let mut h = harness(std::time::Duration::from_millis(50));
         let (reply, receive) = oneshot::channel();
-        h.prompts.send(prompt(reply)).await.unwrap();
+        h.prompts.send(Ask::Grant(prompt(reply))).await.unwrap();
         let _ask = h.outbound.recv().await.unwrap();
         assert_eq!(receive.await.unwrap(), None);
         let verdict = h.outbound.recv().await.unwrap();
@@ -445,14 +681,19 @@ mod tests {
         // what the long last line may take, not a fresh budget.
         let mixed = format!("{}\n{long}", "x\n".repeat(18));
         assert_eq!(bubble_lines(&shown_command(&mixed)), ASK_COMMAND_LINES);
-        // The whole ask fits one bubble, header, tail, password and all.
+        // Either ask fits one bubble, header, tail and all.
         for detail in [many, long, mixed] {
             let (reply, _receive) = oneshot::channel();
-            let mut prompt = prompt(reply);
-            prompt.detail = detail;
-            prompt.password_wanted = true;
-            let asker = Asker::of(&prompt, "s");
-            let lines = bubble_lines(&ask_text(&prompt, &asker));
+            let mut asking = prompt(reply);
+            asking.detail = detail.clone();
+            let asker = Asker::of(&asking, "s");
+            assert!(bubble_lines(&ask_text(&asking, &asker)) <= 34);
+            let (reply, _receive) = oneshot::channel();
+            let mut asking = password_prompt(reply);
+            asking.detail = detail;
+            asking.refused = true;
+            let asker = Asker::of_password(&asking, "s");
+            let lines = bubble_lines(&password_ask_text(&asking, &asker));
             assert!(lines <= 34, "{lines}");
         }
     }
@@ -461,13 +702,27 @@ mod tests {
     async fn a_turn_that_ends_takes_its_ask_with_it() {
         let mut h = harness(GRANT_TIMEOUT);
         let (reply, receive) = oneshot::channel();
-        h.prompts.send(prompt(reply)).await.unwrap();
+        h.prompts.send(Ask::Grant(prompt(reply))).await.unwrap();
         let _ask = h.outbound.recv().await.unwrap();
         drop(receive);
         let over = h.outbound.recv().await.unwrap();
         assert!(over.text.contains("stopped waiting"), "{}", over.text);
         assert_eq!(
-            answer(&h.slot, Some(Approval::from(Grant::Once))),
+            answer(&h.slot, Answer::Grant(Grant::Once)),
+            Err("Nothing is waiting for a grant.")
+        );
+        // A password ask goes the same way.
+        let (reply, receive) = oneshot::channel();
+        h.prompts
+            .send(Ask::Password(password_prompt(reply)))
+            .await
+            .unwrap();
+        let _ask = h.outbound.recv().await.unwrap();
+        drop(receive);
+        let over = h.outbound.recv().await.unwrap();
+        assert!(over.text.contains("stopped waiting"), "{}", over.text);
+        assert_eq!(
+            answer(&h.slot, Answer::Password("hunter22".into())),
             Err("Nothing is waiting for a grant.")
         );
         h.cancel.cancel();
