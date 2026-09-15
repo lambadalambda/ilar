@@ -527,6 +527,7 @@ mod tests {
                 queued: app.queued_messages.len(),
                 steerable: false,
                 notifications_paused: self.paused,
+                retry_available: app.retry_available,
             }
         }
 

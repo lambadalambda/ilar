@@ -1592,24 +1592,36 @@ impl App {
         // last event did — the point where it is longest is the worst
         // possible moment to throw the rendered rows away.
         let mut touched = None;
-        if let Err(error) = result {
-            // Closes the open rows and marks the whole transcript.
-            self.close_open_rows();
-            let message = format!("error: {error:#}");
-            self.lines.push(Line_::System(message.clone()));
-            touched = Some(self.lines.len() - 1);
-            // The status line takes the first line only: a provider's
-            // error carries its response body, and the lead line is the
-            // part that says what happened. The transcript above has
-            // all of it.
-            let mut notice = error_notice(&message);
-            if self.turn_committed {
-                self.retry_available = true;
-                notice.push_str(" — Ctrl-R to resume");
+        match result {
+            Err(error) => {
+                // Closes the open rows and marks the whole transcript.
+                self.close_open_rows();
+                let message = format!("error: {error:#}");
+                self.lines.push(Line_::System(message.clone()));
+                touched = Some(self.lines.len() - 1);
+                // The status line takes the first line only: a provider's
+                // error carries its response body, and the lead line is the
+                // part that says what happened. The transcript above has
+                // all of it.
+                let mut notice = error_notice(&message);
+                if self.turn_committed {
+                    self.retry_available = true;
+                    notice.push_str(" — Ctrl-R to resume");
+                }
+                self.set_persistent_notice(&notice, NoticeLevel::Error);
+                self.status = "error".into();
+                self.set_activity(Activity::Error);
             }
-            self.set_persistent_notice(&notice, NoticeLevel::Error);
-            self.status = "error".into();
-            self.set_activity(Activity::Error);
+            // An abort leaves exactly what an error leaves: a committed
+            // chain, and a turn that stopped part-way through it. The
+            // stall watchdog's notice promises a resume and Esc has to
+            // keep that promise, so the same offer stands — over the
+            // "turn aborted" the TurnDone event just set.
+            Ok(TurnOutcome::Aborted) if self.turn_committed => {
+                self.retry_available = true;
+                self.set_notice("turn aborted — Ctrl-R resumes it", NoticeLevel::Warning);
+            }
+            Ok(_) => {}
         }
         self.touch_transcript(touched);
         self.busy = false;
@@ -4619,6 +4631,35 @@ mod tests {
         app.retry_available = false;
         app.finish_turn(Ok(TurnOutcome::Completed));
         assert!(!app.retry_available);
+    }
+
+    /// The stall notice says Esc ends a turn that will resume; an
+    /// abort must therefore leave the same offer an error does — and
+    /// only when there is a committed chain to continue.
+    #[test]
+    fn an_aborted_turn_offers_the_same_resume_an_error_does() {
+        let mut app = App::new();
+        app.push_loop_event(&LoopEvent::TurnStarted);
+        app.push_loop_event(&LoopEvent::TurnDone {
+            outcome: TurnOutcome::Aborted,
+        });
+        app.finish_turn(Ok(TurnOutcome::Aborted));
+        assert!(app.retry_available);
+        assert_eq!(
+            app.notice_text(),
+            Some("turn aborted — Ctrl-R resumes it"),
+            "the abort notice must name the resume"
+        );
+
+        // Aborted before the turn committed: nothing to continue, and
+        // the plain "turn aborted" stands.
+        let mut app = App::new();
+        app.push_loop_event(&LoopEvent::TurnDone {
+            outcome: TurnOutcome::Aborted,
+        });
+        app.finish_turn(Ok(TurnOutcome::Aborted));
+        assert!(!app.retry_available);
+        assert_eq!(app.notice_text(), Some("turn aborted"));
     }
 
     /// Compaction sheds heavy payloads behind the turn boundary — the

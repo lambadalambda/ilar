@@ -33,6 +33,9 @@ pub(crate) struct LoopState {
     pub(crate) steerable: bool,
     /// Notifications are held until the user says otherwise.
     pub(crate) notifications_paused: bool,
+    /// A turn ended badly with its chain committed, so there is
+    /// something for a resume to continue from.
+    pub(crate) retry_available: bool,
 }
 
 impl LoopState {
@@ -354,17 +357,43 @@ pub(crate) fn submit(state: &LoopState, busy: bool, text: String) -> Vec<Intent>
             )];
         }
         if state.turn_running || busy {
-            return vec![Intent::Notice(
-                format!("wait for the current operation before /{name}"),
-                NoticeLevel::Warning,
-            )];
+            return vec![Intent::Notice(wait_before(name), NoticeLevel::Warning)];
         }
     }
-    match submit_target(state, busy) {
+    let target = submit_target(state, busy);
+    // Every other `/name` — a goal, a project command, a skill — is a
+    // command too: it is armed, expanded or routed by `prepare_prompt`,
+    // which only runs on the way into a turn. Steering sends the line
+    // raw, so the model reads "/goal ship it" as prose and nothing is
+    // armed. The queue is fine — it drains through `prepare_prompt` —
+    // so only the steer refuses, and the text stays on the prompt for
+    // the moment the turn ends.
+    if target == SubmitTarget::Steer
+        && let Some((name, _)) = crate::parse_slash_invocation(&text)
+    {
+        return vec![Intent::Notice(wait_before(name), NoticeLevel::Warning)];
+    }
+    match target {
         SubmitTarget::StartTurn => vec![Intent::StartTurn(text)],
         SubmitTarget::Steer => vec![Intent::Steer(text)],
         SubmitTarget::Queue => vec![Intent::Queue(text)],
     }
+}
+
+/// The one refusal every command shares when something is already
+/// running. One text, so the maintenance commands and the rest cannot
+/// say it two ways.
+fn wait_before(name: &str) -> String {
+    format!("wait for the current operation before /{name}")
+}
+
+/// Whether a submitted prompt was refused outright: nothing but
+/// notices came back, so nothing was sent and the text the user typed
+/// is theirs to keep. `prepare_prompt` already restores the input on
+/// its own refusals; this is how the decision layer's refusals reach
+/// the same place.
+pub(crate) fn refused(intents: &[Intent]) -> bool {
+    !intents.is_empty() && intents.iter().all(|i| matches!(i, Intent::Notice(..)))
 }
 
 /// What pasted text becomes. A modal with no text field returns
@@ -381,8 +410,23 @@ pub(crate) fn paste(state: &LoopState, text: String) -> Vec<Intent> {
     }
 }
 
-/// Resume the failed turn, or preserve an unsent draft.
-pub(crate) fn retry(state: &LoopState) -> Vec<Intent> {
+/// Resume the failed turn, or say why not: a resume cannot displace a
+/// running turn, cannot invent a failure to continue, and must not eat
+/// an unsent draft. Every refusal answers the keypress — Ctrl-R on a
+/// healthy session used to do nothing at all.
+pub(crate) fn retry(state: &LoopState, busy: bool) -> Vec<Intent> {
+    if state.turn_running || busy {
+        return vec![Intent::Notice(
+            "a turn is already running — Ctrl-R resumes one that ended badly".into(),
+            NoticeLevel::Info,
+        )];
+    }
+    if !state.retry_available {
+        return vec![Intent::Notice(
+            "nothing to resume — Ctrl-R continues a turn that failed or was aborted".into(),
+            NoticeLevel::Info,
+        )];
+    }
     if !state.input_blank {
         return vec![Intent::Notice(
             "input has an unsent draft — send or clear it before resuming".into(),
@@ -537,6 +581,14 @@ mod tests {
         LoopState {
             input_blank: true,
             ..LoopState::default()
+        }
+    }
+
+    /// Idle, with a failed turn behind it: what Ctrl-R is for.
+    fn resumable() -> LoopState {
+        LoopState {
+            retry_available: true,
+            ..idle()
         }
     }
 
@@ -728,6 +780,86 @@ mod tests {
                 NoticeLevel::Warning,
             )]
         );
+    }
+
+    /// One class per command kind: a goal, a project command, a skill
+    /// and a plain unknown are all `prepare_prompt`'s business, and
+    /// `prepare_prompt` only runs on the way into a turn. Steering
+    /// would send the line to the model as prose.
+    #[test]
+    fn no_slash_command_is_ever_steered_at_the_model() {
+        let running = LoopState {
+            turn_running: true,
+            steerable: true,
+            ..idle()
+        };
+        for text in [
+            "/goal ship the parser",
+            "/goal",
+            "/deploy staging",
+            "/skill-name",
+            "/unknown-thing with args",
+        ] {
+            let name = crate::parse_slash_invocation(text)
+                .expect("a slash invocation")
+                .0;
+            assert_eq!(
+                submit(&running, true, text.into()),
+                vec![Intent::Notice(
+                    format!("wait for the current operation before /{name}"),
+                    NoticeLevel::Warning,
+                )],
+                "{text:?} must not steer"
+            );
+            // The same text queues unchanged when there is no steer
+            // channel: the queue drains through `prepare_prompt`.
+            let routed = LoopState {
+                steerable: false,
+                ..running
+            };
+            assert_eq!(
+                submit(&routed, true, text.into()),
+                vec![Intent::Queue(text.into())],
+                "{text:?} must survive the queue"
+            );
+            // Idle, it is a turn like any other: `prepare_prompt`
+            // arms, expands or refuses it there.
+            assert_eq!(
+                submit(&idle(), false, text.into()),
+                vec![Intent::StartTurn(text.into())],
+                "{text:?} must start a turn"
+            );
+        }
+        // Not a command: prose that happens to open with a slash still
+        // steers, and so does an absolute path.
+        for text in ["/etc/passwd is odd", "/ leading space"] {
+            assert_eq!(
+                submit(&running, true, text.into()),
+                vec![Intent::Steer(text.into())],
+                "{text:?} is not a command"
+            );
+        }
+    }
+
+    /// A refusal is a refusal whichever command class raised it: the
+    /// caller puts the text back on the prompt.
+    #[test]
+    fn a_refusal_is_recognisable_as_one() {
+        let running = LoopState {
+            turn_running: true,
+            steerable: true,
+            ..idle()
+        };
+        assert!(refused(&submit(&running, true, "/goal ship it".into())));
+        assert!(refused(&submit(&running, true, "/compact".into())));
+        assert!(refused(&submit(&idle(), false, "/context lots".into())));
+        assert!(refused(&submit(&idle(), false, "/btw".into())));
+        // Anything that actually went somewhere is not a refusal.
+        assert!(!refused(&submit(&idle(), false, "hello".into())));
+        assert!(!refused(&submit(&running, true, "hello".into())));
+        assert!(!refused(&submit(&idle(), false, "/btw why?".into())));
+        assert!(!refused(&submit(&idle(), false, "/context 128k".into())));
+        assert!(!refused(&[]));
     }
 
     #[test]
@@ -1050,13 +1182,36 @@ mod tests {
     fn retry_declines_on_a_draft_and_continues_otherwise() {
         let drafting = LoopState {
             input_blank: false,
-            ..idle()
+            ..resumable()
         };
         assert!(matches!(
-            retry(&drafting).as_slice(),
+            retry(&drafting, false).as_slice(),
             [Intent::Notice(text, NoticeLevel::Warning)] if text.contains("draft")
         ));
-        assert_eq!(retry(&idle()), vec![Intent::ResumeTurn]);
+        assert_eq!(retry(&resumable(), false), vec![Intent::ResumeTurn]);
+    }
+
+    /// Ctrl-R always answers: nothing armed, or a turn already
+    /// running, used to be a silent keypress.
+    #[test]
+    fn retry_says_so_when_there_is_nothing_to_resume() {
+        assert!(matches!(
+            retry(&idle(), false).as_slice(),
+            [Intent::Notice(text, _)] if text.contains("nothing to resume")
+        ));
+        let running = LoopState {
+            turn_running: true,
+            ..resumable()
+        };
+        assert!(matches!(
+            retry(&running, true).as_slice(),
+            [Intent::Notice(text, _)] if text.contains("already running")
+        ));
+        // Busy without a handle — a turn being aborted — is still busy.
+        assert!(matches!(
+            retry(&resumable(), true).as_slice(),
+            [Intent::Notice(text, _)] if text.contains("already running")
+        ));
     }
 
     /// The watchdog with no clock — no turn, or one aborting/paused —
@@ -1132,12 +1287,12 @@ mod tests {
     /// user can act on it where they raised it.
     #[test]
     fn retry_dismisses_the_manager_only_when_it_resumes() {
-        assert!(retry_dismisses_manager(&retry(&idle())));
+        assert!(retry_dismisses_manager(&retry(&resumable(), false)));
         let drafting = LoopState {
             input_blank: false,
-            ..idle()
+            ..resumable()
         };
-        assert!(!retry_dismisses_manager(&retry(&drafting)));
+        assert!(!retry_dismisses_manager(&retry(&drafting, false)));
     }
 
     fn edges(pairs: &[(&str, &str)]) -> Vec<(String, String)> {

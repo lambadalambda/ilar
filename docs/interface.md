@@ -77,6 +77,12 @@ mid-step (…) — continuing (1/2)`. Past that budget the turn fails, the
 error stands in the notice line, and **Ctrl-R** resumes from the same
 committed state by hand.
 
+A turn you abort yourself leaves the same committed chain behind, so the
+same **Ctrl-R** continues it — that is what the stall watchdog's notice
+means when it offers Esc. The offer survives the session, too: open a
+session whose last turn died and the notice says so, with Ctrl-R still
+armed. Ctrl-R with nothing to resume says so rather than doing nothing.
+
 A different kind of stumble is the one you cause by walking away: once
 the provider's prompt cache has dropped the session, the next move re-reads
 everything at full price. With `cache_compact.enabled` set (see

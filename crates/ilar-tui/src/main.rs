@@ -856,6 +856,7 @@ fn observe(
         queued: app.queued_messages.len(),
         steerable: steer_tx.as_ref().is_some_and(|tx| !tx.is_closed()),
         notifications_paused,
+        retry_available: app.retry_available,
     }
 }
 
@@ -2965,7 +2966,7 @@ async fn run_app(
                 // standing persistent reminder that data would then
                 // destroy along with it.
                 app.set_stall_notice(format!(
-                    "provider silent for {silent_secs}s — Esc aborts, the turn will retry-resume"
+                    "provider silent for {silent_secs}s — Esc aborts, Ctrl-R then resumes the turn"
                 ));
                 if !std::mem::replace(&mut stall_bell_rung, true) {
                     use std::io::Write as _;
@@ -3315,10 +3316,22 @@ async fn run_app(
             let (restore_at, handle) = restore_handle.take().unwrap();
             match handle.await {
                 Ok((view, priced)) => {
+                    // The last turn died and nothing has happened
+                    // since: the resume is still on offer, and a
+                    // restored session used to lose it — the log says
+                    // "error" and Ctrl-R did nothing.
+                    let resume_offer = view.resume_offer;
                     // History goes where the open stood: after the
                     // banner, ahead of startup notices and anything
                     // else pushed while the worker ran.
                     app.land_restored_view(view, restore_at);
+                    if resume_offer && turn_handle.is_none() && !app.retry_available {
+                        app.retry_available = true;
+                        app.set_persistent_notice(
+                            "the last turn ended in an error — Ctrl-R resumes it",
+                            NoticeLevel::Warning,
+                        );
+                    }
                     // A turn that ran meanwhile may have reported the
                     // exact context; the estimate must not regress it.
                     if app.context_estimated {
@@ -3752,20 +3765,18 @@ async fn run_app(
                                 app.clear_transient_notice();
                             }
                             PendingAction::RetryNow => {
-                                if !app.busy && turn_handle.is_none() {
-                                    let state = observe(
-                                        app,
-                                        &turn_handle,
-                                        &pending_terminal_event,
-                                        &steer_tx,
-                                        notifications_paused,
-                                    );
-                                    let decided = retry_intents(&state);
-                                    if retry_dismisses_manager(&decided) {
-                                        app.pending_manager = None;
-                                    }
-                                    intents.extend(decided);
+                                let state = observe(
+                                    app,
+                                    &turn_handle,
+                                    &pending_terminal_event,
+                                    &steer_tx,
+                                    notifications_paused,
+                                );
+                                let decided = retry_intents(&state, app.busy);
+                                if retry_dismisses_manager(&decided) {
+                                    app.pending_manager = None;
                                 }
+                                intents.extend(decided);
                             }
                         },
                         Modal::Help => match code {
@@ -4468,12 +4479,10 @@ async fn run_app(
                         app.todos_visible = true;
                         app.todos_scroll = 0;
                     }
-                    (code, control)
-                        if retry_requested(code, control)
-                            && app.retry_available
-                            && !app.busy
-                            && turn_handle.is_none() =>
-                    {
+                    // Unconditional: `retry_intents` answers a Ctrl-R
+                    // there is nothing to resume from, which was a
+                    // silent keypress before.
+                    (code, control) if retry_requested(code, control) => {
                         let state = observe(
                             app,
                             &turn_handle,
@@ -4481,7 +4490,7 @@ async fn run_app(
                             &steer_tx,
                             notifications_paused,
                         );
-                        intents.extend(retry_intents(&state));
+                        intents.extend(retry_intents(&state, app.busy));
                     }
                     _ => match handle_prompt_key(&mut app.input, key) {
                         PromptAction::Submit if !app.input.is_blank() => {
@@ -4502,7 +4511,14 @@ async fn run_app(
                             // Attached images are not part of the
                             // decision: `apply_intent` takes them off
                             // the prompt whichever way the message goes.
-                            let decided = decide::submit(&state, app.busy, text);
+                            let decided = decide::submit(&state, app.busy, text.clone());
+                            // A refused command keeps its text, exactly
+                            // as `prepare_prompt`'s refusals do: the
+                            // user retypes nothing to fix a typo or to
+                            // wait for the turn to end.
+                            if decide::refused(&decided) {
+                                app.input = InputBuffer::from(text.as_str());
+                            }
                             apply_event_intents(app, decided, &mut intents, steer_tx.as_ref());
                         }
                         PromptAction::Edited => app.clear_transient_notice(),

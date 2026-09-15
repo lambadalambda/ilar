@@ -21,6 +21,32 @@ pub(crate) struct RestoredSessionView {
     /// log.
     pub(crate) task_usage: ilar::session::Usage,
     pub(crate) task_cost: Option<f64>,
+    /// The session's last turn ended in a recorded error and nothing
+    /// has happened since: the resume Ctrl-R offers is still on the
+    /// table, and the restore is the only place that can say so.
+    pub(crate) resume_offer: bool,
+}
+
+/// Whether the log ends on a failed turn. Walked from the end: a user
+/// message after it means the session moved on, an assistant message
+/// carrying a `TurnError` is the failure itself, and the tool results
+/// an interrupted turn leaves behind say nothing either way.
+pub(crate) fn ends_in_turn_error(events: &[ilar::session::SessionEvent]) -> bool {
+    events.iter().rev().find_map(|event| match event {
+        ilar::session::SessionEvent::UserMessage { .. } => Some(false),
+        ilar::session::SessionEvent::AssistantMessage { content, .. } => {
+            Some(content.iter().any(|block| {
+                matches!(
+                    block,
+                    ilar::session::ContentBlock::Diagnostic {
+                        kind: ilar::session::DiagnosticKind::TurnError,
+                        ..
+                    }
+                )
+            }))
+        }
+        _ => None,
+    }) == Some(true)
 }
 
 /// Two cost totals into one; a `None` on either side (an unpriced
@@ -545,6 +571,11 @@ pub(crate) fn restored_session_view_with_store(
     );
     view.task_usage = task_usage;
     view.task_cost = task_cost;
+    // A session that died mid-turn can be continued from its committed
+    // chain — but only the log knows it ended that way, and only a
+    // question-free session can be resumed at all.
+    view.resume_offer =
+        session.pending_question().is_none() && ends_in_turn_error(session.events());
     view
 }
 
@@ -1047,6 +1078,67 @@ mod tests {
             "{:?}",
             view.lines
         );
+
+        // Restored the way the TUI restores it: the failed turn is
+        // still there to continue, so the resume is offered.
+        let restored = restored_session_view_with_store(
+            &store.load(&session_id).unwrap(),
+            &store,
+            Liveness::Settled,
+        );
+        assert!(restored.resume_offer, "a dead turn is resumable");
+    }
+
+    /// Where the log ends decides whether a resume is still on offer:
+    /// a failed turn is, a session that moved on since is not.
+    #[test]
+    fn a_resume_is_offered_only_while_the_log_ends_on_a_failed_turn() {
+        use ilar::session::{ContentBlock, DiagnosticKind, SessionEvent, Usage};
+
+        let assistant = |content: Vec<ContentBlock>| SessionEvent::AssistantMessage {
+            id: new_id(),
+            model: "zai/glm-4.7".into(),
+            content,
+            usage: Usage::default(),
+            stop_reason: "error".into(),
+            ts: chrono::Utc::now(),
+        };
+        let user = || SessionEvent::UserMessage {
+            id: new_id(),
+            text: "try again".into(),
+            images: Vec::new(),
+            ts: chrono::Utc::now(),
+        };
+        let died = || {
+            assistant(vec![ContentBlock::Diagnostic {
+                text: "turn error: provider exploded".into(),
+                kind: DiagnosticKind::TurnError,
+            }])
+        };
+        let answered = || {
+            assistant(vec![ContentBlock::Text {
+                text: "done".into(),
+            }])
+        };
+        let interrupted_tool = || SessionEvent::ToolResult {
+            id: new_id(),
+            tool_use_id: new_id(),
+            content: "Tool call interrupted before completion.".into(),
+            is_error: true,
+            images: Vec::new(),
+            child_session_id: None,
+            state: None,
+            ts: chrono::Utc::now(),
+        };
+
+        assert!(!ends_in_turn_error(&[]));
+        assert!(!ends_in_turn_error(&[user()]));
+        assert!(!ends_in_turn_error(&[died(), user()]));
+        assert!(!ends_in_turn_error(&[died(), user(), answered()]));
+        assert!(ends_in_turn_error(&[user(), died()]));
+        // The back-filled results an interrupted turn leaves say
+        // nothing about how the turn ended.
+        assert!(ends_in_turn_error(&[user(), died(), interrupted_tool()]));
     }
 
     #[test]
