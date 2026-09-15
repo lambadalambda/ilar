@@ -1266,10 +1266,12 @@ impl SubagentSpawner {
                 }
                 activity.turn_done(outcome.activity());
 
-                let failed =
-                    |body: String| task_notification(&parent_session_id, &description, &body, true);
-                let notification = match &outcome {
-                    TaskOutcome::Completed => {
+                // Every ending's words come from `headline`; only the
+                // clean finish is this branch's own, because it carries
+                // the child's text and its resumable id.
+                let notification = match outcome.headline(&description, stall_timeout) {
+                    Some(body) => task_notification(&parent_session_id, &description, &body, true),
+                    None => {
                         let text = final_assistant_text(&spawner.store, &session_id)
                             .unwrap_or_else(|| "(finished with no text)".into());
                         task_notification(
@@ -1281,20 +1283,6 @@ impl SubagentSpawner {
                             false,
                         )
                     }
-                    TaskOutcome::Aborted => failed(format!("Task \"{description}\" was aborted.")),
-                    TaskOutcome::MaxIterations => failed(format!(
-                        "Task \"{description}\" failed: subagent reached its iteration limit."
-                    )),
-                    TaskOutcome::Failed(error) => {
-                        failed(format!("Task \"{description}\" failed: {error:#}"))
-                    }
-                    TaskOutcome::Cancelled => {
-                        cancelled_task_notification(&parent_session_id, &description)
-                    }
-                    TaskOutcome::Stalled => failed(format!(
-                        "Task \"{description}\" stalled: no progress for {}s. It has been stopped.",
-                        stall_timeout.as_secs()
-                    )),
                 };
                 reserved.send(notification);
             });
@@ -1394,21 +1382,16 @@ task's scope yourself; continue only clearly disjoint work."
         }
         activity.turn_done(outcome.activity());
 
-        let output = match outcome {
-            TaskOutcome::Completed => {
+        // The same headline a detached task's parent would read: a
+        // blocked caller and a notified one hear one verb set for one
+        // ending. Only the clean finish differs, and only because the
+        // caller wants the child's words, not a report about them.
+        let output = match outcome.headline(&input.description, self.stall_timeout) {
+            Some(body) => ToolOutput::error(body),
+            None => {
                 let text = final_assistant_text(&self.store, &session_id)
-                    .unwrap_or_else(|| "(subagent finished with no text)".into());
+                    .unwrap_or_else(|| "(finished with no text)".into());
                 ToolOutput::text(text)
-            }
-            TaskOutcome::MaxIterations => {
-                ToolOutput::error("subagent failed: iteration limit reached")
-            }
-            TaskOutcome::Failed(error) => ToolOutput::error(format!("subagent failed: {error:#}")),
-            // `from_turn` never yields the last two: a foreground task
-            // has no watchdog, and its cancellation arrives as an
-            // aborted turn.
-            TaskOutcome::Aborted | TaskOutcome::Cancelled | TaskOutcome::Stalled => {
-                ToolOutput::error("subagent aborted")
             }
         };
         // A default that could not be honoured says so: the schema
@@ -1945,20 +1928,15 @@ task's scope yourself; continue only clearly disjoint work."
                 Err(error) => Err(error),
             };
         };
-        let (text, is_error) = match outcome {
-            Ok(TurnOutcome::Aborted) => ("Nested parent turn was cancelled.".to_string(), true),
-            Ok(TurnOutcome::MaxIterations) => (
-                "Nested parent turn reached its iteration limit.".to_string(),
-                true,
-            ),
-            Ok(TurnOutcome::Completed) => (
+        let (status, text, is_error) = match nested_hop_ending(&outcome) {
+            Some((status, text, is_error)) => (status, text, is_error),
+            None => (
+                "completed",
                 final_assistant_text(&self.store, &notification.parent_session_id)
                     .unwrap_or_else(|| "(finished with no text)".into()),
                 false,
             ),
-            Err(error) => (format!("Nested parent turn failed: {error:#}"), true),
         };
-        let status = if is_error { "failed" } else { "completed" };
         // Named after the task the hop is about: the grandparent's row
         // leads with what finished, never with "Nested task" alone.
         let text = format!(
@@ -2344,6 +2322,32 @@ impl TaskOutcome {
         }
     }
 
+    /// The one headline an ending gets, wherever it is read: the tool
+    /// result a foreground caller sees and the notification a
+    /// background parent sees say the same words for the same ending.
+    /// `None` for a clean finish, whose headline is the child's own
+    /// final text.
+    ///
+    /// The verb set is fixed here and nowhere else: *aborted* for a
+    /// turn that gave up, *cancelled* for a stop someone asked for,
+    /// *failed* for everything the task did to itself, *stalled* for
+    /// the watchdog. `task` for the what, in every one of them.
+    fn headline(&self, description: &str, stall_timeout: std::time::Duration) -> Option<String> {
+        Some(match self {
+            Self::Completed => return None,
+            Self::Aborted => format!("Task \"{description}\" was aborted."),
+            Self::Cancelled => format!("Task \"{description}\" was cancelled."),
+            Self::MaxIterations => {
+                format!("Task \"{description}\" failed: it reached its iteration limit.")
+            }
+            Self::Failed(error) => format!("Task \"{description}\" failed: {error:#}"),
+            Self::Stalled => format!(
+                "Task \"{description}\" stalled: no progress for {}s. It has been stopped.",
+                stall_timeout.as_secs()
+            ),
+        })
+    }
+
     /// What the terminal activity event carries: anything that is not a
     /// clean finish or an iteration limit reads as an abort.
     fn activity(&self) -> TurnOutcome {
@@ -2418,13 +2422,46 @@ fn task_notification(
 
 /// The one way a background task reports that it was stopped — it is
 /// reachable from the lease wait, the revalidation and the run itself.
+/// How a nested hop reports the parent turn it just ran to the
+/// grandparent: the verb for the headline, the body, and whether it
+/// reads as an error. `None` for a clean finish, whose body is the
+/// parent's own final text.
+///
+/// A cancelled turn says *cancelled*. Reporting the user's own stop as
+/// "Nested task X failed" is both the wrong verb and the wrong blame:
+/// nothing about the grandchild failed.
+fn nested_hop_ending(
+    outcome: &anyhow::Result<TurnOutcome>,
+) -> Option<(&'static str, String, bool)> {
+    match outcome {
+        Ok(TurnOutcome::Completed) => None,
+        Ok(TurnOutcome::Aborted) => Some((
+            "was cancelled",
+            "Nested parent turn was cancelled.".to_string(),
+            true,
+        )),
+        Ok(TurnOutcome::MaxIterations) => Some((
+            "failed",
+            "Nested parent turn reached its iteration limit.".to_string(),
+            true,
+        )),
+        Err(error) => Some((
+            "failed",
+            format!("Nested parent turn failed: {error:#}"),
+            true,
+        )),
+    }
+}
+
+/// A task stopped before its turn ever started — no lease, no run, so
+/// no `TaskOutcome` was ever computed. It is still the same ending, so
+/// it borrows the same headline rather than writing a second one.
 fn cancelled_task_notification(parent_session_id: &str, description: &str) -> Notification {
-    task_notification(
-        parent_session_id,
-        description,
-        &format!("Task \"{description}\" was cancelled."),
-        true,
-    )
+    let body = TaskOutcome::Cancelled
+        // No run means no watchdog: the stall timeout is unused here.
+        .headline(description, std::time::Duration::ZERO)
+        .expect("a cancellation always has a headline");
+    task_notification(parent_session_id, description, &body, true)
 }
 
 /// Undo a session that was created moments ago but could not be
@@ -3148,6 +3185,75 @@ mod tests {
             description.into(),
             None,
         )
+    }
+
+    /// One ending, one sentence — whoever reads it. A blocked caller
+    /// used to hear "subagent aborted" for what a notified parent
+    /// heard as `Task "X" was aborted.`; `headline` is the only place
+    /// either wording lives now.
+    #[test]
+    fn every_ending_has_one_headline() {
+        let stall = std::time::Duration::from_secs(600);
+        let headline = |outcome: TaskOutcome| outcome.headline("survey the API", stall);
+
+        // A clean finish has no headline: the child's own words are it.
+        assert_eq!(headline(TaskOutcome::Completed), None);
+        assert_eq!(
+            headline(TaskOutcome::Aborted).as_deref(),
+            Some("Task \"survey the API\" was aborted.")
+        );
+        assert_eq!(
+            headline(TaskOutcome::Cancelled).as_deref(),
+            Some("Task \"survey the API\" was cancelled.")
+        );
+        assert_eq!(
+            headline(TaskOutcome::MaxIterations).as_deref(),
+            Some("Task \"survey the API\" failed: it reached its iteration limit.")
+        );
+        assert_eq!(
+            headline(TaskOutcome::Failed(anyhow::anyhow!("no provider"))).as_deref(),
+            Some("Task \"survey the API\" failed: no provider")
+        );
+        assert_eq!(
+            headline(TaskOutcome::Stalled).as_deref(),
+            Some("Task \"survey the API\" stalled: no progress for 600s. It has been stopped.")
+        );
+
+        // The pre-turn cancellation says the same thing as the
+        // post-turn one, because it asks the same function.
+        assert!(
+            cancelled_task_notification("parent", "survey the API")
+                .text
+                .contains("Task \"survey the API\" was cancelled.")
+        );
+    }
+
+    /// A nested hop whose parent turn the user stopped is a
+    /// cancellation, not the grandchild's failure: the verb said
+    /// "failed" for every unhappy ending, which blamed the child for
+    /// the user's keypress.
+    #[test]
+    fn a_cancelled_nested_hop_says_cancelled() {
+        let (status, text, is_error) =
+            nested_hop_ending(&Ok(TurnOutcome::Aborted)).expect("an abort ends the hop");
+        assert_eq!(status, "was cancelled");
+        assert!(text.contains("cancelled"), "{text}");
+        assert!(is_error);
+
+        assert_eq!(
+            nested_hop_ending(&Ok(TurnOutcome::MaxIterations))
+                .expect("a limit ends the hop")
+                .0,
+            "failed"
+        );
+        assert_eq!(
+            nested_hop_ending(&Err(anyhow::anyhow!("boom")))
+                .expect("an error ends the hop")
+                .0,
+            "failed"
+        );
+        // A clean finish leaves the body to the parent's own last word.
+        assert!(nested_hop_ending(&Ok(TurnOutcome::Completed)).is_none());
     }
 
     /// A background job is a tool call, not a task: no child session,
