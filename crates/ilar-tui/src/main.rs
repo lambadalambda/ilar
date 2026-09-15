@@ -2549,6 +2549,10 @@ fn ring_terminal_bell_if_idle(
 /// replay used to freeze the UI for the length of its log. Returns
 /// whether the child is streaming, which the seed needs.
 fn open_agent_focus(app: &mut App, store: &SessionStore, session_id: &str) -> bool {
+    // A click from inside another focus view: that one hands the prompt
+    // back first, so the root's own draft cannot be swallowed by the
+    // second view parking what was typed at the first agent.
+    app.close_focus();
     let roster = app
         .agents_view
         .iter()
