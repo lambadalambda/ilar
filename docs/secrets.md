@@ -9,14 +9,16 @@ variable once you have said yes to that use.
 ## Storing one
 
 ```sh
-ilar secret set GITHUB_TOKEN --description "gh, read-only PAT"   # value on stdin
-pass show github/pat | ilar secret set GITHUB_TOKEN
+ilar secret set GITHUB_TOKEN --description "gh, read-only PAT"   # asks for the value, hidden, twice
+pass show github/pat | ilar secret set GITHUB_TOKEN               # or piped in
 ilar secret list
 ilar secret remove GITHUB_TOKEN
 ```
 
-The value is read from stdin, never from the command line, so it stays
-out of shell history and process listings. Names are environment
+At a terminal the value is asked for like a password, hidden and
+confirmed; piped, it is read from stdin as it is. It is never taken
+from the command line, so it stays out of shell history and process
+listings. Names are environment
 variable names (`[A-Za-z_][A-Za-z0-9_]*`, up to 64 characters); values
 are at least four characters. The store is `<state dir>/secrets.json`,
 mode 0600, written whole under a lock. In the clear, the file is as

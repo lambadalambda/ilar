@@ -1154,12 +1154,16 @@ async fn main() -> Result<()> {
     }
     if let Some(Command::Secret { command }) = args.command {
         let store = ilar::secrets::SecretStore::open(config.state_dir());
-        let text = secret_cli::run(
-            &store,
-            command,
-            &mut std::io::stdin().lock(),
-            &mut secret_cli::ask_on_terminal,
-        )?;
+        // A piped value is read as it is; at a terminal it is asked
+        // for hidden and confirmed, so nothing is ever echoed.
+        use std::io::IsTerminal;
+        let mut stdin = std::io::stdin().lock();
+        let piped: Option<&mut dyn std::io::Read> = if stdin.is_terminal() {
+            None
+        } else {
+            Some(&mut stdin)
+        };
+        let text = secret_cli::run(&store, command, piped, &mut secret_cli::ask_on_terminal)?;
         println!("{text}");
         return Ok(());
     }

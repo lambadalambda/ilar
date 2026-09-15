@@ -62,10 +62,13 @@ pub(crate) fn unlock_if_sealed(store: &SecretStore, ask: AskPassword<'_>) -> Res
 }
 
 /// Run one command against the store; the text is what to print.
+/// `piped` is stdin when it is not a terminal: `set` reads the value
+/// from it. At a terminal (`None`) the value is asked for hidden, and
+/// asked again to confirm, like the master password.
 pub(crate) fn run(
     store: &SecretStore,
     command: SecretCommand,
-    stdin: &mut dyn std::io::Read,
+    piped: Option<&mut dyn std::io::Read>,
     ask: AskPassword<'_>,
 ) -> Result<String> {
     match &command {
@@ -103,15 +106,30 @@ pub(crate) fn run(
     match command {
         SecretCommand::Set { name, description } => {
             ilar::secrets::valid_name(&name).map_err(anyhow::Error::msg)?;
-            let mut value = String::new();
-            stdin
-                .read_to_string(&mut value)
-                .context("reading the value from stdin")?;
-            let value = value.trim_end_matches(['\n', '\r']);
-            if value.is_empty() {
-                anyhow::bail!("no value on stdin; pipe it in, or type it and end with Ctrl-D");
-            }
-            let replaced = store.set(&name, &description, value)?;
+            let value = match piped {
+                Some(stdin) => {
+                    let mut value = String::new();
+                    stdin
+                        .read_to_string(&mut value)
+                        .context("reading the value from stdin")?;
+                    let value = value.trim_end_matches(['\n', '\r']).to_string();
+                    if value.is_empty() {
+                        anyhow::bail!("no value on stdin");
+                    }
+                    value
+                }
+                None => {
+                    let value = ask(&format!("Value for {name}: "))?;
+                    if value.is_empty() {
+                        anyhow::bail!("no value given");
+                    }
+                    if value != ask("Again: ")? {
+                        anyhow::bail!("the two did not match; nothing stored");
+                    }
+                    value
+                }
+            };
+            let replaced = store.set(&name, &description, &value)?;
             Ok(format!(
                 "{} {name} in {}",
                 if replaced { "Replaced" } else { "Stored" },
@@ -190,7 +208,7 @@ mod tests {
                 name: "GITHUB_TOKEN".into(),
                 description: "for gh".into(),
             },
-            &mut stdin,
+            Some(&mut stdin),
             &mut no_password,
         )
         .unwrap();
@@ -203,7 +221,7 @@ mod tests {
                     name: "X".into(),
                     description: String::new()
                 },
-                &mut empty,
+                Some(&mut empty),
                 &mut no_password
             )
             .is_err()
@@ -215,7 +233,7 @@ mod tests {
                 name: "GITHUB_TOKEN".into(),
                 tool: "bash".into(),
             },
-            &mut none,
+            Some(&mut none),
             &mut no_password,
         )
         .unwrap();
@@ -227,12 +245,18 @@ mod tests {
                     name: "GITHUB_TOKEN".into(),
                     tool: "read".into()
                 },
-                &mut none,
+                Some(&mut none),
                 &mut no_password
             )
             .is_err()
         );
-        let out = run(&store, SecretCommand::List, &mut none, &mut no_password).unwrap();
+        let out = run(
+            &store,
+            SecretCommand::List,
+            Some(&mut none),
+            &mut no_password,
+        )
+        .unwrap();
         assert_eq!(out, "GITHUB_TOKEN  for gh  [always: bash]");
         assert!(!out.contains("ghp_secret"));
         let out = run(
@@ -241,7 +265,7 @@ mod tests {
                 name: "GITHUB_TOKEN".into(),
                 tool: None,
             },
-            &mut none,
+            Some(&mut none),
             &mut no_password,
         )
         .unwrap();
@@ -251,16 +275,47 @@ mod tests {
             SecretCommand::Remove {
                 name: "GITHUB_TOKEN".into(),
             },
-            &mut none,
+            Some(&mut none),
             &mut no_password,
         )
         .unwrap();
         assert_eq!(out, "Removed GITHUB_TOKEN");
         assert!(
-            run(&store, SecretCommand::List, &mut none, &mut no_password)
-                .unwrap()
-                .starts_with("No secrets stored")
+            run(
+                &store,
+                SecretCommand::List,
+                Some(&mut none),
+                &mut no_password
+            )
+            .unwrap()
+            .starts_with("No secrets stored")
         );
+    }
+
+    /// At a terminal the value is typed hidden and confirmed, never
+    /// echoed and never taken from the terminal's raw input.
+    #[test]
+    fn at_a_terminal_the_value_is_asked_for_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SecretStore::open(dir.path());
+        let set = || SecretCommand::Set {
+            name: "TOKEN".into(),
+            description: String::new(),
+        };
+        let mut prompts = Vec::new();
+        let mut answers = vec!["first-try".to_string(), "second-try".to_string()];
+        let mut mismatch = |prompt: &str| {
+            prompts.push(prompt.to_string());
+            Ok(answers.remove(0))
+        };
+        let error = run(&store, set(), None, &mut mismatch).unwrap_err();
+        assert!(error.to_string().contains("did not match"), "{error}");
+        assert_eq!(prompts, ["Value for TOKEN: ", "Again: "]);
+        assert!(store.list().unwrap().is_empty());
+        let mut agree = |_: &str| Ok("same-value".to_string());
+        let out = run(&store, set(), None, &mut agree).unwrap();
+        assert!(out.starts_with("Stored TOKEN"), "{out}");
+        assert_eq!(store.value("TOKEN").unwrap().as_deref(), Some("same-value"));
     }
 
     /// Sealing asks twice; afterwards every command asks once, and an
@@ -276,30 +331,36 @@ mod tests {
                 name: "GITHUB_TOKEN".into(),
                 description: String::new(),
             },
-            &mut stdin,
+            Some(&mut stdin),
             &mut no_password,
         )
         .unwrap();
         let mut none: &[u8] = b"";
         let mut answers = vec!["open sesame".to_string(), "open sesame".to_string()];
         let mut ask = |_: &str| Ok(answers.remove(0));
-        let out = run(&store, SecretCommand::Encrypt, &mut none, &mut ask).unwrap();
+        let out = run(&store, SecretCommand::Encrypt, Some(&mut none), &mut ask).unwrap();
         assert!(out.starts_with("Sealed "), "{out}");
         assert!(store.is_sealed());
         // Forget it, as a new process would.
         ilar::secrets::forget_master(&store);
         assert!(store.is_locked());
         let mut refuse = |_: &str| Ok(String::new());
-        assert!(run(&store, SecretCommand::List, &mut none, &mut refuse).is_err());
+        assert!(run(&store, SecretCommand::List, Some(&mut none), &mut refuse).is_err());
         let mut wrong = |_: &str| Ok("nope".to_string());
-        assert!(run(&store, SecretCommand::List, &mut none, &mut wrong).is_err());
+        assert!(run(&store, SecretCommand::List, Some(&mut none), &mut wrong).is_err());
         let mut right = |_: &str| Ok("open sesame".to_string());
-        let out = run(&store, SecretCommand::List, &mut none, &mut right).unwrap();
+        let out = run(&store, SecretCommand::List, Some(&mut none), &mut right).unwrap();
         assert_eq!(out, "GITHUB_TOKEN");
         // Held now: no further asking.
-        let out = run(&store, SecretCommand::List, &mut none, &mut no_password).unwrap();
+        let out = run(
+            &store,
+            SecretCommand::List,
+            Some(&mut none),
+            &mut no_password,
+        )
+        .unwrap();
         assert_eq!(out, "GITHUB_TOKEN");
-        let out = run(&store, SecretCommand::Decrypt, &mut none, &mut right).unwrap();
+        let out = run(&store, SecretCommand::Decrypt, Some(&mut none), &mut right).unwrap();
         assert!(out.contains("in the clear"), "{out}");
     }
 }
