@@ -1446,6 +1446,11 @@ pub(crate) struct SessionSearch {
     /// — the top row is the answer, whichever session that turns out to
     /// be. Afterwards the cursor follows the row it is on.
     steered: bool,
+    /// Why the last Enter did not resume. This modal takes the whole
+    /// terminal, notice line included, so a refusal raised behind it
+    /// was invisible and Enter looked broken; it is drawn in the
+    /// modal's own body instead. Any other key clears it.
+    pub(crate) refusal: Option<String>,
 }
 
 impl SessionSearch {
@@ -1459,6 +1464,7 @@ impl SessionSearch {
             // the moment the modal opens.
             scanning: true,
             steered: false,
+            refusal: None,
         }
     }
 
@@ -1531,6 +1537,10 @@ impl SessionSearch {
     }
 
     pub(crate) fn handle_key(&mut self, code: KeyCode, control: bool) -> SessionSearchAction {
+        // Read and done: the next keypress is the user's answer to it,
+        // and a refusal about a draft they have since cleared would
+        // otherwise stand for the rest of the search.
+        self.refusal = None;
         match (code, control) {
             (KeyCode::Char('g'), true) => SessionSearchAction::ListMode,
             _ => self.skeleton_key(code, control),
@@ -2287,6 +2297,22 @@ pub(crate) fn render_session_search(frame: &mut Frame, search: &SessionSearch) -
         ]),
         None,
     );
+    // Why the last Enter did nothing. The notice line is behind this
+    // modal, so the refusal has to be in front of it or it is not
+    // there at all.
+    if let Some(refusal) = &search.refusal {
+        body.push(
+            Line::styled(
+                truncate_display(
+                    &format!("⚠ {refusal}"),
+                    inner.width as usize,
+                    Truncation::Right,
+                ),
+                Style::default().fg(theme::WAITING),
+            ),
+            None,
+        );
+    }
     if search.rows.is_empty() {
         let hint = if search.scanning {
             "scanning…"
@@ -4929,6 +4955,28 @@ mod tests {
 
         let (screen, _) = draw_modal(120, 24, |frame| render_session_search(frame, &search));
         assert!(screen.contains("3d"), "{screen}");
+    }
+
+    /// This modal owns the whole terminal, notice line included, so a
+    /// refusal raised behind it was invisible: Enter on a row did
+    /// nothing anyone could see. It is drawn here, and the next key
+    /// clears it.
+    #[test]
+    fn a_refused_resume_is_drawn_inside_the_search() {
+        let mut search = SessionSearch::new();
+        search.query = "needle".into();
+        search.push_rows(0, vec![search_row("s1", "auth work", "ctx")]);
+        search.refusal = Some("input has an unsent draft; send or clear it first".into());
+
+        let (screen, _) = draw_modal(120, 24, |frame| render_session_search(frame, &search));
+        assert!(screen.contains("unsent draft"), "{screen}");
+        assert!(
+            screen.contains("auth work"),
+            "the list is still there: {screen}"
+        );
+
+        search.handle_key(KeyCode::Down, false);
+        assert_eq!(search.refusal, None, "the next keypress answers it");
     }
 
     #[test]

@@ -4060,36 +4060,37 @@ async fn run_app(
                                     ));
                                 }
                                 SessionSearchAction::Resume(new_session) => {
+                                    // This modal covers the notice line,
+                                    // so every refusal it can raise is
+                                    // handed to the modal to draw.
                                     let blocked = switch_blocked(
                                         turn_handle.is_some(),
                                         spawner.running_background(),
                                         routed.len(),
                                         !app.input.is_blank(),
                                         app.goal.is_some(),
-                                    );
+                                    )
+                                    .or_else(|| direct_resume_blocked(store, &new_session));
                                     if let Some(reason) = blocked {
-                                        app.set_notice(reason, NoticeLevel::Warning);
+                                        if let Some(search) = app.session_search.as_mut() {
+                                            search.refusal = Some(reason);
+                                        }
                                         continue;
                                     }
-                                    match direct_resume_blocked(store, &new_session) {
-                                        Some(reason) => app.set_notice(reason, NoticeLevel::Error),
-                                        None => {
-                                            stop_session_scan(&mut search_cancel, &mut search_rx);
-                                            leave_session(
-                                                &spawner,
-                                                &mut aside_cancel,
-                                                &mut aside_handle,
-                                                &mut topic_handle,
-                                            )
-                                            .await;
-                                            return Ok(AppExit::SwitchInto {
-                                                id: new_session,
-                                                prefill: None,
-                                                notice: None,
-                                                stash: std::mem::take(&mut app.input_stash),
-                                            });
-                                        }
-                                    }
+                                    stop_session_scan(&mut search_cancel, &mut search_rx);
+                                    leave_session(
+                                        &spawner,
+                                        &mut aside_cancel,
+                                        &mut aside_handle,
+                                        &mut topic_handle,
+                                    )
+                                    .await;
+                                    return Ok(AppExit::SwitchInto {
+                                        id: new_session,
+                                        prefill: None,
+                                        notice: None,
+                                        stash: std::mem::take(&mut app.input_stash),
+                                    });
                                 }
                             }
                         }
@@ -4429,7 +4430,9 @@ async fn run_app(
                             Some(ModelPicker::new(model_choices.clone(), &app.current_model));
                         continue;
                     }
-                    if matches!(code, KeyCode::Char('t' | 'T')) && !app.busy {
+                    // Like F3: paint, so a running turn is no reason to
+                    // refuse it.
+                    if matches!(code, KeyCode::Char('t' | 'T')) {
                         app.clear_transient_notice();
                         app.theme_picker = Some(ThemePicker::new(app.theme));
                         continue;
@@ -4437,7 +4440,17 @@ async fn run_app(
                     app.status = "ready".into();
                     app.clear_transient_notice();
                 }
-                if matches!((code, control), (KeyCode::Char('x'), true)) && !app.busy {
+                if matches!((code, control), (KeyCode::Char('x'), true)) {
+                    // Mid-turn its M half is refused anyway, so say that
+                    // once here rather than offering a prefix whose
+                    // follow-up key does nothing.
+                    if app.busy {
+                        app.set_notice(
+                            "a turn is running — Ctrl-X picks a model between turns (F3 themes)",
+                            NoticeLevel::Info,
+                        );
+                        continue;
+                    }
                     app.model_key_pending = true;
                     app.set_notice("Ctrl-X: M models · T themes", NoticeLevel::Info);
                     continue;
@@ -4460,7 +4473,21 @@ async fn run_app(
                         app.model_picker =
                             Some(ModelPicker::new(model_choices.clone(), &app.current_model));
                     }
-                    (KeyCode::F(3), false) if !app.busy => {
+                    // Still answers: a documented shortcut that does
+                    // nothing at all reads as a broken keyboard.
+                    (KeyCode::Char('m'), true) | (KeyCode::F(2), false) => {
+                        app.set_notice(
+                            if model_choices.is_empty() {
+                                "no models to switch between — see docs/configuration.md"
+                            } else {
+                                "a turn is running — F2 picks a model between turns"
+                            },
+                            NoticeLevel::Info,
+                        );
+                    }
+                    // No busy guard: a theme is paint, and repainting
+                    // mid-turn costs the turn nothing.
+                    (KeyCode::F(3), false) => {
                         app.clear_transient_notice();
                         app.theme_picker = Some(ThemePicker::new(app.theme));
                     }
@@ -4478,19 +4505,26 @@ async fn run_app(
                                 "a rewind cannot be aborted — it finishes in seconds",
                                 NoticeLevel::Warning,
                             );
-                        } else if app.busy {
-                            if let Some(cancel) = &cancel {
-                                cancel.cancel();
-                                app.status = "aborting…".into();
-                                app.set_notice("aborting current operation…", NoticeLevel::Warning);
-                                app.set_activity(Activity::Aborting);
+                        } else if let Some(cancel) = cancel.as_ref().filter(|_| app.busy) {
+                            cancel.cancel();
+                            app.status = "aborting…".into();
+                            app.set_notice("aborting current operation…", NoticeLevel::Warning);
+                            app.set_activity(Activity::Aborting);
+                        } else {
+                            // Busy with nothing to cancel — the restore
+                            // holds `busy` for itself — still answers:
+                            // the draft is the user's either way, and a
+                            // dead Esc while "restoring session" reads
+                            // as a hung app.
+                            let stashed = app.discard_or_stash_input();
+                            match (stashed, app.busy) {
+                                (Some(notice), _) => app.set_notice(notice, NoticeLevel::Info),
+                                (None, true) => app.set_notice(
+                                    "nothing to abort yet — the session is still loading",
+                                    NoticeLevel::Info,
+                                ),
+                                (None, false) => {}
                             }
-                        } else if !app.input.is_blank() {
-                            app.input.clear();
-                            app.pending_images.clear();
-                        } else if !app.pending_images.is_empty() {
-                            app.pending_images.clear();
-                            app.set_notice("attached images discarded", NoticeLevel::Info);
                         }
                     }
                     // Ctrl-V attaches a clipboard *image*; text arrives

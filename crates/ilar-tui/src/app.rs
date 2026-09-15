@@ -632,8 +632,15 @@ impl App {
         }
     }
 
+    /// Ctrl-P, mid-turn included: most of what the palette offers is
+    /// legal while a turn runs — the pending manager, help, the link
+    /// picker, an export, the usage line — and refusing to open it at
+    /// all made those unreachable under a banner that says "Ctrl-P
+    /// commands". The handful that cannot run mid-turn refuse when
+    /// they are chosen, by name ([`palette_command_blocked`]). Another
+    /// overlay still owns the keyboard, so it keeps it.
     pub(crate) fn open_command_palette(&mut self) {
-        if !self.busy && !self.has_modal() {
+        if !self.has_modal() {
             self.model_key_pending = false;
             self.clear_transient_notice();
             self.command_palette = Some(CommandPalette::new(palette_items()));
@@ -1737,7 +1744,7 @@ impl App {
                     PendingItem::BackgroundJobs => {
                         if is_armed {
                             format!(
-                                "background jobs ({}): press d again to cancel all",
+                                "background jobs ({}): press d or ↵ again to cancel all",
                                 self.background_running
                             )
                         } else {
@@ -1747,7 +1754,7 @@ impl App {
                     PendingItem::Services => {
                         if is_armed {
                             format!(
-                                "services ({}): press d again to stop all",
+                                "services ({}): press d or ↵ again to stop all",
                                 self.services_running
                             )
                         } else {
@@ -1828,7 +1835,22 @@ impl App {
                 PendingItem::Queued(index) => PendingAction::EditQueued(index),
                 PendingItem::Goal => PendingAction::EditGoal,
                 PendingItem::Retry => PendingAction::RetryNow,
-                PendingItem::BackgroundJobs | PendingItem::Services => PendingAction::Stay,
+                // There is nothing to edit about running work, so
+                // acting on it is stopping it: ↵ arms the same
+                // confirmation `d` does rather than doing nothing
+                // under a footer that promises an action.
+                item @ (PendingItem::BackgroundJobs | PendingItem::Services) => {
+                    if manager.armed == Some(item) {
+                        manager.armed = None;
+                        match item {
+                            PendingItem::Services => PendingAction::StopServices,
+                            _ => PendingAction::CancelBackground,
+                        }
+                    } else {
+                        manager.armed = Some(item);
+                        PendingAction::Stay
+                    }
+                }
             },
             _ => PendingAction::Stay,
         }
@@ -2221,13 +2243,47 @@ impl App {
                 None => self.set_notice("nothing stashed", NoticeLevel::Info),
             }
         } else {
-            self.input_stash.push(StashedPrompt {
-                text: self.input.take(),
-                images: std::mem::take(&mut self.pending_images),
-            });
-            self.end_history_browsing();
+            self.stash_input();
             // The input title counts the stash; help names the key.
         }
+    }
+
+    /// Put the prompt aside, text and attachments as one unit.
+    fn stash_input(&mut self) {
+        self.input_stash.push(StashedPrompt {
+            text: self.input.take(),
+            images: std::mem::take(&mut self.pending_images),
+        });
+        self.end_history_browsing();
+    }
+
+    /// Esc (and Ctrl-C) on a draft. A single line clears, as it always
+    /// has — it is one keystroke's worth of typing. A multi-line draft
+    /// is not: a paste or a paragraph written over several lines is
+    /// real work, and there is no undo, so it goes to the stash where
+    /// Ctrl-S brings it back. Returns what to say about it, when
+    /// something happened worth saying.
+    pub(crate) fn discard_or_stash_input(&mut self) -> Option<String> {
+        if self.input.text().contains('\n') {
+            let lines = self.input.text().lines().count();
+            let images = self.pending_images.len();
+            self.stash_input();
+            return Some(match images {
+                0 => format!("{lines}-line draft stashed — Ctrl-S brings it back"),
+                _ => format!(
+                    "{lines}-line draft and {images} image(s) stashed — Ctrl-S brings them back"
+                ),
+            });
+        }
+        if !self.input.is_blank() {
+            self.input.clear();
+            self.pending_images.clear();
+            return None;
+        }
+        (!self.pending_images.is_empty()).then(|| {
+            self.pending_images.clear();
+            "attached images discarded".to_string()
+        })
     }
 
     /// Drop any history-recall cursor. Stashing empties the prompt
@@ -2528,12 +2584,32 @@ pub(crate) fn apply_context_picker_action(app: &mut App, action: ContextPickerAc
     }
 }
 
+/// Why a palette command cannot run while a turn is in flight, if it
+/// cannot. Only the two that would change the model under a running
+/// request: everything else either does nothing to the turn (help,
+/// usage, an export, the link picker, the pending manager) or already
+/// waits for it (a compaction, a rewind, a switch, which refuse in
+/// their own words). Pure, so the list is testable without a turn.
+pub(crate) fn palette_command_blocked(command: PaletteCommand) -> Option<&'static str> {
+    match command {
+        PaletteCommand::Model => Some("a turn is running — switch models between turns (F2)"),
+        PaletteCommand::Reasoning => Some("a turn is running — switch reasoning between turns"),
+        _ => None,
+    }
+}
+
 pub(crate) fn activate_palette_command(
     app: &mut App,
     command: PaletteCommand,
     model_choices: Vec<&'static ilar::model::ModelInfo>,
 ) {
     app.command_palette = None;
+    if app.busy
+        && let Some(reason) = palette_command_blocked(command)
+    {
+        app.set_notice(reason, NoticeLevel::Info);
+        return;
+    }
     match command {
         PaletteCommand::Model if !model_choices.is_empty() => {
             app.model_picker = Some(ModelPicker::new(model_choices, &app.current_model));
@@ -2990,6 +3066,40 @@ mod tests {
         app.stash_or_pop_input();
         assert_eq!(app.input.text(), "look at this");
         assert_eq!(app.pending_images, vec![attached]);
+    }
+
+    /// Esc has no undo, so it may only throw away what is cheap to
+    /// retype. A pasted or several-line draft goes to the stash.
+    #[test]
+    fn esc_stashes_a_multi_line_draft_and_clears_a_single_line() {
+        let mut app = App::new();
+        app.input = crate::input::InputBuffer::from("one line");
+        assert_eq!(app.discard_or_stash_input(), None);
+        assert!(app.input.is_blank());
+        assert!(app.input_stash.is_empty(), "one line is cheap to retype");
+
+        app.input = crate::input::InputBuffer::from("first\nsecond\nthird");
+        app.pending_images = vec![ilar::session::ImageContent::png(b"screenshot")];
+        let notice = app.discard_or_stash_input().expect("a stash says so");
+        assert!(notice.contains("3-line draft"), "{notice}");
+        assert!(notice.contains("1 image(s)"), "{notice}");
+        assert!(notice.contains("Ctrl-S"), "{notice}");
+        assert!(app.input.is_blank());
+        assert!(app.pending_images.is_empty());
+        assert_eq!(app.input_stash.len(), 1);
+
+        // Ctrl-S brings it back whole.
+        app.stash_or_pop_input();
+        assert_eq!(app.input.text(), "first\nsecond\nthird");
+        assert_eq!(app.pending_images.len(), 1);
+
+        // A blank prompt with images still just drops the images.
+        app.input.clear();
+        assert_eq!(
+            app.discard_or_stash_input().as_deref(),
+            Some("attached images discarded")
+        );
+        assert_eq!(app.input_stash.len(), 0);
     }
 
     #[test]
@@ -4116,6 +4226,49 @@ mod tests {
         assert_eq!(
             app.pending_manager_key(KeyCode::Esc, false),
             PendingAction::Close
+        );
+    }
+
+    /// The footer promises "Enter edit/act"; a jobs or services row
+    /// has nothing to edit, so ↵ acts — armed once, like `d`, because
+    /// cancelling running work is not a keystroke to spend by
+    /// accident.
+    #[test]
+    fn enter_on_running_work_arms_the_same_confirmation_d_does() {
+        let mut app = App::new();
+        app.background_running = 2;
+        app.services_running = 1;
+        app.pending_manager = Some(PendingManager::default());
+        assert_eq!(
+            app.pending_items(),
+            vec![PendingItem::BackgroundJobs, PendingItem::Services]
+        );
+
+        assert_eq!(
+            app.pending_manager_key(KeyCode::Enter, false),
+            PendingAction::Stay,
+            "the first ↵ only arms"
+        );
+        let snapshot = app.pending_snapshot().expect("manager open");
+        assert!(
+            snapshot.rows[0].contains("press d or ↵ again to cancel all"),
+            "{:?}",
+            snapshot.rows
+        );
+        assert_eq!(
+            app.pending_manager_key(KeyCode::Enter, false),
+            PendingAction::CancelBackground
+        );
+
+        // Services the same way, and `d` still finishes what ↵ armed.
+        app.pending_manager_key(KeyCode::Down, false);
+        assert_eq!(
+            app.pending_manager_key(KeyCode::Enter, false),
+            PendingAction::Stay
+        );
+        assert_eq!(
+            app.pending_manager_key(KeyCode::Char('d'), false),
+            PendingAction::StopServices
         );
     }
 
@@ -5425,8 +5578,31 @@ mod tests {
         app.model_key_pending = true;
         app.busy = true;
 
+        // Mid-turn the palette opens — most of it is legal there — but
+        // an overlay that owns the keyboard keeps it.
+        app.help_visible = true;
         app.open_command_palette();
         assert!(app.command_palette.is_none());
+        app.help_visible = false;
+        app.open_command_palette();
+        assert!(app.command_palette.is_some(), "the palette opens mid-turn");
+        // The two that would change the model under a running request
+        // refuse by name instead of silently doing nothing.
+        activate_palette_command(
+            &mut app,
+            PaletteCommand::Model,
+            ilar::model::catalog().iter().collect(),
+        );
+        assert!(app.model_picker.is_none());
+        assert_eq!(
+            app.notice_text(),
+            palette_command_blocked(PaletteCommand::Model)
+        );
+        // Everything else runs: the pending manager is exactly what a
+        // running turn is for.
+        activate_palette_command(&mut app, PaletteCommand::Pending, Vec::new());
+        assert!(app.pending_manager.is_some());
+        app.pending_manager = None;
         assert_eq!(app.status, "paused");
 
         app.busy = false;
