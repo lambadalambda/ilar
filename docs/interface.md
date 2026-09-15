@@ -343,22 +343,29 @@ value in its environment, so read it before saying yes. Four answers:
 - **Deny** (`d` or Esc): the tool gets a refusal and the model learns
   the secret is unavailable.
 
-When the asker is the `sudo` tool and no password is known, the prompt
-has a password row: type or paste it there (it shows as bullets, with a
-window on the tail once it outgrows the row), and leave it empty if sudo
-needs none. With that row up the letters type, so the four rows drop
-their `(o)`/`(s)`/`(a)`/`(d)` prefixes and the choice comes from the
-arrows and Enter. The password is held in memory for the session and
-never written. The answer is noted in the transcript (`NAME allowed
+The prompt is approval only, whoever asks. When the asker is the `sudo`
+tool, the password — if sudo turns out to want one at all — comes in a
+second prompt after the yes, titled ` sudo password `: the command
+again under "For:", a masked field with a cursor (a window on the tail
+once the mask outgrows the row), paste accepted, Enter to send, Esc to
+cancel, which fails the sudo call. Enter on an empty field says "sudo
+needs a password on this system" and stays up; a password sudo refuses
+brings the prompt back saying so, up to three times, and the approval
+is not asked for again. A held or stored password, or a system with
+passwordless sudo, means no password prompt at all — see
+[secrets.md](secrets.md#sudo) for the order. What you type is held in
+memory for the session and never written. The answer is noted in the
+transcript (`NAME allowed
 for bash (once)`, `NAME denied for bash`). A subagent's tool asks
 through the same prompt, titled `bash (reviewer subagent) wants NAME` —
 named, so a prompt that appears while several children work says whose
 command it is. Ctrl-C under the prompt is a deny; if the turn ends or is
 cancelled underneath it, the prompt closes without an answer, which the
 tool reads as a refusal, and the transcript says so (`grant prompt for
-NAME withdrawn — the tool stopped waiting`). The prompt's keys have
-their own section in the **F1** overlay — read beforehand, since the
-prompt itself takes every key while it is up.
+NAME withdrawn — the tool stopped waiting`, and `sudo password prompt
+withdrawn — …` for the other one). Both prompts have their own section
+in the **F1** overlay — read beforehand, since a prompt takes every key
+while it is up.
 Standing grants are managed from the shell: `ilar secret list`,
 `ilar secret grant NAME --tool bash`, `ilar secret revoke NAME`.
 

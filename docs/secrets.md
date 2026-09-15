@@ -106,8 +106,8 @@ key is the same secret.
 With `agent.sudo = true` the model gets a `sudo` tool: one command as
 root, with a reason. The ask is the same prompt, for the pseudo-secret
 `root`: "sudo wants root (reason) to run: <command>", once, this
-session, always or deny. Nobody to ask means refused, with the line
-that grants standing approval headless:
+session, always or deny — approval, and nothing else. Nobody to ask
+means refused, with the line that grants standing approval headless:
 
 ```sh
 ilar secret grant root --tool sudo
@@ -119,27 +119,48 @@ approval; it cannot be stored as a value. In the model's own listing it
 shows while this session has the sudo tool — from a grant given this
 session as much as from a stored one — and never without it.
 
-When sudo needs a password, the prompt has a row for it: type it there,
-or leave it empty on a system with passwordless sudo. What you type is
-held in memory for the session, injected on sudo's stdin (never the
-command line), redacted from output like any secret, and forgotten when
-ilar exits. If you would rather not type it each session, store it
-under the name `SUDO_PASSWORD`; the command's approval covers its use,
-there is no second prompt. A standing grant still asks once per session
-when no password is known, since the prompt is where one gets typed;
-an empty answer counts, so a passwordless system is asked once. With
-nobody to ask (`ilar exec`, a scheduled turn) a standing grant runs on
-what is known, and sudo's own error says if that was not enough. A
-password typed into a prompt and refused by sudo is forgotten, and the
-next ask takes a new one; a stored one stays stored, and the result
-says to replace it with `ilar secret set SUDO_PASSWORD`. An empty
-answer on a system that wants a password after all is dropped too, so
-the next ask has the row again. In the chat the password goes last:
-`/grant session hunter2`; a password sent to an ask that took none is
-refused, and a misspelt span (`/grant sesion hunter2`) is refused
-rather than taken as the start of the password. The chat's session
-is its seat, so what it holds is forgotten when that chat is restarted
-— `/new`, or a gateway restart — not only when the process exits.
+The grant prompt is approval only. What sudo wants for the command is
+settled after the yes, in this order:
+
+1. A password held from earlier this session, or stored under the name
+   `SUDO_PASSWORD`, is used as it is.
+2. Otherwise `sudo -n true` is probed. A system that passes it — a
+   NOPASSWD rule — runs with `-n` and nobody is asked anything.
+3. Only a probe that fails brings up a second prompt, for the password
+   alone: the command is shown again, the field is masked, paste works,
+   Enter sends it and Esc cancels (the tool then fails with "no
+   password given"). An empty answer is refused where it stands
+   ("sudo needs a password on this system") instead of being taken as
+   "this system needs none".
+
+A password sudo accepts is held in memory for the session, injected on
+sudo's stdin (never the command line), redacted from output like any
+secret, and forgotten when ilar exits — so a standing grant plus a held
+or stored password runs with no prompt at all. Store one under
+`SUDO_PASSWORD` to skip the typing altogether; the command's approval
+covers its use.
+
+A password sudo refuses ("1 incorrect password attempt") is dropped and
+asked for again, up to three times in one call, without asking for
+approval again; the re-ask says sudo refused the last one. A refused
+*stored* password is not dropped — it is not the session's to forget —
+and the result says `ilar secret set SUDO_PASSWORD` updates it, while
+the one you type is held over it for the session.
+
+With nobody to ask (`ilar exec`, a scheduled turn) a standing grant
+runs on what is known: a held or stored password, or a passing probe.
+A failing probe with no password is a refusal naming
+`ilar secret set SUDO_PASSWORD`, rather than a sudo run that could only
+fail.
+
+In the chat the two questions are two commands: `/grant [session|
+always]` or `/deny` for the approval, and `/password <pw>` for the
+password — which the gateway deletes from the chat afterwards, the way
+it does `/unlock`. A password given to `/grant` is refused and pointed
+at `/password`, and a misspelt span (`/grant sesion`) is named as one.
+The chat's session is its seat, so what it holds is forgotten when that
+chat is restarted — `/new`, or a gateway restart — not only when the
+process exits.
 
 Systems whose sudoers sets `requiretty` refuse a sudo with no terminal;
 the error is sudo's own. The tool is the ask, not a cage: once
