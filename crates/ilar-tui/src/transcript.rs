@@ -1431,7 +1431,10 @@ fn tool_survives_collapse(line: &Line_) -> bool {
 
 /// The first non-blank line of a failed call's error, for the row's own
 /// details: the `×` and the arguments alone put the reason a click away.
+/// Bounded here rather than at the row's width, so a 16 KiB one-line
+/// error is not re-scanned whole on every frame.
 fn failure_note(state: ToolState, result: Option<&str>) -> Option<String> {
+    const MAX_NOTE_CHARS: usize = 200;
     if state != ToolState::Failed {
         return None;
     }
@@ -1439,7 +1442,7 @@ fn failure_note(state: ToolState, result: Option<&str>) -> Option<String> {
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty())?;
-    Some(first.to_string())
+    Some(ilar::text::truncate_chars_ellipsis(first, MAX_NOTE_CHARS))
 }
 
 /// An entry's rows, rendered from scratch. The cached renderer calls
