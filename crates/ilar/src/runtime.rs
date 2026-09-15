@@ -190,22 +190,37 @@ pub fn usable_reasoning(
     }
 }
 
+/// This directory's last session, or none: the pointer's answer, and
+/// failing that the listing's — which then repairs the pointer, so the
+/// next caller does not pay for the scan again.
+///
+/// Both surfaces that mean "where I left off" here read this: an empty
+/// session the last launch left behind is swept on quit and takes the
+/// pointer with it (a pointer may not name a session that is gone), so
+/// the listing fallback is not an exotic path — it is what a directory
+/// looks like after somebody opened `ilar` and closed it again.
+pub fn last_session_here(
+    store: &SessionStore,
+    cwd: &Path,
+) -> Option<crate::session::SessionSummary> {
+    // The pointer first: in almost every case this is the answer, and
+    // it costs one small JSON read instead of a head read per file in
+    // the sessions directory.
+    if let Some(session) = store.last_in(cwd) {
+        return Some(session);
+    }
+    let session = store.latest_in(cwd)?;
+    store.remember_last(&session.id);
+    Some(session)
+}
+
 /// The session `--continue` resumes, scoped to where it was typed:
 /// this directory's newest session, else the newest anywhere. The
 /// second value is the line to say about that fallback — resuming
 /// another checkout's conversation against these files is a surprise
 /// worth naming — and is `None` when the session is from here.
 pub fn latest_session_in(store: &SessionStore, cwd: &Path) -> Result<(String, Option<String>)> {
-    // The pointer first: in almost every case this is the answer, and
-    // it costs one small JSON read instead of a head read per file in
-    // the sessions directory.
-    if let Some(session) = store.last_in(cwd) {
-        return Ok((session.id, None));
-    }
-    if let Some(session) = store.latest_in(cwd) {
-        // The listing was paid for once; the pointer means the next
-        // `--continue` here does not pay again.
-        store.remember_last(&session.id);
+    if let Some(session) = last_session_here(store, cwd) {
         return Ok((session.id, None));
     }
     let id = latest_session_id(store)?;

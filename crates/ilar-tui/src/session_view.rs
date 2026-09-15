@@ -286,18 +286,17 @@ pub(crate) fn ghost_header(
 /// The offer a bare launch makes in this directory, or `None` when
 /// there is nothing to offer.
 ///
-/// Only the per-directory pointer is consulted — never the listing:
-/// paying for a directory scan to *offer* something would put the cost
-/// of the shortcut back where the pointer took it from. A directory
-/// with no pointer, a pointer nobody believes, a session with no title
-/// (nobody ever typed in it) and a tail that renders to nothing are all
-/// the same answer.
+/// The session is the one `--continue` would take here — the same
+/// resolution, so the offer and the flag cannot disagree about what
+/// "here" means. A directory nothing was ever launched in, a session
+/// with no title (nobody typed in it) and a tail that renders to
+/// nothing are all the same answer.
 pub(crate) fn ghost_offer(
     store: &SessionStore,
     cwd: &std::path::Path,
     now: std::time::SystemTime,
 ) -> Option<crate::app::Ghost> {
-    let session = store.last_in(cwd)?;
+    let session = ilar::runtime::last_session_here(store, cwd)?;
     // One name for the session in the header and in the status line,
     // bounded so neither has to wrap.
     let title = crate::text::truncate_display(
@@ -2200,6 +2199,18 @@ mod tests {
         assert!(
             ghost_offer(&store, elsewhere.path(), now).is_none(),
             "another directory's session is not this directory's offer"
+        );
+
+        // Somebody opened `ilar` here and closed it again: the empty
+        // session is swept and takes the pointer with it. The offer is
+        // still the session before it — through the listing, which
+        // repairs the pointer on the way.
+        let opened_and_quit = session_here(&store, &here, 0);
+        assert!(store.remove_if_empty(&opened_and_quit, &state.path().join("outbox")));
+        assert_eq!(
+            ghost_offer(&store, &here, now).map(|offer| offer.session_id),
+            Some(session_id),
+            "an open-and-quit must not cost the directory its offer"
         );
     }
 
