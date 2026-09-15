@@ -261,9 +261,17 @@ pub(crate) fn replayed_lines(events: &[ilar::session::SessionEvent]) -> Vec<Line
 /// Bytes of a session's log a ghost reads, from the end. Two
 /// screenfuls of conversation are a few kilobytes; the rest of an 80 MB
 /// log is never touched, which is what makes the offer free to make.
-const GHOST_TAIL_BYTES: u64 = 64 * 1024;
+/// Sized like the store's own head scan, and like the cap on a kept
+/// tool result, so one big result at the end of a log still leaves
+/// whole records in the window.
+const GHOST_TAIL_BYTES: u64 = 256 * 1024;
 /// Events the tail read keeps, before rendering.
 const GHOST_TAIL_EVENTS: usize = 60;
+/// A log this size or smaller is read whole when the window came back
+/// with nothing — a last record bigger than the window, or a window
+/// that was all rewind. Above it the offer is dropped instead: no offer
+/// is better than a pause on startup.
+const GHOST_WHOLE_READ_BYTES: u64 = 4 * 1024 * 1024;
 /// Transcript lines the ghost keeps, from the end: a couple of
 /// screenfuls, so a chatty tail cannot push the prompt off the screen.
 const GHOST_LINES: usize = 40;
@@ -281,6 +289,34 @@ pub(crate) fn ghost_header(
         "previous session here: {title} · {} — Enter resumes · type to start fresh · Esc dismisses",
         crate::modals::last_used(modified, now),
     )
+}
+
+/// The end of a session, for a preview: the bounded tail read, and
+/// failing that a whole read of a log small enough to afford one.
+///
+/// The window comes back empty on a log whose last record is bigger
+/// than it and on one whose window held nothing but a rewind — both
+/// perfectly ordinary sessions, and both would otherwise be offered
+/// with no ghost at all, which is to say not offered.
+fn ghost_events(store: &SessionStore, id: &str) -> Vec<ilar::session::SessionEvent> {
+    let bounded = ilar::session::tail_events(store, id, GHOST_TAIL_BYTES, GHOST_TAIL_EVENTS)
+        .unwrap_or_default();
+    if !bounded.is_empty() {
+        return bounded;
+    }
+    let small = store
+        .session_path(id)
+        .and_then(std::fs::metadata)
+        .is_ok_and(|metadata| metadata.len() <= GHOST_WHOLE_READ_BYTES);
+    if !small {
+        return Vec::new();
+    }
+    let mut events = store
+        .load(id)
+        .map(|session| session.events().to_vec())
+        .unwrap_or_default();
+    events.drain(..events.len().saturating_sub(GHOST_TAIL_EVENTS));
+    events
 }
 
 /// The offer a bare launch makes in this directory, or `None` when
@@ -304,9 +340,7 @@ pub(crate) fn ghost_offer(
         GHOST_TITLE_CHARS,
         crate::text::Truncation::Right,
     );
-    let events =
-        ilar::session::tail_events(store, &session.id, GHOST_TAIL_BYTES, GHOST_TAIL_EVENTS).ok()?;
-    let mut lines = replayed_lines(&events);
+    let mut lines = replayed_lines(&ghost_events(store, &session.id));
     // Bounded from the end: what the session was last doing is what
     // makes the choice, and the head of the window is the part the tail
     // read already cut arbitrarily.

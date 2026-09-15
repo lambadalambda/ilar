@@ -887,6 +887,7 @@ fn observe(
         steerable: steer_tx.as_ref().is_some_and(|tx| !tx.is_closed()),
         notifications_paused,
         retry_available: app.retry_available,
+        model_key_pending: app.model_key_pending,
     }
 }
 

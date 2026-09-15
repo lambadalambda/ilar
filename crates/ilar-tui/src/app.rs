@@ -202,22 +202,28 @@ impl FocusView {
 /// dismisses it — see meta/issues/a-bare-ilar-offers-the-last-session-here.md.
 ///
 /// Beside the transcript, never in it: nothing here was said in the
-/// session on screen, so no export, search, selection or token estimate
-/// can mistake it for something that was. Its lines never change, which
-/// is why one revision is enough for the render cache.
+/// session on screen, so no export, search or token estimate can
+/// mistake it for something that was. (What is on screen can still be
+/// selected and copied — copying what you can see is honest.) Its lines
+/// never change, which is why one revision is enough for the render
+/// cache.
 pub(crate) struct Ghost {
     pub(crate) session_id: String,
     /// The session's opening prompt, shortened — what the header and
     /// the status line call it.
     pub(crate) title: String,
-    /// The one line above the tail, built when the offer is made.
+    /// The line above the tail, built when the offer is made. It says
+    /// which session and how to answer, so it is wrapped rather than
+    /// cut: on an 80-column terminal a truncated header would lose the
+    /// keys, which are stated nowhere else.
     pub(crate) header: String,
     pub(crate) lines: Vec<Line_>,
     cache: TranscriptRenderCache,
-    /// The ghosted rows as last rendered, and the width they were
-    /// wrapped to. An offer never changes, so this is built once per
-    /// width rather than once per frame.
-    pub(crate) rendered: Vec<ratatui::text::Line<'static>>,
+    /// The header's rows and the tail's, ghosted, at `rendered_width`.
+    /// An offer never changes, so both are built once per width rather
+    /// than once per frame.
+    header_rows: Vec<ratatui::text::Line<'static>>,
+    tail_rows: Vec<ratatui::text::Line<'static>>,
     rendered_width: Option<u16>,
     opened: std::time::Instant,
 }
@@ -235,20 +241,26 @@ impl Ghost {
             header,
             lines,
             cache: TranscriptRenderCache::default(),
-            rendered: Vec::new(),
+            header_rows: Vec::new(),
+            tail_rows: Vec::new(),
             rendered_width: None,
             opened: std::time::Instant::now(),
         }
     }
 
-    /// Bring [`Self::rendered`] up to date at this width and say how
-    /// many rows the offer would take in full: the header, the tail
-    /// under it, and the blank row separating it from the live
-    /// transcript. Every span is remapped to the muted tone with its
-    /// bold stripped — the whole point of the offer is that none of it
-    /// is the conversation.
+    /// Build the rows at this width if they are not built already, and
+    /// say how many the offer takes in full: the header, the tail under
+    /// it, and the blank row separating it from the live transcript.
+    /// Every span is remapped to the muted tone with its bold stripped
+    /// — the whole point of the offer is that none of it is the
+    /// conversation.
     pub(crate) fn render(&mut self, width: u16, now: std::time::Instant) -> usize {
         if self.rendered_width != Some(width) {
+            self.header_rows =
+                crate::text::wrap_styled_line(self.header.clone().into(), width as usize)
+                    .into_iter()
+                    .map(crate::transcript::ghosted)
+                    .collect();
             self.cache.update(
                 &self.lines,
                 &std::collections::HashSet::new(),
@@ -257,34 +269,53 @@ impl Ghost {
                 now,
                 self.opened,
             );
-            self.rendered = std::iter::once(ratatui::text::Line::from(self.header.clone()))
-                .chain(
-                    self.cache
-                        .visible_rows(0, usize::MAX, &[])
-                        .into_iter()
-                        .map(|row| row.line),
-                )
-                .map(crate::transcript::ghosted)
+            self.tail_rows = self
+                .cache
+                .visible_rows(0, usize::MAX, &[])
+                .into_iter()
+                .map(|row| crate::transcript::ghosted(row.line))
                 .collect();
+            // The cache pads its tail for the live transcript's sake;
+            // the offer's own gap is added when it is drawn, so a
+            // trimmed offer does not spend a row on two of them.
+            while self
+                .tail_rows
+                .last()
+                .is_some_and(|row| row.spans.iter().all(|span| span.content.trim().is_empty()))
+            {
+                self.tail_rows.pop();
+            }
             self.rendered_width = Some(width);
         }
-        self.rendered.len()
+        self.header_rows.len() + self.tail_rows.len() + 1
     }
 
-    /// The offer in `rows` rows: the header, then the last of the tail
-    /// that fits under it. The header is never the row that goes — it
+    /// Rows the header takes at the width it was last rendered for:
+    /// the floor under any trim, since an offer nobody can see must not
+    /// still answer to Enter.
+    pub(crate) fn header_rows(&self) -> usize {
+        self.header_rows.len()
+    }
+
+    /// The offer in `rows` rows: the whole header, then as much of the
+    /// end of the tail as fits under it, then the blank row that keeps
+    /// it off the live transcript. The header is never what goes — it
     /// carries the three keys that answer the offer — and the end of
-    /// the tail is what resuming would show, so a cut takes from the
-    /// middle outwards.
+    /// the tail is what resuming would show, so a cut takes the middle.
     pub(crate) fn trimmed_to(&self, rows: usize) -> Vec<ratatui::text::Line<'static>> {
-        if rows == 0 || self.rendered.is_empty() {
-            return Vec::new();
-        }
-        let (header, tail) = self.rendered.split_at(1);
+        let header = &self.header_rows[..self.header_rows.len().min(rows)];
+        // Two rows left over buy a row of tail and the gap under it;
+        // one buys neither, and the header alone is the offer.
+        let room = rows.saturating_sub(header.len());
+        let tail = match room {
+            0 | 1 => &[][..],
+            room => &self.tail_rows[self.tail_rows.len().saturating_sub(room - 1)..],
+        };
         header
             .iter()
-            .chain(&tail[tail.len().saturating_sub(rows - 1)..])
+            .chain(tail)
             .cloned()
+            .chain((room > 1).then(ratatui::text::Line::default))
             .collect()
     }
 }
@@ -10171,5 +10202,55 @@ mod tests {
         assert!(!screen.contains("ghost turn 0 "), "{screen}");
         assert!(screen.contains("live words"), "{screen}");
         assert_eq!(app.scroll_top, 0, "an offer that fits does not scroll");
+    }
+
+    /// The header says how to answer the offer, and it is the only
+    /// place that does: on a narrow terminal it wraps rather than
+    /// losing its keys, and it keeps its rows however much the live
+    /// transcript takes — an offer that still answers Enter must be
+    /// visible.
+    #[test]
+    fn the_offers_header_wraps_and_survives_a_crowded_pane() {
+        let header = crate::session_view::ghost_header(
+            "a session with a rather long opening prompt indeed",
+            std::time::SystemTime::now() - std::time::Duration::from_secs(7_200),
+            std::time::SystemTime::now(),
+        );
+        assert!(header.contains("2h ago"), "{header}");
+
+        let mut app = App::new();
+        for line in 0..40 {
+            app.push_transcript_line(Line_::User(format!("live line {line}")));
+        }
+        app.offer_session(Ghost::new(
+            "old-session".into(),
+            "a session".into(),
+            header,
+            vec![Line_::User("ghost words".into())],
+        ));
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 20)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let screen = (0..20u16)
+            .map(|row| {
+                (0..80u16)
+                    .map(|column| terminal.backend().buffer()[(column, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Every part of the header is readable, wrapped across rows.
+        for phrase in [
+            "previous session here",
+            "Enter resumes",
+            "type to start fresh",
+            "Esc dismisses",
+        ] {
+            assert!(screen.contains(phrase), "{phrase:?} missing:\n{screen}");
+        }
+        // And the crowded transcript still shows its own tail.
+        assert!(screen.contains("live line 39"), "{screen}");
     }
 }

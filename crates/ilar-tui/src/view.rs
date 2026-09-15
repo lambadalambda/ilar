@@ -651,17 +651,23 @@ impl App {
             .transcript_cache
             .row_count()
             .saturating_add(activity_rows.len());
-        // The session on offer, above the live transcript in the same
-        // pane. It is cut to what the pane can show beside the
+        // The session on offer, pinned above the live transcript in the
+        // same pane. It is cut to what the pane can show beside the
         // conversation, keeping its header — which holds the keys that
         // answer it — and the *end* of the tail, which is what resuming
-        // would put in front of you. So the offer never scrolls: it
-        // fits or it is trimmed, and the transcript below it is where
-        // the scroll still lives.
+        // would put in front of you. The header keeps its rows whatever
+        // the transcript does: an offer that can still be answered must
+        // not go invisible. So the offer never scrolls — it fits or it
+        // is trimmed — and the transcript under it is where the scroll
+        // still lives.
         let ghost_rows = match self.ghost.as_mut() {
             Some(ghost) => {
                 let built = ghost.render(text_width, now);
-                built.min(viewport_rows.saturating_sub(live_rows))
+                built.min(
+                    viewport_rows
+                        .saturating_sub(live_rows)
+                        .max(ghost.header_rows()),
+                )
             }
             None => 0,
         };

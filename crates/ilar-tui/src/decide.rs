@@ -36,6 +36,9 @@ pub(crate) struct LoopState {
     /// A turn ended badly with its chain committed, so there is
     /// something for a resume to continue from.
     pub(crate) retry_available: bool,
+    /// The Ctrl-X leader is armed, so the next key belongs to it — it
+    /// is a modal that draws nothing.
+    pub(crate) model_key_pending: bool,
 }
 
 impl LoopState {
@@ -569,13 +572,14 @@ pub(crate) enum GhostStep {
 }
 
 /// Three keys decide an offer's fate and every other key leaves it
-/// alone. A modal in front owns the keyboard, so neither Enter nor Esc
-/// is the offer's while one is up; Shift-Enter is a newline, never a
+/// alone. Anything that owns the keyboard owns those keys too — a modal
+/// in front, or the Ctrl-X leader waiting for its second press, whose
+/// Enter must not resume a session; Shift-Enter is a newline, never a
 /// send; and Esc over a draft clears the draft, so one press does one
 /// thing.
 pub(crate) fn ghost_step(state: &LoopState, key: crossterm::event::KeyEvent) -> GhostStep {
     use crossterm::event::{KeyCode, KeyModifiers};
-    if state.modal.is_some() {
+    if state.modal.is_some() || state.model_key_pending {
         return GhostStep::Keep;
     }
     match key.code {
@@ -1458,15 +1462,23 @@ mod tests {
 
     /// A modal in front owns the keyboard: its own Enter and Esc are
     /// not the offer's, or opening the picker over an offer would
-    /// resume the wrong session on the first Enter.
+    /// resume the wrong session on the first Enter. The Ctrl-X leader
+    /// owns them too — it draws nothing, so nothing else would notice.
     #[test]
     fn a_modal_in_front_keeps_the_offer_out_of_the_keyboard() {
         use crossterm::event::KeyCode;
-        for modal in [Modal::SessionPicker, Modal::Help, Modal::CommandPalette] {
-            let covered = LoopState {
+        let leader = LoopState {
+            model_key_pending: true,
+            ..idle()
+        };
+        for covered in [Modal::SessionPicker, Modal::Help, Modal::CommandPalette]
+            .into_iter()
+            .map(|modal| LoopState {
                 modal: Some(modal),
                 ..idle()
-            };
+            })
+            .chain(std::iter::once(leader))
+        {
             assert_eq!(ghost_step(&covered, press(KeyCode::Enter)), GhostStep::Keep);
             assert_eq!(ghost_step(&covered, press(KeyCode::Esc)), GhostStep::Keep);
         }

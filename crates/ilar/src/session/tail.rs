@@ -239,6 +239,10 @@ fn file_identity(_metadata: &std::fs::Metadata) -> FileIdentity {
 /// - a line that will not parse is skipped, not fatal. A preview shows
 ///   less; it never refuses.
 ///
+/// So an empty answer means "this window held no whole record" — a last
+/// line bigger than the window, or a window that was all rewind — and
+/// not "this session is empty". A caller that cares reads it properly.
+///
 /// Compaction is not applied, exactly as [`SessionTail`] does not apply
 /// it: what to cut is the renderer's decision.
 pub fn tail_events(
@@ -264,13 +268,17 @@ pub fn tail_events(
     };
     let mut events = Vec::new();
     for line in committed[start..].split(|byte| *byte == b'\n') {
-        let parsed = std::str::from_utf8(line)
-            .ok()
-            .and_then(|line| serde_json::from_str::<SessionEvent>(line).ok());
-        match parsed {
-            Some(SessionEvent::Rewind { .. }) => events.clear(),
-            Some(event) => events.push(event),
-            None => continue,
+        // The store's own parser, a line at a time: one JSONL reader in
+        // this module, and the only difference here is what a bad line
+        // costs — a skipped row in a preview, a refused replay there.
+        let Ok(parsed) = parse_event_bytes(line, id, 0) else {
+            continue;
+        };
+        for event in parsed {
+            match event {
+                SessionEvent::Rewind { .. } => events.clear(),
+                event => events.push(event),
+            }
         }
     }
     let excess = events.len().saturating_sub(max_events);
