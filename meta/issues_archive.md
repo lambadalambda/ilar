@@ -358,3 +358,10 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Secrets are stored once and granted per use](issues/secrets-are-stored-once-and-granted-per-use.md)
 - [x] [A sudo tool asks before running as root](issues/a-sudo-tool-asks-before-running-as-root.md)
 - [x] [The secret store can be sealed under a master password](issues/the-secret-store-can-be-sealed-under-a-master-password.md)
+
+## Milestone 20 — Sweep: the user\x27s eye (2026-09-15 batch)
+
+- [x] [Background turns ask nobody](issues/background-turns-ask-nobody.md)
+- [x] [/new stops the turn it replaces](issues/new-stops-the-turn-it-replaces.md)
+- [x] [The chat ask reads cleanly](issues/the-chat-ask-reads-cleanly.md)
+- [x] [A restart finishes or explains](issues/a-restart-finishes-or-explains.md)
