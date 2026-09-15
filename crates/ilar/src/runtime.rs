@@ -59,6 +59,11 @@ pub struct RuntimeOptions {
     /// Skills from `user_dir` alone: no built-ins, no project
     /// `.ilar/skills`. For an assistant that keeps its own.
     pub own_skills_only: bool,
+    /// What this driver's user does to unlock a sealed secret store —
+    /// "restart ilar and …", "/unlock <master password>" — put into
+    /// every refusal the lock causes. See
+    /// [`crate::secrets::Secrets::with_unlock_hint`].
+    pub unlock_hint: Option<String>,
 }
 
 /// The session a driver is about to run, before anything is written.
@@ -82,6 +87,7 @@ pub struct RuntimePlan {
     cwd: PathBuf,
     questions: bool,
     grants: bool,
+    unlock_hint: Option<String>,
     project_instructions: ProjectInstructions,
 }
 
@@ -375,6 +381,7 @@ impl RuntimePlan {
             cwd: options.cwd.clone(),
             questions: options.questions,
             grants: options.grants,
+            unlock_hint: options.unlock_hint.clone(),
             project_instructions,
         })
     }
@@ -395,8 +402,16 @@ impl RuntimePlan {
     ) -> Result<SessionRuntime> {
         let store = session_store(config);
         drop(resolver.resolve_provider(&self.model).with_context(|| {
+            // A key kept in a sealed store is read at startup, when the
+            // store may still be locked: say so, or the person who put
+            // it there reads this as "the key is gone".
+            let locked = if crate::secrets::SecretStore::open(config.state_dir()).is_locked() {
+                "; a key kept in the secret store is unreadable while the store is locked"
+            } else {
+                ""
+            };
             format!(
-                "no provider configured for {} (set ILAR_ZAI_API_KEY, ILAR_OPENAI_API_KEY or ILAR_OPENCODE_API_KEY)",
+                "no provider configured for {} (set ILAR_ZAI_API_KEY, ILAR_OPENAI_API_KEY or ILAR_OPENCODE_API_KEY){locked}",
                 self.model
             )
         })?);
@@ -511,6 +526,13 @@ impl RuntimePlan {
         // depend on the driver.
         let secrets =
             crate::secrets::Secrets::new(crate::secrets::SecretStore::open(config.state_dir()));
+        // How this driver's user opens a sealed store, for the refusals
+        // a locked one causes: the core has no idea which driver it is
+        // talking to.
+        let secrets = match &self.unlock_hint {
+            Some(hint) => secrets.with_unlock_hint(hint.clone()),
+            None => secrets,
+        };
         let (secrets, grants) = if self.grants {
             let (sender, receiver) = crate::secrets::grant_channel(1);
             (secrets.with_prompts(sender), Some(receiver))

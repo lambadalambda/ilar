@@ -105,6 +105,12 @@ const ROOT_STALL_WARN_AFTER: std::time::Duration = std::time::Duration::from_sec
 /// for resume — never a silent disappearance.
 const ROOT_STALL_ABORT_AFTER: std::time::Duration = std::time::Duration::from_secs(600);
 
+/// What a person at the terminal does about a store left locked: the
+/// password is asked for once, before the screen is taken over, and
+/// held for the life of the process. Every refusal the lock causes ends
+/// with this.
+const UNLOCK_HINT: &str = "restart ilar and type the master password at the start prompt";
+
 /// A sealed secret store is unlocked once, on the plain terminal,
 /// before anything else runs; an empty answer leaves it locked for the
 /// session. The configuration is resolved again afterwards, since a
@@ -1036,6 +1042,7 @@ async fn run_exec(config: &ilar::config::Config, args: ExecArgs) -> Result<i32> 
             context_files: None,
             user_dir: None,
             own_skills_only: false,
+            unlock_hint: Some(UNLOCK_HINT.to_string()),
         },
     )?
     .start(config)?;
@@ -1269,6 +1276,7 @@ async fn main() -> Result<()> {
                 context_files: None,
                 user_dir: None,
                 own_skills_only: false,
+                unlock_hint: Some(UNLOCK_HINT.to_string()),
             },
         )?;
         if args.print_prompt {

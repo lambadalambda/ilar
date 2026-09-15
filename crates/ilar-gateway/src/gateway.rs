@@ -357,7 +357,8 @@ impl Gateway {
         }
         if self.driver.secret_store().is_locked() {
             log(
-                "secret store is sealed and locked: /unlock <master password> from a chat opens it",
+                "secret store is sealed and locked: /unlock <master password> from a chat opens it \
+                 (a provider key kept in the store is unreadable until then)",
             );
         }
         let mut inbox_tick = tokio::time::interval(Duration::from_secs(1));

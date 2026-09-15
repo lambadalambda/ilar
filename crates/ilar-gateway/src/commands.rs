@@ -35,6 +35,10 @@ pub enum Command {
     Unknown(String),
 }
 
+/// What a person on a chat does about a sealed secret store, for every
+/// refusal the lock causes.
+pub const UNLOCK_HINT: &str = "send /unlock <master password> in this chat";
+
 /// `Some` when the text is a command: a slash, a word, maybe an
 /// argument. Anything else is a message for the model.
 pub fn parse(text: &str) -> Option<Command> {

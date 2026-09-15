@@ -786,6 +786,9 @@ pub fn plan(
             // Its own skills only: not the built-ins, not the working
             // directory's.
             own_skills_only: true,
+            // The gateway cannot ask for the master password; a chat can
+            // hand it over.
+            unlock_hint: Some(crate::commands::UNLOCK_HINT.to_string()),
         },
     )?;
     // Where it is: reached over a chat, with a home, wakeable from a

@@ -62,10 +62,21 @@ enum Disk {
 
 /// The store is sealed and this process has not been given the master
 /// password. Callers tell it apart from a broken file, since the cure
-/// is different.
+/// is different. How to unlock it depends on the driver, which is why
+/// the way out is not in this text: see [`Secrets::with_unlock_hint`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("the secret store is sealed and locked: unlock it with the master password")]
+#[error("the secret store is sealed and locked")]
 pub struct Locked;
+
+/// The file was sealed again while this process held its password: a
+/// second process changed the master password. The held password is
+/// dropped, so the store reads as locked again and a driver with
+/// somebody to ask asks for the new one.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "the secret store was sealed again since this process opened it, and the master password it holds does not open it"
+)]
+pub struct Resealed;
 
 /// The unlocked key for one sealed store, held for the life of the
 /// process. The password stays too: a store re-sealed under another
@@ -259,18 +270,20 @@ impl SecretStore {
             .with_context(|| format!("parsing secrets {}", self.path.display()))
     }
 
-    /// The key this process holds for the store, re-derived if the
-    /// file was re-sealed under another salt since.
-    fn master_for(&self, salt: &[u8]) -> Result<Option<Zeroizing<[u8; 32]>>> {
+    /// The key this process holds for the store, and whether it had to
+    /// be re-derived because the file carries another salt than the one
+    /// it was unlocked under — a second process resealed it.
+    fn master_for(&self, salt: &[u8]) -> Result<Option<(Zeroizing<[u8; 32]>, bool)>> {
         let mut masters = MASTERS.lock().unwrap();
         let Some(master) = masters.get_mut(&self.path) else {
             return Ok(None);
         };
-        if master.salt != salt {
+        let rederived = master.salt != salt;
+        if rederived {
             master.key = derive_key(&master.password, salt)?;
             master.salt = salt.to_vec();
         }
-        Ok(Some(master.key.clone()))
+        Ok(Some((master.key.clone(), rederived)))
     }
 
     /// The file, unsealed when it is sealed and this process may.
@@ -280,7 +293,18 @@ impl SecretStore {
             Disk::Sealed { sealed } => {
                 let salt = unbase64(&sealed.salt, "salt")?;
                 match self.master_for(&salt)? {
-                    Some(key) => unseal(&sealed, &key),
+                    Some((key, rederived)) => unseal(&sealed, &key).map_err(|error| {
+                        // Re-sealed under another password: the one this
+                        // process holds is worthless, so drop it. The
+                        // store then reads as locked and whoever can
+                        // ask, asks again.
+                        if rederived {
+                            MASTERS.lock().unwrap().remove(&self.path);
+                            Resealed.into()
+                        } else {
+                            error
+                        }
+                    }),
                     None => Err(Locked.into()),
                 }
             }
@@ -658,7 +682,14 @@ pub struct Secrets {
     /// Shielded and redacted like stored ones, never written.
     held: Arc<Mutex<BTreeMap<String, String>>>,
     prompts: Option<GrantSender>,
+    /// What this driver's user does to unlock a sealed store, in a
+    /// refusal the lock caused. The core knows whether there is a
+    /// prompt channel, not which driver is on the other end.
+    unlock_hint: Option<String>,
 }
+
+/// What a driver that never said how to unlock the store falls back to.
+const UNLOCK_HINT: &str = "the user unlocks it with the master password";
 
 /// The CLI line a call without a grant and without anyone to ask
 /// points at.
@@ -673,12 +704,37 @@ impl Secrets {
             session: Arc::new(Mutex::new(BTreeSet::new())),
             held: Arc::new(Mutex::new(BTreeMap::new())),
             prompts: None,
+            unlock_hint: None,
         }
     }
 
     pub fn with_prompts(mut self, sender: GrantSender) -> Self {
         self.prompts = Some(sender);
         self
+    }
+
+    /// What the driver's user does to unlock a sealed store: "restart
+    /// ilar and enter the master password at the start prompt" for the
+    /// TUI, "/unlock <master password>" for the gateway. It goes into
+    /// every refusal the lock caused.
+    pub fn with_unlock_hint(mut self, hint: impl Into<String>) -> Self {
+        self.unlock_hint = Some(hint.into());
+        self
+    }
+
+    fn unlock_hint(&self) -> &str {
+        self.unlock_hint.as_deref().unwrap_or(UNLOCK_HINT)
+    }
+
+    /// A store error as the model sees it: the lock says how to open
+    /// it, anything else is the failure itself. No `secrets:` prefix —
+    /// the tool that asked adds its own name.
+    fn store_error(&self, error: anyhow::Error) -> String {
+        if error.is::<Locked>() || error.is::<Resealed>() {
+            format!("{error}: {}", self.unlock_hint())
+        } else {
+            format!("{error:#}")
+        }
     }
 
     pub fn store(&self) -> &SecretStore {
@@ -693,12 +749,11 @@ impl Secrets {
     pub fn listing(&self) -> Result<String> {
         let listed = match self.store.list() {
             Ok(listed) => listed,
-            Err(error) if error.is::<Locked>() => {
-                return Ok(
-                    "The secret store is sealed and locked for this session; the user \
-                           unlocks it with the master password."
-                        .to_string(),
-                );
+            Err(error) if error.is::<Locked>() || error.is::<Resealed>() => {
+                return Ok(format!(
+                    "The secret store is sealed and locked for this session; {}.",
+                    self.unlock_hint()
+                ));
             }
             Err(error) => return Err(error),
         };
@@ -774,10 +829,7 @@ impl Secrets {
     pub async fn resolve(&self, request: Request<'_>) -> Result<Vec<Granted>, String> {
         // Every name looked up before anyone is asked: a call that
         // names one unknown secret fails without a question.
-        let file = self
-            .store
-            .load()
-            .map_err(|error| format!("secrets: {error:#}"))?;
+        let file = self.store.load().map_err(|error| self.store_error(error))?;
         let mut entries = Vec::new();
         let mut seen = BTreeSet::new();
         for name in request.names {
@@ -810,7 +862,7 @@ impl Secrets {
         // is held too, so a passwordless system is asked once.
         let password_known = self
             .held_or_stored(SUDO_PASSWORD)
-            .map_err(|error| format!("secrets: {error:#}"))?
+            .map_err(|error| self.store_error(error))?
             .is_some();
         let granted =
             self.store.root_granted(request.tool) || self.session_granted(ROOT, request.tool);
@@ -1202,6 +1254,47 @@ mod tests {
         let names = ["KEY".to_string()];
         let error = secrets.resolve(request(&names, &cancel)).await.unwrap_err();
         assert!(error.contains("locked"), "{error}");
+        // With no driver hint, the generic one; with a hint, the way
+        // out that driver offers, in the refusal and in the listing.
+        assert!(error.contains(UNLOCK_HINT), "{error}");
+        assert!(!error.contains("secrets: secrets"), "{error}");
+        let hinted = Secrets::new(store.clone()).with_unlock_hint("/unlock <master password>");
+        let error = hinted.resolve(request(&names, &cancel)).await.unwrap_err();
+        assert!(error.contains("/unlock <master password>"), "{error}");
+        assert!(
+            hinted
+                .listing()
+                .unwrap()
+                .contains("/unlock <master password>"),
+            "{}",
+            hinted.listing().unwrap()
+        );
+    }
+
+    /// A second process reseals the file under another password: the
+    /// one this process holds is dropped, the store reads as locked
+    /// again, and the refusal says what happened.
+    #[tokio::test]
+    async fn a_resealed_store_says_so_and_locks_again() {
+        let (_dir, store) = store();
+        store.set("KEY", "", "value-one").unwrap();
+        store.encrypt("open sesame").unwrap();
+        let theirs = std::fs::read_to_string(store.path()).unwrap();
+        // What a second process leaves behind: the same secrets, sealed
+        // under a password this one never saw.
+        store.decrypt("open sesame").unwrap();
+        store.encrypt("hunter22").unwrap();
+        std::fs::write(store.path(), &theirs).unwrap();
+        assert!(!store.is_locked(), "a master is still held");
+        let secrets = Secrets::new(store.clone()).with_unlock_hint("restart ilar");
+        let cancel = cancel();
+        let names = ["KEY".to_string()];
+        let error = secrets.resolve(request(&names, &cancel)).await.unwrap_err();
+        assert!(error.contains("sealed again"), "{error}");
+        assert!(error.contains("restart ilar"), "{error}");
+        assert!(store.is_locked(), "the useless master was kept");
+        store.unlock("open sesame").unwrap();
+        assert_eq!(store.list().unwrap().len(), 1);
     }
 
     /// Root is a pseudo-secret: nothing to store, a standing grant to
