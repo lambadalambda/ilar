@@ -212,6 +212,17 @@ fn backoff_delay(
     base.saturating_mul(multiplier).min(cap)
 }
 
+/// A failure that ends a turn, saying how many attempts it took. Bare
+/// when nothing was retried: "gave up after 0 retries" would read as a
+/// retry budget of zero rather than a failure nobody could retry.
+fn spent_retries_message(message: String, attempts: usize) -> String {
+    match attempts {
+        0 => message,
+        1 => format!("{message} (gave up after 1 retry)"),
+        attempts => format!("{message} (gave up after {attempts} retries)"),
+    }
+}
+
 impl Default for LoopConfig {
     fn default() -> Self {
         Self {
@@ -2199,6 +2210,11 @@ async fn run_turn_inner(
                 }
                 continue;
             }
+            // Retried attempts are announced one at a time and the
+            // final failure used to arrive bare, word for word the
+            // same line: from the outside there was no telling a single
+            // failure from a budget that ran out.
+            let message = spent_retries_message(message, provider_retries + rate_limit_retries);
             // Persist the partial step so the UI's already-shown deltas
             // don't evaporate from the transcript — and record the error
             // itself so failures stay diagnosable from the session log
@@ -2659,6 +2675,25 @@ mod tests {
     }
 
     use super::*;
+
+    /// The retried attempts are announced one at a time; the failure
+    /// that ends the turn arrived word for word the same, so a spent
+    /// budget was indistinguishable from a single failure.
+    #[test]
+    fn a_spent_retry_budget_says_so_and_a_bare_failure_does_not() {
+        assert_eq!(
+            spent_retries_message("dns failure".into(), 0),
+            "dns failure"
+        );
+        assert_eq!(
+            spent_retries_message("dns failure".into(), 1),
+            "dns failure (gave up after 1 retry)"
+        );
+        assert_eq!(
+            spent_retries_message("dns failure".into(), 3),
+            "dns failure (gave up after 3 retries)"
+        );
+    }
 
     #[test]
     fn tool_argument_summaries_are_bounded_and_redacted() {

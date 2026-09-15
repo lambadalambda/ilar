@@ -334,6 +334,7 @@ impl Provider for OpenAIProvider {
 
         let http = self.http.clone();
         let token_url = self.token_url.clone();
+        let provider = self.prefix;
         let send = async move {
             let mut current_token = token;
             let mut current_account = account;
@@ -390,6 +391,12 @@ impl Provider for OpenAIProvider {
                         return Ok(TransportResponse {
                             response,
                             secrets: vec![current_token],
+                            provider,
+                            credential: if is_chatgpt {
+                                transport::Credential::OAuth
+                            } else {
+                                transport::Credential::ApiKey
+                            },
                         });
                     }
                     Err(error) => return Err(error),

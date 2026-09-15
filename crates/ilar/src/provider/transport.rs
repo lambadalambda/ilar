@@ -136,6 +136,22 @@ fn error_with_sources(error: &dyn std::error::Error) -> String {
 pub(super) struct TransportResponse {
     pub response: reqwest::Response,
     pub secrets: Vec<String>,
+    /// Who answered, for an error that has to say whose credential was
+    /// refused. The model id is not enough: one key can serve two
+    /// gateways and one gateway can serve many models.
+    pub provider: &'static str,
+    /// What the request authenticated with, because the two are fixed
+    /// in different places: a key by a variable or the TOML, stored
+    /// OAuth tokens by `ilar login`.
+    pub credential: Credential,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Credential {
+    /// An API key, or no credential at all (a local server).
+    ApiKey,
+    /// Tokens from the auth store, refreshed on the way out.
+    OAuth,
 }
 
 pub(super) enum TransportError {
@@ -147,11 +163,15 @@ pub(super) fn retryable(error: impl ToString) -> TransportError {
     TransportError::Retryable(error.to_string())
 }
 
+/// The full chain, not reqwest's Display: "error sending request for
+/// url (…)" is the same line for a DNS failure, a refused connection
+/// and a TLS mismatch, and the cause is what says which.
 pub(super) fn request_error(error: reqwest::Error) -> TransportError {
+    let message = error_with_sources(&error);
     if error.is_connect() || error.is_timeout() || error.is_body() {
-        retryable(error)
+        retryable(message)
     } else {
-        fatal(error)
+        fatal(message)
     }
 }
 
@@ -172,7 +192,12 @@ where
     let (tx, rx) = mpsc::channel(64);
     let tx_panic = tx.clone();
     let pump = async move {
-        let TransportResponse { response, secrets } = match send.await {
+        let TransportResponse {
+            response,
+            secrets,
+            provider,
+            credential,
+        } = match send.await {
             Ok(response) => response,
             Err(TransportError::Retryable(error)) => {
                 let _ = tx.send(ProviderEvent::RetryableError(error)).await;
@@ -196,7 +221,7 @@ where
             } else if retryable_status(status) {
                 ProviderEvent::RetryableError(format!("HTTP {status}: {body}"))
             } else {
-                ProviderEvent::Error(format!("HTTP {status}: {body}"))
+                ProviderEvent::Error(status_error(provider, credential, status, &body))
             };
             let _ = tx.send(event).await;
             return;
@@ -266,6 +291,37 @@ where
         stream: ReceiverStream::new(rx),
         handle: Some(handle),
     })
+}
+
+/// A failed request as a line someone can act on. A refused credential
+/// is the one status whose body says nothing useful — `{"error":
+/// {"code":"1002",…}}` names neither the key nor where it came from —
+/// so it gets a lead line and keeps the body underneath, where the
+/// provider's own reason is.
+fn status_error(
+    provider: &str,
+    credential: Credential,
+    status: reqwest::StatusCode,
+    body: &str,
+) -> String {
+    match status {
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => {
+            let next_step = match credential {
+                // The refresh has already been tried once by the time a
+                // 401 gets here, so the sign-in itself is what is left.
+                Credential::OAuth => "run `ilar login` to sign in again".to_string(),
+                Credential::ApiKey => {
+                    format!("check {}", crate::config::credential_sources(provider))
+                }
+            };
+            let what = match credential {
+                Credential::OAuth => "the stored ChatGPT tokens",
+                Credential::ApiKey => "the credential",
+            };
+            format!("{provider} rejected {what} (HTTP {status}): {next_step}\n{body}")
+        }
+        _ => format!("HTTP {status}: {body}"),
+    }
 }
 
 const MAX_EVENT_SNIPPET_CHARS: usize = 600;
@@ -423,6 +479,8 @@ mod tests {
                 Ok(TransportResponse {
                     response,
                     secrets: Vec::new(),
+                    provider: "zai",
+                    credential: Credential::ApiKey,
                 })
             },
             TextMapper,
@@ -452,6 +510,8 @@ mod tests {
                     Ok(TransportResponse {
                         response,
                         secrets: Vec::new(),
+                        provider: "zai",
+                        credential: Credential::ApiKey,
                     })
                 },
                 TextMapper,
@@ -526,6 +586,64 @@ mod tests {
         );
     }
 
+    /// A refused credential used to arrive as the provider's raw JSON.
+    /// The lead line says whose key it was and where that key is
+    /// configured; the body stays, since it is the only place the
+    /// provider's own reason appears.
+    #[tokio::test]
+    async fn a_refused_credential_leads_with_the_key_to_check() {
+        let response = status_response(
+            "401 Unauthorized",
+            "{\"error\":{\"code\":\"1002\",\"message\":\"invalid token\"}}",
+        )
+        .await;
+        let events = stream(
+            async {
+                Ok(TransportResponse {
+                    response,
+                    secrets: Vec::new(),
+                    provider: "zai",
+                    credential: Credential::ApiKey,
+                })
+            },
+            TextMapper,
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let [ProviderEvent::Error(error)] = events.as_slice() else {
+            panic!("expected a single terminal error: {events:?}");
+        };
+        let lead = error.lines().next().unwrap_or_default();
+        assert!(lead.contains("zai rejected the credential"), "{error}");
+        assert!(lead.contains("HTTP 401"), "{error}");
+        assert!(lead.contains("ILAR_ZAI_API_KEY"), "{error}");
+        assert!(lead.contains("providers.zai.api_key"), "{error}");
+        assert!(error.contains("\"1002\""), "{error}");
+
+        // Every other fatal status keeps the plain form.
+        assert_eq!(
+            status_error(
+                "zai",
+                Credential::ApiKey,
+                reqwest::StatusCode::BAD_REQUEST,
+                "bad"
+            ),
+            "HTTP 400 Bad Request: bad"
+        );
+
+        // OAuth is fixed somewhere else entirely: naming a key
+        // variable to somebody signed in with a ChatGPT account sends
+        // them after a key they never had.
+        let oauth = status_error(
+            "openai",
+            Credential::OAuth,
+            reqwest::StatusCode::UNAUTHORIZED,
+            "{}",
+        );
+        assert!(oauth.contains("ilar login"), "{oauth}");
+        assert!(!oauth.contains("ILAR_OPENAI_API_KEY"), "{oauth}");
+    }
+
     #[tokio::test]
     async fn request_errors_retry_connections_but_not_invalid_requests() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -536,10 +654,14 @@ mod tests {
             .send()
             .await
             .unwrap_err();
-        assert!(matches!(
-            request_error(connection),
-            TransportError::Retryable(_)
-        ));
+        // The cause rides along: reqwest's own Display is the same
+        // "error sending request" line for a refused connection, a DNS
+        // failure and a TLS mismatch.
+        let TransportError::Retryable(message) = request_error(connection) else {
+            panic!("a refused connection is retryable");
+        };
+        assert!(message.contains(": "), "{message}");
+        assert!(message.to_lowercase().contains("connect"), "{message}");
 
         let invalid = reqwest::Client::new()
             .get("http://[invalid")
@@ -611,6 +733,8 @@ mod tests {
                 Ok(TransportResponse {
                     response,
                     secrets: vec!["sk-secret".into()],
+                    provider: "zai",
+                    credential: Credential::ApiKey,
                 })
             },
             FailingMapper,
@@ -650,6 +774,8 @@ mod tests {
                 Ok(TransportResponse {
                     response,
                     secrets: Vec::new(),
+                    provider: "zai",
+                    credential: Credential::ApiKey,
                 })
             },
             TerminalMapper,

@@ -241,12 +241,18 @@ impl Provider for ChatProvider {
 
         let http = self.http.clone();
         let secrets = self.dialect.api_key.clone().into_iter().collect::<Vec<_>>();
+        let provider = self.dialect.prefix;
         let send = async move {
             let response = http
                 .execute(request)
                 .await
                 .map_err(transport::request_error)?;
-            Ok(TransportResponse { response, secrets })
+            Ok(TransportResponse {
+                response,
+                secrets,
+                provider,
+                credential: transport::Credential::ApiKey,
+            })
         };
         Ok(transport::stream(send, OpenAiMapper::new()))
     }
