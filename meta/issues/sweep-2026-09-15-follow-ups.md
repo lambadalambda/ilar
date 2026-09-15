@@ -101,3 +101,7 @@ From stream R (sessions):
 - `file_may_contain` folds ASCII while `recall::search` folds Unicode.
 - A `delete` that returns WouldBlock still leaves the directory pointer
   on the session just judged empty.
+From stream O (the resume offer):
+- A log over 4 MiB whose last line is a rewind gets no offer.
+- Enter with text dismisses the offer even when nothing was sent (a
+  refused submit); the ghost cannot be brought back.

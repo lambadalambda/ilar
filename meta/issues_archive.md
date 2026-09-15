@@ -396,3 +396,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [sudo asks for the password after the yes](issues/sudo-asks-for-the-password-after-the-yes.md)
 - [x] [Sessions list fast and true](issues/sessions-list-fast-and-true.md)
 - [x] [A propagated result retires its origin](issues/a-propagated-result-retires-its-origin.md)
+- [x] [A bare ilar offers the last session here](issues/a-bare-ilar-offers-the-last-session-here.md)
