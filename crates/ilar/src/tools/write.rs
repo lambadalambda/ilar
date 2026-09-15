@@ -83,6 +83,10 @@ impl Tool for WriteTool {
                         "write cancelled",
                     ));
                 }
+                // What was there before, so the result can tell creating
+                // a file from replacing one — the model that meant to
+                // append has no other way to notice.
+                let previous = std::fs::metadata(&path).ok().map(|meta| meta.len());
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
@@ -96,12 +100,19 @@ impl Tool for WriteTool {
                 // licenses the edits that follow it. (Write itself needs
                 // no licence: whole content, nothing to match against.)
                 seen_files.record(&path, &content);
-                Ok(())
+                Ok(previous)
             })
             .await;
 
             match result {
-                Ok(()) => ToolOutput::text(format!("wrote {display_path} ({byte_len} bytes)")),
+                Ok(Some(was)) => ToolOutput::text(format!(
+                    "overwrote {display_path} ({}, was {was})",
+                    crate::text::plural(byte_len, "byte")
+                )),
+                Ok(None) => ToolOutput::text(format!(
+                    "wrote {display_path} ({})",
+                    crate::text::plural(byte_len, "byte")
+                )),
                 Err(e) => ToolOutput::error(format!("write {display_path}: {e}")),
             }
         })
@@ -111,6 +122,28 @@ impl Tool for WriteTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// "wrote path (N bytes)" reads the same whether the file was new or
+    /// a hundred lines that are now gone; the second case says so.
+    #[tokio::test]
+    async fn a_write_says_whether_it_created_or_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = || ToolContext::root(dir.path().to_path_buf());
+        let out = WriteTool
+            .run(
+                serde_json::json!({"path": "a.txt", "content": "one\n"}),
+                ctx(),
+            )
+            .await;
+        assert!(!out.is_error, "{}", out.content);
+        assert_eq!(out.content, "wrote a.txt (4 bytes)");
+
+        let out = WriteTool
+            .run(serde_json::json!({"path": "a.txt", "content": "x"}), ctx())
+            .await;
+        assert!(!out.is_error, "{}", out.content);
+        assert_eq!(out.content, "overwrote a.txt (1 byte, was 4)");
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn filesystem_work_uses_the_blocking_pool() {

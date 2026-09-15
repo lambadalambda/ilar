@@ -1738,6 +1738,7 @@ fn tool_entry_rows(
         } else {
             rows.extend(tool_diff_rows(
                 diff,
+                diff_label(name, result.as_deref()),
                 width,
                 indent + 4,
                 if *full { usize::MAX } else { 8 },
@@ -2112,8 +2113,21 @@ fn detail_source_lines<'a>(
     (source, cut)
 }
 
+/// What the block of `±` lines is: a write that replaced an existing
+/// file paints its whole body `+`, which reads as a new file — the
+/// label is what says otherwise. The tool's own result is the only
+/// thing that knows (the arguments carry no previous content).
+fn diff_label(name: &str, result: Option<&str>) -> &'static str {
+    if name == "write" && result.is_some_and(|text| text.starts_with("overwrote")) {
+        "rewrite"
+    } else {
+        "diff"
+    }
+}
+
 fn tool_diff_rows(
     diff: &[diff::DiffLine],
+    label: &str,
     width: u16,
     indent: usize,
     limit: usize,
@@ -2155,7 +2169,7 @@ fn tool_diff_rows(
             .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
-    labeled_rows("diff", content, &layout, limit, cut, false, more_target)
+    labeled_rows(label, content, &layout, limit, cut, false, more_target)
 }
 
 pub(crate) fn transcript_entry_lines(
@@ -3194,7 +3208,7 @@ mod tests {
                 text: format!("added line {index}"),
             })
             .collect();
-        let limited = tool_diff_rows(&diff, 80, 4, 8, None);
+        let limited = tool_diff_rows(&diff, "diff", 80, 4, 8, None);
         assert_eq!(limited.len(), 8);
         assert!(rendered_text(&limited.last().unwrap().line).contains("… more"));
         assert!(
@@ -3203,7 +3217,7 @@ mod tests {
                 .any(|row| rendered_text(&row.line).contains("added line 11"))
         );
 
-        let full = tool_diff_rows(&diff, 80, 4, usize::MAX, None);
+        let full = tool_diff_rows(&diff, "diff", 80, 4, usize::MAX, None);
         assert_eq!(full.len(), 12);
         assert!(
             full.iter()
@@ -3395,6 +3409,19 @@ mod tests {
             !rendered.iter().any(|row| row.contains("cargo test")),
             "{rendered:?}"
         );
+    }
+
+    /// A write that replaced a file paints its whole body `+`; only the
+    /// label distinguishes that from creating one.
+    #[test]
+    fn a_write_that_replaced_a_file_is_labelled_a_rewrite() {
+        assert_eq!(
+            diff_label("write", Some("overwrote f.rs (12 bytes, was 40)")),
+            "rewrite"
+        );
+        assert_eq!(diff_label("write", Some("wrote f.rs (12 bytes)")), "diff");
+        assert_eq!(diff_label("write", None), "diff");
+        assert_eq!(diff_label("edit", Some("overwrote f.rs")), "diff");
     }
 
     /// A failed row with nothing recorded has no error line to show;

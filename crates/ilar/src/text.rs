@@ -29,6 +29,16 @@ pub fn format_bytes(bytes: u64) -> String {
     }
 }
 
+/// `1 line`, `2 lines`: a count with its unit, so a note about one
+/// thing does not read like an unfinished template.
+pub fn plural(count: usize, unit: &str) -> String {
+    if count == 1 {
+        format!("{count} {unit}")
+    } else {
+        format!("{count} {unit}s")
+    }
+}
+
 /// How much of a tool result any surface keeps.
 pub const MAX_DETAIL_CHARS: usize = 16 * 1024;
 
