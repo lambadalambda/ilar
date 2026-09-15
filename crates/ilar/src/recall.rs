@@ -286,7 +286,7 @@ pub struct SessionHits {
 /// Bytes read at a time while grepping a session's raw file.
 const RAW_CHUNK: usize = 256 * 1024;
 
-/// Whether a query is one the raw bytes of a JSONL log can be grepped
+/// Whether a word is one the raw bytes of a JSONL log can be grepped
 /// for. The log escapes quotes, backslashes and control characters, and
 /// ASCII case-folding is the only kind that cannot change a string's
 /// length — so anything else is not looked for in the raw file at all.
@@ -301,15 +301,26 @@ fn greppable(needle: &str) -> bool {
 /// nothing parsed. This is what keeps a cross-session search from
 /// deserializing gigabytes of JSON to find four hits.
 ///
-/// Conservative in both directions it can afford to be: a query the
-/// escaping or case-folding rules above cannot be trusted for, and any
-/// read failure, answer `true` and pay the full parse. A search that is
+/// What is looked for is the query's longest word, not the query: the
+/// searchable text of a tool call is its name and its arguments joined
+/// by a space that exists nowhere in the file, so a phrase spanning
+/// that join is in the entry and not in the bytes. A word cannot span
+/// it. Everything the full query would match contains its longest word,
+/// so this never rules out a session the precise search would have
+/// found — it only lets a few more through to it.
+///
+/// Conservative everywhere else too: a word the escaping or
+/// case-folding rules above cannot be trusted for, and any read
+/// failure, answer `true` and pay the full parse. A search that is
 /// slower is a nuisance; a search that misses is a bug.
 pub fn file_may_contain(path: &std::path::Path, query: &str) -> bool {
-    let needle = query.trim();
-    if needle.is_empty() || !greppable(needle) {
+    let Some(needle) = query
+        .split_whitespace()
+        .max_by_key(|word| word.len())
+        .filter(|word| greppable(word))
+    else {
         return true;
-    }
+    };
     let Ok(file) = std::fs::File::open(path) else {
         return true;
     };
@@ -639,8 +650,50 @@ mod tests {
         std::fs::write(&path, b"{\"text\":\"plain ascii only\"}\n").unwrap();
 
         assert!(file_may_contain(&path, "İstanbul"), "non-ascii");
-        assert!(file_may_contain(&path, "say \"hello\""), "a quote");
+        assert!(file_may_contain(&path, "\"hello\""), "a quote");
         assert!(file_may_contain(&path, "C:\\Users"), "a backslash");
         assert!(file_may_contain(&path, "   "), "an empty query");
+    }
+
+    /// A tool call's searchable text is its name and its arguments
+    /// joined by a space the file does not contain, so the gate looks
+    /// for the longest word instead of the phrase: what the phrase
+    /// would match, the word matches too.
+    #[test]
+    fn a_phrase_is_judged_by_its_longest_word() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let events = vec![SessionEvent::AssistantMessage {
+            id: new_id(),
+            model: "zai/glm-4.7".into(),
+            content: vec![ContentBlock::ToolCall {
+                id: "call-1".into(),
+                name: "bash".into(),
+                input: serde_json::json!({"command": "cargo nextest run"}),
+                item_id: None,
+            }],
+            usage: Default::default(),
+            stop_reason: "tool_use".into(),
+            ts: chrono::Utc::now(),
+        }];
+        let lines: String = events
+            .iter()
+            .map(|event| format!("{}\n", serde_json::to_string(event).unwrap()))
+            .collect();
+        std::fs::write(&path, lines).unwrap();
+
+        // "bash {" spans the name/arguments join, which exists only in
+        // the searchable text. The search finds it; so must the gate.
+        assert_eq!(
+            search(&entries(&events), "bash {", None, MAX_MATCHES).len(),
+            1
+        );
+        assert!(
+            file_may_contain(&path, "bash {"),
+            "the gate ruled out a session the search matches"
+        );
+        // Still selective: a word that is nowhere in the file rules it
+        // out however many of the query's other words are.
+        assert!(!file_may_contain(&path, "run nextest-archive"));
     }
 }
