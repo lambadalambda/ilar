@@ -3700,7 +3700,7 @@ impl Provider for RecordingPendingOnHang {
     }
 }
 
-/// One concurrency slot, so "Concurrent subagent limit reached" is one
+/// One concurrency slot, so "concurrent subagent limit reached" is one
 /// hung background task away — the deterministic stand-in for every
 /// early return of the resume path.
 fn single_slot_spawner(provider: Arc<dyn Provider>, store: &SessionStore) -> Arc<SubagentSpawner> {
@@ -3781,7 +3781,7 @@ async fn a_message_refused_by_the_concurrency_limit_waits_for_the_next_resume() 
         .await;
     assert!(refused.is_error, "{}", refused.content);
     assert!(
-        refused.content.contains("Concurrent subagent limit"),
+        refused.content.contains("concurrent subagent limit"),
         "{}",
         refused.content
     );
