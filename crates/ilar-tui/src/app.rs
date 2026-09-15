@@ -14,6 +14,7 @@ use ilar::agent::{LoopEvent, TurnOutcome};
 #[cfg(test)]
 use ilar::session::SessionStore;
 
+use crate::grants::GrantModal;
 use crate::input::{InputBuffer, slash_candidates};
 use crate::modals::{
     AsideModal, CommandPalette, ContextPicker, ContextPickerAction, LinkPicker, Modal, ModelPicker,
@@ -309,6 +310,8 @@ pub(crate) struct App {
     /// Selection inside the inline slash-completion popup.
     pub(crate) slash_selected: usize,
     pub(crate) question_modal: Option<QuestionModal>,
+    /// A tool's ask for a stored secret, waiting on the person.
+    pub(crate) grant_modal: Option<GrantModal>,
     pub(crate) pending_manager: Option<PendingManager>,
     /// Where the active modal's rows were drawn last frame; how a click
     /// finds the item it landed on. Rebuilt by every render.
@@ -524,6 +527,7 @@ impl App {
             goal: None,
             slash_selected: 0,
             question_modal: None,
+            grant_modal: None,
             pending_manager: None,
             modal_hit: None,
             available_models: Vec::new(),
@@ -623,6 +627,8 @@ impl App {
     pub(crate) fn active_modal(&self) -> Option<Modal> {
         if self.question_modal.is_some() {
             Some(Modal::Question)
+        } else if self.grant_modal.is_some() {
+            Some(Modal::Grant)
         } else if self.pending_manager.is_some() {
             Some(Modal::PendingManager)
         } else if self.help_visible {
@@ -837,7 +843,7 @@ impl App {
             // The question modal navigates its own rows with the arrows;
             // search leaves the wheel to the transcript so results stay
             // browsable underneath it.
-            Some(Modal::Question) | Some(Modal::Search) | None => {
+            Some(Modal::Question) | Some(Modal::Grant) | Some(Modal::Search) | None => {
                 return false;
             }
         }
@@ -885,7 +891,12 @@ impl App {
                         .expect("pending manager")
                         .select(index, len);
                 }
-                Modal::Question | Modal::Help | Modal::Todos | Modal::Aside | Modal::Search => {}
+                Modal::Question
+                | Modal::Grant
+                | Modal::Help
+                | Modal::Todos
+                | Modal::Aside
+                | Modal::Search => {}
             }
         }
         true
@@ -3081,6 +3092,23 @@ mod tests {
         // everything: whatever is showing must also be taking the keys.
         app.pending_manager = Some(PendingManager::default());
         assert_eq!(app.active_modal(), Some(Modal::PendingManager));
+
+        // A tool blocked on a secret outranks the manager: the turn
+        // cannot move until the person answers.
+        let (reply, _rx) = tokio::sync::oneshot::channel();
+        app.grant_modal = Some(GrantModal::new(
+            &ilar::secrets::GrantPrompt {
+                session_id: "s1".into(),
+                tool_call_id: None,
+                tool: "bash".into(),
+                secret: "TOKEN".into(),
+                description: String::new(),
+                detail: "gh api /user".into(),
+                reply,
+            },
+            false,
+        ));
+        assert_eq!(app.active_modal(), Some(Modal::Grant));
 
         app.question_modal = Some(QuestionModal::new(ilar::question::QuestionRequest {
             questions: vec![ilar::question::Question {

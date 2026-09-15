@@ -1141,6 +1141,13 @@ impl App {
                     .render(frame, frame.area());
                 None
             }
+            Some(Modal::Grant) => {
+                self.grant_modal
+                    .as_ref()
+                    .expect("grant modal")
+                    .render(frame, frame.area());
+                None
+            }
             Some(Modal::PendingManager) => self
                 .pending_snapshot()
                 .map(|snapshot| render_pending_manager(frame, &snapshot)),

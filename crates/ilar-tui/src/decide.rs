@@ -121,7 +121,8 @@ pub(crate) fn paste_target(state: &LoopState) -> PasteTarget {
         // must fail to compile here instead of silently swallowing
         // pastes, the way the pickers used to.
         Some(
-            Modal::Help
+            Modal::Grant
+            | Modal::Help
             | Modal::Todos
             | Modal::Aside
             | Modal::PendingManager
@@ -563,6 +564,7 @@ mod tests {
             );
         }
         for modal in [
+            Modal::Grant,
             Modal::Help,
             Modal::Todos,
             Modal::Aside,

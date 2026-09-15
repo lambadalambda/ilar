@@ -230,6 +230,29 @@ answer or a failure when it lands; the root's own queue and stash are
 untouched. Arrow keys, PageUp/PageDown, Home and End scroll the view;
 Esc leaves it.
 
+## Secrets
+
+A stored secret (`ilar secret set NAME`, value on stdin) never sits in
+the agent's environment. When `bash` or `service` names one, the turn
+pauses on a prompt titled `bash wants NAME`: the secret's description,
+then the command **verbatim** — that exact text is what runs with the
+value in its environment, so read it before saying yes. Four answers:
+
+- **Allow once** (`o`, the default): this command only.
+- **Allow for this session** (`s`): this tool, until ilar exits.
+- **Always allow for `tool`** (`a`): written to the store as a standing
+  grant; the prompt does not come back for that tool.
+- **Deny** (`d` or Esc): the tool gets a refusal and the model learns
+  the secret is unavailable.
+
+The answer is noted in the transcript (`NAME allowed for bash (once)`,
+`NAME denied for bash`). A subagent's tool asks through the same
+prompt, titled `bash (subagent) wants NAME`. Ctrl-C under the prompt is
+a deny; if the turn ends or is cancelled underneath it, the prompt
+closes without an answer, which the tool reads as a refusal. Standing
+grants are managed from the shell: `ilar secret list`,
+`ilar secret grant NAME --tool bash`, `ilar secret revoke NAME`.
+
 ## Transcript
 
 The transcript renders markdown with syntax-highlighted code fences and

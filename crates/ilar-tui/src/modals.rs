@@ -514,6 +514,7 @@ trait Picker {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Modal {
     Question,
+    Grant,
     PendingManager,
     Help,
     Todos,

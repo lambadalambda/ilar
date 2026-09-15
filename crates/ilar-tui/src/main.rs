@@ -4,6 +4,7 @@ mod app;
 mod decide;
 mod diff;
 mod exec;
+mod grants;
 mod highlight;
 mod history;
 mod input;
@@ -39,6 +40,7 @@ use crossterm::event::{
 };
 use crossterm::terminal::supports_keyboard_enhancement;
 use decide::{Intent, LoopState, retry as retry_intents, retry_dismisses_manager};
+use grants::GrantAction;
 use input::{
     InputBuffer, Interrupt, PromptAction, handle_prompt_key, interrupt, quit_requested,
     retry_requested,
@@ -1224,7 +1226,7 @@ async fn main() -> Result<()> {
                 resume: resume_target.clone(),
                 cwd: cwd.clone(),
                 questions: true,
-                grants: false,
+                grants: true,
                 // Not first-run-only like the model and agent
                 // overrides: what this launch does with the project
                 // file is a property of the launch, so every session
@@ -1261,10 +1263,12 @@ async fn main() -> Result<()> {
             loop_config,
             resolver,
             questions,
+            grants,
             resumed,
             ..
         } = runtime;
         let question_rx = questions.expect("the TUI asked for questions");
+        let grant_rx = grants.expect("the TUI asked for grants");
         let notifications = spawner.subscribe();
         let subagent_activity = spawner.subscribe_activity();
         let model_choices = config.available_models();
@@ -1416,6 +1420,7 @@ async fn main() -> Result<()> {
             notifications,
             subagent_activity,
             question_rx,
+            grant_rx,
             loop_config,
             model_choices,
             services,
@@ -2723,6 +2728,7 @@ async fn run_app(
     mut notifications: tokio::sync::mpsc::Receiver<ilar::subagent::Notification>,
     mut subagent_activity: tokio::sync::broadcast::Receiver<ilar::subagent::SubagentActivity>,
     mut question_rx: ilar::question::QuestionReceiver,
+    mut grant_rx: ilar::secrets::GrantReceiver,
     loop_config: LoopConfig,
     model_choices: Vec<&'static ilar::model::ModelInfo>,
     services: std::sync::Arc<ilar::tools::service::ServiceManager>,
@@ -2779,6 +2785,10 @@ async fn run_app(
     let mut question_reply: Option<tokio::sync::oneshot::Sender<ilar::question::QuestionResponse>> =
         None;
     let mut pending_question_id = initial_pending_question_id;
+    // The open grant prompt's reply path. Nothing persists: a grant
+    // is for the command in front of the person, and the tool is
+    // blocked on it until they answer or the turn goes away.
+    let mut grant_reply: Option<tokio::sync::oneshot::Sender<Option<ilar::secrets::Grant>>> = None;
     // Decisions accumulate here and are performed in one place below,
     // rather than each arm doing its own effects inline.
     let mut intents: Vec<Intent> = Vec::new();
@@ -3010,6 +3020,28 @@ async fn run_app(
             question_reply = Some(prompt.reply);
             app.question_modal = Some(questions::QuestionModal::new(prompt.request));
             app.status = "waiting for your answer".into();
+            app.set_activity(Activity::Paused);
+        }
+        // A grant whose asker stopped listening — the turn ended or
+        // was aborted under the modal — closes without an answer; the
+        // prompt must not outlive the command it named.
+        if app.grant_modal.is_some() && grant_reply.as_ref().is_none_or(|reply| reply.is_closed()) {
+            app.grant_modal = None;
+            grant_reply = None;
+        }
+        // One prompt at a time: a second asker waits in the channel
+        // until this one is answered, so no reply is dropped unread.
+        // Unlike a question, a child's ask is not filtered out: the
+        // channel is this runtime's alone, a subagent's bash needs the
+        // same yes, and dropping it would be a silent refusal. The
+        // modal names the asker instead.
+        if app.grant_modal.is_none()
+            && let Ok(prompt) = grant_rx.try_recv()
+        {
+            let from_subagent = prompt.session_id != session_id;
+            app.grant_modal = Some(grants::GrantModal::new(&prompt, from_subagent));
+            grant_reply = Some(prompt.reply);
+            app.status = "waiting for your grant".into();
             app.set_activity(Activity::Paused);
         }
         // Rewind and fork requests recorded by /rewind, /fork or the
@@ -3517,6 +3549,29 @@ async fn run_app(
                                         RootTurn::Answer(response),
                                         Bell::Ring,
                                     );
+                                }
+                            }
+                        }
+                        Modal::Grant => {
+                            let modal = app.grant_modal.as_mut().expect("grant modal");
+                            if let GrantAction::Answer(answer) = modal.handle_key(key) {
+                                let line = modal.outcome_line(answer);
+                                app.grant_modal = None;
+                                // The asker can go away between the
+                                // closed-check and this keypress; the
+                                // transcript must not claim a grant
+                                // nobody received.
+                                let delivered = grant_reply
+                                    .take()
+                                    .is_some_and(|reply| reply.send(answer).is_ok());
+                                if delivered {
+                                    app.push_transcript_line(Line_::System(line));
+                                    app.status = "processing grant".into();
+                                    app.set_activity(Activity::Tools);
+                                } else {
+                                    app.push_transcript_line(Line_::System(format!(
+                                        "{line} — but the tool had stopped waiting"
+                                    )));
                                 }
                             }
                         }
