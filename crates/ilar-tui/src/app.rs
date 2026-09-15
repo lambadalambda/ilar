@@ -10027,4 +10027,95 @@ mod tests {
         );
         assert!(app.queued_messages.is_empty());
     }
+
+    /// The offer on screen: one header line, the tail under it, all of
+    /// it in the muted tone with no bold anywhere, above a transcript
+    /// that keeps its own colours — and gone, with the status line, the
+    /// moment it is dismissed.
+    #[test]
+    fn an_offered_session_is_drawn_ghostly_above_the_transcript() {
+        let mut app = App::new();
+        // The adaptive theme is the one whose muted tone *is* the
+        // logical one, so "ghosted" is checkable against a constant.
+        app.theme = theme::ThemeId::parse("terminal").expect("the adaptive theme");
+        app.push_transcript_line(Line_::User("live words".into()));
+        app.offer_session(Ghost::new(
+            "old-session".into(),
+            "the last thing".into(),
+            "previous session here: the last thing · 2h ago — Enter resumes".into(),
+            vec![Line_::User("ghost words".into())],
+        ));
+        assert_eq!(app.status, "ghost of the last thing");
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let screen = |terminal: &ratatui::Terminal<ratatui::backend::TestBackend>| {
+            (0..30u16)
+                .map(|row| {
+                    (0..100u16)
+                        .map(|column| terminal.backend().buffer()[(column, row)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+        };
+        let rows = screen(&terminal);
+        let row_of = |rows: &[String], needle: &str| {
+            rows.iter()
+                .position(|row| row.contains(needle))
+                .unwrap_or_else(|| panic!("{needle:?} is on screen:\n{}", rows.join("\n")))
+        };
+        let header = row_of(&rows, "previous session here: the last thing");
+        let ghost = row_of(&rows, "ghost words");
+        let live = row_of(&rows, "live words");
+        assert!(
+            header < ghost && ghost < live,
+            "the offer sits above the transcript, got {header} {ghost} {live}"
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("ghost of the last thing")),
+            "the status line says what is shown:\n{}",
+            rows.join("\n")
+        );
+
+        for row in [header, ghost] {
+            for column in 0..100u16 {
+                let cell = &terminal.backend().buffer()[(column, row as u16)];
+                if cell.symbol().trim().is_empty() {
+                    continue;
+                }
+                assert_eq!(
+                    cell.fg,
+                    ratatui::style::Color::DarkGray,
+                    "row {row} column {column} ({:?}) is not ghosted",
+                    cell.symbol()
+                );
+                assert!(
+                    !cell.modifier.contains(Modifier::BOLD),
+                    "row {row} column {column} keeps its bold"
+                );
+            }
+        }
+        // The live line is not ghosted: the user's own colour survives.
+        assert!(
+            (0..100u16).any(
+                |column| terminal.backend().buffer()[(column, live as u16)].fg
+                    == ratatui::style::Color::LightCyan
+            ),
+            "the transcript under the offer keeps its colours"
+        );
+
+        let dismissed = app.dismiss_ghost().expect("something was on offer");
+        assert_eq!(dismissed.session_id, "old-session");
+        assert_eq!(app.status, "ready");
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let rows = screen(&terminal);
+        assert!(
+            !rows.iter().any(|row| row.contains("previous session here")),
+            "the offer is off the screen:\n{}",
+            rows.join("\n")
+        );
+        assert!(rows.iter().any(|row| row.contains("live words")));
+    }
 }
