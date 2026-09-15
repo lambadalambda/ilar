@@ -2898,7 +2898,7 @@ async fn isolated_notification_revalidates_after_waiting_for_lease() {
                     ilar::subagent::Notification {
                         parent_session_id: child_id,
                         description: "stale isolated route".into(),
-                        text: "deliver".into(),
+                        text: "the child's finished word".into(),
                         is_error: false,
                     },
                     tokio_util::sync::CancellationToken::new(),
@@ -2926,7 +2926,11 @@ async fn isolated_notification_revalidates_after_waiting_for_lease() {
         "{}",
         failure.text
     );
-    assert!(failure.text.contains("deliver"), "{}", failure.text);
+    assert!(
+        failure.text.contains("the child's finished word"),
+        "the work was dropped with the plumbing error: {}",
+        failure.text
+    );
     assert!(provider.requests().is_empty());
 }
 

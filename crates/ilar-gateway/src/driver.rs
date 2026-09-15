@@ -1024,13 +1024,10 @@ async fn watch_notifications(
             match disposition(routed, parcel) {
                 Disposition::Delivered => {}
                 Disposition::Propagate { parcel, retire } => {
-                    // A climb that *replaced* its origin: nothing took
-                    // that origin and nothing ever will, and the
-                    // replacement carries its work on, so retire it —
-                    // or the next start adopts it, fails the same
-                    // restore and passes on the same failure again. An
-                    // ordinary climb has no origin to retire: the
-                    // target's log took it.
+                    // Set only for a climb that replaced what it was
+                    // carrying; without the retire the next start
+                    // adopts that entry and fails it again. See
+                    // `Disposition::Propagate`.
                     if let Some(origin) = retire {
                         ilar::outbox::retire(&outbox_dir, &origin);
                     }

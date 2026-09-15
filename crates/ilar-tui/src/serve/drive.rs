@@ -1078,10 +1078,9 @@ impl Consumer {
                 // The ordinary climb: the target's log took what was
                 // routed, which is that entry's retire.
                 Ok(RouteOutcome::Propagate(up)) => return Some(up),
-                // A climb that *replaces* what was routed: the target
-                // could not take it and never will, so it would be
-                // re-adopted and re-failed at every start. The
-                // replacement carries its work on; retire the entry.
+                // A climb that replaces what was routed: nothing took
+                // that entry and nothing will, so retire it or every
+                // start re-adopts and re-fails it.
                 Ok(RouteOutcome::Replace(propagated)) => {
                     self.retire(routed).await;
                     return Some(propagated);

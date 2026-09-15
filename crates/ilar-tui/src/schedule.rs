@@ -408,12 +408,9 @@ fn routed_complete<R: Runtime>(
                 "passed on to",
                 &next,
             )));
-            // A climb that *replaced* its origin: the target could not
-            // take it and never will, the replacement carries the work
-            // on, so retire the entry — or the next open adopts it,
-            // fails the same way and passes on the same failure again.
-            // An ordinary climb has no origin to retire: the target's
-            // log took it.
+            // Set only for a climb that replaced what it was carrying;
+            // without the retire the next open adopts that entry and
+            // fails it again. See `Disposition::Propagate`.
             if let Some(origin) = retire {
                 runtime.retire_notification(&origin);
             }

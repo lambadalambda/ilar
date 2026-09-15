@@ -92,6 +92,11 @@ impl Parcel {
 
     /// The same budget carrying a different notification — a hold or a
     /// requeue, which is not a climb.
+    ///
+    /// A `Requeue` hands the router's own argument straight back, so
+    /// the text is unchanged in practice, and the retire a later
+    /// `Replace` owes still names the recorded entry. A requeue that
+    /// started rewriting the text would break that quietly.
     fn carrying(&self, notification: Notification) -> Self {
         Self {
             notification,
@@ -101,11 +106,14 @@ impl Parcel {
 
     /// One hop poorer, carrying the notification the climb is for.
     /// `Err` when the budget is spent — and it hands that notification
-    /// *back*, because it is the one now stranded: the parcel's own was
-    /// appended to the log of the session this hop just reached, while
-    /// this one was freshly recorded for a session nothing can reach.
-    /// Losing it here would leave an outbox entry nobody retires, to be
-    /// re-adopted with a full budget at the next start.
+    /// *back*, because it is the one now stranded: this one was freshly
+    /// recorded for a session nothing can reach, while the parcel's own
+    /// either reached the log of the session this hop just left (an
+    /// ordinary `Propagate`) or is named by the `retire` the
+    /// disposition carries (a `Replace`). Either way it is accounted
+    /// for and this one is not: losing it here would leave an outbox
+    /// entry nobody retires, to be re-adopted with a full budget at the
+    /// next start.
     pub fn climbing(&self, notification: Notification) -> Result<Self, Notification> {
         match self.hops.checked_sub(1) {
             Some(hops) => Ok(Self { notification, hops }),

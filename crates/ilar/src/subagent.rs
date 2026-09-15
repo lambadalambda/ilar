@@ -2366,6 +2366,13 @@ fn context_route_failure(
 /// in it is a finished child's only word and the plumbing error is the
 /// least interesting half of the news. See [`RouteOutcome::Replace`] for
 /// the retire this obliges.
+///
+/// The shape is the producers' shape and not a new one: `Task "{d}"
+/// failed: …` on the first line, everything else in one `<result>`.
+/// Every surface that collapses a notification into a row parses
+/// exactly that (`session_view::normalize_task_notification`), so a
+/// sentence of our own invention would show the reader a paragraph of
+/// raw envelope where a headline belongs.
 fn replacing(
     grandparent_id: &str,
     origin: Notification,
@@ -2373,8 +2380,9 @@ fn replacing(
     error: &str,
 ) -> RouteOutcome {
     let text = format!(
-        "<task-notification>\nNested task \"{}\" finished, but the task session that asked for it could not be resumed to receive the result: {reason}. The result follows.\n<error>\n{error}\n</error>\n{}\n</task-notification>",
-        origin.description, origin.text
+        "<task-notification>\nNested task \"{}\" failed: {reason} — its result follows.\n<result>\n{error}\n\n{}\n</result>\n</task-notification>",
+        origin.description,
+        unwrapped(&origin.text)
     );
     RouteOutcome::Replace(Notification {
         parent_session_id: grandparent_id.to_string(),
@@ -2382,6 +2390,21 @@ fn replacing(
         text,
         is_error: true,
     })
+}
+
+/// A notification's text without its own envelope. The replacement
+/// supplies one, and a `<task-notification>` nested inside another is
+/// a wall of tags in every surface that unwraps exactly one.
+fn unwrapped(text: &str) -> &str {
+    for tag in ["task-notification", "tool-notification"] {
+        if let Some(inner) = text
+            .strip_prefix(&format!("<{tag}>\n"))
+            .and_then(|inner| inner.strip_suffix(&format!("\n</{tag}>")))
+        {
+            return inner;
+        }
+    }
+    text
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -3874,5 +3897,57 @@ mod tests {
             "{}",
             propagated.text
         );
+    }
+
+    /// The replacement wears the producers' shape, because every
+    /// surface that collapses a notification into a row parses that
+    /// shape and nothing else: `Task "{d}" failed: …` on the first
+    /// line, one `<result>` holding the rest. An invented sentence
+    /// showed the reader a paragraph and then raw envelope tags.
+    #[test]
+    fn a_replacement_wears_the_shape_every_surface_parses() {
+        let meta = SessionMeta {
+            session_id: "parent".into(),
+            parent_id: Some("grandparent".into()),
+            agent: "build".into(),
+            model: "zai/glm-4.7".into(),
+            workspace: None,
+            cwd: None,
+        };
+        let origin = Notification {
+            parent_session_id: "parent".into(),
+            description: "review the hub package".into(),
+            text: "<task-notification>\nNested task \"review the hub package\" completed.\n<result>\nthe hub package is fine\n</result>\n</task-notification>".into(),
+            is_error: false,
+        };
+
+        let RouteOutcome::Replace(propagated) =
+            workspace_route_failure(&meta, origin, anyhow::anyhow!("the worktree is gone"))
+                .unwrap()
+        else {
+            panic!("expected the routed notification to be replaced");
+        };
+
+        let inner = propagated
+            .text
+            .strip_prefix("<task-notification>\n")
+            .and_then(|inner| inner.strip_suffix("\n</task-notification>"))
+            .expect("one envelope, the way the producers write it");
+        let (first, body) = inner.split_once('\n').expect("a headline and a body");
+        // The verb the row splits on, and the description ahead of it.
+        assert_eq!(
+            first,
+            "Nested task \"review the hub package\" failed: its workspace could not be \
+             restored — its result follows."
+        );
+        // One `<result>`, and the origin's own envelope unwrapped
+        // inside it rather than nested.
+        let body = body
+            .strip_prefix("<result>\n")
+            .and_then(|body| body.strip_suffix("\n</result>"))
+            .expect("the whole body is one result");
+        assert!(body.contains("the worktree is gone"), "{body}");
+        assert!(body.contains("the hub package is fine"), "{body}");
+        assert!(!body.contains("<task-notification>"), "{body}");
     }
 }
