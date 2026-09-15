@@ -1595,14 +1595,19 @@ impl App {
         if let Err(error) = result {
             // Closes the open rows and marks the whole transcript.
             self.close_open_rows();
-            let mut message = format!("error: {error:#}");
+            let message = format!("error: {error:#}");
             self.lines.push(Line_::System(message.clone()));
             touched = Some(self.lines.len() - 1);
+            // The status line takes the first line only: a provider's
+            // error carries its response body, and the lead line is the
+            // part that says what happened. The transcript above has
+            // all of it.
+            let mut notice = error_notice(&message);
             if self.turn_committed {
                 self.retry_available = true;
-                message.push_str(" — Ctrl-R to resume");
+                notice.push_str(" — Ctrl-R to resume");
             }
-            self.set_persistent_notice(&message, NoticeLevel::Error);
+            self.set_persistent_notice(&notice, NoticeLevel::Error);
             self.status = "error".into();
             self.set_activity(Activity::Error);
         }
@@ -2632,6 +2637,14 @@ fn split_shell_words(text: &str) -> Option<Vec<String>> {
 /// the child's own rows are nested inside it, and `child_running`
 /// masks the parent row's state while it is set.
 /// Click-target ids for expandable thought rows.
+/// The status line's share of a turn error: its first line. A provider
+/// error carries its response body — a rejected key leads with what to
+/// check and keeps the provider's JSON underneath — and the status line
+/// is one row. The transcript above it has the whole thing.
+fn error_notice(message: &str) -> String {
+    message.lines().next().unwrap_or_default().to_string()
+}
+
 fn next_thought_id(counter: &mut u64) -> String {
     *counter = counter.wrapping_add(1);
     format!("thought:{counter}")
@@ -5441,6 +5454,22 @@ mod tests {
     /// A waiting task result is mail, not a typed message: the strip
     /// shows the headline its transcript row will wear, under its own
     /// fate, never the envelope.
+    /// A provider error leads with what to do and keeps its response
+    /// body underneath. The transcript shows all of it; the status line
+    /// is one row and takes the lead.
+    #[test]
+    fn the_error_notice_is_the_lead_line_of_a_multi_line_error() {
+        assert_eq!(
+            error_notice("error: zai rejected the credential (HTTP 401): check X\n{\"code\":1}"),
+            "error: zai rejected the credential (HTTP 401): check X"
+        );
+        assert_eq!(
+            error_notice("error: the provider hung up"),
+            "error: the provider hung up"
+        );
+        assert_eq!(error_notice(""), "");
+    }
+
     /// A notice takes a row of its own: the status line keeps the model
     /// and the meter beside it, and a paused backlog shows even when no
     /// notice stands.
