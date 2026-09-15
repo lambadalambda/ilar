@@ -710,7 +710,8 @@ impl Config {
         merged.gateway = user_gateway;
         merged.channels = user_channels;
 
-        let providers = resolve_providers(&merged, env, PROVIDERS);
+        let secrets = crate::secrets::SecretStore::open(&state_dir);
+        let providers = resolve_providers(&merged, env, Some(&secrets), PROVIDERS);
 
         // Configured models join the catalog before anything reads it:
         // `general.model` may name one, and so may its reasoning check.
@@ -966,13 +967,16 @@ impl crate::provider::ProviderResolver for Config {
 }
 
 /// Resolved settings for every known provider: file values, then the
-/// provider's environment variable for the key. Keys a provider does not
-/// support are rejected by validation, so copying them is a no-op.
+/// provider's environment variable for the key, then the secret store
+/// under that same name. Keys a provider does not support are rejected
+/// by validation, so copying them is a no-op.
 fn resolve_providers(
     merged: &FileConfig,
     env: &Loader,
+    secrets: Option<&crate::secrets::SecretStore>,
     kinds: &[ProviderKind],
 ) -> HashMap<String, ProviderConfigResolved> {
+    let stored = |name: &str| secrets.and_then(|store| store.value(name).ok().flatten());
     kinds
         .iter()
         .map(|kind| {
@@ -986,7 +990,8 @@ fn resolve_providers(
                 ProviderConfigResolved {
                     base_url: field(|config| config.base_url.clone()),
                     api_key: field(|config| config.api_key.clone())
-                        .or_else(|| env.env_lookup(kind.api_key_env)),
+                        .or_else(|| env.env_lookup(kind.api_key_env))
+                        .or_else(|| stored(kind.api_key_env)),
                     auth: field(|config| config.auth.clone()),
                     image_gen: configured
                         .and_then(|config| config.image_gen)
@@ -1582,10 +1587,27 @@ mod tests {
         // Resolution: the row's environment variable supplies the key,
         // and the provider appears alongside the built-in ones.
         let env = Loader::with_env(vec![("ILAR_ACME_API_KEY", "acme-key".into())]);
-        let resolved = resolve_providers(&FileConfig::default(), &env, &kinds);
+        let resolved = resolve_providers(&FileConfig::default(), &env, None, &kinds);
         assert_eq!(resolved.len(), PROVIDERS.len() + 1);
         assert_eq!(resolved["acme"].api_key.as_deref(), Some("acme-key"));
         assert_eq!(resolved["openai"].api_key, None);
+
+        // The secret store answers under the same name, after the
+        // environment.
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::secrets::SecretStore::open(dir.path());
+        store
+            .set("ILAR_OPENAI_API_KEY", "", "stored-openai-key")
+            .unwrap();
+        store
+            .set("ILAR_ACME_API_KEY", "", "stored-acme-key")
+            .unwrap();
+        let resolved = resolve_providers(&FileConfig::default(), &env, Some(&store), &kinds);
+        assert_eq!(resolved["acme"].api_key.as_deref(), Some("acme-key"));
+        assert_eq!(
+            resolved["openai"].api_key.as_deref(),
+            Some("stored-openai-key")
+        );
 
         // Fallback windows: the row's own number, not a match arm.
         assert_eq!(fallback_context_limit("acme/q-1", &kinds), Some(64_000));
