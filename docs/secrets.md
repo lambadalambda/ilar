@@ -112,7 +112,9 @@ nobody to ask (`ilar exec`, a scheduled turn) a standing grant runs on
 what is known, and sudo's own error says if that was not enough. A
 password sudo refuses is forgotten, and the next ask takes a new one.
 In the chat the password goes last: `/grant session hunter2`; a
-password sent to an ask that took none is refused.
+password sent to an ask that took none is refused. The chat's session
+is its seat, so what it holds is forgotten when that chat is restarted
+— `/new`, or a gateway restart — not only when the process exits.
 
 Systems whose sudoers sets `requiretty` refuse a sudo with no terminal;
 the error is sudo's own. The tool is the ask, not a cage: once

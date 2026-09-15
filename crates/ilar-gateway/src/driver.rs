@@ -263,8 +263,11 @@ impl Driver {
                 prompts,
                 grants.clone(),
                 self.wiring.outbound.clone(),
-                channel.to_string(),
-                chat_id.to_string(),
+                crate::grants::Home {
+                    channel: channel.to_string(),
+                    chat_id: chat_id.to_string(),
+                    session_id: runtime.session_id.clone(),
+                },
                 crate::grants::GRANT_TIMEOUT,
                 self.cancel.child_token(),
             ));

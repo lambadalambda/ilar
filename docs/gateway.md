@@ -151,7 +151,7 @@ A message that is a slash command is answered by the gateway itself:
 | `/pending` | What the review staged, when approval is on. |
 | `/approve [id\|all]`, `/reject [id\|all]` | Decide on it. |
 | `/abort` (or `/stop`) | Cancel the turn running on this chat. The chat gets "Aborted."; messages that arrived meanwhile run as a turn of their own. |
-| `/grant [session\|always] [password]`, `/deny` | Answer a tool's ask for a [stored secret](secrets.md) or for root: the chat was shown the tool, the secret and the command verbatim. Bare `/grant` is once; ten minutes without an answer is a no. When the ask was sudo's and it wanted a password, the password goes last and is held in memory until the gateway stops. |
+| `/grant [session\|always] [password]`, `/deny` | Answer a tool's ask for a [stored secret](secrets.md) or for root: the chat is shown who asks — the tool, or "bash (subagent)" for a child of the turn — the secret, and the command verbatim, indented under a blank line so its last line cannot be read as part of the instructions; a command too long for one message is cut with a tail saying so. Bare `/grant` is once; ten minutes without an answer is a no. When the ask was sudo's and it wanted a password, the password goes last and is held in memory until this chat is restarted. |
 | `/unlock <master password>` | Open a [sealed secret store](secrets.md#a-master-password) for this gateway process. The gateway reads provider keys at start, while the store is still locked, so keep provider keys in `ilar.toml` on that box. |
 | `/compact` | Replace this chat's conversation with one handover summary, as the context filling would; waits for a running turn. The summary goes to the daily note, the chat gets its size. |
 | `/help` | The list above. |
