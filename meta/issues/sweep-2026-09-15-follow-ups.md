@@ -90,3 +90,14 @@ From stream C:
   grant prompt and a question modal, which outrank Help.
 - docs/assets/sessions.svg still shows `↵ resume`; a generated
   screenshot to regenerate.
+
+From stream T (delivery):
+- serve/drive.rs hand-rolls the disposition instead of folding
+  `delivery::disposition`: no retire when the hop budget runs out, no
+  salvage on Err.
+- The TUI\x27s Exhausted salvage writes only to the in-memory transcript;
+  a quit loses the salvaged text.
+From stream R (sessions):
+- `file_may_contain` folds ASCII while `recall::search` folds Unicode.
+- A `delete` that returns WouldBlock still leaves the directory pointer
+  on the session just judged empty.

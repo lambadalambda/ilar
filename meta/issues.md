@@ -117,7 +117,6 @@ milestones 15–17 stay filed — they come back when the feature does.*
 - [ ] [UX sweep 2026-09-15](issues/ux-sweep-2026-09-15.md) — index
 - [ ] [Sweep 2026-09-15 follow-ups](issues/sweep-2026-09-15-follow-ups.md)
 - [ ] [A bare ilar offers the last session here](issues/a-bare-ilar-offers-the-last-session-here.md)
-- [ ] [A propagated result retires its origin](issues/a-propagated-result-retires-its-origin.md)
 
 ## Milestone 21 — The assistant
 
