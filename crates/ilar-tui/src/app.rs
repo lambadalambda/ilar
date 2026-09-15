@@ -69,6 +69,21 @@ pub(crate) struct FocusView {
     /// Cleared by the focused session's own TurnDone; only changes the
     /// footer — a finished agent says so in place, the view stays.
     pub(crate) running: bool,
+    /// Why this agent can never be messaged from here, as a phrase for
+    /// [`focus_send_refusal`]: it belongs to another session, or to
+    /// another agent. Decided when the view opens, from the roster row
+    /// it opened from — the row is gone the moment the agent finishes,
+    /// and the refusal must not go with it.
+    pub(crate) unreachable: Option<String>,
+    /// A foreground child of the turn in flight: the turn is blocked on
+    /// its result, so nothing said now can reach it. Only while it runs
+    /// — once it has reported back it resumes like any other task.
+    pub(crate) foreground: bool,
+    /// The root's draft, put aside while this view owns the prompt.
+    /// Typing here talks to the agent on screen, so the two drafts are
+    /// not one: text typed at the root used to go to the agent on
+    /// Enter, and text typed here became the root's draft on Esc.
+    pub(crate) parked: StashedPrompt,
     pub(crate) scroll_top: usize,
     pub(crate) follow_tail: bool,
     /// Set by the render, like the root transcript's scroll metrics.
@@ -104,6 +119,9 @@ impl FocusView {
             lines,
             group: 0,
             running,
+            unreachable: None,
+            foreground: false,
+            parked: StashedPrompt::default(),
             scroll_top: 0,
             follow_tail: true,
             content_rows: 0,
@@ -175,6 +193,56 @@ impl FocusView {
             close_running_tools(&mut self.lines);
         }
         self.touch();
+    }
+}
+
+/// Why Enter cannot message the agent in a focus view, in one
+/// sentence, or `None` when it can. `message_task` refuses three rows —
+/// a foreground child of the turn you are in, another session's agent,
+/// and a grandchild — but only after the send has been recorded, and
+/// then in the model's own words with a raw uuid in them. Deciding here
+/// means the person is told before anything is written.
+pub(crate) fn focus_send_refusal(focus: &FocusView) -> Option<String> {
+    if let Some(whose) = &focus.unreachable {
+        return Some(format!(
+            "{} is {whose}, so this session cannot message it — only the one that started it can.",
+            focus.title
+        ));
+    }
+    if focus.foreground && focus.running {
+        return Some(format!(
+            "{} is working inside this turn and the turn is waiting for its result, so nothing \
+             said now would reach it. It reports back on its own.",
+            focus.title
+        ));
+    }
+    None
+}
+
+/// A root binding pressed inside a focus view. The view owns the
+/// keyboard while it is up and none of these are routed into it, so
+/// naming the key and the way out beats a keystroke that does nothing
+/// at all.
+pub(crate) fn focus_key_belongs_to_the_root(
+    code: crossterm::event::KeyCode,
+    control: bool,
+) -> Option<&'static str> {
+    use crossterm::event::KeyCode;
+    match (code, control) {
+        (KeyCode::F(1), _) => Some("F1"),
+        (KeyCode::F(2), _) => Some("F2"),
+        (KeyCode::F(3), _) => Some("F3"),
+        (KeyCode::Char('p'), true) => Some("Ctrl-P"),
+        (KeyCode::Char('q'), true) => Some("Ctrl-Q"),
+        (KeyCode::Char('f'), true) => Some("Ctrl-F"),
+        (KeyCode::Char('t'), true) => Some("Ctrl-T"),
+        (KeyCode::Char('o'), true) => Some("Ctrl-O"),
+        (KeyCode::Char('s'), true) => Some("Ctrl-S"),
+        (KeyCode::Char('v'), true) => Some("Ctrl-V"),
+        (KeyCode::Char('r'), true) => Some("Ctrl-R"),
+        (KeyCode::Char('d'), true) => Some("Ctrl-D"),
+        (KeyCode::Char('x'), true) => Some("Ctrl-X"),
+        _ => None,
     }
 }
 
@@ -1627,8 +1695,31 @@ impl App {
         }
     }
 
+    /// Leave the view and give the root its prompt back. Anything typed
+    /// at the agent and not sent goes to the stash rather than
+    /// vanishing: it is the same work Esc protects at the root, and the
+    /// root's own draft is waiting underneath it.
     pub(crate) fn close_focus(&mut self) {
-        self.focus = None;
+        let Some(focus) = self.focus.take() else {
+            return;
+        };
+        let unsent = StashedPrompt {
+            text: self.input.take(),
+            images: std::mem::take(&mut self.pending_images),
+        };
+        self.input = crate::input::InputBuffer::from(focus.parked.text);
+        self.pending_images = focus.parked.images;
+        self.end_history_browsing();
+        if !unsent.text.trim().is_empty() || !unsent.images.is_empty() {
+            self.input_stash.push(unsent);
+            self.set_notice(
+                format!(
+                    "unsent message to {} stashed — Ctrl-S brings it back",
+                    focus.title
+                ),
+                NoticeLevel::Info,
+            );
+        }
     }
 
     /// Ctrl-X in the focus view: arm on the first press, fire on the
@@ -4955,6 +5046,136 @@ mod tests {
         assert_eq!(app.lines(), &root_before[..]);
     }
 
+    /// `message_task` refuses three kinds of row, and it does so after
+    /// the send is already in the transcript, in the model's own words
+    /// with a uuid in them. The view decides first, in a sentence.
+    #[test]
+    fn a_row_this_session_cannot_message_is_refused_before_the_send() {
+        let view = |unreachable: Option<&str>, foreground: bool, running: bool| FocusView {
+            unreachable: unreachable.map(str::to_string),
+            foreground,
+            ..FocusView::new(
+                "child".into(),
+                "build · fix tests".into(),
+                Vec::new(),
+                running,
+            )
+        };
+        assert_eq!(focus_send_refusal(&view(None, false, true)), None);
+        assert_eq!(focus_send_refusal(&view(None, false, false)), None);
+        // A foreground child of the turn in flight cannot be reached;
+        // once it has reported back, resuming it is fine.
+        let blocked = focus_send_refusal(&view(None, true, true)).expect("refused");
+        assert!(
+            blocked.starts_with("build · fix tests is working inside this turn"),
+            "{blocked}"
+        );
+        assert_eq!(focus_send_refusal(&view(None, true, false)), None);
+        // Another session's agent, and a grandchild: never, whatever
+        // state they are in.
+        for state in [true, false] {
+            let refusal = focus_send_refusal(&view(
+                Some("explorer's agent, not this session's"),
+                true,
+                state,
+            ))
+            .expect("refused");
+            assert_eq!(
+                refusal,
+                "build · fix tests is explorer's agent, not this session's, so this session \
+                 cannot message it — only the one that started it can."
+            );
+        }
+    }
+
+    /// Nothing routed the root's chords into a focus view, so they did
+    /// nothing at all — Ctrl-D least visibly of the lot.
+    #[test]
+    fn the_roots_chords_name_themselves_inside_a_focus_view() {
+        use crossterm::event::KeyCode;
+        for (code, control, named) in [
+            (KeyCode::F(1), false, "F1"),
+            (KeyCode::Char('p'), true, "Ctrl-P"),
+            (KeyCode::Char('d'), true, "Ctrl-D"),
+            (KeyCode::Char('s'), true, "Ctrl-S"),
+            (KeyCode::Char('q'), true, "Ctrl-Q"),
+        ] {
+            assert_eq!(
+                focus_key_belongs_to_the_root(code, control),
+                Some(named),
+                "{code:?}"
+            );
+        }
+        // What the view itself uses, and ordinary typing, stay its own.
+        for (code, control) in [
+            (KeyCode::Char('d'), false),
+            (KeyCode::Char('p'), false),
+            (KeyCode::Enter, false),
+            (KeyCode::Up, false),
+            (KeyCode::Char('j'), true),
+        ] {
+            assert_eq!(
+                focus_key_belongs_to_the_root(code, control),
+                None,
+                "{code:?}"
+            );
+        }
+    }
+
+    /// One prompt, two drafts: what was typed at the root waits under
+    /// the view and comes back on Esc, and what was typed at the agent
+    /// and never sent goes to the stash rather than becoming the root's
+    /// next message.
+    #[test]
+    fn a_focus_view_borrows_the_prompt_and_gives_it_back() {
+        let mut app = App::new();
+        app.input = crate::input::InputBuffer::from("a half-written root message".to_string());
+        app.pending_images = vec![ilar::session::ImageContent::png(b"screenshot")];
+        let parked = StashedPrompt {
+            text: app.input.take(),
+            images: std::mem::take(&mut app.pending_images),
+        };
+        app.focus = Some(FocusView {
+            parked,
+            ..FocusView::new("child".into(), "build · fix tests".into(), Vec::new(), true)
+        });
+        assert!(app.input.is_blank(), "the agent's prompt starts empty");
+
+        app.input = crate::input::InputBuffer::from("never sent".to_string());
+        app.close_focus();
+        assert_eq!(app.input.text(), "a half-written root message");
+        assert_eq!(app.pending_images.len(), 1);
+        assert_eq!(
+            app.input_stash,
+            vec![StashedPrompt {
+                text: "never sent".into(),
+                images: Vec::new()
+            }]
+        );
+        assert!(
+            app.notice_text()
+                .is_some_and(|text| text.contains("unsent message to build · fix tests stashed")),
+            "{:?}",
+            app.notice_text()
+        );
+
+        // Nothing typed at the agent, nothing attached: nothing
+        // stashed, nothing said.
+        app.input_stash.clear();
+        app.pending_images.clear();
+        app.focus = Some(FocusView {
+            parked: StashedPrompt {
+                text: "back again".into(),
+                images: Vec::new(),
+            },
+            ..FocusView::new("child".into(), "build".into(), Vec::new(), true)
+        });
+        app.input = crate::input::InputBuffer::from("   ".to_string());
+        app.close_focus();
+        assert_eq!(app.input.text(), "back again");
+        assert!(app.input_stash.is_empty());
+    }
+
     /// The focus view takes the transcript area — title, footer and
     /// seeded rows — while the sidebar stays: the agents panel is how
     /// you got here and how you leave. A finished agent changes the
@@ -5001,7 +5222,13 @@ mod tests {
             "{focused}"
         );
         assert!(focused.contains("seeded child reply"), "{focused}");
-        assert!(focused.contains("read-only"), "{focused}");
+        // Enter messages the agent, so the footer must not say
+        // read-only — it says what Enter does.
+        assert!(!focused.contains("read-only"), "{focused}");
+        assert!(
+            focused.contains("Enter messages it · Esc close"),
+            "{focused}"
+        );
         assert!(!focused.contains("root prose"), "{focused}");
         // The map stays on screen: main is still a click away.
         assert!(focused.contains("● main"), "{focused}");
@@ -5010,10 +5237,20 @@ mod tests {
         app.focus.as_mut().unwrap().running = false;
         let finished = screen(&mut app);
         assert!(
-            finished.contains("agent finished · Esc returns"),
+            finished.contains("agent finished · ↑↓ scroll · Enter resumes it · Esc close"),
             "{finished}"
         );
         assert!(finished.contains("seeded child reply"), "{finished}");
+
+        // A row this session cannot message promises nothing: the send
+        // would be refused, so the footer does not offer it.
+        app.focus.as_mut().unwrap().running = true;
+        app.focus.as_mut().unwrap().unreachable =
+            Some("explorer's agent, not this session's".into());
+        let foreign = screen(&mut app);
+        assert!(!foreign.contains("Enter messages"), "{foreign}");
+        assert!(foreign.contains("↑↓ scroll · Esc close"), "{foreign}");
+        app.focus.as_mut().unwrap().unreachable = None;
 
         // Esc's path: the root transcript comes back as it was.
         app.close_focus();

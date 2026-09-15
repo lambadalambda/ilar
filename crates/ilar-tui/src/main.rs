@@ -1775,13 +1775,66 @@ struct RoutedDelivery {
 /// steered, a finished one resumed with the message as its prompt. The
 /// root keeps drawing; the ending lands as a transcript line.
 struct FocusMessage {
-    handle: tokio::task::JoinHandle<ilar::tools::ToolOutput>,
+    handle: tokio::task::JoinHandle<ilar::subagent::TaskMessage>,
     target: String,
 }
 
 /// The root's transcript line for a message sent from a focus view.
 fn focus_message_line(target: &str, text: &str) -> String {
     format!("→ {target}: {text}")
+}
+
+/// How much of an agent's reply the headline carries.
+const FOCUS_REPLY_CHARS: usize = 100;
+
+/// The root's one line for what became of a focus message. The tool's
+/// own wording is written for a model — "do not repeat the message",
+/// with the task's uuid in it — and a resumed agent's whole answer, up
+/// to 16 KiB of unrendered markdown, is not a record of anything: the
+/// focus view already shows it rendered.
+fn focus_outcome_line(target: &str, outcome: ilar::subagent::TaskMessage) -> (String, NoticeLevel) {
+    use ilar::subagent::TaskMessage;
+    match outcome {
+        TaskMessage::Queued { .. } => (
+            format!("{target} takes it at its next step"),
+            NoticeLevel::Info,
+        ),
+        TaskMessage::Held { .. } => (
+            format!(
+                "{target} is busy with work of its own — it gets the message at its next resume"
+            ),
+            NoticeLevel::Info,
+        ),
+        TaskMessage::Refused(why) => (
+            format!(
+                "message to {target} was refused: {}",
+                ilar::text::bounded_detail(&why)
+            ),
+            NoticeLevel::Error,
+        ),
+        TaskMessage::Answered { output, .. } if output.is_error => (
+            format!(
+                "message to {target} failed: {}",
+                ilar::text::bounded_detail(&output.content)
+            ),
+            NoticeLevel::Error,
+        ),
+        TaskMessage::Answered { output, .. } => (
+            format!("{target} answered: {}", reply_headline(&output.content)),
+            NoticeLevel::Info,
+        ),
+    }
+}
+
+/// The first line of a reply worth showing, bounded. The task-id
+/// footer the tool appends is not an answer.
+fn reply_headline(reply: &str) -> String {
+    let headline = reply
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with("(task_id:"))
+        .unwrap_or("(nothing)");
+    crate::text::truncate_display(headline, FOCUS_REPLY_CHARS, crate::text::Truncation::Right)
 }
 
 enum TurnCompletion {
@@ -2510,17 +2563,37 @@ fn open_agent_focus(app: &mut App, store: &SessionStore, session_id: &str) -> bo
     // activity at all, so a row the seed left open would spin forever.
     // Only an agent whose events will actually arrive gets that.
     let streaming = roster.is_some_and(|row| !row.delivering);
+    // What Enter may do here, judged now: the row disappears the moment
+    // the agent finishes, and a refusal that depends on whose child it
+    // is must not disappear with it.
+    let unreachable = roster.and_then(|row| match &row.foreign_parent {
+        Some(owner) => Some(format!("{owner}'s agent, not this session's")),
+        None if row.depth > 0 => Some("another agent's child, not this session's".to_string()),
+        None => None,
+    });
+    let foreground = roster.is_some_and(|row| !row.background && !row.delivering);
     // A live search would keep the keyboard and make the focus
     // footer lie; the click is a navigation, so the search is over.
     app.close_search(false);
-    app.focus = Some(FocusView::new(
-        session_id.to_string(),
-        title,
-        vec![crate::transcript::Line_::System(
-            "loading transcript…".into(),
-        )],
-        running,
-    ));
+    // The root's draft goes with the root: the prompt now belongs to
+    // the agent on screen, and Esc hands it back.
+    let parked = crate::app::StashedPrompt {
+        text: app.input.take(),
+        images: std::mem::take(&mut app.pending_images),
+    };
+    app.focus = Some(FocusView {
+        unreachable,
+        foreground,
+        parked,
+        ..FocusView::new(
+            session_id.to_string(),
+            title,
+            vec![crate::transcript::Line_::System(
+                "loading transcript…".into(),
+            )],
+            running,
+        )
+    });
     streaming
 }
 
@@ -3624,27 +3697,17 @@ async fn run_app(
                 continue;
             }
             let message = focus_messages.remove(index);
-            let output = match message.handle.await {
-                Ok(output) => output,
-                Err(error) => {
-                    ilar::tools::ToolOutput::error(format!("the message task crashed: {error}"))
-                }
+            let outcome = match message.handle.await {
+                Ok(outcome) => outcome,
+                Err(error) => ilar::subagent::TaskMessage::Refused(format!(
+                    "the message task crashed: {error}"
+                )),
             };
-            if output.is_error {
-                let line = format!(
-                    "message to {} failed: {}",
-                    message.target,
-                    ilar::text::bounded_detail(&output.content)
-                );
-                app.set_notice(&line, NoticeLevel::Error);
-                app.push_transcript_line(Line_::System(line));
-            } else {
-                app.push_transcript_line(Line_::System(format!(
-                    "{} · {}",
-                    message.target,
-                    ilar::text::bounded_detail(&output.content)
-                )));
+            let (line, level) = focus_outcome_line(&message.target, outcome);
+            if level == NoticeLevel::Error {
+                app.set_notice(&line, level);
             }
+            app.push_transcript_line(Line_::System(line));
         }
 
         // The whole iteration minus the dispatch — completion
@@ -4485,8 +4548,8 @@ async fn run_app(
                 // modal does: scroll keys move it, Esc closes it — and
                 // must not fall through to the turn-abort arm below,
                 // because closing a view is not aborting the root's
-                // work. Everything else routes nowhere, which the
-                // view's footer says out loud.
+                // work. Enter talks to the agent on screen; the root's
+                // own chords are not routed here and say so.
                 if app.focus.is_some() {
                     // Ctrl-G stops the agent on screen — the one cancel
                     // that is not all-or-nothing. It arms first: this
@@ -4526,6 +4589,13 @@ async fn run_app(
                         app.close_focus();
                         continue;
                     }
+                    if let Some(named) = crate::app::focus_key_belongs_to_the_root(code, control) {
+                        app.set_notice(
+                            format!("{named} belongs to the session behind this view — Esc leaves the view first"),
+                            NoticeLevel::Info,
+                        );
+                        continue;
+                    }
                     let scrolled = app.focus.as_mut().is_some_and(|focus| {
                         match code {
                             KeyCode::Up => focus.scroll_by(-1),
@@ -4547,13 +4617,30 @@ async fn run_app(
                     // it runs, resuming it if it finished.
                     match handle_prompt_key(&mut app.input, key) {
                         PromptAction::Submit if !app.input.is_blank() => {
+                            let focus = app.focus.as_ref().expect("focus is open");
+                            let (session_id, target) =
+                                (focus.session_id.clone(), focus.title.clone());
+                            // Refused before anything is recorded: the
+                            // send used to reach the transcript first
+                            // and the model's refusal — with a raw uuid
+                            // in it — a moment later.
+                            if let Some(refusal) = crate::app::focus_send_refusal(focus) {
+                                app.set_notice(refusal, NoticeLevel::Warning);
+                                continue;
+                            }
+                            // A slash command is the root's, and a
+                            // focus view is not where it runs; sending
+                            // the literal `/sessions` to an agent is
+                            // never what was meant.
+                            if app.input.text().trim_start().starts_with('/') {
+                                app.set_notice(
+                                    "commands belong to the session behind this view — Esc leaves the view first",
+                                    NoticeLevel::Warning,
+                                );
+                                continue;
+                            }
                             let text = app.input.take();
                             app.history.push(&text);
-                            let (session_id, target) = app
-                                .focus
-                                .as_ref()
-                                .map(|focus| (focus.session_id.clone(), focus.title.clone()))
-                                .expect("focus is open");
                             app.push_transcript_line(Line_::System(focus_message_line(
                                 &target, &text,
                             )));
@@ -4563,7 +4650,7 @@ async fn run_app(
                             let message = text;
                             let handle = tokio::spawn(async move {
                                 spawner
-                                    .message_task(
+                                    .deliver_to_task(
                                         ilar::subagent::TaskMessageInput {
                                             task_id: session_id,
                                             message,
@@ -4950,6 +5037,76 @@ mod tests {
             super::focus_message_line("explorer · survey the API", "check the auth module too"),
             "→ explorer · survey the API: check the auth module too"
         );
+    }
+
+    /// What the root's transcript says about a focus message, in the
+    /// TUI's own words: the tool's text is written for a model, and a
+    /// resumed agent's whole reply — up to 16 KiB of unrendered
+    /// markdown — is not a record of anything, since the focus view
+    /// already shows it rendered.
+    #[test]
+    fn a_focus_messages_ending_is_said_in_the_tuis_own_words() {
+        use super::{NoticeLevel, focus_outcome_line};
+        use ilar::subagent::TaskMessage;
+
+        let target = "explorer · survey the API";
+        let task_id = || "7c1e-0000".to_string();
+        assert_eq!(
+            focus_outcome_line(target, TaskMessage::Queued { task_id: task_id() }),
+            (
+                "explorer · survey the API takes it at its next step".into(),
+                NoticeLevel::Info
+            )
+        );
+        let (held, level) = focus_outcome_line(target, TaskMessage::Held { task_id: task_id() });
+        assert!(held.contains("at its next resume"), "{held}");
+        assert_eq!(level, NoticeLevel::Info);
+        // No uuid and no "do not repeat the message" prose anywhere.
+        let answer = format!(
+            "The auth module is fine.\n\nDetails follow.\n{}\n\n(task_id: {})",
+            "x".repeat(20_000),
+            task_id()
+        );
+        let (answered, level) = focus_outcome_line(
+            target,
+            TaskMessage::Answered {
+                task_id: task_id(),
+                output: ilar::tools::ToolOutput::text(answer),
+            },
+        );
+        assert_eq!(
+            answered,
+            "explorer · survey the API answered: The auth module is fine."
+        );
+        assert_eq!(level, NoticeLevel::Info);
+        let (failed, level) = focus_outcome_line(
+            target,
+            TaskMessage::Answered {
+                task_id: task_id(),
+                output: ilar::tools::ToolOutput::error("the worktree is gone"),
+            },
+        );
+        assert_eq!(
+            failed,
+            "message to explorer · survey the API failed: the worktree is gone"
+        );
+        assert_eq!(level, NoticeLevel::Error);
+        let (refused, level) =
+            focus_outcome_line(target, TaskMessage::Refused("nobody is listening".into()));
+        assert!(
+            refused.contains("was refused: nobody is listening"),
+            "{refused}"
+        );
+        assert_eq!(level, NoticeLevel::Error);
+        // An empty answer still says something.
+        let (empty, _) = focus_outcome_line(
+            target,
+            TaskMessage::Answered {
+                task_id: task_id(),
+                output: ilar::tools::ToolOutput::text(format!("\n\n(task_id: {})", task_id())),
+            },
+        );
+        assert!(empty.ends_with("answered: (nothing)"), "{empty}");
     }
 
     /// Every place that names a session for a delivery goes through
