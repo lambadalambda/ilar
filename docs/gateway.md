@@ -16,9 +16,14 @@ ilar-gateway prompt                # what a private chat's model gets: prompt, t
 ## Running it
 
 `ilar-gateway` runs in the foreground and logs to stderr; Ctrl-C stops
-it, waiting a few seconds for turns in flight. `scripts/install.sh`
-installs it next to `ilar`. On a systemd machine run it as a user
-service, from `scripts/ilar-gateway.service`:
+it. A turn in flight is cancelled, not finished: its chat is told
+"Aborted: the gateway is restarting; send that again.", and the prompt
+is not re-run when the gateway comes back — whether it still matters
+is the person's call. A subagent's report caught by the stop is not
+lost: it waits in the outbox and the next start delivers it.
+
+`scripts/install.sh` installs it next to `ilar`. On a systemd machine
+run it as a user service, from `scripts/ilar-gateway.service`:
 
 ```sh
 cp scripts/ilar-gateway.service ~/.config/systemd/user/

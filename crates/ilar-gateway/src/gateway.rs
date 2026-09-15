@@ -58,6 +58,16 @@ struct Status {
 /// What a chat is told when its turn was cancelled.
 pub const ABORTED_REPLY: &str = "Aborted.";
 
+/// The same, when nobody asked for it: the gateway is going down and
+/// every turn in flight goes with it. The prompt is not re-run — the
+/// person is the one who knows whether it still matters.
+pub const RESTARTING_REPLY: &str = "Aborted: the gateway is restarting; send that again.";
+
+/// The same for a subagent's report, which nobody has to send again:
+/// its outbox entry stays and the next start delivers it.
+pub const RESTARTING_FOLLOW_UP: &str =
+    "The gateway is restarting; a subagent's report is delivered once it is back.";
+
 /// What a chat is told when the model ended its turn with no message
 /// and no text.
 pub const EMPTY_REPLY: &str =
@@ -501,7 +511,7 @@ impl Gateway {
             Ok(report) if report.outcome == ilar::agent::TurnOutcome::Aborted => {
                 log(&format!("{key}: turn aborted"));
                 self.keep_handovers(seat, &report);
-                self.deliver(&seat.channel, &seat.chat_id, ABORTED_REPLY)
+                self.deliver(&seat.channel, &seat.chat_id, self.aborted_reply())
                     .await;
             }
             Ok(report) => {
@@ -522,6 +532,17 @@ impl Gateway {
                 )
                 .await;
             }
+        }
+    }
+
+    /// What a cancelled turn is told. The gateway stopping is not the
+    /// person's `/abort`: their prompt was dropped mid-flight and
+    /// nothing re-runs it, so the reply says to send it again.
+    fn aborted_reply(&self) -> &'static str {
+        if self.cancel.is_cancelled() {
+            RESTARTING_REPLY
+        } else {
+            ABORTED_REPLY
         }
     }
 
@@ -744,8 +765,14 @@ impl Gateway {
                 log(&format!("{key}: follow-up aborted"));
                 self.keep_handovers(&seat, &report);
                 if !seat.background {
-                    self.deliver(&seat.channel, &seat.chat_id, ABORTED_REPLY)
-                        .await;
+                    // Not the person's prompt: the report's outbox entry
+                    // stays, and the next start delivers it.
+                    let reply = if self.cancel.is_cancelled() {
+                        RESTARTING_FOLLOW_UP
+                    } else {
+                        ABORTED_REPLY
+                    };
+                    self.deliver(&seat.channel, &seat.chat_id, reply).await;
                 }
             }
             Ok(report) => {

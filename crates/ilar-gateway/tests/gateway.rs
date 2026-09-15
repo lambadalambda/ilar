@@ -952,6 +952,27 @@ async fn slash_abort_ends_the_turn_and_the_waiting_message_runs_after() {
 }
 
 #[tokio::test]
+async fn a_restart_tells_the_chat_the_turn_it_dropped() {
+    let dir = tempfile::tempdir().unwrap();
+    let (gateway, fake) = gateway(
+        dir.path(),
+        vec![
+            calls("bash", serde_json::json!({"command": "sleep 20"})),
+            says("never got here"),
+        ],
+    );
+    fake.inject("run something slow", "chat-1", "alice").await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    gateway.cancel();
+    let sent = fake.wait_for_sent(1, WAIT).await;
+    assert_eq!(
+        sent.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(),
+        [ilar_gateway::gateway::RESTARTING_REPLY],
+        "{sent:?}"
+    );
+}
+
+#[tokio::test]
 async fn a_status_line_follows_the_turn_and_vanishes_before_the_reply() {
     use ilar_gateway::channel::Seen;
     let dir = tempfile::tempdir().unwrap();
