@@ -117,7 +117,9 @@ and unless `providers.openai.image_gen = false`, the model has an
 reference_paths?}`. It posts to the account's images endpoint with
 model `gpt-image-2` (the same call Codex makes), writes the PNG under
 `<state dir>/images/<session>/<call>.png`, returns the path, and attaches
-the image to the result so a vision model can look at what it made.
+the image to the result so a vision model can look at what it made. In a
+session whose model takes no images the file is the whole result, and the
+result says so rather than promising an attachment that is not there.
 Reference images (up to five, resolved against the working directory)
 turn the call into an edit; edits go through the ChatGPT backend's JSON
 shape, so with an API key only generation is available today. Each call

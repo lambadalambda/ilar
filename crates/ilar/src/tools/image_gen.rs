@@ -140,8 +140,9 @@ impl Tool for ImageGenTool {
     fn description(&self) -> &'static str {
         "Generate an image from a prompt with OpenAI's gpt-image-2 on this account, or \
          edit up to five reference images (reference_paths) — logos, mockups, diagrams, \
-         illustrations. Writes a PNG under ilar's state directory, returns its path, and \
-         attaches the image to the result so you can look at it. Each call is one image \
+         illustrations. Writes a PNG under ilar's state directory, returns its path, and — \
+         when this session's model accepts images — attaches the image so you can look at \
+         it; the result says which happened. Each call is one image \
          and costs money: write a complete prompt (subject, style, composition, any text \
          to render verbatim) rather than iterating blindly. size: auto (default) or \
          WIDTHxHEIGHT such as 1536x1024 (landscape), 1024x1536 (portrait), 2048x2048; \
