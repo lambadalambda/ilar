@@ -221,7 +221,10 @@ and `USER.md` (about the person, 1,375), which the `memory` tool edits
 with add, replace and remove; an overflow is an error the model
 resolves by consolidating. The core is injected into the system
 prompt once, when a chat's session opens, and stays frozen for that
-session; it is never injected into a group chat.
+session; it is never injected into a group chat. A room's seat has no
+memory tools either — no `memory`, `memory_search` or `memory_get` —
+so what the assistant knows about its person cannot be read aloud
+there by another door.
 
 The archive is one fact per file under `notes/`, typed as a decision,
 solution, preference, event, task or risk, written with the same
@@ -264,7 +267,9 @@ should end in nothing.
 
 A cron job the gateway owns, `weekly`, kept in step with the
 configuration at every start. It runs on a background session of its
-own, addressed to whichever chat was last heard from, with a fixed
+own, addressed to whichever private chat was last heard from — its
+report is about the person's memory, so a room is never the target,
+and with no private chat on record the job is skipped — with a fixed
 prompt: read the week's daily notes, promote what recurs into the core
 memory through the `memory` tool so the caps hold, drop what is no
 longer true, file the rest as notes, merge overlapping skills through

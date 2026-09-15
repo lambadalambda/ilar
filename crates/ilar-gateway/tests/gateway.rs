@@ -1344,6 +1344,43 @@ async fn the_weekly_review_is_a_job_the_gateway_owns_and_speaks_to_the_last_chat
 }
 
 #[tokio::test]
+async fn a_room_has_no_memory_and_the_weekly_review_keeps_out_of_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = GatewayConfig {
+        scheduler_tick_secs: 1,
+        weekly: ilar_gateway::weekly::WeeklyConfig {
+            // Every second, so the test sees whether it fires.
+            cron: "* * * * * *".into(),
+            ..Default::default()
+        },
+        ..GatewayConfig::default()
+    };
+    let (gateway, fake) = gateway_with(
+        dir.path(),
+        vec![
+            says("hello all"),
+            messages("what I changed in the person's memory", None),
+        ],
+        settings,
+    );
+    fake.inject_in_group("hi bot", "room-1", "alice").await;
+    let sent = fake.wait_for_sent(1, WAIT).await;
+    assert_eq!(sent[0].text, "hello all");
+    // No way to read or write the person's memory from a room.
+    let names = gateway.tool_names("fake:room-1").expect("a seat");
+    for gone in ["memory", "memory_search", "memory_get"] {
+        assert!(!names.contains(&gone), "{gone} survived: {names:?}");
+    }
+    assert!(names.contains(&"message"), "{names:?}");
+    // The room is the only chat that has written, so the weekly review
+    // — which reads that memory aloud — does not run at all.
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert_eq!(fake.sent().len(), 1, "{:?}", fake.sent());
+    assert!(gateway.tool_names("cron:weekly").is_none());
+    gateway.cancel();
+}
+
+#[tokio::test]
 async fn safe_mode_hides_the_unsafe_tools_from_the_chat_and_its_agents() {
     let dir = tempfile::tempdir().unwrap();
     let settings = GatewayConfig {

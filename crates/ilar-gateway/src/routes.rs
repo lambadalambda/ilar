@@ -13,6 +13,11 @@ pub struct Routes {
     pub sessions: BTreeMap<String, String>,
     /// Where an unaddressed message (the inbox, a cron job) goes.
     pub last_active: Option<String>,
+    /// The same, counting private chats only: what the assistant knows
+    /// about its person is not for a room, so a job the gateway owns
+    /// reads this instead.
+    #[serde(default)]
+    pub last_private: Option<String>,
     /// Keys that are group chats.
     #[serde(default)]
     pub groups: Vec<String>,
@@ -56,6 +61,18 @@ impl Routes {
         if is_group && !listed {
             self.groups.push(key.to_string());
         }
+        if !is_group {
+            self.last_private = Some(key.to_string());
+        }
+    }
+
+    /// The last chat heard from that is not a room: where a job of the
+    /// gateway's own — the weekly review, which reads the person's
+    /// memory aloud — is allowed to speak.
+    pub fn last_private_chat(&self) -> Option<&str> {
+        self.last_private
+            .as_deref()
+            .filter(|key| !self.is_group(key))
     }
 
     pub fn is_group(&self, key: &str) -> bool {
@@ -149,5 +166,15 @@ mod tests {
         assert_eq!(reopened.last_active.as_deref(), Some("fake:g"));
         assert!(reopened.is_group("fake:g"));
         assert!(!reopened.is_group("fake:1"));
+        // A room is heard from, but it is not where the weekly review
+        // speaks: that is the last private chat.
+        assert_eq!(reopened.last_private_chat(), Some("fake:1"));
+        // A chat that turns out to be a room stops being one, rather
+        // than standing as the last private chat on a stale flag.
+        let mut routes = reopened;
+        routes.touch("fake:g2", false);
+        routes.touch("fake:g2", true);
+        assert_eq!(routes.last_private_chat(), None);
+        assert!(Routes::default().last_private_chat().is_none());
     }
 }

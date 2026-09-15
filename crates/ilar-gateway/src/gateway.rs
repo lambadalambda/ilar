@@ -905,13 +905,19 @@ impl Gateway {
     /// A cron or heartbeat turn: its own session, homed on the chat it
     /// is for, and heard from only through the message tool.
     async fn handle_scheduled(&self, key: String, target: String, mut prompt: String) {
-        // The gateway's own job goes to whoever was last heard from,
-        // and has the sweep's findings appended.
+        // The gateway's own job goes to whoever was last heard from in
+        // private — its prompt reads the person's memory aloud, which
+        // is not for a room — and has the sweep's findings appended.
         let target = if target == crate::cron::LAST_ACTIVE {
-            match self.routes.snapshot().last_active {
+            match self
+                .routes
+                .snapshot()
+                .last_private_chat()
+                .map(str::to_string)
+            {
                 Some(last) => last,
                 None => {
-                    log(&format!("{key}: no chat has written yet; skipped"));
+                    log(&format!("{key}: no private chat has written yet; skipped"));
                     return;
                 }
             }

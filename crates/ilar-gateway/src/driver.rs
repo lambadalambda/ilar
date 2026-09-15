@@ -127,6 +127,14 @@ pub struct Seat {
     cancel: CancellationToken,
 }
 
+/// The chat a seat's own tools are built for: where it answers, and
+/// whether it is a private chat or a room.
+struct Home<'a> {
+    channel: &'a str,
+    chat_id: &'a str,
+    private: bool,
+}
+
 /// The channels a driver talks through, and what it knows about the
 /// channels it talks for.
 pub struct Wiring {
@@ -264,7 +272,14 @@ impl Driver {
                 routes.bind(key, &runtime.session_id);
             }
         })?;
-        let sent = self.seat_tools(&mut runtime.registry, channel, chat_id)?;
+        let sent = self.seat_tools(
+            &mut runtime.registry,
+            Home {
+                channel,
+                chat_id,
+                private,
+            },
+        )?;
         let cancel = self.cancel.child_token();
         let grants: crate::grants::PendingSlot = Arc::new(Mutex::new(None));
         if let Some(prompts) = runtime.grants.take() {
@@ -347,9 +362,13 @@ impl Driver {
     fn seat_tools(
         &self,
         registry: &mut ilar::tools::ToolRegistry,
-        channel: &str,
-        chat_id: &str,
+        home: Home<'_>,
     ) -> Result<Arc<std::sync::atomic::AtomicUsize>> {
+        let Home {
+            channel,
+            chat_id,
+            private,
+        } = home;
         let (tool, sent) = MessageTool::new(
             self.wiring.outbound.clone(),
             channel,
@@ -363,7 +382,10 @@ impl Driver {
                 .unwrap_or(""),
         );
         registry.add(tool)?;
-        if self.gateway.memory.enabled {
+        // A room's seat has no memory: the core block is withheld from
+        // it, and reading or writing the person's memory aloud there
+        // would be the same leak by another door.
+        if self.gateway.memory.enabled && private {
             let memory = self.wiring.memory.clone();
             for (name, tool) in [
                 (
@@ -414,7 +436,14 @@ impl Driver {
         )?;
         let mut preview = plan.preview(&self.config)?;
         self.restrict(&mut preview.registry);
-        self.seat_tools(&mut preview.registry, channel, chat_id)?;
+        self.seat_tools(
+            &mut preview.registry,
+            Home {
+                channel,
+                chat_id,
+                private,
+            },
+        )?;
         Ok(preview)
     }
 
