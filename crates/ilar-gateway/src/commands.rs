@@ -128,8 +128,9 @@ fn parse_grant(argument: &str) -> Result<ilar::secrets::Grant, String> {
 /// and only where sudo wants one. Public because the gateway takes that
 /// message back out of the chat: whatever it was, it was meant to be a
 /// password and it is in the history now.
-pub const PASSWORD_AFTER_THE_YES: &str = "/grant takes a span and nothing else: once, session or always. The password is asked for \
-     after the yes — /password <pw> when sudo asks for it.";
+pub const PASSWORD_AFTER_THE_YES: &str = "/grant takes a span and nothing else: once, session \
+                                          or always. The password is asked for after the yes — \
+                                          /password <pw> when sudo asks for it.";
 
 /// The span a word was probably trying to be: within two edits of one,
 /// and long enough for that to mean something. A password is left
