@@ -1168,6 +1168,46 @@ mod tests {
         assert_eq!(plain.content, "just plain text #hashtag 100% intact");
     }
 
+    /// A page cut at the character cap used to end there, with no way
+    /// to reach the rest: bash and grep spill through the same context,
+    /// and so does this now.
+    #[tokio::test]
+    async fn a_cut_page_spills_the_rest_to_a_file_it_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = "x".repeat(MAX_TEXT_CHARS + 500);
+        let url = response_url("text/plain", body.as_bytes()).await;
+        let mut ctx = ToolContext::root(dir.path().to_path_buf());
+        ctx.spill_dir = Some(dir.path().join("tool-output"));
+        ctx.session_id = "sess".into();
+        ctx.call_id = Some("call".into());
+        let out = WebFetchTool::for_test(Duration::from_secs(2))
+            .run(serde_json::json!({"url": url}), ctx)
+            .await;
+
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("truncated at"), "{}", out.content);
+        let spilled = dir.path().join("tool-output/sess-call.txt");
+        assert!(
+            out.content.contains(spilled.to_str().unwrap()),
+            "{}",
+            out.content
+        );
+        assert_eq!(std::fs::read_to_string(&spilled).unwrap(), body);
+    }
+
+    /// The default backend is keyless and gets throttled; the status
+    /// alone reads as a blip worth retrying.
+    #[test]
+    fn a_throttled_search_names_the_keys_that_fix_it() {
+        let hint = search_key_hint("exa HTTP 429 Too Many Requests");
+        assert!(hint.contains("ILAR_TAVILY_API_KEY"), "{hint}");
+        assert!(hint.contains("ILAR_EXA_API_KEY"), "{hint}");
+        assert!(search_key_hint("tavily HTTP 401 Unauthorized").contains("ILAR_"));
+        // A real outage is not a missing key.
+        assert_eq!(search_key_hint("exa HTTP 503 Service Unavailable"), "");
+        assert_eq!(search_key_hint("connection closed"), "");
+    }
+
     #[tokio::test]
     async fn fetch_rejects_declared_and_streamed_oversize_bodies() {
         let declared = spawn_server(

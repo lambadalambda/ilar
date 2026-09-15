@@ -326,6 +326,21 @@ where
 mod tests {
     use super::*;
 
+    /// "no such tool: x" alone leaves the model guessing a second name.
+    #[test]
+    fn an_unknown_tool_is_told_what_this_session_has() {
+        let refusal = unknown_tool_refusal("edit_file", &["read", "edit", "write"]);
+        assert_eq!(
+            refusal,
+            "no such tool: edit_file; this session has: read, edit, write"
+        );
+        // A caller that cannot list its tools still says what happened.
+        assert_eq!(
+            unknown_tool_refusal("edit_file", &[]),
+            "no such tool: edit_file"
+        );
+    }
+
     struct GateTool {
         gate: Arc<tokio::sync::Notify>,
     }

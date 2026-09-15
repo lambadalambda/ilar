@@ -2082,7 +2082,13 @@ async fn grep_bounds_long_lines_and_total_output() {
         "{}",
         out.content
     );
-    assert!(out.content.contains("truncated"), "{}", out.content);
+    // Which cap bit, not just that one did: the fix differs per cap.
+    assert!(
+        out.content
+            .contains("truncated at the first 2.0 MiB of a file"),
+        "{}",
+        out.content
+    );
 }
 
 #[tokio::test]

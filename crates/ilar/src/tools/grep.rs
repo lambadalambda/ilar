@@ -563,6 +563,23 @@ async fn spill_over_budget(
 mod tests {
     use super::*;
 
+    /// One "(truncated)" covered three caps, and each of them has a
+    /// different fix — so the notice names the one that bit.
+    #[test]
+    fn the_closing_notice_names_the_cap_that_bit() {
+        assert_eq!(cap_notice(false, false, false), None);
+        let matches = cap_notice(true, false, false).unwrap();
+        assert!(matches.contains("50 matches per file"), "{matches}");
+        let bytes = cap_notice(false, true, false).unwrap();
+        assert!(bytes.contains("the first 2.0 MiB of a file"), "{bytes}");
+        let output = cap_notice(false, false, true).unwrap();
+        assert!(output.contains("256.0 KiB of output"), "{output}");
+        // More than one can bite in the same search.
+        let both = cap_notice(true, false, true).unwrap();
+        assert!(both.contains("matches per file and"), "{both}");
+        assert!(both.contains("narrow the pattern"), "{both}");
+    }
+
     #[tokio::test]
     async fn a_missing_path_is_an_error_not_an_empty_result() {
         let dir = tempfile::tempdir().unwrap();

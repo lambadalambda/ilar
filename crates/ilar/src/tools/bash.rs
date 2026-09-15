@@ -729,6 +729,21 @@ mod tests {
         assert!(out.content.contains("pass 30000"), "{}", out.content);
     }
 
+    /// bash and sudo take the same argument and used to describe it —
+    /// and refuse it — differently, which read as two knobs.
+    #[test]
+    fn both_shells_refuse_a_seconds_shaped_timeout_the_same_way() {
+        assert_eq!(
+            short_timeout_refusal("sudo", 30).strip_prefix("sudo"),
+            short_timeout_refusal("bash", 30).strip_prefix("bash")
+        );
+        assert!(
+            short_timeout_refusal("sudo", 30).contains("pass 30000"),
+            "the sudo refusal kept bash's hint"
+        );
+        assert!(short_timeout_refusal("bash", 0).contains("no time at all"));
+    }
+
     fn spill_file(dir: &Path, name: &str, age: std::time::Duration) -> PathBuf {
         let path = dir.join(name);
         std::fs::write(&path, b"spilled\n").unwrap();
