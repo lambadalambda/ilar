@@ -560,6 +560,14 @@ impl SecretStore {
         self.list().map(|listed| listed.is_empty()).unwrap_or(false)
     }
 
+    /// Whether the person has a store at all. What decides the
+    /// `secrets` tool: a file that exists may gain an entry mid-session,
+    /// and a tool that appears halfway through a session is worse than
+    /// one that says the store is empty.
+    pub fn exists(&self) -> bool {
+        self.path.exists()
+    }
+
     /// Every entry, name and value, for shielding a child environment
     /// and redacting output.
     fn all(&self) -> Result<Vec<Granted>> {
@@ -686,6 +694,13 @@ pub struct Secrets {
     /// refusal the lock caused. The core knows whether there is a
     /// prompt channel, not which driver is on the other end.
     unlock_hint: Option<String>,
+    /// Whether this session has a sudo tool: without one, the `root`
+    /// row in the listing describes something the model cannot do.
+    sudo: bool,
+    /// What an ask had to admit, for the result of the call that asked:
+    /// an Always the store would not keep. Drained by
+    /// [`Self::take_notes`].
+    notes: Arc<Mutex<Vec<String>>>,
 }
 
 /// What a driver that never said how to unlock the store falls back to.
@@ -705,12 +720,28 @@ impl Secrets {
             held: Arc::new(Mutex::new(BTreeMap::new())),
             prompts: None,
             unlock_hint: None,
+            sudo: false,
+            notes: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     pub fn with_prompts(mut self, sender: GrantSender) -> Self {
         self.prompts = Some(sender);
         self
+    }
+
+    /// Whether the session installs the sudo tool (`agent.sudo`): only
+    /// then is `root` something the model can ask for, so only then is
+    /// it in the listing.
+    pub fn with_sudo(mut self, sudo: bool) -> Self {
+        self.sudo = sudo;
+        self
+    }
+
+    /// What the asks in this call had to admit, dropped as it is taken:
+    /// the result of the call carries it.
+    pub fn take_notes(&self) -> Vec<String> {
+        std::mem::take(&mut self.notes.lock().unwrap())
     }
 
     /// What the driver's user does to unlock a sealed store: "restart
@@ -747,7 +778,7 @@ impl Secrets {
 
     /// The listing the model gets: names, descriptions, standing grants.
     pub fn listing(&self) -> Result<String> {
-        let listed = match self.store.list() {
+        let mut listed = match self.store.list() {
             Ok(listed) => listed,
             Err(error) if error.is::<Locked>() || error.is::<Resealed>() => {
                 return Ok(format!(
@@ -757,12 +788,29 @@ impl Secrets {
             }
             Err(error) => return Err(error),
         };
+        let session = self.session.lock().unwrap();
+        // The `root` row belongs to the sudo tool: it goes when there
+        // is no such tool, and it comes from a grant given this session
+        // as much as from one in the store — the store knows nothing
+        // about "yes, this session".
+        if self.sudo {
+            if !listed.iter().any(|secret| secret.name == ROOT)
+                && session.iter().any(|(name, _)| name == ROOT)
+            {
+                listed.push(Listed {
+                    name: ROOT.into(),
+                    description: ROOT_DESCRIPTION.into(),
+                    always: Vec::new(),
+                });
+            }
+        } else {
+            listed.retain(|secret| secret.name != ROOT);
+        }
         if listed.is_empty() {
             return Ok(
                 "No secrets are stored. The user adds one with: ilar secret set NAME".to_string(),
             );
         }
-        let session = self.session.lock().unwrap();
         let lines = listed
             .iter()
             .map(|secret| {
@@ -993,17 +1041,43 @@ impl Secrets {
             }
             Grant::Always => {
                 // The person said yes; a store that cannot be written
-                // makes that a session grant rather than a refusal.
+                // makes that a session grant rather than a refusal —
+                // said out loud, since "always" was the answer and the
+                // next session will ask again.
                 if self.store.grant_always(name, request.tool).is_err() {
                     self.session
                         .lock()
                         .unwrap()
                         .insert((name.to_string(), request.tool.to_string()));
+                    self.notes.lock().unwrap().push(format!(
+                        "{name} for {}: the store is unwritable, so it is granted for this \
+                         session only",
+                        request.tool
+                    ));
                 }
             }
         }
         Ok(())
     }
+}
+
+/// Every value a command's output is redacted of at the source: the
+/// ones this call was granted, plus every other stored or held value.
+/// A command that echoes a secret it never asked for — a `cat` of a
+/// config file, a `env` — must not reach the spill file or the live
+/// tail in the clear either.
+pub fn redaction_set(secrets: Option<&Secrets>, granted: &[Granted]) -> Vec<Granted> {
+    let Some(secrets) = secrets else {
+        return granted.to_vec();
+    };
+    let mut values = granted.to_vec();
+    values.extend(
+        secrets
+            .all()
+            .into_iter()
+            .filter(|secret| !granted.iter().any(|one| one.name == secret.name)),
+    );
+    values
 }
 
 /// Output with every granted value replaced by `<secret:NAME>`. At the
@@ -1116,6 +1190,7 @@ mod tests {
     fn the_store_keeps_names_and_shows_no_values() {
         let (_dir, store) = store();
         assert!(store.list().unwrap().is_empty());
+        assert!(!store.exists(), "no file until something is stored");
         assert!(!store.set("GITHUB_TOKEN", " for gh ", "ghp_abc").unwrap());
         assert!(store.set("GITHUB_TOKEN", "for gh", "ghp_def").unwrap());
         let listed = store.list().unwrap();
@@ -1132,6 +1207,7 @@ mod tests {
             Some("ghp_def")
         );
         assert_eq!(store.value("OTHER").unwrap(), None);
+        assert!(store.exists());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1416,6 +1492,118 @@ mod tests {
 
     /// One unknown name fails the call before anyone is asked about
     /// the known ones.
+    /// The `root` row is the sudo tool's: it shows a grant given this
+    /// session as well as a stored one, and it is absent where there is
+    /// no sudo tool to use it.
+    #[tokio::test]
+    async fn the_root_row_follows_the_sudo_tool() {
+        let (_dir, store) = store();
+        let (tx, mut rx) = grant_channel(1);
+        let secrets = Secrets::new(store.clone()).with_prompts(tx).with_sudo(true);
+        let cancel = cancel();
+        let ask = Request {
+            tool: "sudo",
+            names: &[],
+            detail: "apt install ripgrep",
+            session_id: "s1",
+            tool_call_id: None,
+            cancel: &cancel,
+        };
+        assert!(
+            secrets
+                .listing()
+                .unwrap()
+                .starts_with("No secrets are stored")
+        );
+        let (outcome, _) = tokio::join!(
+            secrets.approve_root(ask, "to install ripgrep"),
+            answer(&mut rx, Some(Grant::Session))
+        );
+        assert!(outcome.is_ok());
+        assert!(store.list().unwrap().is_empty(), "written to the store");
+        let listing = secrets.listing().unwrap();
+        assert!(listing.contains(ROOT), "{listing}");
+        assert!(listing.contains("sudo (this session)"), "{listing}");
+        assert!(listing.contains(ROOT_DESCRIPTION), "{listing}");
+
+        // A standing grant in the store, and no sudo tool in the
+        // session: nothing can use root, so it is not offered.
+        store.grant_always(ROOT, "sudo").unwrap();
+        let sudoless = Secrets::new(store.clone());
+        assert!(
+            sudoless
+                .listing()
+                .unwrap()
+                .starts_with("No secrets are stored"),
+            "{}",
+            sudoless.listing().unwrap()
+        );
+        assert!(secrets.listing().unwrap().contains("sudo (always)"));
+    }
+
+    /// An "always" the store cannot keep is a session grant, and the
+    /// call that asked says so instead of promising it was written.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_always_the_store_cannot_keep_says_it_is_for_the_session() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_dir, store) = store();
+        store.set("KEY", "", "value-one").unwrap();
+        let (tx, mut rx) = grant_channel(1);
+        let secrets = Secrets::new(store.clone()).with_prompts(tx);
+        // The state directory read-only: the file still reads, no
+        // replacement can be written beside it.
+        let state = store.path().parent().unwrap().to_path_buf();
+        let was = std::fs::metadata(&state).unwrap().permissions();
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let cancel = cancel();
+        let names = ["KEY".to_string()];
+        let (outcome, _) = tokio::join!(
+            secrets.resolve(request(&names, &cancel)),
+            answer(&mut rx, Some(Grant::Always))
+        );
+        std::fs::set_permissions(&state, was).unwrap();
+        assert!(outcome.is_ok(), "{:?}", outcome.err());
+        let notes = secrets.take_notes();
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("KEY for bash"), "{notes:?}");
+        assert!(
+            notes[0].contains("granted for this session only"),
+            "{notes:?}"
+        );
+        assert!(secrets.take_notes().is_empty(), "a note was said twice");
+        assert!(
+            store.list().unwrap()[0].always.is_empty(),
+            "the store took it after all"
+        );
+        // Granted for the session all the same: no second question.
+        assert!(secrets.resolve(request(&names, &cancel)).await.is_ok());
+    }
+
+    /// Output is redacted of every value the store holds, not only the
+    /// ones the call asked for: a command that echoes somebody else's
+    /// token never reaches the spill file with it.
+    #[test]
+    fn the_redaction_set_is_every_stored_value() {
+        let (_dir, store) = store();
+        store.set("A", "", "aaaa-value").unwrap();
+        store.set("B", "", "bbbb-value").unwrap();
+        let secrets = Secrets::new(store.clone());
+        let granted = vec![Granted {
+            name: "A".into(),
+            value: "aaaa-value".into(),
+        }];
+        let values = redaction_set(Some(&secrets), &granted);
+        assert_eq!(values.len(), 2);
+        assert_eq!(
+            redact("aaaa-value bbbb-value", &values),
+            "<secret:A> <secret:B>"
+        );
+        // No store at all: only what the call was handed.
+        assert_eq!(redaction_set(None, &granted).len(), 1);
+    }
+
     #[tokio::test]
     async fn an_unknown_name_fails_before_any_question() {
         let (_dir, store) = store();

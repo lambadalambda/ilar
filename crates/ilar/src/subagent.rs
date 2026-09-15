@@ -651,7 +651,7 @@ impl SubagentSpawner {
                 };
                 let registry = registry.with_models(self.available_models.clone())?;
                 let registry = match &self.secrets {
-                    Some(secrets) if !secrets.store().is_empty() => registry.with_secrets()?,
+                    Some(secrets) if secrets.store().exists() => registry.with_secrets()?,
                     _ => registry,
                 };
                 if self.sudo {

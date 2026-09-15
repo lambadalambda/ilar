@@ -366,9 +366,12 @@ impl Tool for ServiceTool {
                     };
                     entry.refresh();
                     let output = entry.output.lock().unwrap();
+                    // Every stored value, not just the ones this
+                    // service was started with: a service that prints
+                    // somebody else's token must not hand it over here.
                     let text = crate::secrets::redact(
                         &String::from_utf8_lossy(&output.retained),
-                        &entry.granted,
+                        &crate::secrets::redaction_set(ctx.secrets.as_ref(), &entry.granted),
                     );
                     let all: Vec<&str> = text.lines().collect();
                     let start = all.len().saturating_sub(lines);

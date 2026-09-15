@@ -789,9 +789,13 @@ impl ToolOutput {
     }
 
     /// The same output with every stored secret value replaced in its
-    /// text. Images and state are untouched.
+    /// text, and anything an ask had to admit — an Always the store
+    /// would not keep — appended. Images and state are untouched.
     pub fn scrubbed(mut self, secrets: &crate::secrets::Secrets) -> Self {
         self.content = secrets.scrub(&self.content);
+        for note in secrets.take_notes() {
+            self.content.push_str(&format!("\n({note})"));
+        }
         self
     }
 

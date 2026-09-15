@@ -164,6 +164,9 @@ impl Tool for SudoTool {
                 std::time::Duration::from_millis(input.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
             let tail_reporter = ctx.call_id.clone().zip(ctx.output_tail.clone());
             let wanted_password = granted.is_empty();
+            // The password rides stdin; the output is scrubbed of it and
+            // of every other value the store holds.
+            let granted = crate::secrets::redaction_set(Some(secrets), &granted);
             let spill = SpillTarget::from_context(&ctx);
             let mut output = run_command(
                 "sudo",

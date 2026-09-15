@@ -29,8 +29,11 @@ seals it, at the cost of typing that password once per session.
 
 The model learns what is stored from the `secrets` tool, which lists
 names, descriptions and standing grants and never a value. The tool is
-present while the store has something in it and absent otherwise, so
-an empty store costs no tool.
+present once a store file exists — the first `ilar secret set` creates
+it — and absent on a machine that has never stored one, so nothing is
+paid for a store that does not exist. An empty store gets the tool and
+says it is empty: what the store holds changes while a session runs,
+and a tool that appears halfway through would be worse.
 
 To use a secret the model names it in the `secrets` argument of `bash`
 or `service start`:
@@ -44,9 +47,12 @@ It is not in ilar's own environment, not in any other command's, and
 not in the tool's arguments. What the command prints of it comes back
 as `<secret:GITHUB_TOKEN>`: the captured output is redacted before the
 spill file, the live tail, the service log or the transcript sees a
-byte of it. On top of that, every tool result that leaves the executor,
-whatever tool produced it, has every stored value replaced, so a `read`
-of the store file or a `grep` that crosses it shows marks, not values.
+byte of it, and not only of the values that call was granted — every
+value the store holds, so a command that echoes somebody else's token
+is marked at the source too. On top of that, every tool result that
+leaves the executor, whatever tool produced it, has every stored value
+replaced, so a `read` of the store file or a `grep` that crosses it
+shows marks, not values.
 
 Two limits are worth knowing. A value the command transforms (base64,
 a hash, a substring) is not recognised. And once a command runs with
@@ -67,6 +73,10 @@ Every use needs a grant. Where it is asked depends on the driver:
   longer, `/deny` refuses; ten minutes without an answer is a no.
 - **`ilar exec`**, a scheduled gateway turn, and any other driver with
   nobody to ask refuse an ungranted secret and say how to grant it.
+
+An "always" the store cannot keep — sealed and locked, or unwritable —
+is not a refusal: the use is granted for the session, and the tool
+result says so rather than claiming it was written.
 
 Grants are per secret and per tool. Once covers that one call (for
 `service start`, that one start; the value lives as long as the
@@ -97,7 +107,9 @@ ilar secret revoke root
 ```
 
 `root` shows in `ilar secret list` while a tool holds standing
-approval; it cannot be stored as a value.
+approval; it cannot be stored as a value. In the model's own listing it
+shows while this session has the sudo tool — from a grant given this
+session as much as from a stored one — and never without it.
 
 When sudo needs a password, the prompt has a row for it: type it there,
 or leave it empty on a system with passwordless sudo. What you type is

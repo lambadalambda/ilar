@@ -533,6 +533,9 @@ impl RuntimePlan {
             Some(hint) => secrets.with_unlock_hint(hint.clone()),
             None => secrets,
         };
+        // Whether `root` is something the model can ask for at all: the
+        // listing says so only where the sudo tool exists.
+        let secrets = secrets.with_sudo(config.agent.sudo);
         let (secrets, grants) = if self.grants {
             let (sender, receiver) = crate::secrets::grant_channel(1);
             (secrets.with_prompts(sender), Some(receiver))
@@ -577,11 +580,16 @@ impl RuntimePlan {
             Some(backend) => registry.with_image_gen(backend)?,
             None => registry,
         };
-        // The listing costs a tool; an empty store does not pay it.
-        let registry = if secrets.store().is_empty() {
-            registry
-        } else {
+        // The listing costs a tool; a machine that has never stored a
+        // secret does not pay it. A store file that exists does install
+        // it, empty or not: the same rule the children use
+        // (`SubagentSpawner::agent_registry`), and one `ilar secret set`
+        // mid-session no longer leaves the parent without the tool its
+        // bash schema points at.
+        let registry = if secrets.store().exists() {
             registry.with_secrets()?
+        } else {
+            registry
         };
         let registry = if config.agent.sudo {
             registry.with_sudo()?

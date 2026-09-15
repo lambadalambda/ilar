@@ -494,6 +494,9 @@ impl Tool for BashTool {
                 Err(error) => return ToolOutput::error(error),
             };
             let env = ChildEnv::shielded(ctx.secrets.as_ref(), &granted);
+            // What the environment gets is what was granted; what the
+            // output is scrubbed of is every value the store holds.
+            let granted = crate::secrets::redaction_set(ctx.secrets.as_ref(), &granted);
             if input.run_in_background {
                 if ctx.has_workspace_lease() {
                     return ToolOutput::error(
@@ -602,6 +605,8 @@ pub(crate) fn run_command(
     spill: Option<SpillTarget>,
     declared_preview: Option<usize>,
     env: ChildEnv,
+    /// Every value this command's output is redacted of, at the source:
+    /// [`crate::secrets::redaction_set`], not just what it was granted.
     granted: Vec<crate::secrets::Granted>,
 ) -> ToolFuture {
     Box::pin(async move {

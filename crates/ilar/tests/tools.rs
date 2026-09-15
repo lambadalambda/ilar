@@ -2444,6 +2444,21 @@ async fn bash_hands_a_granted_secret_over_as_a_variable_and_redacts_it() {
     let out = bash.run(call(serde_json::json!([])), ctx.clone()).await;
     assert!(out.content.contains("token=\n"), "{}", out.content);
 
+    // A value the call never asked for is redacted at the source all
+    // the same — this is the tool's own output, before the executor's
+    // final scrub sees it.
+    let out = bash
+        .run(
+            serde_json::json!({"command": "echo tok-secret-value"}),
+            ctx.clone(),
+        )
+        .await;
+    assert!(
+        out.content.contains("<secret:TEST_TOKEN>"),
+        "{}",
+        out.content
+    );
+
     // A context without a store refuses any name.
     let bare = ToolContext::root(dir.path().to_path_buf());
     let out = bash
