@@ -1549,15 +1549,38 @@ task's scope yourself; continue only clearly disjoint work."
         self.message_task_observed(input, ctx, None).await
     }
 
+    /// The same send, saying what happened rather than telling a model
+    /// about it: a UI that sent the message itself has its own words
+    /// for "queued", "held" and "answered", and should not be reprinting
+    /// a paragraph addressed to the model.
+    pub async fn deliver_to_task(
+        self: &Arc<Self>,
+        input: TaskMessageInput,
+        ctx: &ToolContext,
+    ) -> TaskMessage {
+        self.message_task_outcome(input, ctx, None).await
+    }
+
     async fn message_task_observed(
         self: &Arc<Self>,
         input: TaskMessageInput,
         ctx: &ToolContext,
-        mut on_start: Option<ToolStartObserver>,
+        on_start: Option<ToolStartObserver>,
     ) -> ToolOutput {
+        self.message_task_outcome(input, ctx, on_start)
+            .await
+            .into_tool_output()
+    }
+
+    async fn message_task_outcome(
+        self: &Arc<Self>,
+        input: TaskMessageInput,
+        ctx: &ToolContext,
+        mut on_start: Option<ToolStartObserver>,
+    ) -> TaskMessage {
         let text = input.message.trim().to_string();
         if text.is_empty() {
-            return ToolOutput::error("message must not be empty");
+            return TaskMessage::Refused("message must not be empty".into());
         }
         let task_id = input.task_id.trim().to_string();
         // Only this session's own tasks: an id from somewhere else names
@@ -1569,16 +1592,16 @@ task's scope yourself; continue only clearly disjoint work."
                     meta.clone()
                 }
                 Some(_) => {
-                    return ToolOutput::error(format!(
+                    return TaskMessage::Refused(format!(
                         "task {task_id:?} was not spawned by this session; the tasks tool lists the ones that were"
                     ));
                 }
                 None => {
-                    return ToolOutput::error(format!("task {task_id:?} has no metadata"));
+                    return TaskMessage::Refused(format!("task {task_id:?} has no metadata"));
                 }
             },
             Err(error) => {
-                return ToolOutput::error(format!(
+                return TaskMessage::Refused(format!(
                     "unknown task {task_id:?}: {error}. Use an id from a task result, a \
                      task-notification, or the tasks tool, and never invent one."
                 ));
@@ -1589,7 +1612,7 @@ task's scope yourself; continue only clearly disjoint work."
             .iter()
             .any(|task| task.session_id == task_id && !task.background)
         {
-            return ToolOutput::error(format!(
+            return TaskMessage::Refused(format!(
                 "task {task_id} is a foreground task of the turn you are in: you are blocked on \
                  its result, so nothing said now can reach it before it comes back. Messaging \
                  serves background tasks, which keep working while you do — start one with the \
@@ -1600,18 +1623,7 @@ task's scope yourself; continue only clearly disjoint work."
             if let Some(on_start) = on_start.take() {
                 on_start();
             }
-            // Not "delivered": the task takes it at its next step, and a
-            // task that stops before reaching one leaves it waiting for
-            // its resume. Saying more than that would have the model
-            // count on a reading that may not happen.
-            return ToolOutput::text(format!(
-                "Message queued for running task {task_id}; it reaches that task at its next \
-                 step, and waits for the task's next resume if the task stops before then. Its \
-                 answer comes back the way that task's answers always do — as its result or its \
-                 completion notification — so do not wait for a reply here and do not repeat the \
-                 message."
-            ))
-            .with_child_session(task_id);
+            return TaskMessage::Queued { task_id };
         }
         if self.session_is_active(&task_id) {
             // Running a turn this spawner did not start — a completion
@@ -1622,11 +1634,7 @@ task's scope yourself; continue only clearly disjoint work."
             if let Some(on_start) = on_start.take() {
                 on_start();
             }
-            return ToolOutput::text(format!(
-                "Task {task_id} is busy with a completion of its own and has no live channel; \
-                 your message is held and delivered at its next resume."
-            ))
-            .with_child_session(task_id);
+            return TaskMessage::Held { task_id };
         }
         // The one thing a resume needs that a message does not name: the
         // worktree the task ran in. It is in the task's own metadata, so
@@ -1671,13 +1679,15 @@ task's scope yourself; continue only clearly disjoint work."
         // not read it as one: whatever the refusal says — including the
         // concurrency limit's "do not retry" — the message itself is
         // still parked and rides the child's next resume.
-        if output.is_error && self.child_steers.holds(&task_id, &text) {
-            return output.with_appended_text(
+        let output = if output.is_error && self.child_steers.holds(&task_id, &text) {
+            output.with_appended_text(
                 "\n\n(Your message was not delivered by this call, but it is not lost: it is \
                  queued and will be delivered when this task is next resumed.)",
-            );
-        }
-        output
+            )
+        } else {
+            output
+        };
+        TaskMessage::Answered { task_id, output }
     }
 
     pub async fn spawn_background_tool(
@@ -3000,6 +3010,52 @@ where
     serde_json::from_value(value)
         .map(Some)
         .map_err(serde::de::Error::custom)
+}
+
+/// What became of a message handed to a task. The model's version of
+/// each case is [`Self::into_tool_output`]; a driver that sent the
+/// message on a person's behalf renders the case itself rather than
+/// showing them a paragraph written for a model.
+#[derive(Debug)]
+pub enum TaskMessage {
+    /// Steered into the task's running turn: it takes it at its next
+    /// step.
+    Queued { task_id: String },
+    /// The task is busy with a turn this spawner did not start and has
+    /// no live channel; the message waits for its next resume.
+    Held { task_id: String },
+    /// The task had finished, so it was resumed with the message as its
+    /// prompt: this is what came back. An error here is the resume
+    /// declining, and the message is still queued.
+    Answered { task_id: String, output: ToolOutput },
+    /// Nothing was sent, and why.
+    Refused(String),
+}
+
+impl TaskMessage {
+    pub fn into_tool_output(self) -> ToolOutput {
+        match self {
+            Self::Refused(why) => ToolOutput::error(why),
+            // Not "delivered": the task takes it at its next step, and a
+            // task that stops before reaching one leaves it waiting for
+            // its resume. Saying more than that would have the model
+            // count on a reading that may not happen.
+            Self::Queued { task_id } => ToolOutput::text(format!(
+                "Message queued for running task {task_id}; it reaches that task at its next \
+                 step, and waits for the task's next resume if the task stops before then. Its \
+                 answer comes back the way that task's answers always do — as its result or its \
+                 completion notification — so do not wait for a reply here and do not repeat the \
+                 message."
+            ))
+            .with_child_session(task_id),
+            Self::Held { task_id } => ToolOutput::text(format!(
+                "Task {task_id} is busy with a completion of its own and has no live channel; \
+                 your message is held and delivered at its next resume."
+            ))
+            .with_child_session(task_id),
+            Self::Answered { output, .. } => output,
+        }
+    }
 }
 
 /// One message for one task, whatever that task is currently doing.
