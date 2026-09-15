@@ -605,8 +605,9 @@ pub(crate) fn run_command(
     spill: Option<SpillTarget>,
     declared_preview: Option<usize>,
     env: ChildEnv,
-    /// Every value this command's output is redacted of, at the source:
-    /// [`crate::secrets::redaction_set`], not just what it was granted.
+    // `granted`: every value this command's output is redacted of, at
+    // the source — `secrets::redaction_set`, not only what it was
+    // granted.
     granted: Vec<crate::secrets::Granted>,
 ) -> ToolFuture {
     Box::pin(async move {
