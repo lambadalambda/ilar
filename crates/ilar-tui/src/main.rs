@@ -3640,17 +3640,12 @@ async fn run_app(
                     // blank prompt; say what leaving costs before the
                     // second press takes it. Task results survive in
                     // the outbox — the warning says when they arrive,
-                    // not that they are lost. Counted alongside the
-                    // held and in-flight ones: results that left the
-                    // notification machinery and now sit in the message
-                    // queue or among unread steers as envelope texts.
-                    // The turn, the queue and the stash the app counts
-                    // itself.
+                    // not that they are lost. Only the loop's own
+                    // counts are handed over: the turn, the goal, the
+                    // stash and every waiting message are the app's,
+                    // and it counts those itself.
                     let cost = crate::app::QuitCost {
-                        undelivered: held_notifications.len()
-                            + notifications.len()
-                            + routed.len()
-                            + app.undelivered_queued_results(),
+                        undelivered: held_notifications.len() + notifications.len() + routed.len(),
                         // `spawner.shutdown()` below cancels every one
                         // of these, and each cancelled task mails a
                         // "was cancelled" result to its parent. The
@@ -4425,10 +4420,20 @@ async fn run_app(
                         app.clear_transient_notice();
                         continue;
                     }
-                    if matches!(code, KeyCode::Char('m' | 'M'))
-                        && !app.busy
-                        && !model_choices.is_empty()
-                    {
+                    if matches!(code, KeyCode::Char('m' | 'M')) {
+                        // The leader's one refusal, said by name — the
+                        // same rule the palette follows.
+                        if app.busy || model_choices.is_empty() {
+                            app.set_notice(
+                                if model_choices.is_empty() {
+                                    "no models to switch between — see docs/configuration.md"
+                                } else {
+                                    "a turn is running — switch models between turns"
+                                },
+                                NoticeLevel::Info,
+                            );
+                            continue;
+                        }
                         app.clear_transient_notice();
                         app.model_picker =
                             Some(ModelPicker::new(model_choices.clone(), &app.current_model));
@@ -4444,17 +4449,10 @@ async fn run_app(
                     app.status = "ready".into();
                     app.clear_transient_notice();
                 }
+                // Armed mid-turn too: its T half is only paint, and its
+                // M half refuses above by name rather than under a dead
+                // prefix.
                 if matches!((code, control), (KeyCode::Char('x'), true)) {
-                    // Mid-turn its M half is refused anyway, so say that
-                    // once here rather than offering a prefix whose
-                    // follow-up key does nothing.
-                    if app.busy {
-                        app.set_notice(
-                            "a turn is running — Ctrl-X picks a model between turns (F3 themes)",
-                            NoticeLevel::Info,
-                        );
-                        continue;
-                    }
                     app.model_key_pending = true;
                     app.set_notice("Ctrl-X: M models · T themes", NoticeLevel::Info);
                     continue;

@@ -190,6 +190,26 @@ pub(crate) struct QuitCost {
     pub(crate) focus_messages: usize,
 }
 
+/// Arm a pending row, or do the thing if it was already armed. `d` and
+/// ↵ both go through here — a row with nothing to edit acts on ↵ — so
+/// the confirmation and what it confirms cannot drift apart.
+fn arm_or_confirm(manager: &mut PendingManager, item: PendingItem) -> PendingAction {
+    if manager.armed != Some(item) {
+        manager.armed = Some(item);
+        return PendingAction::Stay;
+    }
+    manager.armed = None;
+    match item {
+        PendingItem::Queued(index) => PendingAction::DeleteQueued(index),
+        PendingItem::Goal => PendingAction::AbortGoal,
+        PendingItem::BackgroundJobs => PendingAction::CancelBackground,
+        PendingItem::Services => PendingAction::StopServices,
+        // Dismissing a retry offer needs no confirmation, so it never
+        // arms and never arrives here.
+        PendingItem::Retry => PendingAction::Stay,
+    }
+}
+
 /// Whether a queued or steered text is a task/tool notification
 /// envelope — a result that left the notification machinery and became
 /// an ordinary message. The tag prefix is the cheap screen; the display
@@ -1640,10 +1660,16 @@ impl App {
             // chain, and a turn that stopped part-way through it. The
             // stall watchdog's notice promises a resume and Esc has to
             // keep that promise, so the same offer stands — over the
-            // "turn aborted" the TurnDone event just set.
+            // "turn aborted" the TurnDone event just set. Persistent,
+            // like the error's: the abort's own stall notice is
+            // persistent too, and a transient would lose to it and
+            // leave the offer unsaid.
             Ok(TurnOutcome::Aborted) if self.turn_committed => {
                 self.retry_available = true;
-                self.set_notice("turn aborted — Ctrl-R resumes it", NoticeLevel::Warning);
+                self.set_persistent_notice(
+                    "turn aborted — Ctrl-R resumes it",
+                    NoticeLevel::Warning,
+                );
             }
             Ok(_) => {}
         }
@@ -1661,17 +1687,24 @@ impl App {
         Some(message)
     }
 
-    /// Task/tool results that left the notification machinery and now
-    /// wait as ordinary texts — spliced into the queue at turn end or
-    /// steered but never read. They are still undelivered in the
-    /// outbox's eyes, so the quit warning must count them: durable, not
-    /// lost, but silent until the next open.
-    pub(crate) fn undelivered_queued_results(&self) -> usize {
-        self.queued_messages
+    /// Everything waiting to be read by the model — queued, or steered
+    /// into a turn that has not delivered it — split by what leaving
+    /// costs: `(the user's own words, task/tool results)`. The words
+    /// die with the process; the results left the notification
+    /// machinery and became ordinary texts, and the outbox still
+    /// counts them as undelivered, so they are durable but silent
+    /// until the next open.
+    pub(crate) fn waiting_messages(&self) -> (usize, usize) {
+        let results = self
+            .queued_messages
             .iter()
             .chain(self.pending_steers.iter())
             .filter(|message| is_notification_envelope(&message.text))
-            .count()
+            .count();
+        (
+            self.queued_messages.len() + self.pending_steers.len() - results,
+            results,
+        )
     }
 
     pub(crate) fn pending_items(&self) -> Vec<PendingItem> {
@@ -1814,21 +1847,7 @@ impl App {
                     PendingItem::Retry => PendingAction::DismissRetry,
                     // Goal, background jobs and task results are
                     // investments: confirm.
-                    armed_item => {
-                        if manager.armed == Some(armed_item) {
-                            manager.armed = None;
-                            match armed_item {
-                                PendingItem::Queued(index) => PendingAction::DeleteQueued(index),
-                                PendingItem::Goal => PendingAction::AbortGoal,
-                                PendingItem::BackgroundJobs => PendingAction::CancelBackground,
-                                PendingItem::Services => PendingAction::StopServices,
-                                _ => PendingAction::Stay,
-                            }
-                        } else {
-                            manager.armed = Some(armed_item);
-                            PendingAction::Stay
-                        }
-                    }
+                    armed_item => arm_or_confirm(manager, armed_item),
                 }
             }
             (KeyCode::Enter, _) => match selected {
@@ -1836,20 +1855,11 @@ impl App {
                 PendingItem::Goal => PendingAction::EditGoal,
                 PendingItem::Retry => PendingAction::RetryNow,
                 // There is nothing to edit about running work, so
-                // acting on it is stopping it: ↵ arms the same
-                // confirmation `d` does rather than doing nothing
+                // acting on it is stopping it: ↵ goes through the same
+                // arm-then-confirm `d` does, rather than doing nothing
                 // under a footer that promises an action.
                 item @ (PendingItem::BackgroundJobs | PendingItem::Services) => {
-                    if manager.armed == Some(item) {
-                        manager.armed = None;
-                        match item {
-                            PendingItem::Services => PendingAction::StopServices,
-                            _ => PendingAction::CancelBackground,
-                        }
-                    } else {
-                        manager.armed = Some(item);
-                        PendingAction::Stay
-                    }
+                    arm_or_confirm(manager, item)
                 }
             },
             _ => PendingAction::Stay,
@@ -2264,7 +2274,10 @@ impl App {
     /// Ctrl-S brings it back. Returns what to say about it, when
     /// something happened worth saying.
     pub(crate) fn discard_or_stash_input(&mut self) -> Option<String> {
-        if self.input.text().contains('\n') {
+        // Blank first: two Shift-Enters are not a draft, and stashing
+        // them would inflate the stash count and the quit warning with
+        // nothing.
+        if !self.input.is_blank() && self.input.text().contains('\n') {
             let lines = self.input.text().lines().count();
             let images = self.pending_images.len();
             self.stash_input();
@@ -2275,7 +2288,9 @@ impl App {
                 ),
             });
         }
-        if !self.input.is_blank() {
+        // Whitespace included: an emptied prompt that still holds
+        // blank lines is not "nothing there" to the layout.
+        if !self.input.text().is_empty() {
             self.input.clear();
             self.pending_images.clear();
             return None;
@@ -2305,43 +2320,43 @@ impl App {
     /// the second press is the answer to everything said; the repeat
     /// quits. `None` means quit now.
     pub(crate) fn quit_warning(&mut self, cost: QuitCost) -> Option<String> {
-        let mut parts = Vec::new();
+        // Short phrases, and the key first: the notice line is one row
+        // and reads from the left, so what the second press does has to
+        // survive the truncation that a session with everything at
+        // stake would otherwise cause.
+        let mut ends = Vec::new();
         if self.busy {
-            parts.push("the running turn would be cancelled".to_string());
+            ends.push("the running turn".to_string());
         }
         if cost.background > 0 {
-            parts.push(format!(
-                "{} background agent(s) would be cancelled",
-                cost.background
-            ));
+            ends.push(format!("{} background agent(s)", cost.background));
+        }
+        if let Some((_, round)) = &self.goal {
+            ends.push(format!("the goal (round {round}/{MAX_GOAL_ROUNDS})"));
         }
         if !self.input_stash.is_empty() {
-            parts.push(format!(
-                "{} stashed prompt(s) would be lost (Ctrl-S pops them)",
-                self.input_stash.len()
-            ));
+            ends.push(format!("{} stashed prompt(s)", self.input_stash.len()));
         }
-        // The undelivered results among them are counted as results,
-        // where the wording says they come back; the rest are simply
-        // gone.
-        let queued = self
-            .queued_messages
-            .iter()
-            .filter(|message| !is_notification_envelope(&message.text))
-            .count();
-        if queued > 0 {
-            parts.push(format!("{queued} queued message(s) would be lost"));
+        // Words the user typed that nothing has read yet: queued, or
+        // steered into the turn that is about to be cancelled. The
+        // results among them are counted as results instead, below,
+        // where the wording says they come back.
+        let (mine, mail) = self.waiting_messages();
+        if mine > 0 {
+            ends.push(format!("{mine} unsent message(s)"));
         }
         if cost.focus_messages > 0 {
-            parts.push(format!(
-                "{} message(s) to an agent are still in flight",
-                cost.focus_messages
-            ));
+            ends.push(format!("{} message(s) to an agent", cost.focus_messages));
         }
-        if cost.undelivered > 0 {
+        let mut parts = Vec::new();
+        if !ends.is_empty() {
+            parts.push(format!("it ends {}", ends.join(", ")));
+        }
+        // Not lost, only silent: the outbox brings these back.
+        let undelivered = cost.undelivered + mail;
+        if undelivered > 0 {
             parts.push(format!(
-                "{} task result(s) are undelivered and will arrive next time this session opens",
-                cost.undelivered
+                "{undelivered} task result(s) arrive at the next open"
             ));
         }
         if parts.is_empty() {
@@ -2352,7 +2367,7 @@ impl App {
             return None;
         }
         self.quit_armed = true;
-        Some(format!("{} — Ctrl-D again quits", parts.join("; ")))
+        Some(format!("Ctrl-D again quits — {}", parts.join("; ")))
     }
 
     /// The notice line's text, for tests that assert what stays off it.
@@ -2673,7 +2688,16 @@ pub(crate) fn activate_palette_command(
         }
         PaletteCommand::Compact => {
             app.compact_requested = true;
-            app.set_notice("compaction starting", NoticeLevel::Info);
+            // The request waits for the turn slot (`schedule::settle`),
+            // so mid-turn it is a promise, not a start.
+            app.set_notice(
+                if app.busy {
+                    "compaction will start when the turn ends"
+                } else {
+                    "compaction starting"
+                },
+                NoticeLevel::Info,
+            );
         }
         PaletteCommand::Context => app.open_context_picker(),
         PaletteCommand::Export => {
@@ -3093,8 +3117,15 @@ mod tests {
         assert_eq!(app.input.text(), "first\nsecond\nthird");
         assert_eq!(app.pending_images.len(), 1);
 
+        // Blank lines are not a draft: nothing is stashed for them.
+        app.input = crate::input::InputBuffer::from("\n\n");
+        assert_eq!(app.discard_or_stash_input(), None);
+        assert!(app.input.text().is_empty());
+        assert!(app.input_stash.is_empty(), "nothing was worth keeping");
+
         // A blank prompt with images still just drops the images.
         app.input.clear();
+        app.pending_images = vec![ilar::session::ImageContent::png(b"screenshot")];
         assert_eq!(
             app.discard_or_stash_input().as_deref(),
             Some("attached images discarded")
@@ -3175,7 +3206,7 @@ mod tests {
             .quit_warning(results(2))
             .expect("undelivered results warn");
         assert!(warning.contains("2 task result(s)"), "{warning}");
-        assert!(warning.contains("next time"), "{warning}");
+        assert!(warning.contains("next open"), "{warning}");
         assert_eq!(
             app.quit_warning(results(2)),
             None,
@@ -3192,13 +3223,14 @@ mod tests {
     }
 
     /// Ctrl-D mid-turn used to exit at once: the turn was cancelled,
-    /// every background agent with it, and the messages queued behind
+    /// every background agent with it, and the messages waiting behind
     /// the turn went with the process — while a two-word stash got a
     /// warning. One warning names all of it.
     #[test]
     fn ctrl_d_names_the_turn_the_agents_and_the_queue_it_would_kill() {
         let mut app = App::new();
         app.busy = true;
+        app.goal = Some(("recover the engine".into(), 3));
         app.queued_messages = vec![
             "the next thing".into(),
             ilar::agent::Steer {
@@ -3206,6 +3238,9 @@ mod tests {
                 images: Vec::new(),
             },
         ];
+        // A message steered into the turn that is about to be
+        // cancelled is as lost as a queued one.
+        app.pending_steers = vec!["and also this".into()];
         let cost = QuitCost {
             undelivered: 1,
             background: 2,
@@ -3213,14 +3248,21 @@ mod tests {
         };
 
         let warning = app.quit_warning(cost).expect("a running turn warns");
-        assert!(warning.contains("running turn"), "{warning}");
+        assert!(
+            warning.starts_with("Ctrl-D again quits —"),
+            "the key must survive a one-row truncation: {warning}"
+        );
+        assert!(warning.contains("the running turn"), "{warning}");
         assert!(warning.contains("2 background agent(s)"), "{warning}");
+        assert!(warning.contains("the goal (round 3/"), "{warning}");
         // The queued task result is counted as a result, not as a lost
         // message: it comes back through the outbox.
-        assert!(warning.contains("1 queued message(s)"), "{warning}");
+        assert!(warning.contains("2 unsent message(s)"), "{warning}");
         assert!(warning.contains("1 message(s) to an agent"), "{warning}");
-        assert!(warning.contains("1 task result(s)"), "{warning}");
-        assert!(warning.ends_with("Ctrl-D again quits"), "{warning}");
+        assert!(warning.contains("2 task result(s)"), "{warning}");
+        // Short enough to read: the notice line keeps 240 characters
+        // and one row.
+        assert!(warning.len() < 240, "{} chars: {warning}", warning.len());
         assert_eq!(app.quit_warning(cost), None, "the second press quits");
     }
 
@@ -4161,14 +4203,14 @@ mod tests {
         assert_eq!(snapshot.rows[0], "task result 1: Run checks completed.");
     }
 
-    /// The quit warning's undelivered count reaches results that left
-    /// the notification machinery: envelope texts spliced into the
-    /// message queue or steered but never read. Ordinary messages and
-    /// steers stay out of it.
+    /// The quit warning splits what is waiting: results that left the
+    /// notification machinery — envelope texts spliced into the queue
+    /// or steered but never read — come back through the outbox, and
+    /// the words the user typed do not.
     #[test]
-    fn queued_and_steered_task_results_count_as_undelivered() {
+    fn waiting_messages_are_split_into_the_users_words_and_the_mail() {
         let mut app = App::new();
-        assert_eq!(app.undelivered_queued_results(), 0);
+        assert_eq!(app.waiting_messages(), (0, 0));
         app.queued_messages = vec![
             "ordinary follow-up".into(),
             "<task-notification>\nTask \"bg survey\" completed.\n</task-notification>".into(),
@@ -4178,7 +4220,7 @@ mod tests {
             "<tool-notification>\nBackground job job-1 (\"Run checks\") completed.\n</tool-notification>".into(),
         ];
 
-        assert_eq!(app.undelivered_queued_results(), 2);
+        assert_eq!(app.waiting_messages(), (2, 2));
     }
 
     #[test]
@@ -4898,6 +4940,13 @@ mod tests {
         app.push_loop_event(&LoopEvent::TurnDone {
             outcome: TurnOutcome::Aborted,
         });
+        // A standing reminder — held results, paused notifications, the
+        // watchdog — is exactly what an abort happens under, and a
+        // transient offer would lose to it and never be said.
+        app.set_persistent_notice(
+            "notifications paused; send a message to resume",
+            NoticeLevel::Info,
+        );
         app.finish_turn(Ok(TurnOutcome::Aborted));
         assert!(app.retry_available);
         assert_eq!(
@@ -5562,7 +5611,7 @@ mod tests {
     }
 
     #[test]
-    fn command_palette_opens_only_while_idle_and_switches_to_model_picker() {
+    fn the_palette_opens_under_no_overlay_and_refuses_per_command_mid_turn() {
         assert!(is_command_palette_shortcut(&Event::Key(KeyEvent::new(
             KeyCode::Char('p'),
             KeyModifiers::CONTROL,

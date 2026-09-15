@@ -62,8 +62,11 @@ take a steer is refused — `wait for the current operation before /goal`
 expanded and routed on the way *into* a turn: steered, `/goal ship the
 parser` would reach the model as that literal line and arm nothing.
 `/btw` and `/context` are the exceptions, and are meant for mid-turn.
-A command that queues (no steer channel) is fine: the queue drains
-through the same path a typed turn does.
+A command with nowhere to steer (a notification turn has no steer
+channel) queues instead and runs when the turn ends, since the queue
+drains through the same path a typed turn does — except the
+maintenance commands (`/compact`, `/rewind`, `/fork`, `/sessions`),
+which refuse whenever anything is running.
 
 Standing state — queued messages, the goal, background jobs, a retry
 offer — is managed in the pending manager (**Ctrl-Q** or the palette):
@@ -119,12 +122,12 @@ is ever sent on its own: a stash only comes back when you pop it.
 Because a stash lives in the running app and nothing else, the things
 that would throw it away say so first: a session switch (resume, fork,
 rewind) is refused while any stash waits, and Ctrl-D on a blank prompt
-warns once before the second press quits. That warning names everything
-leaving would take: the running turn, the background agents that would
-be cancelled with it, the stashed prompts and queued messages that die
-with the process, messages to an agent still in flight, and the task
-results waiting in the outbox — which come back at the next open, and
-say so.
+warns once before the second press quits. That warning leads with the
+key and then names everything leaving would take: the running turn, the
+background agents cancelled with it, the goal and its round, the
+stashed prompts and unsent messages that die with the process, messages
+to an agent still in flight, and the task results waiting in the outbox
+— which come back at the next open, and say so.
 
 **Ctrl-L** clears and repaints the whole screen, including while a
 modal or picker is up — which is when outside damage is most likely

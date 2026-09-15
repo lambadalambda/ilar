@@ -1226,8 +1226,6 @@ impl App {
     }
 }
 
-/// "12.3 KiB" while data flows, "12.3 KiB · no data Ns" once the stream
-/// has been silent past the stall threshold. `None` before any turn.
 /// How tall the prompt may grow for what is in it. A big paste used to
 /// take everything but four rows: the transcript collapsed to one line
 /// and the pending strip truncated to nothing, so the screen became the
@@ -1236,7 +1234,9 @@ impl App {
 /// `SMALL_INPUT_ROWS`, so a handful of typed lines still fits whole on
 /// a short terminal, and never more than the layout below can spare.
 fn input_height(desired: u16, screen: u16) -> u16 {
-    let ceiling = (screen * 2 / 5)
+    // Widened for the multiply: a debug build must not panic on a
+    // terminal taller than 32767 rows, however absurd one would be.
+    let ceiling = ((u32::from(screen) * 2 / 5) as u16)
         .max(SMALL_INPUT_ROWS)
         .min(screen.saturating_sub(4))
         .max(3);

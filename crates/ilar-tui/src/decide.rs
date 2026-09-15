@@ -416,8 +416,10 @@ pub(crate) fn paste(state: &LoopState, text: String) -> Vec<Intent> {
 /// healthy session used to do nothing at all.
 pub(crate) fn retry(state: &LoopState, busy: bool) -> Vec<Intent> {
     if state.turn_running || busy {
+        // "Something", not "a turn": busy also covers a compaction and
+        // the session restore, neither of which is one.
         return vec![Intent::Notice(
-            "a turn is already running — Ctrl-R resumes one that ended badly".into(),
+            "something is already running — Ctrl-R resumes a turn that ended badly".into(),
             NoticeLevel::Info,
         )];
     }
@@ -1207,7 +1209,8 @@ mod tests {
             retry(&running, true).as_slice(),
             [Intent::Notice(text, _)] if text.contains("already running")
         ));
-        // Busy without a handle — a turn being aborted — is still busy.
+        // Busy without a handle — a turn being aborted, a compaction,
+        // a restore — is still busy.
         assert!(matches!(
             retry(&resumable(), true).as_slice(),
             [Intent::Notice(text, _)] if text.contains("already running")
