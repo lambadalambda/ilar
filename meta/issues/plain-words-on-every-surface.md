@@ -32,3 +32,15 @@ the palette's "Switch session" has a blank shortcut column (559-565).
 - One disclosure glyph pair and one label casing across row kinds.
 
 Size: S, many small edits. Source: UX sweep 2026-09-03 (all three).
+
+## Sweep 2026-09-15 additions
+
+Footers name one key many ways: Enter is `Enter select`
+(modals.rs:2934, 3037, 3089), `↵ resume` (2074-2076, 2267), `↵ open
+in browser` (1669), `Enter insert` (1223), `Enter save` (3149-3153),
+`Enter choose` (grants.rs:30), `↵ keep` (view.rs:172), `Enter
+edit/act` (964); a double press is `^D delete ×2`, `↵ rewind (×2
+confirms)` and `d delete (×2 for goal/jobs)`; Esc is
+close/cancel/undo/deny/back/returns. Pick `Enter` or `↵`, one
+double-press phrasing, and `Esc close` everywhere it is not truly
+undo or deny.

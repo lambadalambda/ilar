@@ -114,6 +114,17 @@ milestones 15–17 stay filed — they come back when the feature does.*
 - [ ] [The docs say what the code does](issues/the-docs-say-what-the-code-does.md)
 - [ ] [Pickers show the deciding field](issues/pickers-show-the-deciding-field.md)
 - [ ] [exec names its session](issues/exec-names-its-session.md)
+- [ ] [UX sweep 2026-09-15](issues/ux-sweep-2026-09-15.md) — index
+- [ ] [Background turns ask nobody](issues/background-turns-ask-nobody.md)
+- [ ] [/new stops the turn it replaces](issues/new-stops-the-turn-it-replaces.md)
+- [ ] [A locked store is livable](issues/a-locked-store-is-livable.md)
+- [ ] [sudo forgets what failed](issues/sudo-forgets-what-failed.md)
+- [ ] [The grant prompt takes paste and names its keys](issues/the-grant-prompt-takes-paste-and-names-its-keys.md)
+- [ ] [The chat ask reads cleanly](issues/the-chat-ask-reads-cleanly.md)
+- [ ] [ilar secret is one CLI](issues/ilar-secret-is-one-cli.md)
+- [ ] [The store changes under a running session](issues/the-store-changes-under-a-running-session.md)
+- [ ] [Talking to a focused agent: polish](issues/talking-to-a-focused-agent-polish.md)
+- [ ] [--view looks read-only](issues/view-looks-read-only.md)
 
 ## Milestone 21 — The assistant
 
