@@ -92,8 +92,27 @@ installed binary still refuses to run.
 
 ## Quick start
 
+The default model is `zai/glm-4.7`, so the shortest path is a z.ai key:
+
 ```sh
-ilar login                       # ChatGPT OAuth, or set ILAR_ZAI_API_KEY / ILAR_OPENAI_API_KEY / ILAR_OPENCODE_API_KEY
+export ILAR_ZAI_API_KEY=...       # or `ilar secret set ILAR_ZAI_API_KEY`
+ilar                              # the TUI; F1 shows every keybinding
+```
+
+Any other provider needs `general.model` pointed at it as well, because a key
+alone does not change which model runs. With `ILAR_OPENAI_API_KEY` exported,
+put this in `~/.config/ilar/ilar.toml`:
+
+```toml
+[general]
+model = "openai/gpt-5.6"
+```
+
+`ilar login` signs in with a ChatGPT account instead of an API key and prints
+the two lines to add (`providers.openai.auth = "chatgpt"` and a `general.model`
+the account can reach). Then:
+
+```sh
 ilar                             # the TUI; F1 shows every keybinding
 ilar --continue                  # resume the latest session
 ilar --view <session-id>         # watch a session read-only, live (a gateway chat, say)
@@ -128,9 +147,10 @@ ilar-gateway                     # the assistant, on the channels in ilar.toml
 - **Skills over features:** anything exotic (e.g. git worktree isolation)
   is a markdown skill, not core code.
 
-The workspace is two crates: `ilar` (core — providers, tools, agent
-loop, sessions, config; no TUI dependencies) and `ilar-tui` (the
-ratatui frontend and the `ilar` binary).
+The workspace is three crates: `ilar` (core — providers, tools, agent
+loop, sessions, config; no TUI dependencies), `ilar-tui` (the ratatui
+frontend and the `ilar` binary) and `ilar-gateway` (the assistant and
+its channels, the `ilar-gateway` binary).
 
 ## Status
 

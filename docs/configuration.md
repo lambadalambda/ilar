@@ -3,17 +3,27 @@
 The user configuration is `${ILAR_CONFIG_DIR:-~/.config/ilar}/ilar.toml`; see
 [`ilar.toml.example`](../ilar.toml.example). `./ilar.toml` and
 `./.ilar/ilar.toml` layer project settings over it, in that order. Nested
-sections merge by field. `general.theme`, `general.project_instructions`, and
-the whole of `[providers]` and `[models]` are user-scoped and are not
-overridden by project files; a project file that sets one is reported in the
-transcript at startup rather than silently ignored. Provider and model
-sections decide where the conversation — prompts, code, tool output, your API
-key — is sent, which is never a cloned repository's call to make.
+sections merge by field. These settings are user-scoped and are not
+overridden by project files:
+
+- `general.theme` and `general.project_instructions`;
+- the whole of `[providers]`, `[models]` and `[endpoints]` — where the
+  conversation (prompts, code, tool output, your API key) is sent is never a
+  cloned repository's call to make;
+- `[cache_compact]`, which spends money on an unattended provider request;
+- `[gateway]` and `[channels]`, which decide who may message your assistant.
+
+A user-scoped table is discarded whole rather than merged field by field: a
+project `[providers.openai]` cannot switch `auth` back, point `base_url`
+elsewhere, or change anything else about a provider you configured. A project
+file that sets one of these is reported rather than silently ignored — as a
+system line in the TUI transcript at startup, on stderr from `ilar exec`, and
+as a `{"type":"notice"}` event under `ilar exec --json`.
 
 | Setting | Default | Description |
 | --- | --- | --- |
 | `general.model` | `zai/glm-4.7` | Default `provider/model-id`. |
-| `general.reasoning` | provider default | Default reasoning variant for new sessions (for example `low`, `high`, or `max`; model-specific). Set `default` in a higher config layer to clear an inherited value. |
+| `general.reasoning` | provider default | Default reasoning variant for new sessions (for example `low`, `high`, or `max`; model-specific). Set `default` in a higher config layer to clear an inherited value. It must be valid for `general.model`; a launch that runs some other model (`--model`, or an agent's own `model:`) drops it with a startup line rather than refusing to start. |
 | `general.theme` | `carbon` | See [themes](interface.md#themes). F3 opens the picker. |
 | `general.project_instructions` | `true` | Whether the working directory's `AGENTS.md`/`CLAUDE.md` is part of the system prompt. See [Project instructions](#project-instructions). User-scoped. |
 | `providers.openai.base_url` | API or ChatGPT endpoint | Override the Responses API base URL selected by `auth`. |
@@ -57,7 +67,19 @@ Environment variables:
 A provider key may also live in the [secret store](secrets.md) under
 its variable's name (`ilar secret set ILAR_OPENAI_API_KEY`); the TOML
 field wins, then the environment, then the store. None of these
-reach a shell the model runs.
+reach a shell the model runs. A variable set to the empty string reads
+as unset throughout.
+
+Both directory defaults hang off `HOME`. With `HOME` unset, `ilar` and
+`ilar-gateway` refuse to start unless `ILAR_CONFIG_DIR` and `ILAR_STATE_DIR`
+are both set: the defaults would otherwise resolve to `./.config/ilar` and
+`./.local/state/ilar` and scatter a separate set of sessions and secrets
+through every directory they were launched from.
+
+`ilar secret …` and `ilar login` resolve these two directories and nothing
+else — no `ilar.toml` is parsed and no endpoint is contacted — so a config
+file that fails to parse never stands between you and the credential you
+came to fix.
 
 ## Web search
 
@@ -266,7 +288,9 @@ an OpenAI API key is not required in this mode.
    sandbox must allow that loopback listener and callback.
 
 3. Select ChatGPT authentication and a compatible model in
-   `${ILAR_CONFIG_DIR:-~/.config/ilar}/ilar.toml`:
+   `${ILAR_CONFIG_DIR:-~/.config/ilar}/ilar.toml`. `ilar login` prints these
+   lines when it succeeds, since stored tokens nothing points at change
+   nothing:
 
    ```toml
    [general]

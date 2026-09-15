@@ -120,3 +120,10 @@ Exit codes: 0 completed, 2 hit the iteration limit, 130 aborted, 1
 failed. The `question` tool is not attached, since nobody is there to
 answer; a model that asks is told so immediately. Background tasks and
 services do not outlive the process.
+
+Settings this launch could not honour — a project file's user-scoped table,
+a reasoning variant the model does not have, an `--agent` on a resumed
+session that nothing will record — are printed before the turn: on stderr,
+or as `{"type":"notice","text":"…"}` events under `--json`. A session
+records the agent it was created with and nothing records a change, so
+`--agent` on `--continue` lasts one launch and says so.
