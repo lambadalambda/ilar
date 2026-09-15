@@ -539,14 +539,11 @@ impl App {
         // "read-only" was the one thing this view is not. A row that
         // cannot be messaged at all promises no Enter, and a finished
         // agent no cancel.
-        let footer = match (
-            crate::app::focus_send_refusal(focus).is_some(),
-            focus.running,
-        ) {
-            (true, true) => " ↑↓ scroll · ^G cancel ×2 · Esc close ",
-            (true, false) => " agent finished · ↑↓ scroll · Esc close ",
-            (false, true) => " ↑↓ scroll · Enter messages it · ^G cancel ×2 · Esc close ",
-            (false, false) => " agent finished · ↑↓ scroll · Enter resumes it · Esc close ",
+        let footer = match (crate::app::focus_can_send(focus), focus.running) {
+            (false, true) => " ↑↓ scroll · ^G cancel ×2 · Esc close ",
+            (false, false) => " agent finished · ↑↓ scroll · Esc close ",
+            (true, true) => " ↑↓ scroll · Enter messages it · ^G cancel ×2 · Esc close ",
+            (true, false) => " agent finished · ↑↓ scroll · Enter resumes it · Esc close ",
         };
         let title = format!(
             " {} ",

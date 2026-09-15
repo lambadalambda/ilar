@@ -196,6 +196,13 @@ impl FocusView {
     }
 }
 
+/// Whether Enter can message the agent in a focus view at all — the
+/// footer's question, asked every frame, so it does not build a
+/// sentence only to throw it away.
+pub(crate) fn focus_can_send(focus: &FocusView) -> bool {
+    focus.unreachable.is_none() && !(focus.foreground && focus.running)
+}
+
 /// Why Enter cannot message the agent in a focus view, in one
 /// sentence, or `None` when it can. `message_task` refuses three rows —
 /// a foreground child of the turn you are in, another session's agent,
@@ -203,6 +210,9 @@ impl FocusView {
 /// then in the model's own words with a raw uuid in them. Deciding here
 /// means the person is told before anything is written.
 pub(crate) fn focus_send_refusal(focus: &FocusView) -> Option<String> {
+    if focus_can_send(focus) {
+        return None;
+    }
     if let Some(whose) = &focus.unreachable {
         return Some(format!(
             "{} is {whose}, so this session cannot message it — only the one that started it can.",
@@ -5063,6 +5073,9 @@ mod tests {
         };
         assert_eq!(focus_send_refusal(&view(None, false, true)), None);
         assert_eq!(focus_send_refusal(&view(None, false, false)), None);
+        assert!(focus_can_send(&view(None, false, true)));
+        assert!(!focus_can_send(&view(None, true, true)));
+        assert!(!focus_can_send(&view(Some("somebody's"), false, false)));
         // A foreground child of the turn in flight cannot be reached;
         // once it has reported back, resuming it is fine.
         let blocked = focus_send_refusal(&view(None, true, true)).expect("refused");
