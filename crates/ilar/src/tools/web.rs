@@ -608,7 +608,8 @@ impl Tool for WebSearchTool {
     }
     fn description(&self) -> &'static str {
         "Search the web. Returns titles, URLs and snippets. Use it to locate \
-         the real pages webfetch should fetch instead of guessing a URL."
+         the real pages webfetch should fetch instead of guessing a URL. The \
+         search is given 20 seconds."
     }
     fn concurrency(&self) -> ToolConcurrency {
         ToolConcurrency::Concurrent
