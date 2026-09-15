@@ -2374,17 +2374,6 @@ impl LeaseFailure {
     }
 }
 
-/// Take the lease a child will run under, then confirm its workspace
-/// survived the wait. An inherited lease already covers the child; a
-/// nested task reaching into another workspace only tries for it, since
-/// blocking there is how two tasks deadlock on each other's checkouts.
-///
-/// Both task paths funnel through here so the checks stay in step; they
-/// differ only in how they phrase the outcome. `cancel` ends the wait
-/// for the lease; a caller that also wants the revalidation abandoned
-/// races this whole call against its own token. `waiting` names the row
-/// to announce a real wait on — background tasks have none.
-#[allow(clippy::too_many_arguments)] // one funnel, one set of checks
 /// Where a task says it is waiting for the workspace. A foreground one
 /// writes into the tool row its blocked caller is watching; a detached
 /// one has no row of its own, so it marks its entry on the agents
@@ -2418,6 +2407,17 @@ impl WaitAnnouncement<'_> {
     }
 }
 
+/// Take the lease a child will run under, then confirm its workspace
+/// survived the wait. An inherited lease already covers the child; a
+/// nested task reaching into another workspace only tries for it, since
+/// blocking there is how two tasks deadlock on each other's checkouts.
+///
+/// Both task paths funnel through here so the checks stay in step; they
+/// differ only in how they phrase the outcome. `cancel` ends the wait
+/// for the lease; a caller that also wants the revalidation abandoned
+/// races this whole call against its own token. `waiting` says where a
+/// real wait is announced — see [`WaitAnnouncement`].
+#[allow(clippy::too_many_arguments)] // one funnel, one set of checks
 async fn acquire_task_lease(
     workspace: &crate::tools::WorkspaceScheduler,
     access: WorkspaceAccess,
