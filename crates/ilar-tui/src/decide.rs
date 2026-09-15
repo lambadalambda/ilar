@@ -554,6 +554,39 @@ pub(crate) fn may_start_notification_turn(state: &LoopState) -> bool {
     !state.turn_running && !state.notifications_paused && state.modal.is_none()
 }
 
+/// What a keypress does to the offer of this directory's last session
+/// — see meta/issues/a-bare-ilar-offers-the-last-session-here.md.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GhostStep {
+    /// Enter on an empty prompt: open the session on offer, exactly as
+    /// the picker's resume does.
+    Resume,
+    /// The offer goes: Esc said so, or a message is on its way and the
+    /// session being spoken to is the fresh one.
+    Dismiss,
+    /// Nothing about the offer changes.
+    Keep,
+}
+
+/// Three keys decide an offer's fate and every other key leaves it
+/// alone. A modal in front owns the keyboard, so neither Enter nor Esc
+/// is the offer's while one is up; Shift-Enter is a newline, never a
+/// send; and Esc over a draft clears the draft, so one press does one
+/// thing.
+pub(crate) fn ghost_step(state: &LoopState, key: crossterm::event::KeyEvent) -> GhostStep {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    if state.modal.is_some() {
+        return GhostStep::Keep;
+    }
+    match key.code {
+        KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => GhostStep::Keep,
+        KeyCode::Enter if state.input_blank => GhostStep::Resume,
+        KeyCode::Enter => GhostStep::Dismiss,
+        KeyCode::Esc if state.input_blank => GhostStep::Dismiss,
+        _ => GhostStep::Keep,
+    }
+}
+
 /// Nesting depth for each `(session_id, parent_session_id)` row, in
 /// registry order: a row whose parent is also listed sits one level
 /// under it, walked transitively; anyone else — a root's child, a
@@ -1369,5 +1402,73 @@ mod tests {
     fn tree_depths_key_a_duplicated_session_by_first_occurrence() {
         let doubled = edges(&[("a", "root"), ("a", "ghost"), ("b", "a")]);
         assert_eq!(tree_depths(&doubled), vec![0, 0, 1]);
+    }
+
+    fn press(code: crossterm::event::KeyCode) -> crossterm::event::KeyEvent {
+        crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
+    }
+
+    /// The whole offer in one test: Enter on an empty prompt takes it,
+    /// Enter over a draft leaves it behind, Esc on an empty prompt
+    /// dismisses it, and nothing else touches it.
+    #[test]
+    fn an_offered_session_answers_enter_and_esc_and_nothing_else() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let drafting = LoopState {
+            input_blank: false,
+            ..idle()
+        };
+
+        assert_eq!(
+            ghost_step(&idle(), press(KeyCode::Enter)),
+            GhostStep::Resume
+        );
+        assert_eq!(
+            ghost_step(&drafting, press(KeyCode::Enter)),
+            GhostStep::Dismiss,
+            "a message sent goes to the fresh session, and the offer is answered"
+        );
+        assert_eq!(ghost_step(&idle(), press(KeyCode::Esc)), GhostStep::Dismiss);
+        assert_eq!(
+            ghost_step(&drafting, press(KeyCode::Esc)),
+            GhostStep::Keep,
+            "Esc over a draft clears the draft; one press, one thing"
+        );
+        assert_eq!(
+            ghost_step(
+                &idle(),
+                crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)
+            ),
+            GhostStep::Keep,
+            "Shift-Enter is a newline, not a send"
+        );
+        for code in [
+            KeyCode::Char('x'),
+            KeyCode::Up,
+            KeyCode::PageUp,
+            KeyCode::F(1),
+        ] {
+            assert_eq!(
+                ghost_step(&idle(), press(code)),
+                GhostStep::Keep,
+                "{code:?} is not the offer's key"
+            );
+        }
+    }
+
+    /// A modal in front owns the keyboard: its own Enter and Esc are
+    /// not the offer's, or opening the picker over an offer would
+    /// resume the wrong session on the first Enter.
+    #[test]
+    fn a_modal_in_front_keeps_the_offer_out_of_the_keyboard() {
+        use crossterm::event::KeyCode;
+        for modal in [Modal::SessionPicker, Modal::Help, Modal::CommandPalette] {
+            let covered = LoopState {
+                modal: Some(modal),
+                ..idle()
+            };
+            assert_eq!(ghost_step(&covered, press(KeyCode::Enter)), GhostStep::Keep);
+            assert_eq!(ghost_step(&covered, press(KeyCode::Esc)), GhostStep::Keep);
+        }
     }
 }

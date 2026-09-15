@@ -625,16 +625,28 @@ impl App {
             .saturating_sub(2 + CONTENT_HORIZONTAL_PADDING * 2);
         let now = std::time::Instant::now();
         self.refresh_transcript_cache(text_width, now);
+        // The offer sits above the transcript, in the same pane and the
+        // same scroll: its rows are built once per width, not per frame.
+        let ghost_rows = self
+            .ghost
+            .as_mut()
+            .map_or(0, |ghost| ghost.render(text_width, now));
         // Streaming shifts row indices; keep search matches in sync with
-        // the rows actually on screen.
+        // the rows actually on screen — and the offer above them shifts
+        // every one of them down while it is up.
         if self.search_active
-            && self.search_computed_at != Some((self.transcript_revision, text_width))
+            && self.search_computed_at != Some((self.transcript_revision, text_width, ghost_rows))
         {
-            self.search_matches = self.transcript_cache.matching_rows(&self.search_query);
+            self.search_matches = self
+                .transcript_cache
+                .matching_rows(&self.search_query)
+                .into_iter()
+                .map(|row| row + ghost_rows)
+                .collect();
             self.search_current = self
                 .search_current
                 .min(self.search_matches.len().saturating_sub(1));
-            self.search_computed_at = Some((self.transcript_revision, text_width));
+            self.search_computed_at = Some((self.transcript_revision, text_width, ghost_rows));
         }
         let mut activity_rows = activity_line(
             self.busy,
@@ -661,7 +673,8 @@ impl App {
         let content_rows = self
             .transcript_cache
             .row_count()
-            .saturating_add(activity_rows.len());
+            .saturating_add(activity_rows.len())
+            .saturating_add(ghost_rows);
         self.update_scroll_metrics(content_rows, viewport_rows);
         let visible_rows = content_rows
             .saturating_sub(self.scroll_top)
@@ -723,9 +736,29 @@ impl App {
                 transcript_block = transcript_block.title_bottom(summary.right_aligned());
             }
         }
-        let visible =
-            self.transcript_cache
-                .visible_rows(self.scroll_top, viewport_rows, &activity_rows);
+        // The offer's rows first, then the transcript's from wherever
+        // the scroll has left them: one pane, one scroll, and nothing
+        // in the offer is clickable — it is not the conversation, so it
+        // has no rows to expand.
+        let mut visible: Vec<crate::transcript::TranscriptRow> = self
+            .ghost
+            .as_ref()
+            .map(|ghost| ghost.rendered.as_slice())
+            .unwrap_or_default()
+            .iter()
+            .skip(self.scroll_top)
+            .take(viewport_rows)
+            .cloned()
+            .map(|line| crate::transcript::TranscriptRow { line, target: None })
+            .collect();
+        let below = viewport_rows.saturating_sub(visible.len());
+        if below > 0 {
+            visible.extend(self.transcript_cache.visible_rows(
+                self.scroll_top.saturating_sub(ghost_rows),
+                below,
+                &activity_rows,
+            ));
+        }
         self.transcript_hit_targets = visible.iter().map(|row| row.target.clone()).collect();
         // Hover marks what a click would hit right now — positional,
         // and off when a modal in front owns the mouse.

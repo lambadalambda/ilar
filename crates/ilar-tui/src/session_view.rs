@@ -234,7 +234,93 @@ pub(crate) enum Liveness {
 /// outside the tests wants the store too, for its children's history.
 #[cfg(test)]
 pub(crate) fn restored_session_view(session: &ilar::session::SessionReader) -> RestoredSessionView {
-    restored_session_invocation_view(session, None, Liveness::Settled)
+    restored_session_invocation_view(
+        session.events(),
+        pending_question_id(session),
+        None,
+        Liveness::Settled,
+    )
+}
+
+/// The tool call a session is waiting on an answer for, as the replay
+/// wants it: an id to leave running while every other open row settles.
+fn pending_question_id(session: &ilar::session::SessionReader) -> Option<&str> {
+    session
+        .pending_question()
+        .map(|pending| pending.tool_call_id.as_str())
+}
+
+/// The lines a session's events render to, and nothing else: no store,
+/// no children, no totals. What a preview of somebody's last session
+/// needs — see [`crate::app::Ghost`] — over whatever slice of events it
+/// was given, which for a ghost is a bounded tail rather than a log.
+pub(crate) fn replayed_lines(events: &[ilar::session::SessionEvent]) -> Vec<Line_> {
+    restored_session_invocation_view(events, None, None, Liveness::Settled).lines
+}
+
+/// Bytes of a session's log a ghost reads, from the end. Two
+/// screenfuls of conversation are a few kilobytes; the rest of an 80 MB
+/// log is never touched, which is what makes the offer free to make.
+const GHOST_TAIL_BYTES: u64 = 64 * 1024;
+/// Events the tail read keeps, before rendering.
+const GHOST_TAIL_EVENTS: usize = 60;
+/// Transcript lines the ghost keeps, from the end: a couple of
+/// screenfuls, so a chatty tail cannot push the prompt off the screen.
+const GHOST_LINES: usize = 40;
+/// Columns the offered session's name may take in the header.
+const GHOST_TITLE_CHARS: usize = 56;
+
+/// The offer's one header line: which session, how long since it was
+/// used, and the three keys that answer it.
+pub(crate) fn ghost_header(
+    title: &str,
+    modified: std::time::SystemTime,
+    now: std::time::SystemTime,
+) -> String {
+    format!(
+        "previous session here: {title} · {} — Enter resumes · type to start fresh · Esc dismisses",
+        crate::modals::last_used(modified, now),
+    )
+}
+
+/// The offer a bare launch makes in this directory, or `None` when
+/// there is nothing to offer.
+///
+/// Only the per-directory pointer is consulted — never the listing:
+/// paying for a directory scan to *offer* something would put the cost
+/// of the shortcut back where the pointer took it from. A directory
+/// with no pointer, a pointer nobody believes, a session with no title
+/// (nobody ever typed in it) and a tail that renders to nothing are all
+/// the same answer.
+pub(crate) fn ghost_offer(
+    store: &SessionStore,
+    cwd: &std::path::Path,
+    now: std::time::SystemTime,
+) -> Option<crate::app::Ghost> {
+    let session = store.last_in(cwd)?;
+    // One name for the session in the header and in the status line,
+    // bounded so neither has to wrap.
+    let title = crate::text::truncate_display(
+        &session.title?,
+        GHOST_TITLE_CHARS,
+        crate::text::Truncation::Right,
+    );
+    let events =
+        ilar::session::tail_events(store, &session.id, GHOST_TAIL_BYTES, GHOST_TAIL_EVENTS).ok()?;
+    let mut lines = replayed_lines(&events);
+    // Bounded from the end: what the session was last doing is what
+    // makes the choice, and the head of the window is the part the tail
+    // read already cut arbitrarily.
+    lines.drain(..lines.len().saturating_sub(GHOST_LINES));
+    if lines.is_empty() {
+        return None;
+    }
+    Some(crate::app::Ghost::new(
+        session.id,
+        title.clone(),
+        ghost_header(&title, session.modified, now),
+        lines,
+    ))
 }
 
 /// Click-target id for a restored thought or note. Nested subagent lines
@@ -249,13 +335,17 @@ fn restored_line_id(nested: bool, prefix: &str, index: usize) -> String {
     }
 }
 
+/// Events rather than a reader: the only thing this replay wants from a
+/// session beyond its events is the question it is waiting on, and a
+/// caller with a bounded slice of somebody's log (a ghost) has no reader
+/// to offer at all.
 fn restored_session_invocation_view(
-    session: &ilar::session::SessionReader,
+    all_events: &[ilar::session::SessionEvent],
+    pending_question_id: Option<&str>,
     parent_tool_call_id: Option<&str>,
     liveness: Liveness,
 ) -> RestoredSessionView {
     let nested = parent_tool_call_id.is_some();
-    let all_events = session.events();
     // Where this view's slice begins in the event list. A child view
     // starts partway in and `Compaction.kept_from` indexes the whole
     // list, so the two have to be rebased against each other.
@@ -523,9 +613,6 @@ fn restored_session_invocation_view(
             ilar::session::SessionEvent::Compaction { .. } => {}
         }
     }
-    let pending_question_id = session
-        .pending_question()
-        .map(|pending| pending.tool_call_id.as_str());
     if liveness == Liveness::Settled {
         for line in &mut lines {
             if let Line_::Tool { id, state, .. } = line
@@ -554,7 +641,12 @@ pub(crate) fn restored_session_view_with_store(
     store: &SessionStore,
     liveness: Liveness,
 ) -> RestoredSessionView {
-    let mut view = restored_session_invocation_view(session, None, liveness);
+    let mut view = restored_session_invocation_view(
+        session.events(),
+        pending_question_id(session),
+        None,
+        liveness,
+    );
     let owner_session_id = session
         .meta()
         .map(|meta| meta.session_id.as_str())
@@ -647,8 +739,13 @@ fn restore_child_activity(
             add_usage(&mut task_usage, &spend);
             task_cost = add_costs(task_cost, cost);
         }
-        let mut restored =
-            restored_session_invocation_view(&session, Some(parent_tool_call_id), liveness).lines;
+        let mut restored = restored_session_invocation_view(
+            session.events(),
+            pending_question_id(&session),
+            Some(parent_tool_call_id),
+            liveness,
+        )
+        .lines;
         // The agent row already shows the task prompt, so the child's
         // copy of it is dropped. A compacted child leads with its
         // handover summary instead, and the prompt sits behind it.
@@ -1333,8 +1430,10 @@ mod tests {
             .unwrap();
         drop(child);
 
+        let child = store.load(&child_id).unwrap();
         let view = restored_session_invocation_view(
-            &store.load(&child_id).unwrap(),
+            child.events(),
+            pending_question_id(&child),
             Some("task-restore"),
             Liveness::Settled,
         );

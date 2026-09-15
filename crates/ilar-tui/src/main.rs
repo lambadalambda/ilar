@@ -1390,6 +1390,18 @@ async fn main() -> Result<()> {
         } else {
             session_override.clone()
         };
+        // What a bare launch offers: this directory's last session,
+        // ghosted, for one key. Only on a launch that named no session
+        // — `--session`, `--continue` and `--view` have all said which
+        // conversation this is — and read here, before the fresh
+        // session is created, because creating one moves the pointer
+        // the offer comes from.
+        let offer = if first_run && resume_target.is_none() && config.general.resume_offer {
+            let here = std::env::current_dir().context("no cwd")?;
+            session_view::ghost_offer(&store, &here, std::time::SystemTime::now())
+        } else {
+            None
+        };
         // CLI overrides apply to the launch session only, not picker switches.
         let cli_model = if first_run {
             args.model.as_deref()
@@ -1573,6 +1585,11 @@ async fn main() -> Result<()> {
             // Stashed prompts belong to the person, not to the session
             // they were put aside in.
             app.input_stash = stash;
+        }
+        // Last, so nothing above resets the status line under it: the
+        // offer says what is on screen until a choice is made.
+        if let Some(ghost) = offer {
+            app.offer_session(ghost);
         }
 
         if terminal_hold.is_none() {
@@ -4830,6 +4847,64 @@ async fn run_app(
                         PromptAction::Unhandled | PromptAction::Submit => {}
                     }
                     continue;
+                }
+                // The session on offer answers three keys before the
+                // ordinary ones: Enter on an empty prompt resumes it,
+                // Enter over a draft leaves it behind, and Esc
+                // dismisses it. Everything else falls through unchanged
+                // and the offer stays — including the Esc that clears a
+                // draft, which has its own work to do.
+                if app.ghost.is_some() {
+                    let state = observe(
+                        app,
+                        &turn_handle,
+                        &pending_terminal_event,
+                        &steer_tx,
+                        notifications_paused,
+                    );
+                    match decide::ghost_step(&state, key) {
+                        decide::GhostStep::Resume => {
+                            // The picker's resume, to the letter: the
+                            // same refusals, the same handover, the
+                            // same restart. A session offered must not
+                            // open by a path the picker does not use.
+                            let id = app
+                                .ghost
+                                .as_ref()
+                                .expect("an offer is up")
+                                .session_id
+                                .clone();
+                            if let Some(reason) = switch_blocked(
+                                turn_handle.is_some(),
+                                spawner.running_background(),
+                                routed.len(),
+                                !app.input.is_blank(),
+                                app.goal.is_some(),
+                            )
+                            .or_else(|| direct_resume_blocked(store, &id))
+                            {
+                                app.set_notice(reason, NoticeLevel::Warning);
+                                continue;
+                            }
+                            leave_session(
+                                &spawner,
+                                &mut aside_cancel,
+                                &mut aside_handle,
+                                &mut topic_handle,
+                            )
+                            .await;
+                            return Ok(AppExit::SwitchInto {
+                                id,
+                                prefill: None,
+                                notice: None,
+                                stash: std::mem::take(&mut app.input_stash),
+                            });
+                        }
+                        decide::GhostStep::Dismiss => {
+                            app.dismiss_ghost();
+                        }
+                        decide::GhostStep::Keep => {}
+                    }
                 }
                 if matches!((code, control), (KeyCode::Char('p'), true)) {
                     app.model_key_pending = false;

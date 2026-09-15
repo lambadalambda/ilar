@@ -684,6 +684,19 @@ pub(crate) fn underline_content_spans(line: &mut Line<'static>) {
     }
 }
 
+/// One row, ghosted: every colour mapped to the muted tone, every
+/// modifier dropped, backgrounds included. A session offered but not
+/// yet resumed is shown this way — visibly not the conversation, and
+/// unmistakable against any theme, since the muted tone is the one
+/// every one of them damps.
+pub(crate) fn ghosted(mut line: Line<'static>) -> Line<'static> {
+    for span in &mut line.spans {
+        span.style = Style::default().fg(MUTED);
+    }
+    line.style = Style::default().fg(MUTED);
+    line
+}
+
 /// Wrap one entry line keeping its gutter: the label a row leads with
 /// (`you  `, `—    `, `task `, `▸ Thought: `, or plain indent) is
 /// repeated as blank space on every continuation row, so a wrapped

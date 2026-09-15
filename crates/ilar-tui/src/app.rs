@@ -196,6 +196,81 @@ impl FocusView {
     }
 }
 
+/// This directory's previous session, shown rather than described: its
+/// tail, ghosted, above a fresh session's empty transcript, until Enter
+/// on an empty prompt resumes it, a message leaves it behind, or Esc
+/// dismisses it — see meta/issues/a-bare-ilar-offers-the-last-session-here.md.
+///
+/// Beside the transcript, never in it: nothing here was said in the
+/// session on screen, so no export, search, selection or token estimate
+/// can mistake it for something that was. Its lines never change, which
+/// is why one revision is enough for the render cache.
+pub(crate) struct Ghost {
+    pub(crate) session_id: String,
+    /// The session's opening prompt, shortened — what the header and
+    /// the status line call it.
+    pub(crate) title: String,
+    /// The one line above the tail, built when the offer is made.
+    pub(crate) header: String,
+    pub(crate) lines: Vec<Line_>,
+    cache: TranscriptRenderCache,
+    /// The ghosted rows as last rendered, and the width they were
+    /// wrapped to. An offer never changes, so this is built once per
+    /// width rather than once per frame.
+    pub(crate) rendered: Vec<ratatui::text::Line<'static>>,
+    rendered_width: Option<u16>,
+    opened: std::time::Instant,
+}
+
+impl Ghost {
+    pub(crate) fn new(
+        session_id: String,
+        title: String,
+        header: String,
+        lines: Vec<Line_>,
+    ) -> Self {
+        Self {
+            session_id,
+            title,
+            header,
+            lines,
+            cache: TranscriptRenderCache::default(),
+            rendered: Vec::new(),
+            rendered_width: None,
+            opened: std::time::Instant::now(),
+        }
+    }
+
+    /// Bring [`Self::rendered`] up to date at this width and say how
+    /// many rows the offer takes: the header, the tail under it, and
+    /// the blank row separating it from the live transcript. Every span
+    /// is remapped to the muted tone with its bold stripped — the whole
+    /// point of the offer is that none of it is the conversation.
+    pub(crate) fn render(&mut self, width: u16, now: std::time::Instant) -> usize {
+        if self.rendered_width != Some(width) {
+            self.cache.update(
+                &self.lines,
+                &std::collections::HashSet::new(),
+                1,
+                width,
+                now,
+                self.opened,
+            );
+            self.rendered = std::iter::once(ratatui::text::Line::from(self.header.clone()))
+                .chain(
+                    self.cache
+                        .visible_rows(0, usize::MAX, &[])
+                        .into_iter()
+                        .map(|row| row.line),
+                )
+                .map(crate::transcript::ghosted)
+                .collect();
+            self.rendered_width = Some(width);
+        }
+        self.rendered.len()
+    }
+}
+
 /// Whether Enter can message the agent in a focus view at all — the
 /// footer's question, asked every frame, so it does not build a
 /// sentence only to throw it away.
@@ -524,11 +599,13 @@ pub(crate) struct App {
     pub(crate) search_current: usize,
     /// (scroll_top, follow_tail) before the search opened; Esc restores.
     search_saved: Option<(usize, bool)>,
-    /// The (revision, width) the current matches were scanned at. A
-    /// resize reflows every row without touching the transcript, so
-    /// revision alone would leave the highlights on the rows the text
-    /// used to occupy.
-    pub(crate) search_computed_at: Option<(u64, u16)>,
+    /// The (revision, width, rows above the transcript) the current
+    /// matches were scanned at. A resize reflows every row without
+    /// touching the transcript, so revision alone would leave the
+    /// highlights on the rows the text used to occupy; the third is the
+    /// session offer's rows, which shift every match down while it is
+    /// up and let go of them all at once when it is dismissed.
+    pub(crate) search_computed_at: Option<(u64, u16, usize)>,
     pub(crate) scroll_top: usize,
     content_rows: usize,
     pub(crate) viewport_rows: usize,
@@ -593,6 +670,9 @@ pub(crate) struct App {
     pub(crate) agents_row_hits: Vec<(Rect, AgentTarget)>,
     /// A child session's transcript taken over the screen, if any.
     pub(crate) focus: Option<FocusView>,
+    /// This directory's previous session, on offer above the
+    /// transcript until it is resumed, typed past or dismissed.
+    pub(crate) ghost: Option<Ghost>,
     /// Raw pointer position for chrome outside the transcript (the
     /// sidebar toggle); the transcript keeps its own relative hover.
     pub(crate) hover_screen: Option<(u16, u16)>,
@@ -752,6 +832,7 @@ impl App {
             agents_more_hit: None,
             agents_row_hits: Vec::new(),
             focus: None,
+            ghost: None,
             hover_screen: None,
             transcript_cells: Vec::new(),
             transcript_selection: None,
@@ -1725,6 +1806,32 @@ impl App {
     /// root's own draft is waiting underneath it. Returns whether
     /// something was stashed, for the caller that has a notice of its
     /// own to put on the line.
+    /// Make the offer: the previous session here, ghosted above an
+    /// empty transcript, with the status line saying what is on screen.
+    /// The window title stays plain — nothing has been chosen yet.
+    pub(crate) fn offer_session(&mut self, ghost: Ghost) {
+        self.status = format!("ghost of {}", ghost.title);
+        // The status line shows a detail only while it belongs to the
+        // activity on screen; the offer is made on a ready session, and
+        // saying so is what puts it on the line.
+        self.set_activity(Activity::Ready);
+        self.ghost = Some(ghost);
+        self.follow_tail = true;
+    }
+
+    /// Take the offer off the screen — resumed, typed past or
+    /// dismissed. Returns what was on offer, for the caller that means
+    /// to resume it.
+    pub(crate) fn dismiss_ghost(&mut self) -> Option<Ghost> {
+        let ghost = self.ghost.take()?;
+        if self.status == format!("ghost of {}", ghost.title) {
+            self.status = "ready".into();
+        }
+        self.scroll_top = 0;
+        self.follow_tail = true;
+        Some(ghost)
+    }
+
     pub(crate) fn close_focus(&mut self) -> bool {
         let Some(focus) = self.focus.take() else {
             return false;
