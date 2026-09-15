@@ -363,6 +363,50 @@ mod tests {
         );
     }
 
+    /// A single minified line longer than the output budget used to come
+    /// back with neither an ellipsis nor a marker: the model believed it
+    /// had seen the whole file.
+    #[tokio::test]
+    async fn a_single_over_long_line_says_it_was_cut() {
+        let dir = tempfile::tempdir().unwrap();
+        let line = "x".repeat(MAX_OUTPUT_BYTES + 4096);
+        std::fs::write(dir.path().join("big.json"), format!("{line}\n")).unwrap();
+        let out = ReadTool
+            .run(
+                serde_json::json!({"path": "big.json"}),
+                ToolContext::root(dir.path().to_path_buf()),
+            )
+            .await;
+        assert!(!out.is_error, "{}", out.content);
+        let tail = out.content.split_at(out.content.len() - 400).1;
+        assert!(tail.contains("line 1 cut at"), "{tail}");
+        assert!(tail.contains("bash"), "{tail}");
+        // The window did reach the end of the file: there is no later
+        // line to continue at, and the rest of line 1 is not reachable
+        // with an offset anyway.
+        assert!(!tail.contains("continue with offset"), "{tail}");
+    }
+
+    /// A long line in the middle used to yield "continue with offset
+    /// K+1" alone, which silently skips the rest of line K.
+    #[tokio::test]
+    async fn a_long_line_mid_file_names_the_cut_line_and_the_next_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let line = "y".repeat(MAX_OUTPUT_BYTES + 4096);
+        std::fs::write(dir.path().join("mid.txt"), format!("head\n{line}\ntail\n")).unwrap();
+        let out = ReadTool
+            .run(
+                serde_json::json!({"path": "mid.txt"}),
+                ToolContext::root(dir.path().to_path_buf()),
+            )
+            .await;
+        assert!(!out.is_error, "{}", out.content);
+        let tail = out.content.split_at(out.content.len() - 400).1;
+        assert!(tail.contains("line 2 cut at"), "{tail}");
+        assert!(tail.contains("lines 1–2 of 3"), "{tail}");
+        assert!(tail.contains("continue with offset 3"), "{tail}");
+    }
+
     /// The pre-decode size guard is the only thing between a malformed
     /// header and reading an arbitrarily large file into memory, and the
     /// size it checks comes from `file.metadata()`. When that fails the
