@@ -2117,4 +2117,132 @@ mod tests {
             "only top-level thoughts are clickable: {targets:?}"
         );
     }
+
+    /// A session launched in `cwd` with `turns` exchanges in it, left
+    /// as this directory's last session — which is what `create` writes
+    /// down.
+    fn session_here(store: &SessionStore, cwd: &std::path::Path, turns: usize) -> String {
+        let session_id = new_id();
+        let mut session = store
+            .create(SessionMeta {
+                session_id: session_id.clone(),
+                parent_id: None,
+                agent: "build".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+                cwd: Some(cwd.to_path_buf()),
+            })
+            .unwrap();
+        for turn in 0..turns {
+            session
+                .append(ilar::session::SessionEvent::UserMessage {
+                    id: new_id(),
+                    text: format!("ask {turn}"),
+                    images: Vec::new(),
+                    ts: chrono::Utc::now(),
+                })
+                .unwrap();
+            session
+                .append(ilar::session::SessionEvent::AssistantMessage {
+                    id: new_id(),
+                    model: "zai/glm-4.7".into(),
+                    content: vec![ilar::session::ContentBlock::Text {
+                        text: format!("answer {turn}"),
+                    }],
+                    usage: ilar::session::Usage::default(),
+                    stop_reason: "end_turn".into(),
+                    ts: chrono::Utc::now(),
+                })
+                .unwrap();
+        }
+        session_id
+    }
+
+    /// The offer is the pointer's answer or nothing: a directory that
+    /// has a session here shows it, and one that does not shows
+    /// nothing rather than paying for a listing to find a stranger's.
+    #[test]
+    fn an_offer_is_made_where_a_session_was_left_and_nowhere_else() {
+        let state = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(state.path().to_path_buf());
+        let work = tempfile::tempdir().unwrap();
+        let here = std::fs::canonicalize(work.path()).unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let now = std::time::SystemTime::now();
+
+        assert!(
+            ghost_offer(&store, &here, now).is_none(),
+            "nothing has happened in this directory yet"
+        );
+
+        let session_id = session_here(&store, &here, 2);
+
+        let offer = ghost_offer(&store, &here, now).expect("the session here is on offer");
+        assert_eq!(offer.session_id, session_id);
+        assert_eq!(offer.title, "ask 0", "named by its opening prompt");
+        assert!(
+            offer.header.starts_with("previous session here: ask 0 · "),
+            "{}",
+            offer.header
+        );
+        assert!(
+            offer
+                .header
+                .ends_with("Enter resumes · type to start fresh · Esc dismisses"),
+            "{}",
+            offer.header
+        );
+        assert!(
+            format!("{:?}", offer.lines).contains("answer 1"),
+            "the tail is what it was last doing"
+        );
+
+        assert!(
+            ghost_offer(&store, elsewhere.path(), now).is_none(),
+            "another directory's session is not this directory's offer"
+        );
+    }
+
+    /// A session nobody typed in has no title and is no offer: it is
+    /// the empty session a previous launch left behind, and offering to
+    /// resume nothing is worse than offering nothing.
+    #[test]
+    fn an_untouched_session_is_not_offered() {
+        let state = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(state.path().to_path_buf());
+        let work = tempfile::tempdir().unwrap();
+        let here = std::fs::canonicalize(work.path()).unwrap();
+
+        session_here(&store, &here, 0);
+
+        assert!(ghost_offer(&store, &here, std::time::SystemTime::now()).is_none());
+    }
+
+    /// Bounded from the end, whatever the log weighs: the offer is a
+    /// couple of screenfuls of the session's ending, and a long
+    /// conversation costs it nothing.
+    #[test]
+    fn an_offer_is_bounded_however_long_the_session() {
+        let state = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(state.path().to_path_buf());
+        let work = tempfile::tempdir().unwrap();
+        let here = std::fs::canonicalize(work.path()).unwrap();
+
+        session_here(&store, &here, 400);
+
+        let offer = ghost_offer(&store, &here, std::time::SystemTime::now()).expect("on offer");
+        assert!(
+            offer.lines.len() <= GHOST_LINES,
+            "{} lines is not a couple of screenfuls",
+            offer.lines.len()
+        );
+        assert!(
+            format!("{:?}", offer.lines).contains("answer 399"),
+            "and it is the ending that is kept"
+        );
+        assert!(
+            !format!("{:?}", offer.lines).contains("ask 0\""),
+            "not the beginning"
+        );
+    }
 }
