@@ -892,6 +892,63 @@ mod tests {
         assert_eq!(latest_session_id(&store).unwrap(), own);
     }
 
+    /// `--continue` means this directory's work. Opening another
+    /// checkout's conversation against these files is a surprise, so
+    /// the fallback happens but says where that session started.
+    #[test]
+    fn continuing_prefers_this_directory_and_names_the_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().join("sessions"));
+        let here = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let canonical = |dir: &tempfile::TempDir| std::fs::canonicalize(dir.path()).unwrap();
+
+        let theirs = new_id();
+        drop(
+            store
+                .create(SessionMeta {
+                    session_id: theirs.clone(),
+                    parent_id: None,
+                    agent: "build".into(),
+                    model: "zai/glm-4.7".into(),
+                    workspace: None,
+                    cwd: Some(canonical(&elsewhere)),
+                })
+                .unwrap(),
+        );
+
+        let (id, notice) = latest_session_in(&store, here.path()).unwrap();
+        assert_eq!(id, theirs, "the only session there is");
+        let notice = notice.expect("a session from elsewhere is announced");
+        assert!(
+            notice.contains("no session started in this directory"),
+            "{notice}"
+        );
+        assert!(
+            notice.contains(&canonical(&elsewhere).display().to_string()),
+            "{notice}"
+        );
+
+        // One from here outranks it, however much newer the other is.
+        let mine = new_id();
+        drop(
+            store
+                .create(SessionMeta {
+                    session_id: mine.clone(),
+                    parent_id: None,
+                    agent: "build".into(),
+                    model: "zai/glm-4.7".into(),
+                    workspace: None,
+                    cwd: Some(canonical(&here)),
+                })
+                .unwrap(),
+        );
+        assert_eq!(
+            latest_session_in(&store, here.path()).unwrap(),
+            (mine, None)
+        );
+    }
+
     /// A name the program does not know, answered with the names it
     /// does: an agent list is three words long and was left out.
     #[test]
