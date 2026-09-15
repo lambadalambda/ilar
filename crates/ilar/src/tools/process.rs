@@ -16,6 +16,15 @@ pub(crate) struct Captured {
 }
 
 impl Captured {
+    /// The same capture with every granted value replaced. `total`
+    /// keeps counting what the command wrote, not what is left.
+    pub fn redacted(mut self, granted: &[crate::secrets::Granted]) -> Self {
+        if !granted.is_empty() {
+            self.retained = crate::secrets::redact_bytes(&self.retained, granted);
+        }
+        self
+    }
+
     fn push(&mut self, chunk: &[u8], cap: usize) {
         self.total = self.total.saturating_add(chunk.len());
         let keep = chunk.len().min(cap);
@@ -59,6 +68,33 @@ pub(crate) async fn drain<R: tokio::io::AsyncRead + Unpin>(
     }
 }
 
+/// What a child's environment differs in from ilar's own: the
+/// variables it must not see, and the secrets it was granted.
+#[derive(Clone, Default, Debug)]
+pub(crate) struct ChildEnv {
+    pub remove: Vec<String>,
+    pub set: Vec<(String, String)>,
+}
+
+impl ChildEnv {
+    /// Ilar's own keys and every stored value hidden; the granted
+    /// secrets set by name. Without a store nothing is hidden by value,
+    /// but ilar's keys still are.
+    pub fn shielded(
+        secrets: Option<&crate::secrets::Secrets>,
+        granted: &[crate::secrets::Granted],
+    ) -> Self {
+        let values = secrets.map(|secrets| secrets.values()).unwrap_or_default();
+        Self {
+            remove: crate::secrets::shielded_env(&values),
+            set: granted
+                .iter()
+                .map(|secret| (secret.name.clone(), secret.value().to_string()))
+                .collect(),
+        }
+    }
+}
+
 /// `sh -c` in `cwd` with both pipes captured, no stdin, and its own
 /// session so descendants can be killed as a unit.
 ///
@@ -69,12 +105,21 @@ pub(crate) async fn drain<R: tokio::io::AsyncRead + Unpin>(
 /// call until its timeout. With no controlling terminal that open fails
 /// fast, with an error the model can read and relay. A session leader
 /// leads its own group too, so `killpg(pid)` reaping is unchanged.
-pub(crate) fn shell_command(command_text: &str, cwd: &std::path::Path) -> tokio::process::Command {
+pub(crate) fn shell_command(
+    command_text: &str,
+    cwd: &std::path::Path,
+    env: &ChildEnv,
+) -> tokio::process::Command {
     let mut command = tokio::process::Command::new("sh");
     command
         .arg("-c")
         .arg(command_text)
         .current_dir(cwd)
+        .envs(env.set.iter().map(|(name, value)| (name, value)));
+    for name in &env.remove {
+        command.env_remove(name);
+    }
+    command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -202,7 +247,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_shell_child_leads_its_own_process_group() {
-        let mut child = shell_command("sleep 30", std::path::Path::new("."))
+        let mut child = shell_command("sleep 30", std::path::Path::new("."), &ChildEnv::default())
             .spawn()
             .expect("pre_exec must not fail on a healthy fork");
         let pid = i32::try_from(child.id().unwrap()).unwrap();
@@ -223,7 +268,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_group_that_has_exited_is_not_signalable() {
-        let mut child = shell_command("exit 0", std::path::Path::new("."))
+        let mut child = shell_command("exit 0", std::path::Path::new("."), &ChildEnv::default())
             .spawn()
             .expect("pre_exec must not fail on a healthy fork");
         let pid = child.id().unwrap();
@@ -235,6 +280,32 @@ mod tests {
             !process_group_signalable(pid),
             "a reaped group still claimed its id"
         );
+    }
+
+    /// The child gets what it was granted and not what ilar keeps for
+    /// itself: the set names are there, the removed ones are gone, the
+    /// rest of the environment is untouched.
+    #[tokio::test]
+    async fn a_child_sees_granted_names_and_not_removed_ones() {
+        // SAFETY: a name nothing else in this process reads, set before
+        // the spawn and never changed again.
+        unsafe { std::env::set_var("PROCESS_TEST_HIDDEN", "leaked") };
+        let env = ChildEnv {
+            remove: vec!["PROCESS_TEST_HIDDEN".into()],
+            set: vec![("PROCESS_TEST_GRANTED".into(), "granted-value".into())],
+        };
+        let output = shell_command(
+            "echo \"h=[$PROCESS_TEST_HIDDEN] g=$PROCESS_TEST_GRANTED p=${PATH:+set}\"",
+            std::path::Path::new("."),
+            &env,
+        )
+        .output()
+        .await
+        .unwrap();
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(text.contains("h=[]"), "{text}");
+        assert!(text.contains("g=granted-value"), "{text}");
+        assert!(text.contains("p=set"), "{text}");
     }
 
     #[test]

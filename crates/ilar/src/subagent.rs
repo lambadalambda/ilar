@@ -145,6 +145,9 @@ pub struct SubagentSpawner {
     services: Option<std::sync::Arc<crate::tools::service::ServiceManager>>,
     /// Models available for per-task overrides and the models tool.
     available_models: Vec<&'static crate::model::ModelInfo>,
+    /// The session's secrets, for the listing tool in child registries
+    /// and the notification turns this spawner runs.
+    secrets: Option<crate::secrets::Secrets>,
 }
 
 /// A subagent that is working right now, for anything that wants to
@@ -450,6 +453,7 @@ impl SubagentSpawner {
             loop_config: LoopConfig::default(),
             services: None,
             available_models: Vec::new(),
+            secrets: None,
         })
     }
 
@@ -488,6 +492,11 @@ impl SubagentSpawner {
 
     pub fn with_available_models(mut self, models: Vec<&'static crate::model::ModelInfo>) -> Self {
         self.available_models = models;
+        self
+    }
+
+    pub fn with_secrets(mut self, secrets: crate::secrets::Secrets) -> Self {
+        self.secrets = Some(secrets);
         self
     }
 
@@ -608,6 +617,7 @@ impl SubagentSpawner {
             loop_config: self.loop_config.clone(),
             services: self.services.clone(),
             available_models: self.available_models.clone(),
+            secrets: self.secrets.clone(),
         })
     }
 
@@ -630,7 +640,11 @@ impl SubagentSpawner {
                     Some(services) => registry.with_services(services)?,
                     None => registry,
                 };
-                registry.with_models(self.available_models.clone())?
+                let registry = registry.with_models(self.available_models.clone())?;
+                match &self.secrets {
+                    Some(secrets) if !secrets.values().is_empty() => registry.with_secrets()?,
+                    _ => registry,
+                }
             }
         };
         Ok(match &agent.tools {
@@ -1035,6 +1049,8 @@ impl SubagentSpawner {
             // Inherited: a child's oversized output is worth keeping for
             // the same reason its parent's is.
             spill_dir: ctx.spill_dir.clone(),
+            // Inherited: a child's bash asks the same person.
+            secrets: ctx.secrets.clone(),
             // Inherited for a foreground child, whose every event is
             // its blocked caller's progress; the background branch
             // below replaces it with the watchdog of its own.
@@ -1859,6 +1875,7 @@ task's scope yourself; continue only clearly disjoint work."
                     // A routed notification turn runs under no background
                     // watchdog.
                     heartbeat: None,
+                    secrets: self.secrets.clone(),
                 },
                 // No live channel: this turn is not the parent's to
                 // steer, so a message that arrives while it runs waits

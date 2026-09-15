@@ -11,6 +11,7 @@ pub mod image_gen;
 pub mod models;
 mod process;
 pub mod read;
+pub mod secrets_tool;
 pub mod service;
 pub mod web;
 pub mod write;
@@ -597,6 +598,10 @@ pub struct ToolContext {
     /// runs under one. Inherited by foreground children; a background
     /// child starts its own.
     pub heartbeat: Option<Heartbeat>,
+    /// The secret store and the grants given so far, for the tools
+    /// that take `secrets`. `None` in a context built without one:
+    /// every named secret is then refused.
+    pub secrets: Option<crate::secrets::Secrets>,
 }
 
 impl ToolContext {
@@ -629,7 +634,14 @@ impl ToolContext {
             seen_files: SeenFiles::default(),
             spill_dir: None,
             heartbeat: None,
+            secrets: None,
         })
+    }
+
+    /// Context with the secret store attached.
+    pub fn with_secrets(mut self, secrets: crate::secrets::Secrets) -> Self {
+        self.secrets = Some(secrets);
+        self
     }
 
     /// Context that may spill oversized tool output into `dir`.
@@ -898,6 +910,7 @@ impl ChildTool {
     pub const MODELS: Self = Self("models");
     pub const HISTORY: Self = Self("history");
     pub const IMAGE_GEN: Self = Self("image_gen");
+    pub const SECRETS: Self = Self("secrets");
 
     /// Every non-builtin tool an allowlist may name.
     pub const ALL: &'static [Self] = &[
@@ -908,6 +921,7 @@ impl ChildTool {
         Self::MODELS,
         Self::HISTORY,
         Self::IMAGE_GEN,
+        Self::SECRETS,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -1057,6 +1071,15 @@ impl ToolRegistry {
         self.with_child_tool(
             ChildTool::MODELS,
             std::sync::Arc::new(models::ModelsTool::new(models)),
+        )
+    }
+
+    /// Registry with the secrets listing attached — for a session
+    /// whose store has something to list.
+    pub fn with_secrets(self) -> Result<Self, DuplicateToolError> {
+        self.with_child_tool(
+            ChildTool::SECRETS,
+            std::sync::Arc::new(secrets_tool::SecretsTool),
         )
     }
 

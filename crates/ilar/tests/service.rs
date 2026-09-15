@@ -141,3 +141,49 @@ async fn service_input_validation() {
         assert!(output.content.contains(needle), "{}", output.content);
     }
 }
+
+/// A service started with a secret has it in its environment, and its
+/// logs come back without the value.
+#[tokio::test]
+async fn service_start_takes_secrets_and_its_logs_hide_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ilar::secrets::SecretStore::open(dir.path());
+    store.set("SVC_TOKEN", "", "svc-secret-value").unwrap();
+    store.grant_always("SVC_TOKEN", "service").unwrap();
+    let ctx = ctx().with_secrets(ilar::secrets::Secrets::new(store));
+    let manager = ServiceManager::new();
+    let tool = ServiceTool::new(manager.clone());
+
+    let started = tool
+        .run(
+            serde_json::json!({"action": "start", "name": "sec", "command": "echo token=$SVC_TOKEN; sleep 30", "secrets": ["SVC_TOKEN"]}),
+            ctx.clone(),
+        )
+        .await;
+    assert!(!started.is_error, "{}", started.content);
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let logs = tool
+        .run(
+            serde_json::json!({"action": "logs", "name": "sec"}),
+            ctx.clone(),
+        )
+        .await;
+    assert!(
+        logs.content.contains("token=<secret:SVC_TOKEN>"),
+        "{}",
+        logs.content
+    );
+    assert!(!logs.content.contains("svc-secret-value"));
+    let _ = tool
+        .run(serde_json::json!({"action": "stop", "name": "sec"}), ctx)
+        .await;
+
+    // Unknown to a context without a store: refused before anything runs.
+    let refused = run(
+        &tool,
+        serde_json::json!({"action": "start", "name": "bare", "command": "sleep 30", "secrets": ["SVC_TOKEN"]}),
+    )
+    .await;
+    assert!(refused.is_error);
+    assert_eq!(manager.running_count(), 0, "{}", refused.content);
+}

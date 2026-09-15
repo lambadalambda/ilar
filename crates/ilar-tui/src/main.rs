@@ -11,8 +11,8 @@ mod links;
 mod markdown;
 mod modals;
 mod questions;
-mod secret_cli;
 mod schedule;
+mod secret_cli;
 mod selection;
 #[cfg(feature = "serve")]
 mod serve;
@@ -1010,6 +1010,7 @@ async fn run_exec(config: &ilar::config::Config, args: ExecArgs) -> Result<i32> 
             // Nobody is here to answer: the tool is left off so the
             // model is told so on the spot instead of blocking.
             questions: false,
+            grants: false,
             project_instructions: cli_project_instructions(
                 args.project_instructions,
                 args.no_project_instructions,
@@ -1223,6 +1224,7 @@ async fn main() -> Result<()> {
                 resume: resume_target.clone(),
                 cwd: cwd.clone(),
                 questions: true,
+                grants: false,
                 // Not first-run-only like the model and agent
                 // overrides: what this launch does with the project
                 // file is a property of the launch, so every session

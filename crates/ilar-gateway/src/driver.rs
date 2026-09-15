@@ -695,6 +695,7 @@ pub fn plan(
             // Nobody sits at a channel to answer a form: the tool is
             // left off and the model is told so on the spot.
             questions: false,
+            grants: false,
             project_instructions: None,
             // An assistant has a SOUL.md before it has coding
             // instructions: who it is, how it talks — and reads it,

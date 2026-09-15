@@ -41,6 +41,10 @@ pub struct RuntimeOptions {
     /// Attach the `question` tool. A driver with nobody to answer
     /// leaves it off, and the tool call fails instead of hanging.
     pub questions: bool,
+    /// Somebody can answer a secret's grant prompt. A driver with
+    /// nobody to ask leaves it off, and an ungranted secret is refused
+    /// with the CLI line that grants it.
+    pub grants: bool,
     /// `--project-instructions` / `--no-project-instructions`, for one
     /// launch. `None` leaves the decision to configuration.
     pub project_instructions: Option<bool>,
@@ -77,6 +81,7 @@ pub struct RuntimePlan {
     user_dir: PathBuf,
     cwd: PathBuf,
     questions: bool,
+    grants: bool,
     project_instructions: ProjectInstructions,
 }
 
@@ -97,6 +102,8 @@ pub struct SessionRuntime {
     pub resolver: Arc<dyn ProviderResolver>,
     /// `None` when the driver did not ask for questions.
     pub questions: Option<QuestionReceiver>,
+    /// `None` when the driver did not offer to answer grant prompts.
+    pub grants: Option<crate::secrets::GrantReceiver>,
     pub skills: Vec<(String, String)>,
     pub commands: Vec<crate::command::Command>,
     /// The resumed session's replay, for drivers that rebuild a view.
@@ -367,6 +374,7 @@ impl RuntimePlan {
             user_dir,
             cwd: options.cwd.clone(),
             questions: options.questions,
+            grants: options.grants,
             project_instructions,
         })
     }
@@ -439,6 +447,7 @@ impl RuntimePlan {
             tool_ctx,
             loop_config,
             questions,
+            grants,
         } = self.tooling(config, resolver.clone(), &store)?;
 
         Ok(SessionRuntime {
@@ -456,6 +465,7 @@ impl RuntimePlan {
             loop_config,
             resolver,
             questions,
+            grants,
             skills: self.skills,
             commands: self.commands,
             resumed: self.resumed,
@@ -496,6 +506,17 @@ impl RuntimePlan {
             ..LoopConfig::default()
         };
         let services = ServiceManager::new();
+        // Always attached, even to an empty store: a child shell is
+        // shielded from ilar's own keys either way. Only the prompts
+        // depend on the driver.
+        let secrets =
+            crate::secrets::Secrets::new(crate::secrets::SecretStore::open(config.state_dir()));
+        let (secrets, grants) = if self.grants {
+            let (sender, receiver) = crate::secrets::grant_channel(1);
+            (secrets.with_prompts(sender), Some(receiver))
+        } else {
+            (secrets, None)
+        };
         let spawner = Arc::new(
             SubagentSpawner::try_new(
                 resolver,
@@ -517,7 +538,8 @@ impl RuntimePlan {
             ))
             .with_loop_config(loop_config.clone())
             .with_services(services.clone())
-            .with_available_models(config.available_models()),
+            .with_available_models(config.available_models())
+            .with_secrets(secrets.clone()),
         );
         let todos = Arc::new(Mutex::new(restored_todos(self.resumed.as_ref())));
         let registry = ToolRegistry::builtin()
@@ -532,6 +554,12 @@ impl RuntimePlan {
             Some(backend) => registry.with_image_gen(backend)?,
             None => registry,
         };
+        // The listing costs a tool; an empty store does not pay it.
+        let registry = if secrets.values().is_empty() {
+            registry
+        } else {
+            registry.with_secrets()?
+        };
         // No receiver, no question tool: a driver that cannot answer
         // makes the call fail immediately rather than hang on it.
         let (registry, questions) = if self.questions {
@@ -545,7 +573,8 @@ impl RuntimePlan {
         // report, not a reason to abort the process.
         let tool_ctx = ToolContext::try_root(self.cwd.clone())?
             .with_subagents(spawner.clone())
-            .with_spill_dir(crate::tools::bash::spill_dir(config.state_dir()));
+            .with_spill_dir(crate::tools::bash::spill_dir(config.state_dir()))
+            .with_secrets(secrets);
         Ok(Tooling {
             registry,
             spawner,
@@ -554,6 +583,7 @@ impl RuntimePlan {
             tool_ctx,
             loop_config,
             questions,
+            grants,
         })
     }
 }
@@ -567,6 +597,7 @@ struct Tooling {
     tool_ctx: ToolContext,
     loop_config: LoopConfig,
     questions: Option<QuestionReceiver>,
+    grants: Option<crate::secrets::GrantReceiver>,
 }
 
 /// What the first request of a session would carry, for reading.

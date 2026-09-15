@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use serde::Deserialize;
 
 use super::process::{
-    Captured, drain, kill_process_group, process_group_signalable, shell_command,
+    Captured, ChildEnv, drain, kill_process_group, process_group_signalable, shell_command,
 };
 use super::{Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, WorkspaceAccess};
 
@@ -32,6 +32,9 @@ struct ServiceEntry {
     /// never signalled at all.
     group: Option<u32>,
     output: Arc<Mutex<Captured>>,
+    /// What the service was started with; its logs are redacted of
+    /// these values on the way out.
+    granted: Vec<crate::secrets::Granted>,
     started: std::time::Instant,
     exited: Option<String>,
 }
@@ -175,6 +178,10 @@ struct Input {
     command: Option<String>,
     #[serde(default)]
     lines: Option<usize>,
+    /// Stored secrets to hand the command as environment variables
+    /// (start only).
+    #[serde(default)]
+    secrets: Vec<String>,
 }
 
 fn valid_name(name: &str) -> bool {
@@ -224,7 +231,8 @@ impl Tool for ServiceTool {
                 "action": {"type": "string", "enum": ["start", "status", "logs", "stop"]},
                 "name": {"type": "string", "description": "Service name ([a-zA-Z0-9_-], max 64)"},
                 "command": {"type": "string", "description": "Shell command (start only)"},
-                "lines": {"type": "integer", "description": "Log lines to return (default 50, max 500)"}
+                "lines": {"type": "integer", "description": "Log lines to return (default 50, max 500)"},
+                "secrets": {"type": "array", "items": {"type": "string"}, "description": "Names of stored secrets (see the secrets tool) to set as environment variables of the service (start only). The user is asked before each use unless they granted it."}
             },
             "required": ["action"]
         })
@@ -268,7 +276,19 @@ impl Tool for ServiceTool {
                             existing.kill_group();
                         }
                     }
-                    let mut child = match shell_command(&command, &ctx.cwd).spawn() {
+                    let granted = match super::bash::resolve_secrets(
+                        &ctx,
+                        "service",
+                        &input.secrets,
+                        &format!("service {name}: {command}"),
+                    )
+                    .await
+                    {
+                        Ok(granted) => granted,
+                        Err(error) => return ToolOutput::error(error),
+                    };
+                    let env = ChildEnv::shielded(ctx.secrets.as_ref(), &granted);
+                    let mut child = match shell_command(&command, &ctx.cwd, &env).spawn() {
                         Ok(child) => child,
                         Err(error) => {
                             return ToolOutput::error(format!("service {name}: {error}"));
@@ -293,6 +313,7 @@ impl Tool for ServiceTool {
                             output,
                             started: std::time::Instant::now(),
                             exited: None,
+                            granted,
                         },
                     );
                     ToolOutput::text(format!(
@@ -345,7 +366,10 @@ impl Tool for ServiceTool {
                     };
                     entry.refresh();
                     let output = entry.output.lock().unwrap();
-                    let text = String::from_utf8_lossy(&output.retained);
+                    let text = crate::secrets::redact(
+                        &String::from_utf8_lossy(&output.retained),
+                        &entry.granted,
+                    );
                     let all: Vec<&str> = text.lines().collect();
                     let start = all.len().saturating_sub(lines);
                     let mut body = all[start..].join("\n");

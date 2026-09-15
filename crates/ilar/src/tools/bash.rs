@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use super::process::{Captured, ProcessGroup, drain, shell_command};
+use super::process::{Captured, ChildEnv, ProcessGroup, drain, shell_command};
 use super::{
     Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, WorkspaceAccess, parse_input,
 };
@@ -418,6 +418,9 @@ struct Input {
     run_in_background: bool,
     #[serde(default)]
     preview_bytes: Option<usize>,
+    /// Stored secrets to hand the command as environment variables.
+    #[serde(default)]
+    secrets: Vec<String>,
 }
 
 impl Tool for BashTool {
@@ -452,7 +455,8 @@ impl Tool for BashTool {
                 "command": {"type": "string", "description": "The shell command, run with sh -c in the project cwd"},
                 "timeout_ms": {"type": "integer", "description": "Kill after this many milliseconds (default 120000 foreground; configured default for background)"},
                 "run_in_background": {"type": "boolean", "description": "Run detached and deliver the result as a notification"},
-                "preview_bytes": {"type": "integer", "description": "Output size you expect: on success the inline preview is capped at this (clamped 1024-30720) and the full output still goes to the spill file. Ignored when the command fails, so error output stays visible."}
+                "preview_bytes": {"type": "integer", "description": "Output size you expect: on success the inline preview is capped at this (clamped 1024-30720) and the full output still goes to the spill file. Ignored when the command fails, so error output stays visible."},
+                "secrets": {"type": "array", "items": {"type": "string"}, "description": "Names of stored secrets (see the secrets tool) to set as environment variables of this command, e.g. [\"GITHUB_TOKEN\"] makes $GITHUB_TOKEN available. The user is asked before each use unless they granted it. Read the value from the variable; never print it."}
             },
             "required": ["command"]
         })
@@ -482,6 +486,12 @@ impl Tool for BashTool {
                 });
             }
             let spill = SpillTarget::from_context(&ctx);
+            let granted = match resolve_secrets(&ctx, "bash", &input.secrets, &input.command).await
+            {
+                Ok(granted) => granted,
+                Err(error) => return ToolOutput::error(error),
+            };
+            let env = ChildEnv::shielded(ctx.secrets.as_ref(), &granted);
             if input.run_in_background {
                 if ctx.has_workspace_lease() {
                     return ToolOutput::error(
@@ -513,6 +523,8 @@ impl Tool for BashTool {
                     None,
                     spill,
                     input.preview_bytes,
+                    env,
+                    granted,
                 );
                 return spawner
                     .spawn_background_tool(
@@ -535,10 +547,42 @@ impl Tool for BashTool {
                 tail_reporter,
                 spill,
                 input.preview_bytes,
+                env,
+                granted,
             )
             .await
         })
     }
+}
+
+/// The secrets a call named, each granted or the whole call refused.
+/// A context without a store refuses any name at all.
+pub(crate) async fn resolve_secrets(
+    ctx: &ToolContext,
+    tool: &str,
+    names: &[String],
+    detail: &str,
+) -> Result<Vec<crate::secrets::Granted>, String> {
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    let Some(secrets) = ctx.secrets.as_ref() else {
+        return Err(format!(
+            "{tool}: this session has no secret store, so {} cannot be provided",
+            names.join(", ")
+        ));
+    };
+    secrets
+        .resolve(crate::secrets::Request {
+            tool,
+            names,
+            detail,
+            session_id: &ctx.session_id,
+            tool_call_id: ctx.call_id.as_deref(),
+            cancel: &ctx.cancel,
+        })
+        .await
+        .map_err(|error| format!("{tool}: {error}"))
 }
 
 /// The tail of one stream's capture, and how much of it there was. Only
@@ -571,6 +615,7 @@ fn live_tail(stdout: &DrainTask, stderr: &DrainTask) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_command(
     command_text: String,
     cwd: std::path::PathBuf,
@@ -578,9 +623,11 @@ fn run_command(
     tail_reporter: Option<(String, crate::tools::OutputTailSink)>,
     spill: Option<SpillTarget>,
     declared_preview: Option<usize>,
+    env: ChildEnv,
+    granted: Vec<crate::secrets::Granted>,
 ) -> ToolFuture {
     Box::pin(async move {
-        let mut child = match shell_command(&command_text, &cwd).spawn() {
+        let mut child = match shell_command(&command_text, &cwd, &env).spawn() {
             Ok(c) => c,
             Err(e) => return ToolOutput::error(format!("bash: {e}")),
         };
@@ -599,8 +646,8 @@ fn run_command(
                     group.terminate();
                     child.start_kill().ok();
                     let _ = child.wait().await;
-                    let out = stdout.finish(drain_grace).await;
-                    let err = stderr.finish(drain_grace).await;
+                    let out = stdout.finish(drain_grace).await.redacted(&granted);
+                    let err = stderr.finish(drain_grace).await.redacted(&granted);
                     group.disarm();
                     // A timeout is a failure: the full budget applies.
                     let rendered =
@@ -613,7 +660,7 @@ fn run_command(
                 }
                 _ = ticker.tick() => {
                     if let Some((call_id, sink)) = &tail_reporter {
-                        let tail = live_tail(&stdout, &stderr);
+                        let tail = crate::secrets::redact(&live_tail(&stdout, &stderr), &granted);
                         if !tail.is_empty() {
                             sink.report(call_id, tail);
                         }
@@ -625,8 +672,10 @@ fn run_command(
         // descendants outlive an apparently completed tool call.
         group.terminate();
         group.disarm();
-        let out = stdout.finish(drain_grace).await;
-        let err = stderr.finish(drain_grace).await;
+        // Redacted before anything downstream — the spill file, the
+        // preview, the transcript — sees a byte of it.
+        let out = stdout.finish(drain_grace).await.redacted(&granted);
+        let err = stderr.finish(drain_grace).await.redacted(&granted);
         let success = matches!(&status, Ok(status) if status.success());
         let budget = preview_budget(declared_preview, success);
         let mut content = render_output(out, err, spill.as_ref(), budget).await;
@@ -816,6 +865,8 @@ mod tests {
             None,
             None,
             None,
+            ChildEnv::default(),
+            Vec::new(),
         )
         .await;
 
@@ -853,6 +904,8 @@ mod tests {
             None,
             Some(target),
             Some(2048),
+            ChildEnv::default(),
+            Vec::new(),
         )
         .await;
 
@@ -884,6 +937,8 @@ mod tests {
             None,
             Some(target),
             Some(2048),
+            ChildEnv::default(),
+            Vec::new(),
         )
         .await;
 

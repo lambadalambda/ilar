@@ -2384,3 +2384,86 @@ async fn the_registry_lists_its_running_services() {
     assert!(!stopped.is_error, "{}", stopped.content);
     assert!(reg.running_services().is_empty());
 }
+
+/// A bash call names a stored secret: it arrives as that variable, and
+/// what the command prints of it is gone before the result exists.
+#[tokio::test]
+async fn bash_hands_a_granted_secret_over_as_a_variable_and_redacts_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ilar::secrets::SecretStore::open(&dir.path().join("state"));
+    store
+        .set("TEST_TOKEN", "a test token", "tok-secret-value")
+        .unwrap();
+    let ctx = ctx(dir.path()).with_secrets(ilar::secrets::Secrets::new(store.clone()));
+    let bash = registry().get("bash").unwrap();
+    let call = |secrets: serde_json::Value| {
+        serde_json::json!({
+            "command": "echo \"token=$TEST_TOKEN\"; echo \"$TEST_TOKEN\" >&2",
+            "secrets": secrets
+        })
+    };
+
+    // Nobody to ask: refused, with the CLI line.
+    let out = bash
+        .run(call(serde_json::json!(["TEST_TOKEN"])), ctx.clone())
+        .await;
+    assert!(out.is_error, "{}", out.content);
+    assert!(
+        out.content
+            .contains("ilar secret grant TEST_TOKEN --tool bash"),
+        "{}",
+        out.content
+    );
+    assert!(!out.content.contains("tok-secret-value"));
+
+    // Unknown name: the known ones are listed.
+    let out = bash
+        .run(call(serde_json::json!(["NOPE"])), ctx.clone())
+        .await;
+    assert!(out.is_error);
+    assert!(
+        out.content.contains("stored: TEST_TOKEN"),
+        "{}",
+        out.content
+    );
+
+    // A standing grant: the variable is there, its value is not in the result.
+    store.grant_always("TEST_TOKEN", "bash").unwrap();
+    let out = bash
+        .run(call(serde_json::json!(["TEST_TOKEN"])), ctx.clone())
+        .await;
+    assert!(!out.is_error, "{}", out.content);
+    assert!(
+        out.content.contains("token=<secret:TEST_TOKEN>"),
+        "{}",
+        out.content
+    );
+    assert!(!out.content.contains("tok-secret-value"), "{}", out.content);
+
+    // Without naming it, the variable is not set.
+    let out = bash.run(call(serde_json::json!([])), ctx.clone()).await;
+    assert!(out.content.contains("token=\n"), "{}", out.content);
+
+    // A context without a store refuses any name.
+    let out = bash
+        .run(call(serde_json::json!(["TEST_TOKEN"])), ctx(dir.path()))
+        .await;
+    assert!(out.is_error);
+    assert!(out.content.contains("no secret store"), "{}", out.content);
+}
+
+/// Ilar's own keys do not reach a child shell.
+#[tokio::test]
+async fn bash_shields_the_child_from_ilars_own_keys() {
+    // SAFETY: a name only this test reads, set before the spawn.
+    unsafe { std::env::set_var("ILAR_TOOLTEST_API_KEY", "sk-leak") };
+    let dir = tempfile::tempdir().unwrap();
+    let bash = registry().get("bash").unwrap();
+    let out = bash
+        .run(
+            serde_json::json!({"command": "echo \"key=[$ILAR_TOOLTEST_API_KEY]\""}),
+            ctx(dir.path()),
+        )
+        .await;
+    assert!(out.content.contains("key=[]"), "{}", out.content);
+}

@@ -788,11 +788,15 @@ mod tests {
         });
         assert!(outcome.unwrap_err().contains("nobody answered"));
 
-        let (outcome, _) = tokio::join!(secrets.resolve(request(&names, &cancel)), async {
-            let _prompt = rx.recv().await.unwrap();
+        // The prompt outlives the cancel, so the only thing that can
+        // end the wait is the cancel itself.
+        let (outcome, prompt) = tokio::join!(secrets.resolve(request(&names, &cancel)), async {
+            let prompt = rx.recv().await.unwrap();
             cancel.cancel();
+            prompt
         });
         assert!(outcome.unwrap_err().contains("cancelled"));
+        drop(prompt);
     }
 
     #[test]
