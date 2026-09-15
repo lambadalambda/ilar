@@ -1551,9 +1551,12 @@ impl SessionSearch {
     ///
     /// With no query the rows are a resume listing, not search results,
     /// so this directory's sessions are kept at the top as they arrive
-    /// — the scan streams in recency order, and the partition is stable,
-    /// so each group stays in it. A typed query is ordered by the scan's
-    /// match quality and left exactly as delivered.
+    /// — the scan streams in recency order, and the grouping is stable,
+    /// so each group stays in it. The batch is grouped *before* the row
+    /// cap takes it: a listing full of sessions nothing was said in
+    /// would otherwise spend the cap on rows that then sink to the
+    /// bottom. A typed query is ordered by the scan's match quality and
+    /// left exactly as delivered.
     ///
     /// Hoisting a late arrival past a cursor the user placed would leave
     /// the highlight on a different session than the one it was on, so
@@ -1569,9 +1572,15 @@ impl SessionSearch {
                     .map(|row| (row.session_id.clone(), row.event))
             })
             .flatten();
+        let listing = self.query.trim().is_empty();
+        let rows = if listing {
+            ranked(rows, |row| resume_rank(row.origin.here(), row.untitled))
+        } else {
+            rows
+        };
         let room = MAX_SEARCH_ROWS.saturating_sub(self.rows.len());
         self.rows.extend(rows.into_iter().take(room));
-        if self.query.trim().is_empty() {
+        if listing {
             self.rows = ranked(std::mem::take(&mut self.rows), |row| {
                 resume_rank(row.origin.here(), row.untitled)
             });
@@ -5028,9 +5037,29 @@ mod tests {
     }
 
     /// A session nothing was ever said in has nothing to resume: it
-    /// goes last, and never among this directory's rows.
+    /// goes last, and never among this directory's rows — and it does
+    /// not spend a row of the cap that a named session needs.
     #[test]
     fn a_session_with_nothing_in_it_is_listed_last() {
+        let mut crowded = SessionSearch::new();
+        let mut rows: Vec<SearchRow> = (0..MAX_SEARCH_ROWS)
+            .map(|index| SearchRow {
+                origin: RowOrigin::Here,
+                untitled: true,
+                ..search_row(&format!("empty-{index}"), "(no messages yet)", "ctx")
+            })
+            .collect();
+        rows.push(SearchRow {
+            origin: RowOrigin::Elsewhere(Some("~/repos/other".into())),
+            ..search_row("named", "other project", "ctx")
+        });
+        crowded.push_rows(0, rows);
+        assert_eq!(
+            crowded.rows.first().map(|row| row.session_id.as_str()),
+            Some("named"),
+            "empty sessions spent the whole cap"
+        );
+
         let mut search = SessionSearch::new();
         search.push_rows(
             0,

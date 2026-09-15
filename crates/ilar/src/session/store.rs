@@ -617,10 +617,23 @@ impl SessionStore {
         }
     }
 
-    /// Forget every directory pointing at `id` — a session that was
-    /// deleted must not stay pointed at.
-    pub fn forget_last(&self, id: &str) {
-        last_by_dir::update(&self.root, |pointers| pointers.forget(id));
+    /// Forget every directory pointing at one of these sessions — a
+    /// session that was deleted must not stay pointed at. One write for
+    /// the lot, so a sweep of a hundred does not rewrite the file a
+    /// hundred times.
+    fn forget(&self, ids: &[&str]) {
+        if ids.is_empty() {
+            return;
+        }
+        last_by_dir::update(&self.root, |pointers| {
+            // Every id, not the first that matched: `any` would stop
+            // early and leave the rest pointed at.
+            let mut changed = false;
+            for id in ids {
+                changed |= pointers.forget(id);
+            }
+            changed
+        });
     }
 
     /// This directory's last session as the pointer file names it,
@@ -665,13 +678,17 @@ impl SessionStore {
             .find(|session| session.cwd.as_deref() == Some(cwd.as_path()))
     }
 
-    /// Whether any session in the root names `parent_id` as its
-    /// parent. The scan's cached verdicts answer it, so this is one
-    /// cache read rather than a head read per file.
-    pub fn has_children(&self, parent_id: &str) -> bool {
-        self.scan()
+    /// Every session named as somebody's parent by a file in the root,
+    /// from the scan's cached verdicts. One question asked of the whole
+    /// directory, because both callers need it for more than one id.
+    fn parents_in(scanned: &[Scanned]) -> HashSet<&str> {
+        scanned
             .iter()
-            .any(|entry| matches!(&entry.kind, CachedKind::Child { parent } if parent == parent_id))
+            .filter_map(|entry| match &entry.kind {
+                CachedKind::Child { parent } => Some(parent.as_str()),
+                CachedKind::Root { .. } | CachedKind::Unreadable => None,
+            })
+            .collect()
     }
 
     /// Remove a root session nobody ever said anything in: the log is
@@ -685,17 +702,25 @@ impl SessionStore {
     /// read, and one whose writer lease somebody holds — `delete`
     /// declines that last case on its own.
     pub fn remove_if_empty(&self, id: &str, outbox_dir: &Path) -> bool {
-        if !self.is_empty_root(id, outbox_dir) || self.delete(id).is_err() {
+        // The file's own answers first, so a session with a user
+        // message costs one head read and never walks the directory.
+        if !self.is_unspoken_root(id, outbox_dir) || Self::parents_in(&self.scan()).contains(id) {
             return false;
         }
-        // A directory must not be left pointing at a session that is
-        // gone: `last_in` would refuse it anyway, but at the cost of
-        // the listing this pointer exists to skip.
-        self.forget_last(id);
+        if self.delete(id).is_err() {
+            return false;
+        }
+        // A directory left naming a session that is gone costs the next
+        // `--continue` the listing the pointer exists to skip.
+        self.forget(&[id]);
         true
     }
 
-    fn is_empty_root(&self, id: &str, outbox_dir: &Path) -> bool {
+    /// Everything about disposability one file can answer: a root
+    /// session, no user message, no mail waiting for it. Whether it has
+    /// children takes a directory scan, so the callers add that — once
+    /// per id here, once for the whole sweep there.
+    fn is_unspoken_root(&self, id: &str, outbox_dir: &Path) -> bool {
         let Ok(parsed) = SessionId::parse(id) else {
             return false;
         };
@@ -705,18 +730,20 @@ impl SessionStore {
         head.meta.parent_id.is_none()
             && !log_has_user_message(&self.session_path_for(&parsed))
             && !crate::outbox::has_entry(outbox_dir, id)
-            // Last, because it is the only check that walks the
-            // directory — and a session with no user message has
-            // almost certainly never spawned anything.
-            && !self.has_children(id)
     }
 
     /// Remove the empty root sessions untouched for `older_than`: the
     /// ones a crash, a kill or a session switch left behind, since only
     /// a clean runtime end removes its own. Returns how many went.
     ///
-    /// `title.is_none()` is the cheap half of the test — a session with
-    /// a user message is titled after it — so the precise check only
+    /// One scan for the whole sweep — the candidates and their
+    /// parenthood come out of the same pass — and one pointer write at
+    /// the end. A sweep that rescanned the directory per candidate
+    /// would cost more on startup than the listing it is here to make
+    /// cheap.
+    ///
+    /// `title.is_none()` is the cheap half of the test: a session with
+    /// a user message is titled after it, so the precise check only
     /// runs on candidates.
     pub fn sweep_empty_sessions(
         &self,
@@ -726,16 +753,21 @@ impl SessionStore {
         let Some(cutoff) = std::time::SystemTime::now().checked_sub(older_than) else {
             return 0;
         };
-        let candidates: Vec<String> = self
-            .list()
-            .into_iter()
-            .filter(|session| session.title.is_none() && session.modified < cutoff)
-            .map(|session| session.id)
-            .collect();
-        candidates
+        let scanned = self.scan();
+        let parents = Self::parents_in(&scanned);
+        let candidates: Vec<&str> = scanned
             .iter()
-            .filter(|id| self.remove_if_empty(id, outbox_dir))
-            .count()
+            .filter(|entry| matches!(&entry.kind, CachedKind::Root { title: None, .. }))
+            .filter(|entry| entry.modified < cutoff)
+            .map(|entry| entry.id.as_str())
+            .filter(|id| !parents.contains(id))
+            .collect();
+        let removed: Vec<&str> = candidates
+            .into_iter()
+            .filter(|id| self.is_unspoken_root(id, outbox_dir) && self.delete(id).is_ok())
+            .collect();
+        self.forget(&removed);
+        removed.len()
     }
 
     /// The subagent tasks spawned by `parent_id`, newest first.
@@ -793,9 +825,11 @@ impl SessionStore {
     /// held (active in some turn) with `WouldBlock`.
     pub fn delete(&self, id: &str) -> std::io::Result<()> {
         let parsed = SessionId::parse(id)?;
-        let lock_path = self.lock_path_for(&parsed);
-        // Unlink everything while the lease is held: removing the lock
-        // after release would race a new holder of the same path.
+        // Unlink everything while the lease is held: removing a file
+        // after release would race a new holder of the same path. The
+        // lock file is the writer's own to remove — its drop does it,
+        // under the identity check that keeps it from taking a
+        // successor's file by mistake.
         let _writer = self.acquire_writer_id(parsed.clone())?;
         let _ = std::fs::remove_file(self.replay_index_path_for(&parsed));
         for path in self.replay_ids_paths_for(&parsed) {
@@ -806,7 +840,6 @@ impl SessionStore {
         // active turn for a session that is gone.
         let _ = std::fs::remove_file(super::live::live_path(&self.session_path_for(&parsed)));
         std::fs::remove_file(self.session_path_for(&parsed))?;
-        let _ = std::fs::remove_file(lock_path);
         Ok(())
     }
 

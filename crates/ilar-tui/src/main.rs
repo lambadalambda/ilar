@@ -1587,7 +1587,7 @@ async fn main() -> Result<()> {
         // The scan loads a parent log per outbox file and walks
         // ancestry, so it joins the restore off the UI task; its
         // results land in the loop.
-        let outbox_dir = config.state_dir().join("outbox");
+        let outbox_dir = ilar::runtime::outbox_dir(&config);
         let adoption_handle = {
             let store = store.clone();
             let outbox_dir = outbox_dir.clone();

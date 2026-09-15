@@ -205,6 +205,49 @@ fn subagent_children_stay_hidden() {
     );
 }
 
+/// The raw-bytes gate is really in the walk, not just available to it:
+/// a file whose bytes do not hold the query is never parsed at all.
+///
+/// The only way to observe that from outside is a file whose *parsed*
+/// text would have matched while its bytes do not — so this session is
+/// hand-built with a JSON escape for a plain letter, which ilar itself
+/// never writes. The point of the test is that nothing read it.
+#[test]
+fn a_file_whose_bytes_lack_the_query_is_never_parsed() {
+    let (store, _dir) = temp_store();
+    let meta = meta(None);
+    let planted = meta.session_id.clone();
+    let meta_line = serde_json::to_string(&SessionEvent::Meta {
+        meta,
+        ts: Utc::now(),
+    })
+    .unwrap();
+    std::fs::write(
+        store.session_path(&planted).unwrap(),
+        format!(
+            "{meta_line}\n{{\"type\":\"user_message\",\"id\":\"{}\",\"text\":\"the \\u0061es table\",\"ts\":\"{}\"}}\n",
+            new_id(),
+            Utc::now().to_rfc3339()
+        ),
+    )
+    .unwrap();
+
+    // Parsed, the session says "aes" — the precise search would match.
+    let entries = ilar::recall::session_entries(&store, &planted).unwrap();
+    assert!(
+        entries.iter().any(|entry| entry.text.contains("aes")),
+        "{entries:?}"
+    );
+    // Unparsed, its bytes do not, so the walk skips it without looking.
+    assert!(collect_all(&store, "aes", 5).is_empty());
+
+    // And a session that does hold the bytes is still reached.
+    let plain = session_with(&store, vec![user("the aes table")]);
+    let found = collect_all(&store, "aes", 5);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].session_id, plain);
+}
+
 #[test]
 fn an_empty_query_emits_nothing() {
     let (store, _dir) = temp_store();

@@ -301,37 +301,44 @@ fn greppable(needle: &str) -> bool {
 /// nothing parsed. This is what keeps a cross-session search from
 /// deserializing gigabytes of JSON to find four hits.
 ///
-/// What is looked for is the query's longest word, not the query: the
+/// What is looked for is one of the query's words, not the query: the
 /// searchable text of a tool call is its name and its arguments joined
 /// by a space that exists nowhere in the file, so a phrase spanning
 /// that join is in the entry and not in the bytes. A word cannot span
-/// it. Everything the full query would match contains its longest word,
-/// so this never rules out a session the precise search would have
-/// found — it only lets a few more through to it.
+/// it. Everything the full query would match contains each of its
+/// words, so the longest greppable one rules out nothing the precise
+/// search would have found — it only lets a few more through to it.
 ///
-/// Conservative everywhere else too: a word the escaping or
-/// case-folding rules above cannot be trusted for, and any read
-/// failure, answer `true` and pay the full parse. A search that is
-/// slower is a nuisance; a search that misses is a bug.
+/// Conservative everywhere else too: a query with no greppable word at
+/// all, and any read failure, answer `true` and pay the full parse. A
+/// search that is slower is a nuisance; a search that misses is a bug.
+/// One known gap, left standing: the precise search case-folds by
+/// Unicode and this folds by ASCII, so a file whose only match is a
+/// character like U+212A KELVIN SIGN folding to `k` is ruled out.
 pub fn file_may_contain(path: &std::path::Path, query: &str) -> bool {
     let Some(needle) = query
         .split_whitespace()
-        .max_by_key(|word| word.len())
         .filter(|word| greppable(word))
+        // Longest last, so a phrase is judged by its most selective
+        // word rather than by whichever came first.
+        .max_by_key(|word| word.len())
+        // A needle that cannot fit in one chunk would grow the carry
+        // by a chunk per read — the whole file in memory, to answer a
+        // question about a query nobody types.
+        .filter(|word| word.len() <= RAW_CHUNK)
     else {
         return true;
     };
-    let Ok(file) = std::fs::File::open(path) else {
+    let Ok(mut file) = std::fs::File::open(path) else {
         return true;
     };
     let lowered = needle.as_bytes().to_ascii_lowercase();
-    let mut reader = std::io::BufReader::with_capacity(RAW_CHUNK, file);
     let mut chunk = vec![0u8; RAW_CHUNK];
     // The tail of the previous chunk, so a match straddling the
     // boundary is still found.
     let mut carry: Vec<u8> = Vec::new();
     loop {
-        let read = match std::io::Read::read(&mut reader, &mut chunk) {
+        let read = match std::io::Read::read(&mut file, &mut chunk) {
             Ok(0) => return false,
             Ok(read) => read,
             Err(_) => return true,
@@ -653,6 +660,16 @@ mod tests {
         assert!(file_may_contain(&path, "\"hello\""), "a quote");
         assert!(file_may_contain(&path, "C:\\Users"), "a backslash");
         assert!(file_may_contain(&path, "   "), "an empty query");
+        assert!(
+            file_may_contain(&path, &"z".repeat(RAW_CHUNK + 1)),
+            "a needle too long to carry across a chunk"
+        );
+        // One greppable word among unjudgeable ones is enough to judge
+        // the file by.
+        assert!(
+            !file_may_contain(&path, "\"hello\" cargo-nextest-run"),
+            "the gate gave up because the longest word had a quote in it"
+        );
     }
 
     /// A tool call's searchable text is its name and its arguments
