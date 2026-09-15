@@ -175,7 +175,8 @@ pub fn ask_text(prompt: &GrantPrompt, asker: &Asker) -> String {
     };
     format!(
         "🔑 {} wants {}{purpose} to run:\n\n{}\n/grant allows it this once, /grant session or \
-         /grant always for longer, /deny refuses. Unanswered in {} minutes, it is a no.{password}",
+         /grant always for longer, /deny refuses. The turn waits for your answer; unanswered in \
+         {} minutes, it is a no.{password}",
         asker.shown,
         prompt.secret,
         shown_command(&prompt.detail),
