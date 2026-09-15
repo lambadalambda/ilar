@@ -612,6 +612,22 @@ impl Gateway {
         }
     }
 
+    /// `/approve` or `/reject` for an id that is not staged: say what
+    /// is, since the ids are short and easy to mistype.
+    fn nothing_pending_as(&self, id: &str) -> String {
+        match self.pending.list() {
+            Ok(list) if list.is_empty() => "Nothing pending.".to_string(),
+            Ok(list) => format!(
+                "Nothing pending as {id}. Pending: {}",
+                list.iter()
+                    .map(|p| p.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Err(_) => format!("Nothing pending as {id}."),
+        }
+    }
+
     /// A slash command, answered by the gateway itself.
     async fn command(&self, key: &str, message: &Inbound, command: Command) -> String {
         match command {
@@ -620,25 +636,32 @@ impl Gateway {
                 Ok(list) if list.is_empty() => "Nothing pending.".to_string(),
                 Ok(list) => list
                     .iter()
-                    .map(|p| format!("{} ({}): {}", p.id, p.chat, p.plan.describe().join("; ")))
+                    .map(|p| format!("{} — {}", p.id, p.plan.describe().join("; ")))
                     .collect::<Vec<_>>()
                     .join("\n"),
                 Err(error) => failed_reply("/pending", &error),
             },
             Command::Approve(id) => match self.pending.take(&id) {
-                Ok(taken) if taken.is_empty() => format!("Nothing pending as {id}."),
-                Ok(taken) => {
-                    let mut lines = Vec::new();
-                    for p in taken {
-                        lines.extend(p.plan.apply(&self.memory, &self.skills));
-                    }
-                    format!("💾 remembered: {}", lines.join("; "))
-                }
+                Ok(taken) if taken.is_empty() => self.nothing_pending_as(&id),
+                Ok(taken) => taken
+                    .iter()
+                    .map(|p| p.plan.apply(&self.memory, &self.skills))
+                    .collect::<crate::review::Applied>()
+                    .report(),
                 Err(error) => failed_reply("/approve", &error),
             },
             Command::Reject(id) => match self.pending.take(&id) {
-                Ok(taken) if taken.is_empty() => format!("Nothing pending as {id}."),
-                Ok(taken) => format!("Dropped {}.", taken.len()),
+                Ok(taken) if taken.is_empty() => self.nothing_pending_as(&id),
+                // What was dropped, not how many: an id nobody reads
+                // means nothing a week later.
+                Ok(taken) => format!(
+                    "Dropped: {}",
+                    taken
+                        .iter()
+                        .flat_map(|p| p.plan.describe())
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ),
                 Err(error) => failed_reply("/reject", &error),
             },
             Command::Unknown(name) => format!("No command /{name}.\n{}", commands::HELP),
@@ -1056,13 +1079,9 @@ impl Gateway {
             return;
         }
         let outcome = plan.apply(&self.memory, &self.skills);
-        log(&format!("{}: review kept {}", seat.key, outcome.join("; ")));
-        self.deliver(
-            &seat.channel,
-            &seat.chat_id,
-            &format!("💾 remembered: {}", outcome.join("; ")),
-        )
-        .await;
+        log(&format!("{}: review: {}", seat.key, outcome.report()));
+        self.deliver(&seat.channel, &seat.chat_id, &outcome.report())
+            .await;
     }
 
     /// A compaction's handover is the turn's own summary of what it

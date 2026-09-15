@@ -222,10 +222,11 @@ impl Plan {
         lines
     }
 
-    /// Write the plan through the store. Every edit is attempted; the
-    /// outcome lines say what landed and what did not.
-    pub fn apply(&self, store: &MemoryStore, skills: &crate::skills::SkillLibrary) -> Vec<String> {
-        let mut outcome = Vec::new();
+    /// Write the plan through the store. Every edit is attempted; what
+    /// landed and what did not are kept apart, so a chat is never told
+    /// it remembered something that failed to be written.
+    pub fn apply(&self, store: &MemoryStore, skills: &crate::skills::SkillLibrary) -> Applied {
+        let mut outcome = Applied::default();
         for skill in &self.skills {
             let result = match skill.action.as_str() {
                 "create" => skills
@@ -243,10 +244,14 @@ impl Plan {
                 ),
                 other => Err(anyhow::anyhow!("unknown skill action {other:?}")),
             };
-            outcome.push(match result {
-                Ok(()) => format!("skill {}: {}", skill.action, skill.name),
-                Err(error) => format!("skill {} not written — {error:#}", skill.name),
-            });
+            match result {
+                Ok(()) => outcome
+                    .kept
+                    .push(format!("skill {}: {}", skill.action, skill.name)),
+                Err(error) => outcome
+                    .failed
+                    .push(format!("skill {}: {error:#}", skill.name)),
+            }
         }
         for edit in &self.memory {
             let file = file_name(edit.file);
@@ -271,22 +276,62 @@ impl Plan {
                     .map(|dropped| format!("{file}: removed {}", dropped.join("; "))),
                 other => Err(anyhow::anyhow!("unknown action {other:?}")),
             };
-            outcome.push(result.unwrap_or_else(|error| format!("{file}: not written — {error:#}")));
+            match result {
+                Ok(line) => outcome.kept.push(line),
+                Err(error) => outcome.failed.push(format!("{file}: {error:#}")),
+            }
         }
         for note in &self.notes {
-            let line = match store.note(
+            match store.note(
                 note.kind,
                 &note.title,
                 &note.summary,
                 note.body.as_deref().unwrap_or(&note.summary),
                 Utc::now(),
             ) {
-                Ok(written) => format!("note {}: {}", written.id, note.title),
-                Err(error) => format!("note not written — {error:#}"),
-            };
-            outcome.push(line);
+                Ok(written) => outcome
+                    .kept
+                    .push(format!("note {}: {}", written.id, note.title)),
+                Err(error) => outcome
+                    .failed
+                    .push(format!("note {}: {error:#}", note.title)),
+            }
         }
         outcome
+    }
+}
+
+/// What applying a plan came to: what the store now holds, and what it
+/// refused.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Applied {
+    pub kept: Vec<String>,
+    pub failed: Vec<String>,
+}
+
+impl Applied {
+    /// The line the chat gets. A failure is never dressed as a memory.
+    pub fn report(&self) -> String {
+        let kept = self.kept.join("; ");
+        let failed = self.failed.join("; ");
+        match (self.kept.is_empty(), self.failed.is_empty()) {
+            (true, true) => "Nothing to remember.".to_string(),
+            (true, false) => format!("⚠ nothing kept: {failed}"),
+            (false, true) => format!("💾 remembered: {kept}"),
+            (false, false) => format!("💾 remembered: {kept} — not kept: {failed}"),
+        }
+    }
+}
+
+/// Several plans applied in one go — `/approve all` — read as one.
+impl FromIterator<Applied> for Applied {
+    fn from_iter<I: IntoIterator<Item = Applied>>(parts: I) -> Self {
+        let mut all = Self::default();
+        for part in parts {
+            all.kept.extend(part.kept);
+            all.failed.extend(part.failed);
+        }
+        all
     }
 }
 
@@ -435,11 +480,44 @@ mod tests {
         .unwrap();
         let skills = crate::skills::SkillLibrary::new(dir.path().join("skills"));
         let outcome = plan.apply(&store, &skills);
-        assert_eq!(outcome[0], "user: Likes tea");
-        assert!(outcome[1].contains("not written"), "{outcome:?}");
-        assert!(outcome[2].starts_with("note "), "{outcome:?}");
+        assert_eq!(outcome.kept[0], "user: Likes tea");
+        assert!(outcome.kept[1].starts_with("note "), "{outcome:?}");
+        assert_eq!(outcome.kept.len(), 2, "{outcome:?}");
+        assert_eq!(outcome.failed.len(), 1, "{outcome:?}");
+        assert!(outcome.failed[0].starts_with("user: "), "{outcome:?}");
         assert_eq!(store.core(CoreFile::User).unwrap(), "Likes tea\n");
         assert_eq!(store.notes().unwrap().len(), 1);
+        // The chat hears what was kept and what was not, apart.
+        let report = outcome.report();
+        assert!(
+            report.starts_with("💾 remembered: user: Likes tea"),
+            "{report}"
+        );
+        assert!(report.contains(" — not kept: user: "), "{report}");
+    }
+
+    #[test]
+    fn a_failure_is_never_reported_as_a_memory() {
+        let nothing = Applied::default();
+        assert_eq!(nothing.report(), "Nothing to remember.");
+        let failed = Applied {
+            kept: vec![],
+            failed: vec!["user: absent".into()],
+        };
+        assert_eq!(failed.report(), "⚠ nothing kept: user: absent");
+        let both: Applied = [
+            Applied {
+                kept: vec!["user: tea".into()],
+                failed: vec![],
+            },
+            failed,
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            both.report(),
+            "💾 remembered: user: tea — not kept: user: absent"
+        );
     }
 
     #[test]

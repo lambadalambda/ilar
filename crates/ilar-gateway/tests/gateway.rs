@@ -1201,10 +1201,19 @@ async fn a_quiet_episode_is_not_reviewed_and_approval_stages_the_plan() {
     fake.inject("/pending", "chat-1", "alice").await;
     let sent = fake.wait_for_sent(4, WAIT).await;
     assert!(sent[3].text.contains("Likes earl grey"), "{sent:?}");
-    fake.inject("/approve all", "chat-1", "alice").await;
+    // A mistyped id says what is staged instead of just refusing.
+    fake.inject("/approve nope", "chat-1", "alice").await;
     let sent = fake.wait_for_sent(5, WAIT).await;
     assert!(
         sent[4]
+            .text
+            .starts_with("Nothing pending as nope. Pending: "),
+        "{sent:?}"
+    );
+    fake.inject("/approve all", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(6, WAIT).await;
+    assert!(
+        sent[5]
             .text
             .starts_with("💾 remembered: user: Likes earl grey"),
         "{sent:?}"
@@ -1212,8 +1221,11 @@ async fn a_quiet_episode_is_not_reviewed_and_approval_stages_the_plan() {
     let user = std::fs::read_to_string(dir.path().join("state/gateway/memory/USER.md")).unwrap();
     assert_eq!(user, "Likes earl grey\n");
     fake.inject("/pending", "chat-1", "alice").await;
-    let sent = fake.wait_for_sent(6, WAIT).await;
-    assert_eq!(sent[5].text, "Nothing pending.");
+    let sent = fake.wait_for_sent(7, WAIT).await;
+    assert_eq!(sent[6].text, "Nothing pending.");
+    fake.inject("/reject all", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(8, WAIT).await;
+    assert_eq!(sent[7].text, "Nothing pending.");
     gateway.cancel();
 }
 
