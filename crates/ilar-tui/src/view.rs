@@ -589,7 +589,7 @@ impl App {
             .visual_line_count(input_width)
             .saturating_add(2)
             .min(u16::MAX as usize) as u16;
-        let input_height = desired_input_height.min(frame.area().height.saturating_sub(4).max(3));
+        let input_height = input_height(desired_input_height, frame.area().height);
         let mut pending_lines = self.pending_strip_lines(frame.area().width);
         // The strip yields to the panes it sits between: on a cramped
         // terminal the transcript and input win.
@@ -1228,6 +1228,25 @@ impl App {
 
 /// "12.3 KiB" while data flows, "12.3 KiB · no data Ns" once the stream
 /// has been silent past the stall threshold. `None` before any turn.
+/// How tall the prompt may grow for what is in it. A big paste used to
+/// take everything but four rows: the transcript collapsed to one line
+/// and the pending strip truncated to nothing, so the screen became the
+/// draft. Two fifths is the ceiling — the prompt scrolls inside it
+/// (`InputBuffer::multiline_view` follows the cursor) — with a floor of
+/// `SMALL_INPUT_ROWS`, so a handful of typed lines still fits whole on
+/// a short terminal, and never more than the layout below can spare.
+fn input_height(desired: u16, screen: u16) -> u16 {
+    let ceiling = (screen * 2 / 5)
+        .max(SMALL_INPUT_ROWS)
+        .min(screen.saturating_sub(4))
+        .max(3);
+    desired.clamp(3, ceiling)
+}
+
+/// A prompt this tall is nobody's runaway paste — four typed lines
+/// between its borders — so the two-fifths ceiling never cuts below it.
+const SMALL_INPUT_ROWS: u16 = 6;
+
 /// The strip row a waiting message gets. A task or tool result is
 /// mail, not something the user typed: it wears the collapsed headline
 /// its transcript row will wear, under its own name, and never the
@@ -1324,4 +1343,37 @@ pub(crate) fn activity_line(
         Span::styled(format!("{frame} "), Style::default().fg(color)),
         Span::styled(label, Style::default().fg(MUTED)),
     ]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::input_height;
+
+    /// A paste must not become the whole screen: the prompt takes at
+    /// most two fifths and scrolls inside, leaving the transcript and
+    /// the pending strip room to exist.
+    #[test]
+    fn a_big_draft_stops_at_two_fifths_of_the_screen() {
+        // Small drafts are unaffected.
+        assert_eq!(input_height(3, 40), 3);
+        assert_eq!(input_height(8, 40), 8);
+        // A 200-line paste yields to the transcript.
+        assert_eq!(input_height(202, 40), 16);
+        assert_eq!(input_height(202, 24), 9);
+        // A few typed lines still fit whole on a short terminal.
+        assert_eq!(input_height(5, 12), 5);
+        assert_eq!(input_height(202, 12), 6);
+        // Room for the pending strip's five rows and the status line
+        // below the transcript, at the sizes a terminal actually is.
+        for screen in [24u16, 40, 60, 100] {
+            assert!(
+                screen - input_height(u16::MAX, screen) >= 10,
+                "{screen} leaves too little"
+            );
+        }
+        // Tiny terminals keep a typable prompt rather than none.
+        for screen in [0u16, 1, 3, 6] {
+            assert_eq!(input_height(202, screen), 3, "{screen}");
+        }
+    }
 }
