@@ -132,9 +132,9 @@ impl Tool for TodoTool {
     fn run(&self, input: serde_json::Value, _ctx: ToolContext) -> ToolFuture {
         let list = self.list.clone();
         Box::pin(async move {
-            let input: Input = match serde_json::from_value(input) {
+            let input: Input = match crate::tools::parse_input(input, "todo") {
                 Ok(v) => v,
-                Err(e) => return ToolOutput::error(format!("invalid input for todo: {e}")),
+                Err(error) => return error,
             };
             let Some(todos) = input.todos else {
                 let current = list.lock().unwrap().checklist();

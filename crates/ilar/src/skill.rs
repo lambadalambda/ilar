@@ -260,13 +260,9 @@ impl crate::tools::Tool for SkillTool {
     ) -> crate::tools::ToolFuture {
         let store = self.store.clone();
         Box::pin(async move {
-            let input: SkillInput = match serde_json::from_value(input) {
+            let input: SkillInput = match crate::tools::parse_input(input, "skill") {
                 Ok(v) => v,
-                Err(e) => {
-                    return crate::tools::ToolOutput::error(format!(
-                        "invalid input for skill: {e}"
-                    ));
-                }
+                Err(error) => return error,
             };
             match store.load(&input.name) {
                 Ok(Some(skill)) => crate::tools::ToolOutput::text(format!(

@@ -1253,12 +1253,15 @@ impl ToolRegistry {
 
 /// Parse tool input; on failure return a ToolOutput error instead of
 /// panicking (malformed model output must not crash the loop).
+///
+/// One shape for every tool error, `tool: message`, so a model reading
+/// its own failures does not have to learn a per-tool dialect.
 pub fn parse_input<T: serde::de::DeserializeOwned>(
     input: serde_json::Value,
     tool_name: &str,
 ) -> Result<T, ToolOutput> {
     serde_json::from_value(input)
-        .map_err(|e| ToolOutput::error(format!("invalid input for {tool_name}: {e}")))
+        .map_err(|e| ToolOutput::error(format!("{tool_name}: invalid input: {e}")))
 }
 
 /// Run filesystem work on the blocking pool while holding the workspace

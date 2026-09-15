@@ -693,7 +693,8 @@ impl SubagentSpawner {
     ) -> ToolOutput {
         if self.depth >= self.max_depth {
             return ToolOutput::error(format!(
-                "Subagent nesting limit reached (depth {} of {}). Complete this task directly with your tools instead of spawning another agent.",
+                "task: nesting limit reached (depth {} of {}); do this work directly with your \
+                 own tools instead of spawning another agent",
                 self.depth, self.max_depth
             ));
         }
@@ -2859,9 +2860,9 @@ impl Tool for TaskTool {
     fn run(&self, input: serde_json::Value, ctx: ToolContext) -> ToolFuture {
         let spawner = self.spawner.clone();
         Box::pin(async move {
-            let input: TaskInput = match serde_json::from_value(input) {
+            let input: TaskInput = match crate::tools::parse_input(input, "task") {
                 Ok(v) => v,
-                Err(e) => return ToolOutput::error(format!("invalid input for task: {e}")),
+                Err(error) => return error,
             };
             spawner.run_task(input, &ctx).await
         })
@@ -2875,9 +2876,9 @@ impl Tool for TaskTool {
     ) -> ToolFuture {
         let spawner = self.spawner.clone();
         Box::pin(async move {
-            let input: TaskInput = match serde_json::from_value(input) {
+            let input: TaskInput = match crate::tools::parse_input(input, "task") {
                 Ok(v) => v,
-                Err(e) => return ToolOutput::error(format!("invalid input for task: {e}")),
+                Err(error) => return error,
             };
             spawner.run_task_observed(input, &ctx, Some(on_start)).await
         })
@@ -2980,8 +2981,7 @@ impl Tool for TaskMessageTool {
 }
 
 fn parse_task_message(input: serde_json::Value) -> Result<TaskMessageInput, ToolOutput> {
-    serde_json::from_value(input)
-        .map_err(|error| ToolOutput::error(format!("invalid input for task_message: {error}")))
+    crate::tools::parse_input(input, "task_message")
 }
 
 /// How many tasks the listing reports, newest first. A long session

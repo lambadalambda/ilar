@@ -10,7 +10,9 @@ use serde::Deserialize;
 use url::{Host, Url};
 
 use crate::text::truncate_chars;
-use crate::tools::{Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, WorkspaceAccess};
+use crate::tools::{
+    Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, WorkspaceAccess, parse_input,
+};
 
 const MAX_FETCH_BYTES: usize = 2 * 1024 * 1024;
 const MAX_TEXT_CHARS: usize = 60_000;
@@ -456,9 +458,9 @@ impl Tool for WebFetchTool {
         let http = self.http.clone();
         let allow_private_initial = self.allow_private_initial;
         Box::pin(async move {
-            let input: FetchInput = match serde_json::from_value(input) {
+            let input: FetchInput = match parse_input(input, "webfetch") {
                 Ok(v) => v,
-                Err(e) => return ToolOutput::error(format!("invalid input for webfetch: {e}")),
+                Err(error) => return error,
             };
             if input.url.chars().count() > MAX_FETCH_URL_CHARS {
                 return ToolOutput::error(format!(
@@ -611,13 +613,9 @@ impl Tool for WebSearchTool {
     }
     fn run(&self, input: serde_json::Value, _ctx: ToolContext) -> ToolFuture {
         let backend = &self.backend;
-        let input: SearchInput = match serde_json::from_value(input) {
+        let input: SearchInput = match parse_input(input, "websearch") {
             Ok(v) => v,
-            Err(e) => {
-                return Box::pin(async move {
-                    ToolOutput::error(format!("invalid input for websearch: {e}"))
-                });
-            }
+            Err(error) => return Box::pin(async move { error }),
         };
         if input.query.trim().is_empty() {
             return Box::pin(async { ToolOutput::error("websearch query must not be empty") });
