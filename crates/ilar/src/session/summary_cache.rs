@@ -97,8 +97,9 @@ pub(super) struct Scanned {
 
 /// The mtime as the cache records it. The same reduction
 /// `replay_index::file_stamp` makes, and for the same reason: a
-/// comparable integer that survives a round trip through JSON.
-fn modified_nanos(modified: std::time::SystemTime) -> u64 {
+/// comparable integer that survives a round trip through JSON. Shared
+/// with the directory pointer, which stamps its answers the same way.
+pub(super) fn modified_nanos(modified: std::time::SystemTime) -> u64 {
     modified
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

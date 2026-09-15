@@ -196,7 +196,16 @@ pub fn usable_reasoning(
 /// another checkout's conversation against these files is a surprise
 /// worth naming — and is `None` when the session is from here.
 pub fn latest_session_in(store: &SessionStore, cwd: &Path) -> Result<(String, Option<String>)> {
+    // The pointer first: in almost every case this is the answer, and
+    // it costs one small JSON read instead of a head read per file in
+    // the sessions directory.
+    if let Some(session) = store.last_in(cwd) {
+        return Ok((session.id, None));
+    }
     if let Some(session) = store.latest_in(cwd) {
+        // The listing was paid for once; the pointer means the next
+        // `--continue` here does not pay again.
+        store.remember_last(&session.id);
         return Ok((session.id, None));
     }
     let id = latest_session_id(store)?;
@@ -368,10 +377,13 @@ const EMPTY_SESSION_RETENTION: std::time::Duration = std::time::Duration::from_s
 
 /// What a runtime does on its way out (the TUI's quit and its session
 /// switches, the end of `ilar exec`): a root session nobody said
-/// anything in leaves nothing behind. Best-effort — an exit is no place
-/// to raise a housekeeping error.
+/// anything in leaves nothing behind, and one that survives becomes its
+/// directory's answer to `--continue`. Best-effort — an exit is no
+/// place to raise a housekeeping error.
 pub fn end_session(config: &Config, store: &SessionStore, session_id: &str) {
-    store.remove_if_empty(session_id, &outbox_dir(config));
+    if !store.remove_if_empty(session_id, &outbox_dir(config)) {
+        store.remember_last(session_id);
+    }
 }
 
 pub fn session_store(config: &Config) -> SessionStore {
@@ -560,6 +572,9 @@ impl RuntimePlan {
                     persist_model_change(resolver.as_ref(), &store, id, &self.model, None)
                         .with_context(|| format!("persisting model override {}", self.model))?;
                 }
+                // Resuming is using: the session's own directory now
+                // answers `--continue` with it.
+                store.remember_last(id);
                 id.clone()
             }
             None => {
@@ -968,6 +983,79 @@ mod tests {
         assert_eq!(
             latest_session_in(&store, here.path()).unwrap(),
             (mine, None)
+        );
+    }
+
+    /// A session file written by hand, so the pointer does not know
+    /// about it: the only way to tell "read the pointer" apart from
+    /// "read the directory" from the outside.
+    fn plant_session(store: &SessionStore, cwd: &Path) -> String {
+        let id = new_id();
+        let line = serde_json::to_string(&crate::session::SessionEvent::Meta {
+            meta: SessionMeta {
+                session_id: id.clone(),
+                parent_id: None,
+                agent: "build".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+                cwd: Some(cwd.to_path_buf()),
+            },
+            ts: chrono::Utc::now(),
+        })
+        .unwrap();
+        std::fs::create_dir_all(store.root()).unwrap();
+        std::fs::write(store.session_path(&id).unwrap(), format!("{line}\n")).unwrap();
+        id
+    }
+
+    /// The pointer is the whole point: `--continue` answers from it
+    /// without reading the directory, which is observable because a
+    /// session planted behind its back — newer, and from this very
+    /// directory — does not win.
+    #[test]
+    fn continuing_reads_the_pointer_before_the_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().join("sessions"));
+        let here = tempfile::tempdir().unwrap();
+        let canonical = std::fs::canonicalize(here.path()).unwrap();
+
+        let pointed = new_id();
+        drop(
+            store
+                .create(SessionMeta {
+                    session_id: pointed.clone(),
+                    parent_id: None,
+                    agent: "build".into(),
+                    model: "zai/glm-4.7".into(),
+                    workspace: None,
+                    cwd: Some(canonical.clone()),
+                })
+                .unwrap(),
+        );
+        let newer = plant_session(&store, &canonical);
+        assert_eq!(
+            store.latest_in(&canonical).map(|session| session.id),
+            Some(newer.clone()),
+            "the planted session is the newest one the listing sees"
+        );
+
+        assert_eq!(
+            latest_session_in(&store, here.path()).unwrap(),
+            (pointed.clone(), None),
+            "the directory was listed instead of the pointer read"
+        );
+
+        // A pointer that no longer names a session falls back to the
+        // listing — and repairs itself, so the next call is cheap again.
+        store.delete(&pointed).unwrap();
+        assert_eq!(
+            latest_session_in(&store, here.path()).unwrap(),
+            (newer.clone(), None)
+        );
+        assert_eq!(
+            store.last_in(&canonical).map(|session| session.id),
+            Some(newer),
+            "the fallback did not repair the pointer"
         );
     }
 

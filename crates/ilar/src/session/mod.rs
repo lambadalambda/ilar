@@ -1,6 +1,7 @@
 //! JSONL session store — see meta/issues/session-jsonl.md.
 
 mod event;
+mod last_by_dir;
 mod live;
 mod model;
 mod replay_index;

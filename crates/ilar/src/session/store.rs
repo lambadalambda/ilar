@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use fs2::FileExt;
 
 use super::event::{SessionEvent, SessionMeta, new_id, unknown_event_type};
+use super::last_by_dir;
 use super::model::{ChatMessage, ContentBlock, Role};
 use super::replay_index::{
     FileStamp, REPLAY_INDEX_VERSION, ReplayCheckpoint, ReplayIdIndex, checkpoint_checksum,
@@ -467,6 +468,8 @@ impl SessionStore {
     }
 
     /// Create a new session; writes the Meta event as the first line.
+    /// A root session with a launch directory also becomes that
+    /// directory's answer to "what was I last doing here?".
     pub fn create(&self, meta: SessionMeta) -> std::io::Result<Session> {
         let id = SessionId::parse(&meta.session_id)?;
         let path = self.session_path_for(&id);
@@ -491,10 +494,14 @@ impl SessionStore {
             checkpoint_tail_start: 0,
             observed_stamp,
         };
+        let launched_in = meta.cwd.clone().filter(|_| meta.parent_id.is_none());
         session.append(SessionEvent::Meta {
             meta,
             ts: chrono::Utc::now(),
         })?;
+        if let Some(cwd) = launched_in {
+            self.point_directory_at(&cwd, session.session_id());
+        }
         Ok(session)
     }
 
@@ -553,6 +560,81 @@ impl SessionStore {
         self.list().into_iter().next()
     }
 
+    /// Point a directory at a session: the answer `--continue` and the
+    /// picker read before they list anything. `cwd` must be the
+    /// directory the session itself recorded — nothing else is
+    /// comparable with what a reader will canonicalize.
+    fn point_directory_at(&self, cwd: &Path, id: &str) {
+        let Ok(parsed) = SessionId::parse(id) else {
+            return;
+        };
+        let Ok(modified) = std::fs::symlink_metadata(self.session_path_for(&parsed))
+            .and_then(|metadata| metadata.modified())
+        else {
+            return;
+        };
+        last_by_dir::update(&self.root, |pointers| {
+            pointers.set(
+                cwd,
+                last_by_dir::Pointer {
+                    session_id: id.to_string(),
+                    modified_nanos: super::summary_cache::modified_nanos(modified),
+                },
+            )
+        });
+    }
+
+    /// Remember a session as the last one used in the directory it was
+    /// launched from. The directory comes from the session's own head,
+    /// so no caller can point a directory at another one's work; a
+    /// subagent's session and a session that recorded no directory have
+    /// nowhere to be remembered and are skipped.
+    pub fn remember_last(&self, id: &str) {
+        let Ok(head) = self.head(id) else {
+            return;
+        };
+        if head.meta.parent_id.is_some() {
+            return;
+        }
+        if let Some(cwd) = head.meta.cwd.as_deref() {
+            self.point_directory_at(cwd, id);
+        }
+    }
+
+    /// Forget every directory pointing at `id` — a session that was
+    /// deleted must not stay pointed at.
+    pub fn forget_last(&self, id: &str) {
+        last_by_dir::update(&self.root, |pointers| pointers.forget(id));
+    }
+
+    /// This directory's last session as the pointer file names it,
+    /// without listing the directory: one JSON read and one head read.
+    ///
+    /// `None` when there is no pointer or it cannot be believed — the
+    /// session is gone, is somebody's subagent, was launched somewhere
+    /// else, or its file has been replaced by an older one. Callers
+    /// fall back to [`Self::latest_in`] and repair the pointer with
+    /// [`Self::remember_last`].
+    pub fn last_in(&self, cwd: &std::path::Path) -> Option<SessionSummary> {
+        let cwd = std::fs::canonicalize(cwd).ok()?;
+        let pointer = last_by_dir::load(&self.root).get(&cwd).cloned()?;
+        let head = self.head(&pointer.session_id).ok()?;
+        if head.meta.parent_id.is_some() || head.meta.cwd.as_deref() != Some(cwd.as_path()) {
+            return None;
+        }
+        // The file the pointer was written for only ever grows. One
+        // that has gone backwards is a different file at the same path.
+        if super::summary_cache::modified_nanos(head.modified) < pointer.modified_nanos {
+            return None;
+        }
+        Some(SessionSummary {
+            id: head.id,
+            title: head.title,
+            modified: head.modified,
+            cwd: head.meta.cwd,
+        })
+    }
+
     /// The most recently modified root session launched from `cwd`, if
     /// any. "Continue where I left off" means this directory's work:
     /// the newest session overall may belong to another checkout
@@ -587,7 +669,14 @@ impl SessionStore {
     /// read, and one whose writer lease somebody holds — `delete`
     /// declines that last case on its own.
     pub fn remove_if_empty(&self, id: &str, outbox_dir: &Path) -> bool {
-        self.is_empty_root(id, outbox_dir) && self.delete(id).is_ok()
+        if !self.is_empty_root(id, outbox_dir) || self.delete(id).is_err() {
+            return false;
+        }
+        // A directory must not be left pointing at a session that is
+        // gone: `last_in` would refuse it anyway, but at the cost of
+        // the listing this pointer exists to skip.
+        self.forget_last(id);
+        true
     }
 
     fn is_empty_root(&self, id: &str, outbox_dir: &Path) -> bool {
@@ -2194,6 +2283,73 @@ mod tests {
         assert!(scratch.exists(), "the store did not touch the scratch");
     }
 
+    /// The pointer is written when a root session is created, believed
+    /// without reading the directory, and refused the moment it names
+    /// something it should not.
+    #[test]
+    fn a_directory_is_pointed_at_the_session_last_used_in_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().join("sessions"));
+        let here = tempfile::tempdir().unwrap();
+        let here = std::fs::canonicalize(here.path()).unwrap();
+        let meta = |session_id: &str, parent_id: Option<&str>, cwd: Option<&Path>| SessionMeta {
+            session_id: session_id.into(),
+            parent_id: parent_id.map(str::to_string),
+            agent: "build".into(),
+            model: "test/model".into(),
+            workspace: None,
+            cwd: cwd.map(Path::to_path_buf),
+        };
+
+        let first = new_id();
+        drop(store.create(meta(&first, None, Some(&here))).unwrap());
+        assert_eq!(
+            store.last_in(&here).map(|session| session.id),
+            Some(first.clone()),
+            "creating a session did not point its directory at it"
+        );
+
+        // A child records no directory of its own and never becomes
+        // one's answer.
+        let child = new_id();
+        drop(
+            store
+                .create(meta(&child, Some(&first), Some(&here)))
+                .unwrap(),
+        );
+        assert_eq!(
+            store.last_in(&here).map(|session| session.id),
+            Some(first.clone())
+        );
+
+        // The pointer is what is believed, not the newest file: nothing
+        // lists the directory to find this out.
+        let second = new_id();
+        drop(store.create(meta(&second, None, Some(&here))).unwrap());
+        assert_eq!(
+            store.last_in(&here).map(|session| session.id),
+            Some(second.clone())
+        );
+        store.remember_last(&first);
+        assert_eq!(
+            store.last_in(&here).map(|session| session.id),
+            Some(first.clone())
+        );
+
+        // Deleted, and no longer pointed at.
+        store.delete(&first).unwrap();
+        assert!(store.last_in(&here).is_none(), "a dead session was named");
+        // The repair a caller makes after falling back to the listing.
+        store.remember_last(&second);
+        assert_eq!(store.last_in(&here).map(|session| session.id), Some(second));
+
+        // Another directory's session is never this directory's answer,
+        // however the pointer came to name it.
+        let elsewhere = tempfile::tempdir().unwrap();
+        let elsewhere = std::fs::canonicalize(elsewhere.path()).unwrap();
+        assert!(store.last_in(&elsewhere).is_none());
+    }
+
     /// A session created by a launch and never typed into goes when its
     /// runtime ends — and one that was typed into, one that spawned a
     /// task, and one with mail waiting in the outbox all stay.
@@ -2202,13 +2358,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = SessionStore::new(dir.path().join("sessions"));
         let outbox = dir.path().join("outbox");
+        let here = tempfile::tempdir().unwrap();
+        let here = std::fs::canonicalize(here.path()).unwrap();
         let meta = |session_id: &str, parent_id: Option<&str>| SessionMeta {
             session_id: session_id.into(),
             parent_id: parent_id.map(str::to_string),
             agent: "build".into(),
             model: "test/model".into(),
             workspace: None,
-            cwd: None,
+            cwd: Some(here.clone()),
         };
 
         // Opened and quit: a Meta line and nothing else.
@@ -2216,6 +2374,10 @@ mod tests {
         drop(store.create(meta(&untouched, None)).unwrap());
         assert!(store.remove_if_empty(&untouched, &outbox));
         assert!(!store.session_path(&untouched).unwrap().exists());
+        assert!(
+            last_by_dir::load(&store.root).get(&here).is_none(),
+            "the directory is still pointed at a session that is gone"
+        );
         // Idempotent: a session that is already gone is not an error.
         assert!(!store.remove_if_empty(&untouched, &outbox));
 
