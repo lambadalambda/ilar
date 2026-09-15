@@ -443,6 +443,20 @@ impl SessionStore {
         self.list().into_iter().next()
     }
 
+    /// The most recently modified root session launched from `cwd`, if
+    /// any. "Continue where I left off" means this directory's work:
+    /// the newest session overall may belong to another checkout
+    /// entirely, and resuming it here would run its conversation
+    /// against these files. Compared canonically, the way a session
+    /// records its own launch directory; a session from before that
+    /// was written down has no directory and is never "here".
+    pub fn latest_in(&self, cwd: &std::path::Path) -> Option<SessionSummary> {
+        let cwd = std::fs::canonicalize(cwd).ok()?;
+        self.list()
+            .into_iter()
+            .find(|session| session.cwd.as_deref() == Some(cwd.as_path()))
+    }
+
     /// The subagent tasks spawned by `parent_id`, newest first.
     /// [`Self::list`] hides children by construction — this is the other
     /// half, and it is scoped: a session sees its own tasks only.
@@ -535,8 +549,8 @@ impl SessionStore {
     }
 
     /// Fork a session: copy its validated history under a fresh id (the
-    /// Meta event is rewritten; everything else is verbatim). Returns the
-    /// new session id.
+    /// Meta event is rewritten, the topic is dropped; everything else is
+    /// verbatim). Returns the new session id.
     pub fn fork(&self, id: &str) -> std::io::Result<String> {
         let source = self.load(id)?;
         let cut = source.events().len();
@@ -564,7 +578,15 @@ impl SessionStore {
     }
 
     fn fork_events(&self, id: &str, source: SessionReader, cut: usize) -> std::io::Result<String> {
-        let mut events = source.events()[..cut].to_vec();
+        // Everything but the name: titling only runs on a session with
+        // no topic yet, so a copied Topic left the fork and its source
+        // wearing one name for ever. Without it the fork names itself
+        // after its next completed turn.
+        let mut events: Vec<SessionEvent> = source.events()[..cut]
+            .iter()
+            .filter(|event| !matches!(event, SessionEvent::Topic { .. }))
+            .cloned()
+            .collect();
         let new_id = crate::session::new_id();
         match events.first_mut() {
             Some(SessionEvent::Meta { meta, .. }) => {

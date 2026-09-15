@@ -2022,6 +2022,81 @@ fn fork_copies_history_under_a_new_id() {
     );
 }
 
+/// Titling only runs on a session with no topic, so a copied Topic
+/// left the fork and its source wearing one name for ever — neither
+/// could ever be told from the other in the picker.
+#[test]
+fn a_fork_leaves_the_topic_behind_so_it_can_name_itself() {
+    let (store, _dir) = temp_store();
+    let meta = sample_meta();
+    let mut session = store.create(meta.clone()).unwrap();
+    for event in sample_log(&meta).into_iter().skip(1) {
+        session.append(event).unwrap();
+    }
+    session
+        .append(SessionEvent::Topic {
+            id: new_id(),
+            text: "reading the config".into(),
+            ts: Utc::now(),
+        })
+        .unwrap();
+    drop(session);
+
+    let fork_id = store.fork(&meta.session_id).unwrap();
+    let fork = store.load(&fork_id).unwrap();
+    assert_eq!(fork.topic(), None, "the fork names itself");
+    assert_eq!(
+        store.load(&meta.session_id).unwrap().topic(),
+        Some("reading the config"),
+        "the source keeps its name"
+    );
+    // Only the name is gone: the conversation is whole.
+    assert_eq!(
+        fork.transcript().len(),
+        store.load(&meta.session_id).unwrap().transcript().len()
+    );
+}
+
+/// `--continue` means this directory's work. The newest session
+/// overall may belong to another checkout, and opening it here would
+/// aim its conversation at these files.
+#[test]
+fn the_latest_session_can_be_scoped_to_the_directory_it_was_launched_in() {
+    let (store, _dir) = temp_store();
+    let here = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let canonical = |dir: &tempfile::TempDir| std::fs::canonicalize(dir.path()).unwrap();
+
+    let mine = SessionMeta {
+        cwd: Some(canonical(&here)),
+        ..sample_meta()
+    };
+    drop(store.create(mine.clone()).unwrap());
+    // Newer, and from another directory: the global latest, never this
+    // directory's.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let theirs = SessionMeta {
+        cwd: Some(canonical(&elsewhere)),
+        ..sample_meta()
+    };
+    drop(store.create(theirs.clone()).unwrap());
+
+    assert_eq!(store.latest().unwrap().id, theirs.session_id);
+    assert_eq!(
+        store.latest_in(here.path()).unwrap().id,
+        mine.session_id,
+        "this directory's own session"
+    );
+    // A directory with nothing in it has no session of its own; the
+    // caller decides what to do about that.
+    let empty = tempfile::tempdir().unwrap();
+    assert!(store.latest_in(empty.path()).is_none());
+    // A session that recorded no directory is never "here".
+    let (other_store, _other_dir) = temp_store();
+    drop(other_store.create(sample_meta()).unwrap());
+    assert!(other_store.latest_in(here.path()).is_none());
+}
+
 #[test]
 fn checkpoint_events_round_trip_and_render_nothing() {
     let (store, _dir) = temp_store();

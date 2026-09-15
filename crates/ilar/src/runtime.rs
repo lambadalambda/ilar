@@ -14,7 +14,7 @@
 //! first, so asking what the prompt is does not leave an empty session
 //! behind.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
@@ -187,6 +187,30 @@ pub fn usable_reasoning(
         ),
         reasoning => (reasoning, None),
     }
+}
+
+/// The session `--continue` resumes, scoped to where it was typed:
+/// this directory's newest session, else the newest anywhere. The
+/// second value is the line to say about that fallback — resuming
+/// another checkout's conversation against these files is a surprise
+/// worth naming — and is `None` when the session is from here.
+pub fn latest_session_in(store: &SessionStore, cwd: &Path) -> Result<(String, Option<String>)> {
+    if let Some(session) = store.latest_in(cwd) {
+        return Ok((session.id, None));
+    }
+    let id = latest_session_id(store)?;
+    let started_in = store
+        .head(&id)
+        .ok()
+        .and_then(|head| head.meta.cwd)
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "a directory it did not record".into());
+    Ok((
+        id,
+        Some(format!(
+            "no session started in this directory — continuing the newest one, from {started_in}"
+        )),
+    ))
 }
 
 /// The session `--continue` resumes. An empty store and a store whose

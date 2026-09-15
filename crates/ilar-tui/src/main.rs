@@ -326,6 +326,13 @@ impl TerminalSession {
 
 impl Drop for TerminalSession {
     fn drop(&mut self) {
+        if self.terminal_initialized {
+            // The window is ours only while we run. Left as "ilar —
+            // <topic>" it names a session that ended, in a shell that
+            // has moved on; an empty title hands the name back, and
+            // the shell's own prompt hook takes it from there.
+            let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::SetTitle(""));
+        }
         if self.paste_enabled {
             let _ = crossterm::execute!(std::io::stdout(), DisableBracketedPaste);
         }
@@ -800,7 +807,11 @@ fn goal_kickoff_prompt(goal: &str) -> String {
     format!(
         "Work toward this goal: {goal}
 
-This is a goal-mode session: after          each of your turns you will be asked to verify progress with          concrete evidence. If no automatic verification exists yet          (tests, a replay harness, a checker script), building one is part          of the goal. Do not claim success without evidence."
+This is a goal-mode session: after each of your turns you will be \
+         asked to verify progress with concrete evidence. If no automatic \
+         verification exists yet (tests, a replay harness, a checker \
+         script), building one is part of the goal. Do not claim success \
+         without evidence."
     )
 }
 
@@ -808,7 +819,12 @@ fn goal_continuation_prompt(goal: &str, round: u32) -> String {
     format!(
         "Goal check, round {round}/{MAX_GOAL_ROUNDS}. The goal: {goal}
 
-         Verify the current state with concrete evidence by running your          verification (tests, harness, checker) now — do not judge from          memory. If the goal is genuinely achieved, output a line starting          with `{GOAL_SENTINEL}:` followed by the evidence. Otherwise state          what is still missing and continue working toward the goal in          this same turn."
+Verify the current state with concrete evidence by running your \
+         verification (tests, harness, checker) now — do not judge from \
+         memory. If the goal is genuinely achieved, output a line starting \
+         with `{GOAL_SENTINEL}:` followed by the evidence. Otherwise state \
+         what is still missing and continue working toward the goal in this \
+         same turn."
     )
 }
 
@@ -1056,8 +1072,16 @@ async fn run_exec(config: &ilar::config::Config, args: ExecArgs) -> Result<i32> 
     }
 
     let store = ilar::runtime::session_store(config);
+    let cwd = std::env::current_dir().context("no cwd")?;
+    // The same rule the TUI follows — this directory's latest — since
+    // the docs promise `--continue` behaves the same in both drivers,
+    // and a script that resumes another checkout's conversation
+    // against these files is the worse surprise of the two.
+    let mut continued_elsewhere = None;
     let resume = if args.continue_last {
-        Some(ilar::runtime::latest_session_id(&store)?)
+        let (id, elsewhere) = ilar::runtime::latest_session_in(&store, &cwd)?;
+        continued_elsewhere = elsewhere;
+        Some(id)
     } else {
         args.session
     };
@@ -1067,7 +1091,7 @@ async fn run_exec(config: &ilar::config::Config, args: ExecArgs) -> Result<i32> 
             model: args.model,
             agent: args.agent,
             resume,
-            cwd: std::env::current_dir().context("no cwd")?,
+            cwd: cwd.clone(),
             // Nobody is here to answer: the tool is left off so the
             // model is told so on the spot instead of blocking.
             questions: false,
@@ -1082,9 +1106,14 @@ async fn run_exec(config: &ilar::config::Config, args: ExecArgs) -> Result<i32> 
             unlock_hint: Some(UNLOCK_HINT.to_string()),
         },
     )?;
+    let mut plan_notices = std::mem::take(&mut plan.notices);
+    if let Some(notice) = continued_elsewhere {
+        // First: it says which conversation everything below is about.
+        plan_notices.insert(0, notice);
+    }
     let notices = startup_notices(
         config.warnings.clone(),
-        std::mem::take(&mut plan.notices),
+        plan_notices,
         plan.skipped_project_instructions,
         args.no_project_instructions,
     );
@@ -1301,7 +1330,19 @@ async fn main() -> Result<()> {
     loop {
         let resume_target = if first_run {
             if args.continue_last {
-                Some(ilar::runtime::latest_session_id(&store)?)
+                // This directory's newest session first: the newest one
+                // overall may belong to another checkout, and opening it
+                // here would point its conversation at these files. The
+                // fallback still opens, and says where it started.
+                let here = std::env::current_dir().context("no cwd")?;
+                let (id, elsewhere) = ilar::runtime::latest_session_in(&store, &here)?;
+                if let Some(notice) = elsewhere {
+                    // Carried rather than notified: the app does not
+                    // exist yet, and `carried` is how a notice reaches
+                    // the session being opened.
+                    carried = Some((None, Some(notice), Vec::new()));
+                }
+                Some(id)
             } else {
                 args.session.clone()
             }
@@ -5089,6 +5130,11 @@ mod tests {
         let cont = goal_continuation_prompt("replay 5 turns at 90%", 3);
         assert!(cont.contains("round 3/25"), "{cont}");
         assert!(cont.contains("GOAL_ACHIEVED"), "{cont}");
+        // Both are shown verbatim as `you` rows: source indentation
+        // must not reach the transcript as runs of spaces.
+        for prompt in [&kickoff, &cont] {
+            assert!(!prompt.contains("  "), "{prompt}");
+        }
     }
 
     #[test]
