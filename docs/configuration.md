@@ -87,7 +87,9 @@ The `websearch` tool works out of the box: without any configuration it calls
 the hosted [Exa](https://exa.ai) MCP endpoint anonymously. Keyless access is
 best-effort and rate-limited by Exa, so for real use you should bring your own
 key — either `ILAR_TAVILY_API_KEY` to use Tavily, or `ILAR_EXA_API_KEY` to
-authenticate against Exa. If both are set, Tavily wins.
+authenticate against Exa. If both are set, Tavily wins. A throttled or
+refused search says so and names both variables, so the model can pass
+the fix on instead of retrying.
 
 ## Bring your own model
 

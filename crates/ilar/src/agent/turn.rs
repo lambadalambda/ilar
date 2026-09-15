@@ -2388,7 +2388,9 @@ async fn run_turn_inner(
             .count();
         if question_calls > 0 && ordered_calls.len() != 1 {
             for (id, name, _, _) in ordered_calls {
-                let content = "question must be the sole tool call in a provider step".to_string();
+                let content =
+                    "question: must be the sole tool call in a provider step; send it alone"
+                        .to_string();
                 session.append(SessionEvent::ToolResult {
                     id: new_id(),
                     tool_use_id: id.clone(),
@@ -2417,18 +2419,31 @@ async fn run_turn_inner(
 
         if question_calls == 1 {
             let (id, name, input, completed) = ordered_calls[0];
+            // Same shape and the same plain words as every other tool
+            // refusal: what happened, and what to do instead. "Not
+            // attached to this registry" was our vocabulary, not the
+            // model's, and the docs promise it is simply told nobody is
+            // there to answer.
             let parsed = if !completed || input.is_null() {
-                Err("question call was incomplete or had invalid arguments".to_string())
+                Err("question: the call was incomplete or its arguments were invalid".to_string())
             } else if tool_ctx.depth != 0 {
-                Err("questions are available only to the root agent".to_string())
+                Err(
+                    "question: only the root agent may ask the user; decide it yourself and say \
+                     in your answer what you assumed"
+                        .to_string(),
+                )
             } else if registry.question_sender().is_none() {
-                Err("question capability is not attached to this registry".to_string())
+                Err(
+                    "question: nobody can answer in this session; decide it yourself and say in \
+                     your answer what you assumed"
+                        .to_string(),
+                )
             } else {
                 serde_json::from_value::<crate::question::QuestionRequest>(input.clone())
-                    .map_err(|error| format!("invalid question request: {error}"))
+                    .map_err(|error| format!("question: invalid request: {error}"))
                     .and_then(|request| {
                         crate::question::validate_request(&request)
-                            .map_err(|error| format!("invalid question request: {error}"))?;
+                            .map_err(|error| format!("question: invalid request: {error}"))?;
                         Ok(request)
                     })
             };
@@ -2452,7 +2467,9 @@ async fn run_turn_inner(
                             }
                         };
                         if delivered.is_err() {
-                            break Err("question frontend is unavailable".to_string());
+                            break Err("question: nobody can answer in this session; decide it \
+                                       yourself and say in your answer what you assumed"
+                                .to_string());
                         }
                         let received = tokio::select! {
                             response = receive => response,
@@ -2463,7 +2480,13 @@ async fn run_turn_inner(
                         };
                         let response = match received {
                             Ok(response) => response,
-                            Err(_) => break Err("question frontend dropped its reply".to_string()),
+                            Err(_) => {
+                                break Err(
+                                    "question: the answer never came back; decide it yourself \
+                                     and say in your answer what you assumed"
+                                        .to_string(),
+                                );
+                            }
                         };
                         if response.validate(&request).is_ok() {
                             break serde_json::to_string(&response)

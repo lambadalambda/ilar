@@ -230,6 +230,28 @@ answer or a failure when it lands; the root's own queue and stash are
 untouched. Arrow keys, PageUp/PageDown, Home and End scroll the view;
 Esc leaves it.
 
+## Questions
+
+A model that needs a decision from you calls the `question` tool, and
+the turn stops on a modal: one question per screen, its prompt and an
+optional description, then the options. Arrows (or Tab) move, Space
+picks — one option for a single choice, any number for a multiple one —
+and a question that allows it has an "Other…" row you simply type
+into. Enter takes the screen and moves to the next question; the last
+one hands every answer back at once. Free-text questions are a text
+field with the same Enter.
+
+**Esc** cancels the whole modal. That is an answer too, not a failure:
+the tool comes back `{"status":"cancelled"}` and the turn goes on with
+what the model already knew, so cancelling is the right move when the
+question is one it should decide itself.
+
+Only the root agent may ask, and only where someone can answer: a
+subagent, `ilar exec`, and a turn started from `ilar serve` are all
+told nobody is there to answer and to decide for themselves. A question
+left pending when the TUI exits comes back on the next resume of that
+session.
+
 ## Secrets
 
 A stored secret (`ilar secret set NAME`: the value is asked for hidden
@@ -261,13 +283,17 @@ grants are managed from the shell: `ilar secret list`,
 ## Transcript
 
 The transcript renders markdown with syntax-highlighted code fences and
-diffs for edits. **Ctrl-F** searches it, **Ctrl-O** opens any link it
+diffs for the tools that change files — an `edit` as a real diff, a
+`write` as the body it wrote, labelled `rewrite` when it replaced a
+file that was already there. **Ctrl-F** searches it, **Ctrl-O** opens any link it
 contains, mouse drag selects and copies, and the palette's "Export
 transcript" writes the session as a Markdown file. Tool rows expand on
 click (or Enter targeting) to show arguments, diffs and output — and a
 truncated block's "… more" row is itself clickable, advancing the
 expansion right where the eye stopped; grouped tool calls align their
-columns to the widest sibling. Anything
+columns to the widest sibling. A collapsed group still shows what is
+running and what failed, and a failed row carries the error's first
+line after its arguments. Anything
 clickable underlines itself when the pointer hovers over it, and
 clicks resolve against the row that was under the pointer when the
 button went down — a streaming turn cannot pull the target out from
