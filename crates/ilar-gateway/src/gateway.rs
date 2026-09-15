@@ -49,6 +49,20 @@ pub struct Gateway {
     cancel: CancellationToken,
 }
 
+/// Something whose time has come: a cron job, or a heartbeat.
+struct Due {
+    /// The session it runs on: `cron:<id>` or `heartbeat:<key>`.
+    key: String,
+    /// What it is called when the chat has to be told it failed.
+    name: String,
+    /// The chat it speaks to, or `LAST_ACTIVE`.
+    target: String,
+    prompt: String,
+    /// The job it came from. `None` for a heartbeat, which is silent
+    /// by design — including about its own failures.
+    job: Option<crate::cron::Job>,
+}
+
 /// What a chat is told when its turn was cancelled.
 pub const ABORTED_REPLY: &str = "Aborted.";
 
@@ -81,10 +95,12 @@ pub const BUSY_FOLLOW_UP: &str = "A subagent finished, but this chat's session i
 /// clipped. The chat is allowlisted to its operator, who wants the
 /// reason where they are; the full chain is in the log regardless.
 pub fn failed_reply(what: &str, error: &anyhow::Error) -> String {
-    let cause: String = format!("{error:#}")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+    failed_line(what, &format!("{error:#}"))
+}
+
+/// The same for a cause that is already a line of its own.
+pub fn failed_line(what: &str, cause: &str) -> String {
+    let cause: String = cause.split_whitespace().collect::<Vec<_>>().join(" ");
     let cause = if cause.chars().count() > FAILURE_CAUSE_CHARS {
         let mut cut: String = cause.chars().take(FAILURE_CAUSE_CHARS - 1).collect();
         cut.push('…');
@@ -116,6 +132,8 @@ const CHANNEL_RESTART: Duration = Duration::from_secs(5);
 /// How many times a refused send is tried; the pause between them is
 /// `gateway.send_retry_secs`.
 const SEND_TRIES: u32 = 4;
+/// How long after a failed one-shot job it is tried once more.
+const ONE_SHOT_RETRY: chrono::TimeDelta = chrono::TimeDelta::minutes(1);
 /// How long the start announcement keeps trying while the channel
 /// connects, and how long the stop announcement may take.
 const ANNOUNCE_RETRY: Duration = Duration::from_secs(2);
@@ -328,6 +346,7 @@ impl Gateway {
                         target: crate::cron::LAST_ACTIVE.into(),
                         next_run: None,
                         last_run: None,
+                        retries: 0,
                     },
                     chrono::Utc::now(),
                 )
@@ -395,9 +414,9 @@ impl Gateway {
                 Some(_) = handlers.join_next(), if !handlers.is_empty() => {}
                 _ = inbox_tick.tick() => self.poll_inbox(&inbound_tx).await,
                 _ = scheduler_tick.tick() => {
-                    for (key, target, prompt) in self.due_now(&mut last_heartbeat) {
+                    for due in self.due_now(&mut last_heartbeat) {
                         let gateway = self.clone();
-                        handlers.spawn(async move { gateway.handle_scheduled(key, target, prompt).await });
+                        handlers.spawn(async move { gateway.handle_scheduled(due).await });
                     }
                 }
             }
@@ -921,17 +940,19 @@ impl Gateway {
     }
 
     /// Everything whose time has come: due cron jobs, and a heartbeat
-    /// for every configured chat whose interval has passed. Each is a
-    /// session key, the chat it speaks to, and the prompt.
-    fn due_now(
-        &self,
-        last_heartbeat: &mut HashMap<String, Instant>,
-    ) -> Vec<(String, String, String)> {
+    /// for every configured chat whose interval has passed.
+    fn due_now(&self, last_heartbeat: &mut HashMap<String, Instant>) -> Vec<Due> {
         let mut due = Vec::new();
         match self.cron.take_due(chrono::Utc::now()) {
             Ok(jobs) => {
                 for job in jobs {
-                    due.push((job.session_key(), job.target.clone(), job.prompt.clone()));
+                    due.push(Due {
+                        key: job.session_key(),
+                        name: job.name.clone(),
+                        target: job.target.clone(),
+                        prompt: job.prompt.clone(),
+                        job: Some(job),
+                    });
                 }
             }
             Err(error) => log(&format!("cron: {error:#}")),
@@ -946,11 +967,13 @@ impl Gateway {
                     .is_none_or(|last| now.duration_since(*last) >= interval);
                 if beat {
                     last_heartbeat.insert(chat.clone(), now);
-                    due.push((
-                        format!("heartbeat:{chat}"),
-                        chat.clone(),
-                        heartbeat.prompt.clone(),
-                    ));
+                    due.push(Due {
+                        key: format!("heartbeat:{chat}"),
+                        name: "heartbeat".to_string(),
+                        target: chat.clone(),
+                        prompt: heartbeat.prompt.clone(),
+                        job: None,
+                    });
                 }
             }
         }
@@ -959,7 +982,14 @@ impl Gateway {
 
     /// A cron or heartbeat turn: its own session, homed on the chat it
     /// is for, and heard from only through the message tool.
-    async fn handle_scheduled(&self, key: String, target: String, mut prompt: String) {
+    async fn handle_scheduled(&self, due: Due) {
+        let Due {
+            key,
+            name,
+            target,
+            mut prompt,
+            job,
+        } = due;
         // The gateway's own job goes to whoever was last heard from in
         // private — its prompt reads the person's memory aloud, which
         // is not for a room — and has the sweep's findings appended.
@@ -1019,7 +1049,49 @@ impl Gateway {
                     log(&format!("{key}: {} message(s) sent", report.sent));
                 }
             }
-            Err(error) => log(&format!("{key}: scheduled turn failed: {error}")),
+            Err(error) => {
+                log(&format!("{key}: scheduled turn failed: {error}"));
+                // A job is somebody's reminder: silence is the wrong
+                // answer, and a one-shot has already been retired, so
+                // it gets one more go. A heartbeat is silent by
+                // design and says nothing about its troubles.
+                if let Some(job) = job {
+                    self.deliver(
+                        channel,
+                        chat_id,
+                        &failed_line(&format!("Job {name}"), &error.to_string()),
+                    )
+                    .await;
+                    self.retry_once(&key, job);
+                }
+            }
+        }
+    }
+
+    /// A one-shot that failed never fired at all: it is scheduled once
+    /// more, shortly, and if that fails too it is done — a reminder
+    /// that keeps failing must not become a loop.
+    fn retry_once(&self, key: &str, job: crate::cron::Job) {
+        if job.retries > 0 || !matches!(job.schedule, crate::cron::Schedule::At { .. }) {
+            return;
+        }
+        let now = chrono::Utc::now();
+        let again = crate::cron::Job {
+            id: ilar::session::new_id()[..8].to_string(),
+            schedule: crate::cron::Schedule::At {
+                at: now + ONE_SHOT_RETRY,
+            },
+            next_run: None,
+            retries: job.retries + 1,
+            ..job
+        };
+        match self.cron.add(again, now) {
+            Ok(added) => log(&format!(
+                "{key}: {} runs again at {}",
+                added.name,
+                added.next_run.map(|at| at.to_rfc3339()).unwrap_or_default()
+            )),
+            Err(error) => log(&format!("{key}: not scheduled again: {error:#}")),
         }
     }
 

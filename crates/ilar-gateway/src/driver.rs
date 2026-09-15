@@ -849,8 +849,11 @@ pub fn plan(
     // Where it is: reached over a chat, with a home, wakeable from a
     // script. Before the memory, which is about the person.
     plan.system_prompt.push_str("\n\n");
-    plan.system_prompt
-        .push_str(&crate::situation::block(&home, &workspace));
+    plan.system_prompt.push_str(&crate::situation::block(
+        &home,
+        &workspace,
+        chrono::Local::now().fixed_offset(),
+    ));
     // The policy reaches the subagents too: an agent definition's
     // own restriction is narrowed before the spawner is built from
     // it, and the chat's registry is filtered after.

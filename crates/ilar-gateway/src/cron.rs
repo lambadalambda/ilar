@@ -75,6 +75,10 @@ pub struct Job {
     pub target: String,
     pub next_run: Option<DateTime<Utc>>,
     pub last_run: Option<DateTime<Utc>>,
+    /// How often this job has been rescheduled after a failed run. A
+    /// one-shot that never fired gets one more go, not a loop.
+    #[serde(default)]
+    pub retries: u32,
 }
 
 impl Job {
@@ -421,6 +425,7 @@ impl Tool for CronTool {
                         target,
                         next_run: None,
                         last_run: None,
+                        retries: 0,
                     };
                     match store.add(job, now) {
                         Ok(job) => ToolOutput::text(format!(
@@ -565,6 +570,7 @@ mod tests {
             target: "fake:1".into(),
             next_run: None,
             last_run: None,
+            retries: 0,
         };
         store
             .add(

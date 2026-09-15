@@ -198,8 +198,11 @@ After the base instructions every gateway session gets a short block
 about its situation: that it is reached over a chat and answers
 through the message tool, where its home and workspace are, that a
 script can wake it with `ilar-gateway notify` and that it should use
-that from cron jobs, services and long builds to report back, and that
-scheduled turns speak only through the message tool. `ilar-gateway
+that from cron jobs, services and long builds to report back, that
+scheduled turns speak only through the message tool, and when the
+session opened — an RFC 3339 stamp with the machine's own offset, so
+a model that cannot run `date` still knows the date and the person's
+time zone when it writes a schedule in UTC. `ilar-gateway
 prompt` prints the whole request a chat would get — model, request
 options, the system prompt with this block and the core memory, and
 every tool with its description and schema, the chat's own included —
@@ -311,6 +314,15 @@ Nobody is watching a scheduled turn, so it is never the one to ask for
 a [secret](secrets.md): an ungranted one is refused on the spot, with
 the `ilar secret grant NAME --tool bash` line that allows it for good.
 A job that needs a secret needs a standing grant.
+
+A job whose turn fails is not silent about it: the chat gets one line,
+"Job <name> failed: …", and a one-shot — which `take_due` has already
+retired — is scheduled once more a minute later, then not again. A
+heartbeat says nothing about its own failures; it is the kind of turn
+nobody asked for. Since a model under `safe_mode` cannot run `date`,
+the situation block carries the time the session opened as an RFC 3339
+stamp with the machine's offset, and the tool takes cron expressions
+in UTC.
 
 ## Replying: the message tool
 

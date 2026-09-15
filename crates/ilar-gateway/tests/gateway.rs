@@ -520,6 +520,48 @@ async fn a_scheduled_turn_speaks_only_through_the_message_tool_and_a_one_shot_re
 }
 
 #[tokio::test]
+async fn a_scheduled_turn_that_fails_says_so_and_a_one_shot_gets_one_more_go() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = GatewayConfig {
+        scheduler_tick_secs: 1,
+        announce: false,
+        ..GatewayConfig::default()
+    };
+    // The reminder's own turn hits a provider that is down.
+    let (gateway, fake) = gateway_with(
+        dir.path(),
+        vec![
+            schedules_once(1, "remind them"),
+            says("scheduled"),
+            vec![ProviderEvent::Error("the provider is down".into())],
+        ],
+        settings,
+    );
+    fake.inject("remind me", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(2, Duration::from_secs(15)).await;
+    assert_eq!(sent[0].text, "scheduled", "{sent:?}");
+    assert!(
+        sent[1].text.starts_with("Job ping failed:") && sent[1].text.contains("provider is down"),
+        "{sent:?}"
+    );
+    // A one-shot that never fired is not lost: it is scheduled once
+    // more, and marked so a second failure ends it.
+    let jobs = ilar_gateway::cron::CronStore::open(dir.path().join("state/gateway/cron.json"))
+        .unwrap()
+        .list();
+    let again = jobs
+        .iter()
+        .find(|job| job.name == "ping")
+        .expect("the reminder, scheduled again");
+    assert_eq!(again.retries, 1, "{jobs:?}");
+    assert!(matches!(
+        again.schedule,
+        ilar_gateway::cron::Schedule::At { .. }
+    ));
+    gateway.cancel();
+}
+
+#[tokio::test]
 async fn a_heartbeat_with_nothing_to_say_sends_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let settings = GatewayConfig {
