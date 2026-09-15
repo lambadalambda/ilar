@@ -1059,6 +1059,65 @@ mod tests {
         );
     }
 
+    /// The other end of the pointer's life: a runtime that ends leaves
+    /// its directory naming the session it was in — unless that session
+    /// is one nobody said anything in, which goes instead, pointer and
+    /// all.
+    #[test]
+    fn a_runtime_that_ends_leaves_its_directory_pointed_at_its_session() {
+        let guard = tempfile::tempdir().unwrap();
+        let config = crate::config::Loader::with_env(vec![("ILAR_ZAI_API_KEY", "zk".to_string())])
+            .config_dir(guard.path().join("config"))
+            .state_dir(guard.path().join("state"))
+            .resolve()
+            .unwrap();
+        let store = session_store(&config);
+        let here = tempfile::tempdir().unwrap();
+        let canonical = std::fs::canonicalize(here.path()).unwrap();
+        let meta = |session_id: &str| SessionMeta {
+            session_id: session_id.into(),
+            parent_id: None,
+            agent: "build".into(),
+            model: "zai/glm-4.7".into(),
+            workspace: None,
+            cwd: Some(canonical.clone()),
+        };
+
+        let spoken = new_id();
+        let mut session = store.create(meta(&spoken)).unwrap();
+        session
+            .append(crate::session::SessionEvent::UserMessage {
+                id: new_id(),
+                text: "do the thing".into(),
+                images: Vec::new(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        drop(session);
+
+        // A second launch in the same directory, closed without a word:
+        // it holds the pointer until its runtime ends.
+        let untouched = new_id();
+        drop(store.create(meta(&untouched)).unwrap());
+        assert_eq!(
+            store.last_in(&canonical).map(|session| session.id),
+            Some(untouched.clone())
+        );
+
+        end_session(&config, &store, &untouched);
+        assert!(!store.session_path(&untouched).unwrap().exists());
+        assert!(
+            store.last_in(&canonical).is_none(),
+            "the directory still points at the session that was removed"
+        );
+
+        end_session(&config, &store, &spoken);
+        assert_eq!(
+            store.last_in(&canonical).map(|session| session.id),
+            Some(spoken)
+        );
+    }
+
     /// A name the program does not know, answered with the names it
     /// does: an agent list is three words long and was left out.
     #[test]
