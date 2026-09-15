@@ -172,10 +172,11 @@ fn read_window(
             truncated = true;
             break;
         }
-        if line.truncated && line.prefix.is_empty() {
-            // Nothing of this line fits in what is left of the budget:
-            // `N→` alone would claim the line is empty. Stop short of
-            // it so the marker's continue offset points *at* it.
+        if line.truncated && emitted > 0 {
+            // What is left of the budget cut this line, not the line's
+            // own length: half of it is worse than none, and the marker
+            // below points the continue offset *at* it, so the next
+            // window opens with the whole line.
             truncated = true;
             break;
         }
@@ -184,6 +185,9 @@ fn read_window(
         let _ = writeln!(out, "{line_number}→{}", text.trim_end_matches('\r'));
         emitted += 1;
         if line.truncated {
+            // A whole window went into one line and did not finish it:
+            // no offset reaches the rest, so the marker says so instead
+            // of letting a prefix read as the line.
             cut = Some((line_number, text.len()));
         }
         if line.truncated || out.len() >= budget {
@@ -415,23 +419,42 @@ mod tests {
         assert!(!tail.contains("continue with offset"), "{tail}");
     }
 
-    /// A long line in the middle used to yield "continue with offset
-    /// K+1" alone, which silently skips the rest of line K.
+    /// A long line in the middle used to be shown as a fragment and then
+    /// skipped by "continue with offset K+1". It is left for the next
+    /// window instead, and only a window that cannot hold it at all
+    /// reports it as cut.
     #[tokio::test]
-    async fn a_long_line_mid_file_names_the_cut_line_and_the_next_one() {
+    async fn a_long_line_mid_file_is_left_for_the_next_window() {
         let dir = tempfile::tempdir().unwrap();
         let line = "y".repeat(MAX_OUTPUT_BYTES + 4096);
         std::fs::write(dir.path().join("mid.txt"), format!("head\n{line}\ntail\n")).unwrap();
-        let out = ReadTool
-            .run(
-                serde_json::json!({"path": "mid.txt"}),
-                ToolContext::root(dir.path().to_path_buf()),
-            )
-            .await;
+        let read = async |offset: usize| {
+            ReadTool
+                .run(
+                    serde_json::json!({"path": "mid.txt", "offset": offset}),
+                    ToolContext::root(dir.path().to_path_buf()),
+                )
+                .await
+        };
+
+        let out = read(1).await;
         assert!(!out.is_error, "{}", out.content);
+        // Line 1 alone, and the continue offset points *at* line 2.
+        assert!(out.content.starts_with("1→head\n"), "{}", out.content);
+        assert!(!out.content.contains("2→"), "{}", out.content);
+        assert!(
+            out.content
+                .contains("lines 1–1 of 3; continue with offset 2"),
+            "{}",
+            out.content
+        );
+        assert!(!out.content.contains("cut at"), "{}", out.content);
+
+        // Asked for it directly, the over-long line says it was cut and
+        // where the file goes on.
+        let out = read(2).await;
         let tail = out.content.split_at(out.content.len() - 400).1;
         assert!(tail.contains("line 2 cut at"), "{tail}");
-        assert!(tail.contains("lines 1–2 of 3"), "{tail}");
         assert!(tail.contains("continue with offset 3"), "{tail}");
     }
 
