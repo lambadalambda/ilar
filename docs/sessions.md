@@ -39,6 +39,9 @@ last used there, written whenever a session is created, resumed, or
 closed; `--continue` opens what it names after one check that the
 session is still there and still belongs to this directory. A pointer
 that cannot be believed falls back to the listing and repairs itself.
+A bare `ilar` reads the same answer to offer it — see
+[Starting](interface.md#starting) — and reads it before it creates the
+launch session, which is what moves the pointer.
 
 Sessions name themselves: after the first completed turn a short topic
 is generated and shown in the title bar, the listing, and the terminal
