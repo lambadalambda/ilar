@@ -32,6 +32,33 @@ pub(crate) enum SecretCommand {
         #[arg(long)]
         tool: Option<String>,
     },
+    /// Seal the store under a master password, asked for once per session from then on
+    Encrypt,
+    /// Write the store back in the clear
+    Decrypt,
+}
+
+/// How a master password is asked for: hidden input on the terminal
+/// outside tests. The prompt text is the argument.
+pub(crate) type AskPassword<'a> = &'a mut dyn FnMut(&str) -> Result<String>;
+
+/// The terminal's own hidden prompt.
+pub(crate) fn ask_on_terminal(prompt: &str) -> Result<String> {
+    rpassword::prompt_password(prompt).context("reading the master password")
+}
+
+/// Unlock a sealed store for this process, asking once. An empty
+/// answer leaves it locked; the caller says what that costs.
+pub(crate) fn unlock_if_sealed(store: &SecretStore, ask: AskPassword<'_>) -> Result<bool> {
+    if !store.is_locked() {
+        return Ok(true);
+    }
+    let password = ask("Secret store master password (Enter leaves it locked): ")?;
+    if password.trim().is_empty() {
+        return Ok(false);
+    }
+    store.unlock(&password)?;
+    Ok(true)
 }
 
 /// Run one command against the store; the text is what to print.
@@ -39,7 +66,40 @@ pub(crate) fn run(
     store: &SecretStore,
     command: SecretCommand,
     stdin: &mut dyn std::io::Read,
+    ask: AskPassword<'_>,
 ) -> Result<String> {
+    match &command {
+        SecretCommand::Encrypt => {
+            if store.is_sealed() {
+                anyhow::bail!(
+                    "the store is already sealed; decrypt it first to change the password"
+                );
+            }
+            let password = ask("New master password: ")?;
+            if password != ask("Again: ")? {
+                anyhow::bail!("the two did not match");
+            }
+            store.encrypt(&password)?;
+            return Ok(format!(
+                "Sealed {}; every session asks for the master password once",
+                store.path().display()
+            ));
+        }
+        SecretCommand::Decrypt => {
+            if !store.is_sealed() {
+                anyhow::bail!("the store is not sealed");
+            }
+            store.decrypt(&ask("Master password: ")?)?;
+            return Ok(format!("{} is in the clear again", store.path().display()));
+        }
+        _ => {
+            if !unlock_if_sealed(store, ask)? {
+                anyhow::bail!(
+                    "the store is sealed; nothing can be read or written without the master password"
+                );
+            }
+        }
+    }
     match command {
         SecretCommand::Set { name, description } => {
             ilar::secrets::valid_name(&name).map_err(anyhow::Error::msg)?;
@@ -107,12 +167,17 @@ pub(crate) fn run(
         } else {
             format!("Nothing to revoke for {name}")
         }),
+        SecretCommand::Encrypt | SecretCommand::Decrypt => unreachable!("handled above"),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn no_password(_: &str) -> Result<String> {
+        panic!("a plain store asks for no master password")
+    }
 
     #[test]
     fn the_value_comes_from_stdin_and_never_shows_again() {
@@ -126,6 +191,7 @@ mod tests {
                 description: "for gh".into(),
             },
             &mut stdin,
+            &mut no_password,
         )
         .unwrap();
         assert!(out.starts_with("Stored GITHUB_TOKEN"), "{out}");
@@ -137,7 +203,8 @@ mod tests {
                     name: "X".into(),
                     description: String::new()
                 },
-                &mut empty
+                &mut empty,
+                &mut no_password
             )
             .is_err()
         );
@@ -149,6 +216,7 @@ mod tests {
                 tool: "bash".into(),
             },
             &mut none,
+            &mut no_password,
         )
         .unwrap();
         assert_eq!(out, "bash may use GITHUB_TOKEN without asking");
@@ -159,11 +227,12 @@ mod tests {
                     name: "GITHUB_TOKEN".into(),
                     tool: "read".into()
                 },
-                &mut none
+                &mut none,
+                &mut no_password
             )
             .is_err()
         );
-        let out = run(&store, SecretCommand::List, &mut none).unwrap();
+        let out = run(&store, SecretCommand::List, &mut none, &mut no_password).unwrap();
         assert_eq!(out, "GITHUB_TOKEN  for gh  [always: bash]");
         assert!(!out.contains("ghp_secret"));
         let out = run(
@@ -173,6 +242,7 @@ mod tests {
                 tool: None,
             },
             &mut none,
+            &mut no_password,
         )
         .unwrap();
         assert_eq!(out, "Every tool will ask for GITHUB_TOKEN again");
@@ -182,13 +252,54 @@ mod tests {
                 name: "GITHUB_TOKEN".into(),
             },
             &mut none,
+            &mut no_password,
         )
         .unwrap();
         assert_eq!(out, "Removed GITHUB_TOKEN");
         assert!(
-            run(&store, SecretCommand::List, &mut none)
+            run(&store, SecretCommand::List, &mut none, &mut no_password)
                 .unwrap()
                 .starts_with("No secrets stored")
         );
+    }
+
+    /// Sealing asks twice; afterwards every command asks once, and an
+    /// empty answer is a refusal to work blind.
+    #[test]
+    fn a_sealed_store_asks_for_its_master_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SecretStore::open(dir.path());
+        let mut stdin: &[u8] = b"ghp_secret\n";
+        run(
+            &store,
+            SecretCommand::Set {
+                name: "GITHUB_TOKEN".into(),
+                description: String::new(),
+            },
+            &mut stdin,
+            &mut no_password,
+        )
+        .unwrap();
+        let mut none: &[u8] = b"";
+        let mut answers = vec!["open sesame".to_string(), "open sesame".to_string()];
+        let mut ask = |_: &str| Ok(answers.remove(0));
+        let out = run(&store, SecretCommand::Encrypt, &mut none, &mut ask).unwrap();
+        assert!(out.starts_with("Sealed "), "{out}");
+        assert!(store.is_sealed());
+        // Forget it, as a new process would.
+        ilar::secrets::forget_master(&store);
+        assert!(store.is_locked());
+        let mut refuse = |_: &str| Ok(String::new());
+        assert!(run(&store, SecretCommand::List, &mut none, &mut refuse).is_err());
+        let mut wrong = |_: &str| Ok("nope".to_string());
+        assert!(run(&store, SecretCommand::List, &mut none, &mut wrong).is_err());
+        let mut right = |_: &str| Ok("open sesame".to_string());
+        let out = run(&store, SecretCommand::List, &mut none, &mut right).unwrap();
+        assert_eq!(out, "GITHUB_TOKEN");
+        // Held now: no further asking.
+        let out = run(&store, SecretCommand::List, &mut none, &mut no_password).unwrap();
+        assert_eq!(out, "GITHUB_TOKEN");
+        let out = run(&store, SecretCommand::Decrypt, &mut none, &mut right).unwrap();
+        assert!(out.contains("in the clear"), "{out}");
     }
 }

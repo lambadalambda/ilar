@@ -18,6 +18,8 @@ pub enum Command {
     Grant(ilar::secrets::Approval),
     /// Refuse it.
     Deny,
+    /// The secret store's master password, for this gateway process.
+    Unlock(String),
     /// Replace this chat's conversation with one handover summary.
     Compact,
     Help,
@@ -59,6 +61,8 @@ pub fn parse(text: &str) -> Option<Command> {
             None => Command::Unknown(format!("grant {}", argument.unwrap_or_default())),
         },
         ("deny", _) => Command::Deny,
+        ("unlock", Some(password)) => Command::Unlock(password.to_string()),
+        ("unlock", None) => Command::Unknown("unlock (the master password goes after it)".into()),
         ("compact", _) => Command::Compact,
         ("help", _) => Command::Help,
         ("pending", _) => Command::Pending,
@@ -94,6 +98,7 @@ pub const HELP: &str = "/new — start a fresh chat (memory stays)\n\
 /model — list the models; /model <provider/model> switches; add --save to make it the default for new chats\n\
 /abort — cancel the turn running now; messages that were waiting run after it\n\
 /grant [session|always] [password], /deny — answer a tool's ask for a stored secret or for root\n\
+/unlock <master password> — open a sealed secret store for this gateway process\n\
 /compact — replace the conversation with one handover summary; memory stays\n\
 /pending — what the review wants to remember, when approval is on\n\
 /approve [id|all], /reject [id|all] — decide on it\n\
@@ -174,6 +179,11 @@ mod tests {
             }))
         );
         assert_eq!(parse("/deny"), Some(Command::Deny));
+        assert_eq!(
+            parse("/unlock open sesame"),
+            Some(Command::Unlock("open sesame".into()))
+        );
+        assert!(matches!(parse("/unlock"), Some(Command::Unknown(_))));
         assert_eq!(parse("/pending"), Some(Command::Pending));
         assert_eq!(parse("/approve"), Some(Command::Approve("all".into())));
         assert_eq!(

@@ -170,6 +170,10 @@ impl Driver {
         self.config.state_dir().join("outbox")
     }
 
+    pub fn secret_store(&self) -> ilar::secrets::SecretStore {
+        ilar::secrets::SecretStore::open(self.config.state_dir())
+    }
+
     pub fn seat_by_key(&self, key: &str) -> Option<Arc<Seat>> {
         self.seats.lock().unwrap().get(key).cloned()
     }

@@ -9,14 +9,18 @@
 //! shaped like the question protocol: a prompt over a channel with a
 //! one-shot reply, so any driver with somebody to ask can answer it.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use anyhow::{Context, Result};
+use base64::Engine;
+use chacha20poly1305::aead::{Aead, AeadCore, KeyInit, OsRng};
+use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
+use zeroize::Zeroizing;
 
 /// Under the state directory.
 pub const FILE_NAME: &str = "secrets.json";
@@ -35,6 +39,124 @@ pub const SUDO_PASSWORD: &str = "SUDO_PASSWORD";
 /// wherever it appears in output, or hiding every variable that
 /// happens to equal "1", mangles more than it protects.
 pub const MIN_VALUE_CHARS: usize = 4;
+
+/// The file sealed under a master password: the key is derived from
+/// the password and `salt` with Argon2id, the JSON is XChaCha20-Poly1305
+/// under a fresh nonce every write.
+#[derive(Serialize, Deserialize)]
+struct Sealed {
+    version: u32,
+    kdf: String,
+    salt: String,
+    nonce: String,
+    ciphertext: String,
+}
+
+/// What is on disk: the JSON as it is, or sealed.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum Disk {
+    Sealed { sealed: Sealed },
+    Plain(File),
+}
+
+/// The store is sealed and this process has not been given the master
+/// password. Callers tell it apart from a broken file, since the cure
+/// is different.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("the secret store is sealed and locked: unlock it with the master password")]
+pub struct Locked;
+
+/// The unlocked key for one sealed store, held for the life of the
+/// process. The password stays too: a store re-sealed under another
+/// salt by a second process is re-derived rather than refused.
+struct Master {
+    password: Zeroizing<String>,
+    salt: Vec<u8>,
+    key: Zeroizing<[u8; 32]>,
+}
+
+static MASTERS: LazyLock<Mutex<HashMap<PathBuf, Master>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Drop the held master for a store: what a new process starts as.
+pub fn forget_master(store: &SecretStore) {
+    MASTERS.lock().unwrap().remove(store.path());
+}
+
+const SEAL_VERSION: u32 = 1;
+const KDF: &str = "argon2id";
+
+/// Argon2id at its defaults (19 MiB, two passes). The unit tests run
+/// it far lighter: a debug build derives at these settings in seconds,
+/// and their stores are throwaways.
+fn kdf() -> argon2::Argon2<'static> {
+    #[cfg(test)]
+    {
+        argon2::Argon2::new(
+            argon2::Algorithm::Argon2id,
+            argon2::Version::V0x13,
+            argon2::Params::new(1024, 1, 1, Some(32)).expect("valid params"),
+        )
+    }
+    #[cfg(not(test))]
+    {
+        argon2::Argon2::default()
+    }
+}
+
+fn derive_key(password: &str, salt: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
+    let mut key = Zeroizing::new([0u8; 32]);
+    kdf()
+        .hash_password_into(password.as_bytes(), salt, key.as_mut())
+        .map_err(|error| anyhow::anyhow!("deriving the master key: {error}"))?;
+    Ok(key)
+}
+
+fn base64(bytes: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+fn unbase64(text: &str, what: &str) -> Result<Vec<u8>> {
+    base64::engine::general_purpose::STANDARD
+        .decode(text)
+        .with_context(|| format!("the sealed store's {what} is not base64"))
+}
+
+fn seal(file: &File, master: &Master) -> Result<Sealed> {
+    let plaintext = Zeroizing::new(serde_json::to_vec(file)?);
+    let cipher = XChaCha20Poly1305::new(master.key.as_ref().into());
+    let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+    let ciphertext = cipher
+        .encrypt(&nonce, plaintext.as_slice())
+        .map_err(|_| anyhow::anyhow!("sealing the secret store"))?;
+    Ok(Sealed {
+        version: SEAL_VERSION,
+        kdf: KDF.into(),
+        salt: base64(&master.salt),
+        nonce: base64(&nonce),
+        ciphertext: base64(&ciphertext),
+    })
+}
+
+fn unseal(sealed: &Sealed, key: &[u8; 32]) -> Result<File> {
+    if sealed.version != SEAL_VERSION || sealed.kdf != KDF {
+        anyhow::bail!(
+            "the sealed store is version {} with {}; this ilar reads version {SEAL_VERSION} with {KDF}",
+            sealed.version,
+            sealed.kdf
+        );
+    }
+    let nonce = unbase64(&sealed.nonce, "nonce")?;
+    let ciphertext = unbase64(&sealed.ciphertext, "ciphertext")?;
+    let cipher = XChaCha20Poly1305::new(key.into());
+    let plaintext = Zeroizing::new(
+        cipher
+            .decrypt(XNonce::from_slice(&nonce), ciphertext.as_slice())
+            .map_err(|_| anyhow::anyhow!("wrong master password"))?,
+    );
+    serde_json::from_slice(&plaintext).context("parsing the unsealed store")
+}
 
 #[derive(Default, Serialize, Deserialize)]
 struct File {
@@ -106,11 +228,12 @@ impl SecretStore {
         &self.path
     }
 
-    fn load(&self) -> Result<File> {
+    /// The file as it is on disk; a missing file is an empty plain one.
+    fn read_disk(&self) -> Result<Disk> {
         let content = match std::fs::read_to_string(&self.path) {
             Ok(content) => content,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(File::default());
+                return Ok(Disk::Plain(File::default()));
             }
             Err(error) => {
                 return Err(error)
@@ -121,26 +244,149 @@ impl SecretStore {
             .with_context(|| format!("parsing secrets {}", self.path.display()))
     }
 
-    fn save(&self, file: &File) -> Result<()> {
+    /// The key this process holds for the store, re-derived if the
+    /// file was re-sealed under another salt since.
+    fn master_for(&self, salt: &[u8]) -> Result<Option<Zeroizing<[u8; 32]>>> {
+        let mut masters = MASTERS.lock().unwrap();
+        let Some(master) = masters.get_mut(&self.path) else {
+            return Ok(None);
+        };
+        if master.salt != salt {
+            master.key = derive_key(&master.password, salt)?;
+            master.salt = salt.to_vec();
+        }
+        Ok(Some(master.key.clone()))
+    }
+
+    /// The file, unsealed when it is sealed and this process may.
+    fn open_disk(&self, disk: Disk) -> Result<File> {
+        match disk {
+            Disk::Plain(file) => Ok(file),
+            Disk::Sealed { sealed } => {
+                let salt = unbase64(&sealed.salt, "salt")?;
+                match self.master_for(&salt)? {
+                    Some(key) => unseal(&sealed, &key),
+                    None => Err(Locked.into()),
+                }
+            }
+        }
+    }
+
+    fn load(&self) -> Result<File> {
+        self.open_disk(self.read_disk()?)
+    }
+
+    fn write_disk(&self, disk: &Disk) -> Result<()> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         crate::atomic_file::replace(
             &self.path,
-            serde_json::to_string_pretty(file)?.as_bytes(),
+            serde_json::to_string_pretty(disk)?.as_bytes(),
             crate::atomic_file::Mode::Force(0o600),
         )
         .with_context(|| format!("writing secrets {}", self.path.display()))?;
         Ok(())
     }
 
+    /// Write the file back the way it was found: sealed under the
+    /// held master, or plain.
+    fn save(&self, file: &File, sealed: bool) -> Result<()> {
+        let disk = if sealed {
+            let masters = MASTERS.lock().unwrap();
+            let master = masters.get(&self.path).ok_or(Locked)?;
+            Disk::Sealed {
+                sealed: seal(file, master)?,
+            }
+        } else {
+            Disk::Plain(File {
+                secrets: file.secrets.clone(),
+                root: file.root.clone(),
+            })
+        };
+        self.write_disk(&disk)
+    }
+
     /// Read, change, write, under the lock.
     fn update<T>(&self, change: impl FnOnce(&mut File) -> T) -> Result<T> {
         let _lock = self.lock()?;
-        let mut file = self.load()?;
+        let disk = self.read_disk()?;
+        let sealed = matches!(disk, Disk::Sealed { .. });
+        let mut file = self.open_disk(disk)?;
         let outcome = change(&mut file);
-        self.save(&file)?;
+        self.save(&file, sealed)?;
         Ok(outcome)
+    }
+
+    /// Whether the file on disk is sealed under a master password.
+    pub fn is_sealed(&self) -> bool {
+        matches!(self.read_disk(), Ok(Disk::Sealed { .. }))
+    }
+
+    /// Sealed, and this process has not been given the password.
+    pub fn is_locked(&self) -> bool {
+        self.is_sealed() && !MASTERS.lock().unwrap().contains_key(&self.path)
+    }
+
+    /// Give this process the master password: verified against the
+    /// file, then held until the process ends. A plain store needs
+    /// none and says so.
+    pub fn unlock(&self, password: &str) -> Result<()> {
+        let Disk::Sealed { sealed } = self.read_disk()? else {
+            anyhow::bail!("the secret store is not sealed; nothing to unlock");
+        };
+        let salt = unbase64(&sealed.salt, "salt")?;
+        let key = derive_key(password, &salt)?;
+        unseal(&sealed, &key)?;
+        MASTERS.lock().unwrap().insert(
+            self.path.clone(),
+            Master {
+                password: Zeroizing::new(password.to_string()),
+                salt,
+                key,
+            },
+        );
+        Ok(())
+    }
+
+    /// Seal a plain store under `password`, and hold it unlocked here.
+    pub fn encrypt(&self, password: &str) -> Result<()> {
+        if password.chars().count() < MIN_VALUE_CHARS {
+            anyhow::bail!("a master password is at least {MIN_VALUE_CHARS} characters");
+        }
+        let _lock = self.lock()?;
+        let Disk::Plain(file) = self.read_disk()? else {
+            anyhow::bail!(
+                "the secret store is already sealed; decrypt it first to change the password"
+            );
+        };
+        let mut salt = vec![0u8; 16];
+        chacha20poly1305::aead::rand_core::RngCore::fill_bytes(&mut OsRng, &mut salt);
+        let master = Master {
+            password: Zeroizing::new(password.to_string()),
+            key: derive_key(password, &salt)?,
+            salt,
+        };
+        self.write_disk(&Disk::Sealed {
+            sealed: seal(&file, &master)?,
+        })?;
+        MASTERS.lock().unwrap().insert(self.path.clone(), master);
+        Ok(())
+    }
+
+    /// Write a sealed store back as plain, given its password, and
+    /// forget the master.
+    pub fn decrypt(&self, password: &str) -> Result<()> {
+        let _lock = self.lock()?;
+        let Disk::Sealed { sealed } = self.read_disk()? else {
+            anyhow::bail!("the secret store is not sealed");
+        };
+        let salt = unbase64(&sealed.salt, "salt")?;
+        let key = derive_key(password, &salt)?;
+        let file = unseal(&sealed, &key)?;
+        self.write_disk(&Disk::Plain(file))?;
+        MASTERS.lock().unwrap().remove(&self.path);
+        Ok(())
     }
 
     fn lock(&self) -> Result<std::fs::File> {
@@ -269,9 +515,13 @@ impl SecretStore {
     }
 
     /// Whether there is nothing to list. A store that cannot be read
-    /// is empty here; the resolve path is where that is reported.
+    /// is empty here; the resolve path is where that is reported. A
+    /// locked one is not: what it holds is worth a tool that says so.
     pub fn is_empty(&self) -> bool {
-        self.list().map(|listed| listed.is_empty()).unwrap_or(true)
+        match self.list() {
+            Ok(listed) => listed.is_empty(),
+            Err(error) => !error.is::<Locked>(),
+        }
     }
 
     /// Every entry, name and value, for shielding a child environment
@@ -429,7 +679,17 @@ impl Secrets {
 
     /// The listing the model gets: names, descriptions, standing grants.
     pub fn listing(&self) -> Result<String> {
-        let listed = self.store.list()?;
+        let listed = match self.store.list() {
+            Ok(listed) => listed,
+            Err(error) if error.is::<Locked>() => {
+                return Ok(
+                    "The secret store is sealed and locked for this session; the user \
+                           unlocks it with the master password."
+                        .to_string(),
+                );
+            }
+            Err(error) => return Err(error),
+        };
         if listed.is_empty() {
             return Ok(
                 "No secrets are stored. The user adds one with: ilar secret set NAME".to_string(),
@@ -821,6 +1081,80 @@ mod tests {
         assert!(store.revoke("KEY", None).unwrap());
         assert!(!store.revoke("KEY", None).unwrap());
         assert!(store.list().unwrap()[0].always.is_empty());
+    }
+
+    /// Sealed, the file holds no plaintext; locked, nothing reads it;
+    /// unlocked once, every read and write goes through for the rest of
+    /// the process; decrypted, it is plain again.
+    #[test]
+    fn a_master_password_seals_the_store_for_the_process() {
+        let (_dir, store) = store();
+        store.set("KEY", "the key", "value-one").unwrap();
+        assert!(!store.is_sealed());
+        assert!(store.encrypt("abc").is_err(), "a short master password");
+        assert!(
+            store.unlock("whatever").is_err(),
+            "nothing sealed to unlock"
+        );
+        store.encrypt("open sesame").unwrap();
+        assert!(store.is_sealed());
+        assert!(!store.is_locked(), "the sealer holds the key");
+        let raw = std::fs::read_to_string(store.path()).unwrap();
+        assert!(raw.contains("\"sealed\""), "{raw}");
+        assert!(
+            !raw.contains("value-one") && !raw.contains("the key"),
+            "{raw}"
+        );
+        assert!(store.encrypt("again").is_err(), "already sealed");
+
+        // Writes stay sealed, and reads see them.
+        store.set("OTHER", "", "value-two").unwrap();
+        assert!(
+            !std::fs::read_to_string(store.path())
+                .unwrap()
+                .contains("value-two")
+        );
+        assert_eq!(store.value("OTHER").unwrap().as_deref(), Some("value-two"));
+
+        // Forget the key: locked, and every read says so.
+        MASTERS.lock().unwrap().remove(store.path());
+        assert!(store.is_locked());
+        let error = store.list().unwrap_err();
+        assert!(error.is::<Locked>(), "{error:#}");
+        assert!(!store.is_empty(), "a locked store is not nothing");
+        assert!(store.set("X", "", "value-x").is_err());
+        assert!(store.unlock("wrong").is_err());
+        assert!(store.is_locked());
+        store.unlock("open sesame").unwrap();
+        assert!(!store.is_locked());
+        assert_eq!(store.list().unwrap().len(), 2);
+        let secrets = Secrets::new(store.clone());
+        assert_eq!(secrets.all().len(), 2);
+
+        // Plain again, under the right password only.
+        assert!(store.decrypt("wrong").is_err());
+        store.decrypt("open sesame").unwrap();
+        assert!(!store.is_sealed());
+        assert!(
+            std::fs::read_to_string(store.path())
+                .unwrap()
+                .contains("value-one")
+        );
+        assert!(!MASTERS.lock().unwrap().contains_key(store.path()));
+    }
+
+    #[tokio::test]
+    async fn a_locked_store_refuses_and_lists_as_locked() {
+        let (_dir, store) = store();
+        store.set("KEY", "", "value-one").unwrap();
+        store.encrypt("open sesame").unwrap();
+        MASTERS.lock().unwrap().remove(store.path());
+        let secrets = Secrets::new(store.clone());
+        assert!(secrets.listing().unwrap().contains("sealed and locked"));
+        let cancel = cancel();
+        let names = ["KEY".to_string()];
+        let error = secrets.resolve(request(&names, &cancel)).await.unwrap_err();
+        assert!(error.contains("locked"), "{error}");
     }
 
     /// Root is a pseudo-secret: nothing to store, a standing grant to

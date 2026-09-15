@@ -334,6 +334,11 @@ impl Gateway {
             let gateway = self.clone();
             handlers.spawn(async move { gateway.announce_start().await });
         }
+        if self.driver.secret_store().is_locked() {
+            log(
+                "secret store is sealed and locked: /unlock <master password> from a chat opens it",
+            );
+        }
         let mut inbox_tick = tokio::time::interval(Duration::from_secs(1));
         let mut scheduler_tick = tokio::time::interval(Duration::from_secs(
             self.settings.scheduler_tick_secs.max(1),
@@ -601,6 +606,22 @@ impl Gateway {
             }
             Command::Grant(approval) => self.answer_grant(key, Some(approval)),
             Command::Deny => self.answer_grant(key, None),
+            Command::Unlock(password) => {
+                let store = self.driver.secret_store();
+                if !store.is_sealed() {
+                    "The secret store is not sealed; nothing to unlock.".to_string()
+                } else if !store.is_locked() {
+                    "The secret store is already unlocked.".to_string()
+                } else {
+                    match store.unlock(&password) {
+                        Ok(()) => {
+                            log(&format!("{key}: secret store unlocked"));
+                            "Secret store unlocked for this gateway process.".to_string()
+                        }
+                        Err(error) => failed_reply("/unlock", &error),
+                    }
+                }
+            }
             Command::Abort => match self.driver.seat_by_key(key) {
                 Some(seat) if self.driver.abort(&seat) => {
                     log(&format!("{key}: turn aborted from the chat"));

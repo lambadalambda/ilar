@@ -105,6 +105,22 @@ const ROOT_STALL_WARN_AFTER: std::time::Duration = std::time::Duration::from_sec
 /// for resume — never a silent disappearance.
 const ROOT_STALL_ABORT_AFTER: std::time::Duration = std::time::Duration::from_secs(600);
 
+/// A sealed secret store is unlocked once, on the plain terminal,
+/// before anything else runs; an empty answer leaves it locked for the
+/// session. The configuration is resolved again afterwards, since a
+/// provider key may live in the store.
+fn unlock_secrets(config: ilar::config::Config) -> Result<ilar::config::Config> {
+    let store = ilar::secrets::SecretStore::open(config.state_dir());
+    if !store.is_locked() {
+        return Ok(config);
+    }
+    if !secret_cli::unlock_if_sealed(&store, &mut secret_cli::ask_on_terminal)? {
+        eprintln!("The secret store stays locked this session: no stored secret can be used.");
+        return Ok(config);
+    }
+    Loader::new().resolve().context("loading config")
+}
+
 #[derive(clap::Subcommand, Debug)]
 enum Command {
     /// Log in to OpenAI with your ChatGPT account (OAuth in the browser)
@@ -1115,6 +1131,7 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let config = Loader::new().resolve().context("loading config")?;
     if let Some(Command::Exec(exec_args)) = args.command {
+        let config = unlock_secrets(config)?;
         let code = run_exec(&config, exec_args).await?;
         std::process::exit(code);
     }
@@ -1137,7 +1154,12 @@ async fn main() -> Result<()> {
     }
     if let Some(Command::Secret { command }) = args.command {
         let store = ilar::secrets::SecretStore::open(config.state_dir());
-        let text = secret_cli::run(&store, command, &mut std::io::stdin().lock())?;
+        let text = secret_cli::run(
+            &store,
+            command,
+            &mut std::io::stdin().lock(),
+            &mut secret_cli::ask_on_terminal,
+        )?;
         println!("{text}");
         return Ok(());
     }
@@ -1184,6 +1206,10 @@ async fn main() -> Result<()> {
     if let Some(id) = args.view.as_deref() {
         return watch::run(&config, id, configured_theme).await;
     }
+    // Before the terminal is taken over: the master password is typed
+    // on the plain terminal, once, and the configuration is read again
+    // so a provider key kept in the store is seen.
+    let config = unlock_secrets(config)?;
     let mut active_theme = configured_theme;
     // Settings that parsed but were not honoured. Shown once, on the
     // first session: they are a property of the config, not the session.
