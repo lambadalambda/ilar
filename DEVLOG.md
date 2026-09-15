@@ -1,5 +1,44 @@
 # DEVLOG
 
+## 2026-09-15 — The sweep, and eight agents in worktrees
+
+A UX sweep, asked for as "weird things, inconsistencies, bad states".
+The first four read-only passes were pointed at what had just landed
+(secrets, grants, sudo, the master password, focus messaging) and came
+back mostly about that; the user asked whether the rest was fine or
+just unread. Unread. Five more passes went by user journey instead of
+by recent change: first run and configuration, the life of a session,
+the tools as the transcript shows them, the gateway's daily use,
+agents and delivery. About 130 findings between them, filed as 32
+issues under one index, a dozen of them real bugs: a bad `--model`
+reported as a missing key, `read` cutting a long line with no marker,
+slash commands mid-turn steered to the model as text, Ctrl-D quitting
+through a running turn unwarned, Esc killing detached children and
+their mail starting a fresh turn, a gateway restart aborting the turn
+in flight with no re-run, "sent" meaning queued, a group chat that
+could receive the weekly memory review.
+
+The fixes ran as eight Opus agents in isolated worktrees, six at once
+and two after, each with its own branch and its own remote worktree on
+tenco or secunda for the gate (the Mac cannot run cargo in useful
+time; a fresh worktree builds in two minutes there and takes 11 GB).
+Streams were cut by crate region so that no two edited the same
+functions; the two gateway streams and the four TUI streams still
+overlapped in the big files, and every branch was rebased onto main
+before its gate, with the orchestrator relaying "main moved, here is
+what changed" between them. Two textual conflicts in all, both in
+docs and one enum arm. Each stream had an independent reviewer before
+reporting; what the reviewers found and the streams deferred is one
+follow-up issue.
+
+Two things worth remembering. The parallel gates made the parked
+serve adoption test flake three times under load; alone it passed
+every time, and the final gate on a quiet box was clean. And one agent
+did a `git reset --soft main` after main had moved, which silently
+folded another stream's revert into its commit; it caught that itself
+by diffing against main before reporting, which is why "report
+`git diff main...HEAD`" is in the briefing.
+
 ## 2026-09-15 — Root, and a password for the passwords
 
 Two follow-ups the same day. A `sudo` tool: one command as root after
