@@ -40,6 +40,12 @@ closed; `--continue` opens what it names after one check that the
 session is still there and still belongs to this directory. A pointer
 that cannot be believed falls back to the listing and repairs itself.
 
+Sessions name themselves: after the first completed turn a short topic
+is generated and shown in the title bar, the listing, and the terminal
+window title. A fork is not born with its parent's name — titling only
+runs on a session that has none — so it names itself after its own next
+completed turn and the two can be told apart.
+
 ## Housekeeping
 
 The sessions directory is written to be cheap to read and to stay
@@ -65,12 +71,6 @@ does not: a root session with no user message is removed when its
 runtime ends, unless it has subagent children or a completion waiting
 in the outbox, and the startup sweep removes such files once they are a
 day old.
-
-Sessions name themselves: after the first completed turn a short topic
-is generated and shown in the title bar, the listing, and the terminal
-window title. A fork is not born with its parent's name — titling only
-runs on a session that has none — so it names itself after its own next
-completed turn and the two can be told apart.
 
 ## Following a session as it is written
 
