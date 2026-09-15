@@ -986,13 +986,15 @@ impl App {
 
         frame.render_widget(Paragraph::new(self.status_line(chunks[1].width)), chunks[1]);
 
-        // A focus view routes keys nowhere near the prompt: the input
-        // stays visible but must not look like it is listening.
         // A focus view is not a modal for the prompt: typing there
-        // talks to the agent on screen.
-        // `--view` has no runtime behind it: the box stays for the
-        // layout's sake, but nothing it could promise would be true.
+        // talks to the agent on screen. `--view` has no runtime behind
+        // it, so the box stays for the layout's sake but promises
+        // nothing.
         let input_focused = !self.read_only && input_accepts_keys(self.busy, self.has_modal());
+        // Whether the focused agent can be messaged at all: a
+        // grandchild's or another session's row takes no message, so
+        // the prompt must not be titled as that agent's.
+        let focus_send = self.focus.as_ref().map(crate::app::focus_can_send);
         let input_block = Block::default()
             .borders(Borders::ALL)
             .border_type(if input_focused {
@@ -1011,6 +1013,8 @@ impl App {
             .multiline_view(input_area.width, input_area.height);
         let mut input_title = if self.read_only {
             " read-only · q leaves ".into()
+        } else if focus_send == Some(false) {
+            " nothing to send here · Esc close ".into()
         } else if let Some(focus) = &self.focus {
             format!(" to {} ", focus.title)
         } else if input_view.line_count > 1 {
@@ -1047,7 +1051,7 @@ impl App {
         // keep none of them, and in a focus view the prompt belongs to
         // the agent on screen — the stash, the history and the images
         // are the root's, and Esc is the way back to them.
-        let input_help = if self.read_only {
+        let input_help = if self.read_only || focus_send == Some(false) {
             None
         } else if self.focus.is_some() {
             Some(if input_chunk.width >= 70 {
@@ -1160,10 +1164,10 @@ impl App {
             );
         }
 
-        if input_accepts_keys(self.busy, self.has_modal() || self.focus.is_some())
-            && input_area.width > 0
-            && input_area.height > 0
-        {
+        // The caret marks where typing lands — the prompt, whether it
+        // is the root's or a focused agent's. `--view` is the one place
+        // typing lands nowhere, so it gets no caret.
+        if input_focused && input_area.width > 0 && input_area.height > 0 {
             frame.set_cursor_position((
                 input_area.x.saturating_add(input_view.cursor_x),
                 input_area.y.saturating_add(input_view.cursor_y),
@@ -1305,22 +1309,18 @@ fn pending_entry(message: &ilar::agent::Steer, kind: &str, when: &str) -> (Strin
 fn agent_panel_title(rows: &[crate::sidebar::AgentRow]) -> String {
     let jobs = rows
         .iter()
-        .filter(|row| row.agent == "job" && !row.delivering)
+        .filter(|row| row.agent == ilar::subagent::JOB_AGENT && !row.delivering)
         .count();
     let mail = rows.iter().filter(|row| row.delivering).count();
     let agents = rows.len() - jobs - mail;
     let mut title = format!("agents ({agents})");
     if jobs > 0 {
-        title.push_str(&format!(" · {jobs} job{}", plural(jobs)));
+        title.push_str(&format!(" · {}", ilar::text::plural(jobs, "job")));
     }
     if mail > 0 {
         title.push_str(&format!(" · {mail} delivering"));
     }
     title
-}
-
-fn plural(count: usize) -> &'static str {
-    if count == 1 { "" } else { "s" }
 }
 
 pub(crate) fn stream_liveness(

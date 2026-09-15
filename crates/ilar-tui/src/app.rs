@@ -236,9 +236,13 @@ pub(crate) fn focus_send_refusal(focus: &FocusView) -> Option<String> {
 pub(crate) fn focus_key_belongs_to_the_root(
     code: crossterm::event::KeyCode,
     control: bool,
+    input_blank: bool,
 ) -> Option<&'static str> {
     use crossterm::event::KeyCode;
     match (code, control) {
+        // Ctrl-D is the quit only on a blank prompt; over a draft it is
+        // delete-forward, here as at the root.
+        (KeyCode::Char('d'), true) if !input_blank => None,
         (KeyCode::F(1), _) => Some("F1"),
         (KeyCode::F(2), _) => Some("F2"),
         (KeyCode::F(3), _) => Some("F3"),
@@ -1708,10 +1712,12 @@ impl App {
     /// Leave the view and give the root its prompt back. Anything typed
     /// at the agent and not sent goes to the stash rather than
     /// vanishing: it is the same work Esc protects at the root, and the
-    /// root's own draft is waiting underneath it.
-    pub(crate) fn close_focus(&mut self) {
+    /// root's own draft is waiting underneath it. Returns whether
+    /// something was stashed, for the caller that has a notice of its
+    /// own to put on the line.
+    pub(crate) fn close_focus(&mut self) -> bool {
         let Some(focus) = self.focus.take() else {
-            return;
+            return false;
         };
         let unsent = StashedPrompt {
             text: self.input.take(),
@@ -1720,16 +1726,18 @@ impl App {
         self.input = crate::input::InputBuffer::from(focus.parked.text);
         self.pending_images = focus.parked.images;
         self.end_history_browsing();
-        if !unsent.text.trim().is_empty() || !unsent.images.is_empty() {
-            self.input_stash.push(unsent);
-            self.set_notice(
-                format!(
-                    "unsent message to {} stashed — Ctrl-S brings it back",
-                    focus.title
-                ),
-                NoticeLevel::Info,
-            );
+        if unsent.text.trim().is_empty() && unsent.images.is_empty() {
+            return false;
         }
+        self.input_stash.push(unsent);
+        self.set_notice(
+            format!(
+                "unsent message to {} stashed — Ctrl-S brings it back",
+                focus.title
+            ),
+            NoticeLevel::Info,
+        );
+        true
     }
 
     /// Ctrl-X in the focus view: arm on the first press, fire on the
@@ -5114,7 +5122,7 @@ mod tests {
             (KeyCode::Char('q'), true, "Ctrl-Q"),
         ] {
             assert_eq!(
-                focus_key_belongs_to_the_root(code, control),
+                focus_key_belongs_to_the_root(code, control, true),
                 Some(named),
                 "{code:?}"
             );
@@ -5128,11 +5136,21 @@ mod tests {
             (KeyCode::Char('j'), true),
         ] {
             assert_eq!(
-                focus_key_belongs_to_the_root(code, control),
+                focus_key_belongs_to_the_root(code, control, true),
                 None,
                 "{code:?}"
             );
         }
+        // Ctrl-D over a draft is delete-forward, here as at the root;
+        // only the quit belongs to the session behind the view.
+        assert_eq!(
+            focus_key_belongs_to_the_root(KeyCode::Char('d'), true, false),
+            None
+        );
+        assert_eq!(
+            focus_key_belongs_to_the_root(KeyCode::Char('s'), true, false),
+            Some("Ctrl-S")
+        );
     }
 
     /// One prompt, two drafts: what was typed at the root waits under
@@ -5261,11 +5279,23 @@ mod tests {
         app.focus.as_mut().unwrap().unreachable =
             Some("explorer's agent, not this session's".into());
         let foreign = screen(&mut app);
-        assert!(!foreign.contains("Enter messages"), "{foreign}");
+        // Neither the view's footer nor the prompt offers a send.
         assert!(
             foreign.contains("↑↓ scroll · ^G cancel ×2 · Esc close"),
             "{foreign}"
         );
+        assert!(
+            foreign.contains("nothing to send here · Esc close"),
+            "{foreign}"
+        );
+        for promise in [
+            "Enter messages",
+            "Enter sends",
+            "Enter send ·",
+            "to explore ·",
+        ] {
+            assert!(!foreign.contains(promise), "{promise} in {foreign}");
+        }
         app.focus.as_mut().unwrap().unreachable = None;
 
         // Esc's path: the root transcript comes back as it was.

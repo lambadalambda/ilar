@@ -677,7 +677,15 @@ fn apply_intent(
             app.clear_transient_notice();
             // A terminal drop arrives as pasted file paths; when every
             // token is an existing image file, attaching is the intent.
-            if let Some(paths) = crate::app::dropped_image_paths(&text)
+            // Not in a focus view: a message to an agent carries text
+            // only, so an attachment there would be promised and then
+            // silently stashed.
+            if crate::app::dropped_image_paths(&text).is_some() && app.focus.is_some() {
+                app.set_notice(
+                    "images belong to the session behind this view — Esc leaves the view first",
+                    NoticeLevel::Warning,
+                );
+            } else if let Some(paths) = crate::app::dropped_image_paths(&text)
                 && paths.iter().all(|path| path.is_file())
             {
                 let total = paths.len();
@@ -1786,6 +1794,9 @@ fn focus_message_line(target: &str, text: &str) -> String {
 
 /// How much of an agent's reply the headline carries.
 const FOCUS_REPLY_CHARS: usize = 100;
+/// How much of a failure it carries. Longer than a reply's: a reply is
+/// on screen in the agent's own view, an error is only here.
+const FOCUS_ERROR_CHARS: usize = 200;
 
 /// The root's one line for what became of a focus message. The tool's
 /// own wording is written for a model — "do not repeat the message",
@@ -1808,33 +1819,49 @@ fn focus_outcome_line(target: &str, outcome: ilar::subagent::TaskMessage) -> (St
         TaskMessage::Refused(why) => (
             format!(
                 "message to {target} was refused: {}",
-                ilar::text::bounded_detail(&why)
+                headline(&why, FOCUS_ERROR_CHARS)
             ),
             NoticeLevel::Error,
+        ),
+        // The resume declined but the message is still parked: a
+        // failure to report, not a message to retype.
+        TaskMessage::Answered {
+            output,
+            still_queued: true,
+            ..
+        } => (
+            format!(
+                "{target} could not be resumed ({}) — the message waits for its next resume",
+                headline(&output.content, FOCUS_ERROR_CHARS)
+            ),
+            NoticeLevel::Warning,
         ),
         TaskMessage::Answered { output, .. } if output.is_error => (
             format!(
                 "message to {target} failed: {}",
-                ilar::text::bounded_detail(&output.content)
+                headline(&output.content, FOCUS_ERROR_CHARS)
             ),
             NoticeLevel::Error,
         ),
         TaskMessage::Answered { output, .. } => (
-            format!("{target} answered: {}", reply_headline(&output.content)),
+            format!(
+                "{target} answered: {}",
+                headline(&output.content, FOCUS_REPLY_CHARS)
+            ),
             NoticeLevel::Info,
         ),
     }
 }
 
-/// The first line of a reply worth showing, bounded. The task-id
-/// footer the tool appends is not an answer.
-fn reply_headline(reply: &str) -> String {
-    let headline = reply
+/// The first line worth showing, bounded. The task-id footer and the
+/// "still queued" note the tool appends are not the answer.
+fn headline(text: &str, chars: usize) -> String {
+    let headline = text
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty() && !line.starts_with("(task_id:"))
         .unwrap_or("(nothing)");
-    crate::text::truncate_display(headline, FOCUS_REPLY_CHARS, crate::text::Truncation::Right)
+    crate::text::truncate_display(headline, chars, crate::text::Truncation::Right)
 }
 
 enum TurnCompletion {
@@ -2547,8 +2574,19 @@ fn ring_terminal_bell_if_idle(
 /// the roster row lends the title and says the agent is running — and
 /// the seed follows from a blocking worker, because a large child's
 /// replay used to freeze the UI for the length of its log. Returns
-/// whether the child is streaming, which the seed needs.
-fn open_agent_focus(app: &mut App, store: &SessionStore, session_id: &str) -> bool {
+/// whether the child is streaming, which the seed needs — or `None`
+/// when the view was already on that agent and there is nothing to do.
+fn open_agent_focus(app: &mut App, store: &SessionStore, session_id: &str) -> Option<bool> {
+    // A second click on the row already in front is not a navigation:
+    // closing and reopening would round-trip the drafts, stashing what
+    // was typed at this agent and handing the root's back.
+    if app
+        .focus
+        .as_ref()
+        .is_some_and(|focus| focus.session_id == session_id)
+    {
+        return None;
+    }
     // A click from inside another focus view: that one hands the prompt
     // back first, so the root's own draft cannot be swallowed by the
     // second view parking what was typed at the first agent.
@@ -2567,14 +2605,26 @@ fn open_agent_focus(app: &mut App, store: &SessionStore, session_id: &str) -> bo
     // activity at all, so a row the seed left open would spin forever.
     // Only an agent whose events will actually arrive gets that.
     let streaming = roster.is_some_and(|row| !row.delivering);
-    // What Enter may do here, judged now: the row disappears the moment
-    // the agent finishes, and a refusal that depends on whose child it
-    // is must not disappear with it.
-    let unreachable = roster.and_then(|row| match &row.foreign_parent {
-        Some(owner) => Some(format!("{owner}'s agent, not this session's")),
-        None if row.depth > 0 => Some("another agent's child, not this session's".to_string()),
-        None => None,
-    });
+    // What Enter may do here, judged now: the roster row is gone the
+    // moment the agent finishes, and a refusal that depends on whose
+    // child it is must not go with it. Without a row the log says whose
+    // it is — `message_task` refuses anything but this session's own
+    // children, and it does so in the model's words with a uuid in them.
+    let unreachable = match roster {
+        Some(row) => match &row.foreign_parent {
+            Some(owner) => Some(format!("{owner}'s agent, not this session's")),
+            None if row.depth > 0 => Some("another agent's child, not this session's".to_string()),
+            None => None,
+        },
+        None => {
+            let parent = store
+                .head(session_id)
+                .ok()
+                .and_then(|head| head.meta.parent_id);
+            (parent.as_deref() != Some(app.session_id.as_str()))
+                .then(|| "not a task this session started".to_string())
+        }
+    };
     let foreground = roster.is_some_and(|row| !row.background && !row.delivering);
     // A live search would keep the keyboard and make the focus
     // footer lie; the click is a navigation, so the search is over.
@@ -2598,7 +2648,7 @@ fn open_agent_focus(app: &mut App, store: &SessionStore, session_id: &str) -> bo
             running,
         )
     });
-    streaming
+    Some(streaming)
 }
 
 /// The focus seed, built off the UI task: the store replay — reading
@@ -2659,8 +2709,16 @@ fn land_agent_focus(
             focus.replace_lines(lines);
         }
         Err(message) => {
-            app.close_focus();
-            app.set_notice(message, NoticeLevel::Error);
+            // The close may stash something typed while the seed
+            // replayed; its notice would be overwritten by this one, so
+            // the two share the line.
+            let stashed = app.close_focus();
+            let stashed = if stashed {
+                " — your unsent message was stashed"
+            } else {
+                ""
+            };
+            app.set_notice(format!("{message}{stashed}"), NoticeLevel::Error);
         }
     }
 }
@@ -3708,7 +3766,9 @@ async fn run_app(
                 )),
             };
             let (line, level) = focus_outcome_line(&message.target, outcome);
-            if level == NoticeLevel::Error {
+            // The transcript always keeps it; the notice line is for
+            // the ones that need answering.
+            if level != NoticeLevel::Info {
                 app.set_notice(&line, level);
             }
             app.push_transcript_line(Line_::System(line));
@@ -4593,7 +4653,11 @@ async fn run_app(
                         app.close_focus();
                         continue;
                     }
-                    if let Some(named) = crate::app::focus_key_belongs_to_the_root(code, control) {
+                    if let Some(named) = crate::app::focus_key_belongs_to_the_root(
+                        code,
+                        control,
+                        app.input.is_blank(),
+                    ) {
                         app.set_notice(
                             format!("{named} belongs to the session behind this view — Esc leaves the view first"),
                             NoticeLevel::Info,
@@ -4992,17 +5056,24 @@ async fn run_app(
                             && !app.click_agents_more(mouse.column, mouse.row)
                         {
                             match app.click_agent_row(mouse.column, mouse.row) {
-                                Some(AgentTarget::Main) => app.close_focus(),
+                                Some(AgentTarget::Main) => {
+                                    app.close_focus();
+                                }
                                 Some(AgentTarget::Focus(id)) => {
-                                    let streaming = open_agent_focus(app, store, &id);
-                                    let store = store.clone();
-                                    let seed_id = id.clone();
-                                    focus_seed = Some((
-                                        id,
-                                        tokio::task::spawn_blocking(move || {
-                                            seed_agent_focus(&store, &seed_id, streaming)
-                                        }),
-                                    ));
+                                    // `None`: the view was already on
+                                    // that agent, and re-seeding it
+                                    // would replace a live tail with a
+                                    // settled replay.
+                                    if let Some(streaming) = open_agent_focus(app, store, &id) {
+                                        let store = store.clone();
+                                        let seed_id = id.clone();
+                                        focus_seed = Some((
+                                            id,
+                                            tokio::task::spawn_blocking(move || {
+                                                seed_agent_focus(&store, &seed_id, streaming)
+                                            }),
+                                        ));
+                                    }
                                 }
                                 None if app.focus.is_none() => {
                                     app.begin_transcript_selection(mouse.column, mouse.row);
@@ -5076,6 +5147,7 @@ mod tests {
             TaskMessage::Answered {
                 task_id: task_id(),
                 output: ilar::tools::ToolOutput::text(answer),
+                still_queued: false,
             },
         );
         assert_eq!(
@@ -5087,7 +5159,11 @@ mod tests {
             target,
             TaskMessage::Answered {
                 task_id: task_id(),
-                output: ilar::tools::ToolOutput::error("the worktree is gone"),
+                output: ilar::tools::ToolOutput::error(format!(
+                    "the worktree is gone\n{}",
+                    "x".repeat(20_000)
+                )),
+                still_queued: false,
             },
         );
         assert_eq!(
@@ -5095,6 +5171,22 @@ mod tests {
             "message to explorer · survey the API failed: the worktree is gone"
         );
         assert_eq!(level, NoticeLevel::Error);
+        // A resume that declined while the message stays parked is a
+        // failure to report, not a message to retype.
+        let (queued, level) = focus_outcome_line(
+            target,
+            TaskMessage::Answered {
+                task_id: task_id(),
+                output: ilar::tools::ToolOutput::error("that checkout is busy"),
+                still_queued: true,
+            },
+        );
+        assert_eq!(
+            queued,
+            "explorer · survey the API could not be resumed (that checkout is busy) — the \
+             message waits for its next resume"
+        );
+        assert_eq!(level, NoticeLevel::Warning);
         let (refused, level) =
             focus_outcome_line(target, TaskMessage::Refused("nobody is listening".into()));
         assert!(
@@ -5108,9 +5200,15 @@ mod tests {
             TaskMessage::Answered {
                 task_id: task_id(),
                 output: ilar::tools::ToolOutput::text(format!("\n\n(task_id: {})", task_id())),
+                still_queued: false,
             },
         );
         assert!(empty.ends_with("answered: (nothing)"), "{empty}");
+        // Every one of them is one line: nothing here carries 16 KiB.
+        for line in [answered, failed, queued, refused, empty] {
+            assert_eq!(line.lines().count(), 1, "{line}");
+            assert!(line.chars().count() < 300, "{line}");
+        }
     }
 
     /// Every place that names a session for a delivery goes through
@@ -5945,7 +6043,7 @@ mod tests {
             waiting: false,
             quiet: None,
         }];
-        let streaming = open_agent_focus(&mut app, &store, &session_id);
+        let streaming = open_agent_focus(&mut app, &store, &session_id).expect("a fresh focus");
         land_agent_focus(
             &mut app,
             &session_id,
@@ -5967,7 +6065,7 @@ mod tests {
         // the replay still opens, marked not running.
         app.agents_view.clear();
         app.close_focus();
-        let streaming = open_agent_focus(&mut app, &store, &session_id);
+        let streaming = open_agent_focus(&mut app, &store, &session_id).expect("a fresh focus");
         land_agent_focus(
             &mut app,
             &session_id,
@@ -5977,7 +6075,8 @@ mod tests {
 
         // A session the store cannot load: a notice, no focus.
         app.close_focus();
-        let streaming = open_agent_focus(&mut app, &store, "no-such-session");
+        let streaming =
+            open_agent_focus(&mut app, &store, "no-such-session").expect("a fresh focus");
         land_agent_focus(
             &mut app,
             "no-such-session",

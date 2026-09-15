@@ -356,8 +356,10 @@ named, so a prompt that appears while several children work says whose
 command it is. Ctrl-C under the prompt is a deny; if the turn ends or is
 cancelled underneath it, the prompt closes without an answer, which the
 tool reads as a refusal, and the transcript says so (`grant prompt for
-NAME withdrawn — the tool stopped waiting`). **F1** lists the prompt's
-keys. Standing grants are managed from the shell: `ilar secret list`,
+NAME withdrawn — the tool stopped waiting`). The prompt's keys have
+their own section in the **F1** overlay — read beforehand, since the
+prompt itself takes every key while it is up.
+Standing grants are managed from the shell: `ilar secret list`,
 `ilar secret grant NAME --tool bash`, `ilar secret revoke NAME`.
 
 ## Transcript

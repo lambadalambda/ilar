@@ -1723,7 +1723,7 @@ pub(crate) fn render_link_picker(frame: &mut Frame, picker: &LinkPicker) -> Moda
         area,
         " links ",
         theme::MARKUP,
-        " type to filter · Enter open in browser · Esc close ",
+        " filter · Enter opens in browser · Esc close ",
     ) else {
         return ModalHit::default();
     };
@@ -1942,7 +1942,7 @@ pub(crate) fn render_turn_picker(frame: &mut Frame, picker: &TurnPicker) -> Moda
     let footer = if area.width < 48 {
         " Enter rewind ×2 · ^Y fork "
     } else {
-        " type to filter · Enter rewind ×2 · ^Y fork here · Esc close "
+        " filter · Enter rewind ×2 · ^Y fork here · Esc close "
     };
     let Some(inner) = modal_frame(frame, area, " rewind to turn ", theme::MARKUP, footer) else {
         return ModalHit::default();
@@ -2130,7 +2130,9 @@ pub(crate) fn render_session_picker(frame: &mut Frame, picker: &SessionPicker) -
     let footer = if area.width < 44 {
         " Enter resume · ^D del ×2 · ^Y fork "
     } else {
-        " type to filter · Enter resume · ^D delete ×2 · ^Y fork · ^G grep content · Esc close "
+        // Kept inside a 72%-wide modal: `Enter` costs four columns the
+        // old `↵` did not, and a clipped footer loses `Esc close`.
+        " filter · Enter resume · ^D delete ×2 · ^Y fork · ^G grep · Esc close "
     };
     let Some(inner) = modal_frame(frame, area, " sessions ", theme::MARKUP, footer) else {
         return ModalHit::default();
@@ -2321,7 +2323,7 @@ pub(crate) fn render_session_search(frame: &mut Frame, search: &SessionSearch) -
     } else {
         format!("{}", search.rows.len())
     };
-    let footer = " type to search · Enter resume · ^G list · Esc close ";
+    let footer = " Enter resume · ^G list · Esc close ";
     let Some(inner) = modal_frame(
         frame,
         list_area,
@@ -4534,7 +4536,7 @@ mod tests {
 
         assert!(screen.contains("links"), "{screen}");
         assert!(screen.contains("filter"), "{screen}");
-        assert!(screen.contains("Enter open in browser"), "{screen}");
+        assert!(screen.contains("Enter opens in browser"), "{screen}");
         // A labelled link shows label then url; a bare one just the url.
         assert!(
             screen.contains("> docs https://docs.example/one"),

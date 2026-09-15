@@ -171,6 +171,11 @@ pub struct SubagentSpawner {
     sudo: bool,
 }
 
+/// The `agent` a background `bash` job registers under: not a subagent
+/// at all, so a panel that counts agents or opens their transcripts has
+/// to tell them apart. Named here, beside the one place that writes it.
+pub const JOB_AGENT: &str = "job";
+
 /// A subagent that is working right now, for anything that wants to
 /// show live delegation — the TUI sidebar reads this every frame.
 #[derive(Debug, Clone)]
@@ -1679,7 +1684,8 @@ task's scope yourself; continue only clearly disjoint work."
         // not read it as one: whatever the refusal says — including the
         // concurrency limit's "do not retry" — the message itself is
         // still parked and rides the child's next resume.
-        let output = if output.is_error && self.child_steers.holds(&task_id, &text) {
+        let still_queued = output.is_error && self.child_steers.holds(&task_id, &text);
+        let output = if still_queued {
             output.with_appended_text(
                 "\n\n(Your message was not delivered by this call, but it is not lost: it is \
                  queued and will be delivered when this task is next resumed.)",
@@ -1687,7 +1693,11 @@ task's scope yourself; continue only clearly disjoint work."
         } else {
             output
         };
-        TaskMessage::Answered { task_id, output }
+        TaskMessage::Answered {
+            task_id,
+            output,
+            still_queued,
+        }
     }
 
     pub async fn spawn_background_tool(
@@ -1758,7 +1768,7 @@ task's scope yourself; continue only clearly disjoint work."
                     session_id: parent_session_id.clone(),
                     parent_session_id: String::new(),
                     description: description.clone(),
-                    agent: "job".into(),
+                    agent: JOB_AGENT.into(),
                     background: true,
                     delivering: false,
                     started: std::time::Instant::now(),
@@ -3025,9 +3035,15 @@ pub enum TaskMessage {
     /// no live channel; the message waits for its next resume.
     Held { task_id: String },
     /// The task had finished, so it was resumed with the message as its
-    /// prompt: this is what came back. An error here is the resume
-    /// declining, and the message is still queued.
-    Answered { task_id: String, output: ToolOutput },
+    /// prompt: this is what came back.
+    Answered {
+        task_id: String,
+        output: ToolOutput,
+        /// The resume declined and the message is still parked for the
+        /// task's next one: a failure to the caller, but not a lost
+        /// message, and a UI must not report it as one.
+        still_queued: bool,
+    },
     /// Nothing was sent, and why.
     Refused(String),
 }

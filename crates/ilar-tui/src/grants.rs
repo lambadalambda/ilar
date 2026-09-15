@@ -511,18 +511,24 @@ mod tests {
         modal.paste(&"x".repeat(200));
         let shown = screen(&modal, 40, 12);
         assert!(shown.contains("Password: …"), "{shown}");
-        assert!(shown.contains('▌'), "{shown}");
-        let masked = shown
+        let row = shown
             .lines()
             .find(|line| line.contains("Password:"))
-            .expect("the password row")
-            .chars()
-            .filter(|c| *c == '•')
-            .count();
-        assert!(
-            (1..40).contains(&masked),
-            "the mask is a window on the row, not 200 bullets: {masked}"
+            .expect("the password row");
+        // Inside the frame the row is exactly label, leader, mask and
+        // cursor: nothing was clipped past the border (the old
+        // unwrapped paragraph was, with no sign of it) and nothing was
+        // left blank.
+        let content = row.trim().trim_matches('║');
+        assert!(content.starts_with("Password: …"), "{row}");
+        assert!(content.ends_with('▌'), "{row}");
+        let masked = content.chars().filter(|c| *c == '•').count();
+        assert_eq!(
+            masked + "Password: …▌".chars().count(),
+            content.chars().count(),
+            "the mask fills the row between the leader and the cursor: {row}"
         );
+        assert!(masked > 4, "a window worth showing: {masked}");
     }
 
     /// The password usually arrives from a manager, so a paste lands in
