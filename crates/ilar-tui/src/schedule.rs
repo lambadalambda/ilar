@@ -25,6 +25,18 @@ use ilar::compaction::ManualCompactionOutcome;
 use ilar::delivery::{Disposition, Parcel};
 use ilar::subagent::{Notification, RouteOutcome};
 
+/// What the warm-cache compaction says on its way in, and what it
+/// leaves standing afterwards. Both used to point at `/rewind`, which
+/// is the one thing that would make it worse: every rewind cut is a
+/// user message, so the newest one discards the last answer and
+/// reverts its edits. Nothing is actually lost — the model's own
+/// `history` tool reads the whole log, summarized turns included — so
+/// that is what they point at.
+pub(crate) const CACHE_COMPACTING_LINE: &str = "compacting while the provider cache is still warm — nothing is lost; \
+     the full log stays searchable (the agent's history tool)";
+pub(crate) const CACHE_COMPACTED_NOTICE: &str = "compacted automatically to keep the provider cache warm — nothing is lost; \
+     the full log stays searchable (the agent's history tool)";
+
 /// How the operation that was running ended — the edge hands this in after
 /// awaiting the join, so the pass itself never blocks.
 pub(crate) enum Completion {
@@ -245,10 +257,7 @@ fn complete<R: Runtime>(app: &mut App, completion: Completion, runtime: &mut R) 
                     app.set_activity(Activity::Ready);
                     if std::mem::take(&mut app.auto_compaction) {
                         // Standing: nobody was watching when it ran.
-                        app.set_persistent_notice(
-                            "compacted automatically to keep the provider cache warm — /rewind reopens the full context",
-                            NoticeLevel::Info,
-                        );
+                        app.set_persistent_notice(CACHE_COMPACTED_NOTICE, NoticeLevel::Info);
                     } else {
                         app.set_notice("compaction complete", NoticeLevel::Info);
                     }
@@ -264,7 +273,10 @@ fn complete<R: Runtime>(app: &mut App, completion: Completion, runtime: &mut R) 
                     app.auto_compaction = false;
                     app.busy = false;
                     app.status = "compaction aborted".into();
-                    app.set_activity(Activity::Paused);
+                    // The same state an aborted turn leaves: `■
+                    // compaction aborted`, not a paused `Ⅱ` that reads
+                    // as work still waiting to go on.
+                    app.set_activity(Activity::Aborted);
                     app.push_transcript_line(Line_::System("compaction aborted".into()));
                 }
                 Err(error) => {
@@ -429,10 +441,7 @@ pub(crate) fn settle<R: Runtime>(
         // the cold read that is coming either way.
         app.cache_compact_fired = true;
         app.auto_compaction = true;
-        app.push_transcript_line(Line_::System(
-            "compacting while the provider cache is still warm — /rewind reopens the full context"
-                .into(),
-        ));
+        app.push_transcript_line(Line_::System(CACHE_COMPACTING_LINE.into()));
         runtime.start_compaction(app);
     }
     // An aside runs beside whatever else is happening — read-only, no
@@ -780,6 +789,40 @@ mod tests {
 
         assert_eq!(runtime.log, vec!["end_turn"]);
         assert_eq!(waiting_texts(&app.queued_messages), vec!["wait for me"]);
+        // An abort is an abort: the status line reads `■ compaction
+        // aborted`, not a paused `Ⅱ` that reads as work still to come.
+        assert_eq!(app.activity, Activity::Aborted);
+        assert_eq!(app.status, "compaction aborted");
+    }
+
+    /// A compaction must not send the user somewhere that makes it
+    /// worse. `/rewind`'s newest cut drops the last answer and reverts
+    /// its edits; the log is searchable and loses nothing.
+    #[test]
+    fn the_cache_compaction_never_points_at_rewind() {
+        for text in [CACHE_COMPACTING_LINE, CACHE_COMPACTED_NOTICE] {
+            assert!(!text.contains("rewind"), "{text}");
+            assert!(text.contains("nothing is lost"), "{text}");
+            assert!(text.contains("history"), "{text}");
+        }
+
+        let mut app = App::new();
+        app.auto_compaction = true;
+        let mut runtime = FakeRuntime::new();
+        pass(
+            &mut app,
+            vec![Completion::Compaction(Ok(
+                ManualCompactionOutcome::Compacted {
+                    summary: "the story so far".into(),
+                    context_tokens: 1_000,
+                },
+            ))],
+            Vec::new(),
+            &mut runtime,
+        )
+        .unwrap();
+        let (notice, _) = app.operational_notice().expect("a standing notice");
+        assert_eq!(notice, CACHE_COMPACTED_NOTICE);
     }
 
     /// The recorded queue-inversion bug, pinned: a turn completes with

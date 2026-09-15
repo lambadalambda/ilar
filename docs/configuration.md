@@ -266,8 +266,9 @@ window (`ttl_secs` per provider) closes, counted from its last completed
 request. It never fires while a turn runs, while a message is queued or a
 result is being delivered, or under a modal, and only once per idle
 episode; the next turn starts a new one. The transcript gets a line when it
-fires and a standing notice when it lands; `/rewind` reopens the full
-context if you want it, at the full price the compaction avoided.
+fires and a standing notice when it lands. Nothing is lost: what left the
+model's context is still in the session log, and the agent's own `history`
+tool searches it, summarized turns included.
 
 It is off by default because it sends a provider request with nobody
 watching, and it is user configuration: a project file cannot turn it on.
