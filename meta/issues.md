@@ -117,6 +117,7 @@ milestones 15–17 stay filed — they come back when the feature does.*
 - [ ] [UX sweep 2026-09-15](issues/ux-sweep-2026-09-15.md) — index
 - [ ] [Sweep 2026-09-15 follow-ups](issues/sweep-2026-09-15-follow-ups.md)
 - [ ] [sudo asks for the password after the yes](issues/sudo-asks-for-the-password-after-the-yes.md)
+- [ ] [Sessions list fast and true](issues/sessions-list-fast-and-true.md)
 
 ## Milestone 21 — The assistant
 
