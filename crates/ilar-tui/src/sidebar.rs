@@ -79,6 +79,35 @@ pub(crate) struct AgentRow {
     /// read as the root's own.
     pub(crate) foreign_parent: Option<String>,
     pub(crate) elapsed: std::time::Duration,
+    /// Queued for the workspace rather than working. A detached task
+    /// has no tool row to say so in, and a mutable one waiting behind
+    /// another read as running.
+    pub(crate) waiting: bool,
+    /// Time since the task last made progress, when something is
+    /// watching for a stall. The row says so once the silence is long
+    /// enough to be worth knowing about, so the watchdog's verdict is
+    /// never the first news of it.
+    pub(crate) quiet: Option<std::time::Duration>,
+}
+
+/// How long a detached task must be silent before its row says so.
+/// Short enough that a hang is visible early, long enough that a
+/// thinking model does not flicker the marker on every step.
+const QUIET_MARKER_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The `· waiting for the workspace` / `· quiet 45s` half of an agent
+/// row's second line. Waiting outranks quiet: a task queued for the
+/// lease is silent *because* it is queued, and one reason is enough.
+fn agent_state_marker(row: &AgentRow) -> String {
+    if row.waiting {
+        return " · waiting for the workspace".into();
+    }
+    match row.quiet {
+        Some(quiet) if quiet >= QUIET_MARKER_AFTER => {
+            format!(" · quiet {}", format_elapsed(quiet))
+        }
+        _ => String::new(),
+    }
 }
 
 /// Where a click on an agent-panel row navigates: home to the root
@@ -194,11 +223,14 @@ pub(crate) fn agent_panel(
             Some(parent) => format!(" · for {}", safe_text(parent)),
             None => String::new(),
         };
+        // Before the elapsed time, which is the least urgent thing on
+        // the line: a truncated row keeps the reason it is not moving.
+        let state = agent_state_marker(agent);
         row_hits.push((lines.len(), target));
         lines.push(Line::styled(
             truncate_display(
                 &format!(
-                    "  {indent}{}{background}{owner} · {}",
+                    "  {indent}{}{background}{owner}{state} · {}",
                     safe_text(&agent.agent),
                     format_elapsed(agent.elapsed)
                 ),
@@ -802,6 +834,8 @@ mod tests {
                 delivering: false,
                 foreign_parent: None,
                 elapsed: std::time::Duration::from_secs(30),
+                waiting: false,
+                quiet: None,
             })
             .collect()
     }
@@ -878,6 +912,41 @@ mod tests {
                 .all(|(_, target)| *target == AgentTarget::Main),
             "{:?}",
             panel.row_hits
+        );
+    }
+
+    /// A detached task has no tool row, so the panel is the only place
+    /// it can say it is not working: queued for the workspace, or gone
+    /// quiet long enough to be worth knowing about before the stall
+    /// watchdog kills it. Both used to render as a plain ticking row
+    /// indistinguishable from work in progress.
+    #[test]
+    fn a_stuck_or_silent_task_says_so_on_its_row() {
+        let second_line = |row: AgentRow| {
+            let panel = agent_panel(&[row], false, 60, 12);
+            rendered_text(&panel.lines[2])
+        };
+
+        // Working, and recently: nothing extra to say.
+        let mut busy = plain_agent_rows(1).remove(0);
+        busy.background = true;
+        busy.quiet = Some(std::time::Duration::from_secs(4));
+        assert_eq!(second_line(busy.clone()), "  explore · bg · 30s");
+
+        // Silent long enough that the ticking elapsed time is
+        // misleading on its own.
+        let mut silent = busy.clone();
+        silent.quiet = Some(std::time::Duration::from_secs(45));
+        assert_eq!(second_line(silent), "  explore · bg · quiet 45s · 30s");
+
+        // Queued for the lease. It is silent *because* it is queued,
+        // so one reason is enough — and the useful one wins.
+        let mut waiting = busy.clone();
+        waiting.waiting = true;
+        waiting.quiet = Some(std::time::Duration::from_secs(45));
+        assert_eq!(
+            second_line(waiting),
+            "  explore · bg · waiting for the workspace · 30s"
         );
     }
 

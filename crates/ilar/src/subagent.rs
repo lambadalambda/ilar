@@ -179,18 +179,58 @@ pub struct RunningTask {
     /// model asked for. The mail on the panel.
     pub delivering: bool,
     pub started: std::time::Instant,
+    /// Waiting for the workspace lease rather than working. A
+    /// foreground task says this in its caller's tool row; a detached
+    /// one has no row of its own, so it says it here — a mutable
+    /// background task queued behind another one otherwise read as
+    /// running on the panel.
+    pub waiting: bool,
+    /// Time since this task last made any progress, for the watchdog's
+    /// marker on the panel. `None` for a task with no watchdog — a
+    /// foreground child, a delivery. Filled by
+    /// [`SubagentSpawner::running_tasks`] from the live clock, so a
+    /// snapshot is never a stale number.
+    pub quiet: Option<std::time::Duration>,
     /// Registry-assigned. Rows are removed by this, not the session
     /// id: a delivery waiting on a session and the turn it waits for
     /// are two rows with one session, and one ending must not erase
     /// the other.
     row: u64,
+    /// The live progress clock `quiet` is read from. Private: the
+    /// registry owns it and readers get the duration, so nobody
+    /// outside can touch a running task's heartbeat.
+    heartbeat: Option<crate::tools::Heartbeat>,
 }
 
 /// Removes its task from the running registry however the run ends —
-/// completion, error, abort, or a dropped background future.
+/// completion, error, abort, or a dropped background future. It is also
+/// the one handle to the live row: the registry entry is a snapshot
+/// everyone else reads, and only the task that owns it may change it.
 struct RunningTaskGuard {
     row: u64,
     registry: Arc<Mutex<Vec<RunningTask>>>,
+}
+
+impl RunningTaskGuard {
+    fn update(&self, change: impl Fn(&mut RunningTask)) {
+        for task in lock_unpoisoned(&self.registry).iter_mut() {
+            if task.row == self.row {
+                change(task);
+            }
+        }
+    }
+
+    /// Say on the panel that this task is queued for the workspace
+    /// rather than working, and take it back when the lease lands.
+    fn set_waiting(&self, waiting: bool) {
+        self.update(|task| task.waiting = waiting);
+    }
+
+    /// Hand the registry this task's progress clock, so the panel can
+    /// say how long it has been quiet before the watchdog decides.
+    fn watch(&self, heartbeat: &crate::tools::Heartbeat) {
+        self.update(|task| task.heartbeat = Some(heartbeat.clone()));
+    }
 }
 
 impl Drop for RunningTaskGuard {
@@ -1047,7 +1087,12 @@ impl SubagentSpawner {
             background,
             delivering: false,
             started: std::time::Instant::now(),
+            // Registry-owned: assigned and maintained by
+            // `register_running` and the guard it hands back.
             row: 0,
+            waiting: false,
+            quiet: None,
+            heartbeat: None,
         });
         // The channel and the queue in one step, under the claim taken
         // above: from here a message reaches the turn that is starting,
@@ -1189,9 +1234,10 @@ impl SubagentSpawner {
                         &parent_location,
                         &leased_location,
                         &task_cancel,
-                        // Nobody is watching a background task's row; its
-                        // wait is reported by the notification it ends in.
-                        None,
+                        // A detached task has no tool row, but it has a
+                        // panel row, and a mutable one queued behind
+                        // another read there as working.
+                        WaitAnnouncement::Panel(&_running_task),
                     ) => outcome,
                     () = task_cancel.cancelled() => LeaseOutcome::Cancelled,
                 };
@@ -1234,6 +1280,10 @@ impl SubagentSpawner {
                 // the context it inherits.
                 let heartbeat = crate::tools::Heartbeat::new();
                 child_ctx.heartbeat = Some(heartbeat.clone());
+                // The panel reads the same clock the watchdog does, so
+                // a task going quiet shows as `quiet 45s` long before
+                // the watchdog decides it is dead.
+                _running_task.watch(&heartbeat);
                 let watcher_heartbeat = heartbeat.clone();
                 let watcher_activity = activity.clone();
                 let watcher = tokio::spawn(async move {
@@ -1350,7 +1400,9 @@ task's scope yourself; continue only clearly disjoint work."
             &ctx.location,
             &child_location,
             &ctx.cancel,
-            waiting_notice.as_ref(),
+            waiting_notice
+                .as_ref()
+                .map_or(WaitAnnouncement::Silent, WaitAnnouncement::Row),
         )
         .await
         {
@@ -1664,7 +1716,12 @@ task's scope yourself; continue only clearly disjoint work."
                     background: true,
                     delivering: false,
                     started: std::time::Instant::now(),
+                    // Registry-owned: assigned and maintained by
+                    // `register_running` and the guard it hands back.
                     row: 0,
+                    waiting: false,
+                    quiet: None,
+                    heartbeat: None,
                 });
                 let outcome = tokio::select! {
                     outcome = tokio::time::timeout(timeout, async move {
@@ -1781,7 +1838,12 @@ task's scope yourself; continue only clearly disjoint work."
             background: true,
             delivering: true,
             started: std::time::Instant::now(),
+            // Registry-owned: assigned and maintained by
+            // `register_running` and the guard it hands back.
             row: 0,
+            waiting: false,
+            quiet: None,
+            heartbeat: None,
         });
         let (workspace_location, depth) = match session_workspace_location(
             &self.store,
@@ -2019,7 +2081,19 @@ task's scope yourself; continue only clearly disjoint work."
     /// The subagents working right now, oldest first, across every
     /// depth — one shared registry, so a nested task shows up too.
     pub fn running_tasks(&self) -> Vec<RunningTask> {
-        lock_unpoisoned(&self.running_tasks).clone()
+        lock_unpoisoned(&self.running_tasks)
+            .iter()
+            .map(|task| {
+                // Read at snapshot time, not at registration: a
+                // stored duration would be as old as the row.
+                let mut snapshot = task.clone();
+                snapshot.quiet = task
+                    .heartbeat
+                    .as_ref()
+                    .map(crate::tools::Heartbeat::elapsed);
+                snapshot
+            })
+            .collect()
     }
 
     fn register_running(&self, mut task: RunningTask) -> RunningTaskGuard {
@@ -2311,6 +2385,39 @@ impl LeaseFailure {
 /// races this whole call against its own token. `waiting` names the row
 /// to announce a real wait on — background tasks have none.
 #[allow(clippy::too_many_arguments)] // one funnel, one set of checks
+/// Where a task says it is waiting for the workspace. A foreground one
+/// writes into the tool row its blocked caller is watching; a detached
+/// one has no row of its own, so it marks its entry on the agents
+/// panel — which used to show it as plainly running, indistinguishable
+/// from a task doing work. Either way nothing is said unless the lease
+/// is actually contended.
+enum WaitAnnouncement<'a> {
+    /// The blocked caller's tool row.
+    Row(&'a crate::tools::WorkspaceWaitNotice),
+    /// The task's own row on the agents panel.
+    Panel(&'a RunningTaskGuard),
+    /// Nobody is watching this wait.
+    Silent,
+}
+
+impl WaitAnnouncement<'_> {
+    fn announce(&self) {
+        match self {
+            Self::Row(notice) => crate::tools::WorkspaceWaitNotice::announce(Some(notice)),
+            Self::Panel(guard) => guard.set_waiting(true),
+            Self::Silent => {}
+        }
+    }
+
+    /// The lease landed: the panel marker comes back off. A tool row's
+    /// notice is a line in a log and stays where it was written.
+    fn settled(&self) {
+        if let Self::Panel(guard) = self {
+            guard.set_waiting(false);
+        }
+    }
+}
+
 async fn acquire_task_lease(
     workspace: &crate::tools::WorkspaceScheduler,
     access: WorkspaceAccess,
@@ -2319,7 +2426,7 @@ async fn acquire_task_lease(
     parent_location: &crate::tools::WorkspaceLocation,
     location: &crate::tools::WorkspaceLocation,
     cancel: &tokio_util::sync::CancellationToken,
-    waiting: Option<&crate::tools::WorkspaceWaitNotice>,
+    waiting: WaitAnnouncement<'_>,
 ) -> LeaseOutcome {
     let lease = match inherited {
         Some(lease) => lease,
@@ -2333,11 +2440,16 @@ async fn acquire_task_lease(
             // side: a mutable task queued behind another one must name
             // itself, not sit on a silent row.
             None => {
-                crate::tools::WorkspaceWaitNotice::announce(waiting);
-                tokio::select! {
+                waiting.announce();
+                let lease = tokio::select! {
                     lease = workspace.acquire_lease(access) => lease,
-                    () = cancel.cancelled() => return LeaseOutcome::Cancelled,
-                }
+                    () = cancel.cancelled() => {
+                        waiting.settled();
+                        return LeaseOutcome::Cancelled;
+                    }
+                };
+                waiting.settled();
+                lease
             }
         },
     };
@@ -3416,7 +3528,9 @@ mod tests {
                     &location,
                     &location,
                     &cancel,
-                    waiting.as_ref(),
+                    waiting
+                        .as_ref()
+                        .map_or(WaitAnnouncement::Silent, WaitAnnouncement::Row),
                 )
                 .await
             }

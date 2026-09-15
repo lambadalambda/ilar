@@ -4594,6 +4594,8 @@ mod tests {
                 delivering: false,
                 foreign_parent: None,
                 elapsed: std::time::Duration::from_secs(72),
+                waiting: false,
+                quiet: None,
             },
             AgentRow {
                 session_id: "child-index".into(),
@@ -4604,6 +4606,8 @@ mod tests {
                 delivering: false,
                 foreign_parent: None,
                 elapsed: std::time::Duration::from_secs(5),
+                waiting: false,
+                quiet: None,
             },
         ];
         let screen = |app: &mut App| {
@@ -4668,6 +4672,8 @@ mod tests {
                 delivering: false,
                 foreign_parent: None,
                 elapsed: std::time::Duration::from_secs(30),
+                waiting: false,
+                quiet: None,
             })
             .collect();
         let screen = |app: &mut App| {
@@ -4740,6 +4746,8 @@ mod tests {
                 delivering: false,
                 foreign_parent: None,
                 elapsed: std::time::Duration::from_secs(10),
+                waiting: false,
+                quiet: None,
             },
             AgentRow {
                 session_id: "child-b".into(),
@@ -4750,6 +4758,8 @@ mod tests {
                 delivering: false,
                 foreign_parent: None,
                 elapsed: std::time::Duration::from_secs(5),
+                waiting: false,
+                quiet: None,
             },
         ];
         let mut terminal =
@@ -4945,6 +4955,8 @@ mod tests {
             delivering: false,
             foreign_parent: None,
             elapsed: std::time::Duration::from_secs(10),
+            waiting: false,
+            quiet: None,
         }];
         app.focus = Some(FocusView::new(
             "child-a".into(),

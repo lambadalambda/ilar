@@ -81,6 +81,20 @@ else — no `ilar.toml` is parsed and no endpoint is contacted — so a config
 file that fails to parse never stands between you and the credential you
 came to fix.
 
+### The stall watchdog
+
+`subagents.background_tool_timeout_ms` bounds one *tool call* a
+background job makes. A separate, non-configurable watchdog bounds a
+detached **task**: if no event reaches it — from the task's own turn or
+from any foreground descendant — for **600 seconds**, the task is
+stopped and reports `Task "X" stalled: no progress for 600s. It has
+been stopped.` The agents panel shows the silence building as `· quiet
+45s` on the task's row well before that, so the watchdog's verdict is
+never the first news of a hang. A task queued behind another for the
+same checkout says `· waiting for the workspace` instead: it is not
+silent, it is in line, and the watchdog's clock does not start until it
+has the lease.
+
 ## Web search
 
 The `websearch` tool works out of the box: without any configuration it calls

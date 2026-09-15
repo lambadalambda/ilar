@@ -50,8 +50,9 @@ edit gate catches stale writes on the mutating side. The one wait that can
 still happen — anything mutating while a same-checkout mutable task runs:
 `bash`, `service`, `edit`/`write`, or another mutable task — names itself in
 the tool row: "waiting for the workspace — a mutable task holds it".
-(A background task has no row; it reports through its completion
-notification instead.)
+(A detached task has no tool row to write that into — it is nobody's
+blocked call — so it says it on its agents-panel row instead:
+`· waiting for the workspace`, until the lease is its.)
 
 To have something *looked at*: save the image, then spawn a task with
 `model` set to a vision model and point it at the file — the child's
@@ -77,7 +78,11 @@ it heads the prompt of that task's next resume, and the `tasks` listing shows
 it as pending until it is actually seen. In the transcript, a delivered
 message appears inside the child's rows at the moment the child saw it. On wide terminals an `agents` panel in the sidebar shows what
 is in flight right now — description, agent, a `bg` marker for detached work,
-and a live elapsed time — and disappears when nothing is running.
+and a live elapsed time — and disappears when nothing is running. A row that
+is not working says why: `· waiting for the workspace` while it queues for a
+mutable lease, `· quiet 45s` once a detached task has made no progress for a
+while (the [stall watchdog](configuration.md#the-stall-watchdog) stops it at
+600 s). **Ctrl-G** twice in a focused agent's view cancels that one agent.
 
 ## Skills
 

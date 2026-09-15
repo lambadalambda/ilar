@@ -2396,6 +2396,8 @@ impl schedule::Runtime for LoopRuntime<'_> {
                 background: task.background,
                 delivering: task.delivering,
                 elapsed: task.started.elapsed(),
+                waiting: task.waiting,
+                quiet: task.quiet,
             })
             .collect();
         app.services_view = self.services.snapshot();
@@ -4891,6 +4893,8 @@ mod tests {
             background: true,
             delivering: false,
             elapsed: std::time::Duration::ZERO,
+            waiting: false,
+            quiet: None,
         });
         assert_eq!(
             label(&app, &mut cache, &running),
@@ -5670,6 +5674,8 @@ mod tests {
             delivering: false,
             foreign_parent: None,
             elapsed: std::time::Duration::from_secs(1),
+            waiting: false,
+            quiet: None,
         }];
         let streaming = open_agent_focus(&mut app, &store, &session_id);
         land_agent_focus(
