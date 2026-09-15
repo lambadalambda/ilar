@@ -2263,6 +2263,46 @@ mod tests {
         assert!(ghost_offer(&store, &here, std::time::SystemTime::now()).is_none());
     }
 
+    /// A last record bigger than the tail window leaves the window
+    /// with no whole record in it — a big tool result, an image-bearing
+    /// message. The offer is still made: a log this size is read
+    /// properly rather than shown empty.
+    #[test]
+    fn a_record_bigger_than_the_window_is_still_offered() {
+        let state = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(state.path().to_path_buf());
+        let work = tempfile::tempdir().unwrap();
+        let here = std::fs::canonicalize(work.path()).unwrap();
+
+        let session_id = session_here(&store, &here, 1);
+        let mut session = store.acquire_writer(&session_id).unwrap().load().unwrap();
+        session
+            .append(ilar::session::SessionEvent::UserMessage {
+                id: new_id(),
+                text: format!(
+                    "one enormous message {}",
+                    "x".repeat(GHOST_TAIL_BYTES as usize)
+                ),
+                images: Vec::new(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        drop(session);
+
+        assert!(
+            ilar::session::tail_events(&store, &session_id, GHOST_TAIL_BYTES, GHOST_TAIL_EVENTS)
+                .unwrap()
+                .is_empty(),
+            "the window holds no whole record, which is the case under test"
+        );
+
+        let offer = ghost_offer(&store, &here, std::time::SystemTime::now()).expect("on offer");
+        assert!(
+            format!("{:?}", offer.lines).contains("one enormous message"),
+            "the offer shows what the session was last doing"
+        );
+    }
+
     /// Bounded from the end, whatever the log weighs: the offer is a
     /// couple of screenfuls of the session's ending, and a long
     /// conversation costs it nothing.
