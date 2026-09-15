@@ -115,6 +115,7 @@ milestones 15–17 stay filed — they come back when the feature does.*
 - [ ] [Pickers show the deciding field](issues/pickers-show-the-deciding-field.md)
 - [ ] [exec names its session](issues/exec-names-its-session.md)
 - [ ] [UX sweep 2026-09-15](issues/ux-sweep-2026-09-15.md) — index
+- [ ] [Sweep 2026-09-15 follow-ups](issues/sweep-2026-09-15-follow-ups.md)
 - [ ] [The grant prompt takes paste and names its keys](issues/the-grant-prompt-takes-paste-and-names-its-keys.md)
 - [ ] [Talking to a focused agent: polish](issues/talking-to-a-focused-agent-polish.md)
 - [ ] [--view looks read-only](issues/view-looks-read-only.md)
