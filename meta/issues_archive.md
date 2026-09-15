@@ -377,3 +377,6 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Startup errors name the next step](issues/startup-errors-name-the-next-step.md)
 - [x] [Provider errors say what happened](issues/provider-errors-say-what-happened.md)
 - [x] [Configuration: small frictions](issues/configuration-small-frictions.md)
+- [x] [read says when a line is cut](issues/read-says-when-a-line-is-cut.md)
+- [x] [Failed tools stay visible](issues/failed-tools-stay-visible.md)
+- [x] [Tool errors share one shape](issues/tool-errors-share-one-shape.md)
