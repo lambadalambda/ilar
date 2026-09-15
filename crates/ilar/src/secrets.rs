@@ -875,9 +875,12 @@ impl Secrets {
     }
 
     /// Drop a value typed this session: a sudo password that was
-    /// refused, so the next ask takes a new one.
-    pub fn forget_held(&self, name: &str) {
-        self.held.lock().unwrap().remove(name);
+    /// refused, or an empty answer the system turned out to need
+    /// something for, so the next ask takes a new one. Returns whether
+    /// one was held — a stored value is not this function's to drop,
+    /// and the caller says so differently.
+    pub fn forget_held(&self, name: &str) -> bool {
+        self.held.lock().unwrap().remove(name).is_some()
     }
 
     fn session_granted(&self, name: &str, tool: &str) -> bool {

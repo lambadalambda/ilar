@@ -2647,3 +2647,85 @@ async fn sudo_runs_an_approved_command_and_feeds_the_password_unseen() {
     assert!(out.content.contains("hi from"), "{}", out.content);
     assert!(!out.content.contains("hunter22"), "{}", out.content);
 }
+
+/// A sudo that refuses everything: `-n` says a password is required,
+/// `-S` says the one it read is wrong.
+fn refusing_sudo(dir: &std::path::Path) -> std::path::PathBuf {
+    let path = dir.join("refusing-sudo");
+    std::fs::write(
+        &path,
+        "#!/bin/sh\nmode=n\nwhile [ $# -gt 0 ]; do case \"$1\" in\n  -S) read pw; mode=S; shift;;\n  -p) shift 2;;\n  -n) shift;;\n  --) shift; break;;\n  *) break;;\nesac; done\nif [ \"$mode\" = S ]; then echo \"sudo: 1 incorrect password attempt\" >&2; else echo \"sudo: a password is required\" >&2; fi\nexit 1\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    path
+}
+
+/// What sudo could not use is not kept: an empty answer the system
+/// needed something for is dropped, so the next ask has a row again,
+/// and a stored password it refused is named as the thing to replace.
+#[tokio::test]
+async fn sudo_forgets_a_password_it_could_not_use() {
+    use ilar::tools::Tool;
+    let dir = tempfile::tempdir().unwrap();
+    let sudo =
+        ilar::tools::sudo::SudoTool::with_binary(&refusing_sudo(dir.path()).to_string_lossy());
+    let store = ilar::secrets::SecretStore::open(&dir.path().join("state"));
+    let call = serde_json::json!({"command": "id", "reason": "a test"});
+
+    // Approved with an empty password — "this system needs none" — and
+    // the system needs one after all.
+    let (tx, mut rx) = ilar::secrets::grant_channel(1);
+    let secrets = ilar::secrets::Secrets::new(store.clone()).with_prompts(tx);
+    let (out, wanted) = tokio::join!(
+        sudo.run(call.clone(), ctx(dir.path()).with_secrets(secrets.clone())),
+        async {
+            let prompt = rx.recv().await.unwrap();
+            let wanted = prompt.password_wanted;
+            prompt
+                .reply
+                .send(Some(ilar::secrets::Approval {
+                    grant: ilar::secrets::Grant::Always,
+                    password: Some(String::new()),
+                }))
+                .unwrap();
+            wanted
+        }
+    );
+    assert!(wanted, "the prompt had no row for a password");
+    assert!(out.is_error, "{}", out.content);
+    assert!(out.content.contains("has a row for it"), "{}", out.content);
+    assert!(
+        secrets
+            .held_or_stored(ilar::secrets::SUDO_PASSWORD)
+            .unwrap()
+            .is_none(),
+        "the empty answer was kept, so the next ask has no row"
+    );
+
+    // A stored password sudo refuses stays stored: say how to replace it.
+    store
+        .set(ilar::secrets::SUDO_PASSWORD, "", "hunter22")
+        .unwrap();
+    let out = sudo
+        .run(call.clone(), ctx(dir.path()).with_secrets(secrets.clone()))
+        .await;
+    assert!(out.is_error, "{}", out.content);
+    assert!(
+        out.content.contains("ilar secret set SUDO_PASSWORD"),
+        "{}",
+        out.content
+    );
+    assert!(!out.content.contains("it is forgotten"), "{}", out.content);
+    assert_eq!(
+        secrets
+            .held_or_stored(ilar::secrets::SUDO_PASSWORD)
+            .unwrap()
+            .as_deref(),
+        Some("hunter22")
+    );
+}

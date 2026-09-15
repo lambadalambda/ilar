@@ -33,6 +33,9 @@ pub enum Command {
     /// Drop a staged plan by id, or `all`.
     Reject(String),
     Unknown(String),
+    /// A known command whose argument does not read as one: the text is
+    /// the whole reply, since "No command /grant" would be a lie.
+    Misread(String),
 }
 
 /// What a person on a chat does about a sealed secret store, for every
@@ -63,7 +66,10 @@ pub fn parse(text: &str) -> Option<Command> {
             }
         }
         ("abort" | "stop", _) => Command::Abort,
-        ("grant", argument) => Command::Grant(parse_grant(argument.unwrap_or_default())),
+        ("grant", argument) => match parse_grant(argument.unwrap_or_default()) {
+            Ok(approval) => Command::Grant(approval),
+            Err(message) => Command::Misread(message),
+        },
         ("deny", _) => Command::Deny,
         ("unlock", Some(password)) => Command::Unlock(password.to_string()),
         ("unlock", None) => Command::Usage(UNLOCK_USAGE),
@@ -77,8 +83,11 @@ pub fn parse(text: &str) -> Option<Command> {
 }
 
 /// `[once|session|always] [password]`: the span first, the password —
-/// sudo's, when the ask wanted one — as everything after it.
-fn parse_grant(argument: &str) -> ilar::secrets::Approval {
+/// sudo's, when the ask wanted one — as everything after it. A first
+/// word that reads like a misspelt span is refused rather than taken
+/// as the start of a password: `/grant sesion hunter2` used to grant
+/// once with the password "sesion hunter2".
+fn parse_grant(argument: &str) -> Result<ilar::secrets::Approval, String> {
     use ilar::secrets::{Approval, Grant};
     let argument = argument.trim();
     let (span, rest) = match argument.split_once(char::is_whitespace) {
@@ -90,13 +99,52 @@ fn parse_grant(argument: &str) -> ilar::secrets::Approval {
         "" | "once" => (Grant::Once, rest),
         "session" => (Grant::Session, rest),
         "always" => (Grant::Always, rest),
-        // No span word: the whole argument is the password.
-        _ => (Grant::Once, argument),
+        // No span word: the whole argument is the password — unless it
+        // was meant to be a span.
+        _ => match misspelt_span(span) {
+            Some(meant) => {
+                return Err(format!(
+                    "{span}? The spans are once, session and always — /grant {meant} … if that \
+                     is what you meant. A password goes after the span.",
+                ));
+            }
+            None => (Grant::Once, argument),
+        },
     };
-    Approval {
+    Ok(Approval {
         grant,
         password: (!password.is_empty()).then(|| password.to_string()),
+    })
+}
+
+/// The span a word was probably trying to be: within two edits of one,
+/// and long enough for that to mean something. A password is left
+/// alone — nothing that far from "once" was a typo of it.
+fn misspelt_span(word: &str) -> Option<&'static str> {
+    const SPANS: [&str; 3] = ["once", "session", "always"];
+    let word = word.to_ascii_lowercase();
+    (word.chars().count() >= 4)
+        .then(|| SPANS.into_iter().find(|span| edits_within(&word, span, 2)))
+        .flatten()
+}
+
+/// Whether `a` becomes `b` in at most `limit` insertions, deletions or
+/// substitutions (Levenshtein).
+fn edits_within(a: &str, b: &str, limit: usize) -> bool {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    if a.len().abs_diff(b.len()) > limit {
+        return false;
     }
+    let mut previous: Vec<usize> = (0..=b.len()).collect();
+    for (i, left) in a.iter().enumerate() {
+        let mut current = vec![i + 1];
+        for (j, right) in b.iter().enumerate() {
+            let substitute = previous[j] + usize::from(left != right);
+            current.push(substitute.min(previous[j + 1] + 1).min(current[j] + 1));
+        }
+        previous = current;
+    }
+    previous[b.len()] <= limit
 }
 
 /// `/unlock` with nothing after it: the password is the whole point.
@@ -199,6 +247,29 @@ mod tests {
         // A usage line, not the whole help on top of a refusal.
         assert_eq!(parse("/unlock"), Some(Command::Usage(UNLOCK_USAGE)));
         assert!(!UNLOCK_USAGE.starts_with("No command"));
+    }
+
+    /// A misspelt span is said out loud: taken as a password it would
+    /// answer the ask with the typo in it and grant once.
+    #[test]
+    fn a_misspelt_span_is_not_a_password() {
+        let Some(Command::Misread(message)) = parse("/grant sesion hunter2") else {
+            panic!("a typo read as a password");
+        };
+        assert!(message.contains("sesion?"), "{message}");
+        assert!(message.contains("/grant session"), "{message}");
+        assert!(matches!(parse("/grant alwyas"), Some(Command::Misread(_))));
+        assert!(matches!(parse("/grant onse"), Some(Command::Misread(_))));
+        // A password that is nothing like a span stays a password, and
+        // so does one too short to be a typo of anything.
+        assert!(matches!(parse("/grant hunter2"), Some(Command::Grant(_))));
+        assert!(matches!(
+            parse("/grant sessionkeyaddendum"),
+            Some(Command::Grant(_))
+        ));
+        assert!(matches!(parse("/grant abc"), Some(Command::Grant(_))));
+        assert!(edits_within("sesion", "session", 2));
+        assert!(!edits_within("hunter2", "session", 2));
         assert_eq!(parse("/pending"), Some(Command::Pending));
         assert_eq!(parse("/approve"), Some(Command::Approve("all".into())));
         assert_eq!(

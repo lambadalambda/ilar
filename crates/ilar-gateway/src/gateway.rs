@@ -638,6 +638,7 @@ impl Gateway {
                 Err(error) => failed_reply("/reject", &error),
             },
             Command::Unknown(name) => format!("No command /{name}.\n{}", commands::HELP),
+            Command::Misread(message) => message,
             Command::Compact => {
                 use ilar::compaction::ManualCompactionOutcome as Outcome;
                 let seat = match self

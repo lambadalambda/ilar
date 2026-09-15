@@ -110,9 +110,14 @@ when no password is known, since the prompt is where one gets typed;
 an empty answer counts, so a passwordless system is asked once. With
 nobody to ask (`ilar exec`, a scheduled turn) a standing grant runs on
 what is known, and sudo's own error says if that was not enough. A
-password sudo refuses is forgotten, and the next ask takes a new one.
-In the chat the password goes last: `/grant session hunter2`; a
-password sent to an ask that took none is refused. The chat's session
+password typed into a prompt and refused by sudo is forgotten, and the
+next ask takes a new one; a stored one stays stored, and the result
+says to replace it with `ilar secret set SUDO_PASSWORD`. An empty
+answer on a system that wants a password after all is dropped too, so
+the next ask has the row again. In the chat the password goes last:
+`/grant session hunter2`; a password sent to an ask that took none is
+refused, and a misspelt span (`/grant sesion hunter2`) is refused
+rather than taken as the start of the password. The chat's session
 is its seat, so what it holds is forgotten when that chat is restarted
 — `/new`, or a gateway restart — not only when the process exits.
 

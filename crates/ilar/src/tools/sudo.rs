@@ -75,7 +75,8 @@ impl Tool for SudoTool {
 
     fn description(&self) -> &'static str {
         "Run one shell command as root. The user is shown the exact command \
-         and asked before it runs; say in `reason` what it is for. Use it only \
+         and asked before it runs, unless they granted root to this tool \
+         already; say in `reason` what it is for. Use it only \
          for what really needs root (package installs, system services, ports \
          under 1024); everything else goes through bash. Output is captured \
          and spilled like bash's."
@@ -177,17 +178,32 @@ impl Tool for SudoTool {
             )
             .await;
             if output.is_error && output.content.contains("incorrect password attempt") {
-                // Forgotten, so the next ask takes a new one instead of
-                // failing the same way for the rest of the session.
-                secrets.forget_held(crate::secrets::SUDO_PASSWORD);
-                output.content.push_str(
-                    "\n(sudo refused the password; it is forgotten, and the next ask takes a new one)",
-                );
+                // A password typed this session is forgotten, so the
+                // next ask takes a new one instead of failing the same
+                // way for the rest of the session. A stored one is not
+                // ours to drop: say how to replace it.
+                if secrets.forget_held(crate::secrets::SUDO_PASSWORD) {
+                    output.content.push_str(
+                        "\n(sudo refused the password; it is forgotten, and the next ask takes a new one)",
+                    );
+                } else {
+                    output.content.push_str(
+                        "\n(sudo refused the stored SUDO_PASSWORD; it is still stored — replace it \
+                         with: ilar secret set SUDO_PASSWORD)",
+                    );
+                }
             } else if output.is_error && wanted_password && output.content.contains("password") {
-                output.content.push_str(
-                    "\n(sudo wanted a password and none was given; the user types one into the \
-                     prompt, or stores one with: ilar secret set SUDO_PASSWORD)",
-                );
+                // An empty answer is held as "none needed"; this system
+                // needs one, so drop it and the next ask has a row for
+                // it again.
+                secrets.forget_held(crate::secrets::SUDO_PASSWORD);
+                output.content.push_str(if secrets.can_ask() {
+                    "\n(sudo wanted a password and none was given; the next ask has a row for it \
+                     — type it there, or store one with: ilar secret set SUDO_PASSWORD)"
+                } else {
+                    "\n(sudo wanted a password and none was given; store one with: \
+                     ilar secret set SUDO_PASSWORD)"
+                });
             }
             output
         })
