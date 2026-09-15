@@ -996,7 +996,7 @@ pub(crate) fn render_pending_manager(frame: &mut Frame, snapshot: &PendingSnapsh
         area,
         " pending ",
         theme::MARKUP,
-        " ↑↓ · Enter edit/act · d delete · ×2 for goal/jobs · Esc close ",
+        " ↑↓ · Enter edit/act/deliver · d delete ×2 · Esc close ",
     ) else {
         return ModalHit::default();
     };

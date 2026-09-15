@@ -535,16 +535,17 @@ impl App {
         let Some(focus) = self.focus.as_mut() else {
             return;
         };
-        // Enter messages the agent on screen, so "read-only" was the
-        // one thing this view is not. A row that cannot be messaged at
-        // all promises nothing instead.
+        // Enter messages the agent on screen and Ctrl-G stops it, so
+        // "read-only" was the one thing this view is not. A row that
+        // cannot be messaged at all promises no Enter, and a finished
+        // agent no cancel.
         let footer = match (
             crate::app::focus_send_refusal(focus).is_some(),
             focus.running,
         ) {
-            (true, true) => " ↑↓ scroll · Esc close ",
+            (true, true) => " ↑↓ scroll · ^G cancel ×2 · Esc close ",
             (true, false) => " agent finished · ↑↓ scroll · Esc close ",
-            (false, true) => " ↑↓ scroll · Enter messages it · Esc close ",
+            (false, true) => " ↑↓ scroll · Enter messages it · ^G cancel ×2 · Esc close ",
             (false, false) => " agent finished · ↑↓ scroll · Enter resumes it · Esc close ",
         };
         let title = format!(
@@ -1455,6 +1456,8 @@ mod tests {
             delivering,
             foreign_parent: None,
             elapsed: std::time::Duration::ZERO,
+            waiting: false,
+            quiet: None,
         };
         assert_eq!(super::agent_panel_title(&[]), "agents (0)");
         assert_eq!(

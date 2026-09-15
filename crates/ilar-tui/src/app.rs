@@ -1965,7 +1965,7 @@ impl App {
                             .get(*index)
                             .map(String::as_str)
                             .unwrap_or("a task result");
-                        format!("held result {}: {headline} — ↵ delivers", index + 1)
+                        format!("held result {}: {headline} — Enter delivers", index + 1)
                     }
                     PendingItem::Retry => "resume failed turn from current context".into(),
                 }
@@ -4472,7 +4472,7 @@ mod tests {
         );
         let rows = app.pending_snapshot().expect("the manager is open").rows;
         assert!(rows[0].contains("survey the API"), "{rows:?}");
-        assert!(rows[0].contains("↵ delivers"), "{rows:?}");
+        assert!(rows[0].contains("Enter delivers"), "{rows:?}");
         assert!(rows[1].contains("land the fix"), "{rows:?}");
 
         // No arming: one press delivers.
@@ -5226,7 +5226,7 @@ mod tests {
         // read-only — it says what Enter does.
         assert!(!focused.contains("read-only"), "{focused}");
         assert!(
-            focused.contains("Enter messages it · Esc close"),
+            focused.contains("Enter messages it · ^G cancel ×2 · Esc close"),
             "{focused}"
         );
         assert!(!focused.contains("root prose"), "{focused}");
@@ -5249,7 +5249,10 @@ mod tests {
             Some("explorer's agent, not this session's".into());
         let foreign = screen(&mut app);
         assert!(!foreign.contains("Enter messages"), "{foreign}");
-        assert!(foreign.contains("↑↓ scroll · Esc close"), "{foreign}");
+        assert!(
+            foreign.contains("↑↓ scroll · ^G cancel ×2 · Esc close"),
+            "{foreign}"
+        );
         app.focus.as_mut().unwrap().unreachable = None;
 
         // Esc's path: the root transcript comes back as it was.
