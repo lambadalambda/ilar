@@ -322,6 +322,110 @@ async fn a_background_completion_rides_the_outbox_until_delivered() {
     spawner.shutdown().await;
 }
 
+/// The phantom-result loop, driver-independent: an outbox entry
+/// addressed to a task session whose workspace is gone. Every open
+/// adopted it, failed to restore the workspace, propagated a fresh
+/// failure note to the root and left the entry in place — so the root
+/// was told the same task had failed once per open (six times for one
+/// root, measured 2026-09-15) and the child's actual result never
+/// climbed at all.
+///
+/// The loop below is everything a driver does about a routed delivery
+/// and nothing a driver draws: adopt, route, honour the disposition.
+#[tokio::test]
+async fn a_result_for_a_vanished_workspace_climbs_once_and_retires() {
+    let store = temp_store();
+    let dir = tempfile::tempdir().unwrap();
+    let root = create_session(&store, None);
+    // The task session's workspace as it was recorded when the task
+    // started, and as it is now: gone.
+    let vanished = std::env::temp_dir().join(format!("ilar-vanished-{}", new_id()));
+    std::fs::create_dir_all(&vanished).unwrap();
+    let workspace = ilar::tools::WorkspaceLocation::shared(vanished.clone());
+    std::fs::remove_dir_all(&vanished).unwrap();
+    let task = new_id();
+    store
+        .create(SessionMeta {
+            session_id: task.clone(),
+            parent_id: Some(root.clone()),
+            agent: "explore".into(),
+            model: "zai/glm-4.7".into(),
+            workspace: Some(workspace),
+            cwd: None,
+        })
+        .unwrap();
+    // The grandchild's finished report, waiting for a session that can
+    // never be resumed to read it.
+    let result = "<task-notification>\nNested task \"review the hub package\" completed.\n<result>\nthe hub package is fine\n</result>\n</task-notification>";
+    outbox::record(dir.path(), &notification(&task, result));
+
+    let spawner = Arc::new(
+        SubagentSpawner::new(
+            Arc::new(FixedProviderResolver::new(Arc::new(InstantText))),
+            store.clone(),
+            vec![AgentDefinition {
+                name: "explore".into(),
+                description: "explores".into(),
+                model: None,
+                prompt: "".into(),
+                workspace_mode: AgentWorkspaceMode::ReadOnly,
+                tools: None,
+            }],
+            std::env::temp_dir(),
+            0,
+            10,
+            3,
+            ProjectInstructions::Include,
+        )
+        .with_outbox_dir(dir.path().to_path_buf()),
+    );
+
+    let adopted = outbox::pending(&store, dir.path(), &root);
+    assert_eq!(adopted.len(), 1, "the entry is the tree's to adopt");
+    let mut landed = Vec::new();
+    for entry in adopted {
+        let parcel = ilar::delivery::Parcel::fresh(entry);
+        let routed = spawner
+            .route_notification(
+                parcel.notification().clone(),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await;
+        match ilar::delivery::disposition(routed, parcel) {
+            ilar::delivery::Disposition::Propagate { parcel, retire } => {
+                let origin = retire.expect("a workspace that cannot be restored replaces");
+                outbox::retire(dir.path(), &origin);
+                // The next hop is the root's own mail, and delivery is
+                // the text reaching the root's log — what a driver's
+                // notification turn does with it.
+                append_user_message(&store, &root, &parcel.notification().text);
+                landed.push(parcel.into_notification());
+            }
+            other => panic!("expected a replacing climb, got {other:?}"),
+        }
+    }
+
+    assert_eq!(landed.len(), 1, "one note for the root, not one per hop");
+    assert_eq!(landed[0].parent_session_id, root);
+    assert!(landed[0].is_error);
+    // The work climbs with the plumbing error, not instead of it.
+    assert!(
+        landed[0].text.contains("the hub package is fine"),
+        "{}",
+        landed[0].text
+    );
+
+    // The second open: silent, and nothing left on disk for a third.
+    assert!(
+        outbox::pending(&store, dir.path(), &root).is_empty(),
+        "the second open re-announced the same failure"
+    );
+    assert!(!dir.path().join(format!("{task}.jsonl")).exists());
+    assert!(!dir.path().join(format!("{root}.jsonl")).exists());
+
+    spawner.shutdown().await;
+}
+
 /// The compaction inside `pending` is a read-filter-rewrite, and a
 /// publish landing between the read and the rename used to be erased —
 /// silent loss of a finished child's only durable record, and strictly
