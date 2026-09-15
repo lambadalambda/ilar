@@ -205,6 +205,41 @@ fn summary_title(text: &str) -> String {
     truncate_chars_ellipsis(&collapsed, SUMMARY_TITLE_CHARS)
 }
 
+/// Bytes of a log read to decide whether anyone ever typed into it. A
+/// session with no user message is a `Meta` line and perhaps a
+/// `ModelChange`; anything larger has a turn in it, and proving that by
+/// reading further is the cost this check exists to avoid.
+const EMPTY_LOG_BYTES: u64 = 64 * 1024;
+
+/// Whether the log holds a user message — the question "is there
+/// anything in this session?" reduces to.
+///
+/// Every uncertainty answers yes: a file that cannot be read, a line
+/// that will not parse, a log too big to check. Keeping a session
+/// nobody wanted costs a row; discarding one somebody did costs their
+/// work.
+fn log_has_user_message(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return true;
+    };
+    if metadata.len() > EMPTY_LOG_BYTES {
+        return true;
+    }
+    let Ok(bytes) = std::fs::read(path) else {
+        return true;
+    };
+    for line in String::from_utf8_lossy(&bytes).lines() {
+        match serde_json::from_str::<SessionEvent>(line) {
+            Ok(SessionEvent::UserMessage { .. }) => return true,
+            Ok(_) => {}
+            // A line nobody can read is not proof that nothing was said.
+            Err(_) if !line.trim().is_empty() => return true,
+            Err(_) => {}
+        }
+    }
+    false
+}
+
 /// Remove the lock files nobody holds, the way the live-turn scratches
 /// are swept: every `<id>.lock` in the sessions directory is offered a
 /// non-blocking flock, and winning it is the proof that the process it
@@ -530,6 +565,72 @@ impl SessionStore {
         self.list()
             .into_iter()
             .find(|session| session.cwd.as_deref() == Some(cwd.as_path()))
+    }
+
+    /// Whether any session in the root names `parent_id` as its
+    /// parent. The scan's cached verdicts answer it, so this is one
+    /// cache read rather than a head read per file.
+    pub fn has_children(&self, parent_id: &str) -> bool {
+        self.scan()
+            .iter()
+            .any(|entry| matches!(&entry.kind, CachedKind::Child { parent } if parent == parent_id))
+    }
+
+    /// Remove a root session nobody ever said anything in: the log is
+    /// written when `ilar` launches, before a prompt exists, so every
+    /// open-and-quit used to leave a "(no messages yet)" row for ever
+    /// (104 of 273, measured). Returns whether the session went.
+    ///
+    /// Refuses anything not plainly disposable: a session with a user
+    /// message, a subagent's session, one that spawned children, one
+    /// with a completion still in the outbox, one whose head cannot be
+    /// read, and one whose writer lease somebody holds — `delete`
+    /// declines that last case on its own.
+    pub fn remove_if_empty(&self, id: &str, outbox_dir: &Path) -> bool {
+        self.is_empty_root(id, outbox_dir) && self.delete(id).is_ok()
+    }
+
+    fn is_empty_root(&self, id: &str, outbox_dir: &Path) -> bool {
+        let Ok(parsed) = SessionId::parse(id) else {
+            return false;
+        };
+        let Ok(head) = self.head(id) else {
+            return false;
+        };
+        head.meta.parent_id.is_none()
+            && !log_has_user_message(&self.session_path_for(&parsed))
+            && !crate::outbox::has_entry(outbox_dir, id)
+            // Last, because it is the only check that walks the
+            // directory — and a session with no user message has
+            // almost certainly never spawned anything.
+            && !self.has_children(id)
+    }
+
+    /// Remove the empty root sessions untouched for `older_than`: the
+    /// ones a crash, a kill or a session switch left behind, since only
+    /// a clean runtime end removes its own. Returns how many went.
+    ///
+    /// `title.is_none()` is the cheap half of the test — a session with
+    /// a user message is titled after it — so the precise check only
+    /// runs on candidates.
+    pub fn sweep_empty_sessions(
+        &self,
+        outbox_dir: &Path,
+        older_than: std::time::Duration,
+    ) -> usize {
+        let Some(cutoff) = std::time::SystemTime::now().checked_sub(older_than) else {
+            return 0;
+        };
+        let candidates: Vec<String> = self
+            .list()
+            .into_iter()
+            .filter(|session| session.title.is_none() && session.modified < cutoff)
+            .map(|session| session.id)
+            .collect();
+        candidates
+            .iter()
+            .filter(|id| self.remove_if_empty(id, outbox_dir))
+            .count()
     }
 
     /// The subagent tasks spawned by `parent_id`, newest first.
@@ -2091,6 +2192,99 @@ mod tests {
         );
         assert!(store.children_of(&id).is_empty());
         assert!(scratch.exists(), "the store did not touch the scratch");
+    }
+
+    /// A session created by a launch and never typed into goes when its
+    /// runtime ends — and one that was typed into, one that spawned a
+    /// task, and one with mail waiting in the outbox all stay.
+    #[test]
+    fn only_a_session_with_nothing_in_it_is_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().join("sessions"));
+        let outbox = dir.path().join("outbox");
+        let meta = |session_id: &str, parent_id: Option<&str>| SessionMeta {
+            session_id: session_id.into(),
+            parent_id: parent_id.map(str::to_string),
+            agent: "build".into(),
+            model: "test/model".into(),
+            workspace: None,
+            cwd: None,
+        };
+
+        // Opened and quit: a Meta line and nothing else.
+        let untouched = new_id();
+        drop(store.create(meta(&untouched, None)).unwrap());
+        assert!(store.remove_if_empty(&untouched, &outbox));
+        assert!(!store.session_path(&untouched).unwrap().exists());
+        // Idempotent: a session that is already gone is not an error.
+        assert!(!store.remove_if_empty(&untouched, &outbox));
+
+        // Somebody said something.
+        let spoken = new_id();
+        let mut session = store.create(meta(&spoken, None)).unwrap();
+        session.append(user_message("do the thing")).unwrap();
+        drop(session);
+        assert!(!store.remove_if_empty(&spoken, &outbox));
+
+        // Empty, but it has a task of its own: the child's log names it
+        // as its parent, and an orphan is worse than a stale row.
+        let parent = new_id();
+        drop(store.create(meta(&parent, None)).unwrap());
+        drop(store.create(meta(&new_id(), Some(&parent))).unwrap());
+        assert!(!store.remove_if_empty(&parent, &outbox));
+
+        // Empty, but a completion is waiting for it.
+        let addressee = new_id();
+        drop(store.create(meta(&addressee, None)).unwrap());
+        std::fs::create_dir_all(&outbox).unwrap();
+        std::fs::write(outbox.join(format!("{addressee}.jsonl")), b"{}\n").unwrap();
+        assert!(!store.remove_if_empty(&addressee, &outbox));
+
+        // A child's own session is never removed this way: its runtime
+        // is its parent's, and Task is what ends it.
+        let child = new_id();
+        drop(store.create(meta(&child, Some(&new_id()))).unwrap());
+        assert!(!store.remove_if_empty(&child, &outbox));
+    }
+
+    /// The startup sweep is for what a crash or a switch left behind, so
+    /// it waits a day: a session opened minutes ago may be sitting at a
+    /// blank prompt in another terminal right now.
+    #[test]
+    fn the_sweep_takes_only_the_empty_sessions_that_have_aged() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().join("sessions"));
+        let outbox = dir.path().join("outbox");
+        let meta = |session_id: &str| SessionMeta {
+            session_id: session_id.into(),
+            parent_id: None,
+            agent: "build".into(),
+            model: "test/model".into(),
+            workspace: None,
+            cwd: None,
+        };
+        let fresh = new_id();
+        drop(store.create(meta(&fresh)).unwrap());
+        let old = new_id();
+        drop(store.create(meta(&old)).unwrap());
+        let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(48 * 3600);
+        File::options()
+            .write(true)
+            .open(store.session_path(&old).unwrap())
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(long_ago)
+                    .set_accessed(long_ago),
+            )
+            .unwrap();
+
+        let removed =
+            store.sweep_empty_sessions(&outbox, std::time::Duration::from_secs(24 * 3600));
+
+        assert_eq!(removed, 1);
+        assert!(!store.session_path(&old).unwrap().exists());
+        assert!(store.session_path(&fresh).unwrap().exists());
     }
 
     /// A lease that ends takes its lock file with it, and a lease that

@@ -1199,6 +1199,10 @@ async fn run_exec(config: &ilar::config::Config, args: ExecArgs) -> Result<i32> 
     }
     runtime.spawner.shutdown().await;
     runtime.services.stop_all();
+    // A turn that never reached the provider — a bad key, a refused
+    // model — leaves a session with nothing in it. It goes with the
+    // run that made it.
+    ilar::runtime::end_session(config, &runtime.store, &runtime.session_id);
 
     if let Err(error) = &outcome {
         let _ = writeln!(err, "error: {error:#}");
@@ -1618,6 +1622,11 @@ async fn main() -> Result<()> {
         )
         .await?;
         active_theme = app.theme;
+        // The session this run is leaving — quit or switch. One created
+        // by the launch and never typed into leaves nothing behind;
+        // before this, every `ilar` opened and closed left a
+        // "(no messages yet)" row for ever.
+        ilar::runtime::end_session(&config, &store, &session_id);
         match exit {
             AppExit::Quit => return Ok(()),
             AppExit::SwitchInto {

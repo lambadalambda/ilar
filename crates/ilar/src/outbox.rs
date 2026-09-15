@@ -81,6 +81,13 @@ fn entry_path(dir: &Path, parent_session_id: &str) -> PathBuf {
     dir.join(format!("{parent_session_id}.jsonl"))
 }
 
+/// Whether anything was ever recorded for this parent. Asked before a
+/// session is discarded as empty: a log with no user message in it may
+/// still be the only address a child's completion has.
+pub fn has_entry(dir: &Path, parent_session_id: &str) -> bool {
+    entry_path(dir, parent_session_id).exists()
+}
+
 /// The tombstone sidecar beside a parent's outbox file. Not `.jsonl`,
 /// deliberately: the [`pending`] scan iterates `.jsonl` files and would
 /// otherwise mistake a sidecar for an outbox file whose stem names no

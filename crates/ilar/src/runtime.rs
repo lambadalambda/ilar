@@ -357,6 +357,23 @@ fn sessions_dir(config: &Config) -> std::path::PathBuf {
     config.state_dir().join("sessions")
 }
 
+pub fn outbox_dir(config: &Config) -> std::path::PathBuf {
+    config.state_dir().join("outbox")
+}
+
+/// How long an empty session is left alone before the startup sweep
+/// takes it. A day, so a launch still sitting at a blank prompt in
+/// another terminal is not swept out from under itself.
+const EMPTY_SESSION_RETENTION: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// What a runtime does on its way out (the TUI's quit and its session
+/// switches, the end of `ilar exec`): a root session nobody said
+/// anything in leaves nothing behind. Best-effort — an exit is no place
+/// to raise a housekeeping error.
+pub fn end_session(config: &Config, store: &SessionStore, session_id: &str) {
+    store.remove_if_empty(session_id, &outbox_dir(config));
+}
+
 pub fn session_store(config: &Config) -> SessionStore {
     SessionStore::new(sessions_dir(config))
 }
@@ -571,10 +588,12 @@ impl RuntimePlan {
         // cannot be read simply has nothing to clean.
         crate::tools::bash::clean_spills(&crate::tools::bash::spill_dir(config.state_dir()));
         // Same errand, same indifference to failure: live-turn scratches
-        // whose process died before its drop guard ran, and the writer
-        // locks nobody holds any more.
+        // whose process died before its drop guard ran, the writer locks
+        // nobody holds any more, and the sessions a launch created and
+        // nobody ever typed into.
         crate::session::sweep_live_scratches(&sessions_dir(config));
         crate::session::sweep_stale_locks(&sessions_dir(config));
+        store.sweep_empty_sessions(&outbox_dir(config), EMPTY_SESSION_RETENTION);
         let Tooling {
             registry,
             spawner,
