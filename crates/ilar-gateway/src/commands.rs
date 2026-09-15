@@ -56,10 +56,7 @@ pub fn parse(text: &str) -> Option<Command> {
             }
         }
         ("abort" | "stop", _) => Command::Abort,
-        ("grant", argument) => match parse_grant(argument.unwrap_or_default()) {
-            Some(approval) => Command::Grant(approval),
-            None => Command::Unknown(format!("grant {}", argument.unwrap_or_default())),
-        },
+        ("grant", argument) => Command::Grant(parse_grant(argument.unwrap_or_default())),
         ("deny", _) => Command::Deny,
         ("unlock", Some(password)) => Command::Unlock(password.to_string()),
         ("unlock", None) => Command::Unknown("unlock (the master password goes after it)".into()),
@@ -74,24 +71,25 @@ pub fn parse(text: &str) -> Option<Command> {
 
 /// `[once|session|always] [password]`: the span first, the password —
 /// sudo's, when the ask wanted one — as everything after it.
-fn parse_grant(argument: &str) -> Option<ilar::secrets::Approval> {
+fn parse_grant(argument: &str) -> ilar::secrets::Approval {
     use ilar::secrets::{Approval, Grant};
     let argument = argument.trim();
     let (span, rest) = match argument.split_once(char::is_whitespace) {
         Some((span, rest)) => (span, rest.trim()),
         None => (argument, ""),
     };
-    let (grant, password) = match span {
+    // Case-blind: a phone capitalises the first word.
+    let (grant, password) = match span.to_ascii_lowercase().as_str() {
         "" | "once" => (Grant::Once, rest),
         "session" => (Grant::Session, rest),
         "always" => (Grant::Always, rest),
         // No span word: the whole argument is the password.
         _ => (Grant::Once, argument),
     };
-    Some(Approval {
+    Approval {
         grant,
         password: (!password.is_empty()).then(|| password.to_string()),
-    })
+    }
 }
 
 pub const HELP: &str = "/new — start a fresh chat (memory stays)\n\
@@ -158,6 +156,10 @@ mod tests {
         );
         assert_eq!(
             parse("/grant always"),
+            Some(Command::Grant(Approval::from(Grant::Always)))
+        );
+        assert_eq!(
+            parse("/grant Always"),
             Some(Command::Grant(Approval::from(Grant::Always)))
         );
         assert_eq!(

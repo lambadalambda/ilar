@@ -148,6 +148,9 @@ fn unseal(sealed: &Sealed, key: &[u8; 32]) -> Result<File> {
         );
     }
     let nonce = unbase64(&sealed.nonce, "nonce")?;
+    if nonce.len() != 24 {
+        anyhow::bail!("the sealed store's nonce is {} bytes, not 24", nonce.len());
+    }
     let ciphertext = unbase64(&sealed.ciphertext, "ciphertext")?;
     let cipher = XChaCha20Poly1305::new(key.into());
     let plaintext = Zeroizing::new(
@@ -240,7 +243,19 @@ impl SecretStore {
                     .with_context(|| format!("reading secrets {}", self.path.display()));
             }
         };
-        serde_json::from_str(&content)
+        // Strict: a file that names a seal is read as one or refused.
+        // Read loosely, a sealed file with one field wrong would look
+        // like an empty plain store, and the next write would replace
+        // it with exactly that.
+        let value: serde_json::Value = serde_json::from_str(&content)
+            .with_context(|| format!("parsing secrets {}", self.path.display()))?;
+        if let Some(sealed) = value.get("sealed") {
+            let sealed: Sealed = serde_json::from_value(sealed.clone())
+                .with_context(|| format!("the seal of {} is malformed", self.path.display()))?;
+            return Ok(Disk::Sealed { sealed });
+        }
+        serde_json::from_value(value)
+            .map(Disk::Plain)
             .with_context(|| format!("parsing secrets {}", self.path.display()))
     }
 
@@ -514,14 +529,11 @@ impl SecretStore {
         Ok(self.load()?.secrets.remove(name).map(|entry| entry.value))
     }
 
-    /// Whether there is nothing to list. A store that cannot be read
-    /// is empty here; the resolve path is where that is reported. A
-    /// locked one is not: what it holds is worth a tool that says so.
+    /// Whether there is nothing to list. A store that cannot be read,
+    /// locked or damaged, is not: what it holds is worth a tool that
+    /// says so, and the resolve path is where the cause is reported.
     pub fn is_empty(&self) -> bool {
-        match self.list() {
-            Ok(listed) => listed.is_empty(),
-            Err(error) => !error.is::<Locked>(),
-        }
+        self.list().map(|listed| listed.is_empty()).unwrap_or(false)
     }
 
     /// Every entry, name and value, for shielding a child environment
@@ -794,18 +806,26 @@ impl Secrets {
     /// standing, given this session, or asked for now. `reason` is
     /// what the model said it is for.
     pub async fn approve_root(&self, request: Request<'_>, reason: &str) -> Result<(), String> {
+        // Known includes "none needed": an empty answer to the prompt
+        // is held too, so a passwordless system is asked once.
         let password_known = self
             .held_or_stored(SUDO_PASSWORD)
             .map_err(|error| format!("secrets: {error:#}"))?
             .is_some();
         let granted =
             self.store.root_granted(request.tool) || self.session_granted(ROOT, request.tool);
-        if granted && password_known {
+        // A standing grant with nobody to ask runs on what is known: a
+        // stored password, or none, and sudo says if that was wrong.
+        if granted && (password_known || !self.can_ask()) {
             return Ok(());
         }
-        // Even a standing grant asks when no password is known: the
-        // prompt is where one gets typed.
         self.ask(&request, ROOT, reason, !password_known).await
+    }
+
+    /// Drop a value typed this session: a sudo password that was
+    /// refused, so the next ask takes a new one.
+    pub fn forget_held(&self, name: &str) {
+        self.held.lock().unwrap().remove(name);
     }
 
     fn session_granted(&self, name: &str, tool: &str) -> bool {
@@ -886,11 +906,13 @@ impl Secrets {
             }
             Err(_) => return Err(unavailable()),
         };
-        if let Some(password) = approval.password.filter(|password| !password.is_empty()) {
-            self.held
-                .lock()
-                .unwrap()
-                .insert(SUDO_PASSWORD.to_string(), password);
+        // Only what was asked for; and an empty answer is an answer,
+        // "none needed", held so the question is not put again.
+        if password_wanted {
+            self.held.lock().unwrap().insert(
+                SUDO_PASSWORD.to_string(),
+                approval.password.unwrap_or_default(),
+            );
         }
         match approval.grant {
             Grant::Once => {}
@@ -1143,6 +1165,31 @@ mod tests {
         assert!(!MASTERS.lock().unwrap().contains_key(store.path()));
     }
 
+    /// A file that names a seal but gets it wrong is refused, not read
+    /// as an empty plain store the next write would replace.
+    #[test]
+    fn a_malformed_seal_is_refused_not_emptied() {
+        let (_dir, store) = store();
+        store.set("KEY", "", "value-one").unwrap();
+        store.encrypt("open sesame").unwrap();
+        let raw = std::fs::read_to_string(store.path()).unwrap();
+        std::fs::write(store.path(), raw.replace("\"nonce\"", "\"nonce_\"")).unwrap();
+        let error = store.list().unwrap_err();
+        assert!(format!("{error:#}").contains("malformed"), "{error:#}");
+        assert!(!store.is_empty());
+        assert!(store.set("X", "", "value-x").is_err());
+        assert!(
+            std::fs::read_to_string(store.path())
+                .unwrap()
+                .contains("nonce_"),
+            "the file was rewritten"
+        );
+        // A nonce of the wrong length is refused too.
+        let short = raw.replace(&raw[raw.find("\"nonce\": \"").unwrap() + 10..][..8], "");
+        std::fs::write(store.path(), short).unwrap();
+        assert!(store.list().is_err());
+    }
+
     #[tokio::test]
     async fn a_locked_store_refuses_and_lists_as_locked() {
         let (_dir, store) = store();
@@ -1208,15 +1255,42 @@ mod tests {
         assert!(secrets.all().iter().any(|held| held.name == SUDO_PASSWORD));
         assert!(secrets.approve_root(ask, "").await.is_ok());
         // A fresh runtime holds no password: the standing grant still
-        // asks, for the password alone.
+        // asks, for the password alone — and an empty answer is held
+        // as "none needed", so it asks once.
         let (tx2, mut rx2) = grant_channel(1);
         let fresh = Secrets::new(store.clone()).with_prompts(tx2);
+        let (outcome, asked) = tokio::join!(
+            fresh.approve_root(ask, ""),
+            answer_with(
+                &mut rx2,
+                Some(Approval {
+                    grant: Grant::Once,
+                    password: Some(String::new()),
+                })
+            )
+        );
+        assert!(outcome.is_ok());
+        assert!(asked.password_wanted);
+        assert_eq!(
+            fresh.held_or_stored(SUDO_PASSWORD).unwrap().as_deref(),
+            Some("")
+        );
+        assert!(fresh.approve_root(ask, "").await.is_ok(), "asked again");
+        // A refused password is forgotten, and the next ask wants one.
+        fresh.forget_held(SUDO_PASSWORD);
         let (outcome, asked) = tokio::join!(
             fresh.approve_root(ask, ""),
             answer(&mut rx2, Some(Grant::Once))
         );
         assert!(outcome.is_ok());
         assert!(asked.password_wanted);
+        // Headless with a standing grant: runs on what is known.
+        assert!(
+            Secrets::new(store.clone())
+                .approve_root(ask, "")
+                .await
+                .is_ok()
+        );
         let listed = store.list().unwrap();
         assert_eq!(listed.last().unwrap().name, ROOT);
         assert_eq!(listed.last().unwrap().always, ["sudo"]);

@@ -2614,13 +2614,14 @@ async fn sudo_runs_an_approved_command_and_feeds_the_password_unseen() {
         out.content
     );
 
-    // Standing grant, no password anywhere: still asked (for the
-    // password), and with nobody to ask that is a no.
+    // Standing grant, no password anywhere, nobody to ask: runs on
+    // what is known, which is sudo -n.
     store.grant_always("root", "sudo").unwrap();
     let out = sudo
         .run(call.clone(), ctx(dir.path()).with_secrets(secrets.clone()))
         .await;
-    assert!(out.is_error, "{}", out.content);
+    assert!(!out.is_error, "{}", out.content);
+    assert!(out.content.contains("noninteractive"), "{}", out.content);
 
     // With a stored password the grant stands and the password rides stdin.
     store.set("SUDO_PASSWORD", "", "hunter22").unwrap();
@@ -2634,7 +2635,12 @@ async fn sudo_runs_an_approved_command_and_feeds_the_password_unseen() {
         out.content
     );
     assert!(
-        out.content.contains("root: sh -c echo hi from $(whoami)"),
+        out.content.contains("root: sh -c exec </dev/null"),
+        "{}",
+        out.content
+    );
+    assert!(
+        out.content.contains("echo hi from $(whoami)"),
         "{}",
         out.content
     );

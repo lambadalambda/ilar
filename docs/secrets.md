@@ -103,13 +103,20 @@ held in memory for the session, injected on sudo's stdin (never the
 command line), redacted from output like any secret, and forgotten when
 ilar exits. If you would rather not type it each session, store it
 under the name `SUDO_PASSWORD`; the command's approval covers its use,
-there is no second prompt. Even a standing grant asks when no password
-is known, since the prompt is where one gets typed. In the chat the
-password goes last: `/grant session hunter2`.
+there is no second prompt. A standing grant still asks once per session
+when no password is known, since the prompt is where one gets typed;
+an empty answer counts, so a passwordless system is asked once. With
+nobody to ask (`ilar exec`, a scheduled turn) a standing grant runs on
+what is known, and sudo's own error says if that was not enough. A
+password sudo refuses is forgotten, and the next ask takes a new one.
+In the chat the password goes last: `/grant session hunter2`; a
+password sent to an ask that took none is refused.
 
 Systems whose sudoers sets `requiretty` refuse a sudo with no terminal;
-the error is sudo's own. And the tool is the ask, not a cage: once
-approved, the command runs as root.
+the error is sudo's own. The tool is the ask, not a cage: once
+approved, the command runs as root. And a root command that outlives
+the tool's timeout is killed only as far as sudo relays the signal,
+which for SIGKILL is not at all: check with `ps` after a timeout.
 
 ## A master password
 

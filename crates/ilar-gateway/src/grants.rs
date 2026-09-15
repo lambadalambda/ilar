@@ -18,6 +18,9 @@ pub const GRANT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10
 pub struct PendingGrant {
     pub secret: String,
     pub tool: String,
+    /// The ask takes a password (sudo's); one sent to any other ask is
+    /// refused rather than held as the sudo password by mistake.
+    pub password_wanted: bool,
     answer: oneshot::Sender<Option<Approval>>,
 }
 
@@ -48,6 +51,15 @@ pub fn answer(slot: &PendingSlot, approval: Option<Approval>) -> Result<String, 
     let Some(pending) = pending else {
         return Err("Nothing is waiting for a grant.");
     };
+    if !pending.password_wanted
+        && approval
+            .as_ref()
+            .is_some_and(|approval| approval.password.is_some())
+    {
+        // Back into the slot: the ask stands, the answer was not one.
+        *slot.lock().unwrap() = Some(pending);
+        return Err("That ask takes no password: /grant, /grant session or /grant always alone.");
+    }
     let text = decided(
         &pending.secret,
         &pending.tool,
@@ -122,6 +134,7 @@ pub async fn watch(
         *slot.lock().unwrap() = Some(PendingGrant {
             secret: prompt.secret.clone(),
             tool: prompt.tool.clone(),
+            password_wanted: prompt.password_wanted,
             answer: answer_tx,
         });
         let mut reply = prompt.reply;
@@ -225,6 +238,15 @@ mod tests {
         })
         .await
         .unwrap();
+        // A password nobody asked for is refused and the ask stands.
+        let refused = answer(
+            &h.slot,
+            Some(Approval {
+                grant: Grant::Once,
+                password: Some("typo".into()),
+            }),
+        );
+        assert!(refused.unwrap_err().contains("takes no password"));
         let text = answer(&h.slot, Some(Approval::from(Grant::Session))).unwrap();
         assert!(
             text.starts_with("GITHUB_TOKEN allowed for bash until"),
