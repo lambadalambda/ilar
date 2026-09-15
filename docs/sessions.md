@@ -27,7 +27,44 @@ See [the interface guide](interface.md#switching-sessions-sessions).
 
 A session records the directory it was launched from, which is what
 that grouping reads; sessions from before it was recorded simply group
-with the ones from elsewhere.
+with the ones from elsewhere. The comparison is exact — both paths are
+canonical — so `--continue` and the listing always agree about which
+sessions are "here", and a subdirectory of this checkout is another
+directory. Sessions nothing was ever said in are listed last, after
+everything that has a name.
+
+`--continue` does not read the directory at all in the usual case.
+`sessions/last-by-dir.json` maps each launch directory to the session
+last used there, written whenever a session is created, resumed, or
+closed; `--continue` opens what it names after one check that the
+session is still there and still belongs to this directory. A pointer
+that cannot be believed falls back to the listing and repairs itself.
+
+## Housekeeping
+
+The sessions directory is written to be cheap to read and to stay
+small.
+
+`sessions/summaries.json` caches what each log's head says — its title,
+its launch directory, whether it is a subagent's — keyed by the file's
+size and mtime. A listing rereads only the files whose stamp moved and
+writes the cache back only when something did, so `/sessions` and
+`--continue` cost a JSON read rather than a head read per file.
+Subagent children are the bulk of the directory and are skipped without
+being opened once they are known. The cache is advisory: delete it and
+the next listing rebuilds it.
+
+A session's writer lease is a `.lock` file holding an OS lock. The file
+is removed when the lease ends, and locks left behind by a killed
+process are swept at startup — a lock nobody holds is one that can be
+taken and unlinked.
+
+The log is created when `ilar` launches, before anything is typed, so a
+launch that is closed again would leave an empty session behind. It
+does not: a root session with no user message is removed when its
+runtime ends, unless it has subagent children or a completion waiting
+in the outbox, and the startup sweep removes such files once they are a
+day old.
 
 Sessions name themselves: after the first completed turn a short topic
 is generated and shown in the title bar, the listing, and the terminal

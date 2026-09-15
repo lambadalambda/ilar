@@ -213,7 +213,11 @@ opens a two-pane grep over every session you have:
   said, and when it was last used ("2h ago" inside a day, "aug 12"
   beyond), with the tail of the conversation previewed on the right.
   So the row you open on is where you left off *here*; sessions from
-  elsewhere follow, marked with their directory (`· ~/repos/foo`).
+  elsewhere follow, marked with their directory (`· ~/repos/foo`), and
+  sessions nothing was ever said in come last. The list is capped per
+  group, not overall, so this directory's last session is shown however
+  many newer ones other checkouts have — and it appears first, straight
+  from the pointer file, before the rest of the listing has been read.
 - **Type anything**: rows become content matches from *every* session's
   full history, compacted-away material included; the preview shows
   each match in its surrounding conversation. Find a session by an
