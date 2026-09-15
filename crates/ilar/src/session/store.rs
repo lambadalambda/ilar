@@ -140,7 +140,19 @@ impl Drop for SessionWriter {
         // re-stats the path, finds it gone and starts over, while
         // unlinking after the release could strand a holder that had
         // already passed that check.
-        let _ = std::fs::remove_file(&self.lock_path);
+        //
+        // And only while the path still names the inode we hold:
+        // `delete` unlinks the lock itself while holding it, and a new
+        // writer may already own a fresh file at the same path by now.
+        // Removing *that* would leave it holding a nameless inode while
+        // a third writer locks a new file at the path — two owners of
+        // one session, the very thing the identity check exists to
+        // prevent. Nothing can replace the file under this check
+        // either: replacing it means unlinking it first, which means
+        // holding the lock this handle is holding.
+        if locked_the_named_file(&self._file, &self.lock_path).unwrap_or(false) {
+            let _ = std::fs::remove_file(&self.lock_path);
+        }
         let _ = FileExt::unlock(&self._file);
     }
 }
@@ -273,8 +285,12 @@ pub fn sweep_stale_locks(dir: &Path) {
             continue;
         }
         // Unlinked while held, then released — the same order
-        // `SessionWriter`'s drop uses, and for the same reason.
-        let _ = std::fs::remove_file(&path);
+        // `SessionWriter`'s drop uses, and with the same identity
+        // check: the lock we just won may be an orphan whose path a
+        // live writer has already taken over.
+        if locked_the_named_file(&file, &path).unwrap_or(false) {
+            let _ = std::fs::remove_file(&path);
+        }
         let _ = FileExt::unlock(&file);
     }
 }
@@ -2483,6 +2499,44 @@ mod tests {
         assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
         drop(writer);
         assert!(!lock.exists());
+    }
+
+    /// `delete` unlinks the lock while holding it, so by the time that
+    /// writer drops, the path may already belong to somebody else. The
+    /// drop must not take that file with it: a holder left with a
+    /// nameless inode while a third writer locks a fresh file at the
+    /// same path is two owners of one session.
+    #[cfg(unix)]
+    #[test]
+    fn a_drop_never_removes_a_lock_file_that_is_not_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf());
+        let id = new_id();
+        let writer = store.acquire_writer(&id).unwrap();
+        let lock = dir.path().join(format!("{id}.lock"));
+
+        // What `delete` does to a lock it holds.
+        std::fs::remove_file(&lock).unwrap();
+        // And what the next writer does at the same path.
+        let successor = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock)
+            .unwrap();
+        FileExt::try_lock_exclusive(&successor).unwrap();
+
+        drop(writer);
+
+        assert!(
+            lock.exists(),
+            "the drop unlinked the lock file its successor is holding"
+        );
+        // And the sweep leaves it alone too: the lock is held.
+        sweep_stale_locks(dir.path());
+        assert!(lock.exists());
+        drop(successor);
     }
 
     /// The startup sweep takes the locks a crash left behind and leaves
