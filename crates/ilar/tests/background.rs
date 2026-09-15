@@ -1760,6 +1760,77 @@ async fn cancelled_background_task_persists_its_partial_answer() {
     );
 }
 
+/// Cancel-all was the only cancel there was: stopping one task meant
+/// stopping every task and every delivery with it. One task is
+/// addressable by the session the panel and the focus view already know
+/// it by, and it dies the same way cancel-all's children do — with a
+/// `was cancelled` notification of its own.
+#[tokio::test]
+async fn one_background_task_can_be_cancelled_by_its_session() {
+    let (store, session_id) = temp_store();
+    let started = Arc::new(tokio::sync::Notify::new());
+    // The watchdog must not steal the cancellation this test is about.
+    let spawner = patient_spawner(
+        Arc::new(NotifyingPartialText {
+            started: started.clone(),
+        }),
+        &store,
+    );
+    let mut notifications = spawner.subscribe();
+    let registry = ToolRegistry::builtin()
+        .with_subagents(spawner.clone())
+        .unwrap();
+    let ctx = background_tool_context(session_id, spawner.clone(), std::env::temp_dir().as_ref());
+
+    let out = registry
+        .get("task")
+        .unwrap()
+        .run(
+            serde_json::json!({
+                "description": "survey the API",
+                "prompt": "work",
+                "subagent_type": "explore",
+                "background": true,
+            }),
+            ctx,
+        )
+        .await;
+    assert!(!out.is_error, "{}", out.content);
+    let child_id = out
+        .child_session_id()
+        .expect("background task names its session")
+        .to_string();
+    started.notified().await;
+
+    // A session nothing is driving is not a cancellation: saying so is
+    // what lets the caller name the refusal instead of claiming a stop
+    // that never happened.
+    assert!(!spawner.cancel_task("no-such-session"));
+    assert!(spawner.cancel_task(&child_id));
+
+    let notification = tokio::time::timeout(Duration::from_secs(5), notifications.recv())
+        .await
+        .expect("cancellation notification")
+        .expect("present");
+    assert!(notification.is_error, "{}", notification.text);
+    assert!(
+        notification
+            .text
+            .contains("Task \"survey the API\" was cancelled."),
+        "{}",
+        notification.text
+    );
+    // Cancelled, and gone: the registry no longer offers it.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while spawner.running_background() > 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the cancelled task leaves the registry");
+    assert!(!spawner.cancel_task(&child_id));
+}
+
 /// A long child that compacted mid-turn loads a window whose task
 /// prompt is gone. Its final report sits after the cut, and the
 /// completion must carry it — anchoring on user messages alone

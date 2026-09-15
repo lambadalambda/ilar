@@ -80,6 +80,20 @@ pub(crate) struct FocusView {
     pub(crate) cache: TranscriptRenderCache,
     pub(crate) revision: u64,
     pub(crate) opened: std::time::Instant,
+    /// Ctrl-X was pressed once. A cancel throws work away and cannot be
+    /// undone, so the second press is the one that fires — the pending
+    /// manager's `d d` rule, on the row's own view. Any other key
+    /// disarms it, so an armed view cannot outlive the thought.
+    pub(crate) cancel_armed: bool,
+}
+
+/// What a Ctrl-X in the focus view means this time round.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FocusCancel {
+    /// First press: the view says what the second one will do.
+    Armed,
+    /// Second press: stop the agent on screen.
+    Fire,
 }
 
 impl FocusView {
@@ -97,6 +111,7 @@ impl FocusView {
             cache: TranscriptRenderCache::default(),
             revision: 0,
             opened: std::time::Instant::now(),
+            cancel_armed: false,
         }
     }
 
@@ -1600,6 +1615,29 @@ impl App {
 
     pub(crate) fn close_focus(&mut self) {
         self.focus = None;
+    }
+
+    /// Ctrl-X in the focus view: arm on the first press, fire on the
+    /// second, and hand back the session either way so the caller can
+    /// name what it is about to stop. `None` with no view open.
+    pub(crate) fn focus_cancel_key(&mut self) -> Option<(String, FocusCancel)> {
+        let focus = self.focus.as_mut()?;
+        let session_id = focus.session_id.clone();
+        let armed = std::mem::replace(&mut focus.cancel_armed, true);
+        if armed {
+            focus.cancel_armed = false;
+            Some((session_id, FocusCancel::Fire))
+        } else {
+            Some((session_id, FocusCancel::Armed))
+        }
+    }
+
+    /// Any other key in the focus view forgets the arming: a cancel
+    /// must be two presses in a row, not two presses ever.
+    pub(crate) fn disarm_focus_cancel(&mut self) {
+        if let Some(focus) = self.focus.as_mut() {
+            focus.cancel_armed = false;
+        }
     }
 
     pub(crate) fn retry_subagent_activity(&mut self) {
@@ -4693,6 +4731,45 @@ mod tests {
             agent: "explore".into(),
             event,
         }
+    }
+
+    /// Cancelling the agent on screen throws its work away, so it
+    /// takes two presses in a row — and any key between them forgets
+    /// the first, so an armed view cannot outlive the thought.
+    #[test]
+    fn cancelling_a_focused_agent_takes_two_presses_in_a_row() {
+        let mut app = App::new();
+        // No view, nothing to cancel: the key is inert everywhere else.
+        assert_eq!(app.focus_cancel_key(), None);
+
+        app.focus = Some(FocusView::new(
+            "child-a".into(),
+            "explore · survey the API".into(),
+            Vec::new(),
+            true,
+        ));
+
+        assert_eq!(
+            app.focus_cancel_key(),
+            Some(("child-a".to_string(), FocusCancel::Armed))
+        );
+        assert_eq!(
+            app.focus_cancel_key(),
+            Some(("child-a".to_string(), FocusCancel::Fire))
+        );
+        // Fired and disarmed: the next press arms again rather than
+        // cancelling a second time.
+        assert_eq!(
+            app.focus_cancel_key(),
+            Some(("child-a".to_string(), FocusCancel::Armed))
+        );
+
+        // A key in between forgets it.
+        app.disarm_focus_cancel();
+        assert_eq!(
+            app.focus_cancel_key(),
+            Some(("child-a".to_string(), FocusCancel::Armed))
+        );
     }
 
     /// Focus is a filter over the stream we already have: the focused

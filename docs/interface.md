@@ -280,8 +280,11 @@ finished one is resumed with it as the prompt. The root's transcript
 records the send as `→ explore · survey the API: …` and the agent's
 answer or a failure when it lands; the root's own queue and stash are
 untouched. Arrow keys, PageUp/PageDown, Home and End scroll the view;
-**Ctrl-X** cancels the agent you are looking at (a second press
-confirms), and Esc leaves the view.
+**Ctrl-G** cancels the agent you are looking at — a second press
+confirms, since a cancel has no undo, and the cancelled task's result
+is held rather than delivered — and Esc leaves the view. It is the only
+cancel that takes one agent; Ctrl-Q's takes every background task and
+every in-flight delivery with it.
 
 ## Questions
 

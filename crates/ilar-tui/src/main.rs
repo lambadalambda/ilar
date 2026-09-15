@@ -29,7 +29,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use app::{
-    App, FocusView, activate_palette_command, apply_context_picker_action,
+    App, FocusCancel, FocusView, activate_palette_command, apply_context_picker_action,
     apply_theme_picker_action,
 };
 use clap::Parser;
@@ -2657,7 +2657,12 @@ fn switch_blocked(
     if turn_running {
         Some("finish or abort the current turn before switching sessions".into())
     } else if background_agents > 0 {
-        Some("background agents are running; wait or abort them first".into())
+        // Naming the keys: "abort them first" sent the user looking for
+        // a cancel that was only reachable through Ctrl-Q's `d d`, and
+        // said nothing about stopping just the one in the way.
+        Some(format!(
+            "{background_agents} background agent(s) running; wait, cancel all in Ctrl-Q, or Ctrl-G in one agent's view"
+        ))
     } else if deliveries > 0 {
         Some("a task result is being delivered; wait a moment".into())
     } else if has_draft {
@@ -4371,6 +4376,42 @@ async fn run_app(
                 // work. Everything else routes nowhere, which the
                 // view's footer says out loud.
                 if app.focus.is_some() {
+                    // Ctrl-G stops the agent on screen — the one cancel
+                    // that is not all-or-nothing. It arms first: this
+                    // throws work away, and the panel's only other
+                    // cancel (`d d` in Ctrl-Q) confirms too. Not Ctrl-X,
+                    // which is already the model/theme prefix: a user
+                    // reaching for models would arm a cancel and then
+                    // confirm it out of habit.
+                    if matches!((code, control), (KeyCode::Char('g'), true)) {
+                        match app.focus_cancel_key() {
+                            Some((_, FocusCancel::Armed)) => app.set_notice(
+                                "press Ctrl-G again to cancel this agent",
+                                NoticeLevel::Warning,
+                            ),
+                            Some((session_id, FocusCancel::Fire)) => {
+                                if spawner.cancel_task(&session_id) {
+                                    // Held, not delivered: the user is
+                                    // at the keyboard, exactly as after
+                                    // an abort or a cancel-all.
+                                    notifications_paused = true;
+                                    app.set_notice(
+                                        "cancelling this agent — its result is held until your next message",
+                                        NoticeLevel::Warning,
+                                    );
+                                } else {
+                                    app.set_notice(
+                                        "nothing to cancel — a finished agent has already stopped, and one running inside the turn goes with Esc",
+                                        NoticeLevel::Info,
+                                    );
+                                }
+                            }
+                            None => {}
+                        }
+                        continue;
+                    }
+                    // Two presses in a row, not two presses ever.
+                    app.disarm_focus_cancel();
                     if code == KeyCode::Esc {
                         app.close_focus();
                         continue;
@@ -4927,10 +4968,15 @@ mod tests {
             switch_blocked(true, 0, 0, false, false).as_deref(),
             Some("finish or abort the current turn before switching sessions")
         );
-        assert_eq!(
-            switch_blocked(false, 1, 0, false, false).as_deref(),
-            Some("background agents are running; wait or abort them first")
+        // The agent refusal names both keys and the count: a refusal
+        // that says "abort them first" without saying how is a dead end.
+        let agents = switch_blocked(false, 1, 0, false, false).expect("agents block the switch");
+        assert!(
+            agents.starts_with("1 background agent(s) running"),
+            "{agents}"
         );
+        assert!(agents.contains("Ctrl-Q"), "{agents}");
+        assert!(agents.contains("Ctrl-G"), "{agents}");
         assert_eq!(
             switch_blocked(false, 0, 0, true, false).as_deref(),
             Some("input has an unsent draft; send or clear it first")

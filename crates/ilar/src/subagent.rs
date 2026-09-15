@@ -368,6 +368,12 @@ impl Drop for ChildTurnSteer {
 
 struct BackgroundTask {
     id: String,
+    /// The child session this task drives, for the one caller that
+    /// wants to stop *one* task: the panel and the focus view know a
+    /// task by its session, and `id` is a registry key nothing outside
+    /// ever sees. `None` for a background job, which has no session of
+    /// its own — only cancel-all reaches those.
+    session_id: Option<String>,
     handle: tokio::task::JoinHandle<()>,
     cancel: tokio_util::sync::CancellationToken,
 }
@@ -552,6 +558,28 @@ impl SubagentSpawner {
         for task in &tasks.tasks {
             task.cancel.cancel();
         }
+    }
+
+    /// Stop the one detached task driving `session_id`. `false` when no
+    /// live task is driving it — it already finished, it is a
+    /// foreground child whose caller owns its token, or it is a
+    /// background job with no session — so the caller can say which
+    /// instead of pretending it cancelled something.
+    ///
+    /// The task reports its own ending the way cancel-all's do: a
+    /// `was cancelled` notification, held rather than delivered while
+    /// notifications are paused.
+    pub fn cancel_task(&self, session_id: &str) -> bool {
+        let mut registry = lock_unpoisoned(&self.background_tasks);
+        registry.tasks.retain(|task| !task.handle.is_finished());
+        let mut cancelled = false;
+        for task in &registry.tasks {
+            if task.session_id.as_deref() == Some(session_id) {
+                task.cancel.cancel();
+                cancelled = true;
+            }
+        }
+        cancelled
     }
 
     pub async fn shutdown(&self) {
@@ -1288,6 +1316,7 @@ impl SubagentSpawner {
             });
             background_registry.tasks.push(BackgroundTask {
                 id: registry_id,
+                session_id: Some(returned_session_id.clone()),
                 handle,
                 cancel: background_cancel,
             });
@@ -1673,6 +1702,10 @@ task's scope yourself; continue only clearly disjoint work."
             });
             background_registry.tasks.push(BackgroundTask {
                 id: registry_id,
+                // A job has no session of its own; only cancel-all
+                // reaches it, exactly as the panel's ⚙ row has
+                // nothing to focus.
+                session_id: None,
                 handle,
                 cancel: background_cancel,
             });
