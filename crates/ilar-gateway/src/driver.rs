@@ -115,6 +115,8 @@ pub struct Seat {
     /// as the loop reports each one delivered; whatever is left when
     /// the turn ends is the caller's to run again.
     undelivered: Mutex<Vec<Steer>>,
+    /// A tool's ask for a secret that the chat has not answered.
+    grants: crate::grants::PendingSlot,
 }
 
 /// The channels a driver talks through, and what it knows about the
@@ -245,6 +247,18 @@ impl Driver {
             }
         })?;
         let sent = self.seat_tools(&mut runtime.registry, channel, chat_id)?;
+        let grants: crate::grants::PendingSlot = Arc::new(Mutex::new(None));
+        if let Some(prompts) = runtime.grants.take() {
+            tokio::spawn(crate::grants::watch(
+                prompts,
+                grants.clone(),
+                self.wiring.outbound.clone(),
+                channel.to_string(),
+                chat_id.to_string(),
+                crate::grants::GRANT_TIMEOUT,
+                self.cancel.child_token(),
+            ));
+        }
         let seat = Arc::new(Seat {
             key: key.to_string(),
             channel: channel.to_string(),
@@ -260,6 +274,7 @@ impl Driver {
             steer: Mutex::new(None),
             turn_cancel: Mutex::new(None),
             undelivered: Mutex::new(Vec::new()),
+            grants,
         });
         tokio::spawn(watch_notifications(
             seat.runtime.spawner.clone(),
@@ -491,6 +506,15 @@ impl Driver {
         }
     }
 
+    /// Answer the secret ask waiting on the seat, if any.
+    pub fn answer_grant(
+        &self,
+        seat: &Seat,
+        grant: Option<ilar::secrets::Grant>,
+    ) -> Result<String, &'static str> {
+        crate::grants::answer(&seat.grants, grant)
+    }
+
     /// Steers the last turn on the seat never delivered.
     pub fn take_undelivered(&self, seat: &Seat) -> Vec<Steer> {
         std::mem::take(&mut *seat.undelivered.lock().unwrap())
@@ -695,7 +719,9 @@ pub fn plan(
             // Nobody sits at a channel to answer a form: the tool is
             // left off and the model is told so on the spot.
             questions: false,
-            grants: false,
+            // A yes or no does fit in a message: the ask is posted to
+            // the chat and /grant or /deny answers it.
+            grants: true,
             project_instructions: None,
             // An assistant has a SOUL.md before it has coding
             // instructions: who it is, how it talks — and reads it,

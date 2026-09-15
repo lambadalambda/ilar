@@ -13,6 +13,10 @@ pub enum Command {
     },
     /// Cancel the turn running on this chat.
     Abort,
+    /// Answer a tool's ask for a secret: once, this session, or always.
+    Grant(ilar::secrets::Grant),
+    /// Refuse it.
+    Deny,
     /// Replace this chat's conversation with one handover summary.
     Compact,
     Help,
@@ -49,6 +53,11 @@ pub fn parse(text: &str) -> Option<Command> {
             }
         }
         ("abort" | "stop", _) => Command::Abort,
+        ("grant", None | Some("once")) => Command::Grant(ilar::secrets::Grant::Once),
+        ("grant", Some("session")) => Command::Grant(ilar::secrets::Grant::Session),
+        ("grant", Some("always")) => Command::Grant(ilar::secrets::Grant::Always),
+        ("grant", Some(other)) => Command::Unknown(format!("grant {other}")),
+        ("deny", _) => Command::Deny,
         ("compact", _) => Command::Compact,
         ("help", _) => Command::Help,
         ("pending", _) => Command::Pending,
@@ -61,6 +70,7 @@ pub fn parse(text: &str) -> Option<Command> {
 pub const HELP: &str = "/new — start a fresh chat (memory stays)\n\
 /model — list the models; /model <provider/model> switches; add --save to make it the default for new chats\n\
 /abort — cancel the turn running now; messages that were waiting run after it\n\
+/grant [session|always], /deny — answer a tool's ask for a stored secret\n\
 /compact — replace the conversation with one handover summary; memory stays\n\
 /pending — what the review wants to remember, when approval is on\n\
 /approve [id|all], /reject [id|all] — decide on it\n\
@@ -113,6 +123,23 @@ mod tests {
         assert_eq!(parse("/abort"), Some(Command::Abort));
         assert_eq!(parse("/compact"), Some(Command::Compact));
         assert_eq!(parse("/stop now"), Some(Command::Abort));
+        assert_eq!(
+            parse("/grant"),
+            Some(Command::Grant(ilar::secrets::Grant::Once))
+        );
+        assert_eq!(
+            parse("/grant always"),
+            Some(Command::Grant(ilar::secrets::Grant::Always))
+        );
+        assert_eq!(
+            parse("/grant session "),
+            Some(Command::Grant(ilar::secrets::Grant::Session))
+        );
+        assert_eq!(
+            parse("/grant forever"),
+            Some(Command::Unknown("grant forever".into()))
+        );
+        assert_eq!(parse("/deny"), Some(Command::Deny));
         assert_eq!(parse("/pending"), Some(Command::Pending));
         assert_eq!(parse("/approve"), Some(Command::Approve("all".into())));
         assert_eq!(

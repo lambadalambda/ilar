@@ -520,6 +520,21 @@ impl Gateway {
         }
     }
 
+    /// `/grant` or `/deny`: the ask standing on this chat's seat gets
+    /// the answer, and the chat hears what was decided.
+    fn answer_grant(&self, key: &str, grant: Option<ilar::secrets::Grant>) -> String {
+        match self.driver.seat_by_key(key) {
+            Some(seat) => match self.driver.answer_grant(&seat, grant) {
+                Ok(text) => {
+                    log(&format!("{key}: {text}"));
+                    text
+                }
+                Err(why) => why.to_string(),
+            },
+            None => "Nothing is waiting for a grant.".to_string(),
+        }
+    }
+
     /// A slash command, answered by the gateway itself.
     async fn command(&self, key: &str, message: &Inbound, command: Command) -> String {
         match command {
@@ -584,6 +599,8 @@ impl Gateway {
                     }
                 }
             }
+            Command::Grant(grant) => self.answer_grant(key, Some(grant)),
+            Command::Deny => self.answer_grant(key, None),
             Command::Abort => match self.driver.seat_by_key(key) {
                 Some(seat) if self.driver.abort(&seat) => {
                     log(&format!("{key}: turn aborted from the chat"));
