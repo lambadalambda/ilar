@@ -103,7 +103,7 @@ pub const HELP: &str = "/new — start a fresh chat (memory stays); a turn runni
 /model — list the models; /model <provider/model> switches; add --save to make it the default for new chats\n\
 /abort (or /stop) — cancel the turn running now; messages that were waiting run after it\n\
 /grant [session|always] [password], /deny — answer a tool's ask for a stored secret or for root\n\
-/unlock <master password> — open a sealed secret store for this gateway process; delete that message afterwards\n\
+/unlock <master password> — open a sealed secret store for this gateway process; the password is taken back out of the chat where the channel allows it\n\
 /compact — replace the conversation with one handover summary; memory stays\n\
 /pending — what the review wants to remember, when approval is on\n\
 /approve [id|all], /reject [id|all] — decide on it\n\

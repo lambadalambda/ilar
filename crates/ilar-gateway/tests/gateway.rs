@@ -472,6 +472,7 @@ async fn a_scheduled_turn_refuses_an_ungranted_secret_rather_than_asking_the_cha
         .unwrap();
     let settings = GatewayConfig {
         scheduler_tick_secs: 1,
+        announce: false,
         ..GatewayConfig::default()
     };
     // The chat asks for a reminder; the reminder's turn reaches for a

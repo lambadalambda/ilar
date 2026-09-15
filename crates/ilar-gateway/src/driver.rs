@@ -240,8 +240,8 @@ impl Driver {
         // minutes later the person would be told they refused it. It
         // runs headless instead, and an ungranted secret is refused
         // with the line that grants it.
-        let grants = !background;
-        let mut runtime = match self.open(known.clone(), private, grants) {
+        let can_ask = !background;
+        let mut runtime = match self.open(known.clone(), private, can_ask) {
             Ok(runtime) => runtime,
             // A route to a session that is gone (deleted, another state
             // dir) is a route to nothing: start over rather than refuse
@@ -251,7 +251,7 @@ impl Driver {
                     "{key}: session {} unusable ({error:#}); starting a new one",
                     known.unwrap_or_default()
                 ));
-                self.open(None, private, grants)?
+                self.open(None, private, can_ask)?
             }
             Err(error) => return Err(error),
         };
@@ -409,6 +409,7 @@ impl Driver {
             &self.wiring.memory,
             None,
             private,
+            // What a chat gets, and a chat can be asked.
             true,
         )?;
         let mut preview = plan.preview(&self.config)?;

@@ -404,16 +404,21 @@ impl Channel for DeltaChat {
         Box::pin(async move {
             let (rpc, account) = self.connection()?;
             let msg_id: u64 = message_id.parse()?;
-            if rpc
+            match rpc
                 .call("delete_messages_for_all", json!([account, [msg_id]]))
                 .await
-                .is_ok()
             {
-                return Ok(true);
+                Ok(_) => Ok(true),
+                Err(error) => {
+                    log(&format!(
+                        "deltachat: message {msg_id} not deleted for all ({error:#}); \
+                         deleting it here"
+                    ));
+                    rpc.call("delete_messages", json!([account, [msg_id]]))
+                        .await?;
+                    Ok(false)
+                }
             }
-            rpc.call("delete_messages", json!([account, [msg_id]]))
-                .await?;
-            Ok(false)
         })
     }
 

@@ -1398,4 +1398,12 @@ mod tests {
         assert!(reply.chars().count() <= "/new failed: ".len() + FAILURE_CAUSE_CHARS);
         assert!(reply.ends_with('…'));
     }
+
+    /// A channel that cannot take the message back says so, rather
+    /// than leaving the person to assume it is gone.
+    #[test]
+    fn the_password_advice_depends_on_whether_the_message_went() {
+        assert!(password_advice(true).starts_with("I deleted"));
+        assert!(password_advice(false).starts_with("Delete that message"));
+    }
 }
