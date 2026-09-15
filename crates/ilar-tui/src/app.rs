@@ -6523,7 +6523,7 @@ mod tests {
         assert!(rendered[0].starts_with("tools "), "{rendered:?}");
         assert!(rendered[1].starts_with("└─tool "), "{rendered:?}");
         assert_eq!(rendered[2], "");
-        assert!(rendered[3].starts_with("agent "), "{rendered:?}");
+        assert!(rendered[3].starts_with("task "), "{rendered:?}");
         assert!(rendered[4].contains("thinking"), "{rendered:?}");
     }
 
@@ -7579,9 +7579,9 @@ mod tests {
             .transcript_lines(120, now)
             .iter()
             .map(rendered_text)
-            .find(|line| line.contains("agent"))
+            .find(|line| line.contains("build · secure"))
             .unwrap();
-        assert!(subagent.contains("agent ▶ build · secure"), "{subagent}");
+        assert!(subagent.contains("task  ▶ build · secure"), "{subagent}");
         assert!(subagent.contains("Review security paths"), "{subagent}");
         assert!(subagent.contains("running · 1m 12s"), "{subagent}");
         assert!(!subagent.contains("received"), "{subagent}");

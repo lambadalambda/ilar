@@ -527,6 +527,20 @@ mod tests {
     use crate::app::waiting_texts;
     use std::collections::VecDeque;
 
+    /// The child's word reached the transcript, whatever row it wears:
+    /// a collapsed notification row for a real envelope, a user row
+    /// for a bare text. Losing it is the failure the salvage tests
+    /// guard; which row it lands in is the renderer's business.
+    fn transcript_carries(app: &App, needle: &str) -> bool {
+        app.lines().iter().any(|line| match line {
+            Line_::System(text)
+            | Line_::User(text)
+            | Line_::Task { text, .. }
+            | Line_::Job { text, .. } => text.contains(needle),
+            _ => false,
+        })
+    }
+
     /// Mirrors the real runtime's shape: `perform` goes through the
     /// real `apply_intent`, and starting any turn flips `turn_running`
     /// — the flag the gate reads. That flip is what a reordered
@@ -1482,9 +1496,7 @@ mod tests {
         .unwrap();
 
         assert!(
-            app.lines().iter().any(
-                |line| matches!(line, Line_::System(text) if text.contains("the build is green"))
-            ),
+            transcript_carries(&app, "the build is green"),
             "{:?}",
             app.lines()
         );
@@ -1540,9 +1552,7 @@ mod tests {
         .unwrap();
 
         assert!(
-            app.lines().iter().any(
-                |line| matches!(line, Line_::System(text) if text.contains("the build is green"))
-            ),
+            transcript_carries(&app, "the build is green"),
             "the child's word was dropped with the climb: {:?}",
             app.lines()
         );
