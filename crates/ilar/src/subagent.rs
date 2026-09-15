@@ -642,7 +642,7 @@ impl SubagentSpawner {
                 };
                 let registry = registry.with_models(self.available_models.clone())?;
                 match &self.secrets {
-                    Some(secrets) if !secrets.values().is_empty() => registry.with_secrets()?,
+                    Some(secrets) if !secrets.store().is_empty() => registry.with_secrets()?,
                     _ => registry,
                 }
             }

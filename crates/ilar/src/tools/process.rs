@@ -70,7 +70,7 @@ pub(crate) async fn drain<R: tokio::io::AsyncRead + Unpin>(
 
 /// What a child's environment differs in from ilar's own: the
 /// variables it must not see, and the secrets it was granted.
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Default)]
 pub(crate) struct ChildEnv {
     pub remove: Vec<String>,
     pub set: Vec<(String, String)>,
@@ -84,9 +84,9 @@ impl ChildEnv {
         secrets: Option<&crate::secrets::Secrets>,
         granted: &[crate::secrets::Granted],
     ) -> Self {
-        let values = secrets.map(|secrets| secrets.values()).unwrap_or_default();
+        let stored = secrets.map(|secrets| secrets.all()).unwrap_or_default();
         Self {
-            remove: crate::secrets::shielded_env(&values),
+            remove: crate::secrets::shielded_env(&stored),
             set: granted
                 .iter()
                 .map(|secret| (secret.name.clone(), secret.value().to_string()))
@@ -111,15 +111,15 @@ pub(crate) fn shell_command(
     env: &ChildEnv,
 ) -> tokio::process::Command {
     let mut command = tokio::process::Command::new("sh");
-    command
-        .arg("-c")
-        .arg(command_text)
-        .current_dir(cwd)
-        .envs(env.set.iter().map(|(name, value)| (name, value)));
+    command.arg("-c").arg(command_text).current_dir(cwd);
+    // Removals first: `env_remove` also clears a name set explicitly,
+    // and a granted secret is often the very variable being hidden —
+    // the person's own exported token, stored under the same name.
     for name in &env.remove {
         command.env_remove(name);
     }
     command
+        .envs(env.set.iter().map(|(name, value)| (name, value)))
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -290,12 +290,16 @@ mod tests {
         // SAFETY: a name nothing else in this process reads, set before
         // the spawn and never changed again.
         unsafe { std::env::set_var("PROCESS_TEST_HIDDEN", "leaked") };
+        // A granted name that is also hidden by name: the grant wins.
         let env = ChildEnv {
-            remove: vec!["PROCESS_TEST_HIDDEN".into()],
-            set: vec![("PROCESS_TEST_GRANTED".into(), "granted-value".into())],
+            remove: vec!["PROCESS_TEST_HIDDEN".into(), "PROCESS_TEST_BOTH".into()],
+            set: vec![
+                ("PROCESS_TEST_GRANTED".into(), "granted-value".into()),
+                ("PROCESS_TEST_BOTH".into(), "both-value".into()),
+            ],
         };
         let output = shell_command(
-            "echo \"h=[$PROCESS_TEST_HIDDEN] g=$PROCESS_TEST_GRANTED p=${PATH:+set}\"",
+            "echo \"h=[$PROCESS_TEST_HIDDEN] g=$PROCESS_TEST_GRANTED b=$PROCESS_TEST_BOTH p=${PATH:+set}\"",
             std::path::Path::new("."),
             &env,
         )
@@ -305,6 +309,7 @@ mod tests {
         let text = String::from_utf8_lossy(&output.stdout);
         assert!(text.contains("h=[]"), "{text}");
         assert!(text.contains("g=granted-value"), "{text}");
+        assert!(text.contains("b=both-value"), "{text}");
         assert!(text.contains("p=set"), "{text}");
     }
 

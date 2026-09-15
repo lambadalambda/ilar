@@ -23,17 +23,18 @@ pub const FILE_NAME: &str = "secrets.json";
 pub const MAX_NAME_CHARS: usize = 64;
 /// The tools that take `secrets`, by name: what a standing grant may name.
 pub const GRANTABLE_TOOLS: &[&str] = &["bash", "service"];
-/// A value shorter than this is not chased through output: replacing
-/// "ab" wherever it appears mangles more than it protects.
-const MIN_REDACTED_CHARS: usize = 4;
+/// A value shorter than this is refused at the door: replacing "ab"
+/// wherever it appears in output, or hiding every variable that
+/// happens to equal "1", mangles more than it protects.
+pub const MIN_VALUE_CHARS: usize = 4;
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Default, Serialize, Deserialize)]
 struct File {
     #[serde(default)]
     secrets: BTreeMap<String, Entry>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct Entry {
     #[serde(default)]
     description: String,
@@ -167,8 +168,10 @@ impl SecretStore {
     /// key is the same secret. Returns whether it replaced one.
     pub fn set(&self, name: &str, description: &str, value: &str) -> Result<bool> {
         valid_name(name).map_err(anyhow::Error::msg)?;
-        if value.is_empty() {
-            anyhow::bail!("the value of {name} is empty");
+        if value.chars().count() < MIN_VALUE_CHARS {
+            anyhow::bail!(
+                "the value of {name} is under {MIN_VALUE_CHARS} characters; that is not a secret"
+            );
         }
         self.update(|file| {
             let previous = file.secrets.remove(name);
@@ -220,19 +223,23 @@ impl SecretStore {
         Ok(self.load()?.secrets.remove(name).map(|entry| entry.value))
     }
 
-    fn entry(&self, name: &str) -> Result<Option<Entry>> {
-        Ok(self.load()?.secrets.remove(name))
+    /// Whether there is nothing to list. A store that cannot be read
+    /// is empty here; the resolve path is where that is reported.
+    pub fn is_empty(&self) -> bool {
+        self.list().map(|listed| listed.is_empty()).unwrap_or(true)
     }
 
-    /// Every value, for shielding a child environment and redacting
-    /// output. A store that cannot be read shields nothing, and says so
-    /// where the tool can report it.
-    pub(crate) fn values(&self) -> Result<Vec<String>> {
+    /// Every entry, name and value, for shielding a child environment
+    /// and redacting output.
+    fn all(&self) -> Result<Vec<Granted>> {
         Ok(self
             .load()?
             .secrets
-            .into_values()
-            .map(|entry| entry.value)
+            .into_iter()
+            .map(|(name, entry)| Granted {
+                name,
+                value: entry.value,
+            })
             .collect())
     }
 }
@@ -378,10 +385,17 @@ impl Secrets {
         Ok(lines.join("\n"))
     }
 
-    /// Every stored value, for shielding and redaction. Unreadable
-    /// store, nothing — the resolve path reports that, this one cannot.
-    pub fn values(&self) -> Vec<String> {
-        self.store.values().unwrap_or_default()
+    /// Every stored secret, name and value, for shielding a child
+    /// environment and redacting output. An unreadable store yields
+    /// nothing here; the resolve path is where that gets reported.
+    pub fn all(&self) -> Vec<Granted> {
+        self.store.all().unwrap_or_default()
+    }
+
+    /// Text with every stored value replaced, whether or not this call
+    /// was granted it: what a tool result may carry.
+    pub fn scrub(&self, text: &str) -> String {
+        redact(text, &self.all())
     }
 
     /// The values the call may use, each granted by a standing grant,
@@ -389,23 +403,31 @@ impl Secrets {
     /// failure ends the whole call: a command that expected three
     /// variables and got two is not the command the person read.
     pub async fn resolve(&self, request: Request<'_>) -> Result<Vec<Granted>, String> {
-        let mut granted = Vec::new();
+        // Every name looked up before anyone is asked: a call that
+        // names one unknown secret fails without a question.
+        let file = self
+            .store
+            .load()
+            .map_err(|error| format!("secrets: {error:#}"))?;
+        let mut entries = Vec::new();
         let mut seen = BTreeSet::new();
         for name in request.names {
             if !seen.insert(name.as_str()) {
                 continue;
             }
-            let entry = match self.store.entry(name) {
-                Ok(Some(entry)) => entry,
-                Ok(None) => return Err(self.unknown(name)),
-                Err(error) => return Err(format!("secrets: {error:#}")),
-            };
+            match file.secrets.get(name) {
+                Some(entry) => entries.push((name, entry)),
+                None => return Err(self.unknown(name)),
+            }
+        }
+        let mut granted = Vec::new();
+        for (name, entry) in entries {
             if !entry.always.contains(request.tool) && !self.session_granted(name, request.tool) {
                 self.ask(&request, name, &entry.description).await?;
             }
             granted.push(Granted {
                 name: name.clone(),
-                value: entry.value,
+                value: entry.value.clone(),
             });
         }
         Ok(granted)
@@ -486,11 +508,17 @@ impl Secrets {
                     .insert((name.to_string(), request.tool.to_string()));
                 Ok(())
             }
-            Ok(Some(Grant::Always)) => self
-                .store
-                .grant_always(name, request.tool)
-                .map(|_| ())
-                .map_err(|error| format!("secrets: {error:#}")),
+            Ok(Some(Grant::Always)) => {
+                // The person said yes; a store that cannot be written
+                // makes that a session grant rather than a refusal.
+                if self.store.grant_always(name, request.tool).is_err() {
+                    self.session
+                        .lock()
+                        .unwrap()
+                        .insert((name.to_string(), request.tool.to_string()));
+                }
+                Ok(())
+            }
             Ok(None) => Err(format!(
                 "the user denied {name} for this {} call",
                 request.tool
@@ -504,15 +532,8 @@ impl Secrets {
 /// source, before a spill file or a transcript sees it: this is the
 /// one redaction in ilar that is not display-only.
 pub fn redact(text: &str, granted: &[Granted]) -> String {
-    let mut text = std::borrow::Cow::Borrowed(text);
-    for secret in longest_first(granted) {
-        if text.contains(secret.value()) {
-            text = std::borrow::Cow::Owned(
-                text.replace(secret.value(), &format!("<secret:{}>", secret.name)),
-            );
-        }
-    }
-    text.into_owned()
+    // Replacing whole UTF-8 values with ASCII marks keeps UTF-8 valid.
+    String::from_utf8(redact_bytes(text.as_bytes(), granted)).expect("redaction keeps UTF-8")
 }
 
 /// [`redact`] for captured bytes, which may not be UTF-8.
@@ -540,11 +561,12 @@ pub fn redact_bytes(bytes: &[u8], granted: &[Granted]) -> Vec<u8> {
 }
 
 /// Longest value first, so one that contains another is replaced whole
-/// and none shorter than [`MIN_REDACTED_CHARS`].
+/// and none shorter than [`MIN_VALUE_CHARS`] (a file from before the
+/// floor may hold one).
 fn longest_first(granted: &[Granted]) -> Vec<&Granted> {
     let mut secrets: Vec<&Granted> = granted
         .iter()
-        .filter(|secret| secret.value().chars().count() >= MIN_REDACTED_CHARS)
+        .filter(|secret| secret.value().chars().count() >= MIN_VALUE_CHARS)
         .collect();
     secrets.sort_by(|a, b| b.value().len().cmp(&a.value().len()));
     secrets
@@ -552,16 +574,30 @@ fn longest_first(granted: &[Granted]) -> Vec<&Granted> {
 
 /// Which of the process's own variables a child must not see: ilar's
 /// keys by name, and anything whose value is a stored secret.
-pub fn shielded_env(store_values: &[String]) -> Vec<String> {
-    shielded_env_from(std::env::vars(), store_values)
+pub fn shielded_env(stored: &[Granted]) -> Vec<String> {
+    // `vars_os`, not `vars`: one non-UTF-8 variable in the environment
+    // must not panic every shell command. A lossy name cannot match
+    // anything to remove, which is the right outcome for it.
+    shielded_env_from(
+        std::env::vars_os().map(|(name, value)| {
+            (
+                name.to_string_lossy().into_owned(),
+                value.to_string_lossy().into_owned(),
+            )
+        }),
+        stored,
+    )
 }
 
 pub fn shielded_env_from(
     vars: impl IntoIterator<Item = (String, String)>,
-    store_values: &[String],
+    stored: &[Granted],
 ) -> Vec<String> {
+    let values = longest_first(stored);
     vars.into_iter()
-        .filter(|(name, value)| ilar_own_secret(name) || store_values.iter().any(|v| v == value))
+        .filter(|(name, value)| {
+            ilar_own_secret(name) || values.iter().any(|secret| secret.value() == value)
+        })
         .map(|(name, _)| name)
         .collect()
 }
@@ -635,10 +671,11 @@ mod tests {
     #[test]
     fn names_are_environment_names_and_values_are_not_empty() {
         let (_dir, store) = store();
-        assert!(store.set("1BAD", "", "x").is_err());
-        assert!(store.set("BAD-NAME", "", "x").is_err());
-        assert!(store.set("", "", "x").is_err());
+        assert!(store.set("1BAD", "", "xxxx").is_err());
+        assert!(store.set("BAD-NAME", "", "xxxx").is_err());
+        assert!(store.set("", "", "xxxx").is_err());
         assert!(store.set("EMPTY", "", "").is_err());
+        assert!(store.set("SHORT", "", "abc").is_err());
         assert!(valid_name("_ok_1").is_ok());
         assert!(valid_name(&"A".repeat(MAX_NAME_CHARS + 1)).is_err());
     }
@@ -647,16 +684,31 @@ mod tests {
     fn standing_grants_survive_a_rotation_and_a_revoke_drops_them() {
         let (_dir, store) = store();
         assert!(!store.grant_always("NOPE", "bash").unwrap());
-        store.set("KEY", "", "one").unwrap();
+        store.set("KEY", "", "one-value").unwrap();
         assert!(store.grant_always("KEY", "bash").unwrap());
         assert!(store.grant_always("KEY", "service").unwrap());
-        store.set("KEY", "", "two").unwrap();
+        store.set("KEY", "", "two-value").unwrap();
         assert_eq!(store.list().unwrap()[0].always, ["bash", "service"]);
         assert!(store.revoke("KEY", Some("bash")).unwrap());
         assert_eq!(store.list().unwrap()[0].always, ["service"]);
         assert!(store.revoke("KEY", None).unwrap());
         assert!(!store.revoke("KEY", None).unwrap());
         assert!(store.list().unwrap()[0].always.is_empty());
+    }
+
+    /// One unknown name fails the call before anyone is asked about
+    /// the known ones.
+    #[tokio::test]
+    async fn an_unknown_name_fails_before_any_question() {
+        let (_dir, store) = store();
+        store.set("KEY", "", "value1").unwrap();
+        let (tx, mut rx) = grant_channel(1);
+        let secrets = Secrets::new(store).with_prompts(tx);
+        let cancel = cancel();
+        let names = ["KEY".to_string(), "NOPE".to_string()];
+        let error = secrets.resolve(request(&names, &cancel)).await.unwrap_err();
+        assert!(error.contains("no secret named NOPE"), "{error}");
+        assert!(rx.try_recv().is_err(), "somebody was asked about KEY");
     }
 
     #[tokio::test]
@@ -836,11 +888,32 @@ mod tests {
             ("PATH", "/bin"),
         ]
         .map(|(k, v)| (k.to_string(), v.to_string()));
-        let mut hidden = shielded_env_from(vars, &["stored-value".to_string()]);
+        let stored = vec![
+            Granted {
+                name: "MINE".into(),
+                value: "stored-value".into(),
+            },
+            Granted {
+                name: "TINY".into(),
+                value: "/bin".into(),
+            },
+        ];
+        let mut hidden = shielded_env_from(vars, &stored);
         hidden.sort();
         assert_eq!(
             hidden,
-            ["ILAR_OPENAI_API_KEY", "ILAR_SERVE_TOKEN", "MY_TOKEN"]
+            [
+                "ILAR_OPENAI_API_KEY",
+                "ILAR_SERVE_TOKEN",
+                "MY_TOKEN",
+                "PATH"
+            ]
         );
+        // A stored value under the floor (an old file) hides nothing.
+        let short = vec![Granted {
+            name: "S".into(),
+            value: "/bi".into(),
+        }];
+        assert!(shielded_env_from([("PATH".to_string(), "/bi".to_string())], &short).is_empty());
     }
 }

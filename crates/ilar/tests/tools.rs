@@ -2445,8 +2445,9 @@ async fn bash_hands_a_granted_secret_over_as_a_variable_and_redacts_it() {
     assert!(out.content.contains("token=\n"), "{}", out.content);
 
     // A context without a store refuses any name.
+    let bare = ToolContext::root(dir.path().to_path_buf());
     let out = bash
-        .run(call(serde_json::json!(["TEST_TOKEN"])), ctx(dir.path()))
+        .run(call(serde_json::json!(["TEST_TOKEN"])), bare)
         .await;
     assert!(out.is_error);
     assert!(out.content.contains("no secret store"), "{}", out.content);
@@ -2466,4 +2467,101 @@ async fn bash_shields_the_child_from_ilars_own_keys() {
         )
         .await;
     assert!(out.content.contains("key=[]"), "{}", out.content);
+}
+
+/// The store file itself is no way around the grant: read through any
+/// tool, its values come out as marks. And the listing tool shows names
+/// and purposes, never values.
+#[tokio::test]
+async fn every_tool_result_is_scrubbed_of_stored_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let store = ilar::secrets::SecretStore::open(&state);
+    store
+        .set("SCRUB_TOKEN", "the scrub token", "scrub-secret-value")
+        .unwrap();
+    let secrets = ilar::secrets::Secrets::new(store.clone());
+    let scrubbing = ctx(dir.path()).with_secrets(secrets.clone());
+    let registry = registry().with_secrets().unwrap();
+
+    // Through the executor, which every real call goes through.
+    let calls = vec![
+        ilar::tools::executor::ToolCall {
+            id: "c-read".into(),
+            name: "read".into(),
+            input: serde_json::json!({"path": store.path().to_string_lossy()}),
+        },
+        ilar::tools::executor::ToolCall {
+            id: "c-bash".into(),
+            name: "bash".into(),
+            input: serde_json::json!({"command": format!("cat {}", store.path().display())}),
+        },
+        ilar::tools::executor::ToolCall {
+            id: "c-list".into(),
+            name: "secrets".into(),
+            input: serde_json::json!({}),
+        },
+    ];
+    let outcomes = ilar::tools::executor::execute_calls(
+        calls,
+        |name| registry.get(name),
+        scrubbing,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    for outcome in &outcomes {
+        assert!(
+            !outcome.output.content.contains("scrub-secret-value"),
+            "{}: {}",
+            outcome.name,
+            outcome.output.content
+        );
+    }
+    assert!(
+        outcomes[0].output.content.contains("<secret:SCRUB_TOKEN>"),
+        "{}",
+        outcomes[0].output.content
+    );
+    assert!(
+        outcomes[1].output.content.contains("<secret:SCRUB_TOKEN>"),
+        "{}",
+        outcomes[1].output.content
+    );
+    let listing = &outcomes[2].output.content;
+    assert!(
+        listing.contains("SCRUB_TOKEN — the scrub token"),
+        "{listing}"
+    );
+}
+
+/// What spills to disk is redacted too: the spill is written by the
+/// tool, before any result exists.
+#[tokio::test]
+async fn a_spilled_output_holds_no_secret_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ilar::secrets::SecretStore::open(&dir.path().join("state"));
+    store.set("SPILL_TOKEN", "", "spill-secret-value").unwrap();
+    store.grant_always("SPILL_TOKEN", "bash").unwrap();
+    let spill_dir = dir.path().join("spills");
+    let ctx = spilling_ctx(dir.path(), &spill_dir, "call-secret")
+        .with_secrets(ilar::secrets::Secrets::new(store));
+    let bash = registry().get("bash").unwrap();
+    let out = bash
+        .run(
+            serde_json::json!({
+                "command": "for i in $(seq 1 3000); do echo \"line $i $SPILL_TOKEN\"; done",
+                "secrets": ["SPILL_TOKEN"]
+            }),
+            ctx,
+        )
+        .await;
+    assert!(!out.is_error, "{}", out.content);
+    assert!(!out.content.contains("spill-secret-value"));
+    let spilled = std::fs::read_to_string(hinted_spill_path(&out.content)).unwrap();
+    assert!(!spilled.contains("spill-secret-value"));
+    assert!(
+        spilled.contains("line 3000 <secret:SPILL_TOKEN>"),
+        "{}",
+        &spilled[spilled.len() - 200..]
+    );
 }

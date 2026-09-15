@@ -150,6 +150,7 @@ where
             let access = tool.workspace_access();
             let mut call_ctx = ctx.clone();
             call_ctx.call_id = Some(call.id.clone());
+            let secrets = call_ctx.secrets.clone();
             let input = call.input;
             let on_start = on_start.clone();
             let started_id = call.id.clone();
@@ -216,6 +217,14 @@ where
                             tool.name()
                         )),
                     }
+                };
+                // Every stored value, out of every result, whatever
+                // the tool: a `read` of the store file, a `grep` that
+                // crosses it, a shell that prints one. The one place
+                // all results pass, so the one place to hold the line.
+                let output = match &secrets {
+                    Some(secrets) => output.scrubbed(secrets),
+                    None => output,
                 };
                 (idx, output, started.load(Ordering::SeqCst))
             }));

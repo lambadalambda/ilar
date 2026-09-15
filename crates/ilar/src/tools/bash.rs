@@ -486,7 +486,9 @@ impl Tool for BashTool {
                 });
             }
             let spill = SpillTarget::from_context(&ctx);
-            let granted = match resolve_secrets(&ctx, "bash", &input.secrets, &input.command).await
+            let granted = match ctx
+                .grant_secrets("bash", &input.secrets, &input.command)
+                .await
             {
                 Ok(granted) => granted,
                 Err(error) => return ToolOutput::error(error),
@@ -553,36 +555,6 @@ impl Tool for BashTool {
             .await
         })
     }
-}
-
-/// The secrets a call named, each granted or the whole call refused.
-/// A context without a store refuses any name at all.
-pub(crate) async fn resolve_secrets(
-    ctx: &ToolContext,
-    tool: &str,
-    names: &[String],
-    detail: &str,
-) -> Result<Vec<crate::secrets::Granted>, String> {
-    if names.is_empty() {
-        return Ok(Vec::new());
-    }
-    let Some(secrets) = ctx.secrets.as_ref() else {
-        return Err(format!(
-            "{tool}: this session has no secret store, so {} cannot be provided",
-            names.join(", ")
-        ));
-    };
-    secrets
-        .resolve(crate::secrets::Request {
-            tool,
-            names,
-            detail,
-            session_id: &ctx.session_id,
-            tool_call_id: ctx.call_id.as_deref(),
-            cancel: &ctx.cancel,
-        })
-        .await
-        .map_err(|error| format!("{tool}: {error}"))
 }
 
 /// The tail of one stream's capture, and how much of it there was. Only

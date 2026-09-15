@@ -555,7 +555,7 @@ impl RuntimePlan {
             None => registry,
         };
         // The listing costs a tool; an empty store does not pay it.
-        let registry = if secrets.values().is_empty() {
+        let registry = if secrets.store().is_empty() {
             registry
         } else {
             registry.with_secrets()?

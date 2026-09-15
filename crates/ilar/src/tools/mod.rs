@@ -683,6 +683,38 @@ impl ToolContext {
     pub fn has_workspace_lease(&self) -> bool {
         self.workspace_lease.is_some()
     }
+
+    /// The secrets a call named, each granted or the whole call
+    /// refused. `detail` is what the person reads before saying yes:
+    /// the command, verbatim. A context without a store refuses any
+    /// name at all.
+    pub async fn grant_secrets(
+        &self,
+        tool: &str,
+        names: &[String],
+        detail: &str,
+    ) -> Result<Vec<crate::secrets::Granted>, String> {
+        if names.is_empty() {
+            return Ok(Vec::new());
+        }
+        let Some(secrets) = self.secrets.as_ref() else {
+            return Err(format!(
+                "{tool}: this session has no secret store, so {} cannot be provided",
+                names.join(", ")
+            ));
+        };
+        secrets
+            .resolve(crate::secrets::Request {
+                tool,
+                names,
+                detail,
+                session_id: &self.session_id,
+                tool_call_id: self.call_id.as_deref(),
+                cancel: &self.cancel,
+            })
+            .await
+            .map_err(|error| format!("{tool}: {error}"))
+    }
 }
 
 /// Decoded image bytes one tool result may carry. Enforced here rather
@@ -753,6 +785,13 @@ impl ToolOutput {
             state: None,
             pending_state_commit: None,
         }
+    }
+
+    /// The same output with every stored secret value replaced in its
+    /// text. Images and state are untouched.
+    pub fn scrubbed(mut self, secrets: &crate::secrets::Secrets) -> Self {
+        self.content = secrets.scrub(&self.content);
+        self
     }
 
     pub fn error(content: impl Into<String>) -> Self {

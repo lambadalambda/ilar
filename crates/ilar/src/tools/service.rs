@@ -276,13 +276,13 @@ impl Tool for ServiceTool {
                             existing.kill_group();
                         }
                     }
-                    let granted = match super::bash::resolve_secrets(
-                        &ctx,
-                        "service",
-                        &input.secrets,
-                        &format!("service {name}: {command}"),
-                    )
-                    .await
+                    let granted = match ctx
+                        .grant_secrets(
+                            "service",
+                            &input.secrets,
+                            &format!("service {name}: {command}"),
+                        )
+                        .await
                     {
                         Ok(granted) => granted,
                         Err(error) => return ToolOutput::error(error),
