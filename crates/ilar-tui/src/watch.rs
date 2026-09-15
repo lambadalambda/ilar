@@ -4,7 +4,9 @@
 //! does, the same renderer — but nothing drives the session: no
 //! runtime, no writer lease, no provider. The file is followed, and
 //! every change rebuilds the view, so a gateway chat or another TUI
-//! can be watched while it works. Enter does nothing but say so.
+//! can be watched while it works. The prompt says `read-only · q
+//! leaves` and offers no send; anything but a scroll key is answered
+//! with the one thing this view cannot do.
 
 use anyhow::{Context, Result};
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
@@ -29,6 +31,7 @@ pub(crate) async fn run(config: &Config, id: &str, theme: crate::theme::ThemeId)
     let mut app = App::new();
     app.theme = theme;
     app.session_id = id.to_string();
+    app.read_only = true;
     app.status = "read-only view".into();
     app.current_model = model;
     if let Some(cwd) = cwd {
@@ -59,23 +62,20 @@ pub(crate) async fn run(config: &Config, id: &str, theme: crate::theme::ThemeId)
             match crossterm::event::read()? {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     let control = key.modifiers.contains(KeyModifiers::CONTROL);
-                    match (key.code, control) {
-                        (KeyCode::Char('c'), true)
-                        | (KeyCode::Char('q'), false)
-                        | (KeyCode::Esc, false) => {
-                            break;
-                        }
-                        (KeyCode::Up, _) => app.scroll_up(1),
-                        (KeyCode::Down, _) => app.scroll_down(1),
-                        (KeyCode::PageUp, _) => app.scroll_up(app.page_size()),
-                        (KeyCode::PageDown, _) => app.scroll_down(app.page_size()),
-                        (KeyCode::Home, _) => app.scroll_to_top(),
-                        (KeyCode::End, _) => app.scroll_to_tail(),
-                        (KeyCode::Enter, _) => app.set_notice(
+                    match view_key(key.code, control) {
+                        ViewKey::Leave => break,
+                        ViewKey::ScrollUp(Span::Line) => app.scroll_up(1),
+                        ViewKey::ScrollDown(Span::Line) => app.scroll_down(1),
+                        ViewKey::ScrollUp(Span::Page) => app.scroll_up(app.page_size()),
+                        ViewKey::ScrollDown(Span::Page) => app.scroll_down(app.page_size()),
+                        ViewKey::ToTop => app.scroll_to_top(),
+                        ViewKey::ToTail => app.scroll_to_tail(),
+                        ViewKey::Repaint => terminal.clear()?,
+                        ViewKey::Refuse => app.set_notice(
                             "read-only view: open the session without --view to talk to it",
                             NoticeLevel::Warning,
                         ),
-                        _ => {}
+                        ViewKey::Ignore => {}
                     }
                 }
                 Event::Mouse(mouse) => match mouse.kind {
@@ -107,6 +107,50 @@ pub(crate) async fn run(config: &Config, id: &str, theme: crate::theme::ThemeId)
         }
     }
     Ok(())
+}
+
+/// How far a scroll key moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Span {
+    Line,
+    Page,
+}
+
+/// What a keystroke means here. Everything this view cannot do is one
+/// answer — the refusal — rather than silence: a person who types into
+/// `--view` has to learn something from the first key, not from Enter
+/// alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ViewKey {
+    Leave,
+    ScrollUp(Span),
+    ScrollDown(Span),
+    ToTop,
+    ToTail,
+    Repaint,
+    Refuse,
+    /// Not a keystroke anybody made: a bare modifier, or a key the
+    /// terminal reported without a code.
+    Ignore,
+}
+
+fn view_key(code: KeyCode, control: bool) -> ViewKey {
+    match (code, control) {
+        (KeyCode::Char('c'), true) | (KeyCode::Char('q'), false) | (KeyCode::Esc, false) => {
+            ViewKey::Leave
+        }
+        (KeyCode::Up, _) => ViewKey::ScrollUp(Span::Line),
+        (KeyCode::Down, _) => ViewKey::ScrollDown(Span::Line),
+        (KeyCode::PageUp, _) => ViewKey::ScrollUp(Span::Page),
+        (KeyCode::PageDown, _) => ViewKey::ScrollDown(Span::Page),
+        (KeyCode::Home, _) => ViewKey::ToTop,
+        (KeyCode::End, _) => ViewKey::ToTail,
+        // The one root binding that still means something without a
+        // runtime: a screen the terminal has scribbled over.
+        (KeyCode::Char('l'), true) => ViewKey::Repaint,
+        (KeyCode::Modifier(_) | KeyCode::Null, _) => ViewKey::Ignore,
+        _ => ViewKey::Refuse,
+    }
 }
 
 type Restore = tokio::task::JoinHandle<Result<(RestoredSessionView, Option<SessionTail>)>>;
@@ -142,5 +186,75 @@ fn driven(store: &SessionStore, id: &str) -> bool {
     match store.acquire_writer(id) {
         Ok(_writer) => false,
         Err(error) => ilar::agent::TurnNeverStarted::writer_held(&anyhow::Error::from(error)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Scrolling and leaving are the whole of what this view does;
+    /// every other key is answered, not swallowed. The view used to
+    /// answer Enter alone, so a person typing a message watched their
+    /// letters disappear under an input box that looked live.
+    #[test]
+    fn every_key_but_a_scroll_is_answered() {
+        for (code, control) in [
+            (KeyCode::Char('q'), false),
+            (KeyCode::Esc, false),
+            (KeyCode::Char('c'), true),
+        ] {
+            assert_eq!(view_key(code, control), ViewKey::Leave, "{code:?}");
+        }
+        assert_eq!(view_key(KeyCode::Up, false), ViewKey::ScrollUp(Span::Line));
+        assert_eq!(
+            view_key(KeyCode::PageDown, false),
+            ViewKey::ScrollDown(Span::Page)
+        );
+        assert_eq!(view_key(KeyCode::Home, false), ViewKey::ToTop);
+        assert_eq!(view_key(KeyCode::End, false), ViewKey::ToTail);
+        assert_eq!(view_key(KeyCode::Char('l'), true), ViewKey::Repaint);
+        for (code, control) in [
+            (KeyCode::Char('h'), false),
+            (KeyCode::Enter, false),
+            (KeyCode::F(1), false),
+            (KeyCode::Char('f'), true),
+            (KeyCode::Char('t'), true),
+            (KeyCode::Tab, false),
+            (KeyCode::Backspace, false),
+        ] {
+            assert_eq!(view_key(code, control), ViewKey::Refuse, "{code:?}");
+        }
+        assert_eq!(view_key(KeyCode::Null, false), ViewKey::Ignore);
+    }
+
+    /// The prompt says what it is. Nothing drives this session, so a
+    /// send footer would be a promise the view cannot keep.
+    #[test]
+    fn the_read_only_prompt_offers_no_send() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let screen = |read_only: bool| {
+            let mut app = App::new();
+            app.read_only = read_only;
+            let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+            terminal.draw(|frame| app.render(frame)).unwrap();
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+        };
+        // "Enter send ·" with the separator: the welcome line in the
+        // transcript says "Enter sends, …" and is not the footer.
+        let watching = screen(true);
+        assert!(watching.contains("read-only · q leaves"), "{watching}");
+        assert!(!watching.contains("Enter send ·"), "{watching}");
+        let live = screen(false);
+        assert!(live.contains("Enter send · Shift-Enter"), "{live}");
+        assert!(!live.contains("read-only · q leaves"), "{live}");
     }
 }

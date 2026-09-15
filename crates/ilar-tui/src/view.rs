@@ -985,7 +985,9 @@ impl App {
         // stays visible but must not look like it is listening.
         // A focus view is not a modal for the prompt: typing there
         // talks to the agent on screen.
-        let input_focused = input_accepts_keys(self.busy, self.has_modal());
+        // `--view` has no runtime behind it: the box stays for the
+        // layout's sake, but nothing it could promise would be true.
+        let input_focused = !self.read_only && input_accepts_keys(self.busy, self.has_modal());
         let input_block = Block::default()
             .borders(Borders::ALL)
             .border_type(if input_focused {
@@ -1002,7 +1004,9 @@ impl App {
         let input_view = self
             .input
             .multiline_view(input_area.width, input_area.height);
-        let mut input_title = if let Some(focus) = &self.focus {
+        let mut input_title = if self.read_only {
+            " read-only · q leaves ".into()
+        } else if let Some(focus) = &self.focus {
             format!(" to {} ", focus.title)
         } else if input_view.line_count > 1 {
             format!(
@@ -1034,16 +1038,22 @@ impl App {
                 theme::SECONDARY
             }),
         ));
-        let input_help = if input_chunk.width >= 62 {
-            " Enter send · Shift-Enter/Ctrl-J newline · Ctrl-S stash "
+        // A footer is a promise about the next keystroke, and `--view`
+        // can keep none of them.
+        let input_help = if self.read_only {
+            None
+        } else if input_chunk.width >= 62 {
+            Some(" Enter send · Shift-Enter/Ctrl-J newline · Ctrl-S stash ")
         } else if input_chunk.width >= 48 {
-            " Enter send · Shift-Enter/Ctrl-J newline "
+            Some(" Enter send · Shift-Enter/Ctrl-J newline ")
         } else {
-            " Enter send "
+            Some(" Enter send ")
         };
-        input_block = input_block.title_bottom(
-            Line::styled(input_help, Style::default().fg(theme::MUTED)).right_aligned(),
-        );
+        if let Some(input_help) = input_help {
+            input_block = input_block.title_bottom(
+                Line::styled(input_help, Style::default().fg(theme::MUTED)).right_aligned(),
+            );
+        }
         let input = Paragraph::new(input_lines)
             .style(Style::default().fg(theme::PRIMARY))
             .block(input_block);

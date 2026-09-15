@@ -296,6 +296,10 @@ pub(crate) struct App {
     pub(crate) input: InputBuffer,
     pub(crate) history: history::PromptHistory,
     pub(crate) busy: bool,
+    /// `ilar --view`: nothing drives this session, so the prompt is not
+    /// a prompt. It keeps its box — the layout is the TUI's own — but
+    /// says read-only and offers no send.
+    pub(crate) read_only: bool,
     pub(crate) status: String,
     notice: Option<StatusNotice>,
     pub(crate) activity: Activity,
@@ -558,6 +562,7 @@ impl App {
             input: InputBuffer::default(),
             history: history::PromptHistory::in_memory(),
             busy: false,
+            read_only: false,
             status: String::new(),
             notice: None,
             activity: Activity::Ready,
