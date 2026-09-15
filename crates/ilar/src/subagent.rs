@@ -148,6 +148,8 @@ pub struct SubagentSpawner {
     /// The session's secrets, for the listing tool in child registries
     /// and the notification turns this spawner runs.
     secrets: Option<crate::secrets::Secrets>,
+    /// Whether child registries get the sudo tool (`agent.sudo`).
+    sudo: bool,
 }
 
 /// A subagent that is working right now, for anything that wants to
@@ -454,6 +456,7 @@ impl SubagentSpawner {
             services: None,
             available_models: Vec::new(),
             secrets: None,
+            sudo: false,
         })
     }
 
@@ -497,6 +500,11 @@ impl SubagentSpawner {
 
     pub fn with_secrets(mut self, secrets: crate::secrets::Secrets) -> Self {
         self.secrets = Some(secrets);
+        self
+    }
+
+    pub fn with_sudo(mut self, sudo: bool) -> Self {
+        self.sudo = sudo;
         self
     }
 
@@ -618,6 +626,7 @@ impl SubagentSpawner {
             services: self.services.clone(),
             available_models: self.available_models.clone(),
             secrets: self.secrets.clone(),
+            sudo: self.sudo,
         })
     }
 
@@ -641,9 +650,14 @@ impl SubagentSpawner {
                     None => registry,
                 };
                 let registry = registry.with_models(self.available_models.clone())?;
-                match &self.secrets {
+                let registry = match &self.secrets {
                     Some(secrets) if !secrets.store().is_empty() => registry.with_secrets()?,
                     _ => registry,
+                };
+                if self.sudo {
+                    registry.with_sudo()?
+                } else {
+                    registry
                 }
             }
         };

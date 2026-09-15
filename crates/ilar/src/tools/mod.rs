@@ -13,6 +13,7 @@ mod process;
 pub mod read;
 pub mod secrets_tool;
 pub mod service;
+pub mod sudo;
 pub mod web;
 pub mod write;
 
@@ -950,6 +951,7 @@ impl ChildTool {
     pub const HISTORY: Self = Self("history");
     pub const IMAGE_GEN: Self = Self("image_gen");
     pub const SECRETS: Self = Self("secrets");
+    pub const SUDO: Self = Self("sudo");
 
     /// Every non-builtin tool an allowlist may name.
     pub const ALL: &'static [Self] = &[
@@ -961,6 +963,7 @@ impl ChildTool {
         Self::HISTORY,
         Self::IMAGE_GEN,
         Self::SECRETS,
+        Self::SUDO,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -1119,6 +1122,15 @@ impl ToolRegistry {
         self.with_child_tool(
             ChildTool::SECRETS,
             std::sync::Arc::new(secrets_tool::SecretsTool),
+        )
+    }
+
+    /// Registry with the sudo tool attached — for a configuration that
+    /// turned it on (`agent.sudo`).
+    pub fn with_sudo(self) -> Result<Self, DuplicateToolError> {
+        self.with_child_tool(
+            ChildTool::SUDO,
+            std::sync::Arc::new(sudo::SudoTool::default()),
         )
     }
 

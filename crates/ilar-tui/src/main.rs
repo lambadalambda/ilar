@@ -2788,7 +2788,8 @@ async fn run_app(
     // The open grant prompt's reply path. Nothing persists: a grant
     // is for the command in front of the person, and the tool is
     // blocked on it until they answer or the turn goes away.
-    let mut grant_reply: Option<tokio::sync::oneshot::Sender<Option<ilar::secrets::Grant>>> = None;
+    let mut grant_reply: Option<tokio::sync::oneshot::Sender<Option<ilar::secrets::Approval>>> =
+        None;
     // Decisions accumulate here and are performed in one place below,
     // rather than each arm doing its own effects inline.
     let mut intents: Vec<Intent> = Vec::new();
@@ -3555,7 +3556,8 @@ async fn run_app(
                         Modal::Grant => {
                             let modal = app.grant_modal.as_mut().expect("grant modal");
                             if let GrantAction::Answer(answer) = modal.handle_key(key) {
-                                let line = modal.outcome_line(answer);
+                                let line =
+                                    modal.outcome_line(answer.as_ref().map(|answer| answer.grant));
                                 app.grant_modal = None;
                                 // The asker can go away between the
                                 // closed-check and this keypress; the

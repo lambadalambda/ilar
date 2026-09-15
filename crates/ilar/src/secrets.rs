@@ -22,7 +22,15 @@ use tokio::sync::{mpsc, oneshot};
 pub const FILE_NAME: &str = "secrets.json";
 pub const MAX_NAME_CHARS: usize = 64;
 /// The tools that take `secrets`, by name: what a standing grant may name.
-pub const GRANTABLE_TOOLS: &[&str] = &["bash", "service"];
+pub const GRANTABLE_TOOLS: &[&str] = &["bash", "service", "sudo"];
+/// The pseudo-secret the sudo tool asks for: root has no value to hand
+/// over, only a yes. Reserved: it cannot be stored.
+pub const ROOT: &str = "root";
+/// What the `root` row says it is for.
+pub const ROOT_DESCRIPTION: &str = "superuser, for the sudo tool";
+/// The secret that answers sudo's password prompt: typed into the
+/// grant prompt and held for the session, or stored under this name.
+pub const SUDO_PASSWORD: &str = "SUDO_PASSWORD";
 /// A value shorter than this is refused at the door: replacing "ab"
 /// wherever it appears in output, or hiding every variable that
 /// happens to equal "1", mangles more than it protects.
@@ -32,6 +40,10 @@ pub const MIN_VALUE_CHARS: usize = 4;
 struct File {
     #[serde(default)]
     secrets: BTreeMap<String, Entry>,
+    /// Tools with standing approval to run as root: `sudo`, when the
+    /// person answered "always".
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    root: BTreeSet<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -150,10 +162,11 @@ impl SecretStore {
         Ok(file)
     }
 
-    /// Every secret, without its value, by name.
+    /// Every secret, without its value, by name; `root` last, when a
+    /// tool holds standing approval for it.
     pub fn list(&self) -> Result<Vec<Listed>> {
-        Ok(self
-            .load()?
+        let file = self.load()?;
+        let mut listed: Vec<Listed> = file
             .secrets
             .into_iter()
             .map(|(name, entry)| Listed {
@@ -161,13 +174,31 @@ impl SecretStore {
                 description: entry.description,
                 always: entry.always.into_iter().collect(),
             })
-            .collect())
+            .collect();
+        if !file.root.is_empty() {
+            listed.push(Listed {
+                name: ROOT.into(),
+                description: ROOT_DESCRIPTION.into(),
+                always: file.root.into_iter().collect(),
+            });
+        }
+        Ok(listed)
+    }
+
+    /// Whether `tool` may run as root without asking.
+    pub fn root_granted(&self, tool: &str) -> bool {
+        self.load()
+            .map(|file| file.root.contains(tool))
+            .unwrap_or(false)
     }
 
     /// Store a secret. A name already there keeps its grants: a rotated
     /// key is the same secret. Returns whether it replaced one.
     pub fn set(&self, name: &str, description: &str, value: &str) -> Result<bool> {
         valid_name(name).map_err(anyhow::Error::msg)?;
+        if name == ROOT {
+            anyhow::bail!("{ROOT} is not a secret to store: it is what the sudo tool asks for");
+        }
         if value.chars().count() < MIN_VALUE_CHARS {
             anyhow::bail!(
                 "the value of {name} is under {MIN_VALUE_CHARS} characters; that is not a secret"
@@ -194,26 +225,40 @@ impl SecretStore {
         self.update(|file| file.secrets.remove(name).is_some())
     }
 
-    /// Grant `tool` the secret for good. Returns whether the secret exists.
+    /// Grant `tool` the secret for good. Returns whether the secret
+    /// exists; `root` always does.
     pub fn grant_always(&self, name: &str, tool: &str) -> Result<bool> {
-        self.update(|file| match file.secrets.get_mut(name) {
-            Some(entry) => {
-                entry.always.insert(tool.to_string());
-                true
+        self.update(|file| {
+            if name == ROOT {
+                file.root.insert(tool.to_string());
+                return true;
             }
-            None => false,
+            match file.secrets.get_mut(name) {
+                Some(entry) => {
+                    entry.always.insert(tool.to_string());
+                    true
+                }
+                None => false,
+            }
         })
     }
 
     /// Drop the standing grants of a secret, for one tool or all.
     /// Returns whether any was dropped.
     pub fn revoke(&self, name: &str, tool: Option<&str>) -> Result<bool> {
-        self.update(|file| match file.secrets.get_mut(name) {
-            Some(entry) => match tool {
-                Some(tool) => entry.always.remove(tool),
-                None => !std::mem::take(&mut entry.always).is_empty(),
-            },
-            None => false,
+        self.update(|file| {
+            let grants = if name == ROOT {
+                &mut file.root
+            } else {
+                match file.secrets.get_mut(name) {
+                    Some(entry) => &mut entry.always,
+                    None => return false,
+                }
+            };
+            match tool {
+                Some(tool) => grants.remove(tool),
+                None => !std::mem::take(grants).is_empty(),
+            }
         })
     }
 
@@ -256,6 +301,24 @@ pub enum Grant {
     Always,
 }
 
+/// The person's answer to a prompt: how long, and what they typed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Approval {
+    pub grant: Grant,
+    /// Typed into the prompt when it asked for one: sudo's password.
+    /// Held in memory for the session, never written anywhere.
+    pub password: Option<String>,
+}
+
+impl From<Grant> for Approval {
+    fn from(grant: Grant) -> Self {
+        Self {
+            grant,
+            password: None,
+        }
+    }
+}
+
 /// A request to use a secret, delivered over [`GrantSender`] with its
 /// one-shot reply path. `None` in the reply is a refusal.
 #[derive(Debug)]
@@ -269,7 +332,10 @@ pub struct GrantPrompt {
     /// What the tool is about to run with it: the command, verbatim.
     /// The person reads this before saying yes; it is the whole safety.
     pub detail: String,
-    pub reply: oneshot::Sender<Option<Grant>>,
+    /// The prompt should take a password along with the answer: root,
+    /// when none is held or stored. Empty means the system needs none.
+    pub password_wanted: bool,
+    pub reply: oneshot::Sender<Option<Approval>>,
 }
 
 pub type GrantSender = mpsc::Sender<GrantPrompt>;
@@ -287,6 +353,15 @@ pub struct Granted {
 }
 
 impl Granted {
+    /// A value a tool obtained on its own authority: the sudo tool's
+    /// stored password, covered by the command's approval.
+    pub(crate) fn new(name: &str, value: String) -> Self {
+        Self {
+            name: name.to_string(),
+            value,
+        }
+    }
+
     pub fn value(&self) -> &str {
         &self.value
     }
@@ -317,6 +392,9 @@ pub struct Secrets {
     store: SecretStore,
     /// `(secret, tool)` pairs granted for the session.
     session: Arc<Mutex<BTreeSet<(String, String)>>>,
+    /// Values typed into a prompt for this session: sudo's password.
+    /// Shielded and redacted like stored ones, never written.
+    held: Arc<Mutex<BTreeMap<String, String>>>,
     prompts: Option<GrantSender>,
 }
 
@@ -331,6 +409,7 @@ impl Secrets {
         Self {
             store,
             session: Arc::new(Mutex::new(BTreeSet::new())),
+            held: Arc::new(Mutex::new(BTreeMap::new())),
             prompts: None,
         }
     }
@@ -389,7 +468,25 @@ impl Secrets {
     /// environment and redacting output. An unreadable store yields
     /// nothing here; the resolve path is where that gets reported.
     pub fn all(&self) -> Vec<Granted> {
-        self.store.all().unwrap_or_default()
+        let mut all = self.store.all().unwrap_or_default();
+        all.extend(
+            self.held
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(name, value)| Granted::new(name, value.clone())),
+        );
+        all
+    }
+
+    /// A value a tool may take on its own authority — the sudo tool's
+    /// password, covered by the command's approval: what was typed this
+    /// session first, then the store.
+    pub fn held_or_stored(&self, name: &str) -> Result<Option<String>> {
+        if let Some(value) = self.held.lock().unwrap().get(name) {
+            return Ok(Some(value.clone()));
+        }
+        self.store.value(name)
     }
 
     /// Text with every stored value replaced, whether or not this call
@@ -423,7 +520,7 @@ impl Secrets {
         let mut granted = Vec::new();
         for (name, entry) in entries {
             if !entry.always.contains(request.tool) && !self.session_granted(name, request.tool) {
-                self.ask(&request, name, &entry.description).await?;
+                self.ask(&request, name, &entry.description, false).await?;
             }
             granted.push(Granted {
                 name: name.clone(),
@@ -431,6 +528,24 @@ impl Secrets {
             });
         }
         Ok(granted)
+    }
+
+    /// Approval to run `request.detail` as root, for the sudo tool:
+    /// standing, given this session, or asked for now. `reason` is
+    /// what the model said it is for.
+    pub async fn approve_root(&self, request: Request<'_>, reason: &str) -> Result<(), String> {
+        let password_known = self
+            .held_or_stored(SUDO_PASSWORD)
+            .map_err(|error| format!("secrets: {error:#}"))?
+            .is_some();
+        let granted =
+            self.store.root_granted(request.tool) || self.session_granted(ROOT, request.tool);
+        if granted && password_known {
+            return Ok(());
+        }
+        // Even a standing grant asks when no password is known: the
+        // prompt is where one gets typed.
+        self.ask(&request, ROOT, reason, !password_known).await
     }
 
     fn session_granted(&self, name: &str, tool: &str) -> bool {
@@ -463,6 +578,7 @@ impl Secrets {
         request: &Request<'_>,
         name: &str,
         description: &str,
+        password_wanted: bool,
     ) -> Result<(), String> {
         let Some(sender) = &self.prompts else {
             return Err(format!(
@@ -479,6 +595,7 @@ impl Secrets {
             secret: name.to_string(),
             description: description.to_string(),
             detail: request.detail.to_string(),
+            password_wanted,
             reply,
         };
         let unavailable = || {
@@ -499,16 +616,31 @@ impl Secrets {
             answer = receive => answer,
             _ = request.cancel.cancelled() => return Err("cancelled while asking for a secret".into()),
         };
-        match answer {
-            Ok(Some(Grant::Once)) => Ok(()),
-            Ok(Some(Grant::Session)) => {
+        let approval = match answer {
+            Ok(Some(approval)) => approval,
+            Ok(None) => {
+                return Err(format!(
+                    "the user denied {name} for this {} call",
+                    request.tool
+                ));
+            }
+            Err(_) => return Err(unavailable()),
+        };
+        if let Some(password) = approval.password.filter(|password| !password.is_empty()) {
+            self.held
+                .lock()
+                .unwrap()
+                .insert(SUDO_PASSWORD.to_string(), password);
+        }
+        match approval.grant {
+            Grant::Once => {}
+            Grant::Session => {
                 self.session
                     .lock()
                     .unwrap()
                     .insert((name.to_string(), request.tool.to_string()));
-                Ok(())
             }
-            Ok(Some(Grant::Always)) => {
+            Grant::Always => {
                 // The person said yes; a store that cannot be written
                 // makes that a session grant rather than a refusal.
                 if self.store.grant_always(name, request.tool).is_err() {
@@ -517,14 +649,9 @@ impl Secrets {
                         .unwrap()
                         .insert((name.to_string(), request.tool.to_string()));
                 }
-                Ok(())
             }
-            Ok(None) => Err(format!(
-                "the user denied {name} for this {} call",
-                request.tool
-            )),
-            Err(_) => Err(unavailable()),
         }
+        Ok(())
     }
 }
 
@@ -696,6 +823,79 @@ mod tests {
         assert!(store.list().unwrap()[0].always.is_empty());
     }
 
+    /// Root is a pseudo-secret: nothing to store, a standing grant to
+    /// keep, listed last, revoked by name.
+    #[tokio::test]
+    async fn root_is_approved_not_stored() {
+        let (_dir, store) = store();
+        assert!(store.set(ROOT, "", "hunter22").is_err());
+        assert!(!store.root_granted("sudo"));
+        let (tx, mut rx) = grant_channel(1);
+        let secrets = Secrets::new(store.clone()).with_prompts(tx);
+        let cancel = cancel();
+        let ask = Request {
+            tool: "sudo",
+            names: &[],
+            detail: "apt install ripgrep",
+            session_id: "s1",
+            tool_call_id: None,
+            cancel: &cancel,
+        };
+        let (outcome, asked) = tokio::join!(
+            secrets.approve_root(ask, "to install ripgrep"),
+            answer(&mut rx, None)
+        );
+        assert!(outcome.unwrap_err().contains("denied root"));
+        assert_eq!((asked.tool.as_str(), asked.secret.as_str()), ("sudo", ROOT));
+        assert_eq!(asked.description, "to install ripgrep");
+        assert!(asked.password_wanted, "no password is known yet");
+        // A typed password is held for the session and covers the
+        // next asks; with a standing grant nothing is asked again.
+        let (outcome, _) = tokio::join!(
+            secrets.approve_root(ask, ""),
+            answer_with(
+                &mut rx,
+                Some(Approval {
+                    grant: Grant::Always,
+                    password: Some("hunter22".into()),
+                })
+            )
+        );
+        assert!(outcome.is_ok());
+        assert!(store.root_granted("sudo"));
+        assert_eq!(
+            secrets.held_or_stored(SUDO_PASSWORD).unwrap().as_deref(),
+            Some("hunter22")
+        );
+        assert!(
+            store.value(SUDO_PASSWORD).unwrap().is_none(),
+            "written to disk"
+        );
+        assert!(secrets.all().iter().any(|held| held.name == SUDO_PASSWORD));
+        assert!(secrets.approve_root(ask, "").await.is_ok());
+        // A fresh runtime holds no password: the standing grant still
+        // asks, for the password alone.
+        let (tx2, mut rx2) = grant_channel(1);
+        let fresh = Secrets::new(store.clone()).with_prompts(tx2);
+        let (outcome, asked) = tokio::join!(
+            fresh.approve_root(ask, ""),
+            answer(&mut rx2, Some(Grant::Once))
+        );
+        assert!(outcome.is_ok());
+        assert!(asked.password_wanted);
+        let listed = store.list().unwrap();
+        assert_eq!(listed.last().unwrap().name, ROOT);
+        assert_eq!(listed.last().unwrap().always, ["sudo"]);
+        assert!(store.revoke(ROOT, None).unwrap());
+        assert!(store.list().unwrap().is_empty());
+        let fresh = Secrets::new(store.clone());
+        let error = fresh.approve_root(ask, "").await.unwrap_err();
+        assert!(
+            error.contains("ilar secret grant root --tool sudo"),
+            "{error}"
+        );
+    }
+
     /// One unknown name fails the call before anyone is asked about
     /// the known ones.
     #[tokio::test]
@@ -746,6 +946,10 @@ mod tests {
 
     /// Answer the next prompt, returning what it asked.
     async fn answer(rx: &mut GrantReceiver, grant: Option<Grant>) -> GrantPrompt {
+        answer_with(rx, grant.map(Approval::from)).await
+    }
+
+    async fn answer_with(rx: &mut GrantReceiver, approval: Option<Approval>) -> GrantPrompt {
         let prompt = rx.recv().await.unwrap();
         let (tool, secret, detail) = (
             prompt.tool.clone(),
@@ -757,9 +961,10 @@ mod tests {
             session_id,
             tool_call_id,
             description,
+            password_wanted,
             ..
         } = prompt;
-        reply.send(grant).unwrap();
+        reply.send(approval).unwrap();
         let (dead, _) = oneshot::channel();
         GrantPrompt {
             session_id,
@@ -768,6 +973,7 @@ mod tests {
             secret,
             description,
             detail,
+            password_wanted,
             reply: dead,
         }
     }

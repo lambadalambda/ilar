@@ -5,7 +5,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use ilar::secrets::{Grant, GrantPrompt, GrantReceiver};
+use ilar::secrets::{Approval, Grant, GrantPrompt, GrantReceiver};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
@@ -18,7 +18,7 @@ pub const GRANT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10
 pub struct PendingGrant {
     pub secret: String,
     pub tool: String,
-    answer: oneshot::Sender<Option<Grant>>,
+    answer: oneshot::Sender<Option<Approval>>,
 }
 
 /// One seat's slot for the ask in flight: a tool blocks on its answer,
@@ -43,15 +43,19 @@ pub fn decided(secret: &str, tool: &str, grant: Option<Grant>) -> String {
 
 /// Answer the ask waiting on `slot`, if any. `Err` says why nothing
 /// was answered.
-pub fn answer(slot: &PendingSlot, grant: Option<Grant>) -> Result<String, &'static str> {
+pub fn answer(slot: &PendingSlot, approval: Option<Approval>) -> Result<String, &'static str> {
     let pending = slot.lock().unwrap().take();
     let Some(pending) = pending else {
         return Err("Nothing is waiting for a grant.");
     };
-    let text = decided(&pending.secret, &pending.tool, grant);
+    let text = decided(
+        &pending.secret,
+        &pending.tool,
+        approval.as_ref().map(|approval| approval.grant),
+    );
     pending
         .answer
-        .send(grant)
+        .send(approval)
         .map(|()| text)
         .map_err(|_| "The tool stopped waiting for that.")
 }
@@ -63,9 +67,15 @@ pub fn ask_text(prompt: &GrantPrompt) -> String {
     } else {
         format!(" ({})", prompt.description)
     };
+    let password = if prompt.password_wanted {
+        " Put the sudo password last (/grant session <password>) if the system wants one; \
+         it is held in memory until the gateway stops."
+    } else {
+        ""
+    };
     format!(
         "🔑 {} wants {}{purpose} to run:\n{}\n/grant allows it this once, /grant session or \
-         /grant always for longer, /deny refuses. Unanswered in {} minutes, it is a no.",
+         /grant always for longer, /deny refuses. Unanswered in {} minutes, it is a no.{password}",
         prompt.tool,
         prompt.secret,
         prompt.detail,
@@ -147,7 +157,7 @@ pub async fn watch(
 mod tests {
     use super::*;
 
-    fn prompt(reply: oneshot::Sender<Option<Grant>>) -> GrantPrompt {
+    fn prompt(reply: oneshot::Sender<Option<Approval>>) -> GrantPrompt {
         GrantPrompt {
             session_id: "s".into(),
             tool_call_id: None,
@@ -155,6 +165,7 @@ mod tests {
             secret: "GITHUB_TOKEN".into(),
             description: "for gh".into(),
             detail: "gh pr list".into(),
+            password_wanted: false,
             reply,
         }
     }
@@ -214,12 +225,12 @@ mod tests {
         })
         .await
         .unwrap();
-        let text = answer(&h.slot, Some(Grant::Session)).unwrap();
+        let text = answer(&h.slot, Some(Approval::from(Grant::Session))).unwrap();
         assert!(
             text.starts_with("GITHUB_TOKEN allowed for bash until"),
             "{text}"
         );
-        assert_eq!(receive.await.unwrap(), Some(Grant::Session));
+        assert_eq!(receive.await.unwrap(), Some(Approval::from(Grant::Session)));
         assert_eq!(
             answer(&h.slot, None),
             Err("Nothing is waiting for a grant.")
@@ -250,7 +261,7 @@ mod tests {
         let over = h.outbound.recv().await.unwrap();
         assert!(over.text.contains("stopped waiting"), "{}", over.text);
         assert_eq!(
-            answer(&h.slot, Some(Grant::Once)),
+            answer(&h.slot, Some(Approval::from(Grant::Once))),
             Err("Nothing is waiting for a grant.")
         );
         h.cancel.cancel();

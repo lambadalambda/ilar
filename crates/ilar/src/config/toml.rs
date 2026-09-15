@@ -132,6 +132,10 @@ pub struct AgentConfig {
     /// looping model otherwise generates until its context fills.
     #[serde(default = "default_max_output_tokens")]
     pub max_output_tokens: u64,
+    /// Install the sudo tool: one command as root, after the person
+    /// has read it and said yes. Off unless asked for.
+    #[serde(default)]
+    pub sudo: bool,
 }
 
 impl Default for AgentConfig {
@@ -139,6 +143,7 @@ impl Default for AgentConfig {
         Self {
             max_iterations: default_max_iterations(),
             max_output_tokens: default_max_output_tokens(),
+            sudo: false,
         }
     }
 }
@@ -288,6 +293,7 @@ struct FileConfig {
 struct AgentLayer {
     max_iterations: Option<usize>,
     max_output_tokens: Option<u64>,
+    sudo: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -775,6 +781,11 @@ impl Config {
                     .as_ref()
                     .and_then(|config| config.max_output_tokens)
                     .unwrap_or_else(default_max_output_tokens),
+                sudo: merged
+                    .agent
+                    .as_ref()
+                    .and_then(|config| config.sudo)
+                    .unwrap_or(false),
             },
             compaction: CompactionConfig {
                 threshold: merged
@@ -1153,6 +1164,7 @@ fn merge_file(base: FileConfig, text: &str, origin: &Path) -> anyhow::Result<Fil
             agent,
             max_iterations,
             max_output_tokens,
+            sudo,
         );
     }
     if let Some(compaction) = parsed.compaction {

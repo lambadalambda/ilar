@@ -13,8 +13,9 @@ pub enum Command {
     },
     /// Cancel the turn running on this chat.
     Abort,
-    /// Answer a tool's ask for a secret: once, this session, or always.
-    Grant(ilar::secrets::Grant),
+    /// Answer a tool's ask for a secret: once, this session, or always,
+    /// with the sudo password when the ask wanted one.
+    Grant(ilar::secrets::Approval),
     /// Refuse it.
     Deny,
     /// Replace this chat's conversation with one handover summary.
@@ -53,10 +54,10 @@ pub fn parse(text: &str) -> Option<Command> {
             }
         }
         ("abort" | "stop", _) => Command::Abort,
-        ("grant", None | Some("once")) => Command::Grant(ilar::secrets::Grant::Once),
-        ("grant", Some("session")) => Command::Grant(ilar::secrets::Grant::Session),
-        ("grant", Some("always")) => Command::Grant(ilar::secrets::Grant::Always),
-        ("grant", Some(other)) => Command::Unknown(format!("grant {other}")),
+        ("grant", argument) => match parse_grant(argument.unwrap_or_default()) {
+            Some(approval) => Command::Grant(approval),
+            None => Command::Unknown(format!("grant {}", argument.unwrap_or_default())),
+        },
         ("deny", _) => Command::Deny,
         ("compact", _) => Command::Compact,
         ("help", _) => Command::Help,
@@ -67,10 +68,32 @@ pub fn parse(text: &str) -> Option<Command> {
     })
 }
 
+/// `[once|session|always] [password]`: the span first, the password —
+/// sudo's, when the ask wanted one — as everything after it.
+fn parse_grant(argument: &str) -> Option<ilar::secrets::Approval> {
+    use ilar::secrets::{Approval, Grant};
+    let argument = argument.trim();
+    let (span, rest) = match argument.split_once(char::is_whitespace) {
+        Some((span, rest)) => (span, rest.trim()),
+        None => (argument, ""),
+    };
+    let (grant, password) = match span {
+        "" | "once" => (Grant::Once, rest),
+        "session" => (Grant::Session, rest),
+        "always" => (Grant::Always, rest),
+        // No span word: the whole argument is the password.
+        _ => (Grant::Once, argument),
+    };
+    Some(Approval {
+        grant,
+        password: (!password.is_empty()).then(|| password.to_string()),
+    })
+}
+
 pub const HELP: &str = "/new — start a fresh chat (memory stays)\n\
 /model — list the models; /model <provider/model> switches; add --save to make it the default for new chats\n\
 /abort — cancel the turn running now; messages that were waiting run after it\n\
-/grant [session|always], /deny — answer a tool's ask for a stored secret\n\
+/grant [session|always] [password], /deny — answer a tool's ask for a stored secret or for root\n\
 /compact — replace the conversation with one handover summary; memory stays\n\
 /pending — what the review wants to remember, when approval is on\n\
 /approve [id|all], /reject [id|all] — decide on it\n\
@@ -123,21 +146,32 @@ mod tests {
         assert_eq!(parse("/abort"), Some(Command::Abort));
         assert_eq!(parse("/compact"), Some(Command::Compact));
         assert_eq!(parse("/stop now"), Some(Command::Abort));
+        use ilar::secrets::{Approval, Grant};
         assert_eq!(
             parse("/grant"),
-            Some(Command::Grant(ilar::secrets::Grant::Once))
+            Some(Command::Grant(Approval::from(Grant::Once)))
         );
         assert_eq!(
             parse("/grant always"),
-            Some(Command::Grant(ilar::secrets::Grant::Always))
+            Some(Command::Grant(Approval::from(Grant::Always)))
         );
         assert_eq!(
             parse("/grant session "),
-            Some(Command::Grant(ilar::secrets::Grant::Session))
+            Some(Command::Grant(Approval::from(Grant::Session)))
         );
         assert_eq!(
-            parse("/grant forever"),
-            Some(Command::Unknown("grant forever".into()))
+            parse("/grant session hunter two"),
+            Some(Command::Grant(Approval {
+                grant: Grant::Session,
+                password: Some("hunter two".into())
+            }))
+        );
+        assert_eq!(
+            parse("/grant hunter2"),
+            Some(Command::Grant(Approval {
+                grant: Grant::Once,
+                password: Some("hunter2".into())
+            }))
         );
         assert_eq!(parse("/deny"), Some(Command::Deny));
         assert_eq!(parse("/pending"), Some(Command::Pending));

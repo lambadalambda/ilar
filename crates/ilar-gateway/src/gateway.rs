@@ -522,9 +522,9 @@ impl Gateway {
 
     /// `/grant` or `/deny`: the ask standing on this chat's seat gets
     /// the answer, and the chat hears what was decided.
-    fn answer_grant(&self, key: &str, grant: Option<ilar::secrets::Grant>) -> String {
+    fn answer_grant(&self, key: &str, approval: Option<ilar::secrets::Approval>) -> String {
         match self.driver.seat_by_key(key) {
-            Some(seat) => match self.driver.answer_grant(&seat, grant) {
+            Some(seat) => match self.driver.answer_grant(&seat, approval) {
                 Ok(text) => {
                     log(&format!("{key}: {text}"));
                     text
@@ -599,7 +599,7 @@ impl Gateway {
                     }
                 }
             }
-            Command::Grant(grant) => self.answer_grant(key, Some(grant)),
+            Command::Grant(approval) => self.answer_grant(key, Some(approval)),
             Command::Deny => self.answer_grant(key, None),
             Command::Abort => match self.driver.seat_by_key(key) {
                 Some(seat) if self.driver.abort(&seat) => {

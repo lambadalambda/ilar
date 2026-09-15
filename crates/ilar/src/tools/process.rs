@@ -74,6 +74,10 @@ pub(crate) async fn drain<R: tokio::io::AsyncRead + Unpin>(
 pub(crate) struct ChildEnv {
     pub remove: Vec<String>,
     pub set: Vec<(String, String)>,
+    /// Bytes for the child's stdin, then end of file; `None` is
+    /// `/dev/null`. The sudo tool's password goes this way, never in
+    /// the arguments.
+    pub stdin: Option<Vec<u8>>,
 }
 
 impl ChildEnv {
@@ -91,6 +95,7 @@ impl ChildEnv {
                 .iter()
                 .map(|secret| (secret.name.clone(), secret.value().to_string()))
                 .collect(),
+            stdin: None,
         }
     }
 }
@@ -120,7 +125,11 @@ pub(crate) fn shell_command(
     }
     command
         .envs(env.set.iter().map(|(name, value)| (name, value)))
-        .stdin(std::process::Stdio::null())
+        .stdin(if env.stdin.is_some() {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::null()
+        })
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
@@ -297,6 +306,7 @@ mod tests {
                 ("PROCESS_TEST_GRANTED".into(), "granted-value".into()),
                 ("PROCESS_TEST_BOTH".into(), "both-value".into()),
             ],
+            stdin: None,
         };
         let output = shell_command(
             "echo \"h=[$PROCESS_TEST_HIDDEN] g=$PROCESS_TEST_GRANTED b=$PROCESS_TEST_BOTH p=${PATH:+set}\"",

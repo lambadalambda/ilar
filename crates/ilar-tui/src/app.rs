@@ -3104,6 +3104,7 @@ mod tests {
                 secret: "TOKEN".into(),
                 description: String::new(),
                 detail: "gh api /user".into(),
+                password_wanted: false,
                 reply,
             },
             false,

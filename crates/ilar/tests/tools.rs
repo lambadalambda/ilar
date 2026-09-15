@@ -2565,3 +2565,79 @@ async fn a_spilled_output_holds_no_secret_value() {
         &spilled[spilled.len() - 200..]
     );
 }
+
+/// A stand-in for sudo: says what it was asked to run, reads the
+/// password when told to, then runs the command as itself.
+fn fake_sudo(dir: &std::path::Path) -> std::path::PathBuf {
+    let path = dir.join("fake-sudo");
+    std::fs::write(
+        &path,
+        "#!/bin/sh\nwhile [ $# -gt 0 ]; do case \"$1\" in\n  -S) read pw; echo \"pw=$pw\"; shift;;\n  -p) shift 2;;\n  -n) echo \"noninteractive\"; shift;;\n  --) shift; break;;\n  *) break;;\nesac; done\necho \"root: $*\"\nexec \"$@\"\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    path
+}
+
+/// The sudo tool runs one approved command through the binary, feeds a
+/// held or stored password on stdin, and never shows it.
+#[tokio::test]
+async fn sudo_runs_an_approved_command_and_feeds_the_password_unseen() {
+    use ilar::tools::Tool;
+    let dir = tempfile::tempdir().unwrap();
+    let sudo = ilar::tools::sudo::SudoTool::with_binary(&fake_sudo(dir.path()).to_string_lossy());
+    let store = ilar::secrets::SecretStore::open(&dir.path().join("state"));
+    let call = serde_json::json!({"command": "echo hi from $(whoami)", "reason": "a test"});
+
+    // No store: nobody to ask.
+    let out = sudo.run(call.clone(), ctx(dir.path())).await;
+    assert!(out.is_error);
+    assert!(
+        out.content.contains("nobody can be asked"),
+        "{}",
+        out.content
+    );
+
+    // A store with nobody to ask and no standing grant: refused, with the line.
+    let secrets = ilar::secrets::Secrets::new(store.clone());
+    let out = sudo
+        .run(call.clone(), ctx(dir.path()).with_secrets(secrets.clone()))
+        .await;
+    assert!(out.is_error);
+    assert!(
+        out.content.contains("ilar secret grant root --tool sudo"),
+        "{}",
+        out.content
+    );
+
+    // Standing grant, no password anywhere: still asked (for the
+    // password), and with nobody to ask that is a no.
+    store.grant_always("root", "sudo").unwrap();
+    let out = sudo
+        .run(call.clone(), ctx(dir.path()).with_secrets(secrets.clone()))
+        .await;
+    assert!(out.is_error, "{}", out.content);
+
+    // With a stored password the grant stands and the password rides stdin.
+    store.set("SUDO_PASSWORD", "", "hunter22").unwrap();
+    let out = sudo
+        .run(call.clone(), ctx(dir.path()).with_secrets(secrets.clone()))
+        .await;
+    assert!(!out.is_error, "{}", out.content);
+    assert!(
+        out.content.contains("pw=<secret:SUDO_PASSWORD>"),
+        "{}",
+        out.content
+    );
+    assert!(
+        out.content.contains("root: sh -c echo hi from $(whoami)"),
+        "{}",
+        out.content
+    );
+    assert!(out.content.contains("hi from"), "{}", out.content);
+    assert!(!out.content.contains("hunter22"), "{}", out.content);
+}

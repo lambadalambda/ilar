@@ -10,7 +10,7 @@ use serde::Deserialize;
 
 /// Tools that change the machine or reach out from it. Safe mode is
 /// this list, denied.
-pub const UNSAFE_TOOLS: &[&str] = &["bash", "write", "edit", "service", "image_gen"];
+pub const UNSAFE_TOOLS: &[&str] = &["bash", "write", "edit", "service", "image_gen", "sudo"];
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]

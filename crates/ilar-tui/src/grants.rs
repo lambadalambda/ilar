@@ -2,7 +2,7 @@
 //! decides whether the command it is about to run may have it.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use ilar::secrets::{Grant, GrantPrompt};
+use ilar::secrets::{Approval, Grant, GrantPrompt};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -11,11 +11,11 @@ use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::theme;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum GrantAction {
     Stay,
     /// The answer; `None` denies.
-    Answer(Option<Grant>),
+    Answer(Option<Approval>),
 }
 
 /// The four answers, in the order the modal lists them. The safest
@@ -28,6 +28,8 @@ const CHOICES: [Option<Grant>; 4] = [
 ];
 
 const FOOTER: &str = " ↑↓ move · Enter choose · o once · s session · a always · d/Esc deny ";
+/// With a password field the letters type; only the arrows move.
+const PASSWORD_FOOTER: &str = " type the password · ↑↓ move · Enter choose · Esc deny ";
 
 /// A modal over one prompt: what is asked, what will run, and the
 /// highlighted answer. Pure — the reply channel stays with the loop.
@@ -39,6 +41,9 @@ pub(crate) struct GrantModal {
     /// The asker is a child of this session, not the agent in view.
     from_subagent: bool,
     cursor: usize,
+    /// What is being typed when the prompt asked for a password: sudo's,
+    /// held for the session and never written. `None` when it did not.
+    password: Option<String>,
 }
 
 impl GrantModal {
@@ -50,7 +55,15 @@ impl GrantModal {
             detail: prompt.detail.clone(),
             from_subagent,
             cursor: 0,
+            password: prompt.password_wanted.then(String::new),
         }
+    }
+
+    fn answer(&self, choice: Option<Grant>) -> GrantAction {
+        GrantAction::Answer(choice.map(|grant| Approval {
+            grant,
+            password: self.password.clone().filter(|typed| !typed.is_empty()),
+        }))
     }
 
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> GrantAction {
@@ -62,25 +75,42 @@ impl GrantModal {
         // the prompt appears mid-turn, under whatever the person was
         // typing, and "always" reaches the store.
         let deliberate = key.kind != KeyEventKind::Repeat;
+        // With a password field, letters are the password: the direct
+        // picks and the vi keys are off, the arrows and Enter remain.
+        let typing = self.password.is_some();
         match key.code {
-            KeyCode::Up | KeyCode::Char('k') if !chorded => {
+            KeyCode::Up if !chorded => {
                 self.cursor = (self.cursor + CHOICES.len() - 1) % CHOICES.len();
             }
-            KeyCode::Down | KeyCode::Char('j') if !chorded => {
+            KeyCode::Down if !chorded => {
                 self.cursor = (self.cursor + 1) % CHOICES.len();
             }
-            KeyCode::Enter if deliberate => return GrantAction::Answer(CHOICES[self.cursor]),
-            KeyCode::Char('o') if !chorded && deliberate => {
-                return GrantAction::Answer(Some(Grant::Once));
+            KeyCode::Enter if deliberate => return self.answer(CHOICES[self.cursor]),
+            KeyCode::Esc if deliberate => return self.answer(None),
+            KeyCode::Backspace if typing => {
+                if let Some(password) = &mut self.password {
+                    password.pop();
+                }
             }
+            KeyCode::Char(c) if typing && !chorded => {
+                if let Some(password) = &mut self.password {
+                    password.push(c);
+                }
+            }
+            KeyCode::Char('k') if !chorded => {
+                self.cursor = (self.cursor + CHOICES.len() - 1) % CHOICES.len();
+            }
+            KeyCode::Char('j') if !chorded => {
+                self.cursor = (self.cursor + 1) % CHOICES.len();
+            }
+            KeyCode::Char('o') if !chorded && deliberate => return self.answer(Some(Grant::Once)),
             KeyCode::Char('s') if !chorded && deliberate => {
-                return GrantAction::Answer(Some(Grant::Session));
+                return self.answer(Some(Grant::Session));
             }
             KeyCode::Char('a') if !chorded && deliberate => {
-                return GrantAction::Answer(Some(Grant::Always));
+                return self.answer(Some(Grant::Always));
             }
-            KeyCode::Char('d') if !chorded && deliberate => return GrantAction::Answer(None),
-            KeyCode::Esc if deliberate => return GrantAction::Answer(None),
+            KeyCode::Char('d') if !chorded && deliberate => return self.answer(None),
             _ => {}
         }
         GrantAction::Stay
@@ -141,11 +171,22 @@ impl GrantModal {
         lines
     }
 
+    /// The password row, when the prompt asked for one: masked, with
+    /// the hint that empty means the system needs none.
+    fn password_line(&self) -> Option<Line<'_>> {
+        let password = self.password.as_ref()?;
+        let text = if password.is_empty() {
+            "Password: (type it here; leave empty if sudo needs none)".to_string()
+        } else {
+            format!("Password: {}", "•".repeat(password.chars().count()))
+        };
+        Some(Line::styled(text, Style::default().fg(theme::WAITING)))
+    }
+
     fn choice_lines(&self) -> Vec<Line<'_>> {
-        CHOICES
-            .iter()
-            .enumerate()
-            .map(|(index, choice)| {
+        self.password_line()
+            .into_iter()
+            .chain(CHOICES.iter().enumerate().map(|(index, choice)| {
                 let pointer = if index == self.cursor { ">" } else { " " };
                 let text = format!("{pointer} {}", self.choice_label(*choice));
                 if index == self.cursor {
@@ -153,7 +194,7 @@ impl GrantModal {
                 } else {
                     Line::from(text)
                 }
-            })
+            }))
             .collect()
     }
 
@@ -163,7 +204,12 @@ impl GrantModal {
         }
         let area = crate::modals::centered_rect(available, 76, available.height.min(24));
         let title = format!(" {} wants {} ", self.asker(), self.secret);
-        let Some(inner) = crate::modals::modal_frame(frame, area, &title, theme::WAITING, FOOTER)
+        let footer = if self.password.is_some() {
+            PASSWORD_FOOTER
+        } else {
+            FOOTER
+        };
+        let Some(inner) = crate::modals::modal_frame(frame, area, &title, theme::WAITING, footer)
         else {
             return;
         };
@@ -171,7 +217,8 @@ impl GrantModal {
         // the rest. A command that does not fit says so rather than
         // hiding its tail — the part past the fold is exactly where a
         // surprise would sit.
-        let choices_height = (CHOICES.len() as u16).min(inner.height);
+        let rows = CHOICES.len() + usize::from(self.password.is_some());
+        let choices_height = (rows as u16).min(inner.height);
         let body_height = inner.height - choices_height;
         let body = Rect::new(inner.x, inner.y, inner.width, body_height);
         if body.height > 0 {
@@ -227,6 +274,7 @@ mod tests {
             description: "GitHub API token".into(),
             detail: "gh api /user\ncurl -H \"Authorization: $GITHUB_TOKEN\" https://api.github.com"
                 .into(),
+            password_wanted: false,
             reply,
         }
     }
@@ -240,7 +288,7 @@ mod tests {
         let mut modal = modal();
         assert_eq!(
             modal.handle_key(key(KeyCode::Enter)),
-            GrantAction::Answer(Some(Grant::Once))
+            GrantAction::Answer(Some(Approval::from(Grant::Once)))
         );
     }
 
@@ -250,12 +298,12 @@ mod tests {
         assert_eq!(modal.handle_key(key(KeyCode::Down)), GrantAction::Stay);
         assert_eq!(
             modal.handle_key(key(KeyCode::Enter)),
-            GrantAction::Answer(Some(Grant::Session))
+            GrantAction::Answer(Some(Approval::from(Grant::Session)))
         );
         modal.handle_key(key(KeyCode::Char('j')));
         assert_eq!(
             modal.handle_key(key(KeyCode::Enter)),
-            GrantAction::Answer(Some(Grant::Always))
+            GrantAction::Answer(Some(Approval::from(Grant::Always)))
         );
         modal.handle_key(key(KeyCode::Char('j')));
         assert_eq!(
@@ -265,7 +313,7 @@ mod tests {
         modal.handle_key(key(KeyCode::Down));
         assert_eq!(
             modal.handle_key(key(KeyCode::Enter)),
-            GrantAction::Answer(Some(Grant::Once)),
+            GrantAction::Answer(Some(Approval::from(Grant::Once))),
             "down from the last row wraps to the first"
         );
         modal.handle_key(key(KeyCode::Up));
@@ -277,16 +325,16 @@ mod tests {
         modal.handle_key(key(KeyCode::Char('k')));
         assert_eq!(
             modal.handle_key(key(KeyCode::Enter)),
-            GrantAction::Answer(Some(Grant::Always))
+            GrantAction::Answer(Some(Approval::from(Grant::Always)))
         );
     }
 
     #[test]
     fn direct_keys_answer_without_moving() {
         for (code, expected) in [
-            (KeyCode::Char('o'), Some(Grant::Once)),
-            (KeyCode::Char('s'), Some(Grant::Session)),
-            (KeyCode::Char('a'), Some(Grant::Always)),
+            (KeyCode::Char('o'), Some(Approval::from(Grant::Once))),
+            (KeyCode::Char('s'), Some(Approval::from(Grant::Session))),
+            (KeyCode::Char('a'), Some(Approval::from(Grant::Always))),
             (KeyCode::Char('d'), None),
             (KeyCode::Esc, None),
         ] {
@@ -312,7 +360,7 @@ mod tests {
         assert_eq!(modal.handle_key(key(KeyCode::Tab)), GrantAction::Stay);
         assert_eq!(
             modal.handle_key(key(KeyCode::Enter)),
-            GrantAction::Answer(Some(Grant::Once)),
+            GrantAction::Answer(Some(Approval::from(Grant::Once))),
             "nothing above moved the cursor"
         );
     }
@@ -338,8 +386,46 @@ mod tests {
         modal.handle_key(down);
         assert_eq!(
             modal.handle_key(key(KeyCode::Enter)),
-            GrantAction::Answer(Some(Grant::Session)),
+            GrantAction::Answer(Some(Approval::from(Grant::Session))),
             "a repeated arrow still moves"
+        );
+    }
+
+    /// A prompt that wants a password turns the letters into typing:
+    /// the picks come from the arrows and Enter, and the answer carries
+    /// what was typed.
+    #[test]
+    fn a_password_prompt_types_and_hands_the_password_over() {
+        let mut asking = prompt();
+        asking.password_wanted = true;
+        let mut modal = GrantModal::new(&asking, false);
+        for c in "s3cret!".chars() {
+            assert_eq!(modal.handle_key(key(KeyCode::Char(c))), GrantAction::Stay);
+        }
+        modal.handle_key(key(KeyCode::Backspace));
+        modal.handle_key(key(KeyCode::Char('?')));
+        let shown = screen(&modal, 80, 24);
+        assert!(shown.contains("Password: •••••••"), "{shown}");
+        assert!(!shown.contains("s3cret"), "{shown}");
+        modal.handle_key(key(KeyCode::Down));
+        assert_eq!(
+            modal.handle_key(key(KeyCode::Enter)),
+            GrantAction::Answer(Some(Approval {
+                grant: Grant::Session,
+                password: Some("s3cret?".into()),
+            }))
+        );
+        // Nothing typed is no password at all.
+        let mut empty = GrantModal::new(&asking, false);
+        assert!(screen(&empty, 80, 24).contains("leave empty if sudo needs none"));
+        assert_eq!(
+            empty.handle_key(key(KeyCode::Esc)),
+            GrantAction::Answer(None)
+        );
+        let mut empty = GrantModal::new(&asking, false);
+        assert_eq!(
+            empty.handle_key(key(KeyCode::Enter)),
+            GrantAction::Answer(Some(Approval::from(Grant::Once)))
         );
     }
 

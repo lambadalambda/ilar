@@ -15,7 +15,7 @@ use super::{
 };
 use crate::text::{tail_bytes, truncate_chars_ellipsis};
 
-const DEFAULT_TIMEOUT_MS: u64 = 120_000;
+pub(crate) const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 /// What the model is shown. Small on purpose: four unfiltered API dumps
 /// once filled a 100 KiB cap with minified JSON and taught the model
 /// nothing, so the bulk goes to disk instead of into the context window.
@@ -519,6 +519,7 @@ impl Tool for BashTool {
                 // Background jobs surface through notifications, not
                 // live tool rows; no tail reporter.
                 let future = run_command(
+                    "bash",
                     input.command,
                     ctx.cwd,
                     timeout + std::time::Duration::from_secs(1),
@@ -543,6 +544,7 @@ impl Tool for BashTool {
                 std::time::Duration::from_millis(input.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
             let tail_reporter = ctx.call_id.clone().zip(ctx.output_tail.clone());
             run_command(
+                "bash",
                 input.command,
                 ctx.cwd,
                 timeout,
@@ -587,8 +589,12 @@ fn live_tail(stdout: &DrainTask, stderr: &DrainTask) -> String {
     }
 }
 
+/// Run one shell command to completion — the bash tool's whole life,
+/// shared with the sudo tool, which differs in what it spawns and in
+/// nothing after. `tool` names the caller in what goes wrong.
 #[allow(clippy::too_many_arguments)]
-fn run_command(
+pub(crate) fn run_command(
+    tool: &'static str,
     command_text: String,
     cwd: std::path::PathBuf,
     timeout: std::time::Duration,
@@ -601,8 +607,17 @@ fn run_command(
     Box::pin(async move {
         let mut child = match shell_command(&command_text, &cwd, &env).spawn() {
             Ok(c) => c,
-            Err(e) => return ToolOutput::error(format!("bash: {e}")),
+            Err(e) => return ToolOutput::error(format!("{tool}: {e}")),
         };
+        // Written from a task of its own: a child that never reads
+        // stdin must not hold the wait below on a full pipe.
+        if let (Some(bytes), Some(mut stdin)) = (env.stdin, child.stdin.take()) {
+            tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt;
+                let _ = stdin.write_all(&bytes).await;
+                let _ = stdin.shutdown().await;
+            });
+        }
         let mut group = ProcessGroup(child.id());
         let mut stdout = DrainTask::spawn(child.stdout.take().unwrap());
         let mut stderr = DrainTask::spawn(child.stderr.take().unwrap());
@@ -625,7 +640,7 @@ fn run_command(
                     let rendered =
                         render_output(out, err, spill.as_ref(), MAX_PREVIEW).await;
                     return ToolOutput::error(format!(
-                        "bash: timed out after {}ms\ncommand: {}\n{rendered}",
+                        "{tool}: timed out after {}ms\ncommand: {}\n{rendered}",
                         timeout.as_millis(),
                         command_text,
                     ));
@@ -660,7 +675,7 @@ fn run_command(
                 content.push_str(&format!("\n({})", exit_description(status)));
                 ToolOutput::error(content)
             }
-            Err(e) => ToolOutput::error(format!("bash: {e}\n{content}")),
+            Err(e) => ToolOutput::error(format!("{tool}: {e}\n{content}")),
         }
     })
 }
@@ -831,6 +846,7 @@ mod tests {
     #[tokio::test]
     async fn children_cannot_open_the_controlling_terminal() {
         let out = run_command(
+            "bash",
             "cat /dev/tty".into(),
             std::path::PathBuf::from("."),
             std::time::Duration::from_secs(10),
@@ -870,6 +886,7 @@ mod tests {
             call_id: "call-declared".into(),
         };
         let out = run_command(
+            "bash",
             "head -c 100000 /dev/zero | tr '\\0' x".into(),
             std::path::PathBuf::from("."),
             std::time::Duration::from_secs(30),
@@ -903,6 +920,7 @@ mod tests {
             call_id: "call-failed".into(),
         };
         let out = run_command(
+            "bash",
             "head -c 100000 /dev/zero | tr '\\0' x; exit 3".into(),
             std::path::PathBuf::from("."),
             std::time::Duration::from_secs(30),

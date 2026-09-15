@@ -510,9 +510,9 @@ impl Driver {
     pub fn answer_grant(
         &self,
         seat: &Seat,
-        grant: Option<ilar::secrets::Grant>,
+        approval: Option<ilar::secrets::Approval>,
     ) -> Result<String, &'static str> {
-        crate::grants::answer(&seat.grants, grant)
+        crate::grants::answer(&seat.grants, approval)
     }
 
     /// Steers the last turn on the seat never delivered.

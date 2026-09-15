@@ -539,7 +539,8 @@ impl RuntimePlan {
             .with_loop_config(loop_config.clone())
             .with_services(services.clone())
             .with_available_models(config.available_models())
-            .with_secrets(secrets.clone()),
+            .with_secrets(secrets.clone())
+            .with_sudo(config.agent.sudo),
         );
         let todos = Arc::new(Mutex::new(restored_todos(self.resumed.as_ref())));
         let registry = ToolRegistry::builtin()
@@ -559,6 +560,11 @@ impl RuntimePlan {
             registry
         } else {
             registry.with_secrets()?
+        };
+        let registry = if config.agent.sudo {
+            registry.with_sudo()?
+        } else {
+            registry
         };
         // No receiver, no question tool: a driver that cannot answer
         // makes the call fail immediately rather than hang on it.
