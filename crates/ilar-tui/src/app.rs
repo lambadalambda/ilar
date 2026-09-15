@@ -1929,7 +1929,7 @@ impl App {
                     PendingItem::BackgroundTasks => {
                         if is_armed {
                             format!(
-                                "background tasks ({}): press d or ↵ again to cancel all",
+                                "background tasks ({}): press d or Enter again to cancel all",
                                 self.background_running
                             )
                         } else {
@@ -1949,7 +1949,7 @@ impl App {
                     PendingItem::Services => {
                         if is_armed {
                             format!(
-                                "services ({}): press d or ↵ again to stop all",
+                                "services ({}): press d or Enter again to stop all",
                                 self.services_running
                             )
                         } else {
@@ -4516,7 +4516,7 @@ mod tests {
         );
         let snapshot = app.pending_snapshot().expect("manager open");
         assert!(
-            snapshot.rows[0].contains("press d or ↵ again to cancel all"),
+            snapshot.rows[0].contains("press d or Enter again to cancel all"),
             "{:?}",
             snapshot.rows
         );

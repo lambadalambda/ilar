@@ -175,8 +175,8 @@ impl App {
             } else {
                 format!("{}/{}", self.search_current + 1, self.search_matches.len())
             };
-            let hints = if width >= 64 {
-                " · ↑↓ jump · ↵ keep · Esc back"
+            let hints = if width >= 70 {
+                " · ↑↓ jump · Enter keep · Esc close"
             } else {
                 ""
             };
@@ -1053,11 +1053,11 @@ impl App {
             None
         } else if self.focus.is_some() {
             Some(if input_chunk.width >= 70 {
-                " Enter sends to the agent · Shift-Enter/Ctrl-J newline · Esc leaves "
+                " Enter sends to the agent · Shift-Enter/Ctrl-J newline · Esc close "
             } else if input_chunk.width >= 48 {
-                " Enter sends to the agent · Esc leaves "
+                " Enter sends to the agent · Esc close "
             } else if input_chunk.width >= 28 {
-                " Enter sends · Esc leaves "
+                " Enter sends · Esc close "
             } else {
                 " Enter sends "
             })
@@ -1108,8 +1108,11 @@ impl App {
                     .border_style(theme::focus_border())
                     .title(Line::styled(" commands ", theme::title(theme::MARKUP)))
                     .title_bottom(
-                        Line::styled(" ↑↓ · Tab/↵ complete ", Style::default().fg(theme::MUTED))
-                            .right_aligned(),
+                        Line::styled(
+                            " ↑↓ · Tab/Enter complete ",
+                            Style::default().fg(theme::MUTED),
+                        )
+                        .right_aligned(),
                     );
                 let inner = block.inner(popup);
                 frame.render_widget(block, popup);

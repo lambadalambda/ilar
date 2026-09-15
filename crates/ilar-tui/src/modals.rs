@@ -904,7 +904,7 @@ static HELP_SECTIONS: &[HelpSection] = &[
     HelpSection {
         title: "Session",
         bindings: &[
-            binding!("/sessions", "grep every session's content; ↵ resumes"),
+            binding!("/sessions", "grep every session's content; Enter resumes"),
             binding!(
                 "^G in that search",
                 "the classic list (filter, delete, fork)"
@@ -996,7 +996,7 @@ pub(crate) fn render_pending_manager(frame: &mut Frame, snapshot: &PendingSnapsh
         area,
         " pending ",
         theme::MARKUP,
-        " ↑↓ · Enter edit/act · d delete (×2 for goal/jobs) · Esc ",
+        " ↑↓ · Enter edit/act · d delete · ×2 for goal/jobs · Esc close ",
     ) else {
         return ModalHit::default();
     };
@@ -1267,7 +1267,7 @@ pub(crate) fn render_skill_picker(frame: &mut Frame, picker: &SkillPicker) -> Mo
         area,
         " skills ",
         theme::MARKUP,
-        " ↑↓ select · Enter insert · Esc cancel ",
+        " ↑↓ select · Enter insert · Esc close ",
     ) else {
         return ModalHit::default();
     };
@@ -1723,7 +1723,7 @@ pub(crate) fn render_link_picker(frame: &mut Frame, picker: &LinkPicker) -> Moda
         area,
         " links ",
         theme::MARKUP,
-        " type to filter · ↵ open in browser · Esc ",
+        " type to filter · Enter open in browser · Esc close ",
     ) else {
         return ModalHit::default();
     };
@@ -1940,9 +1940,9 @@ impl Picker for TurnPicker {
 pub(crate) fn render_turn_picker(frame: &mut Frame, picker: &TurnPicker) -> ModalHit {
     let area = centered_rect(frame.area(), 72, 16);
     let footer = if area.width < 48 {
-        " ↵ rewind ×2 · ^Y fork · Esc "
+        " Enter rewind ×2 · ^Y fork "
     } else {
-        " type to filter · ↵ rewind (×2 confirms) · ^Y fork here · Esc "
+        " type to filter · Enter rewind ×2 · ^Y fork here · Esc close "
     };
     let Some(inner) = modal_frame(frame, area, " rewind to turn ", theme::MARKUP, footer) else {
         return ModalHit::default();
@@ -1973,8 +1973,8 @@ pub(crate) fn render_turn_picker(frame: &mut Frame, picker: &TurnPicker) -> Moda
             // then it states what the confirming Enter would cost.
             let right = if armed {
                 match picker.selected_stakes() {
-                    Some((discarded, true)) => format!("↵ drops {discarded}, restores tree"),
-                    Some((discarded, false)) => format!("↵ drops {discarded}, chat only"),
+                    Some((discarded, true)) => format!("Enter drops {discarded}, restores tree"),
+                    Some((discarded, false)) => format!("Enter drops {discarded}, chat only"),
                     None => String::new(),
                 }
             } else {
@@ -2128,9 +2128,9 @@ fn resume_column(origin: &RowOrigin, stamp: &str, width: usize) -> String {
 pub(crate) fn render_session_picker(frame: &mut Frame, picker: &SessionPicker) -> ModalHit {
     let area = centered_rect(frame.area(), 72, 16);
     let footer = if area.width < 44 {
-        " ↵ resume · ^D del · ^Y fork · ^G grep "
+        " Enter resume · ^D del ×2 · ^Y fork "
     } else {
-        " type to filter · ↵ resume · ^D delete ×2 · ^Y fork · ^G grep content · Esc "
+        " type to filter · Enter resume · ^D delete ×2 · ^Y fork · ^G grep content · Esc close "
     };
     let Some(inner) = modal_frame(frame, area, " sessions ", theme::MARKUP, footer) else {
         return ModalHit::default();
@@ -2321,7 +2321,7 @@ pub(crate) fn render_session_search(frame: &mut Frame, search: &SessionSearch) -
     } else {
         format!("{}", search.rows.len())
     };
-    let footer = " type to search · ↵ resume · ^G list · Esc ";
+    let footer = " type to search · Enter resume · ^G list · Esc close ";
     let Some(inner) = modal_frame(
         frame,
         list_area,
@@ -3218,9 +3218,7 @@ pub(crate) fn render_context_picker(frame: &mut Frame, picker: &ContextPicker) -
 
 pub(crate) fn render_theme_picker(frame: &mut Frame, picker: &ThemePicker) -> ModalHit {
     let area = centered_rect(frame.area(), 58, 20);
-    let footer = if area.width < 32 {
-        " ↵ save · Esc undo "
-    } else if area.width < 48 {
+    let footer = if area.width < 48 {
         " Enter save · Esc undo "
     } else {
         " type to filter · ↑↓ preview · Enter save · Esc undo "
@@ -4536,7 +4534,7 @@ mod tests {
 
         assert!(screen.contains("links"), "{screen}");
         assert!(screen.contains("filter"), "{screen}");
-        assert!(screen.contains("↵ open in browser"), "{screen}");
+        assert!(screen.contains("Enter open in browser"), "{screen}");
         // A labelled link shows label then url; a bare one just the url.
         assert!(
             screen.contains("> docs https://docs.example/one"),
@@ -4698,14 +4696,14 @@ mod tests {
         picker.handle_key(KeyCode::Enter, false);
         let (screen, _) = draw_modal(80, 20, |frame| render_turn_picker(frame, &picker));
         assert!(screen.contains("✗ a steer"), "{screen}");
-        assert!(screen.contains("↵ drops 1, chat only"), "{screen}");
+        assert!(screen.contains("Enter drops 1, chat only"), "{screen}");
 
         // Armed on the tree-backed turn: it promises the tree restore.
         picker.handle_key(KeyCode::Down, false);
         picker.handle_key(KeyCode::Enter, false);
         let (screen, _) = draw_modal(80, 20, |frame| render_turn_picker(frame, &picker));
         assert!(screen.contains("✗ first question"), "{screen}");
-        assert!(screen.contains("↵ drops 2, restores tree"), "{screen}");
+        assert!(screen.contains("Enter drops 2, restores tree"), "{screen}");
     }
 
     #[test]
