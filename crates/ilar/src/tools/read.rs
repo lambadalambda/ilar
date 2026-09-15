@@ -15,8 +15,9 @@ use crate::text::truncate_bytes;
 const MAX_LINES: usize = 2000;
 const MAX_OUTPUT_BYTES: usize = 256 * 1024;
 /// Room kept for the closing marker, so it never has to cut lines the
-/// numbers it carries were computed from.
-const MARKER_RESERVE: usize = 160;
+/// numbers it carries were computed from. Two notes can land there at
+/// once: a cut line and a continue offset.
+const MARKER_RESERVE: usize = 400;
 /// Past this size the rest of the file is not counted for the marker:
 /// a window of a multi-gigabyte log should not cost a pass over it.
 const MAX_COUNTED_BYTES: u64 = 64 * 1024 * 1024;
@@ -136,6 +137,9 @@ fn read_window(
     let mut out = String::new();
     let mut reached_eof = false;
     let mut truncated = false;
+    // The line the budget cut in half, and how much of it survived: an
+    // offset cannot reach the rest of it, so the marker has to say so.
+    let mut cut: Option<(usize, usize)> = None;
     let budget = MAX_OUTPUT_BYTES - MARKER_RESERVE;
 
     loop {
@@ -168,10 +172,20 @@ fn read_window(
             truncated = true;
             break;
         }
+        if line.truncated && line.prefix.is_empty() {
+            // Nothing of this line fits in what is left of the budget:
+            // `N→` alone would claim the line is empty. Stop short of
+            // it so the marker's continue offset points *at* it.
+            truncated = true;
+            break;
+        }
         let mut text = String::from_utf8_lossy(&line.prefix).into_owned();
         truncate_bytes(&mut text, keep);
         let _ = writeln!(out, "{line_number}→{}", text.trim_end_matches('\r'));
         emitted += 1;
+        if line.truncated {
+            cut = Some((line_number, text.len()));
+        }
         if line.truncated || out.len() >= budget {
             truncated = true;
             break;
@@ -206,20 +220,34 @@ fn read_window(
                 Err(error) => return ToolOutput::error(format!("read {display_path}: {error}")),
             }
         };
-        let marker = match total {
+        let continued = match total {
             // The cap landed on the last line: the window did reach the
             // end, and a "continue" would only run past it.
             Some(total) if last_shown >= total => None,
             Some(total) => Some(format!(
-                "…\n(truncated: showing lines {start}–{last_shown} of {total}; continue with offset {})\n",
+                "(truncated: showing lines {start}–{last_shown} of {total}; continue with offset {})\n",
                 last_shown + 1
             )),
             None => Some(format!(
-                "…\n(truncated: showing lines {start}–{last_shown}; the file is too large to count; continue with offset {})\n",
+                "(truncated: showing lines {start}–{last_shown}; the file is too large to count; continue with offset {})\n",
                 last_shown + 1
             )),
         };
-        if let Some(marker) = marker {
+        // An offset window is line-granular, so the tail of a cut line
+        // is unreachable through this tool: name the tool that can get
+        // it rather than let the model read a prefix as the whole line.
+        let cut = cut.map(|(line, kept)| {
+            format!(
+                "(line {line} cut at {}; the rest of that line is not reachable with offset — \
+                 use bash with jq or cut)\n",
+                crate::text::format_bytes(kept as u64)
+            )
+        });
+        if cut.is_some() || continued.is_some() {
+            let marker: String = std::iter::once("…\n".to_string())
+                .chain(cut)
+                .chain(continued)
+                .collect();
             debug_assert!(marker.len() <= MARKER_RESERVE);
             out.push_str(&marker);
         }
