@@ -289,9 +289,15 @@ fn has_tool_result(dir: &Path, key: &str, check: impl Fn(&str, bool) -> bool) ->
         .unwrap()
         .snapshot();
     let session_id = routes.session_for(key).unwrap().to_string();
+    has_tool_result_in(dir, &session_id, check)
+}
+
+/// The same, for a session named by its id — a background one is not
+/// bound to any chat.
+fn has_tool_result_in(dir: &Path, session_id: &str, check: impl Fn(&str, bool) -> bool) -> bool {
     let store = ilar::runtime::session_store(&config(dir));
     store
-        .load(&session_id)
+        .load(session_id)
         .unwrap()
         .events()
         .iter()
@@ -454,6 +460,64 @@ async fn a_heartbeat_with_nothing_to_say_sends_nothing() {
         .unwrap()
         .snapshot();
     assert!(routes.session_for("heartbeat:fake:chat-1").is_none());
+    gateway.cancel();
+}
+
+#[tokio::test]
+async fn a_scheduled_turn_refuses_an_ungranted_secret_rather_than_asking_the_chat() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("state")).unwrap();
+    ilar::secrets::SecretStore::open(&dir.path().join("state"))
+        .set("GITHUB_TOKEN", "gh, read-only", "not-a-real-token")
+        .unwrap();
+    let settings = GatewayConfig {
+        scheduler_tick_secs: 1,
+        ..GatewayConfig::default()
+    };
+    // The chat asks for a reminder; the reminder's turn reaches for a
+    // secret nobody granted it.
+    let (gateway, fake) = gateway_with(
+        dir.path(),
+        vec![
+            schedules_once(1, "check the PRs"),
+            says("will do"),
+            calls(
+                "bash",
+                serde_json::json!({"command": "gh pr list", "secrets": ["GITHUB_TOKEN"]}),
+            ),
+            says("(not for the chat)"),
+        ],
+        settings,
+    );
+    fake.inject("remind me", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(1, WAIT).await;
+    assert_eq!(
+        sent.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(),
+        ["will do"],
+        "{sent:?}"
+    );
+    // The scheduled turn is told how to grant it, headless, the way
+    // docs/secrets.md says — and the chat is asked nothing.
+    let refused = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let background = RouteStore::open(dir.path().join("state/gateway/routes.json"))
+                .unwrap()
+                .snapshot()
+                .background;
+            if let Some(session_id) = background.values().next()
+                && has_tool_result_in(dir.path(), session_id, |content, is_error| {
+                    is_error && content.contains("ilar secret grant GITHUB_TOKEN --tool bash")
+                })
+            {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await
+    .unwrap_or(false);
+    assert!(refused, "the scheduled turn was never refused headlessly");
+    assert_eq!(fake.sent().len(), 1, "{:?}", fake.sent());
     gateway.cancel();
 }
 

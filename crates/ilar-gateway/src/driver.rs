@@ -227,7 +227,13 @@ impl Driver {
             routes.session_for(key)
         }
         .map(str::to_string);
-        let mut runtime = match self.open(known.clone(), private) {
+        // A scheduled turn has nobody watching: its ask would be
+        // posted to a chat whose /grant looks at another seat, and ten
+        // minutes later the person would be told they refused it. It
+        // runs headless instead, and an ungranted secret is refused
+        // with the line that grants it.
+        let grants = !background;
+        let mut runtime = match self.open(known.clone(), private, grants) {
             Ok(runtime) => runtime,
             // A route to a session that is gone (deleted, another state
             // dir) is a route to nothing: start over rather than refuse
@@ -237,7 +243,7 @@ impl Driver {
                     "{key}: session {} unusable ({error:#}); starting a new one",
                     known.unwrap_or_default()
                 ));
-                self.open(None, private)?
+                self.open(None, private, grants)?
             }
             Err(error) => return Err(error),
         };
@@ -296,13 +302,14 @@ impl Driver {
         Ok(seat)
     }
 
-    fn open(&self, resume: Option<String>, private: bool) -> Result<SessionRuntime> {
+    fn open(&self, resume: Option<String>, private: bool, grants: bool) -> Result<SessionRuntime> {
         let plan = plan(
             &self.config,
             &self.gateway,
             &self.wiring.memory,
             resume,
             private,
+            grants,
         )?;
         let mut runtime = plan.start_with(&self.config, self.resolver.clone())?;
         self.restrict(&mut runtime.registry);
@@ -389,6 +396,7 @@ impl Driver {
             &self.wiring.memory,
             None,
             private,
+            true,
         )?;
         let mut preview = plan.preview(&self.config)?;
         self.restrict(&mut preview.registry);
@@ -698,13 +706,16 @@ fn default_model(config: &Config, gateway: &GatewayConfig) -> String {
 /// The session plan a gateway chat runs on: the assistant's workspace,
 /// agent and model, a SOUL.md before any coding instructions, the tool
 /// policy narrowed into every agent definition, and — for a private
-/// chat — the core memory frozen into the system prompt.
+/// chat — the core memory frozen into the system prompt. `grants` is
+/// whether there is somebody to ask for a secret: a chat's seat, yes;
+/// a scheduled one, nobody.
 pub fn plan(
     config: &Config,
     gateway: &GatewayConfig,
     memory: &MemoryStore,
     resume: Option<String>,
     private: bool,
+    grants: bool,
 ) -> Result<RuntimePlan> {
     let workspace = gateway.workspace(config);
     let home = gateway.home(config);
@@ -724,8 +735,9 @@ pub fn plan(
             // left off and the model is told so on the spot.
             questions: false,
             // A yes or no does fit in a message: the ask is posted to
-            // the chat and /grant or /deny answers it.
-            grants: true,
+            // the chat and /grant or /deny answers it. Unless nobody
+            // is there — a scheduled turn — and it is refused instead.
+            grants,
             project_instructions: None,
             // An assistant has a SOUL.md before it has coding
             // instructions: who it is, how it talks — and reads it,

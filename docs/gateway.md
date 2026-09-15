@@ -280,6 +280,11 @@ Neither kind of turn delivers its final text. A scheduled turn reaches
 the chat only through the message tool, so a job or a heartbeat with
 nothing to say says nothing.
 
+Nobody is watching a scheduled turn, so it is never the one to ask for
+a [secret](secrets.md): an ungranted one is refused on the spot, with
+the `ilar secret grant NAME --tool bash` line that allows it for good.
+A job that needs a secret needs a standing grant.
+
 ## Replying: the message tool
 
 Every gateway session has a `message` tool that knows its chat. It is
