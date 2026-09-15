@@ -3466,6 +3466,7 @@ mod tests {
         app.grant_modal = Some(GrantModal::new(
             &ilar::secrets::GrantPrompt {
                 session_id: "s1".into(),
+                agent: None,
                 tool_call_id: None,
                 tool: "bash".into(),
                 secret: "TOKEN".into(),

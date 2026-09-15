@@ -69,8 +69,10 @@ Every use needs a grant. Where it is asked depends on the driver:
 
 - **The TUI** pauses the turn on a prompt: the tool, the secret, its
   description, and the command verbatim. Allow once, allow for this
-  session, always allow for that tool, or deny. Details in
-  [the interface](interface.md#secrets).
+  session, always allow for that tool, or deny. An ask from a subagent
+  names it — `bash (reviewer subagent) wants GITHUB_TOKEN` — so a prompt
+  that appears while several children work says whose command it is.
+  Details in [the interface](interface.md#secrets).
 - **The gateway** posts the same to the chat the seat belongs to.
   `/grant` allows it once, `/grant session` or `/grant always` for
   longer, `/deny` refuses; ten minutes without an answer is a no.
@@ -81,11 +83,14 @@ An "always" the store cannot keep — sealed and locked, or unwritable —
 is not a refusal: the use is granted for the session, and the tool
 result says so rather than claiming it was written.
 
-Grants are per secret and per tool. Once covers that one call (for
-`service start`, that one start; the value lives as long as the
-service). Session lasts until the runtime ends, which for the gateway
-is the chat's seat: a restart or `/new` clears it. Always is written to
-the store and survives everything:
+Grants are per secret and per tool, never per agent. Once covers that
+one call (for `service start`, that one start; the value lives as long
+as the service). Session lasts until the runtime ends, which for the
+gateway is the chat's seat: a restart or `/new` clears it — and it is
+the *runtime's* session, shared with every subagent the turn spawns, at
+any depth. Allowing `GITHUB_TOKEN` for `bash` for this session allows it
+for the root's bash and for every child's bash until ilar exits. Always
+is written to the store and survives everything:
 
 ```sh
 ilar secret grant GITHUB_TOKEN --tool bash

@@ -320,22 +320,29 @@ then the command **verbatim** — that exact text is what runs with the
 value in its environment, so read it before saying yes. Four answers:
 
 - **Allow once** (`o`, the default): this command only.
-- **Allow for this session** (`s`): this tool, until ilar exits.
+- **Allow for this session** (`s`): this tool, until ilar exits — and
+  for the root agent *and* every subagent it spawns, since the grants
+  given this session are one shared set.
 - **Always allow for `tool`** (`a`): written to the store as a standing
   grant; the prompt does not come back for that tool.
 - **Deny** (`d` or Esc): the tool gets a refusal and the model learns
   the secret is unavailable.
 
 When the asker is the `sudo` tool and no password is known, the prompt
-has a password row: type it there (masked), leave it empty if sudo
-needs none. With that row the letters type, so the choice comes from
-the arrows and Enter. The password is held in memory for the session
-and never written. The answer is noted in the transcript (`NAME allowed
-for bash (once)`, `NAME denied for bash`). A subagent's tool asks through the same
-prompt, titled `bash (subagent) wants NAME`. Ctrl-C under the prompt is
-a deny; if the turn ends or is cancelled underneath it, the prompt
-closes without an answer, which the tool reads as a refusal. Standing
-grants are managed from the shell: `ilar secret list`,
+has a password row: type or paste it there (it shows as bullets, with a
+window on the tail once it outgrows the row), and leave it empty if sudo
+needs none. With that row up the letters type, so the four rows drop
+their `(o)`/`(s)`/`(a)`/`(d)` prefixes and the choice comes from the
+arrows and Enter. The password is held in memory for the session and
+never written. The answer is noted in the transcript (`NAME allowed
+for bash (once)`, `NAME denied for bash`). A subagent's tool asks
+through the same prompt, titled `bash (reviewer subagent) wants NAME` —
+named, so a prompt that appears while several children work says whose
+command it is. Ctrl-C under the prompt is a deny; if the turn ends or is
+cancelled underneath it, the prompt closes without an answer, which the
+tool reads as a refusal, and the transcript says so (`grant prompt for
+NAME withdrawn — the tool stopped waiting`). **F1** lists the prompt's
+keys. Standing grants are managed from the shell: `ilar secret list`,
 `ilar secret grant NAME --tool bash`, `ilar secret revoke NAME`.
 
 ## Transcript

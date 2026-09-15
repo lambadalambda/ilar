@@ -619,6 +619,10 @@ impl From<Grant> for Approval {
 #[derive(Debug)]
 pub struct GrantPrompt {
     pub session_id: String,
+    /// The subagent whose tool is asking, when a child's is: several
+    /// children run at once, and a session id is not something a person
+    /// can tell them apart by. `None` for the driver's own session.
+    pub agent: Option<String>,
     pub tool_call_id: Option<String>,
     /// The tool asking: one of [`GRANTABLE_TOOLS`].
     pub tool: String,
@@ -691,6 +695,10 @@ pub struct Secrets {
     /// Shielded and redacted like stored ones, never written.
     held: Arc<Mutex<BTreeMap<String, String>>>,
     prompts: Option<GrantSender>,
+    /// The subagent this handle belongs to, set on the clone a child
+    /// runs with. Every other field is shared through an `Arc`; this
+    /// one is per-child on purpose, so an ask can name who made it.
+    agent: Option<String>,
     /// What this driver's user does to unlock a sealed store, in a
     /// refusal the lock caused. The core knows whether there is a
     /// prompt channel, not which driver is on the other end.
@@ -730,6 +738,7 @@ impl Secrets {
             session: Arc::new(Mutex::new(BTreeSet::new())),
             held: Arc::new(Mutex::new(BTreeMap::new())),
             prompts: None,
+            agent: None,
             unlock_hint: None,
             sudo: false,
             notes: Arc::new(Mutex::new(Vec::new())),
@@ -738,6 +747,14 @@ impl Secrets {
 
     pub fn with_prompts(mut self, sender: GrantSender) -> Self {
         self.prompts = Some(sender);
+        self
+    }
+
+    /// The same store, grants and prompt channel, owned by one
+    /// subagent: its asks say which child they came from. Called on the
+    /// clone handed to a child's tool context, never on the driver's.
+    pub fn for_agent(mut self, agent: impl Into<String>) -> Self {
+        self.agent = Some(agent.into());
         self
     }
 
@@ -1022,6 +1039,7 @@ impl Secrets {
         let (reply, receive) = oneshot::channel();
         let prompt = GrantPrompt {
             session_id: request.session_id.to_string(),
+            agent: self.agent.clone(),
             tool_call_id: request.tool_call_id.map(str::to_string),
             tool: request.tool.to_string(),
             secret: name.to_string(),
@@ -1710,6 +1728,7 @@ mod tests {
         let GrantPrompt {
             reply,
             session_id,
+            agent,
             tool_call_id,
             description,
             password_wanted,
@@ -1719,6 +1738,7 @@ mod tests {
         let (dead, _) = oneshot::channel();
         GrantPrompt {
             session_id,
+            agent,
             tool_call_id,
             tool,
             secret,
@@ -1727,6 +1747,39 @@ mod tests {
             password_wanted,
             reply: dead,
         }
+    }
+
+    /// A child's handle is the same store and the same prompt channel,
+    /// but its asks say which agent made them: with several children
+    /// running, a session id is not something a person can read.
+    #[tokio::test]
+    async fn a_childs_ask_names_the_agent_behind_it() {
+        let (_dir, store) = store();
+        store.set("KEY", "the key", "value1").unwrap();
+        let (tx, mut rx) = grant_channel(1);
+        let secrets = Secrets::new(store.clone()).with_prompts(tx);
+        let cancel = cancel();
+        let names = ["KEY".to_string()];
+
+        let (_, asked) = tokio::join!(
+            secrets.resolve(request(&names, &cancel)),
+            answer(&mut rx, None)
+        );
+        assert_eq!(asked.agent, None, "the driver's own session has no agent");
+
+        let child = secrets.clone().for_agent("reviewer");
+        let (_, asked) = tokio::join!(
+            child.resolve(request(&names, &cancel)),
+            answer(&mut rx, None)
+        );
+        assert_eq!(asked.agent.as_deref(), Some("reviewer"));
+        // Naming the child did not fork the shared state: a grant it
+        // is given still covers the parent.
+        let (_, _) = tokio::join!(
+            child.resolve(request(&names, &cancel)),
+            answer(&mut rx, Some(Grant::Session))
+        );
+        assert!(secrets.resolve(request(&names, &cancel)).await.is_ok());
     }
 
     #[tokio::test]

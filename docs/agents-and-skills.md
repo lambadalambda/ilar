@@ -54,6 +54,15 @@ the tool row: "waiting for the workspace — a mutable task holds it".
 blocked call — so it says it on its agents-panel row instead:
 `· waiting for the workspace`, until the lease is its.)
 
+Children share the parent's secrets, not a copy of them. A child's `bash`
+asks the same person through the same prompt — and the prompt names the
+child, `bash (reviewer subagent) wants GITHUB_TOKEN` — but the answer
+lands in one shared set: "allow for this session" covers the root and
+every subagent at every depth until ilar exits, and "always" is written
+to the store for that tool. The `sudo` tool and its password work the
+same way; a child gets the tool only when the session has it. Details in
+[secrets](secrets.md#granting-a-use).
+
 To have something *looked at*: save the image, then spawn a task with
 `model` set to a vision model and point it at the file — the child's
 `read` returns the picture itself, not just a description.

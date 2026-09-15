@@ -40,6 +40,9 @@ pub(crate) struct GrantModal {
     detail: String,
     /// The asker is a child of this session, not the agent in view.
     from_subagent: bool,
+    /// Which child, when the ask came from one: with several running,
+    /// "(subagent)" alone does not say whose command this is.
+    agent: Option<String>,
     cursor: usize,
     /// What is being typed when the prompt asked for a password: sudo's,
     /// held for the session and never written. `None` when it did not.
@@ -54,6 +57,7 @@ impl GrantModal {
             description: prompt.description.clone(),
             detail: prompt.detail.clone(),
             from_subagent,
+            agent: prompt.agent.clone(),
             cursor: 0,
             password: prompt.password_wanted.then(String::new),
         }
@@ -134,12 +138,15 @@ impl GrantModal {
         GrantAction::Stay
     }
 
-    /// Who is asking, for the title and the transcript line.
+    /// Who is asking, for the title and the transcript line. A child's
+    /// ask is named where the name is known: with three agents running,
+    /// "bash (subagent)" leaves the person guessing whose command they
+    /// are about to allow.
     fn asker(&self) -> String {
-        if self.from_subagent {
-            format!("{} (subagent)", self.tool)
-        } else {
-            self.tool.clone()
+        match (self.from_subagent, self.agent.as_deref()) {
+            (true, Some(agent)) => format!("{} ({agent} subagent)", self.tool),
+            (true, None) => format!("{} (subagent)", self.tool),
+            (false, _) => self.tool.clone(),
         }
     }
 
@@ -323,6 +330,7 @@ mod tests {
         let (reply, _rx) = tokio::sync::oneshot::channel();
         GrantPrompt {
             session_id: "s1".into(),
+            agent: None,
             tool_call_id: Some("call-1".into()),
             tool: "bash".into(),
             secret: "GITHUB_TOKEN".into(),
@@ -555,6 +563,32 @@ mod tests {
             modal.outcome_line(None),
             "GITHUB_TOKEN denied for bash (subagent)"
         );
+        // With the child's name, the prompt says which of them asked.
+        let named = GrantModal::new(
+            &GrantPrompt {
+                agent: Some("reviewer".into()),
+                ..prompt()
+            },
+            true,
+        );
+        assert!(
+            screen(&named, 80, 24).contains("bash (reviewer subagent) wants GITHUB_TOKEN"),
+            "{}",
+            screen(&named, 80, 24)
+        );
+        assert_eq!(
+            named.outcome_line(Some(Grant::Once)),
+            "GITHUB_TOKEN allowed for bash (reviewer subagent) (once)"
+        );
+        // The driver's own session is not a subagent, named or not.
+        let root = GrantModal::new(
+            &GrantPrompt {
+                agent: Some("reviewer".into()),
+                ..prompt()
+            },
+            false,
+        );
+        assert_eq!(root.outcome_line(None), "GITHUB_TOKEN denied for bash");
     }
 
     #[test]

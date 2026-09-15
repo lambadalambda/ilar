@@ -38,10 +38,12 @@ impl Asker {
     /// The prompt's asker, judged against the seat's own session: an
     /// ask from another session came from a child of it.
     pub fn of(prompt: &GrantPrompt, session_id: &str) -> Self {
-        let shown = if prompt.session_id == session_id {
-            prompt.tool.clone()
-        } else {
-            format!("{} (subagent)", prompt.tool)
+        let shown = match (prompt.session_id == session_id, prompt.agent.as_deref()) {
+            (true, _) => prompt.tool.clone(),
+            // Named where the name is known: several children can be
+            // working, and only one of them wants this secret.
+            (false, Some(agent)) => format!("{} ({agent} subagent)", prompt.tool),
+            (false, None) => format!("{} (subagent)", prompt.tool),
         };
         Self {
             shown,
@@ -276,6 +278,7 @@ mod tests {
     fn prompt(reply: oneshot::Sender<Option<Approval>>) -> GrantPrompt {
         GrantPrompt {
             session_id: "s".into(),
+            agent: None,
             tool_call_id: None,
             tool: "bash".into(),
             secret: "GITHUB_TOKEN".into(),

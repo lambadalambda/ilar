@@ -1176,8 +1176,13 @@ impl SubagentSpawner {
             // Inherited: a child's oversized output is worth keeping for
             // the same reason its parent's is.
             spill_dir: ctx.spill_dir.clone(),
-            // Inherited: a child's bash asks the same person.
-            secrets: ctx.secrets.clone(),
+            // Inherited: a child's bash asks the same person — named,
+            // so a prompt that appears while several children run says
+            // which one wants the secret.
+            secrets: ctx
+                .secrets
+                .clone()
+                .map(|secrets| secrets.for_agent(&agent.name)),
             // Inherited for a foreground child, whose every event is
             // its blocked caller's progress; the background branch
             // below replaces it with the watchdog of its own.
