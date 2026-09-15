@@ -543,6 +543,9 @@ fn restored_session_invocation_view(
         total_cost,
         task_usage: ilar::session::Usage::default(),
         task_cost: Some(0.0),
+        // Only the whole-session restore asks for it; a child
+        // invocation's slice has no turn of its own to resume.
+        resume_offer: false,
     }
 }
 

@@ -3588,20 +3588,28 @@ async fn run_app(
                         app.set_notice("rewinding — quit after it finishes", NoticeLevel::Warning);
                         continue;
                     }
-                    // A stash and undelivered task results are both
-                    // invisible from a blank prompt; say what leaving
-                    // costs before the second press takes it. The
-                    // results survive in the outbox — the warning says
-                    // when they arrive, not that they are lost. Counted
-                    // alongside the held and in-flight ones: results
-                    // that left the notification machinery and now sit
-                    // in the message queue or among unread steers as
-                    // envelope texts.
-                    let undelivered = held_notifications.len()
-                        + notifications.len()
-                        + routed.len()
-                        + app.undelivered_queued_results();
-                    if let Some(warning) = app.quit_warning(undelivered) {
+                    // Everything the exit takes down is invisible from a
+                    // blank prompt; say what leaving costs before the
+                    // second press takes it. Task results survive in
+                    // the outbox — the warning says when they arrive,
+                    // not that they are lost. Counted alongside the
+                    // held and in-flight ones: results that left the
+                    // notification machinery and now sit in the message
+                    // queue or among unread steers as envelope texts.
+                    // The turn, the queue and the stash the app counts
+                    // itself.
+                    let cost = crate::app::QuitCost {
+                        undelivered: held_notifications.len()
+                            + notifications.len()
+                            + routed.len()
+                            + app.undelivered_queued_results(),
+                        // `spawner.shutdown()` below cancels every one
+                        // of these, and each cancelled task mails a
+                        // "was cancelled" result to its parent.
+                        background: spawner.running_background() + routed.len(),
+                        focus_messages: focus_messages.len(),
+                    };
+                    if let Some(warning) = app.quit_warning(cost) {
                         // Over anything standing: a second Ctrl-D quits.
                         app.set_notice_now(warning, NoticeLevel::Warning);
                         continue;

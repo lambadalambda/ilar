@@ -173,6 +173,23 @@ pub(crate) struct StashedPrompt {
     pub(crate) images: Vec<ilar::session::ImageContent>,
 }
 
+/// What quitting would take with it that the app cannot see for
+/// itself: the loop owns the agents, the deliveries in flight and the
+/// outbox, so it counts them and hands them over rather than the
+/// warning guessing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct QuitCost {
+    /// Task results that left the notification machinery: held,
+    /// announced, being delivered, or waiting as queue texts. They
+    /// survive in the outbox, which is what the warning says.
+    pub(crate) undelivered: usize,
+    /// Background agents and routed deliveries `spawner.shutdown()`
+    /// would cancel.
+    pub(crate) background: usize,
+    /// Messages typed into a focus view whose tasks are still running.
+    pub(crate) focus_messages: usize,
+}
+
 /// Whether a queued or steered text is a task/tool notification
 /// envelope — a result that left the notification machinery and became
 /// an ordinary message. The tag prefix is the cheap screen; the display
@@ -2224,29 +2241,61 @@ impl App {
     }
 
     /// Ctrl-D on a blank prompt is the exit, but a blank prompt is
-    /// exactly what a waiting stash — which dies with the process —
-    /// and undelivered task results — which survive it, in the outbox
-    /// — look like. Warn once, naming both costs at once so the
-    /// second press is the answer to everything said; the repeat
+    /// exactly what everything the exit takes down looks like: a
+    /// waiting stash and a queued message die with the process, the
+    /// running turn and every background agent are cancelled, a focus
+    /// message in flight is aborted, and undelivered task results
+    /// survive in the outbox. Warn once, naming every cost at once so
+    /// the second press is the answer to everything said; the repeat
     /// quits. `None` means quit now.
-    pub(crate) fn quit_warning(&mut self, undelivered: usize) -> Option<String> {
-        if (self.input_stash.is_empty() && undelivered == 0) || std::mem::take(&mut self.quit_armed)
-        {
-            return None;
-        }
-        self.quit_armed = true;
+    pub(crate) fn quit_warning(&mut self, cost: QuitCost) -> Option<String> {
         let mut parts = Vec::new();
+        if self.busy {
+            parts.push("the running turn would be cancelled".to_string());
+        }
+        if cost.background > 0 {
+            parts.push(format!(
+                "{} background agent(s) would be cancelled",
+                cost.background
+            ));
+        }
         if !self.input_stash.is_empty() {
             parts.push(format!(
                 "{} stashed prompt(s) would be lost (Ctrl-S pops them)",
                 self.input_stash.len()
             ));
         }
-        if undelivered > 0 {
+        // The undelivered results among them are counted as results,
+        // where the wording says they come back; the rest are simply
+        // gone.
+        let queued = self
+            .queued_messages
+            .iter()
+            .filter(|message| !is_notification_envelope(&message.text))
+            .count();
+        if queued > 0 {
+            parts.push(format!("{queued} queued message(s) would be lost"));
+        }
+        if cost.focus_messages > 0 {
             parts.push(format!(
-                "{undelivered} task result(s) are undelivered and will arrive next time this session opens"
+                "{} message(s) to an agent are still in flight",
+                cost.focus_messages
             ));
         }
+        if cost.undelivered > 0 {
+            parts.push(format!(
+                "{} task result(s) are undelivered and will arrive next time this session opens",
+                cost.undelivered
+            ));
+        }
+        if parts.is_empty() {
+            self.quit_armed = false;
+            return None;
+        }
+        if std::mem::take(&mut self.quit_armed) {
+            return None;
+        }
+        self.quit_armed = true;
         Some(format!("{} — Ctrl-D again quits", parts.join("; ")))
     }
 
@@ -2980,36 +3029,89 @@ mod tests {
     #[test]
     fn ctrl_d_warns_once_before_quitting_on_a_waiting_stash() {
         let mut app = App::new();
-        assert_eq!(app.quit_warning(0), None, "no stash, no ceremony");
+        assert_eq!(
+            app.quit_warning(QuitCost::default()),
+            None,
+            "nothing at stake, no ceremony"
+        );
 
         app.input = crate::input::InputBuffer::from("half-written thought");
         app.stash_or_pop_input();
-        let warning = app.quit_warning(0).expect("the first Ctrl-D warns");
+        let warning = app
+            .quit_warning(QuitCost::default())
+            .expect("the first Ctrl-D warns");
         assert!(warning.contains('1'), "{warning}");
-        assert_eq!(app.quit_warning(0), None, "the second Ctrl-D quits anyway");
+        assert_eq!(
+            app.quit_warning(QuitCost::default()),
+            None,
+            "the second Ctrl-D quits anyway"
+        );
 
         // Consuming the arm resets it: a Ctrl-D much later warns again
         // (the dispatcher disarms on every other key for the same
         // reason).
         assert!(!app.quit_armed);
-        assert!(app.quit_warning(0).is_some());
+        assert!(app.quit_warning(QuitCost::default()).is_some());
     }
 
     #[test]
     fn ctrl_d_names_undelivered_results_and_the_stash_in_one_warning() {
+        let results = |undelivered| QuitCost {
+            undelivered,
+            ..QuitCost::default()
+        };
         let mut app = App::new();
-        let warning = app.quit_warning(2).expect("undelivered results warn");
+        let warning = app
+            .quit_warning(results(2))
+            .expect("undelivered results warn");
         assert!(warning.contains("2 task result(s)"), "{warning}");
         assert!(warning.contains("next time"), "{warning}");
-        assert_eq!(app.quit_warning(2), None, "the second Ctrl-D quits");
+        assert_eq!(
+            app.quit_warning(results(2)),
+            None,
+            "the second Ctrl-D quits"
+        );
 
         // Both costs in one message: the second press answers both.
         app.input = crate::input::InputBuffer::from("half-written thought");
         app.stash_or_pop_input();
-        let warning = app.quit_warning(1).expect("both warn together");
+        let warning = app.quit_warning(results(1)).expect("both warn together");
         assert!(warning.contains("stashed"), "{warning}");
         assert!(warning.contains("task result"), "{warning}");
-        assert_eq!(app.quit_warning(1), None);
+        assert_eq!(app.quit_warning(results(1)), None);
+    }
+
+    /// Ctrl-D mid-turn used to exit at once: the turn was cancelled,
+    /// every background agent with it, and the messages queued behind
+    /// the turn went with the process — while a two-word stash got a
+    /// warning. One warning names all of it.
+    #[test]
+    fn ctrl_d_names_the_turn_the_agents_and_the_queue_it_would_kill() {
+        let mut app = App::new();
+        app.busy = true;
+        app.queued_messages = vec![
+            "the next thing".into(),
+            ilar::agent::Steer {
+                text: "<task-notification>\nTask \"scout\" completed.\n</task-notification>".into(),
+                images: Vec::new(),
+            },
+        ];
+        let cost = QuitCost {
+            undelivered: 1,
+            background: 2,
+            focus_messages: 1,
+        };
+
+        let warning = app.quit_warning(cost).expect("a running turn warns");
+        assert!(warning.contains("running turn"), "{warning}");
+        assert!(warning.contains("2 background agent(s)"), "{warning}");
+        // The queued task result is counted as a result, not as a lost
+        // message: it comes back through the outbox.
+        assert!(warning.contains("1 queued message(s)"), "{warning}");
+        assert!(warning.contains("1 message(s) to an agent"), "{warning}");
+        assert!(warning.contains("1 task result(s)"), "{warning}");
+        assert!(warning.ends_with("Ctrl-D again quits"), "{warning}");
+        assert_eq!(app.quit_warning(cost), None, "the second press quits");
     }
 
     #[test]
@@ -5185,6 +5287,7 @@ mod tests {
                     ..Default::default()
                 },
                 task_cost: Some(0.5),
+                resume_offer: false,
             },
             0,
         );
