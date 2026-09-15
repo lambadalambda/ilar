@@ -1412,6 +1412,36 @@ fn tool_is_active(line: &Line_) -> bool {
     )
 }
 
+fn tool_has_failed(line: &Line_) -> bool {
+    matches!(
+        line,
+        Line_::Tool {
+            state: ToolState::Failed,
+            ..
+        }
+    )
+}
+
+/// What a collapsed group still shows: what is still happening, and
+/// what went wrong. A failure folded behind "3 calls · 1 failed" is
+/// the one row the reader wanted.
+fn tool_survives_collapse(line: &Line_) -> bool {
+    tool_is_active(line) || tool_has_failed(line)
+}
+
+/// The first non-blank line of a failed call's error, for the row's own
+/// details: the `×` and the arguments alone put the reason a click away.
+fn failure_note(state: ToolState, result: Option<&str>) -> Option<String> {
+    if state != ToolState::Failed {
+        return None;
+    }
+    let first = result?
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    Some(first.to_string())
+}
+
 /// An entry's rows, rendered from scratch. The cached renderer calls
 /// [`entry_rows`] directly so it can hand down what it already drew.
 pub(crate) fn transcript_entry_rows(
@@ -1542,7 +1572,7 @@ fn entry_rows(
             }];
             let visible = calls
                 .iter()
-                .filter(|call| *expanded || tool_is_active(call))
+                .filter(|call| *expanded || tool_survives_collapse(call))
                 .collect::<Vec<_>>();
             let visible_count = visible.len();
             // Siblings align to their widest name — the exact padding
@@ -1657,10 +1687,18 @@ fn tool_entry_rows(
     } else {
         *state
     };
+    // The error rides in the details, after the arguments: a failed row
+    // says what went wrong without being opened.
+    let arguments: std::borrow::Cow<'_, str> = match failure_note(display_state, result.as_deref())
+    {
+        Some(note) if arguments.is_empty() => note.into(),
+        Some(note) => format!("{arguments} · {note}").into(),
+        None => arguments.as_str().into(),
+    };
     let line = tool_line_with_disclosure(
         name,
         kind,
-        arguments,
+        &arguments,
         display_state,
         width.saturating_sub(indent as u16),
         now.saturating_duration_since(activity_started),
@@ -3309,6 +3347,67 @@ mod tests {
         assert_eq!(bash.find('✓'), fetch.find('✓'), "{bash:?} vs {fetch:?}");
         assert!(bash.contains("bash     ✓"), "{bash}");
         assert!(fetch.contains("webfetch ✓"), "{fetch}");
+    }
+
+    /// A collapsed group used to hide the one call that failed behind
+    /// "3 calls · 1 failed": the failure is the reason to look, so it
+    /// stays on screen, with the error's first line after the args.
+    #[test]
+    fn a_collapsed_group_keeps_the_failed_call_and_its_error() {
+        let mut calls = [
+            finished_tool("t1", "bash", "cargo test"),
+            finished_tool("t2", "read", "missing.rs"),
+        ];
+        if let Line_::Tool { state, result, .. } = &mut calls[1] {
+            *state = ToolState::Failed;
+            *result = Some("read missing.rs: no such file\nsecond line".into());
+        }
+        let group = TranscriptEntry::ToolGroup {
+            id: "g".into(),
+            calls: &calls,
+            expanded: false,
+            child: false,
+        };
+
+        let now = std::time::Instant::now();
+        let rows = transcript_entry_rows(
+            &group,
+            &std::collections::HashSet::new(),
+            120,
+            now,
+            now,
+            false,
+        );
+        let rendered: Vec<String> = rows.iter().map(|row| rendered_text(&row.line)).collect();
+        assert!(
+            rendered.iter().any(|row| row.contains("1 failed")),
+            "{rendered:?}"
+        );
+        let failed = rendered
+            .iter()
+            .find(|row| row.contains("read"))
+            .unwrap_or_else(|| panic!("the failed call must stay visible: {rendered:?}"));
+        assert!(failed.contains("missing.rs"), "{failed}");
+        assert!(failed.contains("no such file"), "{failed}");
+        assert!(!failed.contains("second line"), "{failed}");
+        // The calls that worked are still folded away.
+        assert!(
+            !rendered.iter().any(|row| row.contains("cargo test")),
+            "{rendered:?}"
+        );
+    }
+
+    /// A failed row with nothing recorded has no error line to show;
+    /// the row must not grow a stray separator.
+    #[test]
+    fn a_failed_row_without_a_result_shows_only_its_args() {
+        assert_eq!(
+            failure_note(ToolState::Failed, Some("  \n read x: boom \n more")),
+            Some("read x: boom".to_string())
+        );
+        assert_eq!(failure_note(ToolState::Failed, None), None);
+        assert_eq!(failure_note(ToolState::Failed, Some("   ")), None);
+        assert_eq!(failure_note(ToolState::Succeeded, Some("fine")), None);
     }
 
     #[test]
