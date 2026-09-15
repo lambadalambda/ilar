@@ -3581,6 +3581,7 @@ mod tests {
                     text: "unchanged".into(),
                 },
             ],
+            "diff",
             60,
             0,
             10,
