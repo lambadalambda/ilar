@@ -515,6 +515,8 @@ trait Picker {
 pub(crate) enum Modal {
     Question,
     Grant,
+    /// sudo's password, asked for after the grant prompt's yes.
+    Password,
     PendingManager,
     Help,
     Todos,
@@ -879,8 +881,17 @@ static HELP_SECTIONS: &[HelpSection] = &[
             ),
             binding!(
                 "",
-                "when it asks for a password the letters type it — and paste works"
+                "approval only: sudo's password comes in its own prompt after the yes, and \
+                 only where sudo wants one"
             ),
+        ],
+    },
+    HelpSection {
+        title: "sudo password prompt",
+        bindings: &[
+            binding!("", "type or paste it; it shows as bullets"),
+            binding!("Enter", "send it to sudo; empty is refused in place"),
+            binding!("Esc / Ctrl-C", "cancel; the sudo call fails"),
         ],
     },
     HelpSection {

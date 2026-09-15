@@ -1,8 +1,10 @@
 //! The grant prompt: a tool named a stored secret, and the person
-//! decides whether the command it is about to run may have it.
+//! decides whether the command it is about to run may have it. It is
+//! approval only; the [`PasswordModal`] below is the separate prompt
+//! sudo's password comes in, after a yes and only where sudo wants one.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use ilar::secrets::{Approval, Grant, GrantPrompt};
+use ilar::secrets::{Grant, GrantPrompt, PasswordPrompt};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -15,7 +17,7 @@ use crate::theme;
 pub(crate) enum GrantAction {
     Stay,
     /// The answer; `None` denies.
-    Answer(Option<Approval>),
+    Answer(Option<Grant>),
 }
 
 /// The four answers, in the order the modal lists them. The safest
@@ -28,8 +30,6 @@ const CHOICES: [Option<Grant>; 4] = [
 ];
 
 const FOOTER: &str = " ↑↓ move · Enter choose · o once · s session · a always · d/Esc deny ";
-/// With a password field the letters type; only the arrows move.
-const PASSWORD_FOOTER: &str = " type the password · ↑↓ move · Enter choose · Esc deny ";
 
 /// A modal over one prompt: what is asked, what will run, and the
 /// highlighted answer. Pure — the reply channel stays with the loop.
@@ -44,9 +44,6 @@ pub(crate) struct GrantModal {
     /// "(subagent)" alone does not say whose command this is.
     agent: Option<String>,
     cursor: usize,
-    /// What is being typed when the prompt asked for a password: sudo's,
-    /// held for the session and never written. `None` when it did not.
-    password: Option<String>,
 }
 
 impl GrantModal {
@@ -59,33 +56,11 @@ impl GrantModal {
             from_subagent,
             agent: prompt.agent.clone(),
             cursor: 0,
-            password: prompt.password_wanted.then(String::new),
         }
     }
 
-    /// Whether a password field is up: the letters type instead of
-    /// picking, and a paste has somewhere to land.
-    pub(crate) fn wants_password(&self) -> bool {
-        self.password.is_some()
-    }
-
-    /// Pasted text into the password field. A password manager copies a
-    /// trailing newline as often as not, and a multi-line clipboard is
-    /// never one password, so the newlines are the separator that ends
-    /// the paste rather than characters of it.
-    pub(crate) fn paste(&mut self, text: &str) {
-        let Some(password) = &mut self.password else {
-            return;
-        };
-        let first = text.lines().next().unwrap_or_default();
-        password.extend(first.chars().filter(|c| !c.is_control()));
-    }
-
     fn answer(&self, choice: Option<Grant>) -> GrantAction {
-        GrantAction::Answer(choice.map(|grant| Approval {
-            grant,
-            password: self.password.clone().filter(|typed| !typed.is_empty()),
-        }))
+        GrantAction::Answer(choice)
     }
 
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> GrantAction {
@@ -97,9 +72,6 @@ impl GrantModal {
         // the prompt appears mid-turn, under whatever the person was
         // typing, and "always" reaches the store.
         let deliberate = key.kind != KeyEventKind::Repeat;
-        // With a password field, letters are the password: the direct
-        // picks and the vi keys are off, the arrows and Enter remain.
-        let typing = self.password.is_some();
         match key.code {
             KeyCode::Up if !chorded => {
                 self.cursor = (self.cursor + CHOICES.len() - 1) % CHOICES.len();
@@ -109,16 +81,6 @@ impl GrantModal {
             }
             KeyCode::Enter if deliberate => return self.answer(CHOICES[self.cursor]),
             KeyCode::Esc if deliberate => return self.answer(None),
-            KeyCode::Backspace if typing => {
-                if let Some(password) = &mut self.password {
-                    password.pop();
-                }
-            }
-            KeyCode::Char(c) if typing && !chorded => {
-                if let Some(password) = &mut self.password {
-                    password.push(c);
-                }
-            }
             KeyCode::Char('k') if !chorded => {
                 self.cursor = (self.cursor + CHOICES.len() - 1) % CHOICES.len();
             }
@@ -173,22 +135,14 @@ impl GrantModal {
         }
     }
 
-    /// A row's text. The `(o)`/`(s)`/`(a)`/`(d)` prefixes are dropped
-    /// while a password field is up: there those letters type into the
-    /// password, so offering them as picks would be a lie.
+    /// A row's text, with the letter that picks it: nothing types into
+    /// this prompt, so every row advertises its hotkey.
     fn choice_label(&self, choice: Option<Grant>) -> String {
-        let hotkey = |letter: char| {
-            if self.password.is_some() {
-                String::new()
-            } else {
-                format!("({letter}) ")
-            }
-        };
         match choice {
-            Some(Grant::Once) => format!("{}Allow once", hotkey('o')),
-            Some(Grant::Session) => format!("{}Allow for this session", hotkey('s')),
-            Some(Grant::Always) => format!("{}Always allow for {}", hotkey('a'), self.tool),
-            None => format!("{}Deny", hotkey('d')),
+            Some(Grant::Once) => "(o) Allow once".to_string(),
+            Some(Grant::Session) => "(s) Allow for this session".to_string(),
+            Some(Grant::Always) => format!("(a) Always allow for {}", self.tool),
+            None => "(d) Deny".to_string(),
         }
     }
 
@@ -216,39 +170,11 @@ impl GrantModal {
         lines
     }
 
-    /// The password row, when the prompt asked for one: masked, with a
-    /// cursor at the end and, once the mask outgrows the row, a window
-    /// on its tail. The row used to be an unwrapped paragraph that the
-    /// frame simply clipped, so a long password looked like a short one
-    /// and nothing said otherwise.
-    fn password_line(&self, width: usize) -> Option<Line<'static>> {
-        const LABEL: &str = "Password: ";
-        const CURSOR: char = '▌';
-        let password = self.password.as_ref()?;
-        if password.is_empty() {
-            return Some(Line::styled(
-                format!("{LABEL}{CURSOR} (type or paste it; leave empty if sudo needs none)"),
-                Style::default().fg(theme::WAITING),
-            ));
-        }
-        // The label and the cursor hold their places; what is left of
-        // the row is the window on the mask.
-        let room = width.saturating_sub(LABEL.chars().count() + 1).max(1);
-        let typed = password.chars().count();
-        let text = if typed <= room {
-            format!("{LABEL}{}{CURSOR}", "•".repeat(typed))
-        } else {
-            // The leader says this is the tail of a longer password,
-            // not the whole of it.
-            format!("{LABEL}…{}{CURSOR}", "•".repeat(room - 1))
-        };
-        Some(Line::styled(text, Style::default().fg(theme::WAITING)))
-    }
-
-    fn choice_lines(&self, width: usize) -> Vec<Line<'_>> {
-        self.password_line(width)
-            .into_iter()
-            .chain(CHOICES.iter().enumerate().map(|(index, choice)| {
+    fn choice_lines(&self) -> Vec<Line<'_>> {
+        CHOICES
+            .iter()
+            .enumerate()
+            .map(|(index, choice)| {
                 let pointer = if index == self.cursor { ">" } else { " " };
                 let text = format!("{pointer} {}", self.choice_label(*choice));
                 if index == self.cursor {
@@ -256,7 +182,7 @@ impl GrantModal {
                 } else {
                     Line::from(text)
                 }
-            }))
+            })
             .collect()
     }
 
@@ -266,46 +192,50 @@ impl GrantModal {
         }
         let area = crate::modals::centered_rect(available, 76, available.height.min(24));
         let title = format!(" {} wants {} ", self.asker(), self.secret);
-        let footer = if self.password.is_some() {
-            PASSWORD_FOOTER
-        } else {
-            FOOTER
-        };
-        let Some(inner) = crate::modals::modal_frame(frame, area, &title, theme::WAITING, footer)
+        let Some(inner) = crate::modals::modal_frame(frame, area, &title, theme::WAITING, FOOTER)
         else {
             return;
         };
-        // The choices keep their rows at the bottom; the command gets
-        // the rest. A command that does not fit says so rather than
-        // hiding its tail — the part past the fold is exactly where a
-        // surprise would sit.
-        let rows = CHOICES.len() + usize::from(self.password.is_some());
-        let choices_height = (rows as u16).min(inner.height);
-        let body_height = inner.height - choices_height;
-        let body = Rect::new(inner.x, inner.y, inner.width, body_height);
-        if body.height > 0 {
-            let paragraph = Paragraph::new(self.body_lines()).wrap(Wrap { trim: false });
-            let total = paragraph.line_count(body.width);
-            if total > usize::from(body.height) && body.height > 1 {
-                let shown = body.height - 1;
-                frame.render_widget(paragraph, Rect::new(body.x, body.y, body.width, shown));
-                frame.render_widget(
-                    Paragraph::new(format!(
-                        "… {} more lines not shown",
-                        total - usize::from(shown)
-                    ))
-                    .style(Style::default().fg(theme::ERROR)),
-                    Rect::new(body.x, body.y + shown, body.width, 1),
-                );
-            } else {
-                frame.render_widget(paragraph, body);
-            }
-        }
-        frame.render_widget(
-            Paragraph::new(self.choice_lines(inner.width as usize)),
-            Rect::new(inner.x, body.bottom(), inner.width, choices_height),
-        );
+        render_body_over(frame, inner, self.body_lines(), self.choice_lines());
     }
+}
+
+/// A prompt's two parts: the rows that must stay visible (the choices,
+/// or the password field) pinned to the bottom, and the body — the
+/// command above all — taking the rest. A body that does not fit says
+/// so rather than hiding its tail: the part past the fold is exactly
+/// where a surprise would sit.
+fn render_body_over(
+    frame: &mut Frame<'_>,
+    inner: Rect,
+    body_lines: Vec<Line<'_>>,
+    rows: Vec<Line<'_>>,
+) {
+    let rows_height = (rows.len() as u16).min(inner.height);
+    let body_height = inner.height - rows_height;
+    let body = Rect::new(inner.x, inner.y, inner.width, body_height);
+    if body.height > 0 {
+        let paragraph = Paragraph::new(body_lines).wrap(Wrap { trim: false });
+        let total = paragraph.line_count(body.width);
+        if total > usize::from(body.height) && body.height > 1 {
+            let shown = body.height - 1;
+            frame.render_widget(paragraph, Rect::new(body.x, body.y, body.width, shown));
+            frame.render_widget(
+                Paragraph::new(format!(
+                    "… {} more lines not shown",
+                    total - usize::from(shown)
+                ))
+                .style(Style::default().fg(theme::ERROR)),
+                Rect::new(body.x, body.y + shown, body.width, 1),
+            );
+        } else {
+            frame.render_widget(paragraph, body);
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(rows),
+        Rect::new(inner.x, body.bottom(), inner.width, rows_height),
+    );
 }
 
 fn grant_word(grant: Grant) -> &'static str {
@@ -314,6 +244,184 @@ fn grant_word(grant: Grant) -> &'static str {
         Grant::Session => "this session",
         Grant::Always => "always",
     }
+}
+
+const PASSWORD_FOOTER: &str = " type or paste it · Enter send · Esc cancel ";
+/// Enter on an empty field. The old prompt took that as "this system
+/// needs none" and the command could never run; here it is nothing,
+/// said in place, and the prompt stays up.
+const PASSWORD_EMPTY: &str = "sudo needs a password on this system";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PasswordAction {
+    Stay,
+    /// What was typed; `None` cancels, and the sudo call fails.
+    Answer(Option<String>),
+}
+
+/// The prompt sudo's password comes in: the command it is for, a masked
+/// field, and nothing else to decide — the approval was given already.
+pub(crate) struct PasswordModal {
+    detail: String,
+    from_subagent: bool,
+    agent: Option<String>,
+    /// sudo refused the last one, so this is a re-ask.
+    refused: bool,
+    password: String,
+    /// Enter came on an empty field: said in place.
+    empty: bool,
+}
+
+impl PasswordModal {
+    pub(crate) fn new(prompt: &PasswordPrompt, from_subagent: bool) -> Self {
+        Self {
+            detail: prompt.detail.clone(),
+            from_subagent,
+            agent: prompt.agent.clone(),
+            refused: prompt.refused,
+            password: String::new(),
+            empty: false,
+        }
+    }
+
+    /// Pasted text into the field. A password manager copies a trailing
+    /// newline as often as not, and a multi-line clipboard is never one
+    /// password, so the newlines are the separator that ends the paste
+    /// rather than characters of it.
+    pub(crate) fn paste(&mut self, text: &str) {
+        let first = text.lines().next().unwrap_or_default();
+        self.password
+            .extend(first.chars().filter(|c| !c.is_control()));
+        self.empty = false;
+    }
+
+    pub(crate) fn handle_key(&mut self, key: KeyEvent) -> PasswordAction {
+        let chorded = key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        // A key held down when the prompt opened arrives as a repeat; it
+        // must not send a half-typed password or cancel the call.
+        let deliberate = key.kind != KeyEventKind::Repeat;
+        match key.code {
+            KeyCode::Enter if deliberate => {
+                if self.password.is_empty() {
+                    self.empty = true;
+                } else {
+                    return PasswordAction::Answer(Some(self.password.clone()));
+                }
+            }
+            KeyCode::Esc if deliberate => return PasswordAction::Answer(None),
+            KeyCode::Backspace => {
+                self.password.pop();
+                self.empty = false;
+            }
+            KeyCode::Char(c) if !chorded => {
+                self.password.push(c);
+                self.empty = false;
+            }
+            _ => {}
+        }
+        PasswordAction::Stay
+    }
+
+    /// Whose sudo is waiting, for the title: a child's ask is named
+    /// where the name is known.
+    fn asker(&self) -> String {
+        match (self.from_subagent, self.agent.as_deref()) {
+            (true, Some(agent)) => format!(" sudo password ({agent} subagent) "),
+            (true, None) => " sudo password (subagent) ".to_string(),
+            (false, _) => " sudo password ".to_string(),
+        }
+    }
+
+    /// The transcript's record of a prompt nobody is waiting on any
+    /// more: the turn ended or was aborted under the modal.
+    pub(crate) fn withdrawn_line(&self) -> String {
+        "sudo password prompt withdrawn — the tool stopped waiting".to_string()
+    }
+
+    /// The transcript's one-line record of the answer. The password
+    /// itself never goes in, of course.
+    pub(crate) fn outcome_line(&self, given: bool) -> String {
+        if given {
+            "sudo password given".to_string()
+        } else {
+            "sudo password prompt cancelled — the command does not run".to_string()
+        }
+    }
+
+    fn body_lines(&self) -> Vec<Line<'_>> {
+        let mut lines = Vec::new();
+        if self.refused {
+            lines.push(Line::styled(
+                "(sudo refused the last one)",
+                Style::default().fg(theme::ERROR),
+            ));
+        }
+        lines.push(Line::styled("For:", Style::default().fg(theme::MUTED)));
+        for row in self.detail.split('\n') {
+            lines.push(Line::styled(
+                format!("  {row}"),
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
+        }
+        lines
+    }
+
+    fn field_lines(&self, width: usize) -> Vec<Line<'static>> {
+        let mut lines = vec![masked_line("Password: ", &self.password, width)];
+        if self.empty {
+            lines.push(Line::styled(
+                PASSWORD_EMPTY,
+                Style::default().fg(theme::ERROR),
+            ));
+        }
+        lines
+    }
+
+    pub(crate) fn render(&self, frame: &mut Frame<'_>, available: Rect) {
+        if available.width == 0 || available.height == 0 {
+            return;
+        }
+        let area = crate::modals::centered_rect(available, 76, available.height.min(16));
+        let Some(inner) =
+            crate::modals::modal_frame(frame, area, &self.asker(), theme::WAITING, PASSWORD_FOOTER)
+        else {
+            return;
+        };
+        render_body_over(
+            frame,
+            inner,
+            self.body_lines(),
+            self.field_lines(inner.width as usize),
+        );
+    }
+}
+
+/// A password as a row: masked, with a cursor at the end and, once the
+/// mask outgrows the row, a window on its tail. An unwrapped paragraph
+/// the frame simply clipped made a long password look like a short one,
+/// with nothing to say otherwise.
+fn masked_line(label: &str, password: &str, width: usize) -> Line<'static> {
+    const CURSOR: char = '▌';
+    if password.is_empty() {
+        return Line::styled(
+            format!("{label}{CURSOR} (type or paste it)"),
+            Style::default().fg(theme::WAITING),
+        );
+    }
+    // The label and the cursor hold their places; what is left of the
+    // row is the window on the mask.
+    let room = width.saturating_sub(label.chars().count() + 1).max(1);
+    let typed = password.chars().count();
+    let text = if typed <= room {
+        format!("{label}{}{CURSOR}", "•".repeat(typed))
+    } else {
+        // The leader says this is the tail of a longer password, not the
+        // whole of it.
+        format!("{label}…{}{CURSOR}", "•".repeat(room - 1))
+    };
+    Line::styled(text, Style::default().fg(theme::WAITING))
 }
 
 #[cfg(test)]
@@ -337,7 +445,18 @@ mod tests {
             description: "GitHub API token".into(),
             detail: "gh api /user\ncurl -H \"Authorization: $GITHUB_TOKEN\" https://api.github.com"
                 .into(),
-            password_wanted: false,
+            reply,
+        }
+    }
+
+    fn password_prompt() -> PasswordPrompt {
+        let (reply, _rx) = tokio::sync::oneshot::channel();
+        PasswordPrompt {
+            session_id: "s1".into(),
+            tool_call_id: Some("call-1".into()),
+            agent: None,
+            detail: "apt install ripgrep".into(),
+            refused: false,
             reply,
         }
     }
@@ -351,7 +470,7 @@ mod tests {
         let mut modal = modal();
         assert_eq!(
             modal.handle_key(key(KeyCode::Enter)),
-            GrantAction::Answer(Some(Approval::from(Grant::Once)))
+            GrantAction::Answer(Some(Grant::Once))
         );
     }
 
@@ -361,12 +480,12 @@ mod tests {
         assert_eq!(modal.handle_key(key(KeyCode::Down)), GrantAction::Stay);
         assert_eq!(
             modal.handle_key(key(KeyCode::Enter)),
-            GrantAction::Answer(Some(Approval::from(Grant::Session)))
+            GrantAction::Answer(Some(Grant::Session))
         );
         modal.handle_key(key(KeyCode::Char('j')));
         assert_eq!(
             modal.handle_key(key(KeyCode::Enter)),
-            GrantAction::Answer(Some(Approval::from(Grant::Always)))
+            GrantAction::Answer(Some(Grant::Always))
         );
         modal.handle_key(key(KeyCode::Char('j')));
         assert_eq!(
@@ -376,7 +495,7 @@ mod tests {
         modal.handle_key(key(KeyCode::Down));
         assert_eq!(
             modal.handle_key(key(KeyCode::Enter)),
-            GrantAction::Answer(Some(Approval::from(Grant::Once))),
+            GrantAction::Answer(Some(Grant::Once)),
             "down from the last row wraps to the first"
         );
         modal.handle_key(key(KeyCode::Up));
@@ -388,16 +507,16 @@ mod tests {
         modal.handle_key(key(KeyCode::Char('k')));
         assert_eq!(
             modal.handle_key(key(KeyCode::Enter)),
-            GrantAction::Answer(Some(Approval::from(Grant::Always)))
+            GrantAction::Answer(Some(Grant::Always))
         );
     }
 
     #[test]
     fn direct_keys_answer_without_moving() {
         for (code, expected) in [
-            (KeyCode::Char('o'), Some(Approval::from(Grant::Once))),
-            (KeyCode::Char('s'), Some(Approval::from(Grant::Session))),
-            (KeyCode::Char('a'), Some(Approval::from(Grant::Always))),
+            (KeyCode::Char('o'), Some(Grant::Once)),
+            (KeyCode::Char('s'), Some(Grant::Session)),
+            (KeyCode::Char('a'), Some(Grant::Always)),
             (KeyCode::Char('d'), None),
             (KeyCode::Esc, None),
         ] {
@@ -423,7 +542,7 @@ mod tests {
         assert_eq!(modal.handle_key(key(KeyCode::Tab)), GrantAction::Stay);
         assert_eq!(
             modal.handle_key(key(KeyCode::Enter)),
-            GrantAction::Answer(Some(Approval::from(Grant::Once))),
+            GrantAction::Answer(Some(Grant::Once)),
             "nothing above moved the cursor"
         );
     }
@@ -449,76 +568,131 @@ mod tests {
         modal.handle_key(down);
         assert_eq!(
             modal.handle_key(key(KeyCode::Enter)),
-            GrantAction::Answer(Some(Approval::from(Grant::Session))),
+            GrantAction::Answer(Some(Grant::Session)),
             "a repeated arrow still moves"
         );
     }
 
-    /// A prompt that wants a password turns the letters into typing:
-    /// the picks come from the arrows and Enter, and the answer carries
-    /// what was typed.
+    /// The grant prompt is approval only: no field, every row keeps its
+    /// hotkey, and a typed letter is still a pick.
     #[test]
-    fn a_password_prompt_types_and_hands_the_password_over() {
-        let mut asking = prompt();
-        asking.password_wanted = true;
-        let mut modal = GrantModal::new(&asking, false);
-        for c in "s3cret!".chars() {
-            assert_eq!(modal.handle_key(key(KeyCode::Char(c))), GrantAction::Stay);
-        }
-        modal.handle_key(key(KeyCode::Backspace));
-        modal.handle_key(key(KeyCode::Char('?')));
+    fn the_grant_prompt_has_no_password_field() {
+        let mut modal = modal();
         let shown = screen(&modal, 80, 24);
-        assert!(shown.contains("Password: •••••••"), "{shown}");
-        assert!(!shown.contains("s3cret"), "{shown}");
-        modal.handle_key(key(KeyCode::Down));
+        assert!(!shown.contains("Password"), "{shown}");
+        for prefix in ["(o)", "(s)", "(a)", "(d)"] {
+            assert!(shown.contains(prefix), "{prefix} missing from {shown}");
+        }
         assert_eq!(
-            modal.handle_key(key(KeyCode::Enter)),
-            GrantAction::Answer(Some(Approval {
-                grant: Grant::Session,
-                password: Some("s3cret?".into()),
-            }))
-        );
-        // Nothing typed is no password at all.
-        let mut empty = GrantModal::new(&asking, false);
-        assert!(screen(&empty, 80, 24).contains("leave empty if sudo needs none"));
-        assert_eq!(
-            empty.handle_key(key(KeyCode::Esc)),
-            GrantAction::Answer(None)
-        );
-        let mut empty = GrantModal::new(&asking, false);
-        assert_eq!(
-            empty.handle_key(key(KeyCode::Enter)),
-            GrantAction::Answer(Some(Approval::from(Grant::Once)))
+            modal.handle_key(key(KeyCode::Char('s'))),
+            GrantAction::Answer(Some(Grant::Session))
         );
     }
 
-    /// While the letters type, the rows must not advertise them as
-    /// picks — and a mask longer than the row says so rather than being
-    /// clipped at the frame.
+    /// The password prompt: the command it is for, a masked field, Enter
+    /// sends what was typed, and nothing of it reaches the screen.
     #[test]
-    fn a_password_row_drops_the_hotkeys_and_windows_the_mask() {
-        let mut asking = prompt();
-        asking.password_wanted = true;
-        let mut modal = GrantModal::new(&asking, false);
-        let shown = screen(&modal, 80, 24);
-        for prefix in ["(o)", "(s)", "(a)", "(d)"] {
-            assert!(!shown.contains(prefix), "{prefix} in {shown}");
-        }
-        assert!(shown.contains("> Allow once"), "{shown}");
-        assert!(shown.contains("  Deny"), "{shown}");
+    fn the_password_prompt_types_masks_and_sends() {
+        let mut modal = PasswordModal::new(&password_prompt(), false);
+        let shown = password_screen(&modal, 80, 24);
+        assert!(shown.contains("sudo password"), "{shown}");
+        assert!(shown.contains("For:"), "{shown}");
+        assert!(shown.contains("apt install ripgrep"), "{shown}");
         assert!(shown.contains("type or paste it"), "{shown}");
+        assert!(!shown.contains("refused the last one"), "{shown}");
+        for c in "s3cret!".chars() {
+            assert_eq!(
+                modal.handle_key(key(KeyCode::Char(c))),
+                PasswordAction::Stay
+            );
+        }
+        modal.handle_key(key(KeyCode::Backspace));
+        modal.handle_key(key(KeyCode::Char('?')));
+        let shown = password_screen(&modal, 80, 24);
+        assert!(shown.contains("Password: •••••••"), "{shown}");
+        assert!(!shown.contains("s3cret"), "{shown}");
+        assert_eq!(
+            modal.handle_key(key(KeyCode::Enter)),
+            PasswordAction::Answer(Some("s3cret?".into()))
+        );
+        assert_eq!(modal.outcome_line(true), "sudo password given");
+        assert_eq!(
+            modal.withdrawn_line(),
+            "sudo password prompt withdrawn — the tool stopped waiting"
+        );
+    }
+
+    /// Enter on an empty field is refused in place — the old prompt took
+    /// it as "this system needs none" and the command could never run.
+    /// Esc is the way out, and it cancels the call.
+    #[test]
+    fn an_empty_password_is_refused_in_place_and_esc_cancels() {
+        let mut modal = PasswordModal::new(&password_prompt(), false);
+        assert_eq!(modal.handle_key(key(KeyCode::Enter)), PasswordAction::Stay);
+        let shown = password_screen(&modal, 80, 24);
+        assert!(shown.contains("sudo needs a password"), "{shown}");
+        // Typing clears the complaint.
+        modal.handle_key(key(KeyCode::Char('x')));
+        assert!(
+            !password_screen(&modal, 80, 24).contains("sudo needs a password"),
+            "the refusal outlived the typing"
+        );
+        modal.handle_key(key(KeyCode::Backspace));
+        assert_eq!(
+            modal.handle_key(key(KeyCode::Esc)),
+            PasswordAction::Answer(None)
+        );
+        assert_eq!(
+            modal.outcome_line(false),
+            "sudo password prompt cancelled — the command does not run"
+        );
+        // A repeat of either key — a key held down as the prompt opened
+        // — answers nothing.
+        let mut held = PasswordModal::new(&password_prompt(), false);
+        held.paste("s3cret");
+        for code in [KeyCode::Enter, KeyCode::Esc] {
+            let mut repeat = key(code);
+            repeat.kind = KeyEventKind::Repeat;
+            assert_eq!(held.handle_key(repeat), PasswordAction::Stay, "{code:?}");
+        }
+    }
+
+    /// A re-ask says sudo refused the last one; the password usually
+    /// comes from a manager, so a paste lands in the field, and a mask
+    /// longer than the row shows its tail rather than being clipped.
+    #[test]
+    fn a_re_ask_says_it_was_refused_and_a_paste_lands_in_the_field() {
+        let mut modal = PasswordModal::new(
+            &PasswordPrompt {
+                refused: true,
+                agent: Some("reviewer".into()),
+                ..password_prompt()
+            },
+            true,
+        );
+        let shown = password_screen(&modal, 80, 24);
+        assert!(shown.contains("(sudo refused the last one)"), "{shown}");
+        assert!(
+            shown.contains("sudo password (reviewer subagent)"),
+            "{shown}"
+        );
+        modal.paste("s3cret\n");
+        modal.paste("more\nignored");
+        assert_eq!(
+            modal.handle_key(key(KeyCode::Enter)),
+            PasswordAction::Answer(Some("s3cretmore".into()))
+        );
+
         // A password wider than the row shows its tail behind a leader.
-        modal.paste(&"x".repeat(200));
-        let shown = screen(&modal, 40, 12);
-        assert!(shown.contains("Password: …"), "{shown}");
+        let mut long = PasswordModal::new(&password_prompt(), false);
+        long.paste(&"x".repeat(200));
+        let shown = password_screen(&long, 40, 12);
         let row = shown
             .lines()
             .find(|line| line.contains("Password:"))
             .expect("the password row");
         // Inside the frame the row is exactly label, leader, mask and
-        // cursor: nothing was clipped past the border (the old
-        // unwrapped paragraph was, with no sign of it) and nothing was
-        // left blank.
+        // cursor: nothing clipped past the border, nothing left blank.
         let content = row.trim().trim_matches('║');
         assert!(content.starts_with("Password: …"), "{row}");
         assert!(content.ends_with('▌'), "{row}");
@@ -531,30 +705,26 @@ mod tests {
         assert!(masked > 4, "a window worth showing: {masked}");
     }
 
-    /// The password usually arrives from a manager, so a paste lands in
-    /// the field; a prompt without one has nowhere to put it.
+    /// A long command keeps the field on screen and says what it hid.
     #[test]
-    fn a_pasted_password_lands_in_the_field() {
-        let mut asking = prompt();
-        asking.password_wanted = true;
-        let mut asked = GrantModal::new(&asking, false);
-        assert!(asked.wants_password());
-        asked.paste("s3cret\n");
-        asked.paste("more\nignored");
-        assert_eq!(
-            asked.handle_key(key(KeyCode::Enter)),
-            GrantAction::Answer(Some(Approval {
-                grant: Grant::Once,
-                password: Some("s3cretmore".into()),
-            }))
+    fn a_long_command_keeps_the_password_field_visible() {
+        let modal = PasswordModal::new(
+            &PasswordPrompt {
+                detail: (0..40)
+                    .map(|index| format!("line {index}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                ..password_prompt()
+            },
+            false,
         );
-        let mut plain = modal();
-        assert!(!plain.wants_password());
-        plain.paste("s3cret");
-        assert_eq!(
-            plain.handle_key(key(KeyCode::Enter)),
-            GrantAction::Answer(Some(Approval::from(Grant::Once)))
-        );
+        let shown = password_screen(&modal, 40, 12);
+        assert_eq!(shown.lines().count(), 12);
+        assert!(shown.contains("more lines not shown"), "{shown}");
+        assert!(shown.contains("Password:"), "{shown}");
+        // And a terminal too small for any of it does not panic.
+        password_screen(&modal, 8, 3);
+        password_screen(&modal, 1, 1);
     }
 
     #[test]
@@ -620,10 +790,16 @@ mod tests {
     }
 
     fn screen(modal: &GrantModal, width: u16, height: u16) -> String {
+        shot(width, height, |frame| modal.render(frame, frame.area()))
+    }
+
+    fn password_screen(modal: &PasswordModal, width: u16, height: u16) -> String {
+        shot(width, height, |frame| modal.render(frame, frame.area()))
+    }
+
+    fn shot(width: u16, height: u16, render: impl FnOnce(&mut ratatui::Frame<'_>)) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal
-            .draw(|frame| modal.render(frame, frame.area()))
-            .unwrap();
+        terminal.draw(render).unwrap();
         terminal.backend().buffer().content.iter().enumerate().fold(
             String::new(),
             |mut output, (index, cell)| {

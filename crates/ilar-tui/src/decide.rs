@@ -36,9 +36,6 @@ pub(crate) struct LoopState {
     /// A turn ended badly with its chain committed, so there is
     /// something for a resume to continue from.
     pub(crate) retry_available: bool,
-    /// The open grant prompt is asking for a password, so it has a
-    /// field that takes typed — and pasted — characters.
-    pub(crate) grant_password: bool,
 }
 
 impl LoopState {
@@ -79,8 +76,8 @@ pub(crate) enum Intent {
     PasteQuestion(String),
     /// The filter of whichever picker owns the keyboard.
     PasteModalQuery(String),
-    /// The grant prompt's password field.
-    PasteGrantPassword(String),
+    /// The sudo password prompt's field.
+    PastePassword(String),
     PasteInput(String),
     /// Drop the goal, having finished or run out of rounds.
     ClearGoal,
@@ -105,10 +102,10 @@ pub(crate) enum PasteTarget {
     /// included, which is nothing but a typed query.
     ModalQuery,
     Input,
-    /// The grant prompt's password field. A sudo password comes out of
+    /// The sudo password prompt's field. A sudo password comes out of
     /// a manager, so it arrives as a paste far more often than it is
     /// typed.
-    GrantPassword,
+    Password,
     /// A modal with nowhere to put it.
     Discard,
 }
@@ -129,10 +126,10 @@ pub(crate) fn paste_target(state: &LoopState) -> PasteTarget {
             | Modal::ModelPicker
             | Modal::ThemePicker,
         ) => PasteTarget::ModalQuery,
-        // A grant prompt takes a paste only while its password field is
-        // up; without one the letters are the four answers, and a paste
-        // must not pick one of them.
-        Some(Modal::Grant) if state.grant_password => PasteTarget::GrantPassword,
+        // The sudo password is the one prompt a paste belongs in; the
+        // grant prompt's letters are its four answers, and a paste must
+        // not pick one of them.
+        Some(Modal::Password) => PasteTarget::Password,
         // Spelled out rather than a wildcard: a new modal with a filter
         // must fail to compile here instead of silently swallowing
         // pastes, the way the pickers used to.
@@ -418,7 +415,7 @@ pub(crate) fn paste(state: &LoopState, text: String) -> Vec<Intent> {
         PasteTarget::Search => vec![Intent::PasteSearch(text)],
         PasteTarget::Question => vec![Intent::PasteQuestion(text)],
         PasteTarget::ModalQuery => vec![Intent::PasteModalQuery(text)],
-        PasteTarget::GrantPassword => vec![Intent::PasteGrantPassword(text)],
+        PasteTarget::Password => vec![Intent::PastePassword(text)],
         PasteTarget::Input => vec![Intent::PasteInput(text)],
         PasteTarget::Discard => Vec::new(),
     }
@@ -650,20 +647,19 @@ mod tests {
         }
     }
 
-    /// A sudo password comes out of a manager, so the grant prompt's
-    /// password field is the one place a paste must land — and only
-    /// while that field is up.
+    /// A sudo password comes out of a manager, so its own prompt is the
+    /// one place a paste must land; the grant prompt behind it takes
+    /// none.
     #[test]
-    fn a_grant_prompt_asking_for_a_password_takes_the_paste() {
+    fn the_sudo_password_prompt_takes_the_paste() {
         let asking = LoopState {
-            modal: Some(Modal::Grant),
-            grant_password: true,
+            modal: Some(Modal::Password),
             ..idle()
         };
-        assert_eq!(paste_target(&asking), PasteTarget::GrantPassword);
+        assert_eq!(paste_target(&asking), PasteTarget::Password);
         assert_eq!(
             paste(&asking, "s3cret".into()),
-            vec![Intent::PasteGrantPassword("s3cret".into())]
+            vec![Intent::PastePassword("s3cret".into())]
         );
     }
 

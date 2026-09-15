@@ -14,7 +14,7 @@ use ilar::agent::{LoopEvent, TurnOutcome};
 #[cfg(test)]
 use ilar::session::SessionStore;
 
-use crate::grants::GrantModal;
+use crate::grants::{GrantModal, PasswordModal};
 use crate::input::{InputBuffer, slash_candidates};
 use crate::modals::{
     AsideModal, CommandPalette, ContextPicker, ContextPickerAction, LinkPicker, Modal, ModelPicker,
@@ -457,6 +457,8 @@ pub(crate) struct App {
     pub(crate) question_modal: Option<QuestionModal>,
     /// A tool's ask for a stored secret, waiting on the person.
     pub(crate) grant_modal: Option<GrantModal>,
+    /// sudo's ask for a password, after an approval already given.
+    pub(crate) password_modal: Option<PasswordModal>,
     pub(crate) pending_manager: Option<PendingManager>,
     /// Where the active modal's rows were drawn last frame; how a click
     /// finds the item it landed on. Rebuilt by every render.
@@ -680,6 +682,7 @@ impl App {
             slash_selected: 0,
             question_modal: None,
             grant_modal: None,
+            password_modal: None,
             pending_manager: None,
             modal_hit: None,
             available_models: Vec::new(),
@@ -789,6 +792,8 @@ impl App {
             Some(Modal::Question)
         } else if self.grant_modal.is_some() {
             Some(Modal::Grant)
+        } else if self.password_modal.is_some() {
+            Some(Modal::Password)
         } else if self.pending_manager.is_some() {
             Some(Modal::PendingManager)
         } else if self.help_visible {
@@ -1003,7 +1008,11 @@ impl App {
             // The question modal navigates its own rows with the arrows;
             // search leaves the wheel to the transcript so results stay
             // browsable underneath it.
-            Some(Modal::Question) | Some(Modal::Grant) | Some(Modal::Search) | None => {
+            Some(Modal::Question)
+            | Some(Modal::Grant)
+            | Some(Modal::Password)
+            | Some(Modal::Search)
+            | None => {
                 return false;
             }
         }
@@ -1053,6 +1062,7 @@ impl App {
                 }
                 Modal::Question
                 | Modal::Grant
+                | Modal::Password
                 | Modal::Help
                 | Modal::Todos
                 | Modal::Aside
@@ -3586,12 +3596,43 @@ mod tests {
                 secret: "TOKEN".into(),
                 description: String::new(),
                 detail: "gh api /user".into(),
-                password_wanted: false,
                 reply,
             },
             false,
         ));
         assert_eq!(app.active_modal(), Some(Modal::Grant));
+
+        // The password prompt comes after that yes, so it sits under
+        // the grant prompt and over everything else.
+        let (reply, _rx) = tokio::sync::oneshot::channel();
+        app.password_modal = Some(PasswordModal::new(
+            &ilar::secrets::PasswordPrompt {
+                session_id: "s1".into(),
+                tool_call_id: None,
+                agent: None,
+                detail: "apt install ripgrep".into(),
+                refused: false,
+                reply,
+            },
+            false,
+        ));
+        assert_eq!(app.active_modal(), Some(Modal::Grant));
+        app.grant_modal = None;
+        assert_eq!(app.active_modal(), Some(Modal::Password));
+        app.password_modal = None;
+        app.grant_modal = Some(GrantModal::new(
+            &ilar::secrets::GrantPrompt {
+                session_id: "s1".into(),
+                agent: None,
+                tool_call_id: None,
+                tool: "bash".into(),
+                secret: "TOKEN".into(),
+                description: String::new(),
+                detail: "gh api /user".into(),
+                reply: tokio::sync::oneshot::channel().0,
+            },
+            false,
+        ));
 
         app.question_modal = Some(QuestionModal::new(ilar::question::QuestionRequest {
             questions: vec![ilar::question::Question {

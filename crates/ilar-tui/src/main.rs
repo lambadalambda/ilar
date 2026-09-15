@@ -40,7 +40,7 @@ use crossterm::event::{
 };
 use crossterm::terminal::supports_keyboard_enhancement;
 use decide::{Intent, LoopState, retry as retry_intents, retry_dismisses_manager};
-use grants::GrantAction;
+use grants::{GrantAction, PasswordAction};
 use input::{
     InputBuffer, Interrupt, PromptAction, handle_prompt_key, interrupt, quit_requested,
     retry_requested,
@@ -617,8 +617,8 @@ fn apply_intent(
             }
             None
         }
-        Intent::PasteGrantPassword(text) => {
-            if let Some(modal) = app.grant_modal.as_mut() {
+        Intent::PastePassword(text) => {
+            if let Some(modal) = app.password_modal.as_mut() {
                 modal.paste(&text);
             }
             None
@@ -887,10 +887,6 @@ fn observe(
         steerable: steer_tx.as_ref().is_some_and(|tx| !tx.is_closed()),
         notifications_paused,
         retry_available: app.retry_available,
-        grant_password: app
-            .grant_modal
-            .as_ref()
-            .is_some_and(grants::GrantModal::wants_password),
     }
 }
 
@@ -1433,7 +1429,7 @@ async fn main() -> Result<()> {
             ..
         } = runtime;
         let question_rx = questions.expect("the TUI asked for questions");
-        let grant_rx = grants.expect("the TUI asked for grants");
+        let ask_rx = grants.expect("the TUI asked for grants");
         let notifications = spawner.subscribe();
         let subagent_activity = spawner.subscribe_activity();
         let model_choices = config.available_models();
@@ -1589,7 +1585,7 @@ async fn main() -> Result<()> {
             notifications,
             subagent_activity,
             question_rx,
-            grant_rx,
+            ask_rx,
             loop_config,
             model_choices,
             services,
@@ -3121,7 +3117,7 @@ async fn run_app(
     mut notifications: tokio::sync::mpsc::Receiver<ilar::subagent::Notification>,
     mut subagent_activity: tokio::sync::broadcast::Receiver<ilar::subagent::SubagentActivity>,
     mut question_rx: ilar::question::QuestionReceiver,
-    mut grant_rx: ilar::secrets::GrantReceiver,
+    mut ask_rx: ilar::secrets::AskReceiver,
     loop_config: LoopConfig,
     model_choices: Vec<&'static ilar::model::ModelInfo>,
     services: std::sync::Arc<ilar::tools::service::ServiceManager>,
@@ -3178,11 +3174,12 @@ async fn run_app(
     let mut question_reply: Option<tokio::sync::oneshot::Sender<ilar::question::QuestionResponse>> =
         None;
     let mut pending_question_id = initial_pending_question_id;
-    // The open grant prompt's reply path. Nothing persists: a grant
-    // is for the command in front of the person, and the tool is
-    // blocked on it until they answer or the turn goes away.
-    let mut grant_reply: Option<tokio::sync::oneshot::Sender<Option<ilar::secrets::Approval>>> =
-        None;
+    // The open prompts' reply paths. Nothing persists: a grant is for
+    // the command in front of the person, and the tool is blocked on it
+    // until they answer or the turn goes away. The password is its own
+    // ask, so its own path.
+    let mut grant_reply: Option<tokio::sync::oneshot::Sender<Option<ilar::secrets::Grant>>> = None;
+    let mut password_reply: Option<tokio::sync::oneshot::Sender<Option<String>>> = None;
     // Decisions accumulate here and are performed in one place below,
     // rather than each arm doing its own effects inline.
     let mut intents: Vec<Intent> = Vec::new();
@@ -3422,10 +3419,25 @@ async fn run_app(
         // line behind: a modal that simply vanished looked like a
         // keystroke of the user's had answered it, and the status stayed
         // on "waiting for your grant" until the next event.
-        if app.grant_modal.is_some() && grant_reply.as_ref().is_none_or(|reply| reply.is_closed()) {
-            let withdrawn = app.grant_modal.take().expect("checked above");
+        let withdrawn = if app.grant_modal.is_some()
+            && grant_reply.as_ref().is_none_or(|reply| reply.is_closed())
+        {
             grant_reply = None;
-            app.push_transcript_line(Line_::System(withdrawn.withdrawn_line()));
+            app.grant_modal.take().map(|modal| modal.withdrawn_line())
+        } else if app.password_modal.is_some()
+            && password_reply
+                .as_ref()
+                .is_none_or(|reply| reply.is_closed())
+        {
+            password_reply = None;
+            app.password_modal
+                .take()
+                .map(|modal| modal.withdrawn_line())
+        } else {
+            None
+        };
+        if let Some(line) = withdrawn {
+            app.push_transcript_line(Line_::System(line));
             if turn_handle.is_some() {
                 app.status = "thinking".into();
                 app.set_activity(Activity::Thinking);
@@ -3441,12 +3453,22 @@ async fn run_app(
         // same yes, and dropping it would be a silent refusal. The
         // modal names the asker instead.
         if app.grant_modal.is_none()
-            && let Ok(prompt) = grant_rx.try_recv()
+            && app.password_modal.is_none()
+            && let Ok(ask) = ask_rx.try_recv()
         {
-            let from_subagent = prompt.session_id != session_id;
-            app.grant_modal = Some(grants::GrantModal::new(&prompt, from_subagent));
-            grant_reply = Some(prompt.reply);
-            app.status = "waiting for your grant".into();
+            let from_subagent = ask.session_id() != session_id;
+            match ask {
+                ilar::secrets::Ask::Grant(prompt) => {
+                    app.grant_modal = Some(grants::GrantModal::new(&prompt, from_subagent));
+                    grant_reply = Some(prompt.reply);
+                    app.status = "waiting for your grant".into();
+                }
+                ilar::secrets::Ask::Password(prompt) => {
+                    app.password_modal = Some(grants::PasswordModal::new(&prompt, from_subagent));
+                    password_reply = Some(prompt.reply);
+                    app.status = "waiting for the sudo password".into();
+                }
+            }
             app.set_activity(Activity::Paused);
         }
         // Rewind and fork requests recorded by /rewind, /fork or the
@@ -3976,11 +3998,33 @@ async fn run_app(
                                 }
                             }
                         }
+                        Modal::Password => {
+                            let modal = app.password_modal.as_mut().expect("password modal");
+                            if let PasswordAction::Answer(answer) = modal.handle_key(key) {
+                                let line = modal.outcome_line(answer.is_some());
+                                app.password_modal = None;
+                                // The asker can go away between the
+                                // closed-check and this keypress; the
+                                // transcript must not claim a password
+                                // nobody received.
+                                let delivered = password_reply
+                                    .take()
+                                    .is_some_and(|reply| reply.send(answer).is_ok());
+                                if delivered {
+                                    app.push_transcript_line(Line_::System(line));
+                                    app.status = "running sudo".into();
+                                    app.set_activity(Activity::Tools);
+                                } else {
+                                    app.push_transcript_line(Line_::System(format!(
+                                        "{line} — but the tool had stopped waiting"
+                                    )));
+                                }
+                            }
+                        }
                         Modal::Grant => {
                             let modal = app.grant_modal.as_mut().expect("grant modal");
                             if let GrantAction::Answer(answer) = modal.handle_key(key) {
-                                let line =
-                                    modal.outcome_line(answer.as_ref().map(|answer| answer.grant));
+                                let line = modal.outcome_line(answer);
                                 app.grant_modal = None;
                                 // The asker can go away between the
                                 // closed-check and this keypress; the

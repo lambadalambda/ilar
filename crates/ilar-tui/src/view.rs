@@ -1193,6 +1193,13 @@ impl App {
                     .render(frame, frame.area());
                 None
             }
+            Some(Modal::Password) => {
+                self.password_modal
+                    .as_ref()
+                    .expect("password modal")
+                    .render(frame, frame.area());
+                None
+            }
             Some(Modal::PendingManager) => self
                 .pending_snapshot()
                 .map(|snapshot| render_pending_manager(frame, &snapshot)),

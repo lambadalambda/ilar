@@ -612,7 +612,6 @@ mod tests {
                 steerable: false,
                 notifications_paused: self.paused,
                 retry_available: app.retry_available,
-                grant_password: false,
             }
         }
 
