@@ -704,8 +704,11 @@ pub struct Secrets {
     /// a note must not surface on somebody else's result. Drained by
     /// [`Self::take_notes`]; a call that never came back to collect
     /// its note loses it to [`MAX_NOTES`].
-    notes: Arc<Mutex<Vec<(Option<String>, String)>>>,
+    notes: Arc<Notes>,
 }
+
+/// Notes waiting to be collected, each with the tool call it belongs to.
+type Notes = Mutex<Vec<(Option<String>, String)>>;
 
 /// Notes kept for calls that have not collected them. A cancelled call
 /// never collects, so the oldest is dropped rather than kept for ever.
