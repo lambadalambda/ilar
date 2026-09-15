@@ -55,7 +55,7 @@ declares them is warned about and ignored.
 | `gateway.home` | `<state dir>/gateway` | The assistant's home; see below. |
 | `gateway.agent` | the core's default | The agent every chat runs as. |
 | `gateway.model` | `general.model` | `provider/model` a fresh chat starts on, unless `/model … --save` saved one. |
-| `gateway.workspace` | `<state dir>/gateway/workspace` | Where the assistant's sessions work. |
+| `gateway.workspace` | `<home>/workspace` | Where the assistant's sessions work. |
 | `gateway.notify_interval_secs` | `60` | One inbox message per source per interval. |
 | `gateway.tools.allow` | all | Only these tools. |
 | `gateway.tools.deny` | `[]` | Never these. |
@@ -87,7 +87,7 @@ over stdio; no bridge, no Python at run time.
 | Key | Default | Meaning |
 |---|---|---|
 | `rpc_server` | `deltachat-rpc-server` on PATH | The server binary. |
-| `accounts_dir` | `<state dir>/gateway/deltachat` | Where the account lives. |
+| `accounts_dir` | `<home>/deltachat` | Where the account lives. |
 | `setup_qr` | — | A `DCACCOUNT:` QR for a fresh chatmail identity (e.g. `DCACCOUNT:https://nine.testrun.org/new`). |
 | `addr`, `password` | — | An existing address instead of the QR. |
 | `display_name` | — | The name contacts see. |
@@ -103,13 +103,14 @@ The account is configured on first start and reused after. The
 adapter ignores its own messages, info messages and other bots,
 accepts a contact request from an allowed address, flags group chats,
 and hands attachments to the turn as files. Replies go out as text, or
-as a file message per attachment with the text on the first.
+as a file message per attachment with a short text as the first one's
+caption.
 
 ## How a message becomes a turn
 
 `<channel>:<chat id>` is a session key. The first message on a key
 creates a session; every later one resumes it, through
-`<state dir>/gateway/routes.json`, which also records the last active
+`<home>/routes.json`, which also records the last active
 chat and which chats are groups. A chat's runtime stays open between
 turns, so its background subagents keep running, and their completions
 come back to the chat as follow-up turns exactly as they would reach a
@@ -220,7 +221,7 @@ policy for a bot you do not want changing the machine.
 
 ## Memory that outlives a session
 
-Two tiers, under `<state dir>/gateway/memory/`. The core is two small
+Two tiers, under `<home>/memory/`. The core is two small
 files with hard caps, `MEMORY.md` (about the world, 2,200 characters)
 and `USER.md` (about the person, 1,375), which the `memory` tool edits
 with add, replace and remove; an overflow is an error the model
@@ -287,7 +288,7 @@ can ask about them.
 
 The model has a `cron` tool: add a named prompt with a five-field cron
 expression, an interval or a one-shot time, addressed to its own chat
-or a known one; list; remove. Jobs live in `<state dir>/gateway/cron.json`.
+or a known one; list; remove. Jobs live in `<home>/cron.json`.
 A due job runs on its own session, `cron:<id>`, homed on the chat it
 is for; a one-shot retires after firing. The heartbeat is the same
 kind of turn on a fixed interval, on `heartbeat:<channel>:<chat>` for
@@ -316,9 +317,14 @@ be named with `channel` and `chat`, but only one that has written to
 the bot: the model does not open conversations with strangers. The
 tool's description carries the channel's delivery constraints (for
 Delta Chat: plain text, files by path). Delta Chat folds a bubble past
-3,800 characters or 38 lines behind "Show full message", so the
-adapter sends a long text as several bubbles under both caps, split
-at line breaks; the model writes it whole. The tool refuses what cannot be meant: a chat that has
+38 display lines — a display line being 100 characters or a line
+break, whichever comes first — behind "Show full message", so the
+adapter sends a long text as several bubbles of at most 34 such lines,
+split at line breaks; the model writes it whole. A text that fits one
+bubble rides along as the first attachment's caption; a longer one
+goes out as its own bubbles before the files, since a folded caption
+would hide the answer behind the picture.
+The tool refuses what cannot be meant: a chat that has
 never written (it names the ones that have), a file that is not there,
 and a text that speaks of an attachment while `media` is empty — the
 last unless the call says `no_attachment: true`, for a text that means

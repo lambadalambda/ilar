@@ -293,11 +293,12 @@ impl Channel for DeltaChat {
     }
 
     fn constraints(&self) -> &str {
-        "plain text, no markdown rendering; a long text is sent as several bubbles of about \
-         3000 characters each, split at line breaks, so write it whole; files are \
-         attached by path; a .xdc file (a zip holding index.html and manifest.toml with a \
-         name = \"…\" line, no external resources) is delivered as a webxdc app the person \
-         opens inside the chat"
+        "plain text, no markdown rendering; a long text is sent as several bubbles, each under \
+         34 lines of 100 characters, split at line breaks, so write it whole; files are \
+         attached by path, and a text too long for one bubble goes out as bubbles of its own \
+         before them instead of as a caption; a .xdc file (a zip holding index.html and \
+         manifest.toml with a name = \"…\" line, no external resources) is delivered as a \
+         webxdc app the person opens inside the chat"
     }
 
     fn run<'a>(
@@ -435,27 +436,33 @@ impl Channel for DeltaChat {
                 .chat_id
                 .parse()
                 .with_context(|| format!("chat id {:?} is not a Delta Chat id", message.chat_id))?;
-            let mut text = Some(message.text).filter(|text| !text.trim().is_empty());
-            if message.media.is_empty() {
-                // Delta Chat folds a bubble past 38 display lines of 100
-                // characters behind "Show full message", so a long text
-                // goes out as several bubbles under that.
-                if let Some(text) = text {
-                    for piece in
-                        crate::bus::split_for_delivery(&text, BUBBLE_LINES, BUBBLE_LINE_CHARS)
-                    {
-                        rpc.call("misc_send_text_message", json!([account, chat_id, piece]))
-                            .await?;
-                    }
+            // Delta Chat folds a bubble past 38 display lines of 100
+            // characters behind "Show full message", so a long text
+            // goes out as several bubbles under that — as a caption
+            // too, which the core truncates the same way.
+            let mut pieces =
+                crate::bus::split_for_delivery(&message.text, BUBBLE_LINES, BUBBLE_LINE_CHARS);
+            // A text that fits one bubble rides along as the first
+            // file's caption; a longer one goes ahead of the files in
+            // bubbles of its own, since a folded caption hides the
+            // answer behind the picture.
+            let mut caption = None;
+            if pieces.len() == 1 && !message.media.is_empty() {
+                caption = pieces.pop();
+            } else {
+                for piece in &pieces {
+                    rpc.call("misc_send_text_message", json!([account, chat_id, piece]))
+                        .await?;
                 }
+            }
+            if message.media.is_empty() {
                 return Ok(());
             }
-            // The first file carries the text; the rest go bare.
             for path in &message.media {
                 let data = json!({
                     "file": path,
                     "viewtype": viewtype(path),
-                    "text": text.take(),
+                    "text": caption.take(),
                 });
                 rpc.call("send_msg", json!([account, chat_id, data]))
                     .await?;
@@ -743,12 +750,23 @@ mod tests {
             })
             .await
             .unwrap();
+        // A caption too long for one bubble is not a caption: it goes
+        // out as its own bubbles first, and the picture rides bare.
+        channel
+            .send(Outbound {
+                channel: "deltachat".into(),
+                chat_id: "5".into(),
+                text: format!("{}\n\n{}\n", "c".repeat(2_000), "d".repeat(2_000)),
+                media: vec!["/tmp/a.png".into()],
+            })
+            .await
+            .unwrap();
         let recorded = calls.lock().unwrap().clone();
         let sends: Vec<&(String, Value)> = recorded
             .iter()
             .filter(|(m, _)| m == "misc_send_text_message" || m == "send_msg")
             .collect();
-        assert_eq!(sends.len(), 6, "{sends:?}");
+        assert_eq!(sends.len(), 9, "{sends:?}");
         assert!(sends[4].1[2].as_str().unwrap().starts_with("aaaa"));
         assert!(sends[5].1[2].as_str().unwrap().starts_with("bbbb"));
         assert_eq!(sends[0].1, json!([1, 5, "plain"]));
@@ -757,7 +775,26 @@ mod tests {
         assert_eq!(sends[2].1[2]["viewtype"], "File");
         assert_eq!(sends[2].1[2]["text"], Value::Null);
         assert_eq!(sends[3].1[2]["viewtype"], "Webxdc");
+        assert_eq!(sends[6].0, "misc_send_text_message");
+        assert!(sends[6].1[2].as_str().unwrap().starts_with("cccc"));
+        assert!(sends[7].1[2].as_str().unwrap().starts_with("dddd"));
+        assert_eq!(sends[8].0, "send_msg");
+        assert_eq!(sends[8].1[2]["text"], Value::Null);
         cancel.cancel();
         let _ = running.await;
+    }
+
+    #[test]
+    fn the_constraints_name_the_bubble_cap_the_code_splits_at() {
+        let channel = DeltaChat::new(
+            DeltaChatConfig::default(),
+            std::path::Path::new("/nonexistent"),
+        );
+        let text = channel.constraints().to_string();
+        assert!(text.contains(&format!("{BUBBLE_LINES} lines")), "{text}");
+        assert!(
+            text.contains(&format!("{BUBBLE_LINE_CHARS} characters")),
+            "{text}"
+        );
     }
 }
