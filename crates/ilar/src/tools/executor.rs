@@ -130,11 +130,13 @@ where
                     == Some(true);
             if background && call_count != 1 {
                 outcomes[idx] = Some(CallOutcome {
+                    output: ToolOutput::error(format!(
+                        "{}: a background call must be the only tool call in a provider step; \
+                         send it alone, or run it in the foreground",
+                        call.name
+                    )),
                     id: call.id,
                     name: call.name,
-                    output: ToolOutput::error(
-                        "background tool calls must be the only tool call in a provider step",
-                    ),
                     cancelled: false,
                 });
                 continue;
@@ -189,7 +191,7 @@ where
                             tool.run_observed(input, call_ctx, start).await
                         }
                         WorkspaceCoverage::Incompatible => ToolOutput::error(format!(
-                            "tool {} requests workspace access not covered by its inherited lease",
+                            "{}: workspace access is not covered by its inherited lease",
                             tool.name()
                         )),
                     }
@@ -215,7 +217,7 @@ where
                             tool.run_observed(input, call_ctx, start).await
                         }
                         WorkspaceCoverage::Incompatible => ToolOutput::error(format!(
-                            "tool {} requests workspace access not covered by its inherited lease",
+                            "{}: workspace access is not covered by its inherited lease",
                             tool.name()
                         )),
                     }
@@ -281,9 +283,13 @@ where
                     unreachable!("no cancel, but outcome {idx} missing")
                 };
                 CallOutcome {
+                    output: ToolOutput::error(if name.is_empty() {
+                        "cancelled".to_string()
+                    } else {
+                        format!("{name}: cancelled")
+                    }),
                     id,
                     name,
-                    output: ToolOutput::error("cancelled"),
                     cancelled: true,
                 }
             })

@@ -124,7 +124,7 @@ async fn service_input_validation() {
         ),
         (
             serde_json::json!({"action": "start", "name": "no spaces", "command": "true"}),
-            "invalid service name",
+            "service: invalid name",
         ),
         (serde_json::json!({"action": "logs"}), "requires name"),
         (
@@ -133,7 +133,7 @@ async fn service_input_validation() {
         ),
         (
             serde_json::json!({"action": "restart"}),
-            "unknown service action",
+            "service: unknown action",
         ),
     ] {
         let output = run(&tool, input).await;

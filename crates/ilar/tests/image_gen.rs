@@ -87,6 +87,9 @@ async fn run(
     let mut ctx = ToolContext::root(cwd.to_path_buf());
     ctx.session_id = "sess-1".into();
     ctx.call_id = Some("call_img_1".into());
+    // A model that can be handed the drawing back: the tool only
+    // attaches the image when the session's model accepts images.
+    ctx.vision = true;
     tool.run(input, ctx).await
 }
 

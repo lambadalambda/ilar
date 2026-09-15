@@ -182,23 +182,23 @@ impl Tool for ImageGenTool {
                 Err(error) => return error,
             };
             if input.prompt.trim().is_empty() {
-                return ToolOutput::error("image_gen needs a prompt");
+                return ToolOutput::error("image_gen: prompt is empty; say what to draw");
             }
             let size = input.size.unwrap_or_else(|| "auto".into());
             if !valid_size(&size) {
                 return ToolOutput::error(format!(
-                    "size {size:?} is not auto or WIDTHxHEIGHT (for example 1536x1024)"
+                    "image_gen: size {size:?} is not auto or WIDTHxHEIGHT (for example 1536x1024)"
                 ));
             }
             let quality = input.quality.unwrap_or_else(|| "auto".into());
             if !matches!(quality.as_str(), "auto" | "low" | "medium" | "high") {
                 return ToolOutput::error(format!(
-                    "quality {quality:?} is not one of auto, low, medium, high"
+                    "image_gen: quality {quality:?} is not one of auto, low, medium, high"
                 ));
             }
             if input.reference_paths.len() > MAX_REFERENCES {
                 return ToolOutput::error(format!(
-                    "reference_paths holds {} files; at most {MAX_REFERENCES} are sent",
+                    "image_gen: reference_paths holds {} files; at most {MAX_REFERENCES} are sent",
                     input.reference_paths.len()
                 ));
             }
@@ -206,7 +206,7 @@ impl Tool for ImageGenTool {
             for path in &input.reference_paths {
                 match reference_data_url(&ctx.cwd, path) {
                     Ok(url) => references.push(url),
-                    Err(error) => return ToolOutput::error(error),
+                    Err(error) => return ToolOutput::error(format!("image_gen: {error}")),
                 }
             }
 
@@ -233,7 +233,7 @@ impl Tool for ImageGenTool {
             let png = match backend.post(&url, &body).await {
                 Ok(png) => png,
                 Err(error) => {
-                    return ToolOutput::error(format!("image generation failed: {error}"));
+                    return ToolOutput::error(format!("image_gen: {error}"));
                 }
             };
             let call = ctx.call_id.clone().unwrap_or_else(crate::session::new_id);
@@ -243,19 +243,18 @@ impl Tool for ImageGenTool {
                 std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, &png))
             {
                 return ToolOutput::error(format!(
-                    "image generated but could not be saved to {}: {error}",
+                    "image_gen: generated but could not be saved to {}: {error}",
                     path.display()
                 ));
             }
             // Bounded and downscaled for the model where needed; the file
-            // on disk keeps every pixel.
-            let attachment = crate::image::from_file_bytes(&png).into_iter().collect();
-            ToolOutput::text(format!(
-                "saved {} ({}). The image is attached to this result; the file is the full-resolution original.",
-                path.display(),
-                crate::text::format_bytes(png.len() as u64)
-            ))
-            .with_images(attachment)
+            // on disk keeps every pixel. A text-only session gets none of
+            // it — the same test read applies before promising an image.
+            let attachment = ctx
+                .vision
+                .then(|| crate::image::from_file_bytes(&png))
+                .flatten();
+            attached_output(&path, png.len(), ctx.vision, attachment)
         })
     }
 }
@@ -328,6 +327,33 @@ impl ImageGenBackend {
 
 /// A reference file as the data URL the edits endpoint takes: sniffed,
 /// bounded, never a path the model could not read itself.
+/// The saved image's result, promising an attachment only when the
+/// result actually carries one: a text-only session takes no images, and
+/// the per-result cap can drop one that is too large (it says so
+/// itself). The model's only account of what it drew must not claim a
+/// picture that is not there.
+fn attached_output(
+    path: &Path,
+    png_bytes: usize,
+    vision: bool,
+    attachment: Option<crate::session::ImageContent>,
+) -> ToolOutput {
+    let mut output = ToolOutput::text(format!(
+        "saved {} ({})",
+        path.display(),
+        crate::text::format_bytes(png_bytes as u64)
+    ))
+    .with_images(attachment.into_iter().collect());
+    output.content.push_str(if !output.images().is_empty() {
+        "\nThe image is attached to this result; the file is the full-resolution original."
+    } else if vision {
+        "\nThe image is not attached (see the note above). The file is the result."
+    } else {
+        "\nThe image is not attached: this session's model takes no images. The file is the result."
+    });
+    output
+}
+
 fn reference_data_url(cwd: &Path, path: &str) -> Result<String, String> {
     let resolved = if Path::new(path).is_absolute() {
         PathBuf::from(path)
@@ -372,5 +398,44 @@ fn redact(text: &str, secret: &str) -> String {
         text.to_string()
     } else {
         text.replace(secret, "<redacted>")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The result used to promise an attachment unconditionally, even
+    /// in a session whose model takes no images at all.
+    #[test]
+    fn the_result_promises_an_attachment_only_when_it_carries_one() {
+        let path = Path::new("/tmp/out.png");
+        let image =
+            crate::image::from_file_bytes(&crate::image::encode_png(2, 2, &[7u8; 16]).unwrap());
+        assert!(image.is_some());
+
+        let attached = attached_output(path, 1024, true, image);
+        assert_eq!(attached.images().len(), 1);
+        assert!(
+            attached.content.contains("is attached"),
+            "{}",
+            attached.content
+        );
+
+        let text_only = attached_output(path, 1024, false, None);
+        assert!(text_only.images().is_empty());
+        assert!(
+            text_only
+                .content
+                .contains("not attached: this session's model takes no images"),
+            "{}",
+            text_only.content
+        );
+        // Both still name the file, which is the whole result then.
+        assert!(
+            text_only.content.contains("/tmp/out.png"),
+            "{}",
+            text_only.content
+        );
     }
 }

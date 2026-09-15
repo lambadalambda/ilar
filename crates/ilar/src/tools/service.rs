@@ -248,7 +248,7 @@ impl Tool for ServiceTool {
             match input.action.as_str() {
                 "start" => {
                     let (Some(name), Some(command)) = (input.name, input.command) else {
-                        return ToolOutput::error("service start requires name and command");
+                        return ToolOutput::error("service: start requires name and command");
                     };
                     if command.trim().is_empty() {
                         return ToolOutput::error(
@@ -257,7 +257,7 @@ impl Tool for ServiceTool {
                     }
                     if !valid_name(&name) {
                         return ToolOutput::error(format!(
-                            "invalid service name {name:?} (use [a-zA-Z0-9_-], max 64 chars)"
+                            "service: invalid name {name:?} (use [a-zA-Z0-9_-], max 64 chars)"
                         ));
                     }
                     {
@@ -266,7 +266,7 @@ impl Tool for ServiceTool {
                             existing.refresh();
                             if existing.running() {
                                 return ToolOutput::error(format!(
-                                    "service {name:?} is already running (pid group {:?}); stop it first",
+                                    "service {name}: already running (pid group {:?}); stop it first",
                                     existing.group
                                 ));
                             }
@@ -332,7 +332,9 @@ impl Tool for ServiceTool {
                                 entry.refresh();
                                 ToolOutput::text(describe(&name, entry))
                             }
-                            None => ToolOutput::error(format!("no service named {name:?}")),
+                            None => {
+                                ToolOutput::error(format!("service: no service named {name:?}"))
+                            }
                         },
                         None => {
                             if services.is_empty() {
@@ -354,7 +356,7 @@ impl Tool for ServiceTool {
                 }
                 "logs" => {
                     let Some(name) = input.name else {
-                        return ToolOutput::error("service logs requires name");
+                        return ToolOutput::error("service: logs requires name");
                     };
                     let lines = input
                         .lines
@@ -362,7 +364,7 @@ impl Tool for ServiceTool {
                         .clamp(1, MAX_LOG_LINES);
                     let mut services = manager.services.lock().unwrap();
                     let Some(entry) = services.get_mut(&name) else {
-                        return ToolOutput::error(format!("no service named {name:?}"));
+                        return ToolOutput::error(format!("service: no service named {name:?}"));
                     };
                     entry.refresh();
                     let output = entry.output.lock().unwrap();
@@ -394,12 +396,14 @@ impl Tool for ServiceTool {
                 }
                 "stop" => {
                     let Some(name) = input.name else {
-                        return ToolOutput::error("service stop requires name");
+                        return ToolOutput::error("service: stop requires name");
                     };
                     let mut child = {
                         let mut services = manager.services.lock().unwrap();
                         let Some(entry) = services.get_mut(&name) else {
-                            return ToolOutput::error(format!("no service named {name:?}"));
+                            return ToolOutput::error(format!(
+                                "service: no service named {name:?}"
+                            ));
                         };
                         entry.refresh();
                         if !entry.running() {
@@ -428,7 +432,7 @@ impl Tool for ServiceTool {
                     ToolOutput::text(format!("stopped service {name:?} ({label})"))
                 }
                 action => ToolOutput::error(format!(
-                    "unknown service action {action:?} (start, status, logs, stop)"
+                    "service: unknown action {action:?} (start, status, logs, stop)"
                 )),
             }
         })

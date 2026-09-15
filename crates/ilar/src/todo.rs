@@ -152,7 +152,7 @@ impl Tool for TodoTool {
                     "completed" => Status::Completed,
                     other => {
                         return ToolOutput::error(format!(
-                            "invalid todo status {other:?}: use pending, in_progress or completed"
+                            "todo: invalid status {other:?}; use pending, in_progress or completed"
                         ));
                     }
                 };
@@ -163,7 +163,7 @@ impl Tool for TodoTool {
             }
             let updated = TodoList { items };
             if let Err(error) = updated.validate() {
-                return ToolOutput::error(error);
+                return ToolOutput::error(format!("todo: {error}"));
             }
             let rendered = updated.checklist();
             ToolOutput::text(if rendered.is_empty() {

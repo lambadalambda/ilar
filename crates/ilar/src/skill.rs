@@ -274,17 +274,19 @@ impl crate::tools::Tool for SkillTool {
                         Ok(skills) => skills.into_iter().map(|skill| skill.name).collect(),
                         Err(error) => {
                             return crate::tools::ToolOutput::error(format!(
-                                "loading skills: {error:#}"
+                                "skill: loading skills: {error:#}"
                             ));
                         }
                     };
                     crate::tools::ToolOutput::error(format!(
-                        "unknown skill {:?}; available: {}",
+                        "skill: no skill named {:?}; available: {}",
                         input.name,
                         available.join(", ")
                     ))
                 }
-                Err(error) => crate::tools::ToolOutput::error(format!("loading skills: {error:#}")),
+                Err(error) => {
+                    crate::tools::ToolOutput::error(format!("skill: loading skills: {error:#}"))
+                }
             }
         })
     }

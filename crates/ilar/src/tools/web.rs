@@ -464,7 +464,7 @@ impl Tool for WebFetchTool {
             };
             if input.url.chars().count() > MAX_FETCH_URL_CHARS {
                 return ToolOutput::error(format!(
-                    "webfetch URL exceeds {MAX_FETCH_URL_CHARS} characters"
+                    "webfetch: the URL exceeds {MAX_FETCH_URL_CHARS} characters"
                 ));
             }
             if !input.url.contains("://") {
@@ -480,7 +480,7 @@ impl Tool for WebFetchTool {
                 Ok(url) => url,
                 Err(error) => {
                     return ToolOutput::error(bounded_format(
-                        format_args!("webfetch invalid URL: {error}"),
+                        format_args!("webfetch: invalid URL: {error}"),
                         MAX_FETCH_ERROR_CHARS,
                     ));
                 }
@@ -618,12 +618,12 @@ impl Tool for WebSearchTool {
             Err(error) => return Box::pin(async move { error }),
         };
         if input.query.trim().is_empty() {
-            return Box::pin(async { ToolOutput::error("websearch query must not be empty") });
+            return Box::pin(async { ToolOutput::error("websearch: query must not be empty") });
         }
         if input.query.chars().count() > MAX_SEARCH_QUERY_CHARS {
             return Box::pin(async {
                 ToolOutput::error(format!(
-                    "websearch query exceeds {MAX_SEARCH_QUERY_CHARS} characters"
+                    "websearch: the query exceeds {MAX_SEARCH_QUERY_CHARS} characters"
                 ))
             });
         }

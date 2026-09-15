@@ -268,7 +268,7 @@ fn scan(
     });
 
     if cancelled.load(Ordering::Acquire) {
-        return ToolOutput::error("cancelled");
+        return ToolOutput::error("glob: cancelled");
     }
     let mut matches = matches.into_inner().unwrap();
     matches.sort();
@@ -341,7 +341,7 @@ impl Tool for GlobTool {
             .await
             {
                 Ok(output) => output,
-                Err(error) => ToolOutput::error(format!("glob worker failed: {error}")),
+                Err(error) => ToolOutput::error(format!("glob: worker failed: {error}")),
             }
         })
     }

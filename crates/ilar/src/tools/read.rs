@@ -106,7 +106,7 @@ impl Tool for ReadTool {
             .await
             {
                 Ok(output) => output,
-                Err(error) => ToolOutput::error(format!("read worker failed: {error}")),
+                Err(error) => ToolOutput::error(format!("read: worker failed: {error}")),
             }
         })
     }
@@ -144,7 +144,7 @@ fn read_window(
 
     loop {
         if cancelled.load(Ordering::Acquire) {
-            return ToolOutput::error("cancelled");
+            return ToolOutput::error("read: cancelled");
         }
         let next_number = line_number + 1;
         let selected = next_number >= start && emitted < limit;

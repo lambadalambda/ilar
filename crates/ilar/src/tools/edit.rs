@@ -104,12 +104,12 @@ impl Tool for EditTool {
             };
             if input.old_string.is_empty() {
                 return ToolOutput::error(
-                    "old_string is empty; edit replaces a passage that exists. To create a file \
-                     or replace one whole, use write",
+                    "edit: old_string is empty; edit replaces a passage that exists — to create \
+                     a file or replace one whole, use write",
                 );
             }
             if input.old_string == input.new_string {
-                return ToolOutput::error("old_string and new_string are identical");
+                return ToolOutput::error("edit: old_string and new_string are identical");
             }
             let lease = match ctx.workspace_coverage(WorkspaceAccess::Mutating) {
                 WorkspaceCoverage::Covered => ctx
@@ -120,7 +120,7 @@ impl Tool for EditTool {
                 }
                 WorkspaceCoverage::Incompatible => {
                     return ToolOutput::error(
-                        "edit requests workspace access not covered by its inherited lease",
+                        "edit: workspace access is not covered by its inherited lease",
                     );
                 }
             };

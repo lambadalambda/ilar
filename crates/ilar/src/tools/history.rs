@@ -150,21 +150,21 @@ impl Tool for HistoryTool {
                     Some(speaker) => Some(speaker),
                     None => {
                         return ToolOutput::error(format!(
-                            "unknown speaker {word:?}; use user, assistant, thinking, tool_call, \
-                             tool_result, summary or topic"
+                            "history: unknown speaker {word:?}; use user, assistant, thinking, \
+                             tool_call, tool_result, summary or topic"
                         ));
                     }
                 },
             };
             if ctx.session_id.is_empty() {
-                return ToolOutput::error("history is available only inside a session");
+                return ToolOutput::error("history: available only inside a session");
             }
             // Its own session only, matching the resume guard: no
             // session reads another's log.
             let entries = match recall::session_entries(&store, &ctx.session_id) {
                 Ok(entries) => entries,
                 Err(error) => {
-                    return ToolOutput::error(format!("reading session history: {error}"));
+                    return ToolOutput::error(format!("history: {error}"));
                 }
             };
             match (query, event) {
@@ -185,7 +185,7 @@ impl Tool for HistoryTool {
                         let listed = recall::by_speaker(&entries, speaker, CONTEXT_ENTRY_CHARS);
                         ToolOutput::text(render_listing(&listed, speaker))
                     }
-                    None => ToolOutput::error("history needs a query, an event, or a speaker"),
+                    None => ToolOutput::error("history: needs a query, an event, or a speaker"),
                 },
             }
         })

@@ -69,7 +69,7 @@ impl Tool for WriteTool {
                 }
                 WorkspaceCoverage::Incompatible => {
                     return ToolOutput::error(
-                        "write requests workspace access not covered by its inherited lease",
+                        "write: workspace access is not covered by its inherited lease",
                     );
                 }
             };

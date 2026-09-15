@@ -200,7 +200,7 @@ impl Tool for GrepTool {
             .await
             {
                 Ok(output) => spill_over_budget(output, spill.as_ref()).await,
-                Err(error) => ToolOutput::error(format!("grep worker failed: {error}")),
+                Err(error) => ToolOutput::error(format!("grep: worker failed: {error}")),
             }
         })
     }
@@ -383,7 +383,7 @@ fn grep_files(
     });
 
     if cancelled.load(Ordering::Acquire) {
-        return ToolOutput::error("cancelled");
+        return ToolOutput::error("grep: cancelled");
     }
     let mut hits = hits.into_inner().unwrap();
     // Parallel walking loses walk order; make the output reproducible.
