@@ -56,6 +56,17 @@ pub trait Channel: Send + Sync {
     ) -> ChannelFuture<'a, anyhow::Result<()>> {
         Box::pin(async { Ok(()) })
     }
+
+    /// Take a message back out of the chat — a `/unlock` with the
+    /// master password in it. `false`: this channel cannot, so the
+    /// person is the one who has to delete it.
+    fn delete_message<'a>(
+        &'a self,
+        _chat_id: &'a str,
+        _message_id: &'a str,
+    ) -> ChannelFuture<'a, anyhow::Result<bool>> {
+        Box::pin(async { Ok(false) })
+    }
 }
 
 /// What a fake channel saw of a status line, in order with the sends.
@@ -65,6 +76,8 @@ pub enum Seen {
     StatusPosted(String),
     StatusEdited(String),
     StatusCleared,
+    /// A message taken back out of the chat, by its id.
+    Deleted(String),
 }
 
 /// A channel with nobody behind it: tests inject what a person would
@@ -80,6 +93,8 @@ pub struct FakeChannel {
     /// Runs left that fail right away, for a test of the restart.
     failing_runs: std::sync::atomic::AtomicUsize,
     runs: std::sync::atomic::AtomicUsize,
+    /// Injected messages, for the ids they carry.
+    injections: std::sync::atomic::AtomicUsize,
 }
 
 impl FakeChannel {
@@ -94,6 +109,7 @@ impl FakeChannel {
             delivered: tokio::sync::Notify::new(),
             failing_runs: std::sync::atomic::AtomicUsize::new(0),
             runs: std::sync::atomic::AtomicUsize::new(0),
+            injections: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -129,6 +145,7 @@ impl FakeChannel {
                 channel: self.name.clone(),
                 chat_id: chat_id.to_string(),
                 sender_id: "alice".into(),
+                message_id: Some(self.next_message_id()),
                 text: text.to_string(),
                 media,
                 is_group: false,
@@ -143,12 +160,22 @@ impl FakeChannel {
                 channel: self.name.clone(),
                 chat_id: chat_id.to_string(),
                 sender_id: sender_id.to_string(),
+                message_id: Some(self.next_message_id()),
                 text: text.to_string(),
                 media: Vec::new(),
                 is_group,
             })
             .await
             .expect("fake channel receiver dropped");
+    }
+
+    /// The id the next injected message carries, as a channel's own
+    /// ids are: unique, and the gateway's only handle on it.
+    fn next_message_id(&self) -> String {
+        let n = self
+            .injections
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        format!("msg-{n}")
     }
 
     pub fn sent(&self) -> Vec<Outbound> {
@@ -265,6 +292,20 @@ impl Channel for FakeChannel {
         Box::pin(async move {
             self.seen.lock().unwrap().push(Seen::StatusCleared);
             Ok(())
+        })
+    }
+
+    fn delete_message<'a>(
+        &'a self,
+        _chat_id: &'a str,
+        message_id: &'a str,
+    ) -> ChannelFuture<'a, anyhow::Result<bool>> {
+        Box::pin(async move {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(Seen::Deleted(message_id.to_string()));
+            Ok(true)
         })
     }
 }

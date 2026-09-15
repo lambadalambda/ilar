@@ -8,6 +8,10 @@ pub struct Inbound {
     pub channel: String,
     pub chat_id: String,
     pub sender_id: String,
+    /// The channel's own id for this message, when it has one: what
+    /// deleting it again needs. `None` for a message the gateway made
+    /// up, from the inbox.
+    pub message_id: Option<String>,
     pub text: String,
     /// Attachments, as files the channel already fetched.
     pub media: Vec<PathBuf>,

@@ -277,6 +277,7 @@ impl DeltaChat {
                 channel: self.name().to_string(),
                 chat_id: chat_id.to_string(),
                 sender_id: address,
+                message_id: Some(msg_id.to_string()),
                 text,
                 media,
                 is_group,
@@ -388,6 +389,31 @@ impl Channel for DeltaChat {
             rpc.call("delete_messages_for_all", json!([account, [msg_id]]))
                 .await?;
             Ok(())
+        })
+    }
+
+    /// Delta Chat only takes a message back for everyone when it is
+    /// the bot's own; somebody else's `/unlock` goes at least from the
+    /// gateway's own database, where the password would otherwise sit
+    /// in the clear, and the chat is told to delete it too.
+    fn delete_message<'a>(
+        &'a self,
+        _chat_id: &'a str,
+        message_id: &'a str,
+    ) -> ChannelFuture<'a, Result<bool>> {
+        Box::pin(async move {
+            let (rpc, account) = self.connection()?;
+            let msg_id: u64 = message_id.parse()?;
+            if rpc
+                .call("delete_messages_for_all", json!([account, [msg_id]]))
+                .await
+                .is_ok()
+            {
+                return Ok(true);
+            }
+            rpc.call("delete_messages", json!([account, [msg_id]]))
+                .await?;
+            Ok(false)
         })
     }
 

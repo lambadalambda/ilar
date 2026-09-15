@@ -720,7 +720,7 @@ async fn slash_new_starts_a_fresh_session_and_slash_model_lists_and_switches() {
     fake.inject("/model nope/none", "chat-1", "alice").await;
     let sent = fake.wait_for_sent(5, WAIT).await;
     assert!(
-        sent[4].text.contains("no model nope/none"),
+        sent[4].text == "No model nope/none. /model lists them.",
         "{}",
         sent[4].text
     );
@@ -947,6 +947,39 @@ async fn slash_abort_ends_the_turn_and_the_waiting_message_runs_after() {
             "after the abort",
         ],
         "{sent:?}"
+    );
+    gateway.cancel();
+}
+
+#[tokio::test]
+async fn slash_unlock_answers_with_a_usage_line_and_takes_the_password_back() {
+    use ilar_gateway::channel::Seen;
+    let dir = tempfile::tempdir().unwrap();
+    let (gateway, fake) = gateway(dir.path(), vec![]);
+    // Alone: the usage line, not a refusal with the whole help on it.
+    fake.inject("/unlock", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(1, WAIT).await;
+    assert_eq!(sent[0].text, ilar_gateway::commands::UNLOCK_USAGE);
+    assert!(!sent[0].text.contains("/compact"), "{}", sent[0].text);
+
+    fake.inject("/unlock open sesame", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(2, WAIT).await;
+    // The store is not sealed here; the password is in the chat either
+    // way, and the channel took the message back out.
+    assert!(
+        sent[1].text.starts_with("The secret store is not sealed"),
+        "{}",
+        sent[1].text
+    );
+    assert!(
+        sent[1].text.contains("I deleted that message"),
+        "{}",
+        sent[1].text
+    );
+    assert!(
+        fake.seen().iter().any(|s| matches!(s, Seen::Deleted(_))),
+        "{:?}",
+        fake.seen()
     );
     gateway.cancel();
 }

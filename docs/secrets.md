@@ -142,7 +142,13 @@ Enter without a password leaves the store locked for that session,
 and every use of a secret is then refused with a note saying so.
 `ilar secret …` asks when it needs to. The gateway cannot ask: it logs
 that the store is locked, and `/unlock <master password>` from a chat
-opens it for the life of the process. The gateway reads provider keys
+opens it for the life of the process. That message carries the master
+password into the chat's history on every device it syncs to, right
+password or wrong: the adapter takes it back out where the channel
+allows it — Delta Chat only deletes the bot's own messages for
+everyone, so a `/unlock` goes at least from the gateway's database —
+and the reply says whether there is still one for you to delete.
+The gateway reads provider keys
 at start, when a sealed store is still locked, so a provider key kept
 there is never seen by it: on a box that runs the gateway keep provider
 keys in `ilar.toml`, and weigh whether sealing buys anything there at

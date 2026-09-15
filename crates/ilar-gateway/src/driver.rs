@@ -586,7 +586,7 @@ impl Driver {
 
     fn known_model(&self, model: &str) -> Result<()> {
         if !self.available_models().iter().any(|known| known == model) {
-            bail!("no model {model}; /model lists them");
+            bail!("No model {model}. /model lists them.");
         }
         Ok(())
     }

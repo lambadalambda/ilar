@@ -99,6 +99,17 @@ pub fn failed_reply(what: &str, error: &anyhow::Error) -> String {
 /// How much of a failure's cause goes into the chat.
 const FAILURE_CAUSE_CHARS: usize = 400;
 
+/// What to do about the master password now sitting in the chat: a
+/// `/unlock` is in the history of every device it synced to, and the
+/// channel may or may not be able to take it back.
+pub fn password_advice(taken_back: bool) -> &'static str {
+    if taken_back {
+        "I deleted that message; check that the password is gone on your other devices too."
+    } else {
+        "Delete that message: the master password stays in this chat's history otherwise."
+    }
+}
+
 /// How long a stop waits for turns in flight before giving up on them.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(15);
 /// The pause before a channel that stopped is started again.
@@ -546,6 +557,27 @@ impl Gateway {
         }
     }
 
+    /// Take a message the person sent back out of the chat, by the id
+    /// the channel gave it. `true` when it is gone for everyone.
+    async fn delete_inbound(&self, message: &Inbound) -> bool {
+        let Some(id) = &message.message_id else {
+            return false;
+        };
+        let Some(channel) = self.channels.get(&message.channel) else {
+            return false;
+        };
+        match channel.delete_message(&message.chat_id, id).await {
+            Ok(gone) => gone,
+            Err(error) => {
+                log(&format!(
+                    "{}: message {id} not deleted: {error:#}",
+                    message.session_key()
+                ));
+                false
+            }
+        }
+    }
+
     /// What a cancelled turn is told. The gateway stopping is not the
     /// person's `/abort`: their prompt was dropped mid-flight and
     /// nothing re-runs it, so the reply says to send it again.
@@ -638,9 +670,14 @@ impl Gateway {
             }
             Command::Grant(approval) => self.answer_grant(key, Some(approval)),
             Command::Deny => self.answer_grant(key, None),
+            Command::Usage(usage) => usage.to_string(),
             Command::Unlock(password) => {
+                // Right password or wrong, it is in the chat's history
+                // now: taken back out where the channel can, and said
+                // either way.
+                let taken_back = self.delete_inbound(message).await;
                 let store = self.driver.secret_store();
-                if !store.is_sealed() {
+                let verdict = if !store.is_sealed() {
                     "The secret store is not sealed; nothing to unlock.".to_string()
                 } else if !store.is_locked() {
                     "The secret store is already unlocked.".to_string()
@@ -652,7 +689,8 @@ impl Gateway {
                         }
                         Err(error) => failed_reply("/unlock", &error),
                     }
-                }
+                };
+                format!("{verdict} {}", password_advice(taken_back))
             }
             Command::Abort => match self.driver.seat_by_key(key) {
                 Some(seat) if self.driver.abort(&seat) => {
@@ -1290,6 +1328,8 @@ impl Gateway {
                     channel: channel.to_string(),
                     chat_id: chat_id.to_string(),
                     sender_id: format!("notify:{}", message.source),
+                    // Nothing in a chat to delete: the gateway wrote it.
+                    message_id: None,
                     text: message.text,
                     media: Vec::new(),
                     is_group: self
