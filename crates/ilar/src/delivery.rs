@@ -122,14 +122,35 @@ impl Parcel {
 pub enum Disposition {
     /// It arrived. Say so; there is nothing to keep.
     Delivered,
-    /// The target belongs to another tree — hand the notification up to
-    /// whoever owns that tree. Still undelivered, still owed, and one
-    /// hop poorer.
-    Propagate(Parcel),
+    /// Hand the notification up to the next session in the chain. Still
+    /// undelivered, still owed, and one hop poorer.
+    ///
+    /// `retire` is what tells the two kinds of climb apart, and it is a
+    /// field rather than prose because a driver that forgets it
+    /// re-manufactures the same failure at every open:
+    /// - `None` — the ordinary climb of a nested result. The target's
+    ///   log took the origin and ran a turn on it; that log is the
+    ///   origin's retire.
+    /// - `Some(origin)` — this note *replaces* an origin the target
+    ///   could not take terminally (workspace gone, context
+    ///   unloadable). Nothing delivered the origin, so nothing else
+    ///   will ever retire it: the driver must, once the replacement is
+    ///   recorded for the next hop.
+    Propagate {
+        parcel: Parcel,
+        retire: Option<Notification>,
+    },
     /// It has climbed as far as it may. Only a parent chain that loops
     /// gets here, and the work in the text is real, so this ends the
     /// same way a terminal failure does rather than in silence.
-    Exhausted(Notification),
+    ///
+    /// `notification` is the stranded hop, which the driver retires
+    /// along with `retire` — the origin a replacing climb superseded on
+    /// the way here, if that is what ran out.
+    Exhausted {
+        notification: Notification,
+        retire: Option<Notification>,
+    },
     /// The target could not take it *yet* (its writer is held, its
     /// session is mid-turn elsewhere). Hold it and stop announcing new
     /// ones until something moves, or the next attempt races the same
@@ -152,14 +173,31 @@ pub enum Disposition {
 pub fn disposition(result: anyhow::Result<RouteOutcome>, parcel: Parcel) -> Disposition {
     match result {
         Ok(RouteOutcome::Complete) => Disposition::Delivered,
-        Ok(RouteOutcome::Propagate(propagated)) => match parcel.climbing(propagated) {
-            Ok(next) => Disposition::Propagate(next),
-            Err(stranded) => Disposition::Exhausted(stranded),
-        },
+        Ok(RouteOutcome::Propagate(propagated)) => climb(parcel, propagated, None),
+        Ok(RouteOutcome::Replace(propagated)) => {
+            // The origin is the parcel's own notification — the one
+            // this attempt handed to the router — and nothing took it,
+            // so it rides back out as the retire the driver owes. The
+            // same identity `Salvage` relies on.
+            let origin = parcel.notification().clone();
+            climb(parcel, propagated, Some(origin))
+        }
         Ok(RouteOutcome::Requeue(requeued)) => Disposition::Hold(parcel.carrying(requeued)),
         Err(error) => Disposition::Salvage {
             notification: parcel.into_notification(),
             error: format!("{error:#}"),
+        },
+    }
+}
+
+/// One hop up, or the end of the budget — carrying the retire
+/// obligation either way, because a spent budget does not excuse it.
+fn climb(parcel: Parcel, propagated: Notification, retire: Option<Notification>) -> Disposition {
+    match parcel.climbing(propagated) {
+        Ok(parcel) => Disposition::Propagate { parcel, retire },
+        Err(notification) => Disposition::Exhausted {
+            notification,
+            retire,
         },
     }
 }
@@ -278,10 +316,28 @@ mod tests {
         );
         assert_eq!(
             disposition(Ok(RouteOutcome::Propagate(notification("up"))), parcel()),
-            Disposition::Propagate(Parcel {
-                notification: notification("up"),
-                hops: PROPAGATION_HOPS - 1,
-            })
+            Disposition::Propagate {
+                parcel: Parcel {
+                    notification: notification("up"),
+                    hops: PROPAGATION_HOPS - 1,
+                },
+                // The child's log took the origin: nothing to retire.
+                retire: None,
+            }
+        );
+        // The same climb, but nothing took what was routed — so that
+        // rides back out as the retire the driver owes, and it is the
+        // *routed* notification that is named, never the hop replacing
+        // it. Retiring the hop would tombstone the wrong file.
+        assert_eq!(
+            disposition(Ok(RouteOutcome::Replace(notification("up"))), parcel()),
+            Disposition::Propagate {
+                parcel: Parcel {
+                    notification: notification("up"),
+                    hops: PROPAGATION_HOPS - 1,
+                },
+                retire: Some(notification("done")),
+            }
         );
         // A hold is not a climb: the budget is untouched, or a
         // notification that bounced a few times would run out of room
@@ -319,7 +375,9 @@ mod tests {
         for hop in 1..=PROPAGATION_HOPS {
             let next = notification(&format!("hop {hop}"));
             match disposition(Ok(RouteOutcome::Propagate(next)), parcel) {
-                Disposition::Propagate(carried) => parcel = carried,
+                Disposition::Propagate {
+                    parcel: carried, ..
+                } => parcel = carried,
                 other => panic!("the budget ended early at hop {hop}: {other:?}"),
             }
         }
@@ -332,9 +390,22 @@ mod tests {
         assert_eq!(
             disposition(
                 Ok(RouteOutcome::Propagate(notification("stranded"))),
-                parcel
+                parcel.clone()
             ),
-            Disposition::Exhausted(notification("stranded"))
+            Disposition::Exhausted {
+                notification: notification("stranded"),
+                retire: None,
+            }
+        );
+        // A spent budget is no excuse: this last hop replaced what it
+        // was carrying rather than following it, and nothing delivered
+        // that, so it is still owed a retire.
+        assert_eq!(
+            disposition(Ok(RouteOutcome::Replace(notification("stranded"))), parcel),
+            Disposition::Exhausted {
+                notification: notification("stranded"),
+                retire: Some(notification(&format!("hop {PROPAGATION_HOPS}"))),
+            }
         );
     }
 }

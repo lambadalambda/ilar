@@ -1023,12 +1023,33 @@ async fn watch_notifications(
                 .await;
             match disposition(routed, parcel) {
                 Disposition::Delivered => {}
-                Disposition::Propagate(next) => queue.push_back(next),
+                Disposition::Propagate { parcel, retire } => {
+                    // A climb that *replaced* its origin: nothing took
+                    // that origin and nothing ever will, and the
+                    // replacement carries its work on, so retire it —
+                    // or the next start adopts it, fails the same
+                    // restore and passes on the same failure again. An
+                    // ordinary climb has no origin to retire: the
+                    // target's log took it.
+                    if let Some(origin) = retire {
+                        ilar::outbox::retire(&outbox_dir, &origin);
+                    }
+                    queue.push_back(parcel);
+                }
                 Disposition::Hold(parcel) => {
                     held.push(parcel);
                     retry_at.get_or_insert_with(|| tokio::time::Instant::now() + HOLD_RETRY);
                 }
-                Disposition::Exhausted(stranded) => {
+                Disposition::Exhausted {
+                    notification: stranded,
+                    retire,
+                } => {
+                    // The origin a replacing hop superseded on the way
+                    // here is owed its retire too; `salvage` retires
+                    // the stranded hop itself once the chat holds it.
+                    if let Some(origin) = retire {
+                        ilar::outbox::retire(&outbox_dir, &origin);
+                    }
                     salvage(&follow_ups, &key, stranded, "no session left to climb to").await;
                 }
                 Disposition::Salvage {
@@ -1087,4 +1108,128 @@ async fn salvage(
 
 pub fn log(message: &str) {
     eprintln!("{} {message}", chrono::Local::now().format("%H:%M:%S"));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ilar::config::{AgentDefinition, AgentWorkspaceMode, ProjectInstructions};
+    use ilar::provider::{FixedProviderResolver, MockProvider};
+    use ilar::session::{SessionMeta, new_id};
+
+    /// The pump's `Propagate` arm. An entry addressed to a task session
+    /// whose workspace is gone cannot be delivered ever, and the note
+    /// that replaces it climbs to the chat's own session — but the
+    /// entry itself has to be retired here, or every start of the
+    /// gateway adopts it again, fails the same restore and tells the
+    /// chat the same task failed once more.
+    #[tokio::test]
+    async fn a_replacing_climb_retires_the_entry_it_superseded() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().join("sessions"));
+        let outbox_dir = dir.path().join("outbox");
+        let root = new_id();
+        store
+            .create(SessionMeta {
+                session_id: root.clone(),
+                parent_id: None,
+                agent: "explore".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+                cwd: None,
+            })
+            .unwrap();
+        // The task session's workspace as recorded, and as it is now.
+        let vanished = dir.path().join("worktree");
+        std::fs::create_dir_all(&vanished).unwrap();
+        let workspace = ilar::tools::WorkspaceLocation::shared(vanished.clone());
+        std::fs::remove_dir_all(&vanished).unwrap();
+        let task = new_id();
+        store
+            .create(SessionMeta {
+                session_id: task.clone(),
+                parent_id: Some(root.clone()),
+                agent: "explore".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: Some(workspace),
+                cwd: None,
+            })
+            .unwrap();
+        let origin = Notification {
+            parent_session_id: task.clone(),
+            description: "review the hub package".into(),
+            text: "<task-notification>\nthe hub package is fine\n</task-notification>".into(),
+            is_error: false,
+        };
+        ilar::outbox::record(&outbox_dir, &origin);
+
+        let spawner = Arc::new(
+            SubagentSpawner::new(
+                // Never reached: the restore fails before any turn.
+                Arc::new(FixedProviderResolver::new(Arc::new(MockProvider::error(
+                    "no turn is owed here",
+                )))),
+                store.clone(),
+                vec![AgentDefinition {
+                    name: "explore".into(),
+                    description: "explores".into(),
+                    model: None,
+                    prompt: String::new(),
+                    workspace_mode: AgentWorkspaceMode::ReadOnly,
+                    tools: None,
+                }],
+                std::env::temp_dir(),
+                0,
+                10,
+                3,
+                ProjectInstructions::Include,
+            )
+            .with_outbox_dir(outbox_dir.clone()),
+        );
+        let (follow_ups, mut inbox) = mpsc::channel(4);
+        let cancel = CancellationToken::new();
+        let pump = tokio::spawn(watch_notifications(
+            spawner.clone(),
+            store.clone(),
+            outbox_dir.clone(),
+            root.clone(),
+            "chat".into(),
+            follow_ups,
+            cancel.clone(),
+        ));
+
+        let follow_up = tokio::time::timeout(std::time::Duration::from_secs(10), inbox.recv())
+            .await
+            .expect("the replacing note reaches the chat")
+            .expect("a follow-up, not a closed channel");
+        // The child's work climbs with the plumbing error, not instead
+        // of it.
+        assert!(
+            follow_up.prompt.contains("the hub package is fine"),
+            "{}",
+            follow_up.prompt
+        );
+        cancel.cancel();
+        let _ = pump.await;
+
+        // The entry for the vanished task session is retired, so the
+        // next start adopts nothing for it and manufactures no second
+        // failure. What is left is the replacement itself, which the
+        // chat retires once its follow-up turn has read it — the
+        // `retire` this follow-up carries.
+        assert_eq!(follow_up.retire.parent_session_id, root);
+        let remaining = ilar::outbox::pending(&store, &outbox_dir, &root);
+        assert!(
+            remaining
+                .iter()
+                .all(|entry| entry.parent_session_id != task),
+            "the undeliverable entry survived: {remaining:?}"
+        );
+        assert_eq!(remaining.len(), 1, "{remaining:?}");
+        // The scan that read the tombstone also compacted both files
+        // away, so there is nothing left for a third start either.
+        assert!(!outbox_dir.join(format!("{task}.jsonl")).exists());
+        assert!(!outbox_dir.join(format!("{task}.retired")).exists());
+        spawner.shutdown().await;
+    }
 }

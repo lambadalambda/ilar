@@ -1064,6 +1064,9 @@ impl Consumer {
     async fn route(&self, mut notification: Notification) -> Option<Notification> {
         let mut delay = RETRY_BASE;
         for _ in 0..ROUTE_RETRY_LIMIT {
+            // Kept across the call for the one ending that has to name
+            // it again: a replacing climb owes this entry a retire.
+            let routed = notification.clone();
             match self
                 .turn
                 .runtime
@@ -1072,7 +1075,17 @@ impl Consumer {
                 .await
             {
                 Ok(RouteOutcome::Complete) => return None,
+                // The ordinary climb: the target's log took what was
+                // routed, which is that entry's retire.
                 Ok(RouteOutcome::Propagate(up)) => return Some(up),
+                // A climb that *replaces* what was routed: the target
+                // could not take it and never will, so it would be
+                // re-adopted and re-failed at every start. The
+                // replacement carries its work on; retire the entry.
+                Ok(RouteOutcome::Replace(propagated)) => {
+                    self.retire(routed).await;
+                    return Some(propagated);
+                }
                 Ok(RouteOutcome::Requeue(again)) => {
                     notification = again;
                     if !self.pause(delay).await {
@@ -1091,6 +1104,15 @@ impl Consumer {
             notification.parent_session_id
         );
         None
+    }
+
+    /// Tombstone an outbox entry nothing will ever deliver. Blocking —
+    /// it takes the outbox's directory lock — so it runs off the async
+    /// thread, like the adoption scan.
+    async fn retire(&self, notification: Notification) {
+        let dir = self.outbox_dir.clone();
+        let _ =
+            tokio::task::spawn_blocking(move || ilar::outbox::retire(&dir, &notification)).await;
     }
 
     /// Sleep, unless torn down first; `false` says stop delivering.

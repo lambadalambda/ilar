@@ -112,7 +112,24 @@ pub struct SubagentActivity {
 
 pub enum RouteOutcome {
     Complete,
+    /// The ordinary climb: the target's log *took* the notification and
+    /// ran a turn on it, and this is that turn's nested result rising to
+    /// the target's own parent. The origin was delivered where it was
+    /// addressed, so it owes the outbox nothing — the log holding it is
+    /// what retires it.
     Propagate(Notification),
+    /// The target could not take it at all, and no retry will change
+    /// that: its workspace is gone, its context will not load. So this
+    /// note does not follow the notification that was routed, it
+    /// *replaces* it — that one reached no log, so its text (the
+    /// finished child's only word) rides along inside this envelope,
+    /// and the caller must retire it. The caller has it: it is what it
+    /// handed in, which is also what `Salvage` hands back. Without that
+    /// retire the entry stays undelivered for ever and every open
+    /// re-adopts it, re-fails the same restore and manufactures this
+    /// note anew: one root got the same phantom failure six times, once
+    /// per open, measured 2026-09-15.
+    Replace(Notification),
     Requeue(Notification),
 }
 
@@ -2119,15 +2136,22 @@ task's scope yourself; continue only clearly disjoint work."
 
     /// A propagated hop is synthesized here and exists nowhere else —
     /// unlike a task completion, no permit guard recorded it at birth.
-    /// Every `Propagate` leaves through this, so the memory it rides to
-    /// the next hop is never the only copy.
+    /// Every `Propagate` and `Replace` leaves through this, so the
+    /// memory it rides to the next hop is never the only copy.
     fn recorded_propagate(
         &self,
         outcome: anyhow::Result<RouteOutcome>,
     ) -> anyhow::Result<RouteOutcome> {
-        if let (Some(dir), Ok(RouteOutcome::Propagate(notification))) =
-            (self.outbox_dir.as_deref(), &outcome)
-        {
+        let propagated = match &outcome {
+            Ok(RouteOutcome::Propagate(notification)) => Some(notification),
+            // Recorded, never retired here: the retire of the origin is
+            // the driver's, and it must not happen before the
+            // replacement is durably somewhere, or a crash in between
+            // loses the child's work outright.
+            Ok(RouteOutcome::Replace(notification)) => Some(notification),
+            _ => None,
+        };
+        if let (Some(dir), Some(notification)) = (self.outbox_dir.as_deref(), propagated) {
             crate::outbox::record(dir, notification);
         }
         outcome
@@ -2313,16 +2337,12 @@ fn workspace_route_failure(
             "notification workspace routing failed: {error:#}"
         ));
     };
-    let text = format!(
-        "<task-notification>\nNested task \"{}\" failed: its workspace could not be restored.\n<result>\n{error:#}\n</result>\n</task-notification>",
-        notification.description
-    );
-    Ok(RouteOutcome::Propagate(Notification {
-        parent_session_id: grandparent_id.clone(),
-        description: notification.description,
-        text,
-        is_error: true,
-    }))
+    Ok(replacing(
+        grandparent_id,
+        notification,
+        "its workspace could not be restored",
+        &format!("{error:#}"),
+    ))
 }
 
 fn context_route_failure(
@@ -2333,16 +2353,35 @@ fn context_route_failure(
     let Some(grandparent_id) = &meta.parent_id else {
         return Err(error).context("loading routed subagent context");
     };
+    Ok(replacing(
+        grandparent_id,
+        notification,
+        "its context could not be loaded",
+        &format!("{error:#}"),
+    ))
+}
+
+/// The note that replaces an origin nothing could deliver: why the
+/// target is unreachable *and* the origin's own text, because the work
+/// in it is a finished child's only word and the plumbing error is the
+/// least interesting half of the news. See [`RouteOutcome::Replace`] for
+/// the retire this obliges.
+fn replacing(
+    grandparent_id: &str,
+    origin: Notification,
+    reason: &str,
+    error: &str,
+) -> RouteOutcome {
     let text = format!(
-        "<task-notification>\nNested task \"{}\" failed: its context could not be loaded.\n<result>\n{error:#}\n</result>\n</task-notification>",
-        notification.description
+        "<task-notification>\nNested task \"{}\" finished, but the task session that asked for it could not be resumed to receive the result: {reason}. The result follows.\n<error>\n{error}\n</error>\n{}\n</task-notification>",
+        origin.description, origin.text
     );
-    Ok(RouteOutcome::Propagate(Notification {
-        parent_session_id: grandparent_id.clone(),
-        description: notification.description,
+    RouteOutcome::Replace(Notification {
+        parent_session_id: grandparent_id.to_string(),
+        description: origin.description,
         text,
         is_error: true,
-    }))
+    })
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -3803,7 +3842,7 @@ mod tests {
     }
 
     #[test]
-    fn nested_context_failure_propagates_to_the_grandparent() {
+    fn nested_context_failure_replaces_the_origin_for_the_grandparent() {
         let meta = SessionMeta {
             session_id: "parent".into(),
             parent_id: Some("grandparent".into()),
@@ -3820,11 +3859,20 @@ mod tests {
         )
         .unwrap();
 
-        let RouteOutcome::Propagate(notification) = outcome else {
-            panic!("expected propagated failure");
+        // Replace, not Propagate: nothing took what was routed, so the
+        // driver owes that entry a retire.
+        let RouteOutcome::Replace(propagated) = outcome else {
+            panic!("expected the routed notification to be replaced");
         };
-        assert_eq!(notification.parent_session_id, "grandparent");
-        assert!(notification.is_error);
-        assert!(notification.text.contains("bad AGENTS.md"));
+        assert_eq!(propagated.parent_session_id, "grandparent");
+        assert!(propagated.is_error);
+        assert!(propagated.text.contains("bad AGENTS.md"));
+        // The child's work climbs with the plumbing error, not instead
+        // of it: only the error used to, and the result was lost.
+        assert!(
+            propagated.text.contains(&notification("nested").text),
+            "{}",
+            propagated.text
+        );
     }
 }

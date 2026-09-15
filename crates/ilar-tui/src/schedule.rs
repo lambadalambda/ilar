@@ -397,18 +397,27 @@ fn routed_complete<R: Runtime>(
                 &target,
             )));
         }
-        Disposition::Propagate(propagated) => {
+        Disposition::Propagate { parcel, retire } => {
             // The ✉ row this delivery wore is about to vanish, and the
             // next hop's own completion can be minutes away: say where
             // the result went, the way the landing says where it
             // landed.
-            let next = runtime.session_label(app, &propagated.notification().parent_session_id);
+            let next = runtime.session_label(app, &parcel.notification().parent_session_id);
             app.push_transcript_line(Line_::System(envelope_line(
                 &delivered.description,
                 "passed on to",
                 &next,
             )));
-            runtime.hold_propagate(propagated);
+            // A climb that *replaced* its origin: the target could not
+            // take it and never will, the replacement carries the work
+            // on, so retire the entry — or the next open adopts it,
+            // fails the same way and passes on the same failure again.
+            // An ordinary climb has no origin to retire: the target's
+            // log took it.
+            if let Some(origin) = retire {
+                runtime.retire_notification(&origin);
+            }
+            runtime.hold_propagate(parcel);
         }
         Disposition::Hold(requeued) => {
             let target = runtime.session_label(app, &requeued.notification().parent_session_id);
@@ -420,7 +429,10 @@ fn routed_complete<R: Runtime>(
             runtime.hold_requeue(requeued);
             runtime.pause_notifications();
         }
-        Disposition::Exhausted(notification) => {
+        Disposition::Exhausted {
+            notification,
+            retire,
+        } => {
             // A parent chain that loops. Nothing can deliver this, so
             // it ends where a terminal failure ends: in front of the
             // user, and retired so the next open does not start the
@@ -437,6 +449,11 @@ fn routed_complete<R: Runtime>(
             // raw `<task-notification>` envelope as a System line.
             app.push_notification(&notification.description, &notification.text);
             runtime.retire_notification(&notification);
+            // The origin a replacing hop superseded on the way here is
+            // owed its retire too — a spent budget is no excuse.
+            if let Some(origin) = retire {
+                runtime.retire_notification(&origin);
+            }
         }
         Disposition::Salvage {
             notification,
@@ -1584,6 +1601,100 @@ mod tests {
             runtime
                 .log
                 .contains(&"retire:the build is green".to_string()),
+            "{:?}",
+            runtime.log
+        );
+    }
+
+    /// A climb that replaced an origin nothing could take retires that
+    /// origin as it passes the replacement on. Without it the entry
+    /// stays undelivered for ever: every open adopts it, fails the same
+    /// restore, and manufactures the same failure note for the root —
+    /// six times for one root before this was fixed.
+    #[test]
+    fn a_propagate_that_replaces_its_origin_retires_it() {
+        let mut app = App::new();
+        let mut runtime = FakeRuntime::new();
+        let origin = Notification {
+            parent_session_id: "a-vanished-worktree".into(),
+            description: "review the hub package".into(),
+            text: "the grandchild's report".into(),
+            is_error: false,
+        };
+        let replacement = Notification {
+            parent_session_id: "root".into(),
+            description: "review the hub package".into(),
+            text: "its workspace could not be restored: the grandchild's report".into(),
+            is_error: true,
+        };
+
+        pass(
+            &mut app,
+            vec![Completion::Routed {
+                result: Ok(RouteOutcome::Replace(replacement.clone())),
+                parcel: Parcel::fresh(origin.clone()),
+                cancelled: false,
+            }],
+            Vec::new(),
+            &mut runtime,
+        )
+        .unwrap();
+
+        // The origin, not the replacement: retiring the replacement
+        // would tombstone the wrong file and leave the real entry to be
+        // re-adopted at the next open.
+        assert!(
+            runtime.log.contains(&format!("retire:{}", origin.text)),
+            "{:?}",
+            runtime.log
+        );
+        assert!(
+            runtime.log.contains(&format!("hold:{}", replacement.text)),
+            "{:?}",
+            runtime.log
+        );
+        assert!(
+            !runtime
+                .log
+                .contains(&format!("retire:{}", replacement.text)),
+            "{:?}",
+            runtime.log
+        );
+    }
+
+    /// The ordinary climb has no origin to retire: the target's log took
+    /// the notification and ran a turn on it, and that log is its
+    /// retire. Retiring here would tombstone an entry whose delivery
+    /// already counted, for no gain, and blur the distinction the
+    /// replacing climb depends on.
+    #[test]
+    fn an_ordinary_propagate_retires_nothing() {
+        let mut app = App::new();
+        let mut runtime = FakeRuntime::new();
+        let notification = |session: &str, text: &str| Notification {
+            parent_session_id: session.into(),
+            description: "nested task".into(),
+            text: text.into(),
+            is_error: false,
+        };
+
+        pass(
+            &mut app,
+            vec![Completion::Routed {
+                result: Ok(RouteOutcome::Propagate(notification("root", "the result"))),
+                parcel: Parcel::fresh(notification("child", "the child's own")),
+                cancelled: false,
+            }],
+            Vec::new(),
+            &mut runtime,
+        )
+        .unwrap();
+
+        assert!(
+            runtime
+                .log
+                .iter()
+                .all(|entry| !entry.starts_with("retire:")),
             "{:?}",
             runtime.log
         );

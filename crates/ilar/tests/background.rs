@@ -2912,8 +2912,11 @@ async fn isolated_notification_revalidates_after_waiting_for_lease() {
     remove_worktree(&root, &worktree);
     drop(busy);
     let outcome = route.await.unwrap().unwrap();
-    let ilar::subagent::RouteOutcome::Propagate(failure) = outcome else {
-        panic!("stale worktree route did not propagate its failure");
+    // A replacement, not a climb: nothing took the original, so the
+    // driver owes it a retire — and its text rides inside the failure
+    // note rather than being lost with the plumbing error.
+    let ilar::subagent::RouteOutcome::Replace(failure) = outcome else {
+        panic!("stale worktree route did not replace what it was given");
     };
 
     assert!(failure.is_error);
@@ -2923,6 +2926,7 @@ async fn isolated_notification_revalidates_after_waiting_for_lease() {
         "{}",
         failure.text
     );
+    assert!(failure.text.contains("deliver"), "{}", failure.text);
     assert!(provider.requests().is_empty());
 }
 
