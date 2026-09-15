@@ -568,7 +568,7 @@ fn longest_first(granted: &[Granted]) -> Vec<&Granted> {
         .iter()
         .filter(|secret| secret.value().chars().count() >= MIN_VALUE_CHARS)
         .collect();
-    secrets.sort_by(|a, b| b.value().len().cmp(&a.value().len()));
+    secrets.sort_by_key(|secret| std::cmp::Reverse(secret.value().len()));
     secrets
 }
 
