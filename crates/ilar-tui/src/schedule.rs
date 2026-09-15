@@ -446,8 +446,23 @@ fn routed_complete<R: Runtime>(
             // right here: salvage it into the transcript instead of
             // losing the work with the plumbing error.
             let target = runtime.session_label(app, &notification.parent_session_id);
-            let message = format!("a task result could not be delivered to {target}: {error}");
-            app.set_notice(&message, NoticeLevel::Error);
+            // A delivery the user stopped is not a failure, and a
+            // stopped one always ends here rather than held: the turn
+            // it had already started appended the result, so replaying
+            // it would deliver it twice. Say what happened, at the
+            // level a cancel deserves.
+            let (message, level) = if cancelled {
+                (
+                    format!("the delivery of a task result to {target} was cancelled"),
+                    NoticeLevel::Warning,
+                )
+            } else {
+                (
+                    format!("a task result could not be delivered to {target}: {error}"),
+                    NoticeLevel::Error,
+                )
+            };
+            app.set_notice(&message, level);
             app.push_transcript_line(Line_::System(message));
             // The child's words, in the row every other surface gives
             // a notification: collapsed, expandable, not a wall of

@@ -2141,9 +2141,10 @@ async fn stall_watchdog_counts_a_busy_foreground_child_as_progress() {
 /// second result for the same session falls through to the claim wait.
 /// That wait had no cap: the delivery held a ✉ row and refused every
 /// session switch with "a task result is being delivered; wait a
-/// moment" for as long as the resume ran, which can be minutes. It
-/// gives up and requeues instead, the way a held writer lock does; the
-/// backlog re-offers it the moment something moves.
+/// moment" for as long as the resume ran, which can be minutes. It now
+/// gives up after a bounded budget and hands the result back, the way
+/// a held writer lock does; the backlog re-offers it once the user
+/// moves.
 #[tokio::test]
 async fn a_result_waiting_on_a_resume_requeues_instead_of_waiting_it_out() {
     let (store, root_id) = temp_store();
@@ -2162,12 +2163,20 @@ async fn a_result_waiting_on_a_resume_requeues_instead_of_waiting_it_out() {
     );
     let started = Arc::new(tokio::sync::Notify::new());
     // Hangs after its first delta: the resume turn holds the claim for
-    // the rest of the test.
-    let spawner = patient_spawner(
-        Arc::new(NotifyingPartialText {
-            started: started.clone(),
-        }),
-        &store,
+    // the rest of the test. The claim budget is shrunk to milliseconds
+    // — the real one is a minute, deliberately, so that an ordinary
+    // child turn is waited out rather than handed back.
+    let spawner = Arc::new(
+        unwatched_spawner(
+            Arc::new(NotifyingPartialText {
+                started: started.clone(),
+            }),
+            &store,
+            AgentWorkspaceMode::Mutable,
+            std::env::temp_dir(),
+        )
+        .with_stall_timeout(Duration::from_secs(60))
+        .with_claim_wait(Duration::from_millis(20)),
     );
 
     let resuming = {
@@ -2200,7 +2209,7 @@ async fn a_result_waiting_on_a_resume_requeues_instead_of_waiting_it_out() {
         spawner.route_notification(second.clone(), tokio_util::sync::CancellationToken::new()),
     )
     .await
-    .expect("the claim wait must be bounded")
+    .expect("the claim wait must be bounded — it used to wait out the whole resume")
     .unwrap();
     let ilar::subagent::RouteOutcome::Requeue(requeued) = outcome else {
         panic!("expected the result to be handed back for a later attempt");
@@ -2538,7 +2547,9 @@ async fn routed_abort_after_append_is_terminal_instead_of_requeued() {
         Err(error) => error,
         Ok(_) => panic!("an appended aborted route must not be replayed"),
     };
-    assert!(error.to_string().contains("aborted"), "{error:#}");
+    // Terminal either way; the word is "cancelled" because someone
+    // stopped the turn — nothing about the child failed.
+    assert!(error.to_string().contains("cancelled"), "{error:#}");
     let notification_messages = store
         .load(&session_id)
         .unwrap()

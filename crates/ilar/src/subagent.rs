@@ -145,6 +145,11 @@ pub struct SubagentSpawner {
     notify_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<Notification>>>>,
     activity_tx: tokio::sync::broadcast::Sender<SubagentActivity>,
     stall_timeout: std::time::Duration,
+    /// One round of a delivery's wait for a busy session; the total is
+    /// this times [`NOTIFICATION_CLAIM_ROUNDS`]. A field only so a test
+    /// can shrink it — the real value is seconds and the real total a
+    /// minute, which no suite should sit through.
+    claim_wait: std::time::Duration,
     /// Abort handles for detached background tasks.
     background_tasks: Arc<Mutex<BackgroundRegistry>>,
     workspace: crate::tools::WorkspaceScheduler,
@@ -510,6 +515,7 @@ impl SubagentSpawner {
             notify_tx,
             activity_tx,
             stall_timeout: std::time::Duration::from_secs(600),
+            claim_wait: NOTIFICATION_CLAIM_WAIT,
             background_tasks: Arc::new(Mutex::new(BackgroundRegistry::default())),
             workspace,
             background_tool_timeout: std::time::Duration::from_secs(600),
@@ -525,6 +531,15 @@ impl SubagentSpawner {
     /// Override the background stall watchdog timeout (tests).
     pub fn with_stall_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.stall_timeout = timeout;
+        self
+    }
+
+    /// Override one round of a delivery's wait for a busy session
+    /// (tests). The real round is seconds and the whole budget a
+    /// minute, which is the point of it — and far too long to sit
+    /// through in a suite.
+    pub fn with_claim_wait(mut self, wait: std::time::Duration) -> Self {
+        self.claim_wait = wait;
         self
     }
 
@@ -708,6 +723,7 @@ impl SubagentSpawner {
             notify_rx: self.notify_rx.clone(),
             activity_tx: self.activity_tx.clone(),
             stall_timeout: self.stall_timeout,
+            claim_wait: self.claim_wait,
             background_tasks: self.background_tasks.clone(),
             workspace,
             background_tool_timeout: self.background_tool_timeout,
@@ -2039,14 +2055,14 @@ task's scope yourself; continue only clearly disjoint work."
         let Some(grandparent_id) = meta.parent_id else {
             return match outcome {
                 Ok(TurnOutcome::Completed) => Ok(RouteOutcome::Complete),
-                // Cancelled, not failed. An error here reaches the
-                // driver as a salvage: the result is dumped in front
-                // of the user and *retired from the outbox*, so a turn
-                // the user stopped would cost the result its last
-                // durable copy. Hand it back instead — the log check
-                // at the top of this function catches the case where
-                // the aborted turn had already appended it.
-                Ok(TurnOutcome::Aborted) => Ok(RouteOutcome::Requeue(notification)),
+                // Terminal, not requeued: the turn appended the
+                // notification before it was stopped, so the session
+                // has the text and replaying it would deliver it
+                // twice. Only the word changes — a turn someone
+                // stopped was cancelled, and the driver says so.
+                Ok(TurnOutcome::Aborted) => {
+                    Err(anyhow::anyhow!("notification parent turn was cancelled"))
+                }
                 Ok(TurnOutcome::MaxIterations) => Err(anyhow::anyhow!(
                     "notification parent reached its iteration limit"
                 )),
@@ -2187,7 +2203,7 @@ task's scope yourself; continue only clearly disjoint work."
         cancel: &tokio_util::sync::CancellationToken,
     ) -> Option<ActiveSessionGuard> {
         let mut changed = self.active_sessions_changed.subscribe();
-        let deadline = tokio::time::Instant::now() + NOTIFICATION_CLAIM_WAIT;
+        let deadline = tokio::time::Instant::now() + self.claim_wait;
         loop {
             if let Some(claim) = self.claim_session(session_id) {
                 return Some(claim);
