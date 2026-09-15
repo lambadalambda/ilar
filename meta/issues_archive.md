@@ -369,3 +369,8 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [sudo forgets what failed](issues/sudo-forgets-what-failed.md)
 - [x] [ilar secret is one CLI](issues/ilar-secret-is-one-cli.md)
 - [x] [The store changes under a running session](issues/the-store-changes-under-a-running-session.md)
+- [x] [The weekly review stays private](issues/the-weekly-review-stays-private.md)
+- [x] [One status line per seat](issues/one-status-line-per-seat.md)
+- [x] [A failed send is not "sent"](issues/a-failed-send-is-not-sent.md)
+- [x] [Scheduled turns report failure](issues/scheduled-turns-report-failure.md)
+- [x] [Chat replies: small frictions](issues/chat-replies-small-frictions.md)
