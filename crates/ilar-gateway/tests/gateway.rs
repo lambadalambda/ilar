@@ -905,6 +905,37 @@ async fn a_message_during_a_turn_steers_it_and_one_reply_covers_both() {
 }
 
 #[tokio::test]
+async fn a_steer_with_no_status_line_is_acknowledged() {
+    let dir = tempfile::tempdir().unwrap();
+    // No status line to show "steered: …" on: a folded-in correction
+    // would otherwise look exactly like a dropped message.
+    let settings = GatewayConfig {
+        status: false,
+        announce: false,
+        ..GatewayConfig::default()
+    };
+    let (gateway, fake) = gateway_with(
+        dir.path(),
+        vec![
+            calls("bash", serde_json::json!({"command": "sleep 1"})),
+            says("done, and noted"),
+        ],
+        settings,
+    );
+    fake.inject("run something slow", "chat-1", "alice").await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    fake.inject("also this", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(2, Duration::from_secs(15)).await;
+    let texts: Vec<&str> = sent.iter().map(|m| m.text.as_str()).collect();
+    assert_eq!(
+        texts,
+        [ilar_gateway::gateway::STEER_ACK, "done, and noted"],
+        "{sent:?}"
+    );
+    gateway.cancel();
+}
+
+#[tokio::test]
 async fn slash_compact_replaces_the_conversation_with_a_handover() {
     let dir = tempfile::tempdir().unwrap();
     let (gateway, fake) = gateway(

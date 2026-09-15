@@ -34,13 +34,27 @@ struct Input {
     no_attachment: bool,
 }
 
-pub struct MessageTool {
-    outbound: mpsc::Sender<Outbound>,
-    home_channel: String,
-    home_chat: String,
-    routes: Arc<RouteStore>,
+/// What the tool needs to send for one seat.
+pub struct Sending {
+    pub outbound: mpsc::Sender<Outbound>,
+    /// The seat's own chat.
+    pub channel: String,
+    pub chat_id: String,
+    /// The seat's key. A reply to its own chat takes that chat's
+    /// status line down, and a background seat's key is no chat's, so
+    /// a scheduled turn's message never takes a line the person is
+    /// watching down with it.
+    pub key: String,
+    pub routes: Arc<RouteStore>,
     /// Where a relative media path is looked for.
-    workspace: PathBuf,
+    pub workspace: PathBuf,
+    /// What the model is told about sending here.
+    pub constraints: String,
+    pub status: Arc<crate::status::StatusBoard>,
+}
+
+pub struct MessageTool {
+    sending: Sending,
     /// Messages sent during the current turn; the driver reads it to
     /// decide whether the final text still needs delivering.
     sent: Arc<AtomicUsize>,
@@ -107,15 +121,9 @@ fn claims_attachment(text: &str) -> bool {
 }
 
 impl MessageTool {
-    pub fn new(
-        outbound: mpsc::Sender<Outbound>,
-        home_channel: &str,
-        home_chat: &str,
-        routes: Arc<RouteStore>,
-        workspace: PathBuf,
-        constraints: &str,
-    ) -> (Arc<Self>, Arc<AtomicUsize>) {
+    pub fn new(sending: Sending) -> (Arc<Self>, Arc<AtomicUsize>) {
         let sent = Arc::new(AtomicUsize::new(0));
+        let home_channel = &sending.channel;
         let description = format!(
             "Send a message to the person you are talking to, on {home_channel}. Call it for \
              every reply you want them to see; your final text is delivered only if you sent \
@@ -124,18 +132,14 @@ impl MessageTool {
              attaches nothing, and a text that speaks of an attachment without one is refused \
              unless no_attachment is true. A text that names pictures carries them in the same \
              call: never the caption first and the files in a call after.{}",
-            if constraints.is_empty() {
+            if sending.constraints.is_empty() {
                 String::new()
             } else {
-                format!(" Delivery constraints: {constraints}")
+                format!(" Delivery constraints: {}", sending.constraints)
             }
         );
         let tool = Arc::new(Self {
-            outbound,
-            home_channel: home_channel.to_string(),
-            home_chat: home_chat.to_string(),
-            routes,
-            workspace,
+            sending,
             sent: sent.clone(),
             description: Box::leak(description.into_boxed_str()),
         });
@@ -177,11 +181,13 @@ impl Tool for MessageTool {
 
     fn run(&self, input: serde_json::Value, _ctx: ToolContext) -> ToolFuture {
         // The future outlives this borrow: everything it needs is cloned.
-        let outbound = self.outbound.clone();
-        let home_channel = self.home_channel.clone();
-        let home_chat = self.home_chat.clone();
-        let routes = self.routes.clone();
-        let workspace = self.workspace.clone();
+        let outbound = self.sending.outbound.clone();
+        let home_channel = self.sending.channel.clone();
+        let home_chat = self.sending.chat_id.clone();
+        let home_key = self.sending.key.clone();
+        let status = self.sending.status.clone();
+        let routes = self.sending.routes.clone();
+        let workspace = self.sending.workspace.clone();
         let sent = self.sent.clone();
         Box::pin(async move {
             let input: Input = match parse_input(input, "message") {
@@ -237,6 +243,13 @@ impl Tool for MessageTool {
                 text: input.text,
                 media,
             };
+            // This chat's status line was waiting for exactly this, so
+            // it comes down before the reply does — and only this
+            // seat's own line: a message to another chat leaves that
+            // chat's running turn alone.
+            if key == home_key {
+                status.clear(&home_key).await;
+            }
             if outbound.send(message).await.is_err() {
                 return ToolOutput::error("message: the gateway is not delivering");
             }
@@ -252,6 +265,18 @@ mod tests {
     use ilar::tools::Tool;
 
     fn tool(dir: &std::path::Path) -> (Arc<MessageTool>, mpsc::Receiver<Outbound>) {
+        let board =
+            crate::status::StatusBoard::new(Default::default(), false, std::time::Duration::ZERO);
+        tool_on(dir, "fake:12", board)
+    }
+
+    /// The tool as one seat has it: its key, and the board its replies
+    /// may take a line down on.
+    fn tool_on(
+        dir: &std::path::Path,
+        key: &str,
+        status: Arc<crate::status::StatusBoard>,
+    ) -> (Arc<MessageTool>, mpsc::Receiver<Outbound>) {
         let (tx, rx) = mpsc::channel(4);
         let routes = Arc::new(RouteStore::open(dir.join("routes.json")).unwrap());
         routes
@@ -260,7 +285,16 @@ mod tests {
                 routes.bind("fake:15", "s2");
             })
             .unwrap();
-        let (tool, _) = MessageTool::new(tx, "fake", "12", routes, dir.to_path_buf(), "");
+        let (tool, _) = MessageTool::new(Sending {
+            outbound: tx,
+            channel: "fake".into(),
+            chat_id: "12".into(),
+            key: key.to_string(),
+            routes,
+            workspace: dir.to_path_buf(),
+            constraints: String::new(),
+            status,
+        });
         (tool, rx)
     }
 
@@ -386,5 +420,35 @@ mod tests {
         assert!(!out.is_error, "{}", out.content);
         let sent = rx.recv().await.unwrap();
         assert_eq!(sent.media, vec![dir.path().join("selfie.png")]);
+    }
+
+    #[tokio::test]
+    async fn a_reply_takes_its_own_chats_status_line_down_and_no_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = crate::channel::FakeChannel::new("fake");
+        let channels = std::collections::HashMap::from([(
+            "fake".to_string(),
+            fake.clone() as Arc<dyn crate::channel::Channel>,
+        )]);
+        let board = crate::status::StatusBoard::new(channels, true, std::time::Duration::ZERO);
+        let _claim = board.begin("fake:12", "fake", "12").await.expect("a line");
+
+        // A scheduled turn homed on that chat is not the turn the
+        // person is watching: its message leaves the line alone.
+        let (nightly, _out) = tool_on(dir.path(), "cron:nightly", board.clone());
+        let out = send(
+            &nightly,
+            dir.path(),
+            serde_json::json!({"text": "reminder"}),
+        )
+        .await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(board.is_up("fake:12"), "{:?}", fake.seen());
+
+        // The chat's own turn answering: that is what it waited for.
+        let (own, _out) = tool_on(dir.path(), "fake:12", board.clone());
+        let out = send(&own, dir.path(), serde_json::json!({"text": "here you go"})).await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(!board.is_up("fake:12"));
     }
 }

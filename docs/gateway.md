@@ -124,7 +124,10 @@ attachments are handed to the model the way `read` attaches them.
 A message that arrives while the chat's turn is running does not wait
 for it: it steers, as typing into the TUI mid-turn does. The loop
 reads it at its next step boundary, the status line says "steered: …"
-when the model has it, and one reply covers both messages; a message
+when the model has it — and with no line up, because the status is off
+or a reply already took it down, the chat gets one short line saying
+the message went into the running turn, so a folded-in correction is
+never mistaken for a dropped message. One reply covers both; a message
 arriving as the model stops reopens the turn rather than stranding
 it. A slash command is still answered at once. Should the turn end
 without reading it because it failed, the message runs as a turn of
@@ -135,11 +138,16 @@ undelivered.
 
 While a turn runs for a chat, the bot posts "working…" and edits that
 line as things move: "thinking — <topic>" from the reasoning summary,
-"running bash: <command>", "delegating to explore: …", "writing…". The
-line is deleted the moment the reply goes out, or when the turn ends
-without one. On Delta Chat every edit and the deletion are messages
-on the wire, so edits are spaced by `status_interval_secs`. Background
-turns, cron and heartbeat, show nothing.
+"running bash: <command>", "delegating to explore: …", "writing…".
+There is one line per chat: a second turn starting there — a
+subagent's report while the person's turn runs — writes to the same
+line instead of posting another, and only the turn that put it up
+takes it down. It is deleted the moment that chat's own reply goes
+out, or when the turn ends without one; a message from somewhere else,
+a scheduled job's or another chat's, leaves it standing. On Delta Chat
+every edit and the deletion are messages on the wire, so edits are
+spaced by `status_interval_secs`. Background turns, cron and
+heartbeat, show nothing.
 
 ## Commands
 

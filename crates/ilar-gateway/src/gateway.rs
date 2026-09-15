@@ -45,14 +45,8 @@ pub struct Gateway {
     /// The gateway's own handle, for tasks it spawns on itself.
     me: std::sync::Weak<Gateway>,
     /// The status line each chat is watching, while a turn runs there.
-    statuses: Mutex<HashMap<String, Status>>,
+    status: Arc<crate::status::StatusBoard>,
     cancel: CancellationToken,
-}
-
-/// A posted status line and the task that keeps it current.
-struct Status {
-    id: String,
-    updater: tokio::task::JoinHandle<()>,
 }
 
 /// What a chat is told when its turn was cancelled.
@@ -72,6 +66,11 @@ pub const RESTARTING_FOLLOW_UP: &str =
 /// and no text.
 pub const EMPTY_REPLY: &str =
     "The model ended its turn without a reply. Send that again, or switch with /model.";
+
+/// What a chat is told when its message was folded into the turn
+/// running now and there is no status line to show that on.
+pub const STEER_ACK: &str =
+    "Got that — it goes into the turn running now, and one reply covers both.";
 
 /// What a chat is told when its session is held by another process.
 pub const BUSY_REPLY: &str =
@@ -167,6 +166,15 @@ impl Gateway {
                 )
             })
             .collect();
+        let channels: HashMap<String, Arc<dyn Channel>> = channels
+            .into_iter()
+            .map(|channel| (channel.name().to_string(), channel))
+            .collect();
+        let status = crate::status::StatusBoard::new(
+            channels.clone(),
+            gateway.status,
+            Duration::from_secs(gateway.status_interval_secs),
+        );
         let driver = Arc::new(Driver::new(
             config,
             gateway,
@@ -179,16 +187,14 @@ impl Gateway {
                 cron: cron.clone(),
                 memory: memory.clone(),
                 skills: skills.clone(),
+                status: status.clone(),
             },
             cancel.clone(),
         ));
         Ok(Arc::new_cyclic(|me| Self {
             driver,
             routes,
-            channels: channels
-                .into_iter()
-                .map(|channel| (channel.name().to_string(), channel))
-                .collect(),
+            channels,
             inbox_dir: dir.join("inbox"),
             rate: Mutex::new(rate),
             follow_ups: Mutex::new(Some(follow_rx)),
@@ -200,7 +206,7 @@ impl Gateway {
             skills,
             pending: crate::review::PendingStore::new(dir.join("pending")),
             settings,
-            statuses: Mutex::new(HashMap::new()),
+            status,
             me: me.clone(),
             cancel,
         }))
@@ -458,6 +464,14 @@ impl Gateway {
                 message.sender_id,
                 message.text.len()
             ));
+            // With a status line up, the turn says "steered: …" there.
+            // With none — the setting is off, or the line came down
+            // with a reply already sent this turn — a folded-in
+            // correction would look exactly like a dropped message.
+            if !self.status.is_up(&key) {
+                self.deliver(&message.channel, &message.chat_id, STEER_ACK)
+                    .await;
+            }
             return;
         }
         log(&format!(
@@ -531,9 +545,12 @@ impl Gateway {
         images: &[ImageContent],
     ) {
         let key = &seat.key;
-        let status = self.begin_status(seat).await;
-        let outcome = self.driver.run(seat, prompt, images, status).await;
-        self.end_status(key).await;
+        let claim = self.begin_status(seat).await;
+        let outcome = self
+            .driver
+            .run(seat, prompt, images, claim.as_ref().map(|c| c.lines()))
+            .await;
+        self.status.end(claim).await;
         match outcome {
             Ok(report) if report.outcome == ilar::agent::TurnOutcome::Aborted => {
                 log(&format!("{key}: turn aborted"));
@@ -833,9 +850,17 @@ impl Gateway {
             log(&format!("{key}: follow-up for a chat with no seat"));
             return;
         };
-        let status = self.begin_status(&seat).await;
-        let outcome = self.driver.run(&seat, &follow_up.prompt, &[], status).await;
-        self.end_status(&key).await;
+        let claim = self.begin_status(&seat).await;
+        let outcome = self
+            .driver
+            .run(
+                &seat,
+                &follow_up.prompt,
+                &[],
+                claim.as_ref().map(|c| c.lines()),
+            )
+            .await;
+        self.status.end(claim).await;
         // A message may have steered this turn too; whatever it never
         // read must not wait for the next one.
         let seat_for_leftovers = seat.clone();
@@ -1135,95 +1160,27 @@ impl Gateway {
             .await;
     }
 
-    /// A status line in the chat for the turn about to run: "working…",
-    /// then whatever the narrator says, edited no more often than the
-    /// interval allows. `None` when the channel has no such thing, the
-    /// setting is off, or the seat is a background one.
-    async fn begin_status(
-        &self,
-        seat: &crate::driver::Seat,
-    ) -> Option<mpsc::UnboundedSender<String>> {
-        if !self.settings.status || seat.background {
+    /// A status line in the chat for the turn about to run, shared
+    /// with whatever turn already has one up on this seat. `None` when
+    /// the channel has no such thing, the setting is off, or the seat
+    /// is a background one.
+    async fn begin_status(&self, seat: &crate::driver::Seat) -> Option<crate::status::Claim> {
+        if seat.background {
             return None;
         }
-        let channel = self.channels.get(&seat.channel)?.clone();
-        let id = match channel
-            .post_status(&seat.chat_id, crate::status::WORKING)
+        self.status
+            .begin(&seat.key, &seat.channel, &seat.chat_id)
             .await
-        {
-            Ok(Some(id)) => id,
-            Ok(None) => return None,
-            Err(error) => {
-                log(&format!("{}: status not posted: {error:#}", seat.key));
-                return None;
-            }
-        };
-        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
-        let interval = Duration::from_secs(self.settings.status_interval_secs);
-        let chat_id = seat.chat_id.clone();
-        let status_id = id.clone();
-        let updater = tokio::spawn(async move {
-            let mut last_edit: Option<tokio::time::Instant> = None;
-            let mut shown = crate::status::WORKING.to_string();
-            while let Some(mut line) = rx.recv().await {
-                // Wait out the interval, keeping only the newest line.
-                if let Some(last) = last_edit {
-                    let due = last + interval;
-                    loop {
-                        // Once due, post what we have: a line arriving
-                        // in the same instant waits its own interval,
-                        // so every line shows when the interval is zero.
-                        tokio::select! {
-                            biased;
-                            () = tokio::time::sleep_until(due) => break,
-                            newer = rx.recv() => match newer {
-                                Some(newer) => line = newer,
-                                None => return,
-                            },
-                        }
-                    }
-                }
-                if line == shown {
-                    continue;
-                }
-                if let Err(error) = channel.edit_status(&chat_id, &status_id, &line).await {
-                    log(&format!("status not edited: {error:#}"));
-                    return;
-                }
-                shown = line;
-                last_edit = Some(tokio::time::Instant::now());
-            }
-        });
-        self.statuses
-            .lock()
-            .unwrap()
-            .insert(seat.key.clone(), Status { id, updater });
-        Some(tx)
-    }
-
-    /// Take the chat's status line down, if one is up.
-    async fn end_status(&self, key: &str) {
-        let status = self.statuses.lock().unwrap().remove(key);
-        let Some(status) = status else {
-            return;
-        };
-        status.updater.abort();
-        let Some((channel, chat_id)) = split_key(key) else {
-            return;
-        };
-        if let Some(target) = self.channels.get(channel)
-            && let Err(error) = target.clear_status(chat_id, &status.id).await
-        {
-            log(&format!("{key}: status not cleared: {error:#}"));
-        }
     }
 
     /// One outbound message, to its channel. Only the dispatcher calls
-    /// this, one message at a time. The chat's status line goes first:
-    /// the reply is what it was waiting for.
+    /// this, one message at a time. The status line is not touched
+    /// here: the turn that owns it takes it down when it ends, and the
+    /// message tool when its reply to its own chat goes out, so a
+    /// scheduled job posting mid-turn no longer clears a line the
+    /// person is still watching.
     async fn send(&self, message: Outbound) {
         let key = session_key(&message.channel, &message.chat_id);
-        self.end_status(&key).await;
         let Some(target) = self.channels.get(&message.channel) else {
             log(&format!("{key}: no such channel; dropping a message"));
             return;

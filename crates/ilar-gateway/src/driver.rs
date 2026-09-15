@@ -130,6 +130,9 @@ pub struct Seat {
 /// The chat a seat's own tools are built for: where it answers, and
 /// whether it is a private chat or a room.
 struct Home<'a> {
+    /// The seat's key: `<channel>:<chat>` for a chat, `cron:<id>` or
+    /// `heartbeat:<key>` for a scheduled turn.
+    key: &'a str,
     channel: &'a str,
     chat_id: &'a str,
     private: bool,
@@ -146,6 +149,9 @@ pub struct Wiring {
     pub cron: Arc<CronStore>,
     pub memory: Arc<MemoryStore>,
     pub skills: Arc<crate::skills::SkillLibrary>,
+    /// The chats' status lines: a seat's own reply takes its own line
+    /// down, and nobody else's.
+    pub status: Arc<crate::status::StatusBoard>,
 }
 
 pub struct Driver {
@@ -275,6 +281,7 @@ impl Driver {
         let sent = self.seat_tools(
             &mut runtime.registry,
             Home {
+                key,
                 channel,
                 chat_id,
                 private,
@@ -365,22 +372,26 @@ impl Driver {
         home: Home<'_>,
     ) -> Result<Arc<std::sync::atomic::AtomicUsize>> {
         let Home {
+            key,
             channel,
             chat_id,
             private,
         } = home;
-        let (tool, sent) = MessageTool::new(
-            self.wiring.outbound.clone(),
-            channel,
-            chat_id,
-            self.routes.clone(),
-            self.gateway.workspace(&self.config),
-            self.wiring
+        let (tool, sent) = MessageTool::new(crate::message::Sending {
+            outbound: self.wiring.outbound.clone(),
+            channel: channel.to_string(),
+            chat_id: chat_id.to_string(),
+            key: key.to_string(),
+            routes: self.routes.clone(),
+            workspace: self.gateway.workspace(&self.config),
+            constraints: self
+                .wiring
                 .constraints
                 .get(channel)
-                .map(String::as_str)
-                .unwrap_or(""),
-        );
+                .cloned()
+                .unwrap_or_default(),
+            status: self.wiring.status.clone(),
+        });
         registry.add(tool)?;
         // A room's seat has no memory: the core block is withheld from
         // it, and reading or writing the person's memory aloud there
@@ -439,6 +450,7 @@ impl Driver {
         self.seat_tools(
             &mut preview.registry,
             Home {
+                key: &crate::bus::session_key(channel, chat_id),
                 channel,
                 chat_id,
                 private,
