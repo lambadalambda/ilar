@@ -242,10 +242,11 @@ impl Ghost {
     }
 
     /// Bring [`Self::rendered`] up to date at this width and say how
-    /// many rows the offer takes: the header, the tail under it, and
-    /// the blank row separating it from the live transcript. Every span
-    /// is remapped to the muted tone with its bold stripped — the whole
-    /// point of the offer is that none of it is the conversation.
+    /// many rows the offer would take in full: the header, the tail
+    /// under it, and the blank row separating it from the live
+    /// transcript. Every span is remapped to the muted tone with its
+    /// bold stripped — the whole point of the offer is that none of it
+    /// is the conversation.
     pub(crate) fn render(&mut self, width: u16, now: std::time::Instant) -> usize {
         if self.rendered_width != Some(width) {
             self.cache.update(
@@ -268,6 +269,23 @@ impl Ghost {
             self.rendered_width = Some(width);
         }
         self.rendered.len()
+    }
+
+    /// The offer in `rows` rows: the header, then the last of the tail
+    /// that fits under it. The header is never the row that goes — it
+    /// carries the three keys that answer the offer — and the end of
+    /// the tail is what resuming would show, so a cut takes from the
+    /// middle outwards.
+    pub(crate) fn trimmed_to(&self, rows: usize) -> Vec<ratatui::text::Line<'static>> {
+        if rows == 0 || self.rendered.is_empty() {
+            return Vec::new();
+        }
+        let (header, tail) = self.rendered.split_at(1);
+        header
+            .iter()
+            .chain(&tail[tail.len().saturating_sub(rows - 1)..])
+            .cloned()
+            .collect()
     }
 }
 
@@ -10117,5 +10135,41 @@ mod tests {
             rows.join("\n")
         );
         assert!(rows.iter().any(|row| row.contains("live words")));
+    }
+
+    /// An offer taller than the pane keeps the two things that matter:
+    /// the header, which says how to answer it, and the end of the
+    /// tail, which is what resuming would show. The live transcript
+    /// keeps its place under it either way.
+    #[test]
+    fn a_long_offer_keeps_its_header_and_its_ending_on_screen() {
+        let mut app = App::new();
+        app.push_transcript_line(Line_::User("live words".into()));
+        app.offer_session(Ghost::new(
+            "old-session".into(),
+            "the last thing".into(),
+            "previous session here: the last thing".into(),
+            (0..200)
+                .map(|turn| Line_::User(format!("ghost turn {turn}")))
+                .collect(),
+        ));
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 20)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let screen = (0..20u16)
+            .map(|row| {
+                (0..100u16)
+                    .map(|column| terminal.backend().buffer()[(column, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(screen.contains("previous session here"), "{screen}");
+        assert!(screen.contains("ghost turn 199"), "{screen}");
+        assert!(!screen.contains("ghost turn 0 "), "{screen}");
+        assert!(screen.contains("live words"), "{screen}");
+        assert_eq!(app.scroll_top, 0, "an offer that fits does not scroll");
     }
 }

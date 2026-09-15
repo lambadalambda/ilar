@@ -625,29 +625,6 @@ impl App {
             .saturating_sub(2 + CONTENT_HORIZONTAL_PADDING * 2);
         let now = std::time::Instant::now();
         self.refresh_transcript_cache(text_width, now);
-        // The offer sits above the transcript, in the same pane and the
-        // same scroll: its rows are built once per width, not per frame.
-        let ghost_rows = self
-            .ghost
-            .as_mut()
-            .map_or(0, |ghost| ghost.render(text_width, now));
-        // Streaming shifts row indices; keep search matches in sync with
-        // the rows actually on screen — and the offer above them shifts
-        // every one of them down while it is up.
-        if self.search_active
-            && self.search_computed_at != Some((self.transcript_revision, text_width, ghost_rows))
-        {
-            self.search_matches = self
-                .transcript_cache
-                .matching_rows(&self.search_query)
-                .into_iter()
-                .map(|row| row + ghost_rows)
-                .collect();
-            self.search_current = self
-                .search_current
-                .min(self.search_matches.len().saturating_sub(1));
-            self.search_computed_at = Some((self.transcript_revision, text_width, ghost_rows));
-        }
         let mut activity_rows = activity_line(
             self.busy,
             self.activity,
@@ -670,12 +647,43 @@ impl App {
             activity_rows.insert(0, Line::default());
         }
         let viewport_rows = transcript_area.height.saturating_sub(2) as usize;
-        let content_rows = self
+        let live_rows = self
             .transcript_cache
             .row_count()
-            .saturating_add(activity_rows.len())
-            .saturating_add(ghost_rows);
+            .saturating_add(activity_rows.len());
+        // The session on offer, above the live transcript in the same
+        // pane. It is cut to what the pane can show beside the
+        // conversation, keeping its header — which holds the keys that
+        // answer it — and the *end* of the tail, which is what resuming
+        // would put in front of you. So the offer never scrolls: it
+        // fits or it is trimmed, and the transcript below it is where
+        // the scroll still lives.
+        let ghost_rows = match self.ghost.as_mut() {
+            Some(ghost) => {
+                let built = ghost.render(text_width, now);
+                built.min(viewport_rows.saturating_sub(live_rows))
+            }
+            None => 0,
+        };
+        let content_rows = live_rows.saturating_add(ghost_rows);
         self.update_scroll_metrics(content_rows, viewport_rows);
+        // Streaming shifts row indices; keep search matches in sync with
+        // the rows actually on screen — and the offer above them shifts
+        // every one of them down while it is up.
+        if self.search_active
+            && self.search_computed_at != Some((self.transcript_revision, text_width, ghost_rows))
+        {
+            self.search_matches = self
+                .transcript_cache
+                .matching_rows(&self.search_query)
+                .into_iter()
+                .map(|row| row + ghost_rows)
+                .collect();
+            self.search_current = self
+                .search_current
+                .min(self.search_matches.len().saturating_sub(1));
+            self.search_computed_at = Some((self.transcript_revision, text_width, ghost_rows));
+        }
         let visible_rows = content_rows
             .saturating_sub(self.scroll_top)
             .min(viewport_rows) as u16;
@@ -736,25 +744,21 @@ impl App {
                 transcript_block = transcript_block.title_bottom(summary.right_aligned());
             }
         }
-        // The offer's rows first, then the transcript's from wherever
-        // the scroll has left them: one pane, one scroll, and nothing
-        // in the offer is clickable — it is not the conversation, so it
-        // has no rows to expand.
+        // The offer's rows first, then the transcript's: one pane, and
+        // nothing in the offer is clickable — it is not the
+        // conversation, so it has no rows to expand.
         let mut visible: Vec<crate::transcript::TranscriptRow> = self
             .ghost
             .as_ref()
-            .map(|ghost| ghost.rendered.as_slice())
+            .map(|ghost| ghost.trimmed_to(ghost_rows))
             .unwrap_or_default()
-            .iter()
-            .skip(self.scroll_top)
-            .take(viewport_rows)
-            .cloned()
+            .into_iter()
             .map(|line| crate::transcript::TranscriptRow { line, target: None })
             .collect();
         let below = viewport_rows.saturating_sub(visible.len());
         if below > 0 {
             visible.extend(self.transcript_cache.visible_rows(
-                self.scroll_top.saturating_sub(ghost_rows),
+                self.scroll_top,
                 below,
                 &activity_rows,
             ));
