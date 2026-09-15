@@ -114,6 +114,7 @@ the account can reach). Then:
 
 ```sh
 ilar                             # the TUI; F1 shows every keybinding
+                                 # — offers this directory's last session, Enter resumes
 ilar --continue                  # resume the latest session
 ilar --view <session-id>         # watch a session read-only, live (a gateway chat, say)
 ilar exec "what broke in CI?"    # headless one-shot, answer on stdout

@@ -3,6 +3,35 @@
 Press **F1** any time for the full keybinding reference. This page
 covers the parts that deserve more than a one-line hint.
 
+## Starting
+
+A bare `ilar` in a directory you have worked in before offers that
+directory's last session, shown rather than described: its tail is
+drawn in the transcript pane in a muted, ghostly style under one header
+line —
+
+```
+previous session here: fix the flaky adoption test · 2h ago — Enter resumes · type to start fresh · Esc dismisses
+```
+
+- **Enter** on an empty prompt resumes it, exactly as the picker's
+  resume does.
+- **Typing** ignores it: the first message you send goes to the fresh
+  session you are already in, and the ghost clears.
+- **Esc** dismisses it and leaves the fresh session alone.
+
+Anything else — scrolling, F1, the palette — leaves the offer up. The
+ghost is a bounded read from the end of the log (a couple of screenfuls,
+whatever the session weighs), it is never written anywhere, and the
+status line says `ghost of <session>` while it is on screen. The fresh
+session you started in is removed on quit if you never said anything in
+it, so dismissing an offer and leaving costs nothing.
+
+The offer is only made when the launch named no session: `--session`,
+`--continue` and `--view` have all already said which conversation this
+is. `general.resume_offer = false` turns it off — see
+[configuration](configuration.md).
+
 ## The status line
 
 During a turn the status line reads like:
