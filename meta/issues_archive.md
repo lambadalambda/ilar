@@ -365,3 +365,7 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [/new stops the turn it replaces](issues/new-stops-the-turn-it-replaces.md)
 - [x] [The chat ask reads cleanly](issues/the-chat-ask-reads-cleanly.md)
 - [x] [A restart finishes or explains](issues/a-restart-finishes-or-explains.md)
+- [x] [A locked store is livable](issues/a-locked-store-is-livable.md)
+- [x] [sudo forgets what failed](issues/sudo-forgets-what-failed.md)
+- [x] [ilar secret is one CLI](issues/ilar-secret-is-one-cli.md)
+- [x] [The store changes under a running session](issues/the-store-changes-under-a-running-session.md)
