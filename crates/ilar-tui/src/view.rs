@@ -136,10 +136,10 @@ impl App {
         let width = width as usize;
         let (text, color) = match self.operational_notice() {
             Some((text, color)) => (text.to_string(), color),
-            None if self.notifications_paused && self.held_results > 0 => (
+            None if self.notifications_paused && !self.held_results.is_empty() => (
                 format!(
-                    "{} task result(s) held — send a message to deliver",
-                    self.held_results
+                    "{} task result(s) held — send a message, or Ctrl-Q to deliver",
+                    self.held_results.len()
                 ),
                 theme::PRIMARY,
             ),

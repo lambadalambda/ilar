@@ -219,9 +219,9 @@ fn arm_or_confirm(manager: &mut PendingManager, item: PendingItem) -> PendingAct
         PendingItem::Goal => PendingAction::AbortGoal,
         PendingItem::BackgroundTasks => PendingAction::CancelBackground,
         PendingItem::Services => PendingAction::StopServices,
-        // Dismissing a retry offer needs no confirmation, so it never
-        // arms and never arrives here.
-        PendingItem::Retry => PendingAction::Stay,
+        // Neither a retry offer's dismissal nor a held result's
+        // delivery needs confirming, so neither arms nor arrives here.
+        PendingItem::Retry | PendingItem::Held(_) => PendingAction::Stay,
     }
 }
 
@@ -258,10 +258,17 @@ pub(crate) fn topic_slug(topic: &str) -> String {
     slug.trim_end_matches('-').to_string()
 }
 
-pub(crate) fn queued_result_headline(message: &ilar::agent::Steer) -> Option<String> {
-    task_notification_display(&message.text)
-        .or_else(|| tool_notification_display(&message.text))
+/// The one-line headline a task/tool notification wears, whatever is
+/// holding it — a queued steer, or a parcel still waiting for a turn
+/// to carry it. `None` when the text is no notification at all.
+pub(crate) fn notification_headline(text: &str) -> Option<String> {
+    task_notification_display(text)
+        .or_else(|| tool_notification_display(text))
         .map(|display| display.lines().next().unwrap_or_default().to_string())
+}
+
+pub(crate) fn queued_result_headline(message: &ilar::agent::Steer) -> Option<String> {
+    notification_headline(&message.text)
 }
 
 /// Retry frames a buffered subagent activity gets before it is
@@ -390,10 +397,12 @@ pub(crate) struct App {
     /// shows instead.
     pub(crate) status_activity: Activity,
     status_seen: String,
-    /// Task results waiting for the user's next message, and whether
-    /// delivery is paused for them — mirrored from the runtime each
-    /// frame so the notice row can say so without a notice.
-    pub(crate) held_results: usize,
+    /// Task results waiting for the user's next message, one headline
+    /// each, and whether delivery is paused for them — mirrored from
+    /// the runtime every frame. A count alone could say *that* results
+    /// wait; the headlines let the pending manager say *which*, and
+    /// offer to deliver them.
+    pub(crate) held_results: Vec<String>,
     pub(crate) notifications_paused: bool,
     /// The secret store was left sealed and locked at startup: a
     /// standing line on the notice row, since nothing else in the
@@ -592,7 +601,7 @@ impl App {
             pending_subtask: None,
             background_running: 0,
             deliveries_in_flight: 0,
-            held_results: 0,
+            held_results: Vec::new(),
             notifications_paused: false,
             secrets_locked: false,
             status_activity: Activity::Ready,
@@ -1758,6 +1767,10 @@ impl App {
         if self.services_running > 0 {
             items.push(PendingItem::Services);
         }
+        // Held results are standing state like any other: listed, and
+        // actionable, rather than a count on the notice row that the
+        // user could only clear by spending a turn.
+        items.extend((0..self.held_results.len()).map(PendingItem::Held));
         if self.retry_available {
             items.push(PendingItem::Retry);
         }
@@ -1842,6 +1855,17 @@ impl App {
                             format!("services: {} running", self.services_running)
                         }
                     }
+                    // Naming which result waits, and offering the one
+                    // thing the user wants from it. No arming: this
+                    // delivers work, it does not throw any away.
+                    PendingItem::Held(index) => {
+                        let headline = self
+                            .held_results
+                            .get(*index)
+                            .map(String::as_str)
+                            .unwrap_or("a task result");
+                        format!("held result {}: {headline} — ↵ delivers", index + 1)
+                    }
                     PendingItem::Retry => "resume failed turn from current context".into(),
                 }
             })
@@ -1893,6 +1917,9 @@ impl App {
                         PendingAction::DeleteQueued(index)
                     }
                     PendingItem::Retry => PendingAction::DismissRetry,
+                    // A held result is not the user's to delete: the
+                    // outbox owns it and would redeliver it anyway.
+                    PendingItem::Held(_) => PendingAction::Stay,
                     // Goal, background tasks and task results are
                     // investments: confirm.
                     armed_item => arm_or_confirm(manager, armed_item),
@@ -1902,6 +1929,9 @@ impl App {
                 PendingItem::Queued(index) => PendingAction::EditQueued(index),
                 PendingItem::Goal => PendingAction::EditGoal,
                 PendingItem::Retry => PendingAction::RetryNow,
+                // Delivering is the whole point of a held result, and
+                // it destroys nothing: it fires on the first press.
+                PendingItem::Held(_) => PendingAction::DeliverHeld,
                 // There is nothing to edit about running work, so
                 // acting on it is stopping it: ↵ goes through the same
                 // arm-then-confirm `d` does, rather than doing nothing
@@ -4319,6 +4349,43 @@ mod tests {
         );
     }
 
+    /// Held results were a count on the notice row and nothing else:
+    /// the user could see that mail waited, never which, and had to
+    /// spend a turn to find out. They are rows now, named, and ↵
+    /// delivers the backlog — on the first press, because delivering
+    /// throws nothing away.
+    #[test]
+    fn held_results_are_listed_and_enter_delivers_them() {
+        let mut app = App::new();
+        app.notifications_paused = true;
+        app.held_results = vec![
+            "Task \"survey the API\" completed".into(),
+            "Task \"land the fix\" failed".into(),
+        ];
+        app.pending_manager = Some(PendingManager::default());
+
+        assert_eq!(
+            app.pending_items(),
+            vec![PendingItem::Held(0), PendingItem::Held(1)]
+        );
+        let rows = app.pending_snapshot().expect("the manager is open").rows;
+        assert!(rows[0].contains("survey the API"), "{rows:?}");
+        assert!(rows[0].contains("↵ delivers"), "{rows:?}");
+        assert!(rows[1].contains("land the fix"), "{rows:?}");
+
+        // No arming: one press delivers.
+        assert_eq!(
+            app.pending_manager_key(KeyCode::Enter, false),
+            PendingAction::DeliverHeld
+        );
+        // And `d` is not an option — the outbox owns the entry and
+        // would redeliver it anyway.
+        assert_eq!(
+            app.pending_manager_key(KeyCode::Char('d'), false),
+            PendingAction::Stay
+        );
+    }
+
     /// The footer promises "Enter edit/act"; a jobs or services row
     /// has nothing to edit, so ↵ acts — armed once, like `d`, because
     /// cancelling running work is not a keystroke to spend by
@@ -5959,7 +6026,11 @@ mod tests {
 
         app.clear_notice();
         app.notifications_paused = true;
-        app.held_results = 3;
+        app.held_results = vec![
+            "Task \"survey the API\" completed".into(),
+            "Task \"land the fix\" completed".into(),
+            "Task \"read the log\" completed".into(),
+        ];
         terminal.draw(|frame| app.render(frame)).unwrap();
         let screen = (0..24)
             .map(|row| {

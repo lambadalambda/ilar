@@ -811,7 +811,7 @@ static HELP_SECTIONS: &[HelpSection] = &[
                 "dismiss overlay · abort turn · clear input (a multi-line draft stashes)"
             ),
             binding!("Ctrl-D", "quit (blank input, nothing open)"),
-            binding!("Ctrl-Q", "pending manager: queue, goal, jobs, retry"),
+            binding!("Ctrl-Q", "pending manager: queue, goal, tasks, held, retry"),
             binding!("Ctrl-R", "resume a failed or aborted turn from its state"),
             binding!("Ctrl-V", "attach a clipboard image (vision models)"),
             binding!("Ctrl-S", "stash the draft · pops it back when blank"),
@@ -887,6 +887,10 @@ static HELP_SECTIONS: &[HelpSection] = &[
             binding!(
                 "Enter (focus view)",
                 "message the agent on screen: steers it or resumes it"
+            ),
+            binding!(
+                "^G ×2 (focus view)",
+                "cancel that one agent; its result is held"
             ),
             binding!("^Y in that picker", "fork at the turn instead (keeps both)"),
             binding!("/fork", "fork the whole session under a new id"),
@@ -1116,6 +1120,11 @@ pub(crate) enum PendingItem {
     /// panel, the transcript rows and the switch refusals use.
     BackgroundTasks,
     Services,
+    /// Index into the held task results — the backlog a pause is
+    /// holding. It had been a bare count on the notice row: the user
+    /// could see that results waited, never which, and had to spend a
+    /// turn to find out.
+    Held(usize),
     Retry,
 }
 
@@ -1129,6 +1138,10 @@ pub(crate) enum PendingAction {
     EditGoal,
     CancelBackground,
     StopServices,
+    /// Resume delivery of the held backlog. Not per-row: the pause is
+    /// one switch and the queue behind it is ordered, so releasing the
+    /// third would silently release the two ahead of it anyway.
+    DeliverHeld,
     DismissRetry,
     RetryNow,
 }

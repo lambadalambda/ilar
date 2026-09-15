@@ -2345,7 +2345,17 @@ impl schedule::Runtime for LoopRuntime<'_> {
         // cancel-all takes them too.
         app.background_running = self.spawner.running_background() + self.routed.len();
         app.deliveries_in_flight = self.routed.len();
-        app.held_results = self.held_notifications.len();
+        // Headlines, not a count: the pending manager lists which
+        // results wait and offers to deliver them.
+        app.held_results = self
+            .held_notifications
+            .iter()
+            .map(|parcel| {
+                let notification = parcel.notification();
+                crate::app::notification_headline(&notification.text)
+                    .unwrap_or_else(|| notification.description.clone())
+            })
+            .collect();
         app.notifications_paused = *self.notifications_paused;
         let tasks = self.spawner.running_tasks();
         // Depths from the registry's own ancestry, in registry order:
@@ -3840,6 +3850,25 @@ async fn run_app(
                                 services.stop_all();
                                 app.services_running = 0;
                                 app.set_notice("services stopped", NoticeLevel::Info);
+                            }
+                            PendingAction::DeliverHeld => {
+                                // Lifting the pause is the whole
+                                // mechanism: the gate starts the
+                                // delivery turn on the next idle pass,
+                                // in the order the backlog holds.
+                                notifications_paused = false;
+                                // The standing "held" reminder is what
+                                // this press answers, and a transient
+                                // notice may not bury a standing one.
+                                app.clear_notice();
+                                app.set_notice(
+                                    format!(
+                                        "delivering {} held task result(s)",
+                                        app.held_results.len()
+                                    ),
+                                    NoticeLevel::Info,
+                                );
+                                app.pending_manager = None;
                             }
                             PendingAction::DismissRetry => {
                                 app.retry_available = false;
