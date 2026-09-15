@@ -808,11 +808,11 @@ static HELP_SECTIONS: &[HelpSection] = &[
             binding!("Shift-Enter / Ctrl-J", "insert newline"),
             binding!(
                 "Esc / Ctrl-C",
-                "dismiss overlay · abort turn · clear input (nothing else)"
+                "dismiss overlay · abort turn · clear input (a multi-line draft stashes)"
             ),
             binding!("Ctrl-D", "quit (blank input, nothing open)"),
             binding!("Ctrl-Q", "pending manager: queue, goal, jobs, retry"),
-            binding!("Ctrl-R", "resume the failed turn from current context"),
+            binding!("Ctrl-R", "resume a failed or aborted turn from its state"),
             binding!("Ctrl-V", "attach a clipboard image (vision models)"),
             binding!("Ctrl-S", "stash the draft · pops it back when blank"),
             binding!("Up / Down", "recall prompt history (blank input)"),
@@ -840,8 +840,12 @@ static HELP_SECTIONS: &[HelpSection] = &[
     HelpSection {
         title: "Pickers",
         bindings: &[
-            binding!("Ctrl-P", "command palette"),
-            binding!("Ctrl-M / F2", "switch model", portable = "F2"),
+            binding!("Ctrl-P", "command palette (mid-turn too)"),
+            binding!(
+                "Ctrl-M / F2",
+                "switch model (between turns)",
+                portable = "F2"
+            ),
             binding!("F3", "switch theme"),
             binding!("Ctrl-X, M / T", "leader: models / themes"),
             binding!("↑↓ · Enter · Esc", "navigate · choose · dismiss"),
@@ -887,7 +891,10 @@ static HELP_SECTIONS: &[HelpSection] = &[
             binding!("^Y in that picker", "fork at the turn instead (keeps both)"),
             binding!("/fork", "fork the whole session under a new id"),
             binding!("", "rewind/fork rebuild the session; services stop"),
-            binding!("ilar --continue", "resume latest session (CLI)"),
+            binding!(
+                "ilar --continue",
+                "resume this directory's latest session (CLI)"
+            ),
         ],
     },
     HelpSection {

@@ -56,12 +56,31 @@ it errored — the undelivered steers move to the queue rather than
 vanishing. Turns with no steer channel (a notification routed from
 another session) still queue as before.
 
+A `/command` is not steering text. Submitting one into a turn that can
+take a steer is refused — `wait for the current operation before /goal`
+— with the text left on the prompt, because the commands are armed,
+expanded and routed on the way *into* a turn: steered, `/goal ship the
+parser` would reach the model as that literal line and arm nothing.
+`/btw` and `/context` are the exceptions, and are meant for mid-turn.
+A command that queues (no steer channel) is fine: the queue drains
+through the same path a typed turn does.
+
 Standing state — queued messages, the goal, background jobs, a retry
 offer — is managed in the pending manager (**Ctrl-Q** or the palette):
 delete one queued message, pull it back into the input for editing,
 abort the goal or cancel background jobs (both confirmed with a second
-press). **Esc is strictly immediate-scope**: it aborts the running turn
-or clears the input, and never touches the queue or the goal.
+press). Enter on the jobs or services row acts on it — the same
+confirmed cancel `d` gives — since there is nothing there to edit.
+**Esc is strictly immediate-scope**: it aborts the running turn or
+clears the input, and never touches the queue or the goal. A one-line
+draft it clears; a multi-line one — a paste, or a paragraph — goes to
+the stash instead, because Esc has no undo.
+
+The palette (**Ctrl-P**) opens during a turn as well: the pending
+manager, help, the link picker, an export and the usage line all work
+there. Switching model or reasoning does not, and says so rather than
+doing nothing; the same goes for F2 and Ctrl-X mid-turn. A theme
+change (**F3**) is only paint, so it is never refused.
 
 ## When the provider stumbles
 

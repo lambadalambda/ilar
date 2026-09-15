@@ -10,7 +10,10 @@ that one property.
 `ilar --view <id>` opens a session read-only: its transcript in the
 TUI's own renderer, followed as the file grows, with no writer lease
 taken — so a gateway chat or another TUI can be watched while it
-works, and typing into it is refused. `ilar --continue` resumes the latest session from the CLI. Inside the
+works, and typing into it is refused. `ilar --continue` resumes the
+latest session *started in the directory you are in*; with nothing
+from here it falls back to the newest one anywhere and says where that
+one started, since its conversation is about other files. Inside the
 TUI, `/sessions` opens a two-pane search that is both the picker
 (empty query lists the sessions started in the directory you are in
 first, then everything else, newest-first within each — by topic, last
@@ -25,7 +28,9 @@ with the ones from elsewhere.
 
 Sessions name themselves: after the first completed turn a short topic
 is generated and shown in the title bar, the listing, and the terminal
-window title.
+window title. A fork is not born with its parent's name — titling only
+runs on a session that has none — so it names itself after its own next
+completed turn and the two can be told apart.
 
 ## Following a session as it is written
 
