@@ -548,9 +548,15 @@ impl Driver {
         let seat = self.seats.lock().unwrap().remove(key);
         if let Some(seat) = seat {
             self.abort(&seat);
-            // The turn's own lock: held until the cancelled turn has
-            // wound down and let its ask go.
-            drop(seat.turn.lock().await);
+            // The turn's own lock: taken once the cancelled turn has
+            // wound down and let its ask go. A turn that will not stop
+            // must not hold the reply hostage, so the wait is bounded.
+            if tokio::time::timeout(CLOSE_GRACE, seat.turn.lock())
+                .await
+                .is_err()
+            {
+                log(&format!("{key}: closed with its turn still running"));
+            }
             seat.runtime.spawner.shutdown().await;
             seat.runtime.services.stop_all();
         }
@@ -933,6 +939,9 @@ async fn watch_notifications(
 
 /// How long a held delivery waits before the next attempt.
 pub const HOLD_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long `close` waits for the turn it cancelled to wind down.
+pub const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The delivery of last resort: the child's report goes to the chat's
 /// own session as an error prompt. The stranded outbox entry rides
