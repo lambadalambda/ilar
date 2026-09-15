@@ -952,6 +952,37 @@ async fn slash_abort_ends_the_turn_and_the_waiting_message_runs_after() {
 }
 
 #[tokio::test]
+async fn slash_new_stops_the_turn_it_replaces() {
+    let dir = tempfile::tempdir().unwrap();
+    let (gateway, fake) = gateway(
+        dir.path(),
+        vec![
+            calls("bash", serde_json::json!({"command": "sleep 20"})),
+            says("the old conversation's answer"),
+        ],
+    );
+    fake.inject("run something slow", "chat-1", "alice").await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    fake.inject("/new", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(2, Duration::from_secs(15)).await;
+    let texts: Vec<String> = sent.iter().map(|m| m.text.clone()).collect();
+    assert!(
+        texts
+            .iter()
+            .any(|t| t == ilar_gateway::gateway::ABORTED_REPLY),
+        "{texts:?}"
+    );
+    assert!(
+        texts.iter().any(|t| t.starts_with("Started a fresh chat")),
+        "{texts:?}"
+    );
+    // Nothing of the old conversation lands in the fresh chat.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(fake.sent().len(), 2, "{:?}", fake.sent());
+    gateway.cancel();
+}
+
+#[tokio::test]
 async fn a_restart_tells_the_chat_the_turn_it_dropped() {
     let dir = tempfile::tempdir().unwrap();
     let (gateway, fake) = gateway(

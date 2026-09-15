@@ -92,7 +92,7 @@ fn parse_grant(argument: &str) -> ilar::secrets::Approval {
     }
 }
 
-pub const HELP: &str = "/new — start a fresh chat (memory stays)\n\
+pub const HELP: &str = "/new — start a fresh chat (memory stays); a turn running here is cancelled\n\
 /model — list the models; /model <provider/model> switches; add --save to make it the default for new chats\n\
 /abort — cancel the turn running now; messages that were waiting run after it\n\
 /grant [session|always] [password], /deny — answer a tool's ask for a stored secret or for root\n\

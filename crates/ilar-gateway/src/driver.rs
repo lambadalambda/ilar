@@ -538,10 +538,16 @@ impl Driver {
 
     /// Close a chat's seat and forget its route: the next message
     /// opens a fresh session. The old session stays on disk. Whatever
-    /// the seat was running is stopped first.
+    /// the seat was running is stopped first: the turn is cancelled and
+    /// waited out, so its answer, its failure or its standing secret
+    /// ask cannot land in the fresh chat minutes later.
     pub async fn close(&self, key: &str) -> Result<()> {
         let seat = self.seats.lock().unwrap().remove(key);
         if let Some(seat) = seat {
+            self.abort(&seat);
+            // The turn's own lock: held until the cancelled turn has
+            // wound down and let its ask go.
+            drop(seat.turn.lock().await);
             seat.runtime.spawner.shutdown().await;
             seat.runtime.services.stop_all();
         }

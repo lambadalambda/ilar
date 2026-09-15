@@ -459,16 +459,27 @@ impl Gateway {
     /// failing does not spin; what that one leaves is reported, not
     /// run. Nothing runs while the gateway is stopping: a turn under
     /// a cancelled token would record the message and answer nothing.
+    /// Nothing runs on a seat the chat has left behind either — `/new`
+    /// replaced it, and the old conversation is over.
     async fn run_leftovers(&self, seat: &Arc<crate::driver::Seat>) {
         let leftover = self.driver.take_undelivered(seat);
         if leftover.is_empty() {
             return;
         }
         let key = &seat.key;
-        if self.cancel.is_cancelled() {
+        let closed = !self
+            .driver
+            .seat_by_key(key)
+            .is_some_and(|current| Arc::ptr_eq(&current, seat));
+        if self.cancel.is_cancelled() || closed {
             log(&format!(
-                "{key}: {} steer(s) undelivered at shutdown: {:?}",
+                "{key}: {} steer(s) undelivered ({}): {:?}",
                 leftover.len(),
+                if closed {
+                    "the chat started over"
+                } else {
+                    "at shutdown"
+                },
                 leftover.iter().map(|s| s.text.as_str()).collect::<Vec<_>>()
             ));
             return;
