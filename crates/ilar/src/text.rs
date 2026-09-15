@@ -29,6 +29,18 @@ pub fn format_bytes(bytes: u64) -> String {
     }
 }
 
+/// Durations the way every row and every tool message writes them:
+/// `20s`, `2m 0s`. A refusal that says `120000ms` makes the reader do
+/// arithmetic the UI never asks of them.
+pub fn format_duration(duration: std::time::Duration) -> String {
+    let seconds = duration.as_secs();
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else {
+        format!("{}m {}s", seconds / 60, seconds % 60)
+    }
+}
+
 /// `1 line`, `2 lines`: a count with its unit, so a note about one
 /// thing does not read like an unfinished template.
 pub fn plural(count: usize, unit: &str) -> String {

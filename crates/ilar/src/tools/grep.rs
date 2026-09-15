@@ -111,7 +111,10 @@ impl Tool for GrepTool {
          Gitignored files are skipped unless include_ignored is set. \
          Returns file:line:match; with context, surrounding lines as \
          file-line-text and -- between groups. Narrow with glob (*.rs, \
-         src/**/*.ts) and cap with limit instead of piping through head."
+         src/**/*.ts) and cap with limit instead of piping through head. \
+         Beyond limit there are three caps — 50 matches per file, the \
+         first 2 MiB of each file, 256 KiB of output — and the closing \
+         line says which one bit."
     }
 
     fn concurrency(&self) -> ToolConcurrency {
@@ -208,19 +211,28 @@ impl Tool for GrepTool {
 
 /// Scan one file. Pure apart from reading it: returns the hits and
 /// whether the file's byte cap clipped the scan.
+/// Why one file's scan stopped early. A bare "(truncated)" covered
+/// three different caps and named none of them, so nobody could tell a
+/// pattern that needs narrowing from a file too big to read.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Clip {
+    PerFileMatches,
+    FileBytes,
+}
+
 fn grep_one_file(
     path: &std::path::Path,
     relative: &str,
     search: &Search,
     cancelled: &std::sync::atomic::AtomicBool,
-) -> (Vec<Hit>, bool) {
+) -> (Vec<Hit>, Option<Clip>) {
     let Ok(file) = std::fs::File::open(path) else {
-        return (Vec::new(), false);
+        return (Vec::new(), None);
     };
     let mut reader = std::io::BufReader::new(file).take(MAX_FILE_BYTES + 1);
     let mut hits = Vec::new();
     let mut matches = 0_usize;
-    let mut truncated = false;
+    let mut truncated = None;
     let mut line = Vec::new();
     let mut line_number = 0_usize;
     let mut file_bytes = 0_u64;
@@ -248,7 +260,7 @@ fn grep_one_file(
         let file_limit_reached = file_bytes > MAX_FILE_BYTES;
         if file_limit_reached {
             let remaining = MAX_FILE_BYTES.saturating_sub(previous_file_bytes) as usize;
-            truncated = true;
+            truncated = Some(Clip::FileBytes);
             if remaining == 0 {
                 break;
             }
@@ -273,7 +285,7 @@ fn grep_one_file(
             after = search.context;
             matches += 1;
             if matches >= MAX_MATCHES_PER_FILE {
-                truncated = true;
+                truncated = Some(Clip::PerFileMatches);
                 break;
             }
         } else if after > 0 {
@@ -337,7 +349,8 @@ fn grep_files(
     let hits = std::sync::Mutex::new(Vec::<Hit>::new());
     let matched = std::sync::atomic::AtomicUsize::new(0);
     let scanned = std::sync::atomic::AtomicUsize::new(0);
-    let clipped = std::sync::atomic::AtomicBool::new(false);
+    let clipped_matches = std::sync::atomic::AtomicBool::new(false);
+    let clipped_bytes = std::sync::atomic::AtomicBool::new(false);
     let capped_entries = std::sync::atomic::AtomicBool::new(false);
 
     walker.run(|| {
@@ -370,8 +383,10 @@ fn grep_files(
                 return ignore::WalkState::Continue;
             }
             let (found, file_clipped) = grep_one_file(entry.path(), &relative, search, cancelled);
-            if file_clipped {
-                clipped.store(true, Ordering::Release);
+            match file_clipped {
+                Some(Clip::PerFileMatches) => clipped_matches.store(true, Ordering::Release),
+                Some(Clip::FileBytes) => clipped_bytes.store(true, Ordering::Release),
+                None => {}
             }
             if !found.is_empty() {
                 let found_matches = found.iter().filter(|hit| hit.is_match).count();
@@ -388,7 +403,7 @@ fn grep_files(
     let mut hits = hits.into_inner().unwrap();
     // Parallel walking loses walk order; make the output reproducible.
     hits.sort_by(|left, right| left.path.cmp(&right.path).then(left.line.cmp(&right.line)));
-    let mut truncated = clipped.load(Ordering::Acquire);
+    let mut output_clipped = false;
     // The walk stops once the cap is met, so whether a match past it
     // was ever seen is timing; what is known is that the cap was
     // reached, and that is what the notice says.
@@ -411,7 +426,6 @@ fn grep_files(
             kept -= 1;
         }
         hits.truncate(kept);
-        truncated = true;
     }
     let mut out = String::new();
     let mut previous: Option<(&str, usize)> = None;
@@ -422,7 +436,7 @@ fn grep_files(
             && previous.is_some_and(|(path, line)| path != hit.path || hit.line > line + 1);
         let needed = hit.rendered.len() + 1 + if separated { 3 } else { 0 };
         if out.len().saturating_add(needed) > MAX_OUTPUT_BYTES {
-            truncated = true;
+            output_clipped = true;
             break;
         }
         if separated {
@@ -446,10 +460,44 @@ fn grep_files(
             &format!("…(limit {limit} reached; raise limit or narrow the pattern)"),
             MAX_OUTPUT_BYTES,
         );
-    } else if truncated {
-        close_with(&mut out, "…(truncated)", MAX_OUTPUT_BYTES);
+    } else if let Some(notice) = cap_notice(
+        clipped_matches.load(Ordering::Acquire),
+        clipped_bytes.load(Ordering::Acquire),
+        output_clipped,
+    ) {
+        close_with(&mut out, &notice, MAX_OUTPUT_BYTES);
     }
     ToolOutput::text(out)
+}
+
+/// The closing line for whatever cap bit, naming it: three different
+/// caps used to come back as the same bare "(truncated)", and the fix
+/// for each of them is a different one.
+fn cap_notice(per_file_matches: bool, file_bytes: bool, output: bool) -> Option<String> {
+    let causes: Vec<String> = [
+        per_file_matches.then(|| format!("{MAX_MATCHES_PER_FILE} matches per file")),
+        file_bytes.then(|| {
+            format!(
+                "the first {} of a file",
+                crate::text::format_bytes(MAX_FILE_BYTES)
+            )
+        }),
+        output.then(|| {
+            format!(
+                "{} of output",
+                crate::text::format_bytes(MAX_OUTPUT_BYTES as u64)
+            )
+        }),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    (!causes.is_empty()).then(|| {
+        format!(
+            "…(truncated at {}; narrow the pattern or the path)",
+            causes.join(" and ")
+        )
+    })
 }
 
 /// Append a closing notice within `limit`, always on a line of its own.

@@ -374,7 +374,10 @@ fn is_blocked_ipv4(address: Ipv4Addr) -> bool {
 
 #[derive(Debug, thiserror::Error)]
 enum BodyReadError {
-    #[error("response too large (limit {0} bytes)")]
+    #[error(
+        "response too large (over the {0} byte limit); fetch a smaller page, or download it with \
+         bash (curl -o) and read the file"
+    )]
     TooLarge(usize),
     #[error("response body failed")]
     Transport(#[source] reqwest::Error),
@@ -438,7 +441,10 @@ impl Tool for WebFetchTool {
         "Fetch a URL and return its content as plain text (HTML converted). \
          Fetch URLs you were given or that a search returned: guessed URLs \
          mostly 404. When you do not already have the exact URL, websearch \
-         for the page first and fetch a URL from its results."
+         for the page first and fetch a URL from its results. The request \
+         is given 20 seconds and the page 2 MiB; the text comes back cut \
+         at 60000 characters, with the rest saved to a file the result \
+         names."
     }
     fn concurrency(&self) -> ToolConcurrency {
         ToolConcurrency::Concurrent
@@ -454,9 +460,10 @@ impl Tool for WebFetchTool {
             "required": ["url"]
         })
     }
-    fn run(&self, input: serde_json::Value, _ctx: ToolContext) -> ToolFuture {
+    fn run(&self, input: serde_json::Value, ctx: ToolContext) -> ToolFuture {
         let http = self.http.clone();
         let allow_private_initial = self.allow_private_initial;
+        let spill = crate::tools::bash::SpillTarget::from_context(&ctx);
         Box::pin(async move {
             let input: FetchInput = match parse_input(input, "webfetch") {
                 Ok(v) => v,
@@ -504,8 +511,9 @@ impl Tool for WebFetchTool {
                             };
                             if text.chars().count() > MAX_TEXT_CHARS {
                                 ToolOutput::text(format!(
-                                    "{}\n\n…(truncated at {MAX_TEXT_CHARS} chars)",
-                                    truncate_chars(&text, MAX_TEXT_CHARS)
+                                    "{}\n\n…(truncated at {MAX_TEXT_CHARS} chars)\n{}",
+                                    truncate_chars(&text, MAX_TEXT_CHARS),
+                                    spilled_page(spill.as_ref(), &text).await
                                 ))
                             } else {
                                 ToolOutput::text(text)
@@ -541,6 +549,20 @@ impl Tool for WebFetchTool {
                 )),
             }
         })
+    }
+}
+
+/// Where the rest of a cut page went. Same discipline as bash and grep
+/// on the same context: a preview the model can read, and the whole
+/// thing on disk for grep or read — an offset would be no use here,
+/// since a second fetch may not even return the same page.
+async fn spilled_page(spill: Option<&crate::tools::bash::SpillTarget>, text: &str) -> String {
+    match spill {
+        Some(target) => target
+            .write_note(text.as_bytes(), "grep or read that file for the rest")
+            .await
+            .unwrap_or_else(|note| note),
+        None => "(the rest of the page was not saved: no session to save it in)".to_string(),
     }
 }
 
@@ -635,7 +657,10 @@ impl Tool for WebSearchTool {
         let timeout = self.timeout;
         Box::pin(async move {
             match tokio::time::timeout(timeout, fut).await {
-                Err(_) => ToolOutput::error("websearch timed out"),
+                Err(_) => ToolOutput::error(format!(
+                    "websearch: timed out after {}; try again or narrow the query",
+                    crate::text::format_duration(timeout)
+                )),
                 Ok(Ok(results)) if results.hits.is_empty() => ToolOutput::text(truncate_chars(
                     &format!("no results for {:?}", input.query),
                     MAX_SEARCH_OUTPUT_CHARS,
@@ -656,12 +681,29 @@ impl Tool for WebSearchTool {
                         .collect();
                     ToolOutput::text(truncate_chars(&lines.join("\n\n"), MAX_SEARCH_OUTPUT_CHARS))
                 }
-                Ok(Err(error)) => ToolOutput::error(bounded_format(
-                    format_args!("websearch: {error}"),
-                    MAX_SEARCH_OUTPUT_CHARS,
-                )),
+                Ok(Err(error)) => {
+                    let error = error.to_string();
+                    ToolOutput::error(bounded_format(
+                        format_args!("websearch: {error}{}", search_key_hint(&error)),
+                        MAX_SEARCH_OUTPUT_CHARS,
+                    ))
+                }
             }
         })
+    }
+}
+
+/// Out of the box websearch calls Exa anonymously, and Exa throttles
+/// or refuses that: the status alone ("exa HTTP 429") reads like a
+/// transient blip worth retrying, when the fix is a key the user has to
+/// set. Named where the failure is, not only in the docs.
+fn search_key_hint(error: &str) -> &'static str {
+    const AUTH_OR_LIMIT: [&str; 4] = ["HTTP 401", "HTTP 402", "HTTP 403", "HTTP 429"];
+    if AUTH_OR_LIMIT.iter().any(|status| error.contains(status)) {
+        " — keyless web search is rate-limited; ask the user to set ILAR_TAVILY_API_KEY \
+         (recommended) or ILAR_EXA_API_KEY and restart, and do not just retry"
+    } else {
+        ""
     }
 }
 

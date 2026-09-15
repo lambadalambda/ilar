@@ -6,7 +6,10 @@
 
 use serde::Deserialize;
 
-use super::bash::{DEFAULT_TIMEOUT_MS, SpillTarget, run_command};
+use super::bash::{
+    DEFAULT_TIMEOUT_MS, MIN_TIMEOUT_MS, PREVIEW_BYTES_DESCRIPTION, SpillTarget,
+    TIMEOUT_MS_DESCRIPTION, run_command, short_timeout_refusal,
+};
 use super::process::ChildEnv;
 use super::{Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, WorkspaceAccess};
 
@@ -96,8 +99,8 @@ impl Tool for SudoTool {
             "properties": {
                 "command": {"type": "string", "description": "The shell command, run as root with sh -c in the project cwd"},
                 "reason": {"type": "string", "description": "Why this needs root; shown to the user with the command"},
-                "timeout_ms": {"type": "integer", "description": "Kill after this many milliseconds (default 120000)"},
-                "preview_bytes": {"type": "integer", "description": "Output size you expect; the inline preview is capped at this on success"}
+                "timeout_ms": {"type": "integer", "description": TIMEOUT_MS_DESCRIPTION},
+                "preview_bytes": {"type": "integer", "description": PREVIEW_BYTES_DESCRIPTION}
             },
             "required": ["command", "reason"]
         })
@@ -116,11 +119,9 @@ impl Tool for SudoTool {
                 );
             }
             if let Some(timeout) = input.timeout_ms
-                && timeout < 1000
+                && timeout < MIN_TIMEOUT_MS
             {
-                return ToolOutput::error(format!(
-                    "sudo: timeout_ms is in milliseconds and {timeout} is under a second"
-                ));
+                return ToolOutput::error(short_timeout_refusal("sudo", timeout));
             }
             let Some(secrets) = ctx.secrets.as_ref() else {
                 return ToolOutput::error(

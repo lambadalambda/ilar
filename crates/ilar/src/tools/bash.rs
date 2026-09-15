@@ -16,6 +16,33 @@ use super::{
 use crate::text::{tail_bytes, truncate_chars_ellipsis};
 
 pub(crate) const DEFAULT_TIMEOUT_MS: u64 = 120_000;
+/// The shortest timeout worth accepting: anything under a second is a
+/// seconds value the caller forgot to multiply.
+pub(crate) const MIN_TIMEOUT_MS: u64 = 1_000;
+/// `timeout_ms` and `preview_bytes`, described once: bash and sudo take
+/// the same two arguments and meant the same thing by them while saying
+/// it differently, which read as two different knobs.
+pub(crate) const PREVIEW_BYTES_DESCRIPTION: &str = "Output size you expect: on success the inline preview is capped at this (clamped \
+     1024-30720) and the full output still goes to the spill file. Ignored when the command \
+     fails, so error output stays visible.";
+pub(crate) const TIMEOUT_MS_DESCRIPTION: &str =
+    "Kill after this many milliseconds (default 120000, at least 1000).";
+
+/// The refusal both tools give a seconds-shaped timeout, with the value
+/// the caller probably meant.
+pub(crate) fn short_timeout_refusal(tool: &str, timeout_ms: u64) -> String {
+    if timeout_ms == 0 {
+        format!(
+            "{tool}: timeout_ms 0 is no time at all; pass at least {MIN_TIMEOUT_MS}, or omit it"
+        )
+    } else {
+        format!(
+            "{tool}: timeout_ms is in milliseconds and {timeout_ms} is under a second; for \
+             {timeout_ms} seconds pass {}",
+            timeout_ms * 1000
+        )
+    }
+}
 /// What the model is shown. Small on purpose: four unfiltered API dumps
 /// once filled a 100 KiB cap with minified JSON and taught the model
 /// nothing, so the bulk goes to disk instead of into the context window.
@@ -116,10 +143,10 @@ impl SpillTarget {
             return Err(format!("(could not save the full output: {error})"));
         }
         Ok(format!(
-            "full output: {} ({}, {} lines) — {advice}",
+            "full output: {} ({}, {}) — {advice}",
             path.display(),
-            human_bytes(body.len()),
-            line_count(body),
+            crate::text::format_bytes(body.len() as u64),
+            crate::text::plural(line_count(body), "line"),
         ))
     }
 
@@ -187,17 +214,6 @@ fn line_count(body: &[u8]) -> usize {
     body.iter().filter(|byte| **byte == b'\n').count() + usize::from(!body.ends_with(b"\n"))
 }
 
-/// Size for the hint, in the unit that reads honestly at that scale.
-fn human_bytes(bytes: usize) -> String {
-    const KIB: usize = 1024;
-    const MIB: usize = KIB * KIB;
-    if bytes >= MIB {
-        format!("{:.1} MiB", bytes as f64 / MIB as f64)
-    } else {
-        format!("{} KiB", bytes.div_ceil(KIB))
-    }
-}
-
 /// Write the capture and describe where it went. `Err` is the note for
 /// a spill that never landed.
 async fn spill_note(
@@ -216,7 +232,7 @@ async fn spill_note(
         note.push_str(&format!(
             "\n(that file holds the last {} of {total} raw bytes; the earlier output is gone — \
              filter at the source next time)",
-            human_bytes(retained),
+            crate::text::format_bytes(retained as u64),
         ));
     }
     Ok(note)
@@ -453,9 +469,9 @@ impl Tool for BashTool {
             "type": "object",
             "properties": {
                 "command": {"type": "string", "description": "The shell command, run with sh -c in the project cwd"},
-                "timeout_ms": {"type": "integer", "description": "Kill after this many milliseconds (default 120000 foreground; configured default for background)"},
+                "timeout_ms": {"type": "integer", "description": format!("{TIMEOUT_MS_DESCRIPTION} A background run defaults to subagents.background_tool_timeout_ms instead (600000 unless configured).")},
                 "run_in_background": {"type": "boolean", "description": "Run detached and deliver the result as a notification"},
-                "preview_bytes": {"type": "integer", "description": "Output size you expect: on success the inline preview is capped at this (clamped 1024-30720) and the full output still goes to the spill file. Ignored when the command fails, so error output stays visible."},
+                "preview_bytes": {"type": "integer", "description": PREVIEW_BYTES_DESCRIPTION},
                 "secrets": {"type": "array", "items": {"type": "string"}, "description": "Names of stored secrets (see the secrets tool) to set as environment variables of this command, e.g. [\"GITHUB_TOKEN\"] makes $GITHUB_TOKEN available. The user is asked before each use unless they granted it. Read the value from the variable; never print it."}
             },
             "required": ["command"]
@@ -472,18 +488,9 @@ impl Tool for BashTool {
                 return ToolOutput::error("bash: command is empty; give the shell command to run");
             }
             if let Some(timeout) = input.timeout_ms
-                && timeout < 1000
+                && timeout < MIN_TIMEOUT_MS
             {
-                return ToolOutput::error(if timeout == 0 {
-                    "bash: timeout_ms 0 is no time at all; pass at least 1000, or omit it"
-                        .to_string()
-                } else {
-                    format!(
-                        "bash: timeout_ms is in milliseconds and {timeout} is under a second; \
-                         for {timeout} seconds pass {}",
-                        timeout * 1000
-                    )
-                });
+                return ToolOutput::error(short_timeout_refusal("bash", timeout));
             }
             let spill = SpillTarget::from_context(&ctx);
             let granted = match ctx
@@ -506,11 +513,15 @@ impl Tool for BashTool {
             if input.run_in_background {
                 if ctx.has_workspace_lease() {
                     return ToolOutput::error(
-                        "bash: background mutation is unavailable inside a leased child workspace",
+                        "bash: background mutation is unavailable inside a leased child \
+                         workspace; run the command in the foreground",
                     );
                 }
                 let Some(spawner) = ctx.subagent.clone() else {
-                    return ToolOutput::error("bash: background runtime is unavailable");
+                    return ToolOutput::error(
+                        "bash: background runtime is unavailable in this session; run the \
+                         command in the foreground",
+                    );
                 };
                 let timeout = input
                     .timeout_ms
@@ -652,8 +663,8 @@ pub(crate) fn run_command(
                     let rendered =
                         render_output(out, err, spill.as_ref(), MAX_PREVIEW).await;
                     return ToolOutput::error(format!(
-                        "{tool}: timed out after {}ms\ncommand: {}\n{rendered}",
-                        timeout.as_millis(),
+                        "{tool}: timed out after {}\ncommand: {}\n{rendered}",
+                        crate::text::format_duration(timeout),
                         command_text,
                     ));
                 }
@@ -807,10 +818,13 @@ mod tests {
         assert_eq!(line_count(b""), 0);
         assert_eq!(line_count(b"a\nb\n"), 2);
         assert_eq!(line_count(b"a\nb"), 2);
-        assert_eq!(human_bytes(0), "0 KiB");
-        assert_eq!(human_bytes(1), "1 KiB");
-        assert_eq!(human_bytes(30 * 1024), "30 KiB");
-        assert_eq!(human_bytes(2 * 1024 * 1024), "2.0 MiB");
+        // A spill note says what is in the file, not a rounded-up
+        // stand-in for it: "0 KiB" and "1 lines" were both lies.
+        assert_eq!(crate::text::plural(line_count(b"a\n"), "line"), "1 line");
+        assert_eq!(crate::text::format_bytes(0), "0 B");
+        assert_eq!(crate::text::format_bytes(1), "1 B");
+        assert_eq!(crate::text::format_bytes(30 * 1024), "30.0 KiB");
+        assert_eq!(crate::text::format_bytes(2 * 1024 * 1024), "2.0 MiB");
     }
 
     /// Stderr keeps its share of the smaller preview, and stdout takes

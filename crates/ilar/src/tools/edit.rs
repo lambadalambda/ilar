@@ -87,10 +87,10 @@ impl Tool for EditTool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "path": {"type": "string"},
-                "old_string": {"type": "string"},
-                "new_string": {"type": "string"},
-                "replace_all": {"type": "boolean"}
+                "path": {"type": "string", "description": "Relative to cwd, or absolute"},
+                "old_string": {"type": "string", "description": "The exact current text to replace, without read's \"N→\" prefixes; must match once unless replace_all"},
+                "new_string": {"type": "string", "description": "What it becomes; empty deletes the passage"},
+                "replace_all": {"type": "boolean", "description": "Replace every occurrence instead of requiring exactly one (default false)"}
             },
             "required": ["path", "old_string", "new_string"]
         })

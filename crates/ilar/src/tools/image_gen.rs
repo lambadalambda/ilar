@@ -145,7 +145,8 @@ impl Tool for ImageGenTool {
          and costs money: write a complete prompt (subject, style, composition, any text \
          to render verbatim) rather than iterating blindly. size: auto (default) or \
          WIDTHxHEIGHT such as 1536x1024 (landscape), 1024x1536 (portrait), 2048x2048; \
-         quality: auto (default), low for drafts, high for final assets or dense text."
+         quality: auto (default), low for drafts, high for final assets or dense text. \
+         One call is given five minutes, which a 4K image at high quality can need."
     }
 
     fn concurrency(&self) -> ToolConcurrency {

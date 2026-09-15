@@ -250,16 +250,9 @@ pub(crate) enum Truncation {
     Middle,
 }
 
-pub(crate) use ilar::text::format_bytes;
-
-pub(crate) fn format_elapsed(duration: std::time::Duration) -> String {
-    let seconds = duration.as_secs();
-    if seconds < 60 {
-        format!("{seconds}s")
-    } else {
-        format!("{}m {}s", seconds / 60, seconds % 60)
-    }
-}
+// One spelling of a byte count and one of a duration, shared with the
+// core so a tool message and the row above it agree.
+pub(crate) use ilar::text::{format_bytes, format_duration as format_elapsed};
 
 pub(crate) fn truncate_display(value: &str, max_width: usize, mode: Truncation) -> String {
     if UnicodeWidthStr::width(value) <= max_width {

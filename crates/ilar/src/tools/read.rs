@@ -64,7 +64,7 @@ impl Tool for ReadTool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "File path, relative to cwd"},
+                "path": {"type": "string", "description": "Relative to cwd, or absolute"},
                 "offset": {"type": "integer", "description": "1-based line to start at"},
                 "limit": {"type": "integer", "description": "Max lines to return, at most 2000 (the default)"}
             },

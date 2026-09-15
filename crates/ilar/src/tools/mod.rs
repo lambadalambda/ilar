@@ -245,14 +245,24 @@ fn git_command(cwd: &std::path::Path, args: &[&str]) -> tokio::process::Command 
     command
 }
 
+/// A `git` probe that has not answered in this long is not going to;
+/// named and reported, because a bare "timed out" says nothing about
+/// how long anyone waited.
+const GIT_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 async fn git_output(cwd: &std::path::Path, args: &[&str]) -> anyhow::Result<Vec<u8>> {
     let mut command = git_command(cwd, args);
-    let output = tokio::time::timeout(std::time::Duration::from_secs(10), command.output())
+    let output = tokio::time::timeout(GIT_PROBE_TIMEOUT, command.output())
         .await
-        .map_err(|_| anyhow::anyhow!("Git workspace validation timed out"))??;
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "git workspace validation timed out after {}",
+                crate::text::format_duration(GIT_PROBE_TIMEOUT)
+            )
+        })??;
     if !output.status.success() {
         anyhow::bail!(
-            "Git workspace validation failed: {}",
+            "git workspace validation failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }

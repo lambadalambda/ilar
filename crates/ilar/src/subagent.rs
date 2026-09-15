@@ -1668,8 +1668,8 @@ task's scope yourself; continue only clearly disjoint work."
                     ),
                     Some(Err(_)) => (
                         format!(
-                            "<tool-notification>\nBackground job {notification_id} (\"{description}\") timed out after {}ms and was stopped.\n</tool-notification>",
-                            timeout.as_millis()
+                            "<tool-notification>\nBackground job {notification_id} (\"{description}\") timed out after {} and was stopped.\n</tool-notification>",
+                            crate::text::format_duration(timeout)
                         ),
                         true,
                     ),

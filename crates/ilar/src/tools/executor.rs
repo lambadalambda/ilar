@@ -43,6 +43,19 @@ struct Running {
     concurrency: ToolConcurrency,
 }
 
+/// What an unknown tool name is told: the names it could have used.
+/// A bare "no such tool: x" is one the model can only answer by
+/// guessing again.
+fn unknown_tool_refusal(name: &str, known: &[&'static str]) -> String {
+    if known.is_empty() {
+        return format!("no such tool: {name}");
+    }
+    format!(
+        "no such tool: {name}; this session has: {}",
+        known.join(", ")
+    )
+}
+
 /// Execute a turn's tool calls under the barrier discipline.
 ///
 /// `resolve` maps tool names to implementations (usually the registry).
@@ -62,13 +75,25 @@ pub async fn execute_calls<F>(
 where
     F: Fn(&str) -> Option<Arc<dyn Tool>>,
 {
-    execute_calls_observed(calls, resolve, ctx, cancel, |_, _| {}, |_, _| {}).await
+    execute_calls_observed(
+        calls,
+        resolve,
+        Vec::new(),
+        ctx,
+        cancel,
+        |_, _| {},
+        |_, _| {},
+    )
+    .await
 }
 
 #[allow(clippy::type_complexity)]
 pub(crate) async fn execute_calls_observed<F, O, C>(
     calls: Vec<ToolCall>,
     resolve: F,
+    // What this session actually has, for the refusal an unknown name
+    // earns: "no such tool: x" alone left the model to guess again.
+    known: Vec<&'static str>,
     ctx: ToolContext,
     cancel: CancellationToken,
     on_start: O,
@@ -105,7 +130,7 @@ where
                 outcomes[idx] = Some(CallOutcome {
                     name: call.name.clone(),
                     id: call.id.clone(),
-                    output: ToolOutput::error(format!("no such tool: {}", call.name)),
+                    output: ToolOutput::error(unknown_tool_refusal(&call.name, &known)),
                     cancelled: false,
                 });
                 continue;
@@ -470,6 +495,7 @@ mod tests {
                 "immediate" => Some(immediate_tool.clone()),
                 _ => None,
             },
+            vec!["gate", "immediate"],
             ToolContext::root(dir.path().to_path_buf()),
             CancellationToken::new(),
             move |id, _| {
@@ -531,6 +557,7 @@ mod tests {
                 input: serde_json::json!({}),
             }],
             move |_| Some(tool.clone()),
+            Vec::new(),
             ctx,
             CancellationToken::new(),
             move |id, _| {
@@ -603,6 +630,7 @@ mod tests {
                 input: serde_json::json!({}),
             }],
             move |_| Some(tool.clone()),
+            Vec::new(),
             ctx,
             CancellationToken::new(),
             |_, _| {},
@@ -662,6 +690,7 @@ mod tests {
                 input: serde_json::json!({}),
             }],
             move |_| Some(tool.clone()),
+            Vec::new(),
             ToolContext::root(dir.path().to_path_buf()),
             CancellationToken::new(),
             move |id, _| {

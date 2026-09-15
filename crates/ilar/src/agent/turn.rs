@@ -2537,6 +2537,7 @@ async fn run_turn_inner(
         let execution = execute_calls_observed(
             calls,
             |name| registry.get(name),
+            registry.tool_names(),
             call_ctx,
             cancel.clone(),
             move |id, _name| {
