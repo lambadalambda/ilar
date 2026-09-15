@@ -852,6 +852,23 @@ static HELP_SECTIONS: &[HelpSection] = &[
         ],
     },
     HelpSection {
+        title: "A focused agent",
+        bindings: &[
+            binding!(
+                "click an agents-panel row",
+                "its transcript over the screen"
+            ),
+            binding!("↑↓ / PgUp / PgDn / Home / End", "scroll the view"),
+            binding!(
+                "Enter",
+                "message the agent on screen: steers it or resumes it"
+            ),
+            binding!("^G ×2", "cancel that one agent; its result is held"),
+            binding!("Esc", "close the view; the root's keys work again"),
+            binding!("", "the root's other chords are not routed here"),
+        ],
+    },
+    HelpSection {
         title: "Grant prompt",
         bindings: &[
             binding!("o / s / a / d", "allow once / this session / always · deny"),
@@ -899,14 +916,6 @@ static HELP_SECTIONS: &[HelpSection] = &[
                 "override the model's context window this session"
             ),
             binding!("/rewind", "pick a turn: Enter ×2 rewinds chat + tree"),
-            binding!(
-                "Enter (focus view)",
-                "message the agent on screen: steers it or resumes it"
-            ),
-            binding!(
-                "^G ×2 (focus view)",
-                "cancel that one agent; its result is held"
-            ),
             binding!("^Y in that picker", "fork at the turn instead (keeps both)"),
             binding!("/fork", "fork the whole session under a new id"),
             binding!("", "rewind/fork rebuild the session; services stop"),

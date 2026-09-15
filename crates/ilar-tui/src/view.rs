@@ -535,10 +535,17 @@ impl App {
         let Some(focus) = self.focus.as_mut() else {
             return;
         };
-        let footer = if focus.running {
-            " read-only · ↑↓ scroll · Esc returns "
-        } else {
-            " agent finished · Esc returns "
+        // Enter messages the agent on screen, so "read-only" was the
+        // one thing this view is not. A row that cannot be messaged at
+        // all promises nothing instead.
+        let footer = match (
+            crate::app::focus_send_refusal(focus).is_some(),
+            focus.running,
+        ) {
+            (true, true) => " ↑↓ scroll · Esc close ",
+            (true, false) => " agent finished · ↑↓ scroll · Esc close ",
+            (false, true) => " ↑↓ scroll · Enter messages it · Esc close ",
+            (false, false) => " agent finished · ↑↓ scroll · Enter resumes it · Esc close ",
         };
         let title = format!(
             " {} ",
@@ -909,7 +916,7 @@ impl App {
                             0,
                         ))
                         .title(Line::from(Span::styled(
-                            format!("agents ({})", self.agents_view.len()),
+                            agent_panel_title(&self.agents_view),
                             theme::title(theme::SECONDARY),
                         )));
                     frame.render_widget(Paragraph::new(lines).block(agent_block), agent_area);
@@ -1038,10 +1045,22 @@ impl App {
                 theme::SECONDARY
             }),
         ));
-        // A footer is a promise about the next keystroke, and `--view`
-        // can keep none of them.
+        // A footer is a promise about the next keystroke. `--view` can
+        // keep none of them, and in a focus view the prompt belongs to
+        // the agent on screen — the stash, the history and the images
+        // are the root's, and Esc is the way back to them.
         let input_help = if self.read_only {
             None
+        } else if self.focus.is_some() {
+            Some(if input_chunk.width >= 70 {
+                " Enter sends to the agent · Shift-Enter/Ctrl-J newline · Esc leaves "
+            } else if input_chunk.width >= 48 {
+                " Enter sends to the agent · Esc leaves "
+            } else if input_chunk.width >= 28 {
+                " Enter sends · Esc leaves "
+            } else {
+                " Enter sends "
+            })
         } else if input_chunk.width >= 62 {
             Some(" Enter send · Shift-Enter/Ctrl-J newline · Ctrl-S stash ")
         } else if input_chunk.width >= 48 {
@@ -1068,7 +1087,11 @@ impl App {
         } else {
             Vec::new()
         };
-        if !candidates.is_empty() && !self.has_modal() {
+        // Not in a focus view: there the commands are not on offer —
+        // ↑↓ scroll the transcript instead of moving the selection, Tab
+        // does nothing, and Enter is refused. The popup promised a
+        // completion nothing performed.
+        if !candidates.is_empty() && !self.has_modal() && self.focus.is_none() {
             let rows = candidates.len().min(6) as u16;
             let height = rows + 2;
             let width = input_chunk.width.clamp(20, 64);
@@ -1274,6 +1297,31 @@ fn pending_entry(message: &ilar::agent::Steer, kind: &str, when: &str) -> (Strin
     }
 }
 
+/// The agents panel's title. ⚙ background jobs and ✉ deliveries share
+/// the panel with the agents but are not agents — a job has no session
+/// to open and no model behind it — so the count says how many of each
+/// rather than one number that disagrees with the word beside it.
+fn agent_panel_title(rows: &[crate::sidebar::AgentRow]) -> String {
+    let jobs = rows
+        .iter()
+        .filter(|row| row.agent == "job" && !row.delivering)
+        .count();
+    let mail = rows.iter().filter(|row| row.delivering).count();
+    let agents = rows.len() - jobs - mail;
+    let mut title = format!("agents ({agents})");
+    if jobs > 0 {
+        title.push_str(&format!(" · {jobs} job{}", plural(jobs)));
+    }
+    if mail > 0 {
+        title.push_str(&format!(" · {mail} delivering"));
+    }
+    title
+}
+
+fn plural(count: usize) -> &'static str {
+    if count == 1 { "" } else { "s" }
+}
+
 pub(crate) fn stream_liveness(
     received: u64,
     last_data: Option<std::time::Instant>,
@@ -1386,5 +1434,42 @@ mod tests {
         for screen in [0u16, 1, 3, 6] {
             assert_eq!(input_height(202, screen), 3, "{screen}");
         }
+    }
+
+    /// The panel's count said "agents" and counted ⚙ jobs and ✉
+    /// deliveries too. A job has no session to open and no model behind
+    /// it; each kind is named for what it is.
+    #[test]
+    fn the_agents_panel_counts_agents_and_names_the_rest() {
+        use crate::sidebar::AgentRow;
+
+        let row = |agent: &str, delivering: bool| AgentRow {
+            session_id: "s".into(),
+            depth: 0,
+            description: "d".into(),
+            agent: agent.into(),
+            background: false,
+            delivering,
+            foreign_parent: None,
+            elapsed: std::time::Duration::ZERO,
+        };
+        assert_eq!(super::agent_panel_title(&[]), "agents (0)");
+        assert_eq!(
+            super::agent_panel_title(&[row("build", false), row("explore", false)]),
+            "agents (2)"
+        );
+        assert_eq!(
+            super::agent_panel_title(&[
+                row("build", false),
+                row("job", false),
+                row("job", false),
+                row("explore", true),
+            ]),
+            "agents (1) · 2 jobs · 1 delivering"
+        );
+        assert_eq!(
+            super::agent_panel_title(&[row("job", false)]),
+            "agents (0) · 1 job"
+        );
     }
 }
