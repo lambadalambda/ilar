@@ -1038,6 +1038,23 @@ pub fn summarize_tool_input(name: &str, input: &serde_json::Value) -> String {
                 _ => path,
             }
         }),
+        // The first prompt, the way task shows its description:
+        // "questions=2 items" named nothing the user was asked.
+        crate::question::QUESTION_TOOL_NAME => input
+            .get("questions")
+            .and_then(serde_json::Value::as_array)
+            .filter(|questions| !questions.is_empty())
+            .map(|questions| {
+                let first = questions[0]
+                    .get("prompt")
+                    .and_then(serde_json::Value::as_str)
+                    .map(collapse_whitespace);
+                match (first, questions.len() - 1) {
+                    (Some(prompt), 0) => prompt,
+                    (Some(prompt), rest) => format!("{prompt} · +{rest} more"),
+                    (None, _) => crate::text::plural(questions.len(), "question"),
+                }
+            }),
         "write" | "edit" => string("path"),
         "grep" => string("pattern").map(|pattern| match string("path") {
             Some(path) => format!("/{pattern}/ · {path}"),
@@ -2794,15 +2811,25 @@ mod tests {
         let malformed = summarize_tool_input("task_message", &serde_json::json!({"message": "hi"}));
         assert_eq!(malformed, "message=hi");
 
-        // Array-only and empty schemas said nothing at all.
+        // Array-only and empty schemas said nothing at all, and then
+        // only how many items there were: the prompt is the question.
         let question = summarize_tool_input(
             "question",
             &serde_json::json!({"questions": [{"prompt": "which?"}]}),
         );
-        assert!(
-            !question.is_empty(),
-            "an array-only input summarised to nothing"
+        assert_eq!(question, "which?");
+        let two = summarize_tool_input(
+            "question",
+            &serde_json::json!({"questions": [
+                {"prompt": "which branch?"},
+                {"prompt": "and the remote?"},
+            ]}),
         );
+        assert_eq!(two, "which branch? · +1 more");
+        // A malformed question list still says what it was about.
+        let promptless =
+            summarize_tool_input("question", &serde_json::json!({"questions": [{"id": "a"}]}));
+        assert_eq!(promptless, "1 question");
         for empty in ["tasks", "models"] {
             let summary = summarize_tool_input(empty, &serde_json::json!({}));
             assert!(!summary.is_empty(), "{empty} summarised to nothing");
