@@ -239,7 +239,9 @@ picks — one option for a single choice, any number for a multiple one —
 and a question that allows it has an "Other…" row you simply type
 into. Enter takes the screen and moves to the next question; the last
 one hands every answer back at once. Free-text questions are a text
-field with the same Enter.
+field with the same Enter, and an arrow with nowhere left to go inside
+it steps between questions instead. **Shift-Tab** goes back a question
+without validating the one you are on.
 
 **Esc** cancels the whole modal. That is an answer too, not a failure:
 the tool comes back `{"status":"cancelled"}` and the turn goes on with
