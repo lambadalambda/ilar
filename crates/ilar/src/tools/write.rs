@@ -44,7 +44,7 @@ impl Tool for WriteTool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Relative to cwd, or absolute"},
+                "path": {"type": "string", "description": super::PATH_DESCRIPTION},
                 "content": {"type": "string", "description": "The whole file; to change part of one, use edit"}
             },
             "required": ["path", "content"]
@@ -78,9 +78,11 @@ impl Tool for WriteTool {
             let seen_files = ctx.seen_files.clone();
             let result = run_blocking_io(lease, move || {
                 if cancel.is_cancelled() {
+                    // The caller prefixes "write {path}: "; saying
+                    // "write" again here reads as a stutter.
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::Interrupted,
-                        "write cancelled",
+                        "cancelled",
                     ));
                 }
                 // What was there before, so the result can tell creating

@@ -112,9 +112,9 @@ impl Tool for GrepTool {
          Returns file:line:match; with context, surrounding lines as \
          file-line-text and -- between groups. Narrow with glob (*.rs, \
          src/**/*.ts) and cap with limit instead of piping through head. \
-         Beyond limit there are three caps — 50 matches per file, the \
-         first 2 MiB of each file, 256 KiB of output — and the closing \
-         line says which one bit."
+         Beyond limit it caps at 50 matches per file, the first 2 MiB of \
+         each file and 256 KiB of output; the closing line says which \
+         cap bit."
     }
 
     fn concurrency(&self) -> ToolConcurrency {
@@ -209,8 +209,6 @@ impl Tool for GrepTool {
     }
 }
 
-/// Scan one file. Pure apart from reading it: returns the hits and
-/// whether the file's byte cap clipped the scan.
 /// Why one file's scan stopped early. A bare "(truncated)" covered
 /// three different caps and named none of them, so nobody could tell a
 /// pattern that needs narrowing from a file too big to read.
@@ -220,6 +218,8 @@ enum Clip {
     FileBytes,
 }
 
+/// Scan one file. Pure apart from reading it: returns the hits and
+/// which cap, if any, clipped the scan.
 fn grep_one_file(
     path: &std::path::Path,
     relative: &str,

@@ -1423,10 +1423,18 @@ fn tool_has_failed(line: &Line_) -> bool {
 }
 
 /// What a collapsed group still shows: what is still happening, and
-/// what went wrong. A failure folded behind "3 calls · 1 failed" is
-/// the one row the reader wanted.
+/// what went wrong *with something to say about it*. A failure folded
+/// behind "3 calls · 1 failed" is the one row the reader wanted — but
+/// an abort marks every unfinished row failed with no result at all,
+/// and ten of those pinned open say nothing the header does not.
 fn tool_survives_collapse(line: &Line_) -> bool {
-    tool_is_active(line) || tool_has_failed(line)
+    if tool_is_active(line) {
+        return true;
+    }
+    matches!(
+        line,
+        Line_::Tool { state, result, .. } if failure_note(*state, result.as_deref()).is_some()
+    )
 }
 
 /// The first non-blank line of a failed call's error, for the row's own
@@ -1443,6 +1451,18 @@ fn failure_note(state: ToolState, result: Option<&str>) -> Option<String> {
         .map(str::trim)
         .find(|line| !line.is_empty())?;
     Some(ilar::text::truncate_chars_ellipsis(first, MAX_NOTE_CHARS))
+}
+
+/// The same note, with the prefix the row's own columns already show
+/// cut off: every tool error reads `tool: …` or `tool path: …`, and
+/// `read ▸ missing.rs · read missing.rs: no such file` says it twice.
+fn row_failure_note(name: &str, state: ToolState, result: Option<&str>) -> Option<String> {
+    let note = failure_note(state, result)?;
+    let trimmed = match note.strip_prefix(name) {
+        Some(rest) => rest.split_once(": ").map(|(_, message)| message),
+        None => None,
+    };
+    Some(trimmed.unwrap_or(&note).to_string())
 }
 
 /// An entry's rows, rendered from scratch. The cached renderer calls
@@ -1536,18 +1556,7 @@ fn entry_rows(
             child,
         } => {
             let running = calls.iter().filter(|call| tool_is_active(call)).count();
-            let failed = calls
-                .iter()
-                .filter(|call| {
-                    matches!(
-                        call,
-                        Line_::Tool {
-                            state: ToolState::Failed,
-                            ..
-                        }
-                    )
-                })
-                .count();
+            let failed = calls.iter().filter(|call| tool_has_failed(call)).count();
             let show_hierarchy = width >= 64;
             let group_indent = if *child && show_hierarchy && !nested {
                 2
@@ -1692,12 +1701,12 @@ fn tool_entry_rows(
     };
     // The error rides in the details, after the arguments: a failed row
     // says what went wrong without being opened.
-    let arguments: std::borrow::Cow<'_, str> = match failure_note(display_state, result.as_deref())
-    {
-        Some(note) if arguments.is_empty() => note.into(),
-        Some(note) => format!("{arguments} · {note}").into(),
-        None => arguments.as_str().into(),
-    };
+    let arguments: std::borrow::Cow<'_, str> =
+        match row_failure_note(name, display_state, result.as_deref()) {
+            Some(note) if arguments.is_empty() => note.into(),
+            Some(note) => format!("{arguments} · {note}").into(),
+            None => arguments.as_str().into(),
+        };
     let line = tool_line_with_disclosure(
         name,
         kind,
@@ -3407,6 +3416,8 @@ mod tests {
         assert!(failed.contains("missing.rs"), "{failed}");
         assert!(failed.contains("no such file"), "{failed}");
         assert!(!failed.contains("second line"), "{failed}");
+        // Said once: the row's own columns carry "read" and the path.
+        assert_eq!(failed.matches("missing.rs").count(), 1, "{failed}");
         // The calls that worked are still folded away.
         assert!(
             !rendered.iter().any(|row| row.contains("cargo test")),
@@ -3428,7 +3439,9 @@ mod tests {
     }
 
     /// A failed row with nothing recorded has no error line to show;
-    /// the row must not grow a stray separator.
+    /// the row must not grow a stray separator — and it must not be
+    /// pinned open in a collapsed group either, which is what an
+    /// aborted turn leaves behind by the dozen.
     #[test]
     fn a_failed_row_without_a_result_shows_only_its_args() {
         assert_eq!(
@@ -3438,6 +3451,43 @@ mod tests {
         assert_eq!(failure_note(ToolState::Failed, None), None);
         assert_eq!(failure_note(ToolState::Failed, Some("   ")), None);
         assert_eq!(failure_note(ToolState::Succeeded, Some("fine")), None);
+
+        let mut swept = finished_tool("t", "bash", "cargo test");
+        if let Line_::Tool { state, .. } = &mut swept {
+            *state = ToolState::Failed;
+        }
+        assert!(
+            !tool_survives_collapse(&swept),
+            "a row swept to failed by an abort has nothing to add"
+        );
+    }
+
+    /// The row's own columns already name the tool and the path the
+    /// error repeats: `read ▸ missing.rs · read missing.rs: boom`.
+    #[test]
+    fn the_row_note_drops_the_prefix_the_row_already_shows() {
+        assert_eq!(
+            row_failure_note(
+                "read",
+                ToolState::Failed,
+                Some("read missing.rs: no such file")
+            ),
+            Some("no such file".to_string())
+        );
+        assert_eq!(
+            row_failure_note("bash", ToolState::Failed, Some("bash: cancelled")),
+            Some("cancelled".to_string())
+        );
+        // Nothing to strip: an error that does not name its tool, and a
+        // one-word one with no message after a colon, both stand.
+        assert_eq!(
+            row_failure_note("task", ToolState::Failed, Some("subagent went missing")),
+            Some("subagent went missing".to_string())
+        );
+        assert_eq!(
+            row_failure_note("read", ToolState::Failed, Some("read failed")),
+            Some("read failed".to_string())
+        );
     }
 
     #[test]

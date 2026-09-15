@@ -1261,6 +1261,12 @@ impl ToolRegistry {
     }
 }
 
+/// What every file-taking tool says about its `path`, once: read,
+/// write and edit all resolve a relative path from cwd and take an
+/// absolute one as it stands, and three different sentences about that
+/// read as three different rules.
+pub(crate) const PATH_DESCRIPTION: &str = "Relative to cwd, or absolute";
+
 /// Parse tool input; on failure return a ToolOutput error instead of
 /// panicking (malformed model output must not crash the loop).
 ///
@@ -1401,6 +1407,23 @@ mod tests {
         assert!(
             note.contains(&format!("{} MiB", MAX_RESULT_IMAGE_BYTES / (1024 * 1024))),
             "{note:?}"
+        );
+    }
+
+    /// Every tool error reads `tool: …`, the input ones included: five
+    /// tools used to hand-roll "invalid input for X" instead.
+    #[test]
+    fn a_malformed_input_is_refused_in_the_one_shape() {
+        let refusal = super::parse_input::<std::collections::HashMap<String, String>>(
+            serde_json::json!([1, 2]),
+            "todo",
+        )
+        .expect_err("an array is not an object");
+        assert!(refusal.is_error);
+        assert!(
+            refusal.content.starts_with("todo: invalid input: "),
+            "{}",
+            refusal.content
         );
     }
 

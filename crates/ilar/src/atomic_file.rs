@@ -57,7 +57,9 @@ impl Hooks for CancelHooks<'_> {
 impl CancelHooks<'_> {
     fn check(&self) -> std::io::Result<()> {
         if self.0.is_cancelled() {
-            Err(Error::new(ErrorKind::Interrupted, "write cancelled"))
+            // Whoever surfaces this already names the tool and the
+            // path it was writing.
+            Err(Error::new(ErrorKind::Interrupted, "cancelled"))
         } else {
             Ok(())
         }

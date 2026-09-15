@@ -64,7 +64,7 @@ impl Tool for ReadTool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Relative to cwd, or absolute"},
+                "path": {"type": "string", "description": super::PATH_DESCRIPTION},
                 "offset": {"type": "integer", "description": "1-based line to start at"},
                 "limit": {"type": "integer", "description": "Max lines to return, at most 2000 (the default)"}
             },
@@ -232,6 +232,11 @@ fn read_window(
                 "(truncated: showing lines {start}–{last_shown} of {total}; continue with offset {})\n",
                 last_shown + 1
             )),
+            // Uncounted, so "is there more?" is a peek at the reader
+            // rather than a pass over the file. Without it an over-long
+            // last line offered a continue offset past the end, one
+            // line under a note saying the rest is unreachable.
+            None if reader.fill_buf().is_ok_and(|rest| rest.is_empty()) => None,
             None => Some(format!(
                 "(truncated: showing lines {start}–{last_shown}; the file is too large to count; continue with offset {})\n",
                 last_shown + 1
@@ -371,6 +376,15 @@ fn read_line_prefix<R: BufRead>(
 mod tests {
     use super::*;
 
+    /// Everything from the closing "…" on — the marker and nothing of
+    /// the body, however long the body's last line is.
+    fn marker_of(content: &str) -> &str {
+        content
+            .rsplit_once("…\n")
+            .map(|(_, marker)| marker)
+            .unwrap_or("")
+    }
+
     #[tokio::test]
     async fn a_directory_and_a_zero_limit_are_refused_with_the_fix() {
         let dir = tempfile::tempdir().unwrap();
@@ -410,7 +424,7 @@ mod tests {
             )
             .await;
         assert!(!out.is_error, "{}", out.content);
-        let tail = out.content.split_at(out.content.len() - 400).1;
+        let tail = marker_of(&out.content);
         assert!(tail.contains("line 1 cut at"), "{tail}");
         assert!(tail.contains("bash"), "{tail}");
         // The window did reach the end of the file: there is no later
@@ -453,7 +467,7 @@ mod tests {
         // Asked for it directly, the over-long line says it was cut and
         // where the file goes on.
         let out = read(2).await;
-        let tail = out.content.split_at(out.content.len() - 400).1;
+        let tail = marker_of(&out.content);
         assert!(tail.contains("line 2 cut at"), "{tail}");
         assert!(tail.contains("continue with offset 3"), "{tail}");
     }

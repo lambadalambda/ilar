@@ -374,9 +374,12 @@ fn is_blocked_ipv4(address: Ipv4Addr) -> bool {
 
 #[derive(Debug, thiserror::Error)]
 enum BodyReadError {
+    // One spelling of a byte count everywhere, the description above
+    // included: "2097152 bytes" and "2 MiB" are the same limit.
     #[error(
-        "response too large (over the {0} byte limit); fetch a smaller page, or download it with \
-         bash (curl -o) and read the file"
+        "response too large (over the {} limit); fetch a smaller page, or download it with bash \
+         (curl -o) and read the file",
+        crate::text::format_bytes(*_0 as u64)
     )]
     TooLarge(usize),
     #[error("response body failed")]
@@ -694,15 +697,16 @@ impl Tool for WebSearchTool {
     }
 }
 
-/// Out of the box websearch calls Exa anonymously, and Exa throttles
-/// or refuses that: the status alone ("exa HTTP 429") reads like a
-/// transient blip worth retrying, when the fix is a key the user has to
-/// set. Named where the failure is, not only in the docs.
+/// Out of the box websearch calls Exa anonymously, and Exa throttles or
+/// refuses that: the status alone ("exa HTTP 429") reads like a
+/// transient blip worth retrying, when what it needs is a key. The
+/// wording holds either way — no key set, or the one that is set being
+/// refused — since the backend does not report which.
 fn search_key_hint(error: &str) -> &'static str {
     const AUTH_OR_LIMIT: [&str; 4] = ["HTTP 401", "HTTP 402", "HTTP 403", "HTTP 429"];
     if AUTH_OR_LIMIT.iter().any(|status| error.contains(status)) {
-        " — keyless web search is rate-limited; ask the user to set ILAR_TAVILY_API_KEY \
-         (recommended) or ILAR_EXA_API_KEY and restart, and do not just retry"
+        " — web search needs a key the backend accepts (ILAR_TAVILY_API_KEY, recommended, or \
+         ILAR_EXA_API_KEY; keyless access is rate-limited). Tell the user rather than retrying"
     } else {
         ""
     }

@@ -631,6 +631,11 @@ async fn persist_partial_step(
     Ok(())
 }
 
+/// What a model is told to do when its question cannot be answered.
+/// Four refusals share it, and a question the model then decides for
+/// itself is only safe if it says which way it went.
+const DECIDE_IT_YOURSELF: &str = "decide it yourself and say in your answer what you assumed";
+
 const MAX_TOOL_ARGUMENT_SUMMARY_CHARS: usize = 512;
 const MAX_STREAMED_PATH_BYTES: usize = 4 * 1024;
 const MAX_STREAMED_JSON_DEPTH: usize = 64;
@@ -2388,9 +2393,18 @@ async fn run_turn_inner(
             .count();
         if question_calls > 0 && ordered_calls.len() != 1 {
             for (id, name, _, _) in ordered_calls {
-                let content =
+                // Each call is told about itself: the same sentence on
+                // every result made a `bash` row read as a `question`
+                // error. None of them ran.
+                let content = if name.as_str() == crate::question::QUESTION_TOOL_NAME {
                     "question: must be the sole tool call in a provider step; send it alone"
-                        .to_string();
+                        .to_string()
+                } else {
+                    format!(
+                        "{name}: not run — a question was sent in the same provider step, and \
+                         question must be the sole call in its step"
+                    )
+                };
                 session.append(SessionEvent::ToolResult {
                     id: new_id(),
                     tool_use_id: id.clone(),
@@ -2427,17 +2441,13 @@ async fn run_turn_inner(
             let parsed = if !completed || input.is_null() {
                 Err("question: the call was incomplete or its arguments were invalid".to_string())
             } else if tool_ctx.depth != 0 {
-                Err(
-                    "question: only the root agent may ask the user; decide it yourself and say \
-                     in your answer what you assumed"
-                        .to_string(),
-                )
+                Err(format!(
+                    "question: only the root agent may ask the user; {DECIDE_IT_YOURSELF}"
+                ))
             } else if registry.question_sender().is_none() {
-                Err(
-                    "question: nobody can answer in this session; decide it yourself and say in \
-                     your answer what you assumed"
-                        .to_string(),
-                )
+                Err(format!(
+                    "question: nobody can answer in this session; {DECIDE_IT_YOURSELF}"
+                ))
             } else {
                 serde_json::from_value::<crate::question::QuestionRequest>(input.clone())
                     .map_err(|error| format!("question: invalid request: {error}"))
@@ -2467,9 +2477,9 @@ async fn run_turn_inner(
                             }
                         };
                         if delivered.is_err() {
-                            break Err("question: nobody can answer in this session; decide it \
-                                       yourself and say in your answer what you assumed"
-                                .to_string());
+                            break Err(format!(
+                                "question: nobody can answer in this session; {DECIDE_IT_YOURSELF}"
+                            ));
                         }
                         let received = tokio::select! {
                             response = receive => response,
@@ -2481,11 +2491,9 @@ async fn run_turn_inner(
                         let response = match received {
                             Ok(response) => response,
                             Err(_) => {
-                                break Err(
-                                    "question: the answer never came back; decide it yourself \
-                                     and say in your answer what you assumed"
-                                        .to_string(),
-                                );
+                                break Err(format!(
+                                    "question: the answer never came back; {DECIDE_IT_YOURSELF}"
+                                ));
                             }
                         };
                         if response.validate(&request).is_ok() {
@@ -2557,10 +2565,17 @@ async fn run_turn_inner(
         let received_bytes = acc.tool_received_bytes.clone();
         let (lifecycle_tx, mut lifecycle_rx) = tokio::sync::mpsc::unbounded_channel();
         let completed_tx = lifecycle_tx.clone();
+        // The names the model was actually offered: `definitions()` adds
+        // question when a frontend is attached, and the registry's own
+        // tool list cannot hold it.
+        let mut known_tools = registry.tool_names();
+        if registry.question_sender().is_some() {
+            known_tools.push(crate::question::QUESTION_TOOL_NAME);
+        }
         let execution = execute_calls_observed(
             calls,
             |name| registry.get(name),
-            registry.tool_names(),
+            known_tools,
             call_ctx,
             cancel.clone(),
             move |id, _name| {

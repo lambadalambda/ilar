@@ -87,7 +87,7 @@ impl Tool for EditTool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Relative to cwd, or absolute"},
+                "path": {"type": "string", "description": super::PATH_DESCRIPTION},
                 "old_string": {"type": "string", "description": "The exact current text to replace, without read's \"N→\" prefixes; must match once unless replace_all"},
                 "new_string": {"type": "string", "description": "What it becomes; empty deletes the passage"},
                 "replace_all": {"type": "boolean", "description": "Replace every occurrence instead of requiring exactly one (default false)"}
@@ -156,7 +156,7 @@ fn replace_in_file(
     cancel: &tokio_util::sync::CancellationToken,
 ) -> std::io::Result<usize> {
     if cancel.is_cancelled() {
-        return Err(interrupted("edit cancelled"));
+        return Err(interrupted("cancelled"));
     }
     let size = std::fs::metadata(path)?.len();
     if size > MAX_FILE_BYTES {
@@ -202,7 +202,7 @@ fn replace_in_file(
     // Last check before the replace commits; the atomic write is
     // all-or-nothing, so an abort here leaves the original intact.
     if cancel.is_cancelled() {
-        return Err(interrupted("edit cancelled"));
+        return Err(interrupted("cancelled"));
     }
     crate::atomic_file::replace_cancellable(
         path,

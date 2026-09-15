@@ -82,15 +82,56 @@ async fn run(
     cwd: &std::path::Path,
     input: serde_json::Value,
 ) -> ilar::tools::ToolOutput {
+    // A model that can be handed the drawing back: the tool only
+    // attaches the image when the session's model accepts images.
+    run_with_vision(backend, cwd, input, true).await
+}
+
+async fn run_with_vision(
+    backend: ImageGenBackend,
+    cwd: &std::path::Path,
+    input: serde_json::Value,
+    vision: bool,
+) -> ilar::tools::ToolOutput {
     let registry = ToolRegistry::builtin().with_image_gen(backend).unwrap();
     let tool = registry.get("image_gen").expect("installed");
     let mut ctx = ToolContext::root(cwd.to_path_buf());
     ctx.session_id = "sess-1".into();
     ctx.call_id = Some("call_img_1".into());
-    // A model that can be handed the drawing back: the tool only
-    // attaches the image when the session's model accepts images.
-    ctx.vision = true;
+    ctx.vision = vision;
     tool.run(input, ctx).await
+}
+
+/// A text-only session gets the file and is told so: the result used to
+/// promise "the image is attached" to a model that cannot take one, and
+/// the chat wire then substituted "[image omitted]".
+#[tokio::test]
+async fn a_text_only_session_gets_the_file_and_no_promise_of_an_image() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, server) = image_server(tiny_png());
+    let backend = ImageGenBackend::with_api_key("k".into(), Some(base), dir.path().join("images"));
+
+    let output = run_with_vision(
+        backend,
+        dir.path(),
+        serde_json::json!({"prompt": "a lighthouse"}),
+        false,
+    )
+    .await;
+    let _ = server.await.unwrap();
+
+    assert!(!output.is_error, "{}", output.content);
+    assert!(output.images().is_empty(), "{:?}", output.images().len());
+    assert!(
+        output.content.contains("takes no images"),
+        "{}",
+        output.content
+    );
+    assert!(
+        output.content.contains("call_img_1.png"),
+        "{}",
+        output.content
+    );
 }
 
 #[tokio::test]

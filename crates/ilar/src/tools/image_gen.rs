@@ -327,13 +327,12 @@ impl ImageGenBackend {
     }
 }
 
-/// A reference file as the data URL the edits endpoint takes: sniffed,
-/// bounded, never a path the model could not read itself.
 /// The saved image's result, promising an attachment only when the
-/// result actually carries one: a text-only session takes no images, and
-/// the per-result cap can drop one that is too large (it says so
-/// itself). The model's only account of what it drew must not claim a
-/// picture that is not there.
+/// result actually carries one: a text-only session takes no images, the
+/// per-result cap can drop one that is too large (it says so itself),
+/// and a PNG the decoder refuses carries nothing either. The model's
+/// only account of what it drew must not claim a picture that is not
+/// there.
 fn attached_output(
     path: &Path,
     png_bytes: usize,
@@ -349,13 +348,15 @@ fn attached_output(
     output.content.push_str(if !output.images().is_empty() {
         "\nThe image is attached to this result; the file is the full-resolution original."
     } else if vision {
-        "\nThe image is not attached (see the note above). The file is the result."
+        "\nThe image is not attached; the file is the result."
     } else {
         "\nThe image is not attached: this session's model takes no images. The file is the result."
     });
     output
 }
 
+/// A reference file as the data URL the edits endpoint takes: sniffed,
+/// bounded, never a path the model could not read itself.
 fn reference_data_url(cwd: &Path, path: &str) -> Result<String, String> {
     let resolved = if Path::new(path).is_absolute() {
         PathBuf::from(path)
