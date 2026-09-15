@@ -202,7 +202,7 @@ fn arm_or_confirm(manager: &mut PendingManager, item: PendingItem) -> PendingAct
     match item {
         PendingItem::Queued(index) => PendingAction::DeleteQueued(index),
         PendingItem::Goal => PendingAction::AbortGoal,
-        PendingItem::BackgroundJobs => PendingAction::CancelBackground,
+        PendingItem::BackgroundTasks => PendingAction::CancelBackground,
         PendingItem::Services => PendingAction::StopServices,
         // Dismissing a retry offer needs no confirmation, so it never
         // arms and never arrives here.
@@ -1715,7 +1715,7 @@ impl App {
             items.push(PendingItem::Goal);
         }
         if self.background_running > 0 {
-            items.push(PendingItem::BackgroundJobs);
+            items.push(PendingItem::BackgroundTasks);
         }
         if self.services_running > 0 {
             items.push(PendingItem::Services);
@@ -1774,14 +1774,24 @@ impl App {
                             format!("goal (round {round}/{MAX_GOAL_ROUNDS}): {goal}")
                         }
                     }
-                    PendingItem::BackgroundJobs => {
+                    PendingItem::BackgroundTasks => {
                         if is_armed {
                             format!(
-                                "background jobs ({}): press d or ↵ again to cancel all",
+                                "background tasks ({}): press d or ↵ again to cancel all",
                                 self.background_running
                             )
                         } else {
-                            format!("background jobs: {} running", self.background_running)
+                            // The count folds in deliveries, which are
+                            // nobody's task: name them rather than
+                            // letting the row overstate the work.
+                            let delivering = match self.deliveries_in_flight {
+                                0 => String::new(),
+                                n => format!(" ({n} delivering a result)"),
+                            };
+                            format!(
+                                "background tasks: {} running{delivering}",
+                                self.background_running
+                            )
                         }
                     }
                     PendingItem::Services => {
@@ -1845,7 +1855,7 @@ impl App {
                         PendingAction::DeleteQueued(index)
                     }
                     PendingItem::Retry => PendingAction::DismissRetry,
-                    // Goal, background jobs and task results are
+                    // Goal, background tasks and task results are
                     // investments: confirm.
                     armed_item => arm_or_confirm(manager, armed_item),
                 }
@@ -1858,7 +1868,7 @@ impl App {
                 // acting on it is stopping it: ↵ goes through the same
                 // arm-then-confirm `d` does, rather than doing nothing
                 // under a footer that promises an action.
-                item @ (PendingItem::BackgroundJobs | PendingItem::Services) => {
+                item @ (PendingItem::BackgroundTasks | PendingItem::Services) => {
                     arm_or_confirm(manager, item)
                 }
             },
@@ -4283,7 +4293,7 @@ mod tests {
         app.pending_manager = Some(PendingManager::default());
         assert_eq!(
             app.pending_items(),
-            vec![PendingItem::BackgroundJobs, PendingItem::Services]
+            vec![PendingItem::BackgroundTasks, PendingItem::Services]
         );
 
         assert_eq!(

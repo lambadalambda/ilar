@@ -3515,6 +3515,10 @@ async fn run_app(
             };
             completions.push(schedule::Completion::Routed {
                 result,
+                // Asked before the parcel moves: the token is the only
+                // witness that this requeue was a cancel, not a busy
+                // target.
+                cancelled: delivery.cancel.is_cancelled(),
                 parcel: delivery.parcel,
             });
         }
@@ -3823,7 +3827,7 @@ async fn run_app(
                                 notifications_paused = true;
                                 app.background_running = 0;
                                 app.set_persistent_notice(
-                                "background jobs cancelled; task results held — send a message to deliver",
+                                "background tasks cancelled; task results held — send a message to deliver",
                                 NoticeLevel::Warning,
                             );
                             }

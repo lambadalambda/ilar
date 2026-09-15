@@ -2498,7 +2498,10 @@ fn tool_line_with_disclosure(
     let name = display_name(tool_name, kind);
     let (label, label_color) = match kind {
         ToolKind::Tool => ("tool", theme::SECONDARY),
-        ToolKind::Agent { .. } => ("agent", theme::REASONING),
+        // `task` for the what, `agent` for the who: the row's name
+        // column already says which agent (`explore@flash`), and the
+        // result row it pairs with is `task ▸`.
+        ToolKind::Agent { .. } => ("task", theme::REASONING),
     };
     let label = if width >= 72 {
         format!("{label:<6}")

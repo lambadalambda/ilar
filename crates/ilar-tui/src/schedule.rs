@@ -49,6 +49,11 @@ pub(crate) enum Completion {
     Routed {
         result: anyhow::Result<RouteOutcome>,
         parcel: Parcel,
+        /// Someone cancelled this delivery — cancel-all, or a quit.
+        /// A cancelled delivery requeues, which looks exactly like a
+        /// busy target from the outside; only the token knows the
+        /// difference, and the held notice must say which it was.
+        cancelled: bool,
     },
     Compaction(anyhow::Result<ManualCompactionOutcome>),
     /// The turn task itself died.
@@ -193,8 +198,12 @@ fn complete<R: Runtime>(app: &mut App, completion: Completion, runtime: &mut R) 
         // revert — is its to trigger: a root turn may be running
         // right now, and end_turn would tear that turn's channels
         // down.
-        Completion::Routed { result, parcel } => {
-            routed_complete(app, result, parcel, runtime);
+        Completion::Routed {
+            result,
+            parcel,
+            cancelled,
+        } => {
+            routed_complete(app, result, parcel, cancelled, runtime);
             return Vec::new();
         }
         Completion::Root(result) => {
@@ -329,6 +338,26 @@ fn complete<R: Runtime>(app: &mut App, completion: Completion, runtime: &mut R) 
     intents
 }
 
+/// The status line a held result puts up, and the verb every other
+/// surface must use for the same state: `deliver`, not `retry`. The
+/// notice line in `view.rs` counts them; this one names the state.
+pub(crate) const HELD_RESULT_STATUS: &str = "task result held — send a message to deliver";
+
+/// What a held delivery says on the notice line. A delivery the user
+/// just cancelled says *cancelled*: a cancelled attempt requeues, and
+/// the "cannot reach it while it is busy" wording then landed on the
+/// notice line moments after cancel-all — overwriting "background
+/// tasks cancelled" with a complaint about a wall nobody hit.
+fn hold_notice(target: &str, cancelled: bool) -> String {
+    if cancelled {
+        format!("the task result for {target} was cancelled — held; send a message to deliver")
+    } else {
+        format!(
+            "a task result for {target} cannot reach it while it is busy — held; send a message to deliver"
+        )
+    }
+}
+
 /// A delivery to another session finished: file its outcome. Nothing
 /// here touches the turn slot or the root's busy state — the delivery
 /// never owned either.
@@ -336,6 +365,7 @@ fn routed_complete<R: Runtime>(
     app: &mut App,
     result: anyhow::Result<RouteOutcome>,
     parcel: Parcel,
+    cancelled: bool,
     runtime: &mut R,
 ) {
     // Kept for the success notice, which names what arrived where; the
@@ -358,17 +388,24 @@ fn routed_complete<R: Runtime>(
                 delivered.description
             )));
         }
-        Disposition::Propagate(propagated) => runtime.hold_propagate(propagated),
+        Disposition::Propagate(propagated) => {
+            // The ✉ row this delivery wore is about to vanish, and the
+            // next hop's own completion can be minutes away: say where
+            // the result went, the way the steer path says where it
+            // landed. Quiet, because the user is not being asked for
+            // anything.
+            let next = runtime.session_label(app, &propagated.notification().parent_session_id);
+            app.push_transcript_line(Line_::System(format!(
+                "✉ \"{}\" passed on to {next}",
+                delivered.description
+            )));
+            runtime.hold_propagate(propagated);
+        }
         Disposition::Hold(requeued) => {
             let target = runtime.session_label(app, &requeued.notification().parent_session_id);
-            app.set_persistent_notice(
-                format!(
-                    "a task result for {target} cannot reach it while it is busy — held; send a message to retry"
-                ),
-                NoticeLevel::Warning,
-            );
+            app.set_persistent_notice(hold_notice(&target, cancelled), NoticeLevel::Warning);
             if !runtime.observe(app).turn_running {
-                app.status = "task result held — send a message to retry".into();
+                app.status = HELD_RESULT_STATUS.into();
                 app.set_activity(Activity::Paused);
             }
             runtime.hold_requeue(requeued);
@@ -386,10 +423,10 @@ fn routed_complete<R: Runtime>(
             );
             app.set_notice(&message, NoticeLevel::Error);
             app.push_transcript_line(Line_::System(message));
-            app.push_transcript_line(Line_::System(format!(
-                "undelivered result of {}:\n{}",
-                notification.description, notification.text
-            )));
+            // The child's words, in the row every other surface gives
+            // a notification: collapsed, expandable, not a wall of
+            // raw `<task-notification>` envelope as a System line.
+            app.push_notification(&notification.description, &notification.text);
             runtime.retire_notification(&notification);
         }
         Disposition::Salvage {
@@ -403,10 +440,10 @@ fn routed_complete<R: Runtime>(
             let message = format!("a task result could not be delivered to {target}: {error}");
             app.set_notice(&message, NoticeLevel::Error);
             app.push_transcript_line(Line_::System(message));
-            app.push_transcript_line(Line_::System(format!(
-                "undelivered result of {}:\n{}",
-                notification.description, notification.text
-            )));
+            // The child's words, in the row every other surface gives
+            // a notification: collapsed, expandable, not a wall of
+            // raw `<task-notification>` envelope as a System line.
+            app.push_notification(&notification.description, &notification.text);
             // The salvage above IS the delivery of last resort: retire
             // the outbox entry so the next open does not announce,
             // re-attempt and re-fail it forever.
@@ -1059,6 +1096,7 @@ mod tests {
             vec![Completion::Routed {
                 result: Ok(RouteOutcome::Requeue(notification.clone())),
                 parcel: Parcel::fresh(notification),
+                cancelled: false,
             }],
             Vec::new(),
             &mut runtime,
@@ -1350,6 +1388,7 @@ mod tests {
             vec![Completion::Routed {
                 result: Ok(RouteOutcome::Complete),
                 parcel: Parcel::fresh(notification),
+                cancelled: false,
             }],
             Vec::new(),
             &mut runtime,
@@ -1390,10 +1429,12 @@ mod tests {
                 Completion::Routed {
                     result: Ok(RouteOutcome::Propagate(propagated("first"))),
                     parcel: Parcel::fresh(propagated("first")),
+                    cancelled: false,
                 },
                 Completion::Routed {
                     result: Ok(RouteOutcome::Propagate(propagated("second"))),
                     parcel: Parcel::fresh(propagated("second")),
+                    cancelled: false,
                 },
             ],
             Vec::new(),
@@ -1433,6 +1474,7 @@ mod tests {
             vec![Completion::Routed {
                 result: Err(anyhow::anyhow!("unknown persisted agent")),
                 parcel: Parcel::fresh(notification),
+                cancelled: false,
             }],
             Vec::new(),
             &mut runtime,
@@ -1490,6 +1532,7 @@ mod tests {
                 // parcel arrived carrying.
                 result: Ok(RouteOutcome::Propagate(notification("the build is green"))),
                 parcel,
+                cancelled: false,
             }],
             Vec::new(),
             &mut runtime,
@@ -1531,6 +1574,7 @@ mod tests {
             vec![Completion::Routed {
                 result: Ok(RouteOutcome::Requeue(notification.clone())),
                 parcel: Parcel::fresh(notification),
+                cancelled: false,
             }],
             Vec::new(),
             &mut runtime,

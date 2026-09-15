@@ -641,7 +641,7 @@ pub(crate) static PALETTE_COMMANDS: &[PaletteCommandDefinition] = &[
         section: "General",
         label: "Pending…",
         shortcut: "^Q",
-        search_terms: "pending queue queued goal background jobs retry manage",
+        search_terms: "pending queue queued goal background tasks jobs held results retry manage",
     },
     PaletteCommandDefinition {
         id: PaletteCommand::Help,
@@ -975,7 +975,7 @@ pub(crate) fn render_pending_manager(frame: &mut Frame, snapshot: &PendingSnapsh
     if snapshot.rows.is_empty() {
         frame.render_widget(
             Paragraph::new(muted_line(
-                "nothing pending — queued messages, the goal, background jobs, and retry offers appear here",
+                "nothing pending — queued messages, the goal, background tasks, held results and retry offers appear here",
             )),
             inner,
         );
@@ -1111,7 +1111,10 @@ pub(crate) enum PendingItem {
     /// Index into the message queue.
     Queued(usize),
     Goal,
-    BackgroundJobs,
+    /// Detached tasks, background tool jobs and in-flight deliveries —
+    /// everything cancel-all takes. "Tasks" is the vocabulary the
+    /// panel, the transcript rows and the switch refusals use.
+    BackgroundTasks,
     Services,
     Retry,
 }
@@ -1131,8 +1134,8 @@ pub(crate) enum PendingAction {
 }
 
 /// Modal listing all standing state: queued messages, the goal,
-/// background jobs, and the retry offer. Destructive actions arm on the
-/// first press and fire on the second.
+/// background tasks, held results, and the retry offer. Destructive
+/// actions arm on the first press and fire on the second.
 #[derive(Default)]
 pub(crate) struct PendingManager {
     nav: ListNav,

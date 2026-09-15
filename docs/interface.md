@@ -68,12 +68,14 @@ drains through the same path a typed turn does — except the
 maintenance commands (`/compact`, `/rewind`, `/fork`, `/sessions`),
 which refuse whenever anything is running.
 
-Standing state — queued messages, the goal, background jobs, a retry
-offer — is managed in the pending manager (**Ctrl-Q** or the palette):
-delete one queued message, pull it back into the input for editing,
-abort the goal or cancel background jobs (both confirmed with a second
-press). Enter on the tasks or services row acts on it — the same
-confirmed cancel `d` gives — since there is nothing there to edit.
+Standing state — queued messages, the goal, background tasks, held task
+results, a retry offer — is managed in the pending manager (**Ctrl-Q**
+or the palette): delete one queued message, pull it back into the input
+for editing, abort the goal or cancel background tasks (both confirmed
+with a second press). Enter on the tasks or services row acts on it —
+the same confirmed cancel `d` gives — since there is nothing there to
+edit; Enter on a held task result delivers it without spending a turn
+on the asking.
 **Esc is strictly immediate-scope**: it aborts the running turn or
 clears the input, and never touches the queue or the goal. A one-line
 draft it clears; a multi-line one — a paste, or a paragraph — goes to
@@ -257,25 +259,29 @@ into a count that clicks open to show who died how — and, while subagents are 
 with each task's description, agent, a `bg` marker for detached work,
 and a live elapsed time. A result on its way to another session shows
 there too, as a `delivering` row, and when it lands the transcript gets
-one quiet line — `✉ "review the diff" delivered to explorer · survey the
-API` — naming the session by its agent and task rather than by id. Only
-a result that cannot be delivered claims the notice line above the
+one quiet line — `✉ "review the diff" delivered to explore · survey the
+API` — naming the session by its agent and task rather than by id. A
+result that has to climb to another tree says so on its way — `✉
+"review the diff" passed on to build · land the fix` — and only a
+result that cannot be delivered at all claims the notice line above the
 input.
-
-## Talking to a focused agent
 
 A background job — `bash` with `run_in_background` — sits in the same
 panel while it runs, as a ⚙ row with its command and elapsed time, so a
 long render never reads as a hang; it has no transcript to open.
+
+## Talking to a focused agent
+
 Click an agents-panel row and the child's transcript fills the screen.
-The prompt is then that agent's: the input title reads `to explorer ·
+The prompt is then that agent's: the input title reads `to explore ·
 survey the API`, and Enter sends what you typed the way the model's own
 `task_message` does — a running agent takes it at its next step, a
 finished one is resumed with it as the prompt. The root's transcript
-records the send as `→ explorer · survey the API: …` and the agent's
+records the send as `→ explore · survey the API: …` and the agent's
 answer or a failure when it lands; the root's own queue and stash are
 untouched. Arrow keys, PageUp/PageDown, Home and End scroll the view;
-Esc leaves it.
+**Ctrl-X** cancels the agent you are looking at (a second press
+confirms), and Esc leaves the view.
 
 ## Questions
 
