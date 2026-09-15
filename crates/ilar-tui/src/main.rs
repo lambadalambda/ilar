@@ -11,6 +11,7 @@ mod links;
 mod markdown;
 mod modals;
 mod questions;
+mod secret_cli;
 mod schedule;
 mod selection;
 #[cfg(feature = "serve")]
@@ -106,6 +107,11 @@ const ROOT_STALL_ABORT_AFTER: std::time::Duration = std::time::Duration::from_se
 enum Command {
     /// Log in to OpenAI with your ChatGPT account (OAuth in the browser)
     Login,
+    /// Store, list and grant the secrets tools may ask for
+    Secret {
+        #[command(subcommand)]
+        command: secret_cli::SecretCommand,
+    },
     /// Run one turn without a terminal and print the answer
     Exec(ExecArgs),
     /// Read the session store over HTTP (read-only, no turns run)
@@ -1125,6 +1131,12 @@ async fn main() -> Result<()> {
             },
         )
         .await;
+    }
+    if let Some(Command::Secret { command }) = args.command {
+        let store = ilar::secrets::SecretStore::open(config.state_dir());
+        let text = secret_cli::run(&store, command, &mut std::io::stdin().lock())?;
+        println!("{text}");
+        return Ok(());
     }
     if let Some(Command::Login) = args.command {
         let store = ilar::auth::AuthStore::open(config.state_dir().to_path_buf());

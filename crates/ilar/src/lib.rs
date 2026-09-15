@@ -20,6 +20,7 @@ pub mod question;
 pub mod recall;
 pub mod rewind;
 pub mod runtime;
+pub mod secrets;
 pub mod session;
 pub mod skill;
 pub mod subagent;
