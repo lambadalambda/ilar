@@ -125,8 +125,10 @@ fn parse_grant(argument: &str) -> Result<ilar::secrets::Grant, String> {
 
 /// What a password given with `/grant` is told. The ask it would answer
 /// is the approval question; sudo's password is asked for on its own,
-/// and only where sudo wants one.
-const PASSWORD_AFTER_THE_YES: &str = "/grant takes a span and nothing else: once, session or always. The password is asked for \
+/// and only where sudo wants one. Public because the gateway takes that
+/// message back out of the chat: whatever it was, it was meant to be a
+/// password and it is in the history now.
+pub const PASSWORD_AFTER_THE_YES: &str = "/grant takes a span and nothing else: once, session or always. The password is asked for \
      after the yes — /password <pw> when sudo asks for it.";
 
 /// The span a word was probably trying to be: within two edits of one,
@@ -275,6 +277,9 @@ mod tests {
             let Some(Command::Misread(message)) = parse(typed) else {
                 panic!("{typed} took a password");
             };
+            // The exact text, not a lookalike: the gateway matches on
+            // it to delete the message the password came in.
+            assert_eq!(message, PASSWORD_AFTER_THE_YES, "{typed}");
             assert!(message.contains("/password <pw>"), "{typed}: {message}");
         }
         assert!(edits_within("sesion", "session", 2));

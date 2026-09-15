@@ -700,6 +700,13 @@ impl Gateway {
                 Err(error) => failed_reply("/reject", &error),
             },
             Command::Unknown(name) => format!("No command /{name}.\n{}", commands::HELP),
+            // A password typed after `/grant` answers nothing, and it
+            // is in the chat's history all the same: out it comes, as
+            // `/password` and `/unlock` do it.
+            Command::Misread(text) if text == commands::PASSWORD_AFTER_THE_YES => {
+                let taken_back = self.delete_inbound(message).await;
+                format!("{text} {}", password_advice(taken_back))
+            }
             Command::Misread(message) => message,
             Command::Compact => {
                 use ilar::compaction::ManualCompactionOutcome as Outcome;

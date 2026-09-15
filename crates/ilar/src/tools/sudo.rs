@@ -96,14 +96,20 @@ async fn passwordless(binary: &str, cwd: &std::path::Path, env: &ChildEnv) -> bo
     let Ok(mut child) = command.spawn() else {
         return false;
     };
-    match tokio::time::timeout(PROBE_TIMEOUT, child.wait()).await {
+    // The child leads its own session, so killing the shell would leave
+    // a wedged sudo behind: the group goes, as `run_command` does it.
+    let mut group = super::process::ProcessGroup(child.id());
+    let passed = match tokio::time::timeout(PROBE_TIMEOUT, child.wait()).await {
         Ok(Ok(status)) => status.success(),
         Ok(Err(_)) => false,
         Err(_) => {
+            group.terminate();
             child.start_kill().ok();
-            false
+            return false;
         }
-    }
+    };
+    group.disarm();
+    passed
 }
 
 impl Tool for SudoTool {
@@ -181,7 +187,11 @@ impl Tool for SudoTool {
             // reached here.
             let mut password = match secrets.held_or_stored(crate::secrets::SUDO_PASSWORD) {
                 Ok(password) => password.filter(|password| !password.is_empty()),
-                Err(error) => return ToolOutput::error(format!("sudo: {error:#}")),
+                // A locked store says how this driver's user unlocks
+                // it, as every other refusal the lock causes does.
+                Err(error) => {
+                    return ToolOutput::error(format!("sudo: {}", secrets.store_error(error)));
+                }
             };
             let timeout =
                 std::time::Duration::from_millis(input.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
@@ -198,6 +208,11 @@ impl Tool for SudoTool {
                     .collect();
                 let mut env = ChildEnv::shielded_from(&stored, &[]);
                 env.stdin = stdin;
+                // sudo's own diagnostics, in the wording this code
+                // reads: "1 incorrect password attempt" is translated
+                // on a localised system, and a refusal nobody
+                // recognises is a refusal nobody re-asks for.
+                env.set.push(("LC_ALL".into(), "C".into()));
                 run_command(
                     "sudo",
                     line,
@@ -218,12 +233,22 @@ impl Tool for SudoTool {
                 let stored = secrets.all();
                 let env = ChildEnv::shielded_from(&stored, &[]);
                 if passwordless(&binary, &ctx.cwd, &env).await {
-                    return run(None, stored).await;
-                }
-                if !secrets.can_ask() {
+                    let output = run(None, stored).await;
+                    // The probe passed and the command still wanted a
+                    // password: a rule that covers `true` and not this,
+                    // or a timestamp that expired in between. Ask,
+                    // rather than hand back a refusal nobody was given
+                    // the chance to answer.
+                    if !(output.is_error && output.content.contains("password is required")) {
+                        return output;
+                    }
+                    if !secrets.can_ask() {
+                        return output;
+                    }
+                } else if !secrets.can_ask() {
                     return ToolOutput::error(format!(
-                        "sudo: this system wants a password and nobody is here to type one; {}",
-                        crate::secrets::STORE_PASSWORD
+                        "sudo: {}",
+                        crate::secrets::NO_ONE_TO_TYPE_IT
                     ));
                 }
             }

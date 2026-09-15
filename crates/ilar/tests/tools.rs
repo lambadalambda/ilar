@@ -2592,9 +2592,11 @@ async fn a_spilled_output_holds_no_secret_value() {
 ///
 /// It answers the `-n true` probe both ways, like the real one. With no
 /// marker file beside it, the system is passwordless: `-n` succeeds.
-/// Write the accepted password into `<path>.needs-password` — see
-/// [`sudo_wants_a_password`] — and `-n` fails the way sudo does, while
+/// [`sudo_wants_a_password`] writes the accepted password into
+/// `<path>.needs-password`, and then `-n` fails the way sudo does while
 /// `-S` refuses anything but that password with sudo's own wording.
+/// [`sudo_lies_about_the_probe`] is the awkward system in between: the
+/// probe passes and the command still wants a password.
 fn fake_sudo(dir: &std::path::Path) -> std::path::PathBuf {
     let path = dir.join("fake-sudo");
     std::fs::write(
@@ -2610,9 +2612,13 @@ while [ $# -gt 0 ]; do case "$1" in
   *) break;;
 esac; done
 wanted="$0.needs-password"
+probe_passes=
+if [ -f "$0.probe-passes" ]; then wanted="$0.probe-passes"; probe_passes=1; fi
 if [ -f "$wanted" ]; then
-  if [ "$mode" = n ]; then echo "sudo: a password is required" >&2; exit 1; fi
-  if [ "$pw" != "$(cat "$wanted")" ]; then
+  if [ "$mode" = n ] && [ -z "$probe_passes" -o "$*" != "true" ]; then
+    echo "sudo: a password is required" >&2; exit 1
+  fi
+  if [ "$mode" = S ] && [ "$pw" != "$(cat "$wanted")" ]; then
     echo "sudo: 1 incorrect password attempt" >&2; exit 1
   fi
 fi
@@ -2633,9 +2639,20 @@ exec "$@"
 /// Make the fake sudo want `password`, the way a system with no
 /// NOPASSWD rule does.
 fn sudo_wants_a_password(binary: &std::path::Path, password: &str) {
-    let mut marker = binary.as_os_str().to_os_string();
-    marker.push(".needs-password");
-    std::fs::write(std::path::PathBuf::from(marker), password).unwrap();
+    marker(binary, ".needs-password", password);
+}
+
+/// Make the fake sudo pass the `-n true` probe and want `password` for
+/// anything else: a NOPASSWD rule that covers one command and not the
+/// next, or a timestamp that expires in between.
+fn sudo_lies_about_the_probe(binary: &std::path::Path, password: &str) {
+    marker(binary, ".probe-passes", password);
+}
+
+fn marker(binary: &std::path::Path, suffix: &str, content: &str) {
+    let mut path = binary.as_os_str().to_os_string();
+    path.push(suffix);
+    std::fs::write(std::path::PathBuf::from(path), content).unwrap();
 }
 
 /// The sudo tool runs one approved command through the binary, feeds a
@@ -2859,6 +2876,55 @@ async fn a_cancelled_password_fails_and_a_refused_stored_one_says_so() {
     );
     assert!(
         !out.content.contains("incorrect password"),
+        "{}",
+        out.content
+    );
+}
+
+/// The probe passed and the command wanted a password anyway — a rule
+/// that covers `true` and not this one, or a timestamp that expired in
+/// between. The person is asked, rather than handed a refusal they were
+/// never given the chance to answer.
+#[tokio::test]
+async fn a_password_wanted_after_a_passing_probe_is_still_asked_for() {
+    use ilar::secrets::Ask;
+    use ilar::tools::Tool;
+    let dir = tempfile::tempdir().unwrap();
+    let binary = fake_sudo(dir.path());
+    sudo_lies_about_the_probe(&binary, "hunter22");
+    let sudo = ilar::tools::sudo::SudoTool::with_binary(&binary.to_string_lossy());
+    let store = ilar::secrets::SecretStore::open(&dir.path().join("state"));
+    store.grant_always("root", "sudo").unwrap();
+    let call = serde_json::json!({"command": "id", "reason": "a test"});
+    let (tx, mut rx) = ilar::secrets::ask_channel(1);
+    let secrets = ilar::secrets::Secrets::new(store.clone()).with_prompts(tx);
+
+    let (out, _) = tokio::join!(
+        sudo.run(call.clone(), ctx(dir.path()).with_secrets(secrets.clone())),
+        async {
+            let Some(Ask::Password(prompt)) = rx.recv().await else {
+                panic!("the password ask never came");
+            };
+            prompt.reply.send(Some("hunter22".into())).unwrap();
+        }
+    );
+    assert!(!out.is_error, "{}", out.content);
+    assert!(
+        out.content.contains("pw=<secret:SUDO_PASSWORD>"),
+        "{}",
+        out.content
+    );
+
+    // Headless, the same system: sudo's own error, not a prompt.
+    let out = sudo
+        .run(
+            call,
+            ctx(dir.path()).with_secrets(ilar::secrets::Secrets::new(store)),
+        )
+        .await;
+    assert!(out.is_error, "{}", out.content);
+    assert!(
+        out.content.contains("password is required"),
         "{}",
         out.content
     );

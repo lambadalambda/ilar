@@ -753,6 +753,12 @@ fn grant_hint(name: &str, tool: &str) -> String {
 /// The CLI line a sudo that wants a password nobody can type points at.
 pub const STORE_PASSWORD: &str = "the user can store one with: ilar secret set SUDO_PASSWORD";
 
+/// What sudo says when it wants a password and there is no prompt to
+/// put up: `ilar exec`, a scheduled turn, a headless driver.
+pub const NO_ONE_TO_TYPE_IT: &str = "this system wants a password for sudo and nobody is here to \
+                                     type one; the user can store one with: ilar secret set \
+                                     SUDO_PASSWORD";
+
 /// Why an ask came back with no answer, for the caller to word: the
 /// two asks say different things about it.
 enum NoAnswer {
@@ -858,7 +864,7 @@ impl Secrets {
     /// A store error as the model sees it: the lock says how to open
     /// it, anything else is the failure itself. No `secrets:` prefix —
     /// the tool that asked adds its own name.
-    fn store_error(&self, error: anyhow::Error) -> String {
+    pub(crate) fn store_error(&self, error: anyhow::Error) -> String {
         if error.is::<Locked>() || error.is::<Resealed>() {
             format!("{error}: {}", self.unlock_hint())
         } else {
@@ -1030,9 +1036,7 @@ impl Secrets {
         refused: bool,
     ) -> Result<Option<String>, String> {
         let Some(sender) = &self.prompts else {
-            return Err(format!(
-                "sudo wants a password and nobody is here to type one; {STORE_PASSWORD}"
-            ));
+            return Err(NO_ONE_TO_TYPE_IT.to_string());
         };
         let (reply, receive) = oneshot::channel();
         let ask = Ask::Password(PasswordPrompt {
@@ -1044,7 +1048,10 @@ impl Secrets {
             reply,
         });
         match deliver(sender, ask, receive, request.cancel).await {
-            Ok(answer) => Ok(answer),
+            // An empty answer is nothing, not "this system needs none":
+            // the prompts refuse one where it is typed, and a driver
+            // that lets one through means the same as a cancel.
+            Ok(answer) => Ok(answer.filter(|password| !password.is_empty())),
             Err(NoAnswer::Nobody) => Err(format!(
                 "sudo wants a password and nobody answered; {STORE_PASSWORD}"
             )),
@@ -1622,6 +1629,14 @@ mod tests {
         );
         assert_eq!(answered.unwrap(), None);
         assert!(asked.refused);
+        // And an empty answer is nothing, not "this system needs none":
+        // the prompts refuse one, and a driver that lets one through
+        // means the same as a cancel.
+        let (answered, _) = tokio::join!(
+            secrets.ask_password(request, false),
+            answer_password(&mut rx, Some(""))
+        );
+        assert_eq!(answered.unwrap(), None);
 
         // A child's ask says which child; the driver's own says none.
         let child = secrets.clone().for_agent("reviewer");

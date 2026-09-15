@@ -890,6 +890,29 @@ fn observe(
     }
 }
 
+/// Hand a closed prompt's answer to the tool waiting on it, and note
+/// it in the transcript. The asker can go away between the loop's
+/// closed-check and the keypress that answers, so the transcript must
+/// not claim an answer nobody received.
+fn deliver_answer<T>(
+    app: &mut App,
+    reply: &mut Option<tokio::sync::oneshot::Sender<T>>,
+    answer: T,
+    line: String,
+    status: &str,
+) {
+    let delivered = reply.take().is_some_and(|reply| reply.send(answer).is_ok());
+    if delivered {
+        app.push_transcript_line(Line_::System(line));
+        app.status = status.into();
+        app.set_activity(Activity::Tools);
+    } else {
+        app.push_transcript_line(Line_::System(format!(
+            "{line} — but the tool had stopped waiting"
+        )));
+    }
+}
+
 /// The frontmatter a command carries into its invocation — see
 /// meta/issues/honour-command-frontmatter.md for the semantics.
 #[derive(Debug, PartialEq, Default, Clone)]
@@ -4003,22 +4026,13 @@ async fn run_app(
                             if let PasswordAction::Answer(answer) = modal.handle_key(key) {
                                 let line = modal.outcome_line(answer.is_some());
                                 app.password_modal = None;
-                                // The asker can go away between the
-                                // closed-check and this keypress; the
-                                // transcript must not claim a password
-                                // nobody received.
-                                let delivered = password_reply
-                                    .take()
-                                    .is_some_and(|reply| reply.send(answer).is_ok());
-                                if delivered {
-                                    app.push_transcript_line(Line_::System(line));
-                                    app.status = "running sudo".into();
-                                    app.set_activity(Activity::Tools);
-                                } else {
-                                    app.push_transcript_line(Line_::System(format!(
-                                        "{line} — but the tool had stopped waiting"
-                                    )));
-                                }
+                                deliver_answer(
+                                    app,
+                                    &mut password_reply,
+                                    answer,
+                                    line,
+                                    "running sudo",
+                                );
                             }
                         }
                         Modal::Grant => {
@@ -4026,22 +4040,13 @@ async fn run_app(
                             if let GrantAction::Answer(answer) = modal.handle_key(key) {
                                 let line = modal.outcome_line(answer);
                                 app.grant_modal = None;
-                                // The asker can go away between the
-                                // closed-check and this keypress; the
-                                // transcript must not claim a grant
-                                // nobody received.
-                                let delivered = grant_reply
-                                    .take()
-                                    .is_some_and(|reply| reply.send(answer).is_ok());
-                                if delivered {
-                                    app.push_transcript_line(Line_::System(line));
-                                    app.status = "processing grant".into();
-                                    app.set_activity(Activity::Tools);
-                                } else {
-                                    app.push_transcript_line(Line_::System(format!(
-                                        "{line} — but the tool had stopped waiting"
-                                    )));
-                                }
+                                deliver_answer(
+                                    app,
+                                    &mut grant_reply,
+                                    answer,
+                                    line,
+                                    "processing grant",
+                                );
                             }
                         }
                         Modal::PendingManager => match app.pending_manager_key(code, control) {

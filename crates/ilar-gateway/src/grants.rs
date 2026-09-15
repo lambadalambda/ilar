@@ -118,35 +118,39 @@ pub fn no_answer(secret: &str, asker: &Asker) -> String {
 /// was answered; the ask then stands, so the right command still
 /// reaches it.
 pub fn answer(slot: &PendingSlot, answer: Answer) -> Result<String, &'static str> {
-    let pending = slot.lock().unwrap().take();
-    let Some(pending) = pending else {
+    // One guard for the whole decision: an ask the command cannot
+    // answer is left where it is rather than taken out and put back,
+    // which could drop an ask that arrived in between.
+    let mut held = slot.lock().unwrap();
+    let Some(pending) = held.as_ref() else {
         return Err("Nothing is waiting for a grant.");
     };
-    let text = match (pending.password, &answer) {
-        (true, Answer::Password(_)) => {
-            format!("Password sent to {}.", pending.asker.shown)
-        }
-        (true, Answer::No) => format!(
-            "No password given; that {} command does not run.",
-            pending.asker.shown
-        ),
-        (false, Answer::Grant(grant)) => decided(&pending.secret, &pending.asker, Some(*grant)),
-        (false, Answer::No) => decided(&pending.secret, &pending.asker, None),
-        // The wrong command for the ask in flight. Back into the slot:
-        // the ask stands, the answer was not one.
+    // The wrong command for the ask in flight: say which question is
+    // waiting, and leave it waiting.
+    match (pending.password, &answer) {
         (true, Answer::Grant(_)) => {
-            *slot.lock().unwrap() = Some(pending);
             return Err(
                 "That ask is for the sudo password, not the approval: /password <pw>, or /deny.",
             );
         }
         (false, Answer::Password(_)) => {
-            *slot.lock().unwrap() = Some(pending);
             return Err(
                 "That ask is the approval question: /grant, /grant session or /grant always, \
                  or /deny. The password is asked for after the yes.",
             );
         }
+        _ => {}
+    }
+    let pending = held.take().expect("checked just above");
+    drop(held);
+    let text = match &answer {
+        Answer::Password(_) => format!("Password sent to {}.", pending.asker.shown),
+        Answer::No if pending.password => format!(
+            "No password given; that {} command does not run.",
+            pending.asker.shown
+        ),
+        Answer::Grant(grant) => decided(&pending.secret, &pending.asker, Some(*grant)),
+        Answer::No => decided(&pending.secret, &pending.asker, None),
     };
     pending
         .answer

@@ -141,8 +141,9 @@ or stored password runs with no prompt at all. Store one under
 covers its use.
 
 A password sudo refuses ("1 incorrect password attempt") is dropped and
-asked for again, up to three times in one call, without asking for
-approval again; the re-ask says sudo refused the last one. A refused
+asked for again, without asking for approval again; the re-ask says
+sudo refused the last one. One call runs sudo three times at most — so
+a refused password that was already known costs one of the three. A refused
 *stored* password is not dropped — it is not the session's to forget —
 and the result says `ilar secret set SUDO_PASSWORD` updates it, while
 the one you type is held over it for the session.
@@ -157,7 +158,8 @@ In the chat the two questions are two commands: `/grant [session|
 always]` or `/deny` for the approval, and `/password <pw>` for the
 password — which the gateway deletes from the chat afterwards, the way
 it does `/unlock`. A password given to `/grant` is refused and pointed
-at `/password`, and a misspelt span (`/grant sesion`) is named as one.
+at `/password`, and deleted too; a misspelt span (`/grant sesion`) is
+named as one.
 The chat's session is its seat, so what it holds is forgotten when that
 chat is restarted — `/new`, or a gateway restart — not only when the
 process exits.

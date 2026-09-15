@@ -100,16 +100,13 @@ impl GrantModal {
         GrantAction::Stay
     }
 
-    /// Who is asking, for the title and the transcript line. A child's
-    /// ask is named where the name is known: with three agents running,
-    /// "bash (subagent)" leaves the person guessing whose command they
-    /// are about to allow.
+    /// Who is asking, for the title and the transcript line.
     fn asker(&self) -> String {
-        match (self.from_subagent, self.agent.as_deref()) {
-            (true, Some(agent)) => format!("{} ({agent} subagent)", self.tool),
-            (true, None) => format!("{} (subagent)", self.tool),
-            (false, _) => self.tool.clone(),
-        }
+        format!(
+            "{}{}",
+            self.tool,
+            subagent_mark(self.from_subagent, self.agent.as_deref())
+        )
     }
 
     /// The transcript's record of a prompt nobody is waiting on any
@@ -238,6 +235,17 @@ fn render_body_over(
     );
 }
 
+/// What a prompt wears when the ask came from a child of this session:
+/// the person did not ask for that command themselves, and with three
+/// agents running "(subagent)" alone does not say whose it is.
+fn subagent_mark(from_subagent: bool, agent: Option<&str>) -> String {
+    match (from_subagent, agent) {
+        (true, Some(agent)) => format!(" ({agent} subagent)"),
+        (true, None) => " (subagent)".to_string(),
+        (false, _) => String::new(),
+    }
+}
+
 fn grant_word(grant: Grant) -> &'static str {
     match grant {
         Grant::Once => "once",
@@ -324,14 +332,12 @@ impl PasswordModal {
         PasswordAction::Stay
     }
 
-    /// Whose sudo is waiting, for the title: a child's ask is named
-    /// where the name is known.
-    fn asker(&self) -> String {
-        match (self.from_subagent, self.agent.as_deref()) {
-            (true, Some(agent)) => format!(" sudo password ({agent} subagent) "),
-            (true, None) => " sudo password (subagent) ".to_string(),
-            (false, _) => " sudo password ".to_string(),
-        }
+    /// The title: whose sudo is waiting, named where the name is known.
+    fn title(&self) -> String {
+        format!(
+            " sudo password{} ",
+            subagent_mark(self.from_subagent, self.agent.as_deref())
+        )
     }
 
     /// The transcript's record of a prompt nobody is waiting on any
@@ -385,7 +391,7 @@ impl PasswordModal {
         }
         let area = crate::modals::centered_rect(available, 76, available.height.min(16));
         let Some(inner) =
-            crate::modals::modal_frame(frame, area, &self.asker(), theme::WAITING, PASSWORD_FOOTER)
+            crate::modals::modal_frame(frame, area, &self.title(), theme::WAITING, PASSWORD_FOOTER)
         else {
             return;
         };
