@@ -232,7 +232,8 @@ Esc leaves it.
 
 ## Secrets
 
-A stored secret (`ilar secret set NAME`, value on stdin) never sits in
+A stored secret (`ilar secret set NAME`: the value is asked for hidden
+at a terminal, or piped in) never sits in
 the agent's environment. When `bash` or `service` names one, the turn
 pauses on a prompt titled `bash wants NAME`: the secret's description,
 then the command **verbatim** — that exact text is what runs with the

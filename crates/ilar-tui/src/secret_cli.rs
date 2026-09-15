@@ -1,13 +1,14 @@
-//! `ilar secret …`: the store's command line. Values come in on stdin,
-//! never as an argument, so they stay out of shell history and process
-//! listings.
+//! `ilar secret …`: the store's command line. A value is asked for
+//! hidden at a terminal and read from stdin when piped, never taken as
+//! an argument, so it stays out of shell history and process listings.
 
 use anyhow::{Context, Result};
 use ilar::secrets::SecretStore;
 
 #[derive(clap::Subcommand, Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SecretCommand {
-    /// Store a secret; the value is read from stdin (one line, or a pipe)
+    /// Store a secret; at a terminal the value is asked for hidden and
+    /// confirmed, piped it is read from stdin
     Set {
         /// Environment-variable style name, like GITHUB_TOKEN
         name: String,
@@ -18,17 +19,23 @@ pub(crate) enum SecretCommand {
     /// Names, descriptions and standing grants; never values
     List,
     /// Forget a secret and its grants
-    Remove { name: String },
+    Remove {
+        /// The stored secret's name
+        name: String,
+    },
     /// Let a tool use a secret without asking, for good
     Grant {
+        /// The stored secret's name, or root for the sudo tool
         name: String,
-        /// The tool: bash or service
+        /// The tool that may use it: bash, service, or sudo for root
         #[arg(long)]
         tool: String,
     },
     /// Drop standing grants, for one tool or all of them
     Revoke {
+        /// The stored secret's name, or root
         name: String,
+        /// One tool to drop; every tool when left out
         #[arg(long)]
         tool: Option<String>,
     },
@@ -90,6 +97,47 @@ pub(crate) fn unlock_if_sealed(
     Ok(false)
 }
 
+/// What the store has, for an error that lists it. An unreadable store
+/// lists nothing: the failure itself is reported by the command.
+fn stored_names(store: &SecretStore) -> Vec<String> {
+    store
+        .list()
+        .map(|listed| listed.into_iter().map(|secret| secret.name).collect())
+        .unwrap_or_default()
+}
+
+/// A name the store does not have is an error, whatever the command:
+/// exit 0 on a typo reads as "done".
+fn unknown_name(store: &SecretStore, name: &str) -> anyhow::Error {
+    let names = stored_names(store);
+    if names.is_empty() {
+        anyhow::anyhow!("no secret named {name}; the store is empty")
+    } else {
+        anyhow::anyhow!("no secret named {name}; stored: {}", names.join(", "))
+    }
+}
+
+/// Whether a grant could ever be read: `root` is the sudo tool's
+/// pseudo-secret and sudo takes nothing else, so the other two pairings
+/// would sit in the store looking effective and do nothing.
+fn grantable(name: &str, tool: &str) -> Result<()> {
+    if !ilar::secrets::GRANTABLE_TOOLS.contains(&tool) {
+        anyhow::bail!(
+            "no tool named {tool} takes secrets; one of: {}",
+            ilar::secrets::GRANTABLE_TOOLS.join(", ")
+        );
+    }
+    match (name == ilar::secrets::ROOT, tool == "sudo") {
+        (true, false) => {
+            anyhow::bail!("only the sudo tool asks for root; grant it with --tool sudo")
+        }
+        (false, true) => anyhow::bail!(
+            "the sudo tool takes no secrets, only root; {name} goes to bash or service"
+        ),
+        _ => Ok(()),
+    }
+}
+
 /// Run one command against the store; the text is what to print.
 /// `piped` is stdin when it is not a terminal: `set` reads the value
 /// from it. At a terminal (`None`) the value is asked for hidden, and
@@ -100,6 +148,11 @@ pub(crate) fn run(
     piped: Option<&mut dyn std::io::Read>,
     ask: AskPassword<'_>,
 ) -> Result<String> {
+    // Before the master password is asked for: a name the store would
+    // refuse anyway costs nothing to type twice.
+    if let SecretCommand::Set { name, .. } = &command {
+        ilar::secrets::valid_name(name).map_err(anyhow::Error::msg)?;
+    }
     match &command {
         SecretCommand::Encrypt => {
             if store.is_sealed() {
@@ -108,8 +161,16 @@ pub(crate) fn run(
                 );
             }
             let password = ask("New master password: ")?;
+            // Checked before the confirmation: typing a password twice
+            // to be told it was too short the first time is a waste.
+            if password.chars().count() < ilar::secrets::MIN_VALUE_CHARS {
+                anyhow::bail!(
+                    "a master password is at least {} characters; nothing sealed",
+                    ilar::secrets::MIN_VALUE_CHARS
+                );
+            }
             if password != ask("Again: ")? {
-                anyhow::bail!("the two did not match");
+                anyhow::bail!("the two did not match; nothing sealed");
             }
             store.encrypt(&password)?;
             return Ok(format!(
@@ -134,7 +195,6 @@ pub(crate) fn run(
     }
     match command {
         SecretCommand::Set { name, description } => {
-            ilar::secrets::valid_name(&name).map_err(anyhow::Error::msg)?;
             let value = match piped {
                 Some(stdin) => {
                     let mut value = String::new();
@@ -169,51 +229,65 @@ pub(crate) fn run(
             let listed = store.list()?;
             if listed.is_empty() {
                 return Ok(format!(
-                    "No secrets stored. Add one with: ilar secret set NAME ({})",
+                    "No secrets stored in {}. Add one with: ilar secret set NAME",
                     store.path().display()
                 ));
             }
             Ok(listed
                 .iter()
                 .map(|secret| {
+                    // The separator the model's own listing uses, so one
+                    // reads like the other.
                     let mut line = secret.name.clone();
                     if !secret.description.is_empty() {
-                        line.push_str(&format!("  {}", secret.description));
+                        line.push_str(&format!(" — {}", secret.description));
                     }
                     if !secret.always.is_empty() {
-                        line.push_str(&format!("  [always: {}]", secret.always.join(", ")));
+                        line.push_str(&format!(" [always: {}]", secret.always.join(", ")));
                     }
                     line
                 })
                 .collect::<Vec<_>>()
                 .join("\n"))
         }
-        SecretCommand::Remove { name } => Ok(if store.remove(&name)? {
-            format!("Removed {name}")
-        } else {
-            format!("No secret named {name}")
-        }),
-        SecretCommand::Grant { name, tool } => {
-            if !ilar::secrets::GRANTABLE_TOOLS.contains(&tool.as_str()) {
+        SecretCommand::Remove { name } => {
+            if name == ilar::secrets::ROOT {
                 anyhow::bail!(
-                    "no tool named {tool} takes secrets; one of: {}",
-                    ilar::secrets::GRANTABLE_TOOLS.join(", ")
+                    "{root} is not stored: it is what the sudo tool asks for. \
+                     `ilar secret revoke {root}` drops its standing approval",
+                    root = ilar::secrets::ROOT
                 );
             }
-            Ok(if store.grant_always(&name, &tool)? {
-                format!("{tool} may use {name} without asking")
+            if !store.remove(&name)? {
+                return Err(unknown_name(store, &name));
+            }
+            Ok(format!("Removed {name}"))
+        }
+        SecretCommand::Grant { name, tool } => {
+            grantable(&name, &tool)?;
+            if !store.grant_always(&name, &tool)? {
+                return Err(unknown_name(store, &name));
+            }
+            Ok(format!("{tool} may use {name} without asking"))
+        }
+        SecretCommand::Revoke { name, tool } => {
+            if let Some(tool) = tool.as_deref() {
+                grantable(&name, tool)?;
+            }
+            // Told apart from a name with nothing to revoke: one is a
+            // typo, the other is already the way it was asked for.
+            if name != ilar::secrets::ROOT && !stored_names(store).contains(&name) {
+                return Err(unknown_name(store, &name));
+            }
+            Ok(if store.revoke(&name, tool.as_deref())? {
+                match tool {
+                    Some(tool) => format!("{tool} will ask for {name} again"),
+                    None => format!("Every tool will ask for {name} again"),
+                }
             } else {
-                format!("No secret named {name}")
+                format!("Nothing to revoke for {name}")
             })
         }
-        SecretCommand::Revoke { name, tool } => Ok(if store.revoke(&name, tool.as_deref())? {
-            match tool {
-                Some(tool) => format!("{tool} will ask for {name} again"),
-                None => format!("Every tool will ask for {name} again"),
-            }
-        } else {
-            format!("Nothing to revoke for {name}")
-        }),
         SecretCommand::Encrypt | SecretCommand::Decrypt => unreachable!("handled above"),
     }
 }
@@ -224,6 +298,13 @@ mod tests {
 
     fn no_password(_: &str) -> Result<String> {
         panic!("a plain store asks for no master password")
+    }
+
+    /// One command on a plain store, with nothing on stdin and nobody
+    /// to ask: what every command but `set` needs.
+    fn dry(store: &SecretStore, command: SecretCommand) -> Result<String> {
+        let mut none: &[u8] = b"";
+        run(store, command, Some(&mut none), &mut no_password)
     }
 
     #[test]
@@ -286,7 +367,7 @@ mod tests {
             &mut no_password,
         )
         .unwrap();
-        assert_eq!(out, "GITHUB_TOKEN  for gh  [always: bash]");
+        assert_eq!(out, "GITHUB_TOKEN — for gh [always: bash]");
         assert!(!out.contains("ghp_secret"));
         let out = run(
             &store,
@@ -319,6 +400,111 @@ mod tests {
             .unwrap()
             .starts_with("No secrets stored")
         );
+    }
+
+    /// Every command fails the same way on a name the store does not
+    /// have, `root` is explained rather than reported missing, and a
+    /// grant nothing would ever read is refused.
+    #[test]
+    fn a_name_the_store_does_not_have_is_an_error_everywhere() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SecretStore::open(dir.path());
+        let failure = |result: Result<String>| result.unwrap_err().to_string();
+
+        // An empty store says where it is and what to type.
+        let out = dry(&store, SecretCommand::List).unwrap();
+        assert!(out.starts_with("No secrets stored in "), "{out}");
+        assert!(out.ends_with("ilar secret set NAME"), "{out}");
+
+        let missing = failure(dry(
+            &store,
+            SecretCommand::Remove {
+                name: "NOPE".into(),
+            },
+        ));
+        assert!(missing.contains("no secret named NOPE"), "{missing}");
+        assert!(missing.contains("the store is empty"), "{missing}");
+        store.set("KEY", "", "value-one").unwrap();
+        for command in [
+            SecretCommand::Remove {
+                name: "NOPE".into(),
+            },
+            SecretCommand::Grant {
+                name: "NOPE".into(),
+                tool: "bash".into(),
+            },
+            SecretCommand::Revoke {
+                name: "NOPE".into(),
+                tool: None,
+            },
+        ] {
+            let missing = failure(dry(&store, command));
+            assert!(missing.contains("stored: KEY"), "{missing}");
+        }
+        // A real name with nothing to revoke is not a typo.
+        let out = dry(
+            &store,
+            SecretCommand::Revoke {
+                name: "KEY".into(),
+                tool: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(out, "Nothing to revoke for KEY");
+
+        // root is not stored, and says what does drop it.
+        let root = failure(dry(
+            &store,
+            SecretCommand::Remove {
+                name: ilar::secrets::ROOT.into(),
+            },
+        ));
+        assert!(root.contains("is not stored"), "{root}");
+        assert!(root.contains("ilar secret revoke root"), "{root}");
+
+        // Grants nothing reads: root to anything but sudo, sudo
+        // anything but root, and a tool that takes no secrets at all.
+        let pairs = [
+            (ilar::secrets::ROOT, "bash", "grant it with --tool sudo"),
+            ("KEY", "sudo", "takes no secrets"),
+            ("KEY", "read", "no tool named read"),
+        ];
+        for (name, tool, says) in pairs {
+            let refused = failure(dry(
+                &store,
+                SecretCommand::Grant {
+                    name: name.into(),
+                    tool: tool.into(),
+                },
+            ));
+            assert!(refused.contains(says), "{refused}");
+            let refused = failure(dry(
+                &store,
+                SecretCommand::Revoke {
+                    name: name.into(),
+                    tool: Some(tool.into()),
+                },
+            ));
+            assert!(refused.contains(says), "{refused}");
+        }
+        let out = dry(
+            &store,
+            SecretCommand::Grant {
+                name: ilar::secrets::ROOT.into(),
+                tool: "sudo".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(out, "sudo may use root without asking");
+        let out = dry(
+            &store,
+            SecretCommand::Revoke {
+                name: ilar::secrets::ROOT.into(),
+                tool: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(out, "Every tool will ask for root again");
     }
 
     /// At a terminal the value is typed hidden and confirmed, never
@@ -365,6 +551,16 @@ mod tests {
         )
         .unwrap();
         let mut none: &[u8] = b"";
+        // A master password under the floor is refused after one ask:
+        // typing it twice to hear it was too short is a waste.
+        let mut asked = 0;
+        let mut short = |_: &str| {
+            asked += 1;
+            Ok("abc".to_string())
+        };
+        let error = run(&store, SecretCommand::Encrypt, Some(&mut none), &mut short).unwrap_err();
+        assert!(error.to_string().contains("nothing sealed"), "{error}");
+        assert_eq!(asked, 1);
         let mut answers = vec!["open sesame".to_string(), "open sesame".to_string()];
         let mut ask = |_: &str| Ok(answers.remove(0));
         let out = run(&store, SecretCommand::Encrypt, Some(&mut none), &mut ask).unwrap();
@@ -373,6 +569,22 @@ mod tests {
         // Forget it, as a new process would.
         ilar::secrets::forget_master(&store);
         assert!(store.is_locked());
+        // A name the store would refuse anyway is refused before the
+        // master password is asked for.
+        let error = run(
+            &store,
+            SecretCommand::Set {
+                name: "1bad".into(),
+                description: String::new(),
+            },
+            Some(&mut none),
+            &mut no_password,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("is not a secret name"),
+            "{error}"
+        );
         let mut refuse = |_: &str| Ok(String::new());
         assert!(run(&store, SecretCommand::List, Some(&mut none), &mut refuse).is_err());
         let mut wrong = |_: &str| Ok("nope".to_string());

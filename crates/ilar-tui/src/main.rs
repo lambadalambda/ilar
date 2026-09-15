@@ -165,91 +165,93 @@ enum Command {
 #[derive(clap::Args, Debug)]
 struct ServeArgs {
     /// Address to bind (default 127.0.0.1:4527, falling back to an
-    /// ephemeral port when taken). Anything but loopback requires a
-    /// token; an explicit address never falls back.
+    /// ephemeral port when taken); anything but loopback requires a
+    /// token, and an explicit address never falls back
     #[arg(long)]
     bind: Option<std::net::SocketAddr>,
 
-    /// Open the page in a browser once the server is up.
+    /// Open the page in a browser once the server is up
     #[arg(long)]
     open: bool,
 
     /// Session tail poll interval in milliseconds (default 250);
-    /// overrides ILAR_SERVE_POLL_MS.
+    /// overrides ILAR_SERVE_POLL_MS
     #[arg(long)]
     poll_ms: Option<u64>,
 }
 
 #[derive(clap::Args, Debug)]
 struct ExecArgs {
-    /// The prompt. Omit to read it from stdin.
+    /// The prompt; omit it to read it from stdin
     prompt: Option<String>,
 
-    /// Model to use (provider/model-id); overrides config.
+    /// Model to use (provider/model-id); overrides config
     #[arg(long)]
     model: Option<String>,
 
-    /// Agent name from config.
+    /// Agent name from config (markdown agents)
     #[arg(long)]
     agent: Option<String>,
 
-    /// Session id to continue.
+    /// Session id to resume
     #[arg(long)]
     session: Option<String>,
 
-    /// Continue the most recently modified session.
+    /// Resume the most recently modified session
     #[arg(long = "continue", conflicts_with = "session")]
     continue_last: bool,
 
-    /// Emit the loop's events as NDJSON on stdout instead of the answer.
+    /// Emit the loop's events as NDJSON on stdout instead of the answer
     #[arg(long)]
     json: bool,
 
-    /// Ignore the working directory's AGENTS.md/CLAUDE.md.
+    /// Ignore the working directory's AGENTS.md/CLAUDE.md
     #[arg(long)]
     no_project_instructions: bool,
 
-    /// Use them even when general.project_instructions is off.
+    /// Use them even when general.project_instructions is off
     #[arg(long, conflicts_with = "no_project_instructions")]
     project_instructions: bool,
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "ilar", version, about = "personal coding agent")]
+#[command(name = "ilar", version, about = "Personal coding agent")]
 struct Args {
     #[command(subcommand)]
     command: Option<Command>,
-    /// Model to use (provider/model-id); overrides config.
+    /// Model to use (provider/model-id); overrides config
     #[arg(long)]
     model: Option<String>,
 
-    /// Session id to resume.
+    /// Session id to resume
     #[arg(long)]
     session: Option<String>,
 
     /// Open a session read-only: its transcript, followed live, with
     /// no writer lease taken — the way to look at a gateway chat.
-    #[arg(long, conflicts_with_all = ["session", "continue_last"])]
+    /// Nothing about the session is decided here, so the flags that
+    /// would decide one are refused rather than ignored
+    #[arg(long, conflicts_with_all = ["session", "continue_last", "model", "agent", "print_prompt"])]
     view: Option<String>,
 
-    /// Resume the most recently modified session.
+    /// Resume the most recently modified session
     #[arg(long = "continue", conflicts_with = "session")]
     continue_last: bool,
 
-    /// Agent name from config (markdown agents).
+    /// Agent name from config (markdown agents)
     #[arg(long)]
     agent: Option<String>,
 
     /// Print what the model would get — model, options, system prompt,
-    /// every tool with its schema — and exit.
+    /// every tool with its schema — and exit
     #[arg(long)]
     print_prompt: bool,
 
-    /// Ignore the working directory's AGENTS.md/CLAUDE.md.
+    /// Ignore the working directory's AGENTS.md/CLAUDE.md
     #[arg(long)]
     no_project_instructions: bool,
 
-    /// Use them even when general.project_instructions is off.
+    /// Use them even when general.project_instructions is off
     #[arg(long, conflicts_with = "no_project_instructions")]
     project_instructions: bool,
 }

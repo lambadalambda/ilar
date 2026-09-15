@@ -136,6 +136,7 @@ ilar secret encrypt     # asks twice, seals the file
 ilar secret decrypt     # asks once, writes it back in the clear
 ```
 
+A master password is at least four characters, like any stored value.
 Sealed, the file holds a salt, a nonce and ciphertext: the key comes
 from the password with Argon2id, the JSON is XChaCha20-Poly1305 under a
 fresh nonce every write. Nothing about the secrets, not even their

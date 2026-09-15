@@ -611,7 +611,7 @@ impl From<Grant> for Approval {
 pub struct GrantPrompt {
     pub session_id: String,
     pub tool_call_id: Option<String>,
-    /// The tool asking, `bash` or `service`.
+    /// The tool asking: one of [`GRANTABLE_TOOLS`].
     pub tool: String,
     pub secret: String,
     pub description: String,
@@ -891,10 +891,24 @@ impl Secrets {
     }
 
     fn unknown(&self, name: &str) -> String {
+        if name == ROOT {
+            return format!(
+                "{ROOT} is not a stored secret: it is what the sudo tool asks for, and only the \
+                 sudo tool can ask"
+            );
+        }
+        // Without the `root` row: it is not stored, and `ilar secret
+        // set root` — what this line suggests — is refused.
         let known: Vec<String> = self
             .store
             .list()
-            .map(|listed| listed.into_iter().map(|secret| secret.name).collect())
+            .map(|listed| {
+                listed
+                    .into_iter()
+                    .map(|secret| secret.name)
+                    .filter(|name| name != ROOT)
+                    .collect()
+            })
             .unwrap_or_default();
         if known.is_empty() {
             format!(
