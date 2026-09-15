@@ -283,24 +283,117 @@ pub struct SessionHits {
     pub hits: Vec<Match>,
 }
 
-/// Search every root session's full history for `query`, newest session
-/// first, calling `emit` once per session that matched. `emit` returning
-/// `false` abandons the walk — the caller typed another key.
+/// Bytes read at a time while grepping a session's raw file.
+const RAW_CHUNK: usize = 256 * 1024;
+
+/// Whether a query is one the raw bytes of a JSONL log can be grepped
+/// for. The log escapes quotes, backslashes and control characters, and
+/// ASCII case-folding is the only kind that cannot change a string's
+/// length — so anything else is not looked for in the raw file at all.
+fn greppable(needle: &str) -> bool {
+    needle
+        .chars()
+        .all(|character| character.is_ascii() && !character.is_ascii_control())
+        && !needle.contains(['"', '\\'])
+}
+
+/// Whether the file's raw bytes could hold `query`, read once and
+/// nothing parsed. This is what keeps a cross-session search from
+/// deserializing gigabytes of JSON to find four hits.
+///
+/// Conservative in both directions it can afford to be: a query the
+/// escaping or case-folding rules above cannot be trusted for, and any
+/// read failure, answer `true` and pay the full parse. A search that is
+/// slower is a nuisance; a search that misses is a bug.
+pub fn file_may_contain(path: &std::path::Path, query: &str) -> bool {
+    let needle = query.trim();
+    if needle.is_empty() || !greppable(needle) {
+        return true;
+    }
+    let Ok(file) = std::fs::File::open(path) else {
+        return true;
+    };
+    let lowered = needle.as_bytes().to_ascii_lowercase();
+    let mut reader = std::io::BufReader::with_capacity(RAW_CHUNK, file);
+    let mut chunk = vec![0u8; RAW_CHUNK];
+    // The tail of the previous chunk, so a match straddling the
+    // boundary is still found.
+    let mut carry: Vec<u8> = Vec::new();
+    loop {
+        let read = match std::io::Read::read(&mut reader, &mut chunk) {
+            Ok(0) => return false,
+            Ok(read) => read,
+            Err(_) => return true,
+        };
+        let mut window = std::mem::take(&mut carry);
+        window.extend_from_slice(&chunk[..read]);
+        window.make_ascii_lowercase();
+        if contains(&window, &lowered) {
+            return true;
+        }
+        let keep = window.len().saturating_sub(lowered.len() - 1);
+        carry = window[keep..].to_vec();
+    }
+}
+
+/// Substring search over bytes, candidates found by their first byte —
+/// a plain `windows().any()` costs the needle's length per byte of a
+/// file that may be hundreds of megabytes.
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    let Some((first, _)) = needle.split_first() else {
+        return true;
+    };
+    let mut at = 0;
+    while let Some(offset) = haystack[at..].iter().position(|byte| byte == first) {
+        let start = at + offset;
+        if haystack[start..].starts_with(needle) {
+            return true;
+        }
+        at = start + 1;
+    }
+    false
+}
+
+/// Search the given sessions' full histories for `query`, in the order
+/// given, calling `emit` once per session that matched. `emit`
+/// returning `false` abandons the walk — the caller typed another key —
+/// and so does `cancel`, which is checked between files so a walk over
+/// a store nothing matches is abandoned just as promptly.
+///
+/// The listing is the caller's: the picker needs it anyway, and reading
+/// it twice for one search is a directory walk nobody asked for.
+/// Children never appear in a listing, so they are never searched.
 ///
 /// Sessions are read one at a time, so results stream in listing order
-/// rather than arriving after the whole store has been scanned. The
-/// session's entries ride along so a caller can build context around a
-/// hit (via [`around`]) without reading the session a second time.
+/// rather than arriving after the whole store has been scanned, and a
+/// file whose raw bytes cannot hold the query is never parsed at all.
+/// The session's entries ride along so a caller can build context
+/// around a hit (via [`around`]) without reading the session a second
+/// time.
 pub fn search_sessions<F: FnMut(&[Entry], SessionHits) -> bool>(
     store: &SessionStore,
+    sessions: &[crate::session::SessionSummary],
     query: &str,
     per_session: usize,
+    cancel: &std::sync::atomic::AtomicBool,
     mut emit: F,
 ) {
     if query.trim().is_empty() {
         return;
     }
-    for summary in store.list() {
+    for summary in sessions {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        // The cheap question first: are the query's bytes anywhere in
+        // this file? Most of the store answers no, and answering it
+        // costs one sequential read instead of a full replay.
+        if store
+            .session_path(&summary.id)
+            .is_ok_and(|path| !file_may_contain(&path, query))
+        {
+            continue;
+        }
         // A session that vanished or went unreadable mid-walk is
         // skipped, same as the listing would.
         let Ok(entries) = session_entries(store, &summary.id) else {
@@ -313,8 +406,8 @@ pub fn search_sessions<F: FnMut(&[Entry], SessionHits) -> bool>(
         let keep_going = emit(
             &entries,
             SessionHits {
-                session_id: summary.id,
-                title: summary.title,
+                session_id: summary.id.clone(),
+                title: summary.title.clone(),
                 modified: summary.modified,
                 hits,
             },
@@ -499,5 +592,55 @@ mod tests {
     fn an_empty_query_matches_nothing() {
         let entries = entries(&[user("anything")]);
         assert!(search(&entries, "   ", None, MAX_MATCHES).is_empty());
+    }
+
+    /// The gate that decides whether a file is parsed at all: the
+    /// query's bytes are either in it or they are not, and case does
+    /// not count.
+    #[test]
+    fn a_file_without_the_querys_bytes_is_not_worth_parsing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(
+            &path,
+            b"{\"type\":\"user_message\",\"text\":\"the AES table\"}\n",
+        )
+        .unwrap();
+
+        assert!(file_may_contain(&path, "aes table"));
+        assert!(file_may_contain(&path, "AES TABLE"));
+        assert!(!file_may_contain(&path, "the login page"));
+        // A file that cannot be read is never ruled out.
+        assert!(file_may_contain(&dir.path().join("gone.jsonl"), "anything"));
+    }
+
+    /// A match straddling the chunk boundary is still found: the whole
+    /// point of the carry.
+    #[test]
+    fn a_match_across_a_chunk_boundary_is_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.jsonl");
+        let mut bytes = vec![b'x'; RAW_CHUNK - 4];
+        bytes.extend_from_slice(b"needle");
+        std::fs::write(&path, &bytes).unwrap();
+
+        assert!(file_may_contain(&path, "needle"));
+        assert!(!file_may_contain(&path, "haystack"));
+    }
+
+    /// What the raw grep refuses to judge: the log escapes quotes and
+    /// backslashes, and case-folding outside ASCII can change a
+    /// string's length. Such a query pays the full parse rather than
+    /// risk a miss.
+    #[test]
+    fn a_query_the_raw_bytes_cannot_settle_is_never_ruled_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(&path, b"{\"text\":\"plain ascii only\"}\n").unwrap();
+
+        assert!(file_may_contain(&path, "İstanbul"), "non-ascii");
+        assert!(file_may_contain(&path, "say \"hello\""), "a quote");
+        assert!(file_may_contain(&path, "C:\\Users"), "a backslash");
+        assert!(file_may_contain(&path, "   "), "an empty query");
     }
 }

@@ -62,9 +62,27 @@ fn session_with(store: &SessionStore, events: Vec<SessionEvent>) -> String {
     id
 }
 
+/// The walk over everything the listing shows, uncancelled — what a
+/// caller with no keystrokes to worry about wants.
+fn walk<F: FnMut(&[ilar::recall::Entry], SessionHits) -> bool>(
+    store: &SessionStore,
+    query: &str,
+    per_session: usize,
+    emit: F,
+) {
+    search_sessions(
+        store,
+        &store.list(),
+        query,
+        per_session,
+        &std::sync::atomic::AtomicBool::new(false),
+        emit,
+    );
+}
+
 fn collect_all(store: &SessionStore, query: &str, per_session: usize) -> Vec<SessionHits> {
     let mut all = Vec::new();
-    search_sessions(store, query, per_session, |_, hits| {
+    walk(store, query, per_session, |_, hits| {
         all.push(hits);
         true
     });
@@ -95,7 +113,7 @@ fn a_phrase_from_the_middle_finds_its_session() {
     // The entries handed to the callback are enough to build a preview
     // around the hit — its neighbours, not just the matched line.
     let mut context = Vec::new();
-    ilar::recall::search_sessions(&store, "aes table", 5, |entries, hits| {
+    walk(&store, "aes table", 5, |entries, hits| {
         context = ilar::recall::around(entries, hits.hits[0].event, 2, 400);
         true
     });
@@ -143,12 +161,29 @@ fn emissions_follow_listing_order_and_stop_on_demand() {
     // stops the moment the caller loses interest — a new keystroke.
     let listing: Vec<String> = store.list().into_iter().map(|s| s.id).collect();
     let mut seen = Vec::new();
-    search_sessions(&store, "shared needle", 5, |_, hits| {
+    walk(&store, "shared needle", 5, |_, hits| {
         seen.push(hits.session_id.clone());
         false
     });
     assert_eq!(seen.len(), 1, "kept walking after the caller stopped");
     assert_eq!(seen[0], listing[0]);
+
+    // The cancel flag stops the walk between files, so a store where
+    // nothing matches is abandoned as promptly as one where everything
+    // does.
+    let mut seen = Vec::new();
+    search_sessions(
+        &store,
+        &store.list(),
+        "shared needle",
+        5,
+        &std::sync::atomic::AtomicBool::new(true),
+        |_, hits| {
+            seen.push(hits.session_id.clone());
+            true
+        },
+    );
+    assert!(seen.is_empty(), "a cancelled walk still read {seen:?}");
 
     let all = collect_all(&store, "shared needle", 5);
     let ids: Vec<&str> = all.iter().map(|hits| hits.session_id.as_str()).collect();

@@ -1356,14 +1356,18 @@ impl SessionPicker {
     /// Sessions matching the query, best fuzzy score first (stable, so
     /// equal scores keep recency order). With no query the listing is a
     /// resume list rather than a search result, so this directory's
-    /// sessions lead it — recency within each group.
+    /// sessions lead it and the ones nothing was said in go last —
+    /// recency within each group.
     fn filtered(&self) -> Vec<&ilar::session::SessionSummary> {
         let matched = fuzzy_filter(&self.query, self.sessions.iter(), |session| {
             format!("{} {}", session.title.as_deref().unwrap_or(""), session.id)
         });
         if self.query.trim().is_empty() {
-            here_first(matched, |session| {
-                launched_here(session.cwd.as_deref(), self.cwd.as_deref())
+            ranked(matched, |session| {
+                resume_rank(
+                    launched_here(session.cwd.as_deref(), self.cwd.as_deref()),
+                    session.title.is_none(),
+                )
             })
         } else {
             matched
@@ -1466,6 +1470,10 @@ pub(crate) struct SearchRow {
     /// The query matched the session's title; ranked ahead of
     /// content-only matches.
     pub(crate) title_match: bool,
+    /// Nothing was ever said in this session, so `title` is a
+    /// placeholder. Such a row goes last in a resume listing — it has
+    /// nothing to resume.
+    pub(crate) untitled: bool,
     /// (speaker label, text, is-the-hit) around the match, in order.
     /// Empty on a listing row until the lazy preview loads it.
     pub(crate) context: Vec<(String, String, bool)>,
@@ -1564,7 +1572,9 @@ impl SessionSearch {
         let room = MAX_SEARCH_ROWS.saturating_sub(self.rows.len());
         self.rows.extend(rows.into_iter().take(room));
         if self.query.trim().is_empty() {
-            self.rows = here_first(std::mem::take(&mut self.rows), |row| row.origin.here());
+            self.rows = ranked(std::mem::take(&mut self.rows), |row| {
+                resume_rank(row.origin.here(), row.untitled)
+            });
         } else {
             // Search order: a session named for the query beats one
             // that merely mentions it. Stable, so each group keeps the
@@ -2068,7 +2078,7 @@ impl Default for RowOrigin {
 }
 
 impl RowOrigin {
-    fn here(&self) -> bool {
+    pub(crate) fn here(&self) -> bool {
         matches!(self, Self::Here)
     }
 
@@ -2110,12 +2120,28 @@ pub(crate) fn row_origin(
     }
 }
 
-/// "This directory first", stably: the rows from here keep their
-/// order — recency, as the listing delivered it — and the rest follow
-/// in theirs.
+/// Group rows by rank, stably: the rows in each group keep the order
+/// they arrived in — recency, as the listing delivered it.
+fn ranked<T>(mut rows: Vec<T>, rank: impl Fn(&T) -> u8) -> Vec<T> {
+    rows.sort_by_key(rank);
+    rows
+}
+
+/// "This directory first", stably.
 fn here_first<T>(rows: Vec<T>, here: impl Fn(&T) -> bool) -> Vec<T> {
-    let (mine, others): (Vec<T>, Vec<T>) = rows.into_iter().partition(here);
-    mine.into_iter().chain(others).collect()
+    ranked(rows, |row| u8::from(!here(row)))
+}
+
+/// Where a row belongs in a resume listing: this directory's named
+/// sessions, then everybody else's, then the ones nothing was ever
+/// said in. An untitled row has nothing to resume, so it never leads a
+/// list and never stands among this directory's work.
+fn resume_rank(here: bool, untitled: bool) -> u8 {
+    match (untitled, here) {
+        (false, true) => 0,
+        (false, false) => 1,
+        (true, _) => 2,
+    }
 }
 
 /// The right-hand column of a resume row: when the session was last
@@ -4339,6 +4365,38 @@ mod tests {
         );
     }
 
+    /// A session nothing was said in is not a place to resume: however
+    /// new it is, and whatever directory it was launched from, it goes
+    /// after every session that has a name.
+    #[test]
+    fn a_session_with_no_title_is_listed_last() {
+        let here = std::path::PathBuf::from("/work/ilar");
+        let now = std::time::SystemTime::now();
+        let ago = |seconds: u64| now - std::time::Duration::from_secs(seconds);
+        let picker = SessionPicker::new(
+            vec![
+                summary("empty-here", None, ago(60), Some(here.clone())),
+                summary("named-elsewhere", Some("other work"), ago(600), None),
+                summary(
+                    "named-here",
+                    Some("this repo"),
+                    ago(7_200),
+                    Some(here.clone()),
+                ),
+            ],
+            Some(here),
+        );
+
+        assert_eq!(
+            picker
+                .filtered()
+                .iter()
+                .map(|session| session.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["named-here", "named-elsewhere", "empty-here"]
+        );
+    }
+
     #[test]
     fn reasoning_variant_picker_confirms_default_for_new_model() {
         for id in ["openai/gpt-6-astra", "opencode/gpt-6-astra"] {
@@ -4762,6 +4820,7 @@ mod tests {
             origin: RowOrigin::default(),
             match_count: 1,
             title_match: false,
+            untitled: false,
             context: vec![
                 ("user".into(), "before the hit".into(), false),
                 ("assistant".into(), context_line.into(), true),
@@ -4940,6 +4999,66 @@ mod tests {
             .collect();
         search.push_rows(0, rows);
         assert_eq!(search.rows.len(), MAX_SEARCH_ROWS);
+    }
+
+    /// The cap is applied to a listing that already leads with this
+    /// directory, so this directory's session is in the list however
+    /// many newer ones another checkout has. The scanner groups; this
+    /// pins that the modal does not undo it.
+    #[test]
+    fn this_directorys_session_survives_the_row_cap() {
+        let mut search = SessionSearch::new();
+        let mut rows = vec![SearchRow {
+            origin: RowOrigin::Here,
+            ..search_row("mine", "this repo", "ctx")
+        }];
+        rows.extend((0..MAX_SEARCH_ROWS + 50).map(|index| SearchRow {
+            origin: RowOrigin::Elsewhere(Some("~/repos/other".into())),
+            ..search_row(&format!("other-{index}"), "other project", "ctx")
+        }));
+
+        search.push_rows(0, rows);
+
+        assert_eq!(search.rows.len(), MAX_SEARCH_ROWS);
+        assert_eq!(
+            search.rows.first().map(|row| row.session_id.as_str()),
+            Some("mine"),
+            "this directory's session was capped away"
+        );
+    }
+
+    /// A session nothing was ever said in has nothing to resume: it
+    /// goes last, and never among this directory's rows.
+    #[test]
+    fn a_session_with_nothing_in_it_is_listed_last() {
+        let mut search = SessionSearch::new();
+        search.push_rows(
+            0,
+            vec![
+                SearchRow {
+                    origin: RowOrigin::Here,
+                    untitled: true,
+                    ..search_row("empty-here", "(no messages yet)", "ctx")
+                },
+                SearchRow {
+                    origin: RowOrigin::Elsewhere(Some("~/repos/other".into())),
+                    ..search_row("named-elsewhere", "other project", "ctx")
+                },
+                SearchRow {
+                    origin: RowOrigin::Here,
+                    ..search_row("named-here", "this repo", "ctx")
+                },
+            ],
+        );
+
+        assert_eq!(
+            search
+                .rows
+                .iter()
+                .map(|row| row.session_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["named-here", "named-elsewhere", "empty-here"]
+        );
     }
 
     #[test]

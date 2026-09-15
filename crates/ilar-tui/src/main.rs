@@ -2934,6 +2934,32 @@ const SEARCH_CONTEXT_RADIUS: usize = 2;
 /// Characters of any one entry in the preview.
 const SEARCH_CONTEXT_CHARS: usize = 500;
 
+/// One row of the resume listing. Nothing is read: a summary already
+/// carries everything the row shows, and the launch directory is
+/// compared exactly as recorded — the same comparison `--continue`
+/// makes, so the two surfaces cannot disagree about what "here" is.
+fn listing_row(
+    summary: &ilar::session::SessionSummary,
+    cwd: &std::path::Path,
+    home: Option<&std::path::Path>,
+    now: std::time::SystemTime,
+) -> SearchRow {
+    SearchRow {
+        title: summary
+            .title
+            .clone()
+            .unwrap_or_else(|| UNTITLED_SESSION.to_string()),
+        untitled: summary.title.is_none(),
+        session_id: summary.id.clone(),
+        event: 0,
+        age: crate::modals::last_used(summary.modified, now),
+        origin: crate::modals::row_origin(summary.cwd.as_deref(), Some(cwd), home),
+        match_count: 0,
+        title_match: false,
+        context: Vec::new(),
+    }
+}
+
 /// Start a background walk of every session for the search modal: a
 /// content grep when there is a query, the recent-sessions listing
 /// when there is not. Rows stream through the channel as each session
@@ -2960,40 +2986,44 @@ fn start_session_scan(
         // Symlinked launch paths must still count as "here".
         let cwd = cwd.canonicalize().unwrap_or(cwd);
         if query.trim().is_empty() {
-            // The resume listing: head scans only, one batch, already
-            // newest-first — the modal partitions this directory's
-            // sessions to the top and the preview loads lazily. This is
-            // what makes the modal open instantly: nothing here reads a
-            // session past its head.
-            let rows: Vec<SearchRow> = store
+            // This directory's last session, straight from the pointer
+            // file: one JSON read and one head read, sent before the
+            // listing so the modal opens on the right row even while
+            // the scan is still running — and even with a cold cache.
+            let pointed = store
+                .last_in(&cwd)
+                // Resuming into yourself is not a switch.
+                .filter(|summary| summary.id != current_session);
+            if let Some(summary) = &pointed {
+                let _ = tx.send(vec![listing_row(summary, &cwd, home.as_deref(), now)]);
+            }
+            if flag.load(Ordering::Relaxed) {
+                return;
+            }
+            // The resume listing: head scans only (and the summary cache
+            // answers most of those), one batch, already newest-first —
+            // the modal keeps this directory's sessions at the top and
+            // the preview loads lazily. This is what makes the modal
+            // open instantly: nothing here reads a session past its
+            // head.
+            //
+            // The cap is per group, and that is the whole point: taking
+            // the newest 200 sessions *first* left this directory's last
+            // session off the list entirely once 200 sessions elsewhere
+            // were newer.
+            let (mine, others): (Vec<SearchRow>, Vec<SearchRow>) = store
                 .list()
                 .into_iter()
-                // Resuming into yourself is not a switch.
-                .filter(|summary| summary.id != current_session)
-                .take(MAX_SEARCH_ROWS)
-                .map(|summary| {
-                    let launched = summary
-                        .cwd
-                        .as_ref()
-                        .map(|path| path.canonicalize().unwrap_or_else(|_| path.clone()));
-                    SearchRow {
-                        title: summary
-                            .title
-                            .clone()
-                            .unwrap_or_else(|| UNTITLED_SESSION.to_string()),
-                        session_id: summary.id,
-                        event: 0,
-                        age: crate::modals::last_used(summary.modified, now),
-                        origin: crate::modals::row_origin(
-                            launched.as_deref(),
-                            Some(&cwd),
-                            home.as_deref(),
-                        ),
-                        match_count: 0,
-                        title_match: false,
-                        context: Vec::new(),
-                    }
+                .filter(|summary| {
+                    summary.id != current_session
+                        && pointed.as_ref().is_none_or(|row| row.id != summary.id)
                 })
+                .map(|summary| listing_row(&summary, &cwd, home.as_deref(), now))
+                .partition(|row| row.origin.here());
+            let rows: Vec<SearchRow> = mine
+                .into_iter()
+                .take(MAX_SEARCH_ROWS)
+                .chain(others.into_iter().take(MAX_SEARCH_ROWS))
                 .collect();
             let _ = tx.send(rows);
             return;
@@ -3001,69 +3031,77 @@ fn start_session_scan(
         // Query mode: one row per matching session, its best hit
         // centered in the preview context. Sessions are read one at a
         // time and stream in newest-first; the modal ranks title
-        // matches ahead as they arrive.
-        let launched_in: std::collections::HashMap<String, Option<std::path::PathBuf>> = store
-            .list()
-            .into_iter()
-            .map(|session| (session.id, session.cwd))
+        // matches ahead as they arrive. The listing is taken once and
+        // handed to the walk — it used to be read twice per search.
+        let sessions = store.list();
+        let launched_in: std::collections::HashMap<&str, Option<&std::path::Path>> = sessions
+            .iter()
+            .map(|session| (session.id.as_str(), session.cwd.as_deref()))
             .collect();
         let needle = query.to_lowercase();
         let mut sent = 0usize;
-        ilar::recall::search_sessions(&store, &query, SEARCH_HITS_PER_SESSION, |entries, hits| {
-            if flag.load(Ordering::Relaxed) {
-                return false;
-            }
-            let Some(best) = hits.hits.first() else {
-                return true;
-            };
-            let title = hits
-                .title
-                .clone()
-                .unwrap_or_else(|| UNTITLED_SESSION.to_string());
-            let launched = launched_in
-                .get(&hits.session_id)
-                .and_then(|launched_in| launched_in.as_ref())
-                .map(|path| path.canonicalize().unwrap_or_else(|_| path.clone()));
-            let context = ilar::recall::around(
-                entries,
-                best.event,
-                SEARCH_CONTEXT_RADIUS,
-                SEARCH_CONTEXT_CHARS,
-            )
-            .into_iter()
-            .map(|entry| {
-                let is_hit = entry.event == best.event;
-                let text = if is_hit {
-                    // The slice `around` took runs from the front;
-                    // the match may live past it. Re-center the hit
-                    // entry on the match so the reason this row
-                    // exists is always on screen.
-                    entries
-                        .iter()
-                        .find(|original| original.event == best.event)
-                        .map(|original| {
-                            center_on_match(&original.text, &needle, SEARCH_CONTEXT_CHARS)
-                        })
-                        .unwrap_or(entry.text)
-                } else {
-                    entry.text
+        ilar::recall::search_sessions(
+            &store,
+            &sessions,
+            &query,
+            SEARCH_HITS_PER_SESSION,
+            &flag,
+            |entries, hits| {
+                if flag.load(Ordering::Relaxed) {
+                    return false;
+                }
+                let Some(best) = hits.hits.first() else {
+                    return true;
                 };
-                (entry.speaker.label().to_string(), text, is_hit)
-            })
-            .collect();
-            let row = SearchRow {
-                session_id: hits.session_id.clone(),
-                title_match: title.to_lowercase().contains(&needle),
-                title,
-                event: best.event,
-                age: crate::modals::last_used(hits.modified, now),
-                origin: crate::modals::row_origin(launched.as_deref(), Some(&cwd), home.as_deref()),
-                match_count: hits.hits.len(),
-                context,
-            };
-            sent += 1;
-            tx.send(vec![row]).is_ok() && sent < MAX_SEARCH_ROWS
-        });
+                let title = hits
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| UNTITLED_SESSION.to_string());
+                // As recorded, uncanonicalized: the same comparison the
+                // resume listing and `--continue` make.
+                let launched = launched_in.get(hits.session_id.as_str()).copied().flatten();
+                let context = ilar::recall::around(
+                    entries,
+                    best.event,
+                    SEARCH_CONTEXT_RADIUS,
+                    SEARCH_CONTEXT_CHARS,
+                )
+                .into_iter()
+                .map(|entry| {
+                    let is_hit = entry.event == best.event;
+                    let text = if is_hit {
+                        // The slice `around` took runs from the front;
+                        // the match may live past it. Re-center the hit
+                        // entry on the match so the reason this row
+                        // exists is always on screen.
+                        entries
+                            .iter()
+                            .find(|original| original.event == best.event)
+                            .map(|original| {
+                                center_on_match(&original.text, &needle, SEARCH_CONTEXT_CHARS)
+                            })
+                            .unwrap_or(entry.text)
+                    } else {
+                        entry.text
+                    };
+                    (entry.speaker.label().to_string(), text, is_hit)
+                })
+                .collect();
+                let row = SearchRow {
+                    session_id: hits.session_id.clone(),
+                    title_match: title.to_lowercase().contains(&needle),
+                    untitled: hits.title.is_none(),
+                    title,
+                    event: best.event,
+                    age: crate::modals::last_used(hits.modified, now),
+                    origin: crate::modals::row_origin(launched, Some(&cwd), home.as_deref()),
+                    match_count: hits.hits.len(),
+                    context,
+                };
+                sent += 1;
+                tx.send(vec![row]).is_ok() && sent < MAX_SEARCH_ROWS
+            },
+        );
     });
     (rx, cancel)
 }
