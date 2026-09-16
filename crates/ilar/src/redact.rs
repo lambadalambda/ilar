@@ -11,9 +11,11 @@
 //!
 //! So: one needle table, one token pass, one URL rule. What is *not*
 //! shared is policy — which values a surface runs this over. A tool
-//! argument is the model's own words and only named things are
-//! rewritten; an error body is a stranger's and every string in it
-//! goes through the token pass. Those live with their callers.
+//! argument is the model's own words, and what is rewritten there is
+//! what something names: a key, a header, or the flag of a program
+//! known to take a credential; an error body is a stranger's and every
+//! string in it goes through the token pass. Those live with their
+//! callers.
 //!
 //! Display-side throughout. The persisted event and the provider
 //! request keep the raw text; nothing here is a security boundary, it
@@ -77,33 +79,159 @@ pub(crate) enum Mode {
 /// surfaces carry them.
 const WRAPPERS: [char; 5] = ['\'', '"', ',', '{', '}'];
 
+/// Stands in the token stream where a line break was, and nowhere
+/// else: `split_whitespace` never yields whitespace of its own.
+const LINE_BREAK: &str = "\n";
+
+/// Flags that hand a credential to the *next* token, per program. A
+/// credential passed this way has no name of its own — `bob:hunter2`
+/// says nothing — so the only thing that can tell a secret from a
+/// filename is the command in front of it: `-u` is `user:password` to
+/// `curl` and a sort order to `sort`, a file mode to `chmod`, a user
+/// to `docker run`.
+///
+/// Only the flags whose value *is* the credential belong here. The
+/// ones that name it — `--password`, `--http-password` — are already
+/// caught by [`sensitive_key`], and adding them would say nothing
+/// twice. A username is hidden along with its password for the reason
+/// [`url_credentials`] hides the whole userinfo: it is the account the
+/// secret opens.
+const CREDENTIAL_FLAGS: [(&str, &[&str]); 2] = [
+    ("curl", &["-u", "--user", "-U", "--proxy-user"]),
+    (
+        "wget",
+        &["--user", "--http-user", "--ftp-user", "--proxy-user"],
+    ),
+];
+
+/// Words that stand in front of the program rather than being one,
+/// and the shell keywords a command can open on: what follows is still
+/// the command whose flags are about to be read.
+const COMMAND_PREFIXES: [&str; 11] = [
+    "sudo", "doas", "env", "nohup", "time", "command", "exec", "xargs", "then", "do", "else",
+];
+
+/// Why the pass is armed, which decides whether the value it hides is
+/// also *collected*. Every named secret is: the caller strikes what it
+/// collects out of the tool's whole result. A credential flag's value
+/// is only collected when it carries a password — `curl -u deploy`
+/// hands over an account name, and striking `deploy` out of a result
+/// blanks an ordinary word wherever it appears.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Armed {
+    /// Something named the value: a sensitive key, a header, a scheme.
+    Named,
+    /// A credential flag took it positionally ([`CREDENTIAL_FLAGS`]).
+    Credential,
+}
+
+impl Armed {
+    fn collects(self, value: &str) -> bool {
+        self == Self::Named || value.contains(':')
+    }
+}
+
+/// Why this key's value is hidden, if it is: the key names a secret,
+/// or the program in front of it says this flag hands one over.
+fn armed_by(key: &str, program: Option<&str>) -> Option<Armed> {
+    if sensitive_key(key) {
+        return Some(Armed::Named);
+    }
+    program
+        .is_some_and(|program| {
+            CREDENTIAL_FLAGS
+                .iter()
+                .any(|(name, flags)| *name == program && flags.contains(&key))
+        })
+        .then_some(Armed::Credential)
+}
+
+/// The program a token names: its last path component, without the
+/// punctuation a subshell leaves glued to the front, so
+/// `/usr/bin/curl` and `$(curl` are both `curl`.
+fn program_name(token: &str) -> &str {
+    let trimmed = token.trim_start_matches(['$', '(', '`', '!']);
+    trimmed.rsplit('/').next().unwrap_or(trimmed)
+}
+
+/// Whether the *next* token starts a new command: past a pipeline or a
+/// `&&`, the flags belong to somebody else.
+fn ends_a_command(token: &str) -> bool {
+    matches!(token, "|" | "|&" | "&" | ")") || token.ends_with([';', '|', '&'])
+}
+
+/// Whether *this* token starts one: a subshell runs its own command
+/// wherever it appears, including mid-argument.
+fn opens_a_command(token: &str) -> bool {
+    token.starts_with(['(', '`']) || token.starts_with("$(")
+}
+
+/// Whether this token stands in front of the program rather than being
+/// it: `sudo`, a flag of its own, or the `FOO=bar` an environment
+/// prefix is made of.
+fn precedes_a_program(token: &str) -> bool {
+    COMMAND_PREFIXES.contains(&program_name(token)) || token.starts_with('-') || token.contains('=')
+}
+
 /// One whitespace-separated pass over `text`, hiding the tokens that
-/// follow a sensitive flag or header and the ones that announce
-/// themselves. Every value it hides is pushed to `secrets`, for the
-/// caller that then has to find those same values echoed back in a
-/// result.
+/// follow a sensitive flag or header, the ones that announce
+/// themselves, and the ones a program's own credential flag hands over
+/// without naming ([`CREDENTIAL_FLAGS`]). Every value it hides is
+/// pushed to `secrets`, for the caller that then has to find those same
+/// values echoed back in a result.
 ///
 /// Whitespace is normalised to single spaces on the way out: both
 /// callers show the result rather than run it.
+///
+/// Which program is in force is tracked whatever the mode. A body is
+/// not a command line, but a stranger quoting one is exactly where a
+/// `curl -u` turns up, and the table is narrow enough that reading a
+/// sentence as a command hides nothing a sentence needed.
 pub(crate) fn tokens(text: &str, mode: Mode, secrets: &mut Vec<String>) -> String {
-    let mut redact_next = false;
-    text.split_whitespace()
-        .map(|token| {
+    let mut armed: Option<Armed> = None;
+    // Whose flags are being read: see [`CREDENTIAL_FLAGS`].
+    let mut program: Option<&str> = None;
+    let mut expect_program = true;
+    text.lines()
+        // A line break ends a command as surely as a `;` does, and a
+        // shell command arrives here as a whole script often enough
+        // that the first line must not answer for the rest. The marker
+        // is dropped below, so the output is the same single-spaced run
+        // it always was.
+        .flat_map(|line| line.split_whitespace().chain([LINE_BREAK]))
+        .filter_map(|token| {
+            if token == LINE_BREAK {
+                program = None;
+                expect_program = true;
+                return None;
+            }
             let bare = token.trim_matches(WRAPPERS);
-            if redact_next {
+            if armed.is_none() && !bare.is_empty() {
+                if ends_a_command(bare) {
+                    program = None;
+                    expect_program = true;
+                } else if opens_a_command(bare) || (expect_program && !precedes_a_program(bare)) {
+                    // A bare `(` names nothing; the program is the
+                    // token after it.
+                    let name = program_name(bare);
+                    program = (!name.is_empty()).then_some(name);
+                    expect_program = name.is_empty();
+                }
+            }
+            if let Some(arm) = armed {
                 // The scheme word is not the credential; the token
                 // after it is. Stays armed.
                 if is_scheme(bare) || bare == "=" || bare == ":" {
-                    return token.to_string();
+                    return Some(token.to_string());
                 }
-                redact_next = false;
+                armed = None;
                 // Never an empty needle: both callers strike what they
                 // collect out of a result, and an empty one strikes
                 // everything.
-                if !bare.is_empty() {
+                if !bare.is_empty() && arm.collects(bare) {
                     secrets.push(bare.to_string());
                 }
-                return REDACTED.to_string();
+                return Some(REDACTED.to_string());
             }
             // Keys that name themselves, whatever they sit beside.
             if bare.starts_with("sk-")
@@ -111,7 +239,7 @@ pub(crate) fn tokens(text: &str, mode: Mode, secrets: &mut Vec<String>) -> Strin
                 || bare.starts_with("github_pat_")
             {
                 secrets.push(bare.to_string());
-                return REDACTED.to_string();
+                return Some(REDACTED.to_string());
             }
             let lower = bare.to_ascii_lowercase();
             // `Authorization:` carries its value in the same token as
@@ -120,28 +248,31 @@ pub(crate) fn tokens(text: &str, mode: Mode, secrets: &mut Vec<String>) -> Strin
             if let Some(position) = lower.find("authorization:") {
                 let value = lower[position + "authorization:".len()..].trim();
                 if value.is_empty() || value == "bearer" || value == "basic" {
-                    redact_next = true;
-                    return token.to_string();
+                    armed = Some(Armed::Named);
+                    return Some(token.to_string());
                 }
                 // Sliced from the original, not the lowercased copy:
                 // the secret has to match its own casing to be found
                 // in an echo later.
                 secrets.push(bare[position + "authorization:".len()..].trim().to_string());
-                return format!("{}{REDACTED}", &bare[..position + "authorization:".len()]);
+                return Some(format!(
+                    "{}{REDACTED}",
+                    &bare[..position + "authorization:".len()]
+                ));
             }
             if let Some((key, value, separator)) = split_assignment(bare, mode)
-                && sensitive_key(key)
+                && let Some(arm) = armed_by(key, program)
             {
                 // A scheme word is not the value, it announces it.
                 if value.is_empty() || is_scheme(value.trim_matches(WRAPPERS)) {
-                    redact_next = true;
-                    return token.to_string();
+                    armed = Some(arm);
+                    return Some(token.to_string());
                 }
                 let value = value.trim_matches(WRAPPERS);
-                if !value.is_empty() {
+                if !value.is_empty() && arm.collects(value) {
                     secrets.push(value.to_string());
                 }
-                return format!("{key}{separator}{REDACTED}");
+                return Some(format!("{key}{separator}{REDACTED}"));
             }
             // A bare name whose value is the next token. `bearer`
             // announces one on any surface; `basic` and the plain
@@ -151,10 +282,10 @@ pub(crate) fn tokens(text: &str, mode: Mode, secrets: &mut Vec<String>) -> Strin
             if bare.eq_ignore_ascii_case("bearer")
                 || (mode == Mode::Untrusted && (is_scheme(bare) || sensitive_key(bare)))
             {
-                redact_next = true;
-                return token.to_string();
+                armed = Some(Armed::Named);
+                return Some(token.to_string());
             }
-            url_credentials(token).unwrap_or_else(|| token.to_string())
+            Some(url_credentials(token).unwrap_or_else(|| token.to_string()))
         })
         .collect::<Vec<_>>()
         .join(" ")
@@ -442,6 +573,98 @@ mod tests {
             secrets.iter().any(|secret| secret.contains("swordfish")),
             "{secrets:?}"
         );
+    }
+
+    /// A credential handed to a flag has no name of its own. The only
+    /// thing that says `bob:hunter2` is a secret is the program in
+    /// front of it, so the pass has to know which program it is
+    /// reading — including after a pipeline, a `&&` or a `sudo`.
+    #[test]
+    fn a_flag_whose_program_takes_a_credential_hides_its_value() {
+        for command in [
+            "curl -u bob:hunter2 https://api.example.com",
+            "curl --user bob:hunter2 https://api.example.com",
+            "curl --user=bob:hunter2 https://api.example.com",
+            "curl -U bob:hunter2 -x proxy:3128 https://api.example.com",
+            "/usr/bin/curl -u bob:hunter2 https://api.example.com",
+            "sudo curl -u bob:hunter2 https://api.example.com",
+            "env HTTP_PROXY=x curl -u bob:hunter2 https://api.example.com",
+            "cat urls.txt && curl -u bob:hunter2 https://api.example.com",
+            "echo x | curl -u bob:hunter2 --data-binary @- https://api.example.com",
+            "wget --user bob:hunter2 https://api.example.com",
+            "cd /tmp\ncurl -u bob:hunter2 https://api.example.com",
+            "echo $(curl -u bob:hunter2 https://api.example.com)",
+            "sudo -E curl -u bob:hunter2 https://api.example.com",
+        ] {
+            let mut secrets = Vec::new();
+            let got = tokens(command, Mode::Command, &mut secrets);
+            assert!(!got.contains("hunter2"), "{command}: {got}");
+            assert!(got.contains(REDACTED), "{command}: {got}");
+            assert!(
+                secrets.iter().any(|secret| secret.contains("hunter2")),
+                "{command}: {secrets:?}"
+            );
+        }
+        // Exactly the credential and nothing around it: every value
+        // hidden here is also struck out of the tool's whole result,
+        // so over-hiding costs a URL, a filename, a test report.
+        assert_eq!(
+            hidden("curl -u bob:hunter2 https://api.example.com", Mode::Command),
+            "curl -u <redacted> https://api.example.com"
+        );
+        assert_eq!(
+            hidden("curl --user=bob:hunter2 https://api.io", Mode::Command),
+            "curl --user=<redacted> https://api.io"
+        );
+    }
+
+    /// The account without the password is still hidden — it is the
+    /// account the secret opens — but it is not chased through the
+    /// result: `deploy` and `root` are ordinary words, and striking
+    /// them out of a tool's output blanks lines that never held a
+    /// secret.
+    #[test]
+    fn an_account_name_is_hidden_but_not_hunted() {
+        let mut secrets = Vec::new();
+        assert_eq!(
+            tokens("curl -u deploy https://api.io", Mode::Command, &mut secrets),
+            "curl -u <redacted> https://api.io"
+        );
+        assert!(secrets.is_empty(), "{secrets:?}");
+
+        // With a password, the whole userinfo is a needle.
+        let mut secrets = Vec::new();
+        tokens(
+            "curl -u deploy:hunter2 https://api.io",
+            Mode::Command,
+            &mut secrets,
+        );
+        assert_eq!(secrets, vec!["deploy:hunter2".to_string()]);
+    }
+
+    /// And `-u` means something else entirely everywhere else: a sort
+    /// order, a file mode, a user to run as. Hiding the next token
+    /// there blanks a filename in the row and strikes its text out of
+    /// the whole result.
+    #[test]
+    fn the_same_flag_under_another_program_keeps_its_value() {
+        for command in [
+            "sort -u names.txt",
+            "chmod -u+w secrets.env",
+            "docker run -u root alpine",
+            "uniq -u data.txt",
+            "id -u lain",
+            "sudo -u lain ls /srv",
+            "ssh -u lain host",
+        ] {
+            let mut secrets = Vec::new();
+            assert_eq!(
+                tokens(command, Mode::Command, &mut secrets),
+                command,
+                "a flag that is not a credential's"
+            );
+            assert!(secrets.is_empty(), "{command}: {secrets:?}");
+        }
     }
 
     /// A URL credential is a secret under any key and in any prose,

@@ -1244,7 +1244,8 @@ fn shell_command_argument(key: &str) -> bool {
 }
 
 /// A command line with its secrets removed: the tokens that follow a
-/// sensitive flag or header, and the ones that announce themselves.
+/// sensitive flag or header, the ones that announce themselves, and the
+/// ones a program's own credential flag hands over unnamed.
 /// Public because a command is named in more places than a tool row —
 /// a background job carries its command in the notification it ends
 /// in, which is persisted as text nothing redacts later.
