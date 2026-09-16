@@ -9,10 +9,11 @@ should never wait on the model to talk to it.**
 ## Safety
 
 > [!WARNING]
-> ilar does **not** provide a sandbox, permission prompts, or an access-control
-> boundary. It can run shell commands and read, modify, or delete anything that
-> its process can access, including credentials and files outside the current
-> repository.
+> ilar does **not** provide a sandbox or an access-control boundary. It can run
+> shell commands and read, modify, or delete anything that its process can
+> access, including credentials and files outside the current repository. The
+> only things it asks about are handing a command a stored secret and running
+> one as root; every other tool call happens without a prompt.
 
 Run ilar only inside an external, OS-enforced sandbox with appropriately scoped
 filesystem, network, process, and credential access. Options include
@@ -22,7 +23,9 @@ locked-down container, or a dedicated virtual machine.
 Git worktrees and ilar's read-only/mutating tool scheduling are coordination
 mechanisms, not security boundaries. The [secret store](docs/secrets.md)
 keeps keys out of the model's context and asks before a command gets one,
-but a command that has a value can do anything with it.
+but a command that has a value can do anything with it; the same goes for
+the `sudo` tool's prompt, which is a chance to read the command, not a
+restriction on what it may be.
 
 ## Highlights
 
@@ -144,7 +147,8 @@ ilar-gateway                     # the assistant, on the channels in ilar.toml
   Mutating tools form a barrier; read-only tools run concurrently.
 - **JSONL sessions:** append-only, human-readable, resumable.
 - **No built-in permission system.** An external sandbox is the security
-  boundary; ilar itself does not create or enforce one.
+  boundary; ilar itself does not create or enforce one. The secret and
+  `sudo` grants are consent prompts, not a policy engine.
 - **Skills over features:** anything exotic (e.g. git worktree isolation)
   is a markdown skill, not core code.
 
