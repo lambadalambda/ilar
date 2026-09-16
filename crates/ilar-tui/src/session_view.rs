@@ -591,9 +591,31 @@ fn restored_session_invocation_view(
                             text,
                             kind: ilar::session::DiagnosticKind::TurnError,
                         } => lines.push(Line_::System(text.clone())),
-                        ilar::session::ContentBlock::Thinking { .. }
-                        | ilar::session::ContentBlock::Reasoning { .. }
-                        | ilar::session::ContentBlock::Diagnostic { .. }
+                        // Raw thinking, kept as a local diagnostic
+                        // because no provider will take it back — and
+                        // for a model that hands back no reasoning
+                        // item, the only account of why the turn did
+                        // what it did. It was dropped here, so a
+                        // session showed thoughts while it ran and none
+                        // once it was reread; `--view` is always a
+                        // reread, which made the assistant look like it
+                        // never thought at all. Same collapsed row the
+                        // summary two arms up gets. `Thinking` itself
+                        // only reaches a log written before the
+                        // diagnostic split, and means the same thing.
+                        ilar::session::ContentBlock::Diagnostic {
+                            text,
+                            kind: ilar::session::DiagnosticKind::Local,
+                        }
+                        | ilar::session::ContentBlock::Thinking { text } => {
+                            lines.push(Line_::Thought {
+                                id: restored_line_id(nested, "thought", lines.len()),
+                                text: text.clone(),
+                                complete: true,
+                                expanded: false,
+                            });
+                        }
+                        ilar::session::ContentBlock::Reasoning { .. }
                         | ilar::session::ContentBlock::ToolResult { .. } => {}
                     }
                 }
@@ -1073,7 +1095,7 @@ mod tests {
                         text: "restored answer".into(),
                     },
                     ilar::session::ContentBlock::Thinking {
-                        text: "hidden thought".into(),
+                        text: "a thought from a model that summarises none".into(),
                     },
                     ilar::session::ContentBlock::ReasoningSummary {
                         text: "**Reviewing restored state**\n\nDetails remain collapsed.".into(),
@@ -1139,18 +1161,26 @@ mod tests {
         assert_eq!(view.latest_usage, Some(usage));
         assert!(matches!(&view.lines[0], Line_::User(text) if text == "remember this"));
         assert!(matches!(&view.lines[1], Line_::Assistant(text) if text == "restored answer"));
+        // Both kinds of thinking come back, in the order they were
+        // written: a model's own words and a provider's summary of
+        // them read the same way.
         assert!(matches!(
             &view.lines[2],
+            Line_::Thought { text, complete: true, .. }
+                if text.contains("summarises none")
+        ));
+        assert!(matches!(
+            &view.lines[3],
             Line_::Thought { text, complete: true, .. }
                 if text.contains("Reviewing restored state")
         ));
         assert!(matches!(
-            &view.lines[3],
+            &view.lines[4],
             Line_::Tool { id, name, arguments, state: ToolState::Succeeded, .. }
                 if id == "read-1" && name == "read" && arguments.is_empty()
         ));
         assert!(matches!(
-            &view.lines[4],
+            &view.lines[5],
             Line_::Tool {
                 id,
                 name,
@@ -1167,13 +1197,13 @@ mod tests {
             view.lines.last(),
             Some(Line_::System(text)) if text.contains("openai/gpt-5.6-sol")
         ));
-        let rendered = format!("{:?}", view.lines);
-        assert!(!rendered.contains("hidden thought"), "{rendered}");
     }
 
     /// A session that died mid-turn must say so when it is resumed.
     /// Raw thinking wears the same block — kept because no provider
-    /// takes it back — and stays out of the transcript.
+    /// takes it back — and comes back as the thought it was, because
+    /// a reader who reopens a session wants to know why as much as
+    /// one who watched it happen.
     #[test]
     fn a_resumed_session_shows_why_its_turn_died() {
         let dir = tempfile::tempdir().unwrap();
@@ -1195,7 +1225,7 @@ mod tests {
                 model: "zai/glm-4.7".into(),
                 content: vec![
                     ilar::session::ContentBlock::Diagnostic {
-                        text: "a thought nobody needs to reread".into(),
+                        text: "first I will check the parser".into(),
                         kind: ilar::session::DiagnosticKind::Local,
                     },
                     ilar::session::ContentBlock::Diagnostic {
@@ -1226,6 +1256,22 @@ mod tests {
             "{:?}",
             view.lines
         );
+        // And the thinking is a thought again, collapsed like the
+        // live fold draws it — not a system line, and not gone.
+        let thoughts: Vec<&String> = view
+            .lines
+            .iter()
+            .filter_map(|line| match line {
+                Line_::Thought {
+                    text,
+                    complete: true,
+                    expanded: false,
+                    ..
+                } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(thoughts, vec!["first I will check the parser"]);
 
         // Restored the way the TUI restores it: the failed turn is
         // still there to continue, so the resume is offered.
@@ -1235,6 +1281,80 @@ mod tests {
             Liveness::Settled,
         );
         assert!(restored.resume_offer, "a dead turn is resumable");
+    }
+
+    /// A model that hands back no reasoning item — a local one
+    /// thinking in `<think>` tags — is the case this matters for: the
+    /// diagnostic is the only account of the turn there is. Logs
+    /// written before thinking was stored as a diagnostic carry the
+    /// block itself, and mean the same thing.
+    #[test]
+    fn raw_thinking_restores_as_a_thought_whichever_shape_it_was_written_in() {
+        use ilar::session::{ContentBlock, DiagnosticKind, SessionEvent, Usage};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf());
+        let session_id = new_id();
+        let mut session = store
+            .create(SessionMeta {
+                session_id: session_id.clone(),
+                parent_id: None,
+                agent: "build".into(),
+                model: "lemonade/a-local-one".into(),
+                workspace: None,
+                cwd: None,
+            })
+            .unwrap();
+        session
+            .append(SessionEvent::AssistantMessage {
+                id: new_id(),
+                model: "lemonade/a-local-one".into(),
+                content: vec![
+                    ContentBlock::Diagnostic {
+                        text: "the user wants the article read first".into(),
+                        kind: DiagnosticKind::Local,
+                    },
+                    ContentBlock::Thinking {
+                        text: "an older log wrote it like this".into(),
+                    },
+                    ContentBlock::Text {
+                        text: "here is what I think".into(),
+                    },
+                ],
+                usage: Usage::default(),
+                stop_reason: "end_turn".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        drop(session);
+
+        let view = restored_session_view(&store.load(&session_id).unwrap());
+        let thoughts: Vec<&String> = view
+            .lines
+            .iter()
+            .filter_map(|line| match line {
+                Line_::Thought { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            thoughts,
+            vec![
+                "the user wants the article read first",
+                "an older log wrote it like this"
+            ],
+            "{:?}",
+            view.lines
+        );
+        // The answer is still the answer, and it reads after the
+        // thinking that produced it.
+        assert!(
+            view.lines.iter().any(
+                |line| matches!(line, Line_::Assistant(text) if text == "here is what I think")
+            ),
+            "{:?}",
+            view.lines
+        );
     }
 
     /// Where the log ends decides whether a resume is still on offer:
