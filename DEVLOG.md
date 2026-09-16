@@ -1,5 +1,65 @@
 # DEVLOG
 
+## 2026-09-16 — Two ways in that named nothing
+
+Both of the day's security follow-ups were the same shape: a guard
+that asks "does this name the thing?" against a spelling that names
+nothing.
+
+`curl -u bob:hunter2` went through redaction untouched. `-u` is not a
+sensitive key, `bob:hunter2` is not a URL, and nothing else in the
+line says a word about a secret — the credential is identified by
+position alone. The only thing that can tell that value from a
+filename is the program in front of it, which nothing in the token
+pass knew: `-u` is `user:password` to curl and a sort order to `sort`,
+a file mode to `chmod`, a user to `docker run`. So the pass now tracks
+which program is in force and reads a table of flags whose value is a
+credential.
+
+Tracking a program turns out to be most of the work. A command ends at
+a `;`, a pipeline, a `&&` — and at a line break, which matters more
+than the rest put together, because a `bash` argument is routinely a
+whole script and the first line would otherwise answer for all of it.
+A command begins after those, under `sudo` or `env` or a flag of
+theirs, and inside `$(…)`. The review found the newline gap, and two
+others worth having: the positive test could not see over-hiding (it
+asserted the secret was gone, not that nothing else was), and `curl -u
+deploy` — an account with no password — was being collected as a
+needle, which would have struck the word `deploy` out of the tool's
+entire output. It is hidden in the row and not hunted through the
+result; only a value carrying a `:` is.
+
+The other one: the withheld-path gate refuses a call that names the
+memory directory, and `grep` pointed at the parent named nothing. The
+fix belongs in the walkers rather than in the gate — refusing every
+call that names an ancestor would refuse `read <home>/SOUL.md` — so
+both now skip a withheld subtree the way they skip `.git`, silently,
+because a room that may not read the memory may not be told it is
+there either. The walk's own root is checked separately, since
+`ignore`'s filter never judges its root.
+
+Its review found the one real bypass, and it was not in the new code:
+the comparison was byte-exact. On the filesystem this most often runs
+on, `<home>/Memory` opens `<home>/memory` and `canonicalize` does not
+correct the capital, so one shifted letter walked past the filter —
+and past the gate, which had compared the same way since it was
+written. The two rules now share one comparison: lexically normalised,
+component by component so `memory` does not claim `memory-notes`, and
+blind to ASCII case. What it costs is a sibling differing from a
+withheld path only in case, which cannot exist on the filesystem where
+the rule is needed.
+
+And the sibling leak the same issue named: every seat's transcript
+lives in one directory under the state dir, so a room's seat could
+read the private chat's — what the assistant was told about its
+person, which is exactly what withholding the memory was for. A room
+withholds both now. Nothing a seat opens by path lives there; spilled
+tool output and images have their own directories.
+
+What is still open is the `bash` case — `cd <home> && cat memory/x`
+resolves nothing any gate can see — and that stays with the kernel
+sandbox issue, which is the only thing that closes it.
+
 ## 2026-09-16 — Three follow-ups, a guard rail, and a decode bomb
 
 v0.3.0 went out, and then the backlog's own top three.

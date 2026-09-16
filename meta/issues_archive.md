@@ -402,3 +402,5 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Images are bounded before decoding](issues/images-are-bounded-before-decoding.md)
 - [x] [One redaction engine](issues/one-redaction-engine.md)
 - [x] [A reopened session kept its thinking](issues/a-reopened-session-kept-its-thinking.md)
+- [x] [A credential flag is not a name](issues/a-credential-flag-is-not-a-name.md)
+- [x] [A withheld path survives a walk](issues/a-withheld-path-survives-a-walk.md) — the walkers and the session store; the `bash` case stays with the sandbox issue

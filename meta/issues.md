@@ -128,6 +128,4 @@ milestones 15–17 stay filed — they come back when the feature does.*
 - [ ] [Damaged rewinds fail closed](issues/damaged-rewinds-fail-closed.md)
 - [ ] [Test repositories never sign](issues/test-repositories-never-sign.md)
 - [ ] [Provider URLs are structural](issues/provider-urls-are-structural.md)
-- [ ] [A withheld path survives a walk](issues/a-withheld-path-survives-a-walk.md)
-- [ ] [A credential flag is not a name](issues/a-credential-flag-is-not-a-name.md)
 
