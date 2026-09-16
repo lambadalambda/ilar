@@ -653,8 +653,8 @@ impl App {
             .saturating_add(activity_rows.len());
         // The session on offer, pinned above the live transcript in the
         // same pane. It is cut to what the pane can show beside the
-        // conversation, keeping its header — which holds the keys that
-        // answer it — and the *end* of the tail, which is what resuming
+        // conversation, keeping its header — which names what is on
+        // offer — and the *end* of the tail, which is what resuming
         // would put in front of you. The header keeps its rows whatever
         // the transcript does: an offer that can still be answered must
         // not go invisible. So the offer never scrolls — it fits or it
@@ -1076,12 +1076,28 @@ impl App {
         if let Some((_, round)) = &self.goal {
             input_title = format!("{input_title}· goal {round}/{MAX_GOAL_ROUNDS} ");
         }
-        let input_lines = input_view
-            .lines
-            .iter()
-            .cloned()
-            .map(Line::raw)
-            .collect::<Vec<_>>();
+        // An offer standing over an empty prompt says what the next
+        // keystroke does, muted, where the next keystroke goes. It is
+        // drawn instead of the prompt's rows, which are empty anyway,
+        // and the first character typed takes both it and the offer.
+        // A modal in front takes the offer's keys away (`ghost_step`
+        // refuses them), and the prompt box stays visible under a
+        // centred one, so the hint would be promising a resume that
+        // Enter does not perform.
+        let prompt_hint =
+            (self.ghost.is_some() && !self.read_only && self.focus.is_none() && !self.has_modal())
+                .then(|| ghost_prompt_hint(input_area.width as usize))
+                .flatten()
+                .filter(|_| self.input.is_blank());
+        let input_lines = match prompt_hint {
+            Some(hint) => vec![Line::styled(hint, Style::default().fg(theme::MUTED))],
+            None => input_view
+                .lines
+                .iter()
+                .cloned()
+                .map(Line::raw)
+                .collect::<Vec<_>>(),
+        };
         let mut input_block = input_block.title(Line::styled(
             input_title,
             theme::title(if input_focused {
@@ -1094,7 +1110,9 @@ impl App {
         // keep none of them, and in a focus view the prompt belongs to
         // the agent on screen — the stash, the history and the images
         // are the root's, and Esc is the way back to them.
-        let input_help = if self.read_only || focus_send == Some(false) {
+        let input_help = if self.read_only || focus_send == Some(false) || prompt_hint.is_some() {
+            // Under the offer's hint the footer's "Enter send" would
+            // be a second, contradictory promise about the same key.
             None
         } else if self.focus.is_some() {
             Some(if input_chunk.width >= 70 {
@@ -1336,6 +1354,22 @@ fn input_height(desired: u16, screen: u16) -> u16 {
 /// between its borders — so the two-fifths ceiling never cuts below it.
 const SMALL_INPUT_ROWS: u16 = 6;
 
+/// What the empty prompt says while a session is on offer, at the width
+/// it has to say it in. Resuming is the part worth keeping when the
+/// prompt is narrow — typing is what happens anyway — and below room
+/// for even that the hint stands down rather than trail off mid-word.
+fn ghost_prompt_hint(width: usize) -> Option<&'static str> {
+    const FULL: &str = "Enter resumes · type to start fresh";
+    const SHORT: &str = "Enter resumes";
+    if width >= FULL.chars().count() {
+        Some(FULL)
+    } else if width >= SHORT.chars().count() {
+        Some(SHORT)
+    } else {
+        None
+    }
+}
+
 /// The strip row a waiting message gets. A task or tool result is
 /// mail, not something the user typed: it wears the collapsed headline
 /// its transcript row will wear, under its own name, and never the
@@ -1457,7 +1491,26 @@ pub(crate) fn activity_line(
 
 #[cfg(test)]
 mod tests {
-    use super::input_height;
+    use super::{ghost_prompt_hint, input_height};
+
+    /// The offer's hint fits the prompt it is written in, or says the
+    /// half that matters, or says nothing — never half a word.
+    #[test]
+    fn the_offers_hint_shortens_before_it_is_cut() {
+        assert_eq!(
+            ghost_prompt_hint(80),
+            Some("Enter resumes · type to start fresh")
+        );
+        assert_eq!(
+            ghost_prompt_hint(35),
+            Some("Enter resumes · type to start fresh"),
+            "the full hint at exactly its own width"
+        );
+        assert_eq!(ghost_prompt_hint(34), Some("Enter resumes"));
+        assert_eq!(ghost_prompt_hint(13), Some("Enter resumes"));
+        assert_eq!(ghost_prompt_hint(12), None);
+        assert_eq!(ghost_prompt_hint(0), None);
+    }
 
     /// A paste must not become the whole screen: the prompt takes at
     /// most two fifths and scrolls inside, leaving the transcript and

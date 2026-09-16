@@ -198,8 +198,9 @@ impl FocusView {
 
 /// This directory's previous session, shown rather than described: its
 /// tail, ghosted, above a fresh session's empty transcript, until Enter
-/// on an empty prompt resumes it, a message leaves it behind, or Esc
-/// dismisses it — see meta/issues/a-bare-ilar-offers-the-last-session-here.md.
+/// on an empty prompt resumes it or the first typed character leaves it
+/// behind — see meta/issues/a-bare-ilar-offers-the-last-session-here.md
+/// and meta/issues/the-offers-keys-live-in-the-prompt.md.
 ///
 /// Beside the transcript, never in it: nothing here was said in the
 /// session on screen, so no export, search or token estimate can
@@ -212,10 +213,10 @@ pub(crate) struct Ghost {
     /// The session's opening prompt, shortened — what the header and
     /// the status line call it.
     pub(crate) title: String,
-    /// The line above the tail, built when the offer is made. It says
-    /// which session and how to answer, so it is wrapped rather than
-    /// cut: on an 80-column terminal a truncated header would lose the
-    /// keys, which are stated nowhere else.
+    /// The line above the tail, built when the offer is made. It names
+    /// the session and says when it was last used, and is wrapped
+    /// rather than cut: on an 80-column terminal a long title would
+    /// otherwise take the whole line and lose the rest of it.
     pub(crate) header: String,
     pub(crate) lines: Vec<Line_>,
     cache: TranscriptRenderCache,
@@ -300,8 +301,8 @@ impl Ghost {
     /// The offer in `rows` rows: the whole header, then as much of the
     /// end of the tail as fits under it, then the blank row that keeps
     /// it off the live transcript. The header is never what goes — it
-    /// carries the three keys that answer the offer — and the end of
-    /// the tail is what resuming would show, so a cut takes the middle.
+    /// names the session being offered — and the end of the tail is
+    /// what resuming would show, so a cut takes the middle.
     pub(crate) fn trimmed_to(&self, rows: usize) -> Vec<ratatui::text::Line<'static>> {
         let header = &self.header_rows[..self.header_rows.len().min(rows)];
         // Two rows left over buy a row of tail and the gap under it;
@@ -10091,7 +10092,7 @@ mod tests {
         app.offer_session(Ghost::new(
             "old-session".into(),
             "the last thing".into(),
-            "previous session here: the last thing · 2h ago — Enter resumes".into(),
+            "previous session here: the last thing · 2h ago".into(),
             vec![Line_::User("ghost words".into())],
         ));
         assert_eq!(app.status, "ghost of the last thing");
@@ -10169,7 +10170,7 @@ mod tests {
     }
 
     /// An offer taller than the pane keeps the two things that matter:
-    /// the header, which says how to answer it, and the end of the
+    /// the header, which names what is on offer, and the end of the
     /// tail, which is what resuming would show. The live transcript
     /// keeps its place under it either way.
     #[test]
@@ -10204,11 +10205,10 @@ mod tests {
         assert_eq!(app.scroll_top, 0, "an offer that fits does not scroll");
     }
 
-    /// The header says how to answer the offer, and it is the only
-    /// place that does: on a narrow terminal it wraps rather than
-    /// losing its keys, and it keeps its rows however much the live
-    /// transcript takes — an offer that still answers Enter must be
-    /// visible.
+    /// The header names what is on offer: on a narrow terminal it
+    /// wraps rather than losing the title or the age, and it keeps its
+    /// rows however much the live transcript takes — an offer that
+    /// still answers Enter must be visible.
     #[test]
     fn the_offers_header_wraps_and_survives_a_crowded_pane() {
         let header = crate::session_view::ghost_header(
@@ -10244,13 +10244,79 @@ mod tests {
         // Every part of the header is readable, wrapped across rows.
         for phrase in [
             "previous session here",
-            "Enter resumes",
-            "type to start fresh",
-            "Esc dismisses",
+            "long opening prompt indeed",
+            "2h ago",
         ] {
             assert!(screen.contains(phrase), "{phrase:?} missing:\n{screen}");
         }
         // And the crowded transcript still shows its own tail.
         assert!(screen.contains("live line 39"), "{screen}");
+    }
+
+    /// The keys that answer the offer are said in the empty prompt,
+    /// muted, and nowhere else — and the first character typed takes
+    /// them with it.
+    #[test]
+    fn the_offers_keys_are_said_in_the_prompt_until_something_is_typed() {
+        let mut app = App::new();
+        app.theme = theme::ThemeId::parse("terminal").expect("the adaptive theme");
+        app.offer_session(Ghost::new(
+            "old-session".into(),
+            "the last thing".into(),
+            "previous session here: the last thing · 2h ago".into(),
+            vec![Line_::User("ghost words".into())],
+        ));
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 20)).unwrap();
+        let rows = |terminal: &ratatui::Terminal<ratatui::backend::TestBackend>| {
+            (0..20u16)
+                .map(|row| {
+                    (0..100u16)
+                        .map(|column| terminal.backend().buffer()[(column, row)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+        };
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let drawn = rows(&terminal);
+        let hint = drawn
+            .iter()
+            .position(|row| row.contains("Enter resumes · type to start fresh"))
+            .unwrap_or_else(|| panic!("the prompt says how to answer:\n{}", drawn.join("\n")));
+        // The hint's own first cell, not some border sharing the tone:
+        // muted is what says this is not something somebody typed.
+        let start = drawn[hint]
+            .char_indices()
+            .position(|(byte, _)| drawn[hint][byte..].starts_with("Enter resumes"))
+            .expect("the hint's row") as u16;
+        assert_eq!(
+            terminal.backend().buffer()[(start, hint as u16)].fg,
+            ratatui::style::Color::DarkGray,
+            "the hint is muted, not typed text"
+        );
+        assert!(
+            !drawn.join("\n").contains("Ctrl-S stash"),
+            "the prompt makes one promise about Enter at a time:\n{}",
+            drawn.join("\n")
+        );
+
+        // A draft over a standing offer — history recall puts one
+        // there — takes the hint back: those are the prompt's own rows
+        // and nothing may cover them.
+        app.input.insert("half a thought");
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let drawn = rows(&terminal).join("\n");
+        assert!(!drawn.contains("Enter resumes"), "{drawn}");
+        assert!(drawn.contains("half a thought"), "{drawn}");
+        assert!(drawn.contains("previous session here"), "{drawn}");
+
+        // Typing is the choice: the offer goes, and the prompt's
+        // ordinary footer comes back with it.
+        app.dismiss_ghost();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let drawn = rows(&terminal).join("\n");
+        assert!(!drawn.contains("previous session here"), "{drawn}");
+        assert!(drawn.contains("Ctrl-S stash"), "{drawn}");
     }
 }

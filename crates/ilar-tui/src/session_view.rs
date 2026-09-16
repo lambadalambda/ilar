@@ -278,15 +278,16 @@ const GHOST_LINES: usize = 40;
 /// Columns the offered session's name may take in the header.
 const GHOST_TITLE_CHARS: usize = 56;
 
-/// The offer's one header line: which session, how long since it was
-/// used, and the three keys that answer it.
+/// The offer's one header line: which session, and how long since it
+/// was used. The keys that answer it are stated under the cursor, in
+/// the empty prompt, where they are obeyed.
 pub(crate) fn ghost_header(
     title: &str,
     modified: std::time::SystemTime,
     now: std::time::SystemTime,
 ) -> String {
     format!(
-        "previous session here: {title} · {} — Enter resumes · type to start fresh · Esc dismisses",
+        "previous session here: {title} · {}",
         crate::modals::last_used(modified, now),
     )
 }
@@ -2219,10 +2220,8 @@ mod tests {
             offer.header
         );
         assert!(
-            offer
-                .header
-                .ends_with("Enter resumes · type to start fresh · Esc dismisses"),
-            "{}",
+            !offer.header.contains("Enter"),
+            "the keys are said in the prompt, not here: {}",
             offer.header
         );
         assert!(
