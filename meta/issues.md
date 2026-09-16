@@ -31,8 +31,6 @@
 ## Milestone 7 — Unscheduled
 
 - [ ] [An Anthropic-wire provider](issues/an-anthropic-wire-provider.md)
-(all complete — see issues_archive.md)
-
 
 
 ## Milestone 9 — Time travel follow-ups
@@ -114,7 +112,6 @@ milestones 15–17 stay filed — they come back when the feature does.*
 - [ ] [The docs say what the code does](issues/the-docs-say-what-the-code-does.md)
 - [ ] [Pickers show the deciding field](issues/pickers-show-the-deciding-field.md)
 - [ ] [exec names its session](issues/exec-names-its-session.md)
-- [ ] [UX sweep 2026-09-15](issues/ux-sweep-2026-09-15.md) — index
 - [ ] [Sweep 2026-09-15 follow-ups](issues/sweep-2026-09-15-follow-ups.md)
 
 ## Milestone 21 — The assistant

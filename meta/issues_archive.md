@@ -398,3 +398,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [A propagated result retires its origin](issues/a-propagated-result-retires-its-origin.md)
 - [x] [A bare ilar offers the last session here](issues/a-bare-ilar-offers-the-last-session-here.md)
 - [x] [The offer's keys live in the prompt](issues/the-offers-keys-live-in-the-prompt.md)
+- [x] [UX sweep 2026-09-15](issues/ux-sweep-2026-09-15.md) — index; every subissue archived, the remainder carried by the follow-ups issue
