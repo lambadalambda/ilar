@@ -2064,6 +2064,7 @@ async fn stall_watchdog_fires_on_silent_child() {
                 spill_dir: None,
                 heartbeat: None,
                 secrets: None,
+                withheld: std::sync::Arc::from(Vec::new()),
             },
         )
         .await;

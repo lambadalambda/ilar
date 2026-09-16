@@ -64,6 +64,11 @@ pub struct RuntimeOptions {
     /// every refusal the lock causes. See
     /// [`crate::secrets::Secrets::with_unlock_hint`].
     pub unlock_hint: Option<String>,
+    /// Paths no tool call in this session may name. See
+    /// [`crate::tools::ToolContext::withheld`]; empty for a terminal
+    /// session, where the person at the keyboard owns every path the
+    /// process can reach anyway.
+    pub withheld_paths: Vec<PathBuf>,
 }
 
 /// The session a driver is about to run, before anything is written.
@@ -93,6 +98,7 @@ pub struct RuntimePlan {
     questions: bool,
     grants: bool,
     unlock_hint: Option<String>,
+    withheld_paths: Vec<PathBuf>,
     project_instructions: ProjectInstructions,
 }
 
@@ -545,6 +551,7 @@ impl RuntimePlan {
             questions: options.questions,
             grants: options.grants,
             unlock_hint: options.unlock_hint.clone(),
+            withheld_paths: options.withheld_paths.clone(),
             project_instructions,
         })
     }
@@ -712,6 +719,8 @@ impl RuntimePlan {
         } else {
             (secrets, None)
         };
+        // One list for the session and everything it delegates to.
+        let withheld: Arc<[PathBuf]> = Arc::from(self.withheld_paths.clone());
         let spawner = Arc::new(
             SubagentSpawner::try_new(
                 resolver,
@@ -735,7 +744,8 @@ impl RuntimePlan {
             .with_services(services.clone())
             .with_available_models(config.available_models())
             .with_secrets(secrets.clone())
-            .with_sudo(config.agent.sudo),
+            .with_sudo(config.agent.sudo)
+            .with_withheld(withheld.clone()),
         );
         let todos = Arc::new(Mutex::new(restored_todos(self.resumed.as_ref())));
         let registry = ToolRegistry::builtin()
@@ -780,7 +790,8 @@ impl RuntimePlan {
         let tool_ctx = ToolContext::try_root(self.cwd.clone())?
             .with_subagents(spawner.clone())
             .with_spill_dir(crate::tools::bash::spill_dir(config.state_dir()))
-            .with_secrets(secrets);
+            .with_secrets(secrets)
+            .with_withheld(withheld);
         Ok(Tooling {
             registry,
             spawner,

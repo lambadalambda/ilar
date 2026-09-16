@@ -1142,6 +1142,10 @@ async fn run_exec(config: &ilar::config::Config, args: ExecArgs) -> Result<i32> 
             user_dir: None,
             own_skills_only: false,
             unlock_hint: Some(UNLOCK_HINT.to_string()),
+            // Nothing: the person who started this owns every path the
+            // process can reach, and withholding one from them would be
+            // theatre.
+            withheld_paths: Vec::new(),
         },
     )?;
     let mut plan_notices = std::mem::take(&mut plan.notices);
@@ -1445,6 +1449,9 @@ async fn main() -> Result<()> {
                 user_dir: None,
                 own_skills_only: false,
                 unlock_hint: Some(UNLOCK_HINT.to_string()),
+                // The terminal withholds nothing: see the `exec` launch
+                // above.
+                withheld_paths: Vec::new(),
             },
         )?;
         if args.print_prompt {

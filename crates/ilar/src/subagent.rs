@@ -186,6 +186,10 @@ pub struct SubagentSpawner {
     secrets: Option<crate::secrets::Secrets>,
     /// Whether child registries get the sudo tool (`agent.sudo`).
     sudo: bool,
+    /// Paths withheld from every context this spawner builds — the
+    /// children's, and the notification turns it runs on the parent
+    /// session. See [`crate::tools::ToolContext::withheld`].
+    withheld: Arc<[std::path::PathBuf]>,
 }
 
 /// The `agent` a background `bash` job registers under: not a subagent
@@ -547,6 +551,7 @@ impl SubagentSpawner {
             available_models: Vec::new(),
             secrets: None,
             sudo: false,
+            withheld: Arc::from(Vec::new()),
         })
     }
 
@@ -604,6 +609,12 @@ impl SubagentSpawner {
 
     pub fn with_sudo(mut self, sudo: bool) -> Self {
         self.sudo = sudo;
+        self
+    }
+
+    /// Withhold these paths from every context this spawner builds.
+    pub fn with_withheld(mut self, paths: Arc<[std::path::PathBuf]>) -> Self {
+        self.withheld = paths;
         self
     }
 
@@ -755,6 +766,7 @@ impl SubagentSpawner {
             available_models: self.available_models.clone(),
             secrets: self.secrets.clone(),
             sudo: self.sudo,
+            withheld: self.withheld.clone(),
         })
     }
 
@@ -1205,6 +1217,9 @@ impl SubagentSpawner {
                 .secrets
                 .clone()
                 .map(|secrets| secrets.for_agent(&agent.name)),
+            // Inherited: a child of a seat in a room is in the same
+            // room, and delegating the read is still the read.
+            withheld: ctx.withheld.clone(),
             // Inherited for a foreground child, whose every event is
             // its blocked caller's progress; the background branch
             // below replaces it with the watchdog of its own.
@@ -2053,6 +2068,10 @@ task's scope yourself; continue only clearly disjoint work."
                     // watchdog.
                     heartbeat: None,
                     secrets: self.secrets.clone(),
+                    // The notified session is the seat that delegated
+                    // the work; a result arriving does not move it to
+                    // another room.
+                    withheld: self.withheld.clone(),
                 },
                 // No live channel: this turn is not the parent's to
                 // steer, so a message that arrives while it runs waits

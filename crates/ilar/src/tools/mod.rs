@@ -613,6 +613,18 @@ pub struct ToolContext {
     /// that take `secrets`. `None` in a context built without one:
     /// every named secret is then refused.
     pub secrets: Option<crate::secrets::Secrets>,
+    /// Paths no tool call in this session may name: the assistant's
+    /// memory while it is sitting in a room, say, where withholding
+    /// the memory *tools* still leaves `read` and `bash` pointed at
+    /// the same files.
+    ///
+    /// A guard rail, not a boundary. It refuses a call that spells a
+    /// withheld path out — which is what a model helpfully going to
+    /// look does — and cannot stop a shell command that arrives at one
+    /// by another spelling. The kernel sandbox
+    /// (meta/issues/kernel-sandbox-for-tool-processes.md) is the only
+    /// thing that can.
+    pub withheld: Arc<[PathBuf]>,
 }
 
 impl ToolContext {
@@ -646,6 +658,7 @@ impl ToolContext {
             spill_dir: None,
             heartbeat: None,
             secrets: None,
+            withheld: Arc::from(Vec::new()),
         })
     }
 
@@ -653,6 +666,30 @@ impl ToolContext {
     pub fn with_secrets(mut self, secrets: crate::secrets::Secrets) -> Self {
         self.secrets = Some(secrets);
         self
+    }
+
+    /// Context in which no tool call may name `paths`.
+    pub fn with_withheld(mut self, paths: Arc<[PathBuf]>) -> Self {
+        self.withheld = paths;
+        self
+    }
+
+    /// The refusal a call earns for naming a withheld path, or `None`
+    /// when it names none. Matched against the call's arguments as the
+    /// model wrote them, so it catches `read` on the file, `bash` on a
+    /// command that cats it, and anything else that has to say where it
+    /// is going. The refusal does not repeat the path: the model
+    /// already knew it, and the chat need not learn it.
+    pub fn withheld_refusal(&self, input: &serde_json::Value) -> Option<String> {
+        if self.withheld.is_empty() {
+            return None;
+        }
+        let spelled = input.to_string();
+        self.withheld
+            .iter()
+            .filter_map(|path| path.to_str())
+            .any(|path| spelled.contains(path))
+            .then(|| "that path is not available in this chat".to_string())
     }
 
     /// Context that may spill oversized tool output into `dir`.

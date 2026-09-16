@@ -147,6 +147,18 @@ where
             let call = pending.pop_front().unwrap();
             let idx = next_idx;
             next_idx += 1;
+            // Asked here rather than in each file tool: a path withheld
+            // from `read` is withheld from the `bash` that would cat it,
+            // and one gate cannot be half-applied to a tool added later.
+            if let Some(refusal) = ctx.withheld_refusal(&call.input) {
+                outcomes[idx] = Some(CallOutcome {
+                    output: ToolOutput::error(format!("{}: {refusal}", call.name)),
+                    id: call.id,
+                    name: call.name,
+                    cancelled: false,
+                });
+                continue;
+            }
             let background = tool.supports_background()
                 && call
                     .input
@@ -553,6 +565,60 @@ mod tests {
                 "start:immediate-1",
                 "complete:immediate-1",
             ]
+        );
+    }
+
+    /// A withheld path is withheld from every tool, named or not: the
+    /// call is refused before the tool runs, whatever it was going to
+    /// do with the path, and the refusal does not read the path back
+    /// out into the chat that must not have it.
+    #[tokio::test]
+    async fn a_call_naming_a_withheld_path_is_refused_before_it_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = dir.path().join("home").join("memory");
+        let immediate: Arc<dyn Tool> = Arc::new(ImmediateTool);
+        let outcomes = execute_calls(
+            vec![
+                ToolCall {
+                    id: "read-1".into(),
+                    name: "immediate".into(),
+                    input: serde_json::json!({
+                        "path": memory.join("USER.md").to_str().unwrap(),
+                    }),
+                },
+                ToolCall {
+                    id: "bash-1".into(),
+                    name: "immediate".into(),
+                    input: serde_json::json!({
+                        "command": format!("cat {}/USER.md", memory.display()),
+                    }),
+                },
+                ToolCall {
+                    id: "elsewhere-1".into(),
+                    name: "immediate".into(),
+                    input: serde_json::json!({"command": "ls"}),
+                },
+            ],
+            move |_| Some(immediate.clone()),
+            ToolContext::root(dir.path().to_path_buf())
+                .with_withheld(Arc::from(vec![memory.clone()])),
+            CancellationToken::new(),
+        )
+        .await;
+
+        for refused in &outcomes[..2] {
+            assert!(refused.output.is_error, "{:?}", refused.output);
+            let text = format!("{:?}", refused.output);
+            assert!(text.contains("not available in this chat"), "{text}");
+            assert!(
+                !text.contains("memory"),
+                "the refusal repeats the path back: {text}"
+            );
+        }
+        assert!(
+            !outcomes[2].output.is_error,
+            "a call that names nothing withheld runs: {:?}",
+            outcomes[2].output
         );
     }
 
