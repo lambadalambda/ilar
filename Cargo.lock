@@ -1204,7 +1204,7 @@ dependencies = [
 
 [[package]]
 name = "ilar"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1237,7 +1237,7 @@ dependencies = [
 
 [[package]]
 name = "ilar-gateway"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1255,7 +1255,7 @@ dependencies = [
 
 [[package]]
 name = "ilar-tui"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "arboard",
