@@ -837,6 +837,7 @@ pub fn plan(
 ) -> Result<RuntimePlan> {
     let workspace = gateway.workspace(config);
     let home = gateway.home(config);
+    let withheld = withheld_for(private, gateway, memory);
     std::fs::create_dir_all(&workspace)
         .with_context(|| format!("creating workspace {}", workspace.display()))?;
     let mut plan = RuntimePlan::resolve(
@@ -869,15 +870,17 @@ pub fn plan(
             // The gateway cannot ask for the master password; a chat can
             // hand it over.
             unlock_hint: Some(crate::commands::UNLOCK_HINT.to_string()),
-            withheld_paths: withheld_for(private, gateway, memory),
+            withheld_paths: withheld.clone(),
         },
     )?;
     // Where it is: reached over a chat, with a home, wakeable from a
-    // script. Before the memory, which is about the person.
+    // script — and, in a room, without the directions to the memory it
+    // cannot read anyway. Before the memory, which is about the person.
     plan.system_prompt.push_str("\n\n");
     plan.system_prompt.push_str(&crate::situation::block(
         &home,
         &workspace,
+        withheld.is_empty(),
         chrono::Local::now().fixed_offset(),
     ));
     // The policy reaches the subagents too: an agent definition's
@@ -921,7 +924,12 @@ fn withheld_for(private: bool, gateway: &GatewayConfig, memory: &MemoryStore) ->
     if private || !gateway.memory.enabled {
         return Vec::new();
     }
-    vec![memory.dir().to_path_buf()]
+    // Canonical where the directory exists, since a tool context's cwd
+    // is canonical too and `/var` against `/private/var` would compare
+    // unequal all day. Before it exists, its own spelling is the best
+    // there is — and the memory store writes it on the first note.
+    let dir = memory.dir();
+    vec![dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf())]
 }
 
 /// The prompt a turn actually gets: what it was asked, after the news

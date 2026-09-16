@@ -11,12 +11,17 @@ use chrono::{DateTime, FixedOffset};
 /// policy that withholds `bash` has no other way to know the date,
 /// the time or the person's offset, and a schedule it writes is in
 /// UTC.
-pub fn block(home: &Path, workspace: &Path, now: DateTime<FixedOffset>) -> String {
+///
+/// `memory` is whether this seat has the person's memory at all. A
+/// room's does not, and telling it where the files are is telling it
+/// where to go looking: the seat's tools refuse the directory, but a
+/// refusal is a worse answer than never having been pointed there.
+pub fn block(home: &Path, workspace: &Path, memory: bool, now: DateTime<FixedOffset>) -> String {
     format!(
         "# Where you are\n\n\
          You are reached over a chat channel, run by ilar-gateway; the message tool is how \
          you answer, and nothing you write outside it reaches a scheduled turn's chat. Your \
-         home is {home}: your SOUL.md, skills/, memory/ and the daily notes live there, and \
+         home is {home}: your SOUL.md, skills/{memory} live there, and \
          your sessions work in {workspace}. A script can wake you with \
          `ilar-gateway notify \"text\"` (or `--to <channel:chat>` for a particular chat), \
          which arrives as a message on the last active chat: use it from cron jobs, services \
@@ -28,6 +33,11 @@ pub fn block(home: &Path, workspace: &Path, now: DateTime<FixedOffset>) -> Strin
          latest stamp, not from this one, and write a cron expression, or a time without \
          an offset, in UTC.",
         home = home.display(),
+        memory = if memory {
+            ", memory/ and the daily notes"
+        } else {
+            " and your agents"
+        },
         workspace = workspace.display(),
         now = now.to_rfc3339(),
     )
@@ -64,6 +74,7 @@ mod tests {
         let block = block(
             Path::new("/state/gateway"),
             Path::new("/state/gateway/workspace"),
+            true,
             opened,
         );
         assert!(block.contains("<now> tag"), "{block}");
@@ -76,6 +87,7 @@ mod tests {
         let text = block(
             Path::new("/state/gateway"),
             Path::new("/state/gateway/workspace"),
+            true,
             now,
         );
         assert!(text.contains("/state/gateway/workspace"), "{text}");
@@ -83,5 +95,29 @@ mod tests {
         // `date`, and a cron expression it writes is read as UTC.
         assert!(text.contains("2026-09-15T14:03:11+02:00"), "{text}");
         assert!(text.contains("in UTC"), "{text}");
+    }
+
+    /// A seat without the memory is not told where the memory is: its
+    /// tools would refuse the directory, and a refusal is a worse
+    /// answer than never having been sent there.
+    #[test]
+    fn a_seat_without_memory_is_not_told_where_it_is() {
+        let now = DateTime::parse_from_rfc3339("2026-09-15T14:03:11+02:00").unwrap();
+        let room = block(
+            Path::new("/state/gateway"),
+            Path::new("/state/gateway/workspace"),
+            false,
+            now,
+        );
+        assert!(!room.contains("memory/"), "{room}");
+        assert!(room.contains("/state/gateway"), "{room}");
+
+        let private = block(
+            Path::new("/state/gateway"),
+            Path::new("/state/gateway/workspace"),
+            true,
+            now,
+        );
+        assert!(private.contains("memory/"), "{private}");
     }
 }
