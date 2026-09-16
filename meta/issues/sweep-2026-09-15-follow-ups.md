@@ -6,11 +6,6 @@ What the stream reviewers found and the streams deferred, each too
 small or too far from its issue to land in that batch. Omnibus; tick
 items off here. The first three are the ones worth doing first.
 
-- **A restored aborted session cannot resume.** A user abort writes
-  no `TurnError`, so `ends_in_turn_error` misses it: the live abort
-  offers Ctrl-R, the same session reopened says "nothing to resume".
-  Needs a "log ends mid-turn" heuristic. `MaxIterations` arms no
-  resume either, though its chain is committed like an abort's.
 - **A room seat can still read memory files.** Memory *tools* are
   withheld from non-private seats, but `read`/`bash` reach
   `<home>/memory/USER.md`. Containment, not just tool removal.

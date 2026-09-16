@@ -27,24 +27,37 @@ pub(crate) struct RestoredSessionView {
     pub(crate) resume_offer: bool,
 }
 
-/// Whether the log ends on a failed turn. Walked from the end: a user
-/// message after it means the session moved on, an assistant message
-/// carrying a `TurnError` is the failure itself, and the tool results
-/// an interrupted turn leaves behind say nothing either way.
-pub(crate) fn ends_in_turn_error(events: &[ilar::session::SessionEvent]) -> bool {
+/// Whether the log ends on a turn that never finished: one that
+/// recorded a failure, one whose tool call nobody answered, or one
+/// whose results the provider was never told about.
+///
+/// Walked from the end. A user message means the session moved on and
+/// nothing of that turn is left to continue; an assistant message
+/// carrying a `TurnError` is a failure outright, and one carrying a
+/// tool call the log stops after is a turn cut while the tool ran; a
+/// tool result at the end is a turn cut between the result and the
+/// provider call it was owed to.
+///
+/// Those last two are how an abort looks: the user stopping a turn is
+/// not an error, so nothing writes a `TurnError` and the severed chain
+/// is the only trace left. Without them the live offer — "turn aborted
+/// — Ctrl-R resumes it" — died on reopen, and the same session said
+/// there was nothing to resume. A turn that hit `MaxIterations` stops
+/// in exactly the same shape.
+pub(crate) fn ends_mid_turn(events: &[ilar::session::SessionEvent]) -> bool {
+    use ilar::session::{ContentBlock, DiagnosticKind, SessionEvent};
     events.iter().rev().find_map(|event| match event {
-        ilar::session::SessionEvent::UserMessage { .. } => Some(false),
-        ilar::session::SessionEvent::AssistantMessage { content, .. } => {
-            Some(content.iter().any(|block| {
-                matches!(
-                    block,
-                    ilar::session::ContentBlock::Diagnostic {
-                        kind: ilar::session::DiagnosticKind::TurnError,
-                        ..
-                    }
-                )
-            }))
-        }
+        SessionEvent::UserMessage { .. } => Some(false),
+        SessionEvent::ToolResult { .. } => Some(true),
+        SessionEvent::AssistantMessage { content, .. } => Some(content.iter().any(|block| {
+            matches!(
+                block,
+                ContentBlock::Diagnostic {
+                    kind: DiagnosticKind::TurnError,
+                    ..
+                } | ContentBlock::ToolCall { .. }
+            )
+        })),
         _ => None,
     }) == Some(true)
 }
@@ -700,11 +713,12 @@ pub(crate) fn restored_session_view_with_store(
     );
     view.task_usage = task_usage;
     view.task_cost = task_cost;
-    // A session that died mid-turn can be continued from its committed
-    // chain — but only the log knows it ended that way, and only a
-    // question-free session can be resumed at all.
-    view.resume_offer =
-        session.pending_question().is_none() && ends_in_turn_error(session.events());
+    // A session that stopped mid-turn can be continued from its
+    // committed chain — but only the log knows it ended that way, and
+    // only a question-free session can be resumed at all. (A question
+    // waiting for an answer is itself an unanswered tool call, so the
+    // guard is what keeps it from reading as an abort.)
+    view.resume_offer = session.pending_question().is_none() && ends_mid_turn(session.events());
     view
 }
 
@@ -1224,9 +1238,10 @@ mod tests {
     }
 
     /// Where the log ends decides whether a resume is still on offer:
-    /// a failed turn is, a session that moved on since is not.
+    /// a turn that never finished is, however it stopped, and a
+    /// session that moved on since is not.
     #[test]
-    fn a_resume_is_offered_only_while_the_log_ends_on_a_failed_turn() {
+    fn a_resume_is_offered_only_while_the_log_ends_mid_turn() {
         use ilar::session::{ContentBlock, DiagnosticKind, SessionEvent, Usage};
 
         let assistant = |content: Vec<ContentBlock>| SessionEvent::AssistantMessage {
@@ -1264,15 +1279,36 @@ mod tests {
             state: None,
             ts: chrono::Utc::now(),
         };
+        let called_tool = || {
+            assistant(vec![ContentBlock::ToolCall {
+                id: new_id(),
+                name: "bash".into(),
+                input: serde_json::json!({"command": "sleep 600"}),
+                item_id: None,
+            }])
+        };
 
-        assert!(!ends_in_turn_error(&[]));
-        assert!(!ends_in_turn_error(&[user()]));
-        assert!(!ends_in_turn_error(&[died(), user()]));
-        assert!(!ends_in_turn_error(&[died(), user(), answered()]));
-        assert!(ends_in_turn_error(&[user(), died()]));
-        // The back-filled results an interrupted turn leaves say
-        // nothing about how the turn ended.
-        assert!(ends_in_turn_error(&[user(), died(), interrupted_tool()]));
+        assert!(!ends_mid_turn(&[]));
+        assert!(!ends_mid_turn(&[user()]));
+        assert!(!ends_mid_turn(&[died(), user()]));
+        assert!(!ends_mid_turn(&[died(), user(), answered()]));
+        assert!(!ends_mid_turn(&[user(), answered()]), "the turn finished");
+        assert!(ends_mid_turn(&[user(), died()]));
+        // The back-filled results an interrupted turn leaves say the
+        // same thing the turn error does: the chain stops here.
+        assert!(ends_mid_turn(&[user(), died(), interrupted_tool()]));
+        // An abort writes no turn error. Stopped while the tool ran,
+        // and stopped after its result with the provider call still
+        // owed, are the two shapes it leaves — and the two a
+        // `MaxIterations` ending leaves too.
+        assert!(
+            ends_mid_turn(&[user(), called_tool()]),
+            "a tool call nobody answered"
+        );
+        assert!(
+            ends_mid_turn(&[user(), called_tool(), interrupted_tool()]),
+            "a result the provider was never told about"
+        );
     }
 
     #[test]

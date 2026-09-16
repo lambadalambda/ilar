@@ -1992,10 +1992,19 @@ impl App {
             // like the error's: the abort's own stall notice is
             // persistent too, and a transient would lose to it and
             // leave the offer unsaid.
-            Ok(TurnOutcome::Aborted) if self.turn_committed => {
+            //
+            // The iteration ceiling stops a turn the same way — the
+            // chain is committed and the work is half done — and the
+            // only thing it used to say was that it had stopped.
+            Ok(outcome @ (TurnOutcome::Aborted | TurnOutcome::MaxIterations))
+                if self.turn_committed =>
+            {
                 self.retry_available = true;
                 self.set_persistent_notice(
-                    "turn aborted — Ctrl-R resumes it",
+                    match outcome {
+                        TurnOutcome::MaxIterations => "stopped: max iterations — Ctrl-R resumes it",
+                        _ => "turn aborted — Ctrl-R resumes it",
+                    },
                     NoticeLevel::Warning,
                 );
             }
@@ -5596,7 +5605,8 @@ mod tests {
 
     /// The stall notice says Esc ends a turn that will resume; an
     /// abort must therefore leave the same offer an error does — and
-    /// only when there is a committed chain to continue.
+    /// so must the iteration ceiling, which stops an identical chain.
+    /// Both only when there is a committed chain to continue.
     #[test]
     fn an_aborted_turn_offers_the_same_resume_an_error_does() {
         let mut app = App::new();
@@ -5628,6 +5638,28 @@ mod tests {
         app.finish_turn(Ok(TurnOutcome::Aborted));
         assert!(!app.retry_available);
         assert_eq!(app.notice_text(), Some("turn aborted"));
+
+        // The iteration ceiling stops a committed chain the same way
+        // an abort does, and now says so.
+        let mut app = App::new();
+        app.push_loop_event(&LoopEvent::TurnStarted);
+        app.push_loop_event(&LoopEvent::TurnDone {
+            outcome: TurnOutcome::MaxIterations,
+        });
+        app.finish_turn(Ok(TurnOutcome::MaxIterations));
+        assert!(app.retry_available);
+        assert_eq!(
+            app.notice_text(),
+            Some("stopped: max iterations — Ctrl-R resumes it")
+        );
+
+        let mut app = App::new();
+        app.push_loop_event(&LoopEvent::TurnDone {
+            outcome: TurnOutcome::MaxIterations,
+        });
+        app.finish_turn(Ok(TurnOutcome::MaxIterations));
+        assert!(!app.retry_available);
+        assert_eq!(app.notice_text(), Some("stopped: max iterations"));
     }
 
     /// Compaction sheds heavy payloads behind the turn boundary — the
