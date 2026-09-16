@@ -204,7 +204,15 @@ steering carries text only. Esc discards attachments along with the
 draft. Oversized images are downscaled to fit 2048 px on the longest
 edge before anything is stored or sent — providers shrink to that
 before tiling anyway, so a retina screenshot costs a fraction of the
-bytes with nothing lost. A 10 MB cap remains as the backstop.
+bytes with nothing lost. Three backstops: 64 MiB of file, weighed
+before the file is read at all; 64 megapixels of picture, weighed from
+the header before any decoder is asked to believe it — a few kilobytes
+of PNG can claim to be 40,000 by 40,000, and something has to say no
+before the frame buffer is allocated; and 10 MiB on the attachment as
+stored, after the shrink. A clipboard image is decoded by the system
+clipboard itself before ilar sees a pixel, so that one allocation is
+outside these bounds; what ilar can refuse, and does, is re-encoding
+something past the pixel limit.
 Switching a session with images to a text-only model replaces them
 with a named `[image omitted]` gap rather than an error.
 

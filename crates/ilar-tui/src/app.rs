@@ -2485,8 +2485,11 @@ impl App {
     /// vision would silently ignore what the user thinks it saw.
     /// Returns whether it attached, so multi-file drops can summarize.
     pub(crate) fn attach_image(&mut self, image: ilar::session::ImageContent) -> bool {
-        /// Decoded payload cap; providers reject far larger, but a session
-        /// line this size is already unpleasant to carry around.
+        /// Payload cap, on the picture as it will be *stored*, after
+        /// the shrink: providers reject far larger, but a session line
+        /// this size is already unpleasant to carry around. Not the
+        /// ingest cap, which weighs the file on its way in and is
+        /// generous because most of what it weighs is about to go.
         const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
         if self.busy {
             self.set_notice(
@@ -2528,15 +2531,43 @@ impl App {
 
     /// A dropped image file: sniffed, bounded, attached — or a notice
     /// saying why not. Returns whether it attached.
+    ///
+    /// Weighed before it is read: a drop is somebody's whole video
+    /// file as often as it is a screenshot, and reading it to find out
+    /// how big it is means holding it, and then base64 of it, in
+    /// memory first.
     pub(crate) fn attach_image_file(&mut self, path: &std::path::Path) -> bool {
+        match std::fs::metadata(path).map(|file| file.len()) {
+            Ok(bytes) if bytes > ilar::image::MAX_IMAGE_FILE_BYTES => {
+                self.set_notice(
+                    format!(
+                        "{} is too large to attach ({} — the cap is {})",
+                        path.display(),
+                        crate::text::format_bytes(bytes),
+                        crate::text::format_bytes(ilar::image::MAX_IMAGE_FILE_BYTES)
+                    ),
+                    NoticeLevel::Warning,
+                );
+                return false;
+            }
+            // Unreadable metadata is the read below's problem to report.
+            Ok(_) | Err(_) => {}
+        }
         match std::fs::read(path) {
             Ok(bytes) => match ilar::image::from_file_bytes(&bytes) {
                 Some(image) => return self.attach_image(image),
+                // A format nothing here reads, or a picture it will
+                // not decode — two different answers, and saying the
+                // first about the second would be a lie about a file
+                // the person can see is a PNG.
                 None => self.set_notice(
-                    format!(
-                        "{} is not a supported image (png, jpeg, webp, gif)",
-                        path.display()
-                    ),
+                    match ilar::image::refusal(&bytes) {
+                        Some(why) => format!("{}: {why}", path.display()),
+                        None => format!(
+                            "{} is not a supported image (png, jpeg, webp, gif)",
+                            path.display()
+                        ),
+                    },
                     NoticeLevel::Warning,
                 ),
             },
@@ -2563,6 +2594,18 @@ impl App {
             Err(arboard::Error::ContentNotAvailable) => return Ok(None),
             Err(error) => return Err(error).context("reading clipboard image"),
         };
+        // arboard has already decoded whatever was on the clipboard —
+        // that allocation is the library's and happens before ilar sees
+        // a pixel. What ilar can refuse is making two more of its own,
+        // the downscale's and the PNG's, out of something this size.
+        if !ilar::image::within_decode_limits(image.width, image.height) {
+            anyhow::bail!(
+                "the clipboard image is {}×{}, past the {} pixel limit",
+                image.width,
+                image.height,
+                ilar::image::MAX_IMAGE_PIXELS
+            );
+        }
         let (width, height, pixels) = match ilar::image::downscale_rgba(
             image.width,
             image.height,
@@ -6803,6 +6846,35 @@ mod tests {
         apply_intent(&mut app, Intent::PasteInput(broken.clone()), None);
         assert_eq!(app.pending_images.len(), 2);
         assert!(app.input.text().contains("definitely-missing"));
+    }
+
+    /// A drop is somebody's whole video file as often as it is a
+    /// screenshot. It is weighed on disk, before it is read into
+    /// memory and base64 of it beside that.
+    #[test]
+    fn an_oversized_drop_is_refused_before_it_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("huge.png");
+        // Sparse, and not an image at all: if the weighing below ever
+        // moved after the read, the notice would say "not a supported
+        // image" and this would fail — which is the ordering the test
+        // is here for. Nothing writes 64 MiB to say so.
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(ilar::image::MAX_IMAGE_FILE_BYTES + 1).unwrap();
+        drop(file);
+
+        let mut app = App::new();
+        app.current_model = "openai/gpt-5.6-sol".into();
+        assert!(!app.attach_image_file(&path));
+        assert!(app.pending_images.is_empty());
+        let notice = app.notice_text().unwrap_or_default().to_string();
+        assert!(notice.contains("too large to attach"), "{notice}");
+
+        // The same picture under the cap is ordinary business.
+        let small = dir.path().join("small.png");
+        std::fs::write(&small, ilar::image::encode_png(2, 2, &[1u8; 16]).unwrap()).unwrap();
+        assert!(app.attach_image_file(&small));
+        assert_eq!(app.pending_images.len(), 1);
     }
 
     #[test]

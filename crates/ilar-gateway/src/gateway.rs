@@ -1473,6 +1473,20 @@ pub fn attachments(media: &[PathBuf]) -> (Vec<ImageContent>, String) {
     let mut images = Vec::new();
     let mut notes = String::new();
     for path in media {
+        // Weighed before it is read: anyone who can message the bot
+        // can attach anything, and a file is held whole the moment it
+        // is read. Over the cap it is named rather than carried, which
+        // is what happens to a non-image of any size anyway.
+        let weight = std::fs::metadata(path).map(|file| file.len()).ok();
+        if let Some(bytes) = weight
+            && bytes > ilar::image::MAX_IMAGE_FILE_BYTES
+        {
+            notes.push_str(&format!(
+                "\n(file attached: {}, {bytes} bytes — too large to view; read it if it matters)",
+                path.display(),
+            ));
+            continue;
+        }
         let bytes = match std::fs::read(path) {
             Ok(bytes) => bytes,
             Err(error) => {
