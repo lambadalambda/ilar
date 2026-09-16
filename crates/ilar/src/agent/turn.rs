@@ -1114,7 +1114,7 @@ fn generic_summary(input: &serde_json::Value) -> Option<String> {
     }
     let mut keys = values.keys().collect::<Vec<_>>();
     keys.sort_by_key(|key| {
-        let normalized = normalized_key(key);
+        let normalized = crate::redact::normalized_key(key);
         (
             IDENTIFYING_KEYS
                 .iter()
@@ -1182,7 +1182,7 @@ pub fn tool_argument_detail(_name: &str, input: &serde_json::Value) -> String {
 /// of exactly this rule drifting apart is what published a `service`
 /// command that a `bash` one had redacted.
 fn redacted_argument(key: &str, value: &serde_json::Value) -> Option<serde_json::Value> {
-    if sensitive_key(key) {
+    if crate::redact::sensitive_key(key) {
         return Some(serde_json::Value::String("<redacted>".into()));
     }
     let text = value.as_str()?;
@@ -1191,7 +1191,7 @@ fn redacted_argument(key: &str, value: &serde_json::Value) -> Option<serde_json:
     }
     // A credentialed URL is a secret under *any* key — `url`, `msg`, a
     // prompt — which is exactly why no key predicate catches it.
-    redact_url_credentials(text).map(serde_json::Value::String)
+    crate::redact::url_credentials(text).map(serde_json::Value::String)
 }
 
 fn redact(value: &serde_json::Value) -> serde_json::Value {
@@ -1226,15 +1226,6 @@ fn collapse_whitespace(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// A key name reduced to its letters and digits, lowercased, so
-/// `api_key`, `apiKey` and `API-KEY` are one name.
-fn normalized_key(key: &str) -> String {
-    key.chars()
-        .filter(|character| character.is_ascii_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect()
-}
-
 /// Whether this argument's value is a command line handed to a shell.
 ///
 /// Keyed on the argument, not on the tool: `bash` and `service` both
@@ -1247,25 +1238,9 @@ fn normalized_key(key: &str) -> String {
 /// the next tool that takes one the day it is added.
 fn shell_command_argument(key: &str) -> bool {
     matches!(
-        normalized_key(key).as_str(),
+        crate::redact::normalized_key(key).as_str(),
         "command" | "cmd" | "commandline" | "shellcommand"
     )
-}
-
-fn sensitive_key(key: &str) -> bool {
-    let normalized = normalized_key(key);
-    [
-        "token",
-        "secret",
-        "password",
-        "authorization",
-        "apikey",
-        "privatekey",
-        "credential",
-        "cookie",
-    ]
-    .iter()
-    .any(|needle| normalized.contains(needle))
 }
 
 /// A command line with its secrets removed: the tokens that follow a
@@ -1282,135 +1257,7 @@ pub fn redact_command(command: &str) -> String {
 /// that echoes its command back (`service`'s confirmation does)
 /// republishes verbatim what the argument display just redacted.
 fn redact_command_collecting(command: &str, secrets: &mut Vec<String>) -> String {
-    let mut redact_next = false;
-    let mut allow_authorization_scheme = false;
-    command
-        .split_whitespace()
-        .map(|token| {
-            if redact_next {
-                let normalized = token.trim_matches(['\'', '"', ',']);
-                if allow_authorization_scheme
-                    && (normalized.eq_ignore_ascii_case("bearer")
-                        || normalized.eq_ignore_ascii_case("basic"))
-                {
-                    allow_authorization_scheme = false;
-                    return token.to_string();
-                }
-                redact_next = false;
-                allow_authorization_scheme = false;
-                secrets.push(normalized.to_string());
-                return "<redacted>".to_string();
-            }
-            let normalized = token.trim_matches(['\'', '"', ',']);
-            if normalized.starts_with("sk-")
-                || normalized.starts_with("ghp_")
-                || normalized.starts_with("github_pat_")
-            {
-                secrets.push(normalized.to_string());
-                return "<redacted>".to_string();
-            }
-            let lower = normalized.to_ascii_lowercase();
-            if let Some(position) = lower.find("authorization:") {
-                let value = lower[position + "authorization:".len()..].trim();
-                if value.is_empty() {
-                    redact_next = true;
-                    allow_authorization_scheme = true;
-                    return token.to_string();
-                }
-                if value == "bearer" || value == "basic" {
-                    redact_next = true;
-                    return token.to_string();
-                }
-                // Sliced from `normalized`, not `lower`: the secret has
-                // to match the original casing to be found in an echo.
-                secrets.push(
-                    normalized[position + "authorization:".len()..]
-                        .trim()
-                        .to_string(),
-                );
-                return "Authorization:<redacted>".to_string();
-            }
-            let (key, value) = token.split_once('=').unwrap_or((token, ""));
-            let key_name = key.trim_start_matches('-');
-            let key_is_label = !value.is_empty() || key.starts_with('-') || key.ends_with(':');
-            if key_is_label && sensitive_key(key_name) {
-                if value.is_empty() {
-                    redact_next = true;
-                    return token.to_string();
-                }
-                secrets.push(value.trim_matches(['\'', '"', ',']).to_string());
-                return format!("{key}=<redacted>");
-            }
-            if normalized.eq_ignore_ascii_case("bearer") {
-                redact_next = true;
-                return token.to_string();
-            }
-            if let Some(redacted) = redact_url_credentials(token) {
-                return redacted;
-            }
-            token.to_string()
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// `scheme://user:secret@host` with the credential replaced — the whole
-/// userinfo, since the username is usually the account the secret
-/// opens. `None` when nothing changed. Requires `://` directly ahead of
-/// the credential, so an email or a bare `user:pass@host` in prose is
-/// never touched, and a plain URL has no `user:secret@` to match.
-fn redact_url_credentials(text: &str) -> Option<String> {
-    let mut redacted = String::with_capacity(text.len());
-    let mut changed = false;
-    let mut rest = text;
-    while let Some(position) = rest.find("://") {
-        let after = position + "://".len();
-        redacted.push_str(&rest[..after]);
-        rest = &rest[after..];
-        // The authority ends where a path, query, fragment or plain
-        // prose begins — and at any character a URL authority cannot
-        // contain. Minified JSON is one whitespace-free run: without
-        // the delimiter set, `{"host":"https://api.io","user":"bob@x"}`
-        // reads `api.io","user":"bob` as userinfo and this pass would
-        // corrupt the value and invent a credential.
-        let authority_end = rest
-            .find(|c: char| {
-                matches!(
-                    c,
-                    '/' | '?'
-                        | '#'
-                        | '"'
-                        | '\''
-                        | ','
-                        | ';'
-                        | '{'
-                        | '}'
-                        | '['
-                        | ']'
-                        | '('
-                        | ')'
-                        | '<'
-                        | '>'
-                        | '\\'
-                        | '`'
-                ) || c.is_whitespace()
-            })
-            .unwrap_or(rest.len());
-        if let Some(at) = rest[..authority_end].rfind('@')
-            && let Some((user, secret)) = rest[..at].split_once(':')
-            && !user.is_empty()
-            && !secret.is_empty()
-        {
-            redacted.push_str("<redacted>@");
-            rest = &rest[at + 1..];
-            changed = true;
-        }
-    }
-    if !changed {
-        return None;
-    }
-    redacted.push_str(rest);
-    Some(redacted)
+    crate::redact::tokens(command, crate::redact::Mode::Command, secrets)
 }
 
 /// A result pass will chase at most this many argument secrets, and
@@ -1428,7 +1275,7 @@ fn collect_argument_secrets(input: &serde_json::Value, secrets: &mut Vec<String>
             for (key, value) in values {
                 match value {
                     serde_json::Value::String(text) => {
-                        if sensitive_key(key) {
+                        if crate::redact::sensitive_key(key) {
                             secrets.push(text.clone());
                         } else if shell_command_argument(key) {
                             redact_command_collecting(text, secrets);
@@ -1468,7 +1315,7 @@ pub fn redact_tool_result(input: &serde_json::Value, result: &str) -> String {
             text = std::borrow::Cow::Owned(text.replace(secret.as_str(), "<redacted>"));
         }
     }
-    match redact_url_credentials(&text) {
+    match crate::redact::url_credentials(&text) {
         Some(redacted) => redacted,
         None => text.into_owned(),
     }
@@ -2718,12 +2565,12 @@ mod tests {
     fn url_redaction_leaves_minified_json_alone() {
         let json = r#"{"host":"https://api.io","user":"bob@x.io"}"#;
         assert_eq!(
-            super::redact_url_credentials(json),
+            crate::redact::url_credentials(json),
             None,
             "no credential here"
         );
         let real = "fetch https://alice:tok3nvalue@git.example.com/repo";
-        let redacted = super::redact_url_credentials(real).expect("a real credential");
+        let redacted = crate::redact::url_credentials(real).expect("a real credential");
         assert!(
             redacted.contains("https://<redacted>@git.example.com"),
             "{redacted}"

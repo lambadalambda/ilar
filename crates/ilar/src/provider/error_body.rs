@@ -140,7 +140,7 @@ fn redact_json(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(values) => {
             for (key, value) in values {
-                if sensitive_key(key) {
+                if crate::redact::sensitive_key(key) {
                     *value = serde_json::Value::String("<redacted>".into());
                 } else {
                     redact_json(value);
@@ -153,67 +153,11 @@ fn redact_json(value: &mut serde_json::Value) {
     }
 }
 
+/// A stranger's text, token by token. Shares every rule with the tool
+/// row's own pass — one needle table, one set of shapes — and arms
+/// more freely: see [`crate::redact::Mode`].
 fn redact_text(value: &str) -> String {
-    let mut redact_next = false;
-    value
-        .split_whitespace()
-        .map(|token| {
-            if redact_next {
-                let normalized = token.trim_matches(['\'', '"', ',', '{', '}']);
-                if normalized.eq_ignore_ascii_case("bearer")
-                    || normalized.eq_ignore_ascii_case("basic")
-                    || normalized == "="
-                    || normalized == ":"
-                {
-                    return token.to_string();
-                }
-                redact_next = false;
-                return "<redacted>".to_string();
-            }
-            let normalized = token.trim_matches(['\'', '"', ',', '{', '}']);
-            let lower = normalized.to_ascii_lowercase();
-            if lower == "bearer" || lower == "basic" {
-                redact_next = true;
-                return token.to_string();
-            }
-            if normalized.starts_with("sk-")
-                || normalized.starts_with("ghp_")
-                || normalized.starts_with("github_pat_")
-            {
-                return "<redacted>".to_string();
-            }
-            if let Some((key, value)) = normalized.split_once(['=', ':'])
-                && sensitive_key(key)
-            {
-                redact_next = value.is_empty();
-                return format!("{key}=<redacted>");
-            }
-            if sensitive_key(normalized) {
-                redact_next = true;
-            }
-            token.to_string()
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn sensitive_key(key: &str) -> bool {
-    let key = key
-        .chars()
-        .filter(|character| character.is_ascii_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect::<String>();
-    [
-        "token",
-        "secret",
-        "password",
-        "authorization",
-        "apikey",
-        "credential",
-        "cookie",
-    ]
-    .iter()
-    .any(|needle| key.contains(needle))
+    crate::redact::tokens(value, crate::redact::Mode::Untrusted, &mut Vec::new())
 }
 
 #[cfg(test)]
@@ -242,6 +186,24 @@ mod tests {
         let mut boundary = "request failed: super-sec".to_string();
         redact_explicit_secrets(&mut boundary, &["super-secret"], true);
         assert_eq!(boundary, "request failed: <redacted>");
+    }
+
+    /// The two holes the second copy had. Both were published — a
+    /// provider that names a private key in its complaint, and one
+    /// that quotes back the URL it was called with — and neither was
+    /// visible from this file, which is the argument for there being
+    /// one engine and not two.
+    #[test]
+    fn a_private_key_and_a_credentialed_url_survived_the_second_copy() {
+        let mut json = serde_json::json!({
+            "error": {"private_key": "-----BEGIN RSA-----", "endpoint": "safe"},
+        });
+        redact_json(&mut json);
+        assert_eq!(json["error"]["private_key"], "<redacted>");
+
+        let text = redact_text("could not reach https://bob:hunter2@api.example.com/v1");
+        assert!(!text.contains("hunter2"), "{text}");
+        assert!(text.contains("api.example.com"), "{text}");
     }
 
     #[test]
