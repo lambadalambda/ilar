@@ -206,7 +206,11 @@ that from cron jobs, services and long builds to report back, that
 scheduled turns speak only through the message tool, and when the
 session opened — an RFC 3339 stamp with the machine's own offset, so
 a model that cannot run `date` still knows the date and the person's
-time zone when it writes a schedule in UTC. `ilar-gateway
+time zone when it writes a schedule in UTC. That one ages with the
+session, so every message that arrives afterwards carries its own
+`<now>…</now>` stamp at the end of the conversation, where it costs
+no cached prefix: "tomorrow at nine" is reckoned from the latest
+stamp, not from the session's first moment. `ilar-gateway
 prompt` prints the whole request a chat would get — model, request
 options, the system prompt with this block and the core memory, and
 every tool with its description and schema, the chat's own included —

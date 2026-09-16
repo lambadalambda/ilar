@@ -4,14 +4,12 @@
 
 What the stream reviewers found and the streams deferred, each too
 small or too far from its issue to land in that batch. Omnibus; tick
-items off here. The first three are the ones worth doing first.
+items off here.
 
-- **A room seat can still read memory files.** Memory *tools* are
-  withheld from non-private seats, but `read`/`bash` reach
-  `<home>/memory/USER.md`. Containment, not just tool removal.
-- **The situation stamp is frozen at session open.** A week-old seat
-  carries a stale "now is …". A per-turn prefix at the end of the
-  conversation is cache-safe and small.
+Done 2026-09-16: the three that led this list — a restored aborted
+session that could not resume, a room seat that could read the memory
+files its tools were denied, and the situation stamp frozen at session
+open.
 
 Gateway:
 - `/grant session <password>` leaves the sudo password in the chat

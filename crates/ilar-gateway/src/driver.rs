@@ -480,7 +480,14 @@ impl Driver {
         if seat.cancel.is_cancelled() {
             return Err(TurnError::Closed);
         }
-        let prompt = &with_undelivered(seat, prompt);
+        // Stamped as it arrives, at the end of the conversation: the
+        // system prompt's "opened at" is the session's first moment and
+        // cannot be rewritten per turn without rewriting the cached
+        // prefix under it.
+        let prompt = &crate::situation::stamped(
+            &with_undelivered(seat, prompt),
+            chrono::Local::now().fixed_offset(),
+        );
         let pending = seat.pending_model.lock().unwrap().take();
         if let Some(model) = pending {
             self.persist_model(seat, &model)

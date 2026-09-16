@@ -23,18 +23,52 @@ pub fn block(home: &Path, workspace: &Path, now: DateTime<FixedOffset>) -> Strin
          and long builds to report back when they finish, instead of waiting on them. \
          Scheduled turns and heartbeats speak only through the message tool; say nothing \
          when there is nothing to say. This conversation opened at {now}, the local time \
-         here with its offset: reckon \"tomorrow at nine\" from that, and write a cron \
-         expression, or a time without an offset, in UTC. The stamp ages as the \
-         conversation goes on.",
+         here with its offset, and every message that reaches you afterwards is stamped \
+         with the time it arrived in a <now> tag: reckon \"tomorrow at nine\" from the \
+         latest stamp, not from this one, and write a cron expression, or a time without \
+         an offset, in UTC.",
         home = home.display(),
         workspace = workspace.display(),
         now = now.to_rfc3339(),
     )
 }
 
+/// The stamp a turn's prompt carries in. The system prompt's "opened
+/// at" is true once and ages from there — a seat a week old would
+/// reckon "tomorrow at nine" from last Tuesday — and rewriting it per
+/// turn would rewrite the cached prefix with it, at the price of the
+/// whole conversation's cache. This rides at the end of the
+/// conversation instead, where nothing is cached yet: one short line
+/// in front of what was actually said.
+pub fn stamped(prompt: &str, now: DateTime<FixedOffset>) -> String {
+    format!("<now>{}</now>\n\n{prompt}", now.to_rfc3339())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A turn knows when it is, however old the session is: the stamp
+    /// rides with the message rather than in the prompt above it.
+    #[test]
+    fn every_turn_carries_the_time_it_arrived() {
+        let opened = DateTime::parse_from_rfc3339("2026-09-09T14:03:11+02:00").unwrap();
+        let week_later = DateTime::parse_from_rfc3339("2026-09-16T08:30:00+02:00").unwrap();
+        let prompt = stamped("what is on for tomorrow?", week_later);
+        assert_eq!(
+            prompt,
+            "<now>2026-09-16T08:30:00+02:00</now>\n\nwhat is on for tomorrow?"
+        );
+        // And the system prompt sends the model to it rather than to
+        // its own stamp, which is only ever the session's first moment.
+        let block = block(
+            Path::new("/state/gateway"),
+            Path::new("/state/gateway/workspace"),
+            opened,
+        );
+        assert!(block.contains("<now> tag"), "{block}");
+        assert!(block.contains("latest stamp"), "{block}");
+    }
 
     #[test]
     fn the_block_says_where_and_when_the_session_opened() {

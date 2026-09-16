@@ -1001,7 +1001,15 @@ async fn a_message_during_a_turn_steers_it_and_one_reply_covers_both() {
             _ => None,
         })
         .collect();
-    assert_eq!(texts, ["run something slow", "also this"], "{texts:?}");
+    // The turn's prompt arrives stamped with the time it arrived; a
+    // steer rides into the turn already running and carries none.
+    let stamped = texts[0]
+        .strip_prefix("<now>")
+        .and_then(|rest| rest.split_once("</now>\n\n"))
+        .unwrap_or_else(|| panic!("the turn is stamped: {texts:?}"));
+    assert_eq!(stamped.1, "run something slow", "{texts:?}");
+    assert_eq!(texts[1], "also this", "{texts:?}");
+    assert_eq!(texts.len(), 2, "{texts:?}");
     gateway.cancel();
 }
 
