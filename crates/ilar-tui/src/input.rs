@@ -562,20 +562,31 @@ pub(crate) fn handle_prompt_key(input: &mut InputBuffer, key: KeyEvent) -> Promp
             input.delete();
             PromptAction::Edited
         }
-        KeyCode::Char(character)
-            if !key.modifiers.intersects(
-                KeyModifiers::CONTROL
-                    | KeyModifiers::ALT
-                    | KeyModifiers::SUPER
-                    | KeyModifiers::HYPER
-                    | KeyModifiers::META,
-            ) =>
-        {
+        KeyCode::Char(character) if types_a_character(&key) => {
             input.insert(&character.to_string());
             PromptAction::Edited
         }
         _ => PromptAction::Unhandled,
     }
+}
+
+/// Whether a keypress is a character landing in the prompt rather than
+/// a chord meaning something else. Every modifier a terminal can put on
+/// a chord disqualifies it — the kitty protocol reports an unbound
+/// Cmd-key as `Char` with SUPER, and nothing types it — while Shift
+/// alone does not, since that is how a capital arrives. Asked here and
+/// by the session offer, which goes when the first character is typed:
+/// two answers that drifted apart would lose an offer to a keystroke
+/// the prompt never received.
+pub(crate) fn types_a_character(key: &crossterm::event::KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char(_))
+        && !key.modifiers.intersects(
+            KeyModifiers::CONTROL
+                | KeyModifiers::ALT
+                | KeyModifiers::SUPER
+                | KeyModifiers::HYPER
+                | KeyModifiers::META,
+        )
 }
 
 /// Retry is a modifier chord, never a bare letter: the prompt has focus,

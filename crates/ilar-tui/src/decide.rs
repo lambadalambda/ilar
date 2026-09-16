@@ -564,19 +564,22 @@ pub(crate) enum GhostStep {
     /// Enter on an empty prompt: open the session on offer, exactly as
     /// the picker's resume does.
     Resume,
-    /// The offer goes: Esc said so, or a message is on its way and the
+    /// The offer goes: the first character of a fresh message was
+    /// typed, or Esc said so, or a message is on its way and the
     /// session being spoken to is the fresh one.
     Dismiss,
     /// Nothing about the offer changes.
     Keep,
 }
 
-/// Three keys decide an offer's fate and every other key leaves it
-/// alone. Anything that owns the keyboard owns those keys too — a modal
-/// in front, or the Ctrl-X leader waiting for its second press, whose
-/// Enter must not resume a session; Shift-Enter is a newline, never a
-/// send; and Esc over a draft clears the draft, so one press does one
-/// thing.
+/// Enter on an empty prompt takes the offer; typing anything at all
+/// leaves it behind, the character landing in the prompt as usual; and
+/// every key that neither types nor answers — scrolling, a shortcut,
+/// Backspace on nothing — leaves the offer alone. Anything that owns
+/// the keyboard owns those keys too: a modal in front, or the Ctrl-X
+/// leader waiting for its second press, whose Enter must not resume a
+/// session. Shift-Enter is a newline, never a send, and Esc over a
+/// draft clears the draft, so one press does one thing.
 pub(crate) fn ghost_step(state: &LoopState, key: crossterm::event::KeyEvent) -> GhostStep {
     use crossterm::event::{KeyCode, KeyModifiers};
     if state.modal.is_some() || state.model_key_pending {
@@ -587,6 +590,10 @@ pub(crate) fn ghost_step(state: &LoopState, key: crossterm::event::KeyEvent) -> 
         KeyCode::Enter if state.input_blank => GhostStep::Resume,
         KeyCode::Enter => GhostStep::Dismiss,
         KeyCode::Esc if state.input_blank => GhostStep::Dismiss,
+        // A character typed is the choice made — and only a character
+        // that reaches the prompt, so Ctrl-P and every other chord
+        // still open what they open over an offer that stays.
+        _ if crate::input::types_a_character(&key) => GhostStep::Dismiss,
         _ => GhostStep::Keep,
     }
 }
@@ -1413,8 +1420,8 @@ mod tests {
     }
 
     /// The whole offer in one test: Enter on an empty prompt takes it,
-    /// Enter over a draft leaves it behind, Esc on an empty prompt
-    /// dismisses it, and nothing else touches it.
+    /// typing leaves it behind at the first character, Esc on an empty
+    /// prompt dismisses it, and nothing else touches it.
     #[test]
     fn an_offered_session_answers_enter_and_esc_and_nothing_else() {
         use crossterm::event::{KeyCode, KeyModifiers};
@@ -1446,16 +1453,31 @@ mod tests {
             GhostStep::Keep,
             "Shift-Enter is a newline, not a send"
         );
-        for code in [
-            KeyCode::Char('x'),
-            KeyCode::Up,
-            KeyCode::PageUp,
-            KeyCode::F(1),
-        ] {
+        for code in [KeyCode::Char('x'), KeyCode::Char(' ')] {
+            assert_eq!(
+                ghost_step(&idle(), press(code)),
+                GhostStep::Dismiss,
+                "{code:?} starts a fresh message, so the offer goes"
+            );
+        }
+        for code in [KeyCode::Up, KeyCode::PageUp, KeyCode::F(1)] {
             assert_eq!(
                 ghost_step(&idle(), press(code)),
                 GhostStep::Keep,
-                "{code:?} is not the offer's key"
+                "{code:?} neither types nor answers"
+            );
+        }
+        for shortcut in [
+            crossterm::event::KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+            crossterm::event::KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT),
+            // A kitty-protocol terminal reports an unbound Cmd-key
+            // this way; nothing is typed, so nothing is answered.
+            crossterm::event::KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER),
+        ] {
+            assert_eq!(
+                ghost_step(&idle(), shortcut),
+                GhostStep::Keep,
+                "{shortcut:?} is a shortcut, not typing"
             );
         }
     }

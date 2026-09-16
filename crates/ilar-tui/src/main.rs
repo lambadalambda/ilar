@@ -4855,12 +4855,13 @@ async fn run_app(
                     }
                     continue;
                 }
-                // The session on offer answers three keys before the
-                // ordinary ones: Enter on an empty prompt resumes it,
-                // Enter over a draft leaves it behind, and Esc
-                // dismisses it. Everything else falls through unchanged
-                // and the offer stays — including the Esc that clears a
-                // draft, which has its own work to do.
+                // The session on offer answers the keyboard before the
+                // ordinary handling does: Enter on an empty prompt
+                // resumes it, and anything typed leaves it behind —
+                // the keystroke itself falls through and lands in the
+                // prompt either way. Everything else leaves the offer
+                // standing, including the Esc that clears a draft,
+                // which has its own work to do.
                 if app.ghost.is_some() {
                     let state = observe(
                         app,
@@ -5159,6 +5160,15 @@ async fn run_app(
                 let scan = app.session_search.as_ref().map(|search| search.generation);
                 let decided = decide::paste(&state, text);
                 apply_event_intents(app, decided, &mut intents, steer_tx.as_ref());
+                // A paste into the prompt is typing: the draft has
+                // started, so the offer above it is answered. A paste
+                // into a modal's field leaves the prompt blank, and one
+                // into a focus view's prompt is addressed to that agent
+                // — neither is a message to the fresh session, so both
+                // leave the offer alone, exactly as typing there does.
+                if app.ghost.is_some() && app.focus.is_none() && !app.input.is_blank() {
+                    app.dismiss_ghost();
+                }
                 if scan != app.session_search.as_ref().map(|search| search.generation) {
                     stop_session_scan(&mut search_cancel, &mut search_rx);
                 }
