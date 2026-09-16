@@ -837,7 +837,7 @@ pub fn plan(
 ) -> Result<RuntimePlan> {
     let workspace = gateway.workspace(config);
     let home = gateway.home(config);
-    let withheld = withheld_for(private, gateway, memory);
+    let withheld = withheld_for(private, config, gateway, memory);
     std::fs::create_dir_all(&workspace)
         .with_context(|| format!("creating workspace {}", workspace.display()))?;
     let mut plan = RuntimePlan::resolve(
@@ -880,7 +880,10 @@ pub fn plan(
     plan.system_prompt.push_str(&crate::situation::block(
         &home,
         &workspace,
-        withheld.is_empty(),
+        // Whether this seat is told the memory is there — asked of the
+        // seat, not of `withheld`, which holds the session store for
+        // every room whether or not there is a memory to hide.
+        private || !gateway.memory.enabled,
         chrono::Local::now().fixed_offset(),
     ));
     // The policy reaches the subagents too: an agent definition's
@@ -918,18 +921,50 @@ pub fn plan(
 /// withholds nothing: it is the person's own chat, and the memory
 /// tools are right there.
 ///
+/// Two directories, for the same reason. The memory is what the
+/// assistant was told to remember; the session store is what it was
+/// told at all, and every seat's log sits in the one directory — a
+/// room could read the private chat's transcripts out of it. Nothing a
+/// seat opens by path lives there: spilled tool output goes to
+/// `<state>/tool-output`, images to `<state>/images`.
+///
 /// Containment for a model that goes looking, not for one determined
 /// to arrive: see [`ilar::tools::ToolContext::withheld`].
-fn withheld_for(private: bool, gateway: &GatewayConfig, memory: &MemoryStore) -> Vec<PathBuf> {
-    if private || !gateway.memory.enabled {
+fn withheld_for(
+    private: bool,
+    config: &Config,
+    gateway: &GatewayConfig,
+    memory: &MemoryStore,
+) -> Vec<PathBuf> {
+    if private {
         return Vec::new();
     }
-    // Canonical where the directory exists, since a tool context's cwd
-    // is canonical too and `/var` against `/private/var` would compare
-    // unequal all day. Before it exists, its own spelling is the best
-    // there is — and the memory store writes it on the first note.
-    let dir = memory.dir();
-    vec![dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf())]
+    let mut withheld = vec![canonical(ilar::runtime::sessions_dir(config))];
+    if gateway.memory.enabled {
+        withheld.push(canonical(memory.dir().to_path_buf()));
+    }
+    withheld
+}
+
+/// A directory as its own tools will see it: canonical, since a tool
+/// context's cwd is canonical too and `/var` against `/private/var`
+/// would compare unequal all day.
+///
+/// Neither of these exists on a first run — the sessions directory is
+/// made by the session store, the memory directory by the first note —
+/// and canonicalising a path that is not there fails. So the parent
+/// answers for it, which is the part that carries the symlink.
+fn canonical(dir: PathBuf) -> PathBuf {
+    if let Ok(resolved) = dir.canonicalize() {
+        return resolved;
+    }
+    match (dir.parent(), dir.file_name()) {
+        (Some(parent), Some(name)) => match parent.canonicalize() {
+            Ok(parent) => parent.join(name),
+            Err(_) => dir,
+        },
+        _ => dir,
+    }
 }
 
 /// The prompt a turn actually gets: what it was asked, after the news
@@ -1148,27 +1183,42 @@ mod tests {
 
     /// Withholding the memory *tools* from a room left `read` and
     /// `bash` pointed at the same files. The room's seat now cannot
-    /// name the directory at all; the person's own chat is unchanged,
-    /// and a gateway with memory off has nothing to withhold.
+    /// name the directory at all — nor the session store, where the
+    /// private chat's own transcripts are. The person's own chat is
+    /// unchanged.
     #[test]
-    fn a_room_seat_cannot_name_the_memory_directory() {
+    fn a_room_seat_cannot_name_the_memory_directory_or_the_session_store() {
         let dir = tempfile::tempdir().unwrap();
-        let memory = MemoryStore::new(dir.path().join("memory"));
+        // The test config's state directory is `/nonexistent`, which is
+        // also what keeps the canonicalisation a no-op here.
+        let config = Config::default_for_tests();
+        let sessions = PathBuf::from("/nonexistent/sessions");
+        // Canonical, because that is what the seat will be given: the
+        // memory directory does not exist yet, so its parent answers
+        // for it, and on a Mac the parent of a temporary directory is
+        // a symlink.
+        let home = std::fs::canonicalize(dir.path()).unwrap();
+        let memory = MemoryStore::new(home.join("memory"));
         let mut gateway = GatewayConfig::default();
         gateway.memory.enabled = true;
 
         assert_eq!(
-            withheld_for(false, &gateway, &memory),
-            vec![dir.path().join("memory")],
-            "a room's seat cannot reach the person's memory"
+            withheld_for(false, &config, &gateway, &memory),
+            vec![sessions.clone(), home.join("memory")],
+            "a room's seat reaches neither the person's memory nor their transcripts"
         );
         assert!(
-            withheld_for(true, &gateway, &memory).is_empty(),
-            "the person's own chat is where the memory belongs"
+            withheld_for(true, &config, &gateway, &memory).is_empty(),
+            "the person's own chat is where both belong"
         );
 
+        // What a room is told of a person does not stop being a
+        // transcript because the memory is off.
         gateway.memory.enabled = false;
-        assert!(withheld_for(false, &gateway, &memory).is_empty());
+        assert_eq!(
+            withheld_for(false, &config, &gateway, &memory),
+            vec![sessions]
+        );
     }
 
     /// The pump's `Propagate` arm. An entry addressed to a task session

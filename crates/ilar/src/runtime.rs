@@ -384,7 +384,10 @@ pub fn persist_model_change(
     Ok(session)
 }
 
-fn sessions_dir(config: &Config) -> std::path::PathBuf {
+/// Where every session's log lives — one directory for all of them,
+/// which is why a seat that may not read another's has to withhold it
+/// by name.
+pub fn sessions_dir(config: &Config) -> std::path::PathBuf {
     config.state_dir().join("sessions")
 }
 
