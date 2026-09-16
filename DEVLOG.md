@@ -1,5 +1,29 @@
 # DEVLOG
 
+## 2026-09-16 — The offer's keys move under the cursor
+
+The resume offer shipped yesterday explained itself in its header:
+"previous session here: <title> · just now — Enter resumes · type to
+start fresh · Esc dismisses". On a real terminal that wrapped to two
+lines, read as a sentence about three keys, and sat as far from the
+prompt as the pane allows — instructions furthest from the place they
+are obeyed. The user's verdict was "the usage here is pretty unclear",
+and the fix is placement rather than wording: the header now says only
+what is on screen, and the empty prompt says, muted, "Enter resumes ·
+type to start fresh". A promise directly above the keys that keep it.
+
+The keys followed the wording. Typing used to leave the ghost standing
+until Enter decided its fate, so the screen showed a draft under a
+session that was not going to be resumed. Now the first character
+dismisses it and still lands in the prompt — the offer is answered by
+the same keystroke that starts the fresh message. Esc on an empty
+prompt still works and is no longer advertised; there was nothing for
+it to do that typing does not.
+
+One small thing the change forced: the input box's own footer, "Enter
+send · …", is suppressed while the hint is up. Two promises about
+Enter on one box is the confusion this issue was about.
+
 ## 2026-09-15 — Four more from the evening: sudo's order, the session list, a ghost, a phantom
 
 The user tried the sudo tool and hit the sweep's own bug before the

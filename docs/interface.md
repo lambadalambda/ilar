@@ -11,14 +11,17 @@ drawn in the transcript pane in a muted, ghostly style under one header
 line —
 
 ```
-previous session here: fix the flaky adoption test · 2h ago — Enter resumes · type to start fresh · Esc dismisses
+previous session here: fix the flaky adoption test · 2h ago
 ```
+
+The empty prompt below says how to answer it, muted:
+`Enter resumes · type to start fresh`.
 
 - **Enter** on an empty prompt resumes it, exactly as the picker's
   resume does.
-- **Typing** ignores it: the first message you send goes to the fresh
-  session you are already in, and the ghost clears.
-- **Esc** dismisses it and leaves the fresh session alone.
+- **Typing** leaves it behind: the ghost clears on the first character,
+  and what you write goes to the fresh session you are already in.
+- **Esc** on an empty prompt dismisses it without starting anything.
 
 Anything else — scrolling, F1, the palette — leaves the offer up. The
 ghost is a bounded read from the end of the log (a couple of screenfuls,
