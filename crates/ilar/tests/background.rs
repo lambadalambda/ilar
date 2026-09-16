@@ -1312,6 +1312,105 @@ async fn background_subagent_max_iterations_is_error() {
     spawner.shutdown().await;
 }
 
+/// Delegating the read is still the read: a child of a context that
+/// withholds a path cannot name it either, or a room's seat would get
+/// its person's memory back through `task`.
+#[tokio::test]
+async fn a_child_inherits_the_paths_its_parent_withholds() {
+    let (store, session_id) = temp_store();
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().canonicalize().unwrap();
+    let withheld = cwd.join("memory");
+    std::fs::create_dir_all(&withheld).unwrap();
+    std::fs::write(withheld.join("USER.md"), "what it knows about a person").unwrap();
+    let child = MockProvider::new(vec![
+        vec![
+            ProviderEvent::ToolCallStarted {
+                id: "child-read".into(),
+                name: "read".into(),
+                item_id: None,
+            },
+            ProviderEvent::ToolCallCompleted {
+                id: "child-read".into(),
+                name: "read".into(),
+                input: serde_json::json!({
+                    "path": withheld.join("USER.md").to_str().unwrap(),
+                }),
+            },
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+                usage: Default::default(),
+            },
+        ],
+        vec![
+            ProviderEvent::TextDelta("nothing to report".into()),
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+                usage: Default::default(),
+            },
+        ],
+    ]);
+    let spawner = spawner_for_workspace(
+        Arc::new(child),
+        &store,
+        AgentWorkspaceMode::Mutable,
+        cwd.clone(),
+    );
+    let registry = ToolRegistry::builtin()
+        .with_subagents(spawner.clone())
+        .unwrap();
+    let mut ctx = ToolContext::root(cwd.clone())
+        .with_subagents(spawner.clone())
+        .with_withheld(Arc::from(vec![withheld.clone()]));
+    ctx.session_id = session_id.clone();
+    let output = registry
+        .get("task")
+        .unwrap()
+        .run(
+            serde_json::json!({
+                "description": "look something up",
+                "prompt": "find out what you can",
+                "subagent_type": "explore",
+            }),
+            ctx,
+        )
+        .await;
+    assert!(!output.is_error, "{}", output.content);
+
+    let child_id = store
+        .children_of(&session_id)
+        .first()
+        .map(|child| child.id.clone())
+        .or_else(|| {
+            store
+                .list()
+                .into_iter()
+                .find(|summary| summary.id != session_id)
+                .map(|summary| summary.id)
+        })
+        .expect("the child ran");
+    let results: Vec<String> = store
+        .load(&child_id)
+        .unwrap()
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::ToolResult { content, .. } => Some(content.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results.len(), 1, "{results:?}");
+    assert!(
+        results[0].contains("not available in this chat"),
+        "the child read it anyway: {results:?}"
+    );
+    assert!(
+        !results[0].contains("what it knows about a person"),
+        "{results:?}"
+    );
+    spawner.shutdown().await;
+}
+
 #[tokio::test]
 async fn foreground_child_rejects_detached_workspace_mutation() {
     let (store, session_id) = temp_store();

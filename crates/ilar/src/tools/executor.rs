@@ -575,7 +575,11 @@ mod tests {
     #[tokio::test]
     async fn a_call_naming_a_withheld_path_is_refused_before_it_runs() {
         let dir = tempfile::tempdir().unwrap();
-        let memory = dir.path().join("home").join("memory");
+        // Canonical, as a tool context's own cwd is: on macOS a temp
+        // directory is reached through a symlink, and the two spellings
+        // of one directory must not read as two directories.
+        let root = dir.path().canonicalize().unwrap();
+        let memory = root.join("home").join("memory");
         let immediate: Arc<dyn Tool> = Arc::new(ImmediateTool);
         let outcomes = execute_calls(
             vec![
@@ -593,6 +597,14 @@ mod tests {
                         "command": format!("cat {}/USER.md", memory.display()),
                     }),
                 },
+                // The spelling a model reaches for once its own prompt
+                // has told it where home is: relative, from the
+                // workspace next door.
+                ToolCall {
+                    id: "relative-1".into(),
+                    name: "immediate".into(),
+                    input: serde_json::json!({"path": "home/memory/../memory/USER.md"}),
+                },
                 ToolCall {
                     id: "elsewhere-1".into(),
                     name: "immediate".into(),
@@ -600,25 +612,28 @@ mod tests {
                 },
             ],
             move |_| Some(immediate.clone()),
-            ToolContext::root(dir.path().to_path_buf())
-                .with_withheld(Arc::from(vec![memory.clone()])),
+            ToolContext::root(root.clone()).with_withheld(Arc::from(vec![memory.clone()])),
             CancellationToken::new(),
         )
         .await;
 
-        for refused in &outcomes[..2] {
-            assert!(refused.output.is_error, "{:?}", refused.output);
+        for refused in &outcomes[..3] {
+            assert!(
+                refused.output.is_error,
+                "{}: {:?}",
+                refused.id, refused.output
+            );
             let text = format!("{:?}", refused.output);
             assert!(text.contains("not available in this chat"), "{text}");
             assert!(
-                !text.contains("memory"),
+                !text.contains(memory.to_str().unwrap()),
                 "the refusal repeats the path back: {text}"
             );
         }
         assert!(
-            !outcomes[2].output.is_error,
+            !outcomes[3].output.is_error,
             "a call that names nothing withheld runs: {:?}",
-            outcomes[2].output
+            outcomes[3].output
         );
     }
 

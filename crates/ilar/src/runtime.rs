@@ -65,9 +65,10 @@ pub struct RuntimeOptions {
     /// [`crate::secrets::Secrets::with_unlock_hint`].
     pub unlock_hint: Option<String>,
     /// Paths no tool call in this session may name. See
-    /// [`crate::tools::ToolContext::withheld`]; empty for a terminal
-    /// session, where the person at the keyboard owns every path the
-    /// process can reach anyway.
+    /// [`crate::tools::ToolContext::withheld`]. Empty by default, and
+    /// empty for a terminal session, where the person at the keyboard
+    /// owns every path the process can reach anyway; a driver that
+    /// serves somebody else's session is the one that has to think.
     pub withheld_paths: Vec<PathBuf>,
 }
 
@@ -720,7 +721,7 @@ impl RuntimePlan {
             (secrets, None)
         };
         // One list for the session and everything it delegates to.
-        let withheld: Arc<[PathBuf]> = Arc::from(self.withheld_paths.clone());
+        let withheld: Arc<[PathBuf]> = Arc::from(self.withheld_paths.as_slice());
         let spawner = Arc::new(
             SubagentSpawner::try_new(
                 resolver,

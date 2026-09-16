@@ -20,7 +20,10 @@ pub mod write;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 use anyhow::Context as _;
 
@@ -627,6 +630,79 @@ pub struct ToolContext {
     pub withheld: Arc<[PathBuf]>,
 }
 
+/// What a call naming a withheld path is told. One sentence, and not
+/// the path: a room that must not read the file must not be handed its
+/// location either.
+const WITHHELD_REFUSAL: &str = "that path is not available in this chat";
+
+/// Whether any string in a call's arguments names a withheld path:
+/// spelled out, so a `bash` command that cats the file is caught, or
+/// resolved against `cwd`, so `../memory/USER.md` from the workspace
+/// next door is the same answer as the absolute path. Lexical
+/// resolution — the path need not exist, and a tool that is refused
+/// must not first be allowed to probe the filesystem.
+///
+/// What it does not catch is a walk that never names the place it ends
+/// up: `grep` over the parent directory, a symlink, a shell that `cd`s
+/// first. See [`ToolContext::withheld`] for why that is the sandbox's
+/// job and not this function's.
+fn names_withheld(input: &serde_json::Value, cwd: &Path, withheld: &[PathBuf]) -> bool {
+    let withheld: Vec<&Path> = withheld
+        .iter()
+        .map(PathBuf::as_path)
+        // An empty path is under every path: it would refuse the whole
+        // session rather than one directory of it.
+        .filter(|path| !path.as_os_str().is_empty())
+        .collect();
+    if withheld.is_empty() {
+        return false;
+    }
+    let mut named = false;
+    visit_strings(input, &mut |spelled| {
+        if named {
+            return;
+        }
+        let resolved = lexically_normal(&cwd.join(spelled));
+        named = withheld.iter().any(|path| {
+            resolved.starts_with(path)
+                || path
+                    .to_str()
+                    .is_some_and(|withheld| spelled.contains(withheld))
+        });
+    });
+    named
+}
+
+/// Every string in a JSON value, at any depth: a tool's arguments are
+/// its own shape, and the one thing they have in common is that a path
+/// arrives as a string somewhere in them.
+fn visit_strings(value: &serde_json::Value, visit: &mut impl FnMut(&str)) {
+    match value {
+        serde_json::Value::String(text) => visit(text),
+        serde_json::Value::Array(items) => items.iter().for_each(|item| visit_strings(item, visit)),
+        serde_json::Value::Object(fields) => fields
+            .values()
+            .for_each(|field| visit_strings(field, visit)),
+        _ => {}
+    }
+}
+
+/// `a/b/../c` as `a/c`, without touching the disk. `..` at the root is
+/// the root, as the kernel would have it.
+fn lexically_normal(path: &Path) -> PathBuf {
+    let mut normal = PathBuf::new();
+    for part in path.components() {
+        match part {
+            std::path::Component::ParentDir => {
+                normal.pop();
+            }
+            std::path::Component::CurDir => {}
+            part => normal.push(part),
+        }
+    }
+    normal
+}
+
 impl ToolContext {
     /// Context for a root (non-subagent) session. Panics on a cwd that
     /// cannot be resolved — for tests and callers that own the path.
@@ -675,21 +751,10 @@ impl ToolContext {
     }
 
     /// The refusal a call earns for naming a withheld path, or `None`
-    /// when it names none. Matched against the call's arguments as the
-    /// model wrote them, so it catches `read` on the file, `bash` on a
-    /// command that cats it, and anything else that has to say where it
-    /// is going. The refusal does not repeat the path: the model
-    /// already knew it, and the chat need not learn it.
-    pub fn withheld_refusal(&self, input: &serde_json::Value) -> Option<String> {
-        if self.withheld.is_empty() {
-            return None;
-        }
-        let spelled = input.to_string();
-        self.withheld
-            .iter()
-            .filter_map(|path| path.to_str())
-            .any(|path| spelled.contains(path))
-            .then(|| "that path is not available in this chat".to_string())
+    /// when it names none. The refusal does not repeat the path: the
+    /// model already knew it, and the chat need not learn it.
+    pub fn withheld_refusal(&self, input: &serde_json::Value) -> Option<&'static str> {
+        names_withheld(input, &self.cwd, &self.withheld).then_some(WITHHELD_REFUSAL)
     }
 
     /// Context that may spill oversized tool output into `dir`.
