@@ -245,8 +245,16 @@ resolves by consolidating. The core is injected into the system
 prompt once, when a chat's session opens, and stays frozen for that
 session; it is never injected into a group chat. A room's seat has no
 memory tools either — no `memory`, `memory_search` or `memory_get` —
-so what the assistant knows about its person cannot be read aloud
-there by another door.
+and, since withholding the tools still left `read` and `bash` pointed
+at the same files, no tool call from a room's seat may name the memory
+directory at all: the call is refused before it runs, and the refusal
+does not repeat the path.
+
+That last part is a guard rail, not a boundary. It stops a model that
+goes looking; it cannot stop a shell command that arrives at the files
+by another spelling, and nothing inside one process can. An external
+sandbox is still the security boundary — see the warning in the
+[README](../README.md#safety).
 
 The archive is one fact per file under `notes/`, typed as a decision,
 solution, preference, event, task or risk, written with the same

@@ -862,6 +862,7 @@ pub fn plan(
             // The gateway cannot ask for the master password; a chat can
             // hand it over.
             unlock_hint: Some(crate::commands::UNLOCK_HINT.to_string()),
+            withheld_paths: withheld_for(private, gateway, memory),
         },
     )?;
     // Where it is: reached over a chat, with a home, wakeable from a
@@ -898,6 +899,22 @@ pub fn plan(
         plan.system_prompt.push_str(&block);
     }
     Ok(plan)
+}
+
+/// The paths a seat's tools may not name. A room's seat is told
+/// nothing about the person and has no memory tools; without this it
+/// could still `read` — or `cat` — the files those tools refuse to
+/// open, which is the same leak by another door. A private chat
+/// withholds nothing: it is the person's own chat, and the memory
+/// tools are right there.
+///
+/// Containment for a model that goes looking, not for one determined
+/// to arrive: see [`ilar::tools::ToolContext::withheld`].
+fn withheld_for(private: bool, gateway: &GatewayConfig, memory: &MemoryStore) -> Vec<PathBuf> {
+    if private || !gateway.memory.enabled {
+        return Vec::new();
+    }
+    vec![memory.dir().to_path_buf()]
 }
 
 /// The prompt a turn actually gets: what it was asked, after the news
@@ -1113,6 +1130,31 @@ mod tests {
     use ilar::config::{AgentDefinition, AgentWorkspaceMode, ProjectInstructions};
     use ilar::provider::{FixedProviderResolver, MockProvider};
     use ilar::session::{SessionMeta, new_id};
+
+    /// Withholding the memory *tools* from a room left `read` and
+    /// `bash` pointed at the same files. The room's seat now cannot
+    /// name the directory at all; the person's own chat is unchanged,
+    /// and a gateway with memory off has nothing to withhold.
+    #[test]
+    fn a_room_seat_cannot_name_the_memory_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = MemoryStore::new(dir.path().join("memory"));
+        let mut gateway = GatewayConfig::default();
+        gateway.memory.enabled = true;
+
+        assert_eq!(
+            withheld_for(false, &gateway, &memory),
+            vec![dir.path().join("memory")],
+            "a room's seat cannot reach the person's memory"
+        );
+        assert!(
+            withheld_for(true, &gateway, &memory).is_empty(),
+            "the person's own chat is where the memory belongs"
+        );
+
+        gateway.memory.enabled = false;
+        assert!(withheld_for(false, &gateway, &memory).is_empty());
+    }
 
     /// The pump's `Propagate` arm. An entry addressed to a task session
     /// whose workspace is gone cannot be delivered ever, and the note
