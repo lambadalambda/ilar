@@ -42,6 +42,26 @@ Tuesday. Rewriting the stamp per turn would rewrite the cached prefix
 under it, so it rides in front of each prompt instead, at the end of
 the conversation where nothing is cached yet.
 
+A question from the user closed the day: the assistant on tenco
+seemed to answer without thinking. It was thinking the whole time —
+57 thoughts for 57 answers, all of them in the log. Raw thinking is
+persisted as a `Diagnostic { Local }`, because no provider will take
+it back, and the restore fold dropped that block on the floor. Live
+you saw `▸ Thinking:` rows; reread, nothing. And `--view` is always a
+reread — it tails the file and re-folds on every change — so the one
+surface built for watching the assistant work was the one surface
+that could never show why it did anything. A provider's reasoning
+summary was already restored as a collapsed thought two arms up in
+the same match; raw thinking now joins it, along with the older
+`Thinking` block shape that logs written before the split still
+carry. Checked against the live chat session on tenco, which now
+reads back with its reasoning intact.
+
+The same look at the box turned up something unrelated and worth
+knowing: the gateway is not running the model its config names. A
+`/model` in the chat writes `<home>/model`, and that file outranks
+`[gateway] model` for every new session.
+
 Then one redaction engine, the first of the structure sweep and the
 one that was not really a refactor. Two copies of "hide the secrets"
 — one for a tool row's arguments, one for a provider's error body —

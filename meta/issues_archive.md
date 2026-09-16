@@ -401,3 +401,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [UX sweep 2026-09-15](issues/ux-sweep-2026-09-15.md) — index; every subissue archived, the remainder carried by the follow-ups issue
 - [x] [Images are bounded before decoding](issues/images-are-bounded-before-decoding.md)
 - [x] [One redaction engine](issues/one-redaction-engine.md)
+- [x] [A reopened session kept its thinking](issues/a-reopened-session-kept-its-thinking.md)
