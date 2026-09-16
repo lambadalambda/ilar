@@ -120,7 +120,6 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 ## Review follow-ups
 
-- [ ] [Images are bounded before decoding](issues/images-are-bounded-before-decoding.md)
 - [ ] [Every started turn publishes its ending](issues/every-started-turn-publishes-its-ending.md)
 - [ ] [A delivering child is already settled](issues/a-delivering-child-is-already-settled.md)
 - [ ] [Obsolete replays stop working](issues/obsolete-replays-stop-working.md)

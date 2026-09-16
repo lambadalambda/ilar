@@ -1,5 +1,56 @@
 # DEVLOG
 
+## 2026-09-16 — Three follow-ups, a guard rail, and a decode bomb
+
+v0.3.0 went out, and then the backlog's own top three.
+
+A session that had been aborted could not be resumed after a reopen.
+The live abort offers Ctrl-R; the restore looked for a recorded
+`TurnError` and an abort writes none, because the user stopping a turn
+is not an error. So the restore was asking the wrong question. The
+right one is where the log ends: a tool call nobody answered, or a
+result the provider was never told about, is a severed chain whichever
+way it was severed. The iteration ceiling stops a turn in exactly that
+shape too, and now gets the same offer.
+
+The room seat could read the memory files its tools were denied. The
+earlier fix had withheld `memory`, `memory_search` and `memory_get`
+from a non-private seat; `read` and `bash` were still pointed at
+`<home>/memory/USER.md`. The mechanism that came out of it is a list
+of paths a session's tool calls may not name, checked once in the
+executor rather than in each file tool — a path withheld from `read`
+is withheld from the `bash` that would cat it, and a tool added later
+cannot miss the gate. It is carried into subagent children, since
+delegating the read is still the read.
+
+The review of that one earned its keep twice. First: the substring
+match missed `../memory/USER.md`, which is not an evasive spelling but
+the obvious one, so each string in a call's arguments is now also
+resolved against the cwd — lexically, because a call about to be
+refused must not first get to probe the filesystem. Second, and worse:
+the situation block named `memory/` to *every* seat, so the system
+prompt itself was sending a room's model to the one directory its
+tools refuse. The block now lists what the seat actually has. What
+remains open is a walk that never names where it ends up — `grep` over
+the parent — and that is filed rather than papered over; the whole
+thing is a guard rail, and the kernel sandbox is still the only
+boundary.
+
+Third, the smallest: the situation stamp was frozen at session open, so
+a seat left running for a week reckoned "tomorrow at nine" from last
+Tuesday. Rewriting the stamp per turn would rewrite the cached prefix
+under it, so it rides in front of each prompt instead, at the end of
+the conversation where nothing is cached yet.
+
+Then the decode bomb. A PNG's header is a few dozen bytes and can
+claim to be 40,000 by 40,000; `output_buffer_size` believed it and
+asked for six gigabytes. The size is now read from the header as bytes
+— before any decoder is asked to believe it — and a picture past 64
+megapixels is refused unread, as is a file past 10 MB before it is
+read at all. The clipboard's own decode belongs to arboard and happens
+before ilar sees a pixel; what ilar can refuse, and now does, is making
+two more allocations of its own out of the result.
+
 ## 2026-09-16 — The offer's keys move under the cursor
 
 The resume offer shipped yesterday explained itself in its header:
