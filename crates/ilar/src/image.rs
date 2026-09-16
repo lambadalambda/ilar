@@ -17,6 +17,39 @@ pub const MAX_IMAGE_DIM: usize = 2048;
 pub const INGEST_MAX_DIM: usize = 1568;
 const JPEG_QUALITY: u8 = 85;
 
+/// Bytes an image file may weigh before it is read at all. Generous
+/// on purpose: what is stored is the *shrunk* picture, and a 30 MB
+/// scan becomes a couple of hundred kilobytes of JPEG, so refusing it
+/// on its compressed size would refuse a perfectly ordinary file for
+/// the sake of a decode this pipeline is not going to do. What the
+/// bound is really for is the read itself — a drop is somebody's video
+/// file as often as it is a picture — and the pixel limit below is
+/// what stands between a header's claim and the frame buffer.
+pub const MAX_IMAGE_FILE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// The RGBA8 frame buffer one decode may ask for. Not the peak: a
+/// PNG that arrives as RGB is held once as it decoded and once
+/// widened to RGBA, so a maximal legitimate picture passes through
+/// something closer to twice this. It is the number the pixel limit
+/// below is derived from, in the units a machine allocates in.
+pub const MAX_DECODED_BYTES: usize = 256 * 1024 * 1024;
+
+/// Pixels an image may have before it is refused unread, at four bytes
+/// each. Compressed size says nothing about this: a few kilobytes of
+/// PNG can declare 40,000 by 40,000 and ask the decoder for six
+/// gigabytes, and the decoder will try. Sixty-four megapixels is more
+/// than a 6K screenshot or any phone's camera — and it is applied to a
+/// JPEG too, which nothing here decodes, because a picture this size
+/// is not one to carry into a request either.
+pub const MAX_IMAGE_PIXELS: usize = MAX_DECODED_BYTES / 4;
+
+/// Whether an image of this size may be decoded at all.
+pub fn within_decode_limits(width: usize, height: usize) -> bool {
+    width
+        .checked_mul(height)
+        .is_some_and(|pixels| pixels <= MAX_IMAGE_PIXELS)
+}
+
 /// What stands where an image was once a cutoff dropped it from the
 /// request. The text around it still names the file.
 pub const IMAGE_ELIDED: &str =
@@ -155,20 +188,75 @@ pub fn format_name(bytes: &[u8]) -> Option<&'static str> {
 /// [`INGEST_MAX_DIM`], and stored as whichever is smaller: itself, or
 /// a JPEG of it when it has no transparency. A PNG that fails to
 /// decode passes through untouched.
+///
+/// `None` for anything that is not an image this program will carry:
+/// an unknown format, more bytes than [`MAX_IMAGE_FILE_BYTES`], or a
+/// header declaring more pixels than [`MAX_IMAGE_PIXELS`]. A caller
+/// with a person to tell asks [`refusal`] which of those it was.
 pub fn from_file_bytes(bytes: &[u8]) -> Option<ImageContent> {
     let media_type = media_type(bytes)?;
-    if media_type == "image/png"
-        && let Some(shrunk) = shrunk_png(bytes)
-    {
-        return Some(shrunk);
+    if refusal(bytes).is_some() {
+        return None;
+    }
+    if media_type == "image/png" {
+        return match shrunk_png(bytes) {
+            Shrunk::Image(image) => Some(image),
+            // Already as small as it is going to get.
+            Shrunk::AsItStands => Some(ImageContent::new(media_type, bytes)),
+            Shrunk::TooBig => None,
+        };
     }
     Some(ImageContent::new(media_type, bytes))
 }
 
-/// The smaller of the PNG fitted to the ingest size and its JPEG;
-/// `None` when the original bytes are the thing to keep.
-fn shrunk_png(bytes: &[u8]) -> Option<ImageContent> {
-    let (width, height, rgba) = decode_png(bytes)?;
+/// Why these bytes will not be carried, in a sentence somebody can
+/// read, or `None` when they will be. "Not a supported image" is true
+/// of an unknown format and a lie about a 40,000-pixel PNG, which is a
+/// format this program knows perfectly well and declines to decode.
+pub fn refusal(bytes: &[u8]) -> Option<String> {
+    if bytes.len() as u64 > MAX_IMAGE_FILE_BYTES {
+        return Some(format!(
+            "{} of image, past the {} cap",
+            bytes.len(),
+            MAX_IMAGE_FILE_BYTES
+        ));
+    }
+    // The size the header claims, read as bytes rather than believed
+    // as a picture: it costs nothing, it is known before any decoder
+    // has allocated a row, and it is the number a bomb lies about. A
+    // format that states no size is bounded by its bytes alone, and by
+    // whatever decodes it downstream.
+    let (width, height) = declared_size(bytes)?;
+    (!within_decode_limits(width as usize, height as usize)).then(|| {
+        format!(
+            "a picture of {width}×{height}, past the {MAX_IMAGE_PIXELS} pixel cap — too large to \
+             decode"
+        )
+    })
+}
+
+/// Width and height as the file's own header states them, for the
+/// formats that state them near the front. Believed by nothing: it is
+/// what gets *checked* before a decoder is handed the same claim.
+pub fn declared_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    png_dimensions(bytes).or_else(|| jpeg_dimensions(bytes))
+}
+
+/// What [`shrunk_png`] found: a smaller picture, nothing worth
+/// changing, or a declared size no decode may be attempted at.
+enum Shrunk {
+    Image(ImageContent),
+    AsItStands,
+    TooBig,
+}
+
+/// The smaller of the PNG fitted to the ingest size and its JPEG.
+fn shrunk_png(bytes: &[u8]) -> Shrunk {
+    let (width, height, rgba) = match decode_png(bytes) {
+        Decoded::Pixels(width, height, rgba) => (width, height, rgba),
+        Decoded::TooBig => return Shrunk::TooBig,
+        Decoded::Undecodable => return Shrunk::AsItStands,
+    };
     let fitted = downscale_rgba(width, height, &rgba, INGEST_MAX_DIM);
     let (width, height, rgba) = match &fitted {
         Some((w, h, small)) => (*w, *h, small.as_slice()),
@@ -176,26 +264,54 @@ fn shrunk_png(bytes: &[u8]) -> Option<ImageContent> {
     };
     let opaque = rgba.as_chunks::<4>().0.iter().all(|pixel| pixel[3] == 255);
     let png_bytes = match &fitted {
-        Some(_) => encode_png(width as u32, height as u32, rgba).ok()?,
+        Some(_) => match encode_png(width as u32, height as u32, rgba) {
+            Ok(encoded) => encoded,
+            Err(_) => return Shrunk::AsItStands,
+        },
         None => bytes.to_vec(),
     };
     let jpeg_bytes = opaque
         .then(|| encode_jpeg(width as u32, height as u32, rgba).ok())
         .flatten();
     match jpeg_bytes {
-        Some(jpeg) if jpeg.len() < png_bytes.len() => Some(ImageContent::new("image/jpeg", &jpeg)),
-        _ if fitted.is_some() => Some(ImageContent::png(&png_bytes)),
-        _ => None,
+        Some(jpeg) if jpeg.len() < png_bytes.len() => {
+            Shrunk::Image(ImageContent::new("image/jpeg", &jpeg))
+        }
+        _ if fitted.is_some() => Shrunk::Image(ImageContent::png(&png_bytes)),
+        _ => Shrunk::AsItStands,
     }
 }
 
-/// A PNG's pixels as RGBA8, when it decodes.
-fn decode_png(bytes: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
+/// What a PNG's header promised, once the decoder has read it.
+enum Decoded {
+    Pixels(usize, usize, Vec<u8>),
+    /// More pixels than [`MAX_IMAGE_PIXELS`]: refused before the frame
+    /// buffer is allocated, which is the whole point of the check.
+    TooBig,
+    /// Not a PNG this decoder can read, at any size.
+    Undecodable,
+}
+
+/// A PNG's pixels as RGBA8, when it decodes and is small enough to.
+fn decode_png(bytes: &[u8]) -> Decoded {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     decoder.set_transformations(png::Transformations::normalize_to_color8());
-    let mut reader = decoder.read_info().ok()?;
-    let mut buf = vec![0; reader.output_buffer_size()?];
-    let info = reader.next_frame(&mut buf).ok()?;
+    let Ok(mut reader) = decoder.read_info() else {
+        return Decoded::Undecodable;
+    };
+    // The header is read; nothing the size of the picture has been
+    // allocated yet. This is the only moment the check is free.
+    let declared = reader.info();
+    if !within_decode_limits(declared.width as usize, declared.height as usize) {
+        return Decoded::TooBig;
+    }
+    let Some(size) = reader.output_buffer_size() else {
+        return Decoded::Undecodable;
+    };
+    let mut buf = vec![0; size];
+    let Ok(info) = reader.next_frame(&mut buf) else {
+        return Decoded::Undecodable;
+    };
     buf.truncate(info.buffer_size());
     let (width, height) = (info.width as usize, info.height as usize);
     let rgba: Vec<u8> = match info.color_type {
@@ -213,9 +329,9 @@ fn decode_png(bytes: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
             .iter()
             .flat_map(|&[v, a]| [v, v, v, a])
             .collect(),
-        png::ColorType::Indexed => return None,
+        png::ColorType::Indexed => return Decoded::Undecodable,
     };
-    Some((width, height, rgba))
+    Decoded::Pixels(width, height, rgba)
 }
 
 /// RGBA8 rows → JPEG bytes, alpha dropped: for opaque pictures on
@@ -332,7 +448,7 @@ fn header_dimensions(data: &str) -> Option<(u32, u32)> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(head)
         .ok()?;
-    png_dimensions(&bytes).or_else(|| jpeg_dimensions(&bytes))
+    declared_size(&bytes)
 }
 
 /// A JPEG's size is in its first start-of-frame segment: height then
@@ -380,6 +496,91 @@ fn png_dimensions(head: &[u8]) -> Option<(u32, u32)> {
 
 #[cfg(test)]
 mod tests {
+    /// A real, complete, tiny PNG whose header says it is `width` by
+    /// `height`: a hundred-odd bytes on disk, and an invitation to
+    /// allocate however much the header asks for. The shape of a
+    /// decode bomb, and a file every decoder will open.
+    ///
+    /// IHDR is the first chunk and fixed in size, so its fields sit at
+    /// known offsets: 8 bytes of signature, 4 of length, 4 of type,
+    /// then width and height.
+    fn png_claiming(width: u32, height: u32) -> Vec<u8> {
+        let mut png = super::encode_png(4, 4, &[0u8; 64]).expect("encodes");
+        png[16..20].copy_from_slice(&width.to_be_bytes());
+        png[20..24].copy_from_slice(&height.to_be_bytes());
+        // The chunk's CRC covers its type and data: bytes 12 to 29.
+        let crc = crc32(&png[12..29]);
+        png[29..33].copy_from_slice(&crc.to_be_bytes());
+        png
+    }
+
+    /// PNG chunks carry a CRC-32 and the decoder checks it, so a
+    /// header rewritten in place needs a new one — otherwise the
+    /// decoder refuses the checksum and proves nothing about the size.
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = u32::MAX;
+        for byte in bytes {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                crc = if crc & 1 == 1 {
+                    (crc >> 1) ^ 0xEDB8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    }
+
+    /// The header is the only thing that has to be believed, and it is
+    /// cheap to lie in: a few dozen bytes asking for six gigabytes of
+    /// frame buffer. It is refused before anything is allocated, and
+    /// refused outright rather than passed through — an image nothing
+    /// here will decode is not one to hand a provider either.
+    #[test]
+    fn a_png_that_declares_a_machines_worth_of_pixels_is_refused_unread() {
+        let bomb = png_claiming(40_000, 40_000);
+        assert!(bomb.len() < 200, "the bomb is small, that is the point");
+        assert!(super::media_type(&bomb) == Some("image/png"));
+        assert!(super::from_file_bytes(&bomb).is_none());
+        // And it says which refusal it was: "not a supported image"
+        // would be a lie about a PNG.
+        let why = super::refusal(&bomb).expect("refused");
+        assert!(why.contains("40000×40000"), "{why}");
+        assert!(why.contains("too large to decode"), "{why}");
+        // The decoder's own guard, which the header check above keeps
+        // anything from reaching, still holds on its own: whoever
+        // moves that check is caught here rather than by a machine
+        // running out of memory.
+        assert!(matches!(super::decode_png(&bomb), super::Decoded::TooBig));
+
+        // The limit itself, from both sides.
+        assert!(super::within_decode_limits(8192, 8192));
+        assert!(!super::within_decode_limits(40_000, 40_000));
+        // Nothing overflows on the way to the answer.
+        assert!(!super::within_decode_limits(usize::MAX, 2));
+
+        // An ordinary screenshot is untouched by any of this.
+        let png = super::encode_png(64, 48, &vec![9u8; 64 * 48 * 4]).expect("encodes");
+        assert!(super::from_file_bytes(&png).is_some());
+    }
+
+    /// File bytes are bounded in the one place that knows what an
+    /// image is, so every door — a drop, a chat attachment, the read
+    /// tool — gets the same answer, and says which one it is.
+    #[test]
+    fn more_bytes_than_the_cap_is_not_an_attachment() {
+        let mut png = super::encode_png(4, 4, &[0u8; 64]).expect("encodes");
+        assert!(super::from_file_bytes(&png).is_some());
+        assert!(super::refusal(&png).is_none());
+        png.resize(super::MAX_IMAGE_FILE_BYTES as usize + 1, 0);
+        assert!(super::from_file_bytes(&png).is_none());
+        assert!(
+            super::refusal(&png).is_some_and(|why| why.contains("cap")),
+            "the size is why, and it says so"
+        );
+    }
+
     /// The bug this replaced: six screenshots estimated to 3.2 M tokens
     /// from their base64 length, against a provider that billed 25 k for
     /// the request that carried them — so the next turn compacted a

@@ -22,11 +22,16 @@ const MARKER_RESERVE: usize = 400;
 /// a window of a multi-gigabyte log should not cost a pass over it.
 const MAX_COUNTED_BYTES: u64 = 64 * 1024 * 1024;
 
-/// On-disk ceiling for an image the result may carry, checked before any
-/// decode: a malformed header must never talk the decoder into allocating
-/// a machine's worth of pixels. Matches the TUI's attachment backstop.
-/// Downscaling happens after this, and the decoded result still has to fit
-/// [`super::MAX_RESULT_IMAGE_BYTES`].
+/// On-disk ceiling for an image the result may carry, checked before
+/// the file is read whole. Tighter than the ingest cap
+/// ([`crate::image::MAX_IMAGE_FILE_BYTES`]) on purpose: a tool result
+/// is something the model asked for in passing, and a description is
+/// an answer too. It bounds the bytes, not the picture — a header
+/// inside this budget can still declare a machine's worth of pixels,
+/// which is [`crate::image::MAX_IMAGE_PIXELS`]'s business, at the one
+/// moment the decoder knows the size and has allocated nothing.
+/// Downscaling happens after both, and the decoded result still has to
+/// fit [`super::MAX_RESULT_IMAGE_BYTES`].
 const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
 
 pub struct ReadTool;

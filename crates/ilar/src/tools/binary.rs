@@ -57,20 +57,12 @@ fn line(display_path: &str, kind: &str, total_bytes: u64, hint: &str) -> String 
 /// declines to attach.
 fn image_kind(head: &[u8]) -> Option<String> {
     let format = crate::image::format_name(head)?;
-    Some(match png_dimensions(head) {
+    // The same header read the ingest cap is enforced from: this line
+    // and that refusal must not disagree about how big a picture is.
+    Some(match crate::image::declared_size(head) {
         Some((width, height)) => format!("{format} image, {width}x{height}"),
         None => format!("{format} image"),
     })
-}
-
-/// PNG puts IHDR first: width and height are big-endian u32 at 16..24.
-fn png_dimensions(head: &[u8]) -> Option<(u32, u32)> {
-    if head.len() < 24 || !head.starts_with(b"\x89PNG\r\n\x1a\n") || &head[12..16] != b"IHDR" {
-        return None;
-    }
-    let width = u32::from_be_bytes(head[16..20].try_into().ok()?);
-    let height = u32::from_be_bytes(head[20..24].try_into().ok()?);
-    (width > 0 && height > 0).then_some((width, height))
 }
 
 /// NUL byte, invalid UTF-8, or a dense run of control characters. TAB, LF,
