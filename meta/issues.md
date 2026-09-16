@@ -84,7 +84,6 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 ## Milestone 17 — Sweep: structure
 
-- [ ] [One redaction engine](issues/one-redaction-engine.md)
 - [ ] [One fold for live and restored](issues/one-fold-for-live-and-restored.md)
 - [ ] [One delivery engine](issues/one-delivery-engine.md) — *core engine landed; the serve-side fold is parked with serve*
 - [ ] [One hit map for the sidebar](issues/one-hit-map-for-the-sidebar.md)
@@ -130,4 +129,5 @@ milestones 15–17 stay filed — they come back when the feature does.*
 - [ ] [Test repositories never sign](issues/test-repositories-never-sign.md)
 - [ ] [Provider URLs are structural](issues/provider-urls-are-structural.md)
 - [ ] [A withheld path survives a walk](issues/a-withheld-path-survives-a-walk.md)
+- [ ] [A credential flag is not a name](issues/a-credential-flag-is-not-a-name.md)
 

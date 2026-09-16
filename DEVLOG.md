@@ -42,6 +42,28 @@ Tuesday. Rewriting the stamp per turn would rewrite the cached prefix
 under it, so it rides in front of each prompt instead, at the end of
 the conversation where nothing is cached yet.
 
+Then one redaction engine, the first of the structure sweep and the
+one that was not really a refactor. Two copies of "hide the secrets"
+— one for a tool row's arguments, one for a provider's error body —
+had drifted: the error body's needle list was missing `privatekey`,
+so a provider naming one published it, and it had no URL-credential
+pass at all, so `https://user:token@host` went out verbatim in the
+shape providers most like to quote back. One needle table, one token
+pass, one URL rule; what stays with each caller is policy, which is
+the part that genuinely differs.
+
+The review of it ran a differential corpus over the old pair and the
+new one, and found that merging had quietly pushed the error body's
+aggression onto command lines. A colon splits a header and it splits
+`src/token.rs:88:3`, and the "secret" a path yields is not only
+blanked in the row — it is collected and struck out of the tool's
+entire output, so a pytest run would have lost every `:test_login` in
+its report. The seam is now mode-aware: in a stranger's text every
+colon splits, in a command a path-shaped key is a path. It also found
+the mirror bug, an under-redaction where a failed key check shadowed
+the whole-token one, which is the shape the merge was supposed to make
+impossible.
+
 Then the decode bomb. A PNG's header is a few dozen bytes and can
 claim to be 40,000 by 40,000; `output_buffer_size` believed it and
 asked for six gigabytes. The size is now read from the header as bytes
