@@ -621,6 +621,10 @@ pub struct ToolContext {
     /// the memory *tools* still leaves `read` and `bash` pointed at
     /// the same files.
     ///
+    /// Absolute paths: a relative one is compared against the absolute
+    /// paths a walk and a resolved argument both carry, and would match
+    /// nothing.
+    ///
     /// A guard rail, not a boundary. It refuses a call that spells a
     /// withheld path out — which is what a model helpfully going to
     /// look does — and cannot stop a shell command that arrives at one
@@ -642,35 +646,106 @@ const WITHHELD_REFUSAL: &str = "that path is not available in this chat";
 /// resolution — the path need not exist, and a tool that is refused
 /// must not first be allowed to probe the filesystem.
 ///
-/// What it does not catch is a walk that never names the place it ends
-/// up: `grep` over the parent directory, a symlink, a shell that `cd`s
-/// first. See [`ToolContext::withheld`] for why that is the sandbox's
-/// job and not this function's.
+/// What it cannot catch is a call that never names the place it ends
+/// up. The walkers step around their own subtrees — see
+/// [`WithheldSubtrees`] — but a symlink to a withheld file, or a shell
+/// that `cd`s first, arrives with nothing either of them can read. See
+/// [`ToolContext::withheld`] for why that is the sandbox's job and not
+/// this function's.
 fn names_withheld(input: &serde_json::Value, cwd: &Path, withheld: &[PathBuf]) -> bool {
-    let withheld: Vec<&Path> = withheld
-        .iter()
-        .map(PathBuf::as_path)
-        // An empty path is under every path: it would refuse the whole
-        // session rather than one directory of it.
-        .filter(|path| !path.as_os_str().is_empty())
-        .collect();
+    let withheld = WithheldSubtrees::new(withheld);
     if withheld.is_empty() {
         return false;
     }
     let mut named = false;
     visit_strings(input, &mut |spelled| {
-        if named {
-            return;
-        }
-        let resolved = lexically_normal(&cwd.join(spelled));
-        named = withheld.iter().any(|path| {
-            resolved.starts_with(path)
-                || path
-                    .to_str()
-                    .is_some_and(|withheld| spelled.contains(withheld))
-        });
+        named = named || withheld.named_by(spelled, cwd);
     });
     named
+}
+
+/// The withheld paths, as the two rules that read them need them.
+/// [`names_withheld`] refuses a call that spells one out; a walk over
+/// the parent spells nothing, so `grep` and `glob` pointed at the home
+/// directory named nothing withheld and read the memory on their way
+/// past. The walkers now step around these subtrees the way they step
+/// around `.git` — silently, because a room that may not read the
+/// memory may not be told it is there either.
+///
+/// Empty in every session that withholds nothing, which is the one to
+/// stay cheap for: [`WithheldSubtrees::admits`] is then a length check
+/// per walked entry.
+///
+/// The paths are expected absolute, as everything they are compared
+/// against is: see [`ToolContext::withheld`].
+#[derive(Clone)]
+pub(crate) struct WithheldSubtrees {
+    roots: Vec<PathBuf>,
+}
+
+impl WithheldSubtrees {
+    pub(crate) fn new(withheld: &[PathBuf]) -> Self {
+        Self {
+            roots: withheld
+                .iter()
+                // An empty path is under every path: it would hide the
+                // whole session rather than one directory of it.
+                .filter(|path| !path.as_os_str().is_empty())
+                .map(|path| lexically_normal(path))
+                .collect(),
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.roots.is_empty()
+    }
+
+    /// Whether a walked path may be descended into and reported. The
+    /// candidate is normalised because a walk's own root carries
+    /// whatever the caller wrote — `grep` at `..` yields
+    /// `<cwd>/../memory/USER.md`, which starts with no withheld path
+    /// until the `..` is spent.
+    pub(crate) fn admits(&self, path: &Path) -> bool {
+        if self.is_empty() {
+            return true;
+        }
+        let resolved = lexically_normal(path);
+        !self.roots.iter().any(|root| within(&resolved, root))
+    }
+
+    /// Whether a string a call handed us names one: resolved against
+    /// `cwd`, or spelled out inside something longer, which is how a
+    /// `bash` command line names its paths.
+    fn named_by(&self, spelled: &str, cwd: &Path) -> bool {
+        if !self.admits(&cwd.join(spelled)) {
+            return true;
+        }
+        let spelled = spelled.to_ascii_lowercase();
+        self.roots.iter().any(|root| {
+            root.to_str()
+                .is_some_and(|root| spelled.contains(&root.to_ascii_lowercase()))
+        })
+    }
+}
+
+/// Whether `path` is `root` or sits under it: component by component,
+/// so `/h/memory` does not claim `/h/memory-notes`, and without regard
+/// to ASCII case.
+///
+/// The case rule is not politeness. The filesystem this most often runs
+/// on does not distinguish either, and `canonicalize` does not correct a
+/// capital: `<home>/Memory` opens the directory withheld as
+/// `<home>/memory`, and one shifted letter is well inside "a model that
+/// goes looking". What it costs is a sibling differing from a withheld
+/// path only in case — which cannot exist on the filesystem where the
+/// rule is needed.
+fn within(path: &Path, root: &Path) -> bool {
+    let mut parts = path.components();
+    root.components().all(|wanted| {
+        parts
+            .next()
+            .is_some_and(|part| part.as_os_str().eq_ignore_ascii_case(wanted.as_os_str()))
+    })
 }
 
 /// Every string in a JSON value, at any depth: a tool's arguments are
@@ -1431,6 +1506,48 @@ mod tests {
 
     fn image(bytes: usize) -> ImageContent {
         ImageContent::new("image/png", &vec![0u8; bytes])
+    }
+
+    /// The one comparison two rules share: a call's arguments and every
+    /// entry of a walk. Its edges are where a guard rail of this shape
+    /// usually breaks — a sibling that merely starts with the same
+    /// letters, a shifted capital on a filesystem that does not care.
+    #[test]
+    fn a_withheld_subtree_claims_itself_and_nothing_beside_it() {
+        use super::WithheldSubtrees;
+        use std::path::{Path, PathBuf};
+
+        let withheld = WithheldSubtrees::new(&[PathBuf::from("/home/a/memory")]);
+        for inside in [
+            "/home/a/memory",
+            "/home/a/memory/USER.md",
+            "/home/a/./memory/notes/2026.md",
+            "/home/a/workspace/../memory/USER.md",
+            // One capital letter opens the same directory on the
+            // filesystem this most often runs on.
+            "/home/a/Memory/USER.md",
+        ] {
+            assert!(!withheld.admits(Path::new(inside)), "{inside} got in");
+        }
+        for outside in [
+            "/home/a/memory-notes/x.md",
+            "/home/a/memoryx",
+            "/home/a/SOUL.md",
+            "/home/b/memory/USER.md",
+        ] {
+            assert!(withheld.admits(Path::new(outside)), "{outside} was refused");
+        }
+
+        // A withheld *file* is one path, not a prefix of its neighbours.
+        let file = WithheldSubtrees::new(&[PathBuf::from("/home/a/SOUL.md")]);
+        assert!(!file.admits(Path::new("/home/a/SOUL.md")));
+        assert!(file.admits(Path::new("/home/a/SOUL.mdx")));
+
+        // Nothing withheld admits everything — the cheap path a
+        // terminal session's every walk takes.
+        let nothing = WithheldSubtrees::new(&[PathBuf::new()]);
+        assert!(nothing.is_empty(), "an empty path is under every path");
+        assert!(nothing.admits(Path::new("/anywhere/at/all")));
     }
 
     /// The validator reads git's stderr to decide, so it must be git's

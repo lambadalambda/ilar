@@ -5,7 +5,8 @@ use std::io::{BufRead, Read as _};
 use std::sync::atomic::Ordering;
 
 use super::{
-    Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, WorkspaceAccess, parse_input,
+    Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, WithheldSubtrees, WorkspaceAccess,
+    parse_input,
 };
 use crate::text::truncate_bytes_ellipsis;
 
@@ -53,6 +54,23 @@ struct Hit {
     line: usize,
     is_match: bool,
     rendered: String,
+}
+
+/// What bounds one search: matches kept, and files visited before the
+/// walk gives up. Glob keeps its two the same way.
+#[derive(Clone, Copy)]
+struct Limits {
+    matches: usize,
+    entries: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            matches: MAX_MATCHES,
+            entries: MAX_ENTRIES,
+        }
+    }
 }
 
 /// Everything a scan needs besides the file: shared across the walk's
@@ -188,15 +206,19 @@ impl Tool for GrepTool {
                 context: input.context.unwrap_or(0).min(MAX_CONTEXT),
                 files,
             };
-            let limit = input.limit.unwrap_or(MAX_MATCHES).clamp(1, MAX_MATCHES);
+            let limits = Limits {
+                matches: input.limit.unwrap_or(MAX_MATCHES).clamp(1, MAX_MATCHES),
+                ..Limits::default()
+            };
+            let withheld = WithheldSubtrees::new(&ctx.withheld);
             match super::blocking_scan(move |cancelled| {
                 grep_files(
                     &ctx.cwd,
                     &root,
                     &search,
                     input.include_ignored,
-                    limit,
-                    MAX_ENTRIES,
+                    limits,
+                    &withheld,
                     &cancelled,
                 )
             })
@@ -324,16 +346,30 @@ fn grep_files(
     root: &std::path::Path,
     search: &Search,
     include_ignored: bool,
-    limit: usize,
-    max_entries: usize,
+    limits: Limits,
+    withheld: &WithheldSubtrees,
     cancelled: &std::sync::atomic::AtomicBool,
 ) -> ToolOutput {
+    let Limits {
+        matches: limit,
+        entries: max_entries,
+    } = limits;
+    // A walk's filter never judges its own root: a search pointed
+    // straight at a withheld file would read it. The gate refuses that
+    // spelling before the tool runs; this answers for the ones it
+    // cannot resolve.
+    if !withheld.admits(root) {
+        return ToolOutput::text(String::new());
+    }
     let threads = std::thread::available_parallelism()
         .map(|count| count.get())
         .unwrap_or(1)
         .min(MAX_THREADS);
     // Matches glob: dotted paths stay searchable (`.github/**`, `.env`),
     // ignore files are honoured even outside a git repo, `.git` is out.
+    // A withheld subtree is dropped the same way and for a stronger
+    // reason: a search over the parent must not read what it holds.
+    let withheld = withheld.clone();
     let walker = ignore::WalkBuilder::new(root)
         .hidden(false)
         .ignore(!include_ignored)
@@ -342,7 +378,7 @@ fn grep_files(
         .git_exclude(!include_ignored)
         .parents(!include_ignored)
         .require_git(false)
-        .filter_entry(|entry| entry.file_name() != ".git")
+        .filter_entry(move |entry| entry.file_name() != ".git" && withheld.admits(entry.path()))
         .threads(threads)
         .build_parallel();
 
@@ -597,6 +633,12 @@ mod tests {
         );
     }
 
+    /// A session that withholds nothing: what a terminal agent
+    /// searches with.
+    fn nothing_withheld() -> WithheldSubtrees {
+        WithheldSubtrees::new(&[])
+    }
+
     /// A search with none of the options: what the pre-option tool did.
     fn plain(pattern: &str) -> Search {
         Search {
@@ -621,8 +663,8 @@ mod tests {
             dir.path(),
             &plain("needle"),
             false,
-            MAX_MATCHES,
-            MAX_ENTRIES,
+            Limits::default(),
+            &nothing_withheld(),
             &cancelled,
         );
         assert!(full.content.len() > super::super::bash::MAX_PREVIEW);
@@ -766,8 +808,11 @@ mod tests {
             dir.path(),
             &plain("zzz-absent"),
             false,
-            MAX_MATCHES,
-            5,
+            Limits {
+                entries: 5,
+                ..Limits::default()
+            },
+            &nothing_withheld(),
             &cancelled,
         );
         assert!(!out.is_error, "{}", out.content);
@@ -781,5 +826,56 @@ mod tests {
             "must not read as a match-cap truncation: {}",
             out.content
         );
+    }
+
+    /// The gate refuses a search that *names* a withheld path. A search
+    /// over its parent names nothing and used to read everything inside
+    /// it — which is what a helpful model does, not an evasive one.
+    #[test]
+    fn a_search_never_reads_inside_a_withheld_subtree() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = std::fs::canonicalize(dir.path()).unwrap();
+        let workspace = home.join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::create_dir(home.join("memory")).unwrap();
+        std::fs::write(home.join("memory/USER.md"), "needle: what it knows\n").unwrap();
+        std::fs::write(home.join("SOUL.md"), "needle: who it is\n").unwrap();
+        let withheld = WithheldSubtrees::new(&[home.join("memory")]);
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+
+        // Over the parent, straight at the directory, and from the
+        // workspace next door with a `..` still in the path.
+        for root in [
+            home.clone(),
+            home.join("memory"),
+            workspace.join("..").join("memory"),
+        ] {
+            let out = grep_files(
+                &home,
+                &root,
+                &plain("needle"),
+                false,
+                Limits::default(),
+                &withheld,
+                &cancelled,
+            );
+            assert!(
+                !out.content.contains("what it knows") && !out.content.contains("memory"),
+                "{} reached the withheld directory: {}",
+                root.display(),
+                out.content
+            );
+        }
+        // And everything else in the same walk is still searched.
+        let out = grep_files(
+            &home,
+            &home,
+            &plain("needle"),
+            false,
+            Limits::default(),
+            &withheld,
+            &cancelled,
+        );
+        assert_eq!(out.content, "SOUL.md:1:needle: who it is\n");
     }
 }

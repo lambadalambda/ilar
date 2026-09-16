@@ -6,7 +6,8 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::{
-    Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, WorkspaceAccess, parse_input,
+    Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, WithheldSubtrees, WorkspaceAccess,
+    parse_input,
 };
 
 const MAX_MATCHES: usize = 1000;
@@ -176,6 +177,7 @@ fn scan(
     pattern: &str,
     include_ignored: bool,
     limits: Limits,
+    withheld: &WithheldSubtrees,
     cancelled: &AtomicBool,
 ) -> ToolOutput {
     let expanded = match expand_braces(pattern) {
@@ -205,13 +207,23 @@ fn scan(
             literal_prefix(pattern)
         ));
     }
+    // A walk's filter never judges its own root, so a pattern pointed
+    // straight at a withheld directory would still report it. The gate
+    // refuses that spelling before the tool runs; this answers for the
+    // spellings it cannot resolve.
+    if !withheld.admits(&root) {
+        return ToolOutput::text("(no matches)");
+    }
     let threads = std::thread::available_parallelism()
         .map(|count| count.get())
         .unwrap_or(1)
         .min(MAX_THREADS);
     // Hidden entries stay visible so `.github/workflows/*.yml` keeps
     // working; the ignore files do the heavy filtering, and `.git` is
-    // dropped explicitly because nothing there is a source file.
+    // dropped explicitly because nothing there is a source file. A
+    // withheld subtree is dropped the same way and for a stronger
+    // reason: a pattern over the parent must not list what it holds.
+    let withheld = withheld.clone();
     let walker = ignore::WalkBuilder::new(&root)
         .hidden(false)
         .ignore(!include_ignored)
@@ -221,7 +233,7 @@ fn scan(
         .parents(!include_ignored)
         // Honour ignore files even outside a git repository.
         .require_git(false)
-        .filter_entry(|entry| entry.file_name() != ".git")
+        .filter_entry(move |entry| entry.file_name() != ".git" && withheld.admits(entry.path()))
         .threads(threads)
         .build_parallel();
 
@@ -329,12 +341,14 @@ impl Tool for GlobTool {
                 Ok(v) => v,
                 Err(e) => return e,
             };
+            let withheld = WithheldSubtrees::new(&ctx.withheld);
             match super::blocking_scan(move |cancelled| {
                 scan(
                     &ctx.cwd,
                     &input.pattern,
                     input.include_ignored,
                     Limits::default(),
+                    &withheld,
                     &cancelled,
                 )
             })
@@ -350,6 +364,12 @@ impl Tool for GlobTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A session that withholds nothing: what a terminal agent walks
+    /// with, and what every test but the withheld one wants.
+    fn nothing_withheld() -> WithheldSubtrees {
+        WithheldSubtrees::new(&[])
+    }
 
     #[tokio::test]
     async fn a_missing_literal_prefix_is_an_error_not_no_matches() {
@@ -413,6 +433,7 @@ mod tests {
             &format!("{}/*.txt", spill.parent().unwrap().display()),
             false,
             Limits::default(),
+            &nothing_withheld(),
             &cancelled,
         );
 
@@ -430,7 +451,14 @@ mod tests {
         std::fs::write(root.path().join("sibling.txt"), "").unwrap();
         let cancelled = AtomicBool::new(false);
 
-        let out = scan(&cwd, "../*.txt", false, Limits::default(), &cancelled);
+        let out = scan(
+            &cwd,
+            "../*.txt",
+            false,
+            Limits::default(),
+            &nothing_withheld(),
+            &cancelled,
+        );
 
         assert!(!out.is_error, "{}", out.content);
         assert_eq!(out.content, "../sibling.txt");
@@ -466,12 +494,20 @@ mod tests {
             "{route,client}/*.ts",
             false,
             Limits::default(),
+            &nothing_withheld(),
             &cancelled,
         );
         assert!(!out.is_error, "{}", out.content);
         assert_eq!(out.content, "client/x.ts\nroute/x.ts");
 
-        let out = scan(dir.path(), "{route,", false, Limits::default(), &cancelled);
+        let out = scan(
+            dir.path(),
+            "{route,",
+            false,
+            Limits::default(),
+            &nothing_withheld(),
+            &cancelled,
+        );
         assert!(out.is_error);
         assert!(out.content.contains("unbalanced"), "{}", out.content);
     }
@@ -491,9 +527,89 @@ mod tests {
                 max_matches: MAX_MATCHES,
                 max_entries: 5,
             },
+            &nothing_withheld(),
             &cancelled,
         );
         assert!(!out.is_error, "{}", out.content);
         assert!(out.content.contains("scanned 5 paths"), "{}", out.content);
+    }
+
+    /// The gate refuses a pattern that *names* a withheld path; a
+    /// pattern over its parent names nothing and used to list what was
+    /// inside it anyway. The subtree is skipped whole, and the result
+    /// says nothing about having skipped it.
+    #[test]
+    fn a_walk_never_reports_what_is_inside_a_withheld_subtree() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = std::fs::canonicalize(dir.path()).unwrap();
+        std::fs::create_dir(home.join("memory")).unwrap();
+        std::fs::write(home.join("memory/USER.md"), "what it knows").unwrap();
+        std::fs::write(home.join("SOUL.md"), "who it is").unwrap();
+        let withheld = WithheldSubtrees::new(&[home.join("memory")]);
+        let cancelled = AtomicBool::new(false);
+
+        for pattern in ["**/*.md", "memory/*.md", "*"] {
+            let out = scan(
+                &home,
+                pattern,
+                false,
+                Limits::default(),
+                &withheld,
+                &cancelled,
+            );
+            assert!(!out.is_error, "{pattern}: {}", out.content);
+            assert!(
+                !out.content.contains("memory"),
+                "{pattern} reached the withheld directory: {}",
+                out.content
+            );
+        }
+        // Pointed straight at it, the answer is the ordinary empty one:
+        // "nothing here", never "something here you may not have".
+        let out = scan(
+            &home,
+            "memory/*.md",
+            false,
+            Limits::default(),
+            &withheld,
+            &cancelled,
+        );
+        assert_eq!(out.content, "(no matches)");
+        // And the rest of the walk is untouched.
+        let out = scan(
+            &home,
+            "**/*.md",
+            false,
+            Limits::default(),
+            &withheld,
+            &cancelled,
+        );
+        assert_eq!(out.content, "SOUL.md");
+    }
+
+    /// The walk's root carries whatever the caller wrote, so the
+    /// comparison cannot be a plain prefix test: `../home/**` spells
+    /// the same directory with a `..` still in it.
+    #[test]
+    fn a_withheld_subtree_survives_a_pattern_that_climbs() {
+        let root = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(root.path()).unwrap();
+        let cwd = root.join("workspace");
+        std::fs::create_dir(&cwd).unwrap();
+        std::fs::create_dir(root.join("memory")).unwrap();
+        std::fs::write(root.join("memory/USER.md"), "what it knows").unwrap();
+        let withheld = WithheldSubtrees::new(&[root.join("memory")]);
+        let cancelled = AtomicBool::new(false);
+
+        let out = scan(
+            &cwd,
+            "../**/*.md",
+            false,
+            Limits::default(),
+            &withheld,
+            &cancelled,
+        );
+
+        assert_eq!(out.content, "(no matches)", "{}", out.content);
     }
 }
