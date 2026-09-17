@@ -74,13 +74,65 @@ impl AgentDefinition {
             },
             Self {
                 name: "explore".into(),
-                description:
-                    "Read-only repository explorer and code reviewer for parallel inspection".into(),
+                // What it *has*, not what it will refrain from. Called
+                // read-only, this agent was read as "will not write"
+                // and handed work needing a shell — one was told to
+                // decode a PNG "with python3" and spent forty minutes
+                // improvising with grep instead of saying it could
+                // not. The list is the description now.
+                description: "Repository inspection and review with read, glob, grep and \
+                              webfetch only. No shell: it cannot run tests, builds, git or \
+                              scripts, and cannot write files — send anything that must run a \
+                              command to `build`. Several can run at once."
+                    .into(),
                 model: None,
-                prompt: "Inspect, analyze, and review without modifying the workspace.".into(),
+                prompt: "Inspect, analyze and review. Your tools are read, glob, grep and \
+                         webfetch: you have no shell, so you cannot run tests, builds, git or \
+                         scripts, and you cannot write, edit or delete anything. If the work \
+                         you were given needs one of those, say so in your first reply — name \
+                         the tool you lack and report what you could establish without it. Do \
+                         not improvise around a missing tool."
+                    .into(),
                 workspace_mode: AgentWorkspaceMode::ReadOnly,
                 tools: None,
             },
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A description is what a delegating model reads to choose an
+    /// agent, so it has to name the toolset and not the intention:
+    /// "read-only … without modifying the workspace" was read as
+    /// "will not write" and answered with work that needed a shell,
+    /// which the agent then spent forty minutes improvising around.
+    /// Both halves say what is there and what is not — and a tool
+    /// added to the read-only set has to be added to both.
+    #[test]
+    fn the_read_only_agent_names_every_tool_it_has_and_the_one_it_lacks() {
+        let explore = AgentDefinition::builtins()
+            .into_iter()
+            .find(|agent| agent.name == "explore")
+            .expect("explore is built in");
+
+        for tool in crate::tools::ToolRegistry::read_only().tool_names() {
+            assert!(
+                explore.description.contains(tool),
+                "the description does not name {tool}: {}",
+                explore.description
+            );
+            assert!(
+                explore.prompt.contains(tool),
+                "the prompt does not name {tool}: {}",
+                explore.prompt
+            );
+        }
+        assert!(
+            explore.description.contains("No shell") && explore.prompt.contains("no shell"),
+            "the one tool it does not have is the one worth naming"
+        );
     }
 }

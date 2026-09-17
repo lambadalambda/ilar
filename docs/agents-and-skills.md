@@ -19,7 +19,11 @@ skipped; it does not remove a lower-priority definition with the same name.
 ## Subagents and tasks
 
 Built-in subagents are `build` (mutable, serialized per checkout) and `explore`
-(read-only, safe for parallel repository inspection and review). Tasks can
+(read-only, safe for parallel repository inspection and review). `read_only` is
+a toolset, not a promise of good behaviour: the agent gets `read`, `glob`,
+`grep` and `webfetch` and nothing else — no shell, so no tests, no builds, no
+git, no scripts. Delegate anything that must *run* something to `build`, which
+is serialized per checkout precisely because running things collides. Tasks can
 override the child's model per invocation (`model` and `reasoning` on the task
 tool — e.g. a cheap flash model for mechanical sweeps); omitted, the child uses
 the agent definition's model or inherits the parent's model and reasoning. The
