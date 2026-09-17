@@ -121,6 +121,7 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 - [ ] [A killed task reads as finished](issues/a-killed-task-reads-as-finished.md)
 - [ ] [A finished task's answer is nowhere to be read](issues/a-finished-tasks-answer-is-nowhere-to-be-read.md)
+- [ ] [Read-only says what it takes away](issues/read-only-says-what-it-takes-away.md)
 
 ## Review follow-ups
 
