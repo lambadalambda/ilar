@@ -174,10 +174,11 @@ appended after the user message, framed as retrieved for possible
 relevance and, when a note is older than a day, with a reminder to
 verify before asserting. The block is a session event of its own, so
 the transcript, the web view and a resumed session all show it; the
-TUI shows a count. A note is not surfaced twice in one session — until
-a compaction folds the earlier copy away, when it may come back — and
-after 16 KiB of recall the session gets no more. Nothing here rewrites
-an earlier message: the prefix a provider cached stays put.
+TUI shows a count when the session is reopened. A note is not
+surfaced twice in one context — until a compaction folds the earlier
+copy away, when it may come back — and after 16 KiB of recall in one
+context the window gets no more. Nothing here rewrites an earlier
+message: the prefix a provider cached stays put.
 `general.memory_recall = false` and `general.memory_index = false`
 switch the two off separately.
 

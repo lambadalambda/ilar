@@ -68,6 +68,21 @@ async fn a_write_mid_session_reaches_the_next_session_s_prompt_and_not_this_one_
         done("kept"),
         done("hello again"),
     ]);
+    // One note in the archive before the session opens: its index
+    // line is in the prompt, its body is not.
+    let now = chrono::Utc::now();
+    let note = |title: &str, summary: &str| {
+        store_for(&cwd)
+            .note(
+                ilar::memory::NoteKind::Event,
+                title,
+                summary,
+                "the body",
+                now,
+            )
+            .unwrap()
+    };
+    note("Deploy box", "the deploy box is tenco.local on port 8443");
     let runtime = RuntimePlan::resolve(&config, &options(&cwd))
         .unwrap()
         .start_with(&config, Arc::new(provider.clone()))
@@ -75,8 +90,17 @@ async fn a_write_mid_session_reaches_the_next_session_s_prompt_and_not_this_one_
     let opened_with = runtime.system_prompt.clone();
     assert!(opened_with.contains("# Remembering"), "{opened_with}");
     assert!(!opened_with.contains("# Memory"), "{opened_with}");
+    assert!(
+        opened_with.contains("## Newest notes (1 of 1"),
+        "{opened_with}"
+    );
+    assert!(
+        opened_with.contains("Deploy box: the deploy box"),
+        "{opened_with}"
+    );
+    assert!(!opened_with.contains("the body"), "{opened_with}");
 
-    for text in ["remember I like tea", "hi"] {
+    let turn = |text: &'static str| {
         let (tx, _rx) = loop_event_channel(LOOP_EVENT_CAPACITY);
         run_turn(
             &provider,
@@ -92,17 +116,21 @@ async fn a_write_mid_session_reaches_the_next_session_s_prompt_and_not_this_one_
             runtime.tool_ctx.clone(),
             None,
         )
-        .await
-        .unwrap();
-    }
+    };
+    turn("remember I like tea").await.unwrap();
+    // A note written mid-session — by the tool or by anything else —
+    // is the next session's business.
+    note("Tea", "the person likes earl grey");
+    turn("hi").await.unwrap();
     let requests = provider.requests();
     assert_eq!(requests.len(), 3);
     for request in &requests {
         assert_eq!(request.system_prompt.as_deref(), Some(opened_with.as_str()));
     }
-    // The write landed, the tool said so, and this session's prompt
-    // never saw it.
+    // The writes landed, the tool said so, and this session's prompt
+    // never saw either.
     assert!(!opened_with.contains("Likes tea"));
+    assert!(!opened_with.contains("earl grey"));
     assert_eq!(store_for(&cwd).core(CoreFile::User).unwrap(), "Likes tea\n");
     let session = runtime.store.load(&runtime.session_id).unwrap();
     assert!(session.events().iter().any(|event| matches!(
@@ -123,6 +151,8 @@ async fn a_write_mid_session_reaches_the_next_session_s_prompt_and_not_this_one_
         next.contains("# Memory") && next.contains("Likes tea"),
         "{next}"
     );
+    assert!(next.contains("## Newest notes (2 of 2"), "{next}");
+    assert!(next.contains("Tea: the person likes earl grey"), "{next}");
 }
 
 /// One rule, said everywhere a note gets written.

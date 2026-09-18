@@ -2,7 +2,7 @@
 //! stops calling tools. Pure state machine — persists via the session
 //! store, publishes to the event channel, never touches a UI.
 
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
@@ -1538,11 +1538,13 @@ async fn run_turn_inner(
             // follow up with memory_get, never bodies, never anything
             // it was handed already this side of a compaction. Root
             // sessions only — a child's memory would be its parent's.
+            // Best effort, like the snapshot above: an archive that
+            // cannot be read costs the prompt its recall, not the turn
+            // — the memory tools report the same error when asked.
             if tool_ctx.depth == 0
                 && let Some(recall) = &config.recall
-                && let Some((ids, text)) = recall
-                    .recall(user_input, session.events(), Utc::now())
-                    .context("recalling memory for the prompt")?
+                && let Ok(Some((ids, text))) =
+                    recall.recall(user_input, session.events(), Utc::now())
             {
                 session.append(SessionEvent::MemoryRecall {
                     id: new_id(),

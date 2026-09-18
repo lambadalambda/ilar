@@ -230,8 +230,8 @@ fn index_line(
 }
 
 /// How many notes a prompt may surface, and how much recall one
-/// session may carry in all: after the cap, recall stops for the
-/// session.
+/// context may carry in all: after the cap, recall stops until a
+/// compaction opens a new window.
 pub const RECALL_NOTES: usize = 5;
 pub const RECALL_SESSION_BYTES: usize = 16 * 1024;
 /// The opening index: the newest notes' lines, once, at session open.
@@ -244,7 +244,7 @@ pub struct RecallConfig {
     pub store: Arc<MemoryStore>,
     /// At most this many notes per prompt.
     pub notes: usize,
-    /// At most this many bytes of recall per session.
+    /// At most this many bytes of recall in one context window.
     pub session_bytes: usize,
 }
 
@@ -317,7 +317,9 @@ pub fn recalled_ids(events: &[crate::session::SessionEvent]) -> std::collections
         .collect()
 }
 
-/// Bytes of recall the session has carried, compaction or not.
+/// Bytes of recall in the session's window — what its context holds.
+/// A loaded session starts at its last compaction, so the budget is
+/// the window's, which is the thing the cap protects.
 pub fn recall_bytes(events: &[crate::session::SessionEvent]) -> usize {
     events
         .iter()
