@@ -1,5 +1,31 @@
 # DEVLOG
 
+## 2026-09-18 — A reviewer that may run things
+
+The other half of this morning's read-only decision. `explore` stays
+shell-less because a shell under the shared read lease is parallel
+reviewers running parallel builds over one target directory; the cost
+was that a review which had to *run* the tests went to `build` with a
+"don't edit" note — the wrong agent wearing a label.
+
+`review` is the third built-in: mutable in lease terms, so serialized
+per checkout like `build`, with an allowlist of `read`, `glob`, `grep`,
+`webfetch`, `bash` and `secrets`. No `write`, no `edit`, no delegation,
+no `sudo`. The allowlist is coordination and not a boundary — `bash`
+can write — which is the caveat `read_only` already carries, and the
+prompt says to report and not fix. Its description names every tool
+and the two it lacks, the way `explore`'s does, and a test keeps both
+halves in step with the allowlist; a second test runs a `review` child
+against a scripted provider that calls `edit` and `bash` and checks
+that the first is refused by name and the second runs.
+
+One departure from the issue as filed: it asked for background by
+default, like `explore`. It runs in the foreground, like `build`. A
+review's findings are what the delegating agent waits on before it
+commits, and a detached serialized reviewer would hold the checkout
+against that agent's own edits for the length of the review;
+`background: true` still detaches it when that is wanted.
+
 ## 2026-09-18 — Three things the lock left behind
 
 The lazy master password shipped with three loose ends its review had

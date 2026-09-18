@@ -60,6 +60,11 @@ pub enum AgentWorkspaceMode {
     ReadOnly,
 }
 
+/// What the built-in `review` agent may use: the mutable set with the
+/// write tools removed. `secrets` so a review that runs `gh` can find
+/// the token's name; no delegation, no services, no sudo.
+const REVIEW_TOOLS: &[&str] = &["read", "glob", "grep", "webfetch", "bash", "secrets"];
+
 impl AgentDefinition {
     /// Built-in agents.
     pub fn builtins() -> Vec<Self> {
@@ -95,6 +100,39 @@ impl AgentDefinition {
                     .into(),
                 workspace_mode: AgentWorkspaceMode::ReadOnly,
                 tools: None,
+            },
+            Self {
+                name: "review".into(),
+                // The reviewer that may run things. `explore` cannot,
+                // because a shell under the shared read lease is four
+                // parallel reviewers running four builds over one
+                // target directory; so this one takes the write lease
+                // like `build` and runs one at a time — with the write
+                // tools taken away, since a review reports and does
+                // not fix. The allowlist is the guard rail, plus the
+                // prompt: `bash` can write, so this is coordination,
+                // not a boundary, the same caveat `read_only` carries.
+                description: "Review and verification that has to run things, with read, \
+                              glob, grep, webfetch, bash and secrets: it can run tests, \
+                              builds, git and scripts, and has no write or edit tool. \
+                              Serialized per checkout like `build`, so one at a time; for \
+                              inspection that needs no shell, `explore` runs in parallel."
+                    .into(),
+                model: None,
+                prompt: "Review and verify. Your tools are read, glob, grep, webfetch, bash \
+                         and secrets: you may run tests, builds, git and scripts, and you \
+                         report what you find — you have no write or edit tool, and you do \
+                         not fix what you find through the shell either. A finding names the \
+                         file and line, what is wrong, and a concrete fix, so the agent that \
+                         delegated to you can make it."
+                    .into(),
+                workspace_mode: AgentWorkspaceMode::Mutable,
+                tools: Some(
+                    REVIEW_TOOLS
+                        .iter()
+                        .map(|tool| (*tool).to_string())
+                        .collect(),
+                ),
             },
         ]
     }
@@ -133,6 +171,46 @@ mod tests {
         assert!(
             explore.description.contains("No shell") && explore.prompt.contains("no shell"),
             "the one tool it does not have is the one worth naming"
+        );
+    }
+
+    /// The reviewer that may run things says so the same way: every
+    /// tool on its allowlist in both halves, the two it lacks named,
+    /// and the allowlist itself free of anything that writes.
+    #[test]
+    fn the_review_agent_names_every_tool_it_has_and_the_two_it_lacks() {
+        let review = AgentDefinition::builtins()
+            .into_iter()
+            .find(|agent| agent.name == "review")
+            .expect("review is built in");
+        assert_eq!(review.workspace_mode, AgentWorkspaceMode::Mutable);
+        let tools = review.tools.as_deref().expect("review is an allowlist");
+        for tool in tools {
+            assert!(
+                review.description.contains(tool.as_str()),
+                "the description does not name {tool}: {}",
+                review.description
+            );
+            assert!(
+                review.prompt.contains(tool.as_str()),
+                "the prompt does not name {tool}: {}",
+                review.prompt
+            );
+        }
+        for writes in ["write", "edit", "task", "sudo"] {
+            assert!(
+                !tools.iter().any(|tool| tool == writes),
+                "{writes} is on the review allowlist"
+            );
+        }
+        assert!(
+            review.description.contains("no write or edit tool")
+                && review.prompt.contains("no write or edit tool"),
+            "the tools it does not have are the ones worth naming"
+        );
+        assert!(
+            review.description.contains("one at a time"),
+            "the serialization is part of what a delegator chooses by"
         );
     }
 }

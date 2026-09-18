@@ -2939,6 +2939,112 @@ async fn a_background_task_names_its_session_at_start_and_at_completion() {
     spawner.shutdown().await;
 }
 
+/// The built-in `review` agent may run things and may not edit: its
+/// registry has `bash` and refuses `edit` by name — and the refusal
+/// lists what it does have, so a reviewer told to fix something knows
+/// at once that it cannot.
+#[tokio::test]
+async fn the_review_agent_runs_a_shell_and_has_no_edit_tool() {
+    let (store, parent_id) = temp_store();
+    let call = |id: &str, name: &str, input: serde_json::Value| {
+        [
+            ProviderEvent::ToolCallStarted {
+                id: id.into(),
+                name: name.into(),
+                item_id: None,
+            },
+            ProviderEvent::ToolCallCompleted {
+                id: id.into(),
+                name: name.into(),
+                input,
+            },
+        ]
+    };
+    let provider = Arc::new(MockProvider::new(vec![
+        call(
+            "c1",
+            "edit",
+            serde_json::json!({"path": "x", "old_string": "a", "new_string": "b"}),
+        )
+        .into_iter()
+        .chain(call(
+            "c2",
+            "bash",
+            serde_json::json!({"command": "echo ran-in-review"}),
+        ))
+        .chain([ProviderEvent::TurnComplete {
+            stop_reason: StopReason::ToolUse,
+            usage: Usage::default(),
+        }])
+        .collect(),
+        vec![
+            ProviderEvent::TextDelta("reviewed".into()),
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            },
+        ],
+    ]));
+    let spawner = Arc::new(SubagentSpawner::new(
+        Arc::new(FixedProviderResolver::new(provider)),
+        store.clone(),
+        AgentDefinition::builtins(),
+        std::env::temp_dir(),
+        0,
+        4,
+        1,
+        ProjectInstructions::Include,
+    ));
+    let registry = parent_registry(spawner.clone());
+    let out = registry
+        .get("task")
+        .unwrap()
+        .run(
+            serde_json::json!({
+                "description": "review",
+                "prompt": "review the change and run the tests",
+                "subagent_type": "review",
+            }),
+            task_context(&parent_id),
+        )
+        .await;
+    assert!(!out.is_error, "{}", out.content);
+    assert!(out.content.contains("reviewed"), "{}", out.content);
+
+    let child = store
+        .load(out.child_session_id().expect("a review child"))
+        .unwrap();
+    let results: Vec<(String, String)> = child
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } => Some((tool_use_id.clone(), content.clone())),
+            _ => None,
+        })
+        .collect();
+    let edit = &results
+        .iter()
+        .find(|(id, _)| id == "c1")
+        .expect("edit answered")
+        .1;
+    assert!(edit.contains("no such tool: edit"), "{edit}");
+    assert!(
+        edit.contains("bash"),
+        "the refusal names what it has: {edit}"
+    );
+    assert!(!edit.contains("write"), "{edit}");
+    let bash = &results
+        .iter()
+        .find(|(id, _)| id == "c2")
+        .expect("bash answered")
+        .1;
+    assert!(bash.contains("ran-in-review"), "{bash}");
+}
+
 #[tokio::test]
 async fn the_tasks_tool_lists_this_session_s_children_with_their_last_word() {
     let (store, parent_id) = temp_store();

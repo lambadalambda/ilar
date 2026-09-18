@@ -18,8 +18,10 @@ skipped; it does not remove a lower-priority definition with the same name.
 
 ## Subagents and tasks
 
-Built-in subagents are `build` (mutable, serialized per checkout) and `explore`
-(read-only, safe for parallel repository inspection and review). `read_only` is
+Built-in subagents are `build` (mutable, serialized per checkout), `explore`
+(read-only, safe for parallel repository inspection and review) and `review`
+(serialized like `build`, with a shell and without the write tools: it may run
+tests, builds and git, and reports rather than fixes). `read_only` is
 a toolset, not a promise of good behaviour: the agent gets `read`, `glob`,
 `grep` and `webfetch` and nothing else — no shell, so no tests, no builds, no
 git, no scripts. Delegate anything that must *run* something to `build`, which
@@ -31,8 +33,13 @@ hand them a shell and four parallel reviewers would run four `cargo test`s
 over one target directory. Tools that read "read-only" as "no edits" (Claude
 Code's reviewer runs `git diff`; Codex sandboxes effects, not commands) have
 no lease to protect. A reviewer that must run things is a serialized agent by
-construction — `build` today, a `review` agent that may run but not edit later.
-Tasks can
+construction: that is `review`, whose allowlist is `read`, `glob`, `grep`,
+`webfetch`, `bash` and `secrets` — no `write`, no `edit`, no delegation, no
+`sudo`. The allowlist is coordination, not a boundary (a shell can write);
+the prompt says to report and not fix. It runs in the foreground like `build`,
+since its findings are what the delegating agent waits on before committing,
+and a detached serialized reviewer would hold the checkout against that
+agent's own edits; `background: true` still detaches it. Tasks can
 override the child's model per invocation (`model` and `reasoning` on the task
 tool — e.g. a cheap flash model for mechanical sweeps); omitted, the child uses
 the agent definition's model or inherits the parent's model and reasoning. The
