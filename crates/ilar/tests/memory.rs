@@ -315,7 +315,25 @@ async fn a_prompt_surfaces_the_notes_it_matches_once_until_a_compaction() {
     .await;
     t.turn(question, config()).await;
     let recalls = memory_recalls(&t.store, &t.id);
-    assert_eq!(recalls.len(), 2, "{recalls:?}");
+    let shape: Vec<String> = t
+        .store
+        .load(&t.id)
+        .unwrap()
+        .events()
+        .iter()
+        .map(|event| match event {
+            SessionEvent::UserMessage { text, .. } => format!("user({text})"),
+            SessionEvent::AssistantMessage { .. } => "assistant".into(),
+            SessionEvent::Compaction { kept_from, .. } => format!("compaction(from {kept_from})"),
+            SessionEvent::MemoryRecall { .. } => "recall".into(),
+            other => format!("{other:?}")
+                .split_whitespace()
+                .next()
+                .unwrap()
+                .to_string(),
+        })
+        .collect();
+    assert_eq!(recalls.len(), 2, "{recalls:?}; the log: {shape:?}");
     assert_eq!(recalls[1], vec![deploy.id.clone()]);
     let texts = last_user_texts(t.provider.requests().last().unwrap());
     assert_eq!(texts.len(), 2, "{texts:?}");
