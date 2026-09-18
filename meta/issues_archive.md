@@ -406,3 +406,5 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [A withheld path survives a walk](issues/a-withheld-path-survives-a-walk.md) — the walkers and the session store; the `bash` case stays with the sandbox issue
 - [x] [The master password is asked for when it is needed](issues/the-master-password-is-asked-for-when-it-is-needed.md) — `ilar exec` never asks; the TUI asks on the first call that needs the store
 - [x] [The lock is a prompt, not a notice](issues/the-lock-is-a-prompt-not-a-notice.md)
+- [x] [A killed task reads as finished](issues/a-killed-task-reads-as-finished.md) — a `TurnEnded` event on the child log; the listing says cancelled/failed/stalled/aborted
+- [x] [A finished task's answer is nowhere to be read](issues/a-finished-tasks-answer-is-nowhere-to-be-read.md) — the listing reads the outbox and carries an undelivered result
