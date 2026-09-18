@@ -130,15 +130,15 @@ pub struct Seat {
     failed_sends: Mutex<Vec<String>>,
 }
 
-/// The chat a seat's own tools are built for: where it answers, and
-/// whether it is a private chat or a room.
+/// The chat a seat's own tools are built for: where it answers.
+/// Whether it is a private chat or a room is the plan's business — the
+/// memory tools come in through it — not the seat's.
 struct Home<'a> {
     /// The seat's key: `<channel>:<chat>` for a chat, `cron:<id>` or
     /// `heartbeat:<key>` for a scheduled turn.
     key: &'a str,
     channel: &'a str,
     chat_id: &'a str,
-    private: bool,
 }
 
 /// The channels a driver talks through, and what it knows about the
@@ -287,7 +287,6 @@ impl Driver {
                 key,
                 channel,
                 chat_id,
-                private,
             },
         )?;
         let cancel = self.cancel.child_token();
@@ -379,7 +378,6 @@ impl Driver {
             key,
             channel,
             chat_id,
-            private,
         } = home;
         let (tool, sent) = MessageTool::new(crate::message::Sending {
             outbound: self.wiring.outbound.clone(),
@@ -442,7 +440,6 @@ impl Driver {
                 key: &crate::bus::session_key(channel, chat_id),
                 channel,
                 chat_id,
-                private,
             },
         )?;
         Ok(preview)
