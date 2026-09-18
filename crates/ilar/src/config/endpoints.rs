@@ -43,11 +43,10 @@ pub struct Endpoint {
     /// label does).
     #[serde(default)]
     pub vision: bool,
-    /// Whether a model's thinking goes back to it as
-    /// `reasoning_content` inside a turn. Unstated, it does whenever
-    /// the server streamed any; `false` for a server that streams
-    /// reasoning and refuses it as input.
-    pub replay_thinking: Option<bool>,
+    /// How much of a model's thinking goes back to it — `all`, `turn`
+    /// or `off`; `[general]`'s setting when unstated. `off` is for a
+    /// server that streams reasoning and refuses it as input.
+    pub replay_thinking: Option<crate::provider::chat::ThinkingReplay>,
     /// Only these ids, when set. Otherwise every chat model listed.
     pub models: Option<Vec<String>>,
     /// Body fields merged into every request to this endpoint.
@@ -57,6 +56,8 @@ pub struct Endpoint {
 impl Endpoint {
     /// The wire for one discovered model, under the endpoint's own
     /// prefix — the registered row's, which is the leaked static name.
+    /// Its own `replay_thinking` when it has one; `[general]`'s is
+    /// applied by whoever builds the provider.
     pub fn dialect(
         &self,
         model_id: &str,

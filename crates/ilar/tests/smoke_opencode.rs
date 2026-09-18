@@ -119,6 +119,9 @@ async fn live_go_minimax_on_the_chat_wire_calls_a_tool() {
 /// request has to carry back.
 struct Step {
     thinking: String,
+    /// The field the thinking arrived under, when the wire said it was
+    /// not the default: it goes back under the same one.
+    field: Option<ilar::session::ReasoningField>,
     call: Option<(String, String, serde_json::Value)>,
     text: String,
 }
@@ -127,20 +130,23 @@ async fn step(provider: &OpenCodeProvider, model: &str, request: Request) -> Ste
     let mut stream = provider.stream(request).unwrap();
     let mut step = Step {
         thinking: String::new(),
+        field: None,
         call: None,
         text: String::new(),
     };
     while let Some(event) = stream.next().await {
         match event {
             ProviderEvent::ThinkingDelta(t) => step.thinking.push_str(&t),
+            ProviderEvent::ThinkingField(field) => step.field = Some(field),
             ProviderEvent::TextDelta(t) => step.text.push_str(&t),
             ProviderEvent::ToolCallCompleted { id, name, input } if step.call.is_none() => {
                 step.call = Some((id, name, input));
             }
             ProviderEvent::TurnComplete { stop_reason, .. } => {
                 println!(
-                    "{model}: stop={stop_reason:?} thinking_bytes={} call={:?} text={:?}",
+                    "{model}: stop={stop_reason:?} thinking_bytes={} field={:?} call={:?} text={:?}",
                     step.thinking.len(),
+                    step.field,
                     step.call.as_ref().map(|(_, name, _)| name.as_str()),
                     step.text.chars().take(60).collect::<String>()
                 );
@@ -163,6 +169,7 @@ fn echo(step: Step, result: &str) -> Vec<ilar::session::ChatMessage> {
     if !step.thinking.is_empty() {
         content.push(ContentBlock::Thinking {
             text: step.thinking,
+            field: step.field,
         });
     }
     if !step.text.is_empty() {
@@ -198,11 +205,10 @@ fn echo(step: Step, result: &str) -> Vec<ilar::session::ChatMessage> {
 }
 
 /// The chat-wire rows are a proxy to upstreams nobody can read from
-/// here: the one way to know they take `reasoning_content` back is to
-/// send it. Two turns, so both halves of the wire's rule are on the
-/// line — the current turn's steps carry their thinking, and the
-/// previous turn's, which the wire strips, must not be missed by a
-/// server that wants the field on every assistant message.
+/// here: the one way to know they take their thinking back is to send
+/// it. Two turns under the default, `all`, so the second turn's
+/// requests carry the first turn's thinking as well as their own — a
+/// server that only takes the current turn's would refuse here.
 #[tokio::test]
 #[ignore]
 async fn live_chat_rows_take_their_thinking_back() {
@@ -228,8 +234,8 @@ async fn live_chat_rows_take_their_thinking_back() {
         let answer = step(provider, model, request.clone()).await;
         request.messages.extend(echo(answer, ""));
 
-        // Turn two: a new prompt ahead of all of that, so turn one's
-        // thinking is stripped and turn two's is sent.
+        // Turn two: a new prompt ahead of all of that; under `all`,
+        // turn one's thinking rides along with turn two's.
         request.messages.push(ilar::session::ChatMessage::user_text(
             "Now call the write tool once more to write ok2 to /tmp/probe2.txt, then stop.",
         ));

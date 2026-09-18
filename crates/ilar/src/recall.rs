@@ -498,6 +498,7 @@ mod tests {
                     // reader. Why a turn died is not a thought.
                     ContentBlock::Thinking {
                         text: "the table must be near the header".into(),
+                        field: None,
                     },
                     ContentBlock::Diagnostic {
                         text: "or after the checksum".into(),

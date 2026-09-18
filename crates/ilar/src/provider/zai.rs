@@ -23,6 +23,11 @@ impl ZaiProvider {
         )))
     }
 
+    /// How much thinking goes back, from `[general]`.
+    pub fn with_thinking_replay(self, replay: super::chat::ThinkingReplay) -> Self {
+        Self(self.0.with_thinking_replay(replay))
+    }
+
     /// Test accessor for the wire body (prefix-stability checks).
     pub fn wire_body_for_test(&self, req: &Request) -> serde_json::Value {
         self.0.wire_body_for_test(req)

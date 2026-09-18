@@ -41,9 +41,15 @@ pub enum ProviderEvent {
     TextDelta(String),
     /// A chunk of extended thinking (providers may forward none).
     ThinkingDelta(String),
-    /// A thinking block completed. No cataloged provider signs its
-    /// thinking, and none replays it, so the event carries nothing.
+    /// A thinking block completed. Nobody signs its thinking, so the
+    /// event carries nothing; what the block goes back as is settled
+    /// by [`ProviderEvent::ThinkingField`] where it matters.
     ThinkingCompleted,
+    /// The field this response's thinking is arriving under, sent by
+    /// the chat wire once per response and only when it is not the
+    /// default `reasoning_content`: the thought goes back under the
+    /// same name, so the block has to remember it.
+    ThinkingField(crate::session::ReasoningField),
     /// A chunk of provider-approved, user-visible reasoning summary text.
     ReasoningSummaryDelta(String),
     /// The current reasoning summary block completed.

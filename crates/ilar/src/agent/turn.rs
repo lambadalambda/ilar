@@ -277,6 +277,10 @@ struct StepAccumulator {
     /// thinking that never leaves the process as a local diagnostic —
     /// so the log says what the wire does with it.
     replay_thinking: bool,
+    /// The field this response's thinking arrived under, when the wire
+    /// said it was not the default: stamped on every thinking block of
+    /// the step, so it goes back under the same name.
+    thinking_field: Option<crate::session::ReasoningField>,
 }
 
 impl StepAccumulator {
@@ -293,7 +297,7 @@ impl StepAccumulator {
             .filter_map(|block| match block {
                 // Thinking a provider will not take back is persisted
                 // as what it is to a reader: a diagnostic.
-                ContentBlock::Thinking { text } if !self.replay_thinking => {
+                ContentBlock::Thinking { text, .. } if !self.replay_thinking => {
                     Some(ContentBlock::Diagnostic {
                         text: text.clone(),
                         kind: DiagnosticKind::Local,
@@ -321,6 +325,7 @@ impl StepAccumulator {
             None => {
                 self.content.push(ContentBlock::Thinking {
                     text: String::new(),
+                    field: self.thinking_field,
                 });
                 let index = self.content.len() - 1;
                 self.thinking_open = Some(index);
@@ -330,6 +335,12 @@ impl StepAccumulator {
         if let ContentBlock::Thinking { text, .. } = &mut self.content[index] {
             text.push_str(&delta);
         }
+    }
+
+    /// The wire said this response's thinking comes under another name
+    /// than the default: every block of it goes back under that one.
+    fn set_thinking_field(&mut self, field: crate::session::ReasoningField) {
+        self.thinking_field = Some(field);
     }
 
     /// Closes the open thinking block: the next thinking delta starts a
@@ -1804,6 +1815,9 @@ async fn run_turn_inner(
                         // run this thought into the next one.
                         live.thinking_break();
                         acc.complete_thinking();
+                    }
+                    ProviderEvent::ThinkingField(field) => {
+                        acc.set_thinking_field(field);
                     }
                     ProviderEvent::ReasoningSummaryDelta(summary) => {
                         live.thinking(&summary);

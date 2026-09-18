@@ -1,5 +1,41 @@
 # DEVLOG
 
+## 2026-09-18 — Thinking goes back whole, and under its own name
+
+This morning's replay sent thinking back for the current turn only,
+and always as `reasoning_content`. Then a look at OpenCode's
+`transform.ts`: it sends thinking on *every* assistant message, and
+under whichever field the catalog says the model uses. Two questions,
+two different answers.
+
+Scope: OpenCode's way is the default now. It is wasteful — the whole
+history of thought rides along until compaction — but the models are
+plausibly trained with exactly that in front of them, and the two-turn
+probe had already shown every family on the gateway takes it. The
+current-turn rule stays as a switch, `replay_thinking = "turn"`, next
+to `"off"`; `[general]` sets it for everything, an entry overrides it
+for its own server. The vendors' documented minimum is a setting, not
+the default.
+
+Spelling: an oversight, plainly. The mapper read both spellings on the
+way in and echoed one on the way out. A `Thinking` block now remembers
+the name it arrived under when that was not the default, the chat wire
+says so once per response, and the thought goes back as it came — with
+one refinement the review asked for. Under `all`, a session that
+switched from a `reasoning` model to a `reasoning_content` one would
+otherwise send both names in one request, and hand the new model a
+field it has never seen; an OpenAI-strict validator would refuse the
+whole session, not one turn. So a request speaks one spelling, the
+newest the log holds: the model answering now is the one that streamed
+the latest thought. The one request right after such a switch still
+speaks the old name; the first reply settles it. OpenCode avoids this
+by spelling everything the way the current model's catalog row says,
+which needs a per-row field this design deliberately does not have.
+
+While probing: Kimi K3 behind Zen now streams `reasoning_content`, not
+`reasoning` as it did on 2026-09-03, so the other spelling is no
+longer reachable live on the gateway. The unit tests carry it.
+
 ## 2026-09-18 — The model gets its thinking back
 
 A charachat session on Qwen3.8 flash — local llama.cpp and the

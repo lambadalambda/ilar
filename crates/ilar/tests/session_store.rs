@@ -1291,7 +1291,7 @@ fn a_thinking_block_from_a_signed_session_still_loads() {
         })
         .expect("assistant message");
     assert!(
-        matches!(&content[0], ContentBlock::Thinking { text } if text == "signed thought"),
+        matches!(&content[0], ContentBlock::Thinking { text, .. } if text == "signed thought"),
         "{content:?}"
     );
 }

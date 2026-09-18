@@ -15,7 +15,8 @@ pub use live::{
     sweep_live_scratches,
 };
 pub use model::{
-    ChatMessage, ContentBlock, DiagnosticKind, ImageContent, InputTokenAccounting, Role, Usage,
+    ChatMessage, ContentBlock, DiagnosticKind, ImageContent, InputTokenAccounting, ReasoningField,
+    Role, Usage,
 };
 pub use store::{
     ChildSummary, PendingQuestion, RewindOutcome, Session, SessionHead, SessionId, SessionReader,

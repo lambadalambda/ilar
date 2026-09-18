@@ -23,6 +23,10 @@ pub struct GeneralConfig {
     /// ghosted, for one key. On by default — continuing where you left
     /// off is what nearly every launch wants.
     pub resume_offer: Option<bool>,
+    /// How much of a chat-wire model's thinking goes back to it: `all`
+    /// (the default), `turn`, or `off`. A `[models.*]` or
+    /// `[endpoints.*]` entry can override it for its own server.
+    pub replay_thinking: Option<crate::provider::chat::ThinkingReplay>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -61,11 +65,10 @@ pub struct CustomModel {
     /// Whether the model accepts image input.
     #[serde(default)]
     pub vision: bool,
-    /// Whether the model's thinking goes back to it as
-    /// `reasoning_content` inside a turn. Unstated, it does whenever
-    /// the server streamed any; `false` for a server that streams
-    /// reasoning and refuses it as input.
-    pub replay_thinking: Option<bool>,
+    /// How much of the model's thinking goes back to it — `all`,
+    /// `turn` or `off`; `[general]`'s setting when unstated. `off` is
+    /// for a server that streams reasoning and refuses it as input.
+    pub replay_thinking: Option<crate::provider::chat::ThinkingReplay>,
     /// Name shown in the picker and the models tool; the section name
     /// when unstated.
     pub display_name: Option<String>,
@@ -100,7 +103,9 @@ impl CustomModel {
         }
     }
 
-    /// The wire dialect this entry describes.
+    /// The wire dialect this entry describes. Its own `replay_thinking`
+    /// when it has one; `[general]`'s is applied by whoever builds the
+    /// provider.
     fn dialect(&self, name: &str) -> crate::provider::chat::ChatDialect {
         let dialect = crate::provider::chat::ChatDialect::custom(
             self.base_url.trim_end_matches('/').to_string(),
@@ -444,13 +449,16 @@ fn zai_reaches(settings: &ProviderConfigResolved, access: crate::model::ModelAcc
 }
 
 fn zai_provider(
-    _config: &Config,
+    config: &Config,
     settings: &ProviderConfigResolved,
 ) -> Option<Box<dyn crate::provider::Provider>> {
-    Some(Box::new(crate::provider::zai::ZaiProvider::new(
-        settings.api_key.clone()?,
-        settings.base_url.clone(),
-    )))
+    Some(Box::new(
+        crate::provider::zai::ZaiProvider::new(
+            settings.api_key.clone()?,
+            settings.base_url.clone(),
+        )
+        .with_thinking_replay(config.general.replay_thinking),
+    ))
 }
 
 /// Either OpenCode wire is reachable with a key; the row's provider name
@@ -465,23 +473,29 @@ fn opencode_reaches(settings: &ProviderConfigResolved, access: crate::model::Mod
 }
 
 fn opencode_zen_provider(
-    _config: &Config,
+    config: &Config,
     settings: &ProviderConfigResolved,
 ) -> Option<Box<dyn crate::provider::Provider>> {
-    Some(Box::new(crate::provider::opencode::OpenCodeProvider::zen(
-        settings.api_key.clone()?,
-        settings.base_url.clone(),
-    )))
+    Some(Box::new(
+        crate::provider::opencode::OpenCodeProvider::zen(
+            settings.api_key.clone()?,
+            settings.base_url.clone(),
+        )
+        .with_thinking_replay(config.general.replay_thinking),
+    ))
 }
 
 fn opencode_go_provider(
-    _config: &Config,
+    config: &Config,
     settings: &ProviderConfigResolved,
 ) -> Option<Box<dyn crate::provider::Provider>> {
-    Some(Box::new(crate::provider::opencode::OpenCodeProvider::go(
-        settings.api_key.clone()?,
-        settings.base_url.clone(),
-    )))
+    Some(Box::new(
+        crate::provider::opencode::OpenCodeProvider::go(
+            settings.api_key.clone()?,
+            settings.base_url.clone(),
+        )
+        .with_thinking_replay(config.general.replay_thinking),
+    ))
 }
 
 /// Fully-resolved configuration.
@@ -528,6 +542,10 @@ pub struct GeneralConfigResolved {
     /// Whether a bare launch offers this directory's last session as a
     /// ghost — see docs/interface.md ("Starting").
     pub resume_offer: bool,
+    /// How much thinking goes back on the chat wire, for every model
+    /// that replays it; see docs/configuration.md ("Thinking on the
+    /// wire").
+    pub replay_thinking: crate::provider::chat::ThinkingReplay,
 }
 
 #[derive(Debug, Clone)]
@@ -861,6 +879,11 @@ impl Config {
                     .as_ref()
                     .and_then(|general| general.resume_offer)
                     .unwrap_or(true),
+                replay_thinking: merged
+                    .general
+                    .as_ref()
+                    .and_then(|general| general.replay_thinking)
+                    .unwrap_or_default(),
             },
             providers,
             models,
@@ -975,16 +998,20 @@ impl Config {
             // A configured entry carries its own endpoint, so it needs
             // no row in the provider table to be reachable.
             Route::Configured(entry, model_id) => Ok(Box::new(
-                crate::provider::chat::ChatProvider::new(entry.dialect(model_id)),
+                crate::provider::chat::ChatProvider::new(entry.dialect(model_id))
+                    .with_thinking_replay(self.general.replay_thinking),
             )),
             // A discovered model: the endpoint is the provider, and the
             // row registered at load is what says whether it sees
             // images.
-            Route::Discovered(endpoint, row, model_id) => {
-                Ok(Box::new(crate::provider::chat::ChatProvider::new(
-                    endpoint.dialect(model_id, row.provider, row.supports_vision()),
-                )))
-            }
+            Route::Discovered(endpoint, row, model_id) => Ok(Box::new(
+                crate::provider::chat::ChatProvider::new(endpoint.dialect(
+                    model_id,
+                    row.provider,
+                    row.supports_vision(),
+                ))
+                .with_thinking_replay(self.general.replay_thinking),
+            )),
             Route::Builtin(kind, row, model_id) => {
                 let settings = self
                     .providers
@@ -1135,6 +1162,7 @@ impl Config {
                 theme: "carbon".into(),
                 project_instructions: true,
                 resume_offer: true,
+                replay_thinking: Default::default(),
             },
             agent: AgentConfig::default(),
             providers,
@@ -1392,6 +1420,7 @@ fn merge_file(base: FileConfig, text: &str, origin: &Path) -> anyhow::Result<Fil
             theme,
             project_instructions,
             resume_offer,
+            replay_thinking,
         );
     }
     if parsed.gateway.is_some() {

@@ -46,6 +46,28 @@ impl ImageContent {
     }
 }
 
+/// The chat-completions field a model streams its thinking under, and
+/// wants it back under. `reasoning_content` is the DeepSeek/z.ai/Qwen
+/// spelling and the default; the OpenRouter-style servers behind
+/// OpenCode Zen (Kimi, Nemotron, Ling) say `reasoning`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningField {
+    #[default]
+    ReasoningContent,
+    Reasoning,
+}
+
+impl ReasoningField {
+    /// The field's name on the wire.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::ReasoningContent => "reasoning_content",
+            Self::Reasoning => "reasoning",
+        }
+    }
+}
+
 /// What a [`ContentBlock::Diagnostic`] is carrying. Defaulted on load,
 /// so sessions written before the split read as `Local` — which is what
 /// they were treated as, so nothing changes retroactively.
@@ -72,13 +94,17 @@ pub enum ContentBlock {
         image: ImageContent,
     },
     /// Raw thinking. Persisted only for a model whose chat wire takes
-    /// it back inside a turn as `reasoning_content`; for every other
-    /// model the same thought lands in [`ContentBlock::Diagnostic`] as
-    /// a local note. Nobody signs these, so the block is the thought
-    /// and nothing else; sessions written when one did carry a
-    /// `signature` field, which serde ignores on load.
+    /// it back; for every other model the same thought lands in
+    /// [`ContentBlock::Diagnostic`] as a local note. Nobody signs
+    /// these, so the block is the thought and the name it arrived
+    /// under; sessions written when one did carry a `signature` field,
+    /// which serde ignores on load.
     Thinking {
         text: String,
+        /// The wire field the thought came in as, when it was not the
+        /// usual `reasoning_content`: it goes back under the same one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        field: Option<ReasoningField>,
     },
     /// Provider-approved reasoning summary shown to the user but never replayed.
     ReasoningSummary {

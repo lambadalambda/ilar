@@ -824,19 +824,19 @@ impl ModelInfo {
         self.vision
     }
 
-    /// Whether the model's thinking goes back to it on the wire, inside
-    /// a turn. The chat-completions families — GLM, DeepSeek, Kimi,
-    /// MiniMax, Qwen, and whatever a discovered endpoint serves —
-    /// interleave thinking with tool calls, and their templates keep
-    /// `reasoning_content` on the assistant messages after the last
-    /// user message so the model carries its own plan through a tool
-    /// loop; without it every step starts from an empty think block
-    /// and the model fills the gap. The Responses wire has its own
-    /// reasoning items, and OpenAI's chat wire hands no thinking back
-    /// to begin with — so in practice this is "served on the chat
-    /// wire", and the `false` arm is what a mock provider exercises. A
-    /// configured server can override it: [`crate::config::CustomModel`]
-    /// and [`crate::config::endpoints::Endpoint`] take `replay_thinking`.
+    /// Whether the model's thinking goes back to it on the wire at all.
+    /// The chat-completions families — GLM, DeepSeek, Kimi, MiniMax,
+    /// Qwen, and whatever a discovered endpoint serves — interleave
+    /// thinking with tool calls, and their templates read
+    /// `reasoning_content` off the assistant messages so the model
+    /// carries its own plan through a tool loop; without it every step
+    /// starts from an empty think block and the model fills the gap.
+    /// How much goes back is `replay_thinking` in the configuration
+    /// ([`crate::provider::chat::ThinkingReplay`]). The Responses wire
+    /// has its own reasoning items, and OpenAI's chat wire hands no
+    /// thinking back to begin with — so in practice this is "served on
+    /// the chat wire", and the `false` arm is what a mock provider
+    /// exercises.
     pub fn replays_thinking(&self) -> bool {
         match self.access {
             ModelAccess::ZaiCodingPlan

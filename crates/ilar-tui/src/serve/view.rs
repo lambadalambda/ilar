@@ -961,6 +961,7 @@ mod tests {
                 },
                 ContentBlock::Thinking {
                     text: "hidden thought".into(),
+                    field: None,
                 },
                 ContentBlock::ReasoningSummary {
                     text: "**Planning**".into(),

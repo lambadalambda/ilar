@@ -593,8 +593,8 @@ fn restored_session_invocation_view(
                         } => lines.push(Line_::System(text.clone())),
                         // Raw thinking: a local diagnostic where the
                         // provider will not take it back, `Thinking`
-                        // where it does (the chat-wire families replay
-                        // it inside a turn). Either way the only
+                        // where it does (the chat-wire families). Either
+                        // way the only
                         // account of why the turn did what it did. It
                         // was dropped here once, so a session showed
                         // thoughts while it ran and none once it was
@@ -606,7 +606,7 @@ fn restored_session_invocation_view(
                             text,
                             kind: ilar::session::DiagnosticKind::Local,
                         }
-                        | ilar::session::ContentBlock::Thinking { text } => {
+                        | ilar::session::ContentBlock::Thinking { text, .. } => {
                             lines.push(Line_::Thought {
                                 id: restored_line_id(nested, "thought", lines.len()),
                                 text: text.clone(),
@@ -1100,6 +1100,7 @@ mod tests {
                     },
                     ilar::session::ContentBlock::Thinking {
                         text: "a thought from a model that summarises none".into(),
+                        field: None,
                     },
                     ilar::session::ContentBlock::ReasoningSummary {
                         text: "**Reviewing restored state**\n\nDetails remain collapsed.".into(),
@@ -1320,6 +1321,7 @@ mod tests {
                     },
                     ContentBlock::Thinking {
                         text: "an older log wrote it like this".into(),
+                        field: None,
                     },
                     ContentBlock::Text {
                         text: "here is what I think".into(),

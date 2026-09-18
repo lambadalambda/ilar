@@ -165,10 +165,16 @@ async fn reasoning_is_read_under_either_spelling() {
     let provider = OpenCodeProvider::zen("k".into(), Some(base));
     let events = drain(provider.stream(request("opencode/kimi-k3")).unwrap()).await;
 
-    assert_eq!(events[0], ProviderEvent::ThinkingDelta("The".into()));
-    assert_eq!(events[1], ProviderEvent::ThinkingDelta(" user".into()));
-    assert_eq!(events[2], ProviderEvent::ThinkingCompleted);
-    assert_eq!(events[3], ProviderEvent::TextDelta("hi".into()));
+    // The other spelling is announced ahead of its first delta, so the
+    // thought goes back under the same name.
+    assert_eq!(
+        events[0],
+        ProviderEvent::ThinkingField(ilar::session::ReasoningField::Reasoning)
+    );
+    assert_eq!(events[1], ProviderEvent::ThinkingDelta("The".into()));
+    assert_eq!(events[2], ProviderEvent::ThinkingDelta(" user".into()));
+    assert_eq!(events[3], ProviderEvent::ThinkingCompleted);
+    assert_eq!(events[4], ProviderEvent::TextDelta("hi".into()));
 }
 
 /// Moonshot's Kimi sends usage in a trailer that repeats the finish

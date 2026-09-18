@@ -15,7 +15,7 @@
 //! friends ([`Affinity::OpenCode`]): the gateway keys on the session
 //! and, from 2026-09-06, refuses requests that do not name one.
 
-use super::chat::{ChatDialect, ChatProvider};
+use super::chat::{ChatDialect, ChatProvider, ThinkingReplay as ChatReplay};
 use super::openai::OpenAIProvider;
 use super::request::Request;
 use super::transport::Affinity;
@@ -69,6 +69,13 @@ impl OpenCodeProvider {
                 .with_prefix(prefix)
                 .with_affinity(Affinity::OpenCode),
         }
+    }
+
+    /// How much thinking goes back on the chat wire, from `[general]`;
+    /// the Responses wire has its own reasoning items.
+    pub fn with_thinking_replay(mut self, replay: ChatReplay) -> Self {
+        self.chat = self.chat.with_thinking_replay(replay);
+        self
     }
 
     /// The client the catalog row sends this request to.

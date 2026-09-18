@@ -30,6 +30,24 @@ pub fn reserved_conflicts(options: &serde_json::Map<String, serde_json::Value>) 
     conflicts(options, RESERVED_OPTIONS)
 }
 
+/// How much of a model's thinking goes back to it on the wire.
+///
+/// `All` is the default and what OpenCode does: every assistant
+/// message in the conversation carries its thinking, on the reading
+/// that a model trained with its whole history of thought in context
+/// is starved without it. `Turn` is the vendors' documented minimum —
+/// the assistant messages after the last real prompt, where the Qwen
+/// and GLM templates keep it and DeepSeek's docs say to drop the rest.
+/// `Off` for a server that streams reasoning and refuses it as input.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThinkingReplay {
+    #[default]
+    All,
+    Turn,
+    Off,
+}
+
 /// Everything that distinguishes one chat-completions endpoint from
 /// another.
 #[derive(Clone)]
@@ -45,12 +63,15 @@ pub struct ChatDialect {
     wire_model: Option<String>,
     /// Image support, where the catalog is not the source of it.
     vision: Option<bool>,
-    /// Whether the model's thinking goes back as `reasoning_content`,
-    /// where the configuration says rather than the catalog: a
-    /// `[models.*]` or `[endpoints.*]` entry can point at a server that
-    /// streams reasoning under one spelling and refuses it as input —
-    /// an OpenAI-strict validator rejects unknown assistant fields.
-    replay_thinking: Option<bool>,
+    /// How much of the model's thinking goes back, where the
+    /// configuration says. `None` is [`ThinkingReplay::All`] for a
+    /// model the catalog says replays; a `[models.*]` or
+    /// `[endpoints.*]` entry can narrow it to the current turn, or
+    /// switch it off for a server that streams reasoning and refuses
+    /// it as input — an OpenAI-strict validator rejects unknown
+    /// assistant fields. Either way nothing goes back for a model the
+    /// catalog says takes none.
+    replay_thinking: Option<ThinkingReplay>,
     /// Body fields merged into every request for this endpoint
     /// (sampling: temperature, top_p …). Null when there are none.
     options: serde_json::Value,
@@ -122,10 +143,11 @@ impl ChatDialect {
         }
     }
 
-    /// Whether to send thinking back, when the configuration says;
-    /// `None` leaves it to the catalog row, which for a configured
-    /// server is "yes, if it streamed any".
-    pub fn with_replay_thinking(mut self, replay: Option<bool>) -> Self {
+    /// How much thinking to send back, when the configuration says;
+    /// `None` leaves it at [`ThinkingReplay::All`] for a model the
+    /// catalog says replays, which for a configured server is every one
+    /// that streamed any.
+    pub fn with_replay_thinking(mut self, replay: Option<ThinkingReplay>) -> Self {
         self.replay_thinking = replay;
         self
     }
@@ -171,6 +193,15 @@ impl ChatProvider {
         }
     }
 
+    /// How much thinking goes back, from `[general]` — the answer for
+    /// a dialect whose own configuration gave none. A `[models.*]` or
+    /// `[endpoints.*]` entry that said so keeps its own; a keyed
+    /// endpoint has no entry to say it in.
+    pub fn with_thinking_replay(mut self, replay: ThinkingReplay) -> Self {
+        self.dialect.replay_thinking.get_or_insert(replay);
+        self
+    }
+
     /// Test accessor for the wire body (prefix-stability checks).
     pub fn wire_body_for_test(&self, req: &Request) -> serde_json::Value {
         self.wire_body(req).expect("wire body")
@@ -198,27 +229,47 @@ impl ChatProvider {
             .dialect
             .vision
             .unwrap_or_else(|| crate::model::supports_vision(&req.model));
-        // Thinking goes back only for a model that takes it, and only
-        // inside the current turn: the assistant messages after the
-        // last real prompt, which is where every template that takes
-        // `reasoning_content` keeps it and where one vendor refuses it
-        // anywhere else. A tool result rides a user-role message here
-        // and is not a prompt. The model check is the wire's own, not
-        // only the persist step's: a log written before the split, or
-        // under another model, may carry thinking this one must not
-        // see.
-        let replays = self
-            .dialect
-            .replay_thinking
-            .unwrap_or_else(|| crate::model::replays_thinking(&req.model));
+        // Thinking goes back only for a model that takes it — the
+        // model check is the wire's own, not only the persist step's: a
+        // log written before the split, or under another model, may
+        // carry thinking this one must not see — and as much of it as
+        // the configuration says. `Turn` is the assistant messages
+        // after the last real prompt; a tool result rides a user-role
+        // message here and is not a prompt.
+        let mode = if crate::model::replays_thinking(&req.model) {
+            self.dialect.replay_thinking.unwrap_or_default()
+        } else {
+            ThinkingReplay::Off
+        };
         let last_prompt = req.messages.iter().rposition(is_prompt);
+        // One spelling per request, and the newest the log holds: the
+        // model answering now is the one that streamed the latest
+        // thought, and a request that mixed two names — after a switch
+        // from a `reasoning` model to a `reasoning_content` one — would
+        // hand the new model a field it has never seen. The one request
+        // right after such a switch still speaks the old name; the
+        // first reply settles it.
+        let spelling = req
+            .messages
+            .iter()
+            .rev()
+            .flat_map(|message| message.content.iter().rev())
+            .find_map(|block| match block {
+                ContentBlock::Thinking { field, .. } => Some(field.unwrap_or_default()),
+                _ => None,
+            })
+            .unwrap_or_default();
         messages.extend(
             req.messages
                 .iter()
                 .enumerate()
                 .flat_map(|(index, message)| {
-                    let replay = replays && last_prompt.is_some_and(|last| index > last);
-                    openai_message(message, vision, replay)
+                    let replay = match mode {
+                        ThinkingReplay::All => true,
+                        ThinkingReplay::Turn => last_prompt.is_some_and(|last| index > last),
+                        ThinkingReplay::Off => false,
+                    };
+                    openai_message(message, vision, replay.then_some(spelling))
                 }),
         );
         body.insert("messages".into(), serde_json::json!(messages));
@@ -343,12 +394,14 @@ fn is_prompt(msg: &ChatMessage) -> bool {
 
 /// Neutral -> OpenAI chat-completions wire. Tool results expand into
 /// separate `role: "tool"` messages (the wire format requires it). With
-/// `replay_thinking`, an assistant message's thinking goes along as
-/// `reasoning_content` — only inside the current turn, see the caller.
+/// `replay_thinking` naming a field, an assistant message's thinking
+/// goes along under it; which messages, and which field, the caller
+/// decides (`replay_thinking` in the configuration, and the newest
+/// spelling in the log).
 fn openai_message(
     msg: &ChatMessage,
     vision: bool,
-    replay_thinking: bool,
+    replay_thinking: Option<crate::session::ReasoningField>,
 ) -> Vec<serde_json::Value> {
     let role = match msg.role {
         Role::User => "user",
@@ -369,7 +422,7 @@ fn openai_message(
             // Persisted as thinking only where the model takes it back
             // (`StepAccumulator::content_blocks`); a local diagnostic
             // is the thinking of a model that does not.
-            ContentBlock::Thinking { text } if replay_thinking => {
+            ContentBlock::Thinking { text, .. } if replay_thinking.is_some() => {
                 // One run of thought per block; several go back as
                 // paragraphs rather than glued into one word.
                 if !thinking.is_empty() {
@@ -428,8 +481,10 @@ fn openai_message(
         }
     }
     let with_thinking = |mut value: serde_json::Map<String, serde_json::Value>| {
-        if !thinking.is_empty() {
-            value.insert("reasoning_content".into(), serde_json::json!(thinking));
+        if let Some(field) = replay_thinking
+            && !thinking.is_empty()
+        {
+            value.insert(field.name().into(), serde_json::json!(thinking));
         }
         serde_json::Value::Object(value)
     };
@@ -537,6 +592,10 @@ struct OpenAiMapper {
     /// has no explicit boundary, so reasoning "completes" when content or a
     /// tool call arrives.
     thinking_open: bool,
+    /// Whether the response's reasoning spelling has been reported: it
+    /// is said once, on the first reasoning delta, and only when it is
+    /// the `reasoning` spelling rather than the default.
+    spelling_reported: bool,
 }
 
 impl OpenAiMapper {
@@ -551,6 +610,7 @@ impl OpenAiMapper {
             stop_reason: None,
             calls: HashMap::new(),
             thinking_open: false,
+            spelling_reported: false,
         }
     }
 
@@ -628,10 +688,23 @@ impl TransportEventMapper for OpenAiMapper {
             // Nemotron, Ling) send the same deltas as `reasoning`.
             let reasoning = delta["reasoning_content"]
                 .as_str()
-                .or_else(|| delta["reasoning"].as_str());
-            if let Some(reasoning) = reasoning
+                .map(|text| (text, crate::session::ReasoningField::ReasoningContent))
+                .or_else(|| {
+                    delta["reasoning"]
+                        .as_str()
+                        .map(|text| (text, crate::session::ReasoningField::Reasoning))
+                });
+            if let Some((reasoning, field)) = reasoning
                 && !reasoning.is_empty()
             {
+                // The name it came under is the name it goes back
+                // under; said once, and only for the other spelling.
+                if !self.spelling_reported {
+                    self.spelling_reported = true;
+                    if field != crate::session::ReasoningField::ReasoningContent {
+                        events.push(ProviderEvent::ThinkingField(field));
+                    }
+                }
                 self.thinking_open = true;
                 events.push(ProviderEvent::ThinkingDelta(reasoning.into()));
             }
@@ -853,7 +926,7 @@ mod tests {
     #[test]
     fn vision_models_get_real_image_parts_and_text_models_a_named_gap() {
         // Vision: one message, text + image_url parts.
-        let wire = openai_message(&image_message(), true, false);
+        let wire = openai_message(&image_message(), true, None);
         assert_eq!(wire.len(), 1);
         let content = wire[0]["content"].as_array().unwrap();
         assert_eq!(content[0]["type"], "text");
@@ -864,12 +937,12 @@ mod tests {
         );
 
         // No vision: plain string with the named gap.
-        let wire = openai_message(&image_message(), false, false);
+        let wire = openai_message(&image_message(), false, None);
         let content = wire[0]["content"].as_str().unwrap();
         assert!(content.contains("[image omitted"), "{content}");
 
         // Text-only stays the plain string it always was.
-        let wire = openai_message(&ChatMessage::user_text("hi"), true, false);
+        let wire = openai_message(&ChatMessage::user_text("hi"), true, None);
         assert_eq!(wire[0]["content"], "hi");
     }
 
@@ -1006,6 +1079,42 @@ mod tests {
         }
     }
 
+    /// The spelling a response's thinking arrives under is reported
+    /// once, and only for the other one: `reasoning` is announced ahead
+    /// of its first delta, `reasoning_content` announces nothing.
+    #[test]
+    fn the_reasoning_spelling_is_reported_once_and_only_when_it_differs() {
+        use crate::session::ReasoningField;
+        let usual =
+            r#"{"choices":[{"index":0,"finish_reason":null,"delta":{"reasoning_content":"hm"}}]}"#;
+        let again =
+            r#"{"choices":[{"index":0,"finish_reason":null,"delta":{"reasoning_content":"m"}}]}"#;
+        let done = r#"{"choices":[{"index":0,"finish_reason":"stop","delta":{}}]}"#;
+        let events = openai_stream(&[usual, again, done]).unwrap();
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ProviderEvent::ThinkingField(_))),
+            "{events:?}"
+        );
+
+        let other = r#"{"choices":[{"index":0,"finish_reason":null,"delta":{"reasoning":"hm"}}]}"#;
+        let more = r#"{"choices":[{"index":0,"finish_reason":null,"delta":{"reasoning":"m"}}]}"#;
+        let events = openai_stream(&[other, more, done]).unwrap();
+        assert_eq!(
+            events[0],
+            ProviderEvent::ThinkingField(ReasoningField::Reasoning)
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, ProviderEvent::ThinkingField(_)))
+                .count(),
+            1,
+            "{events:?}"
+        );
+    }
+
     /// DeepSeek spells every absent field as `null` on every delta.
     /// Seen live on deepseek-v4-flash behind OpenCode Go, 2026-09-18:
     /// the mapper read `"tool_calls":null` as a malformed list and
@@ -1025,18 +1134,23 @@ mod tests {
         openai_stream(&[chunk, trailer]).expect("a null-spelled trailer");
     }
 
-    /// Thinking goes back as `reasoning_content` on the assistant
-    /// messages of the current turn — after the last real prompt — and
-    /// on none from an earlier turn. A tool result is not a prompt: it
-    /// rides a user-role message here, and counting it would strip the
-    /// thinking of the very step that produced the call.
+    /// By default thinking goes back on every assistant message, the
+    /// way OpenCode sends it; `turn` narrows that to the assistant
+    /// messages after the last real prompt, and `off` sends none. A
+    /// tool result is not a prompt: it rides a user-role message here,
+    /// and counting it would strip the thinking of the very step that
+    /// produced the call. A block that arrived as `reasoning` goes back
+    /// as `reasoning`.
     #[test]
-    fn thinking_is_replayed_inside_the_current_turn_only() {
+    fn thinking_goes_back_as_configured_and_under_its_own_name() {
         let thought = |text: &str, rest: Vec<ContentBlock>| ChatMessage {
             role: Role::Assistant,
-            content: std::iter::once(ContentBlock::Thinking { text: text.into() })
-                .chain(rest)
-                .collect(),
+            content: std::iter::once(ContentBlock::Thinking {
+                text: text.into(),
+                field: None,
+            })
+            .chain(rest)
+            .collect(),
         };
         let call = ContentBlock::ToolCall {
             id: "c1".into(),
@@ -1063,54 +1177,71 @@ mod tests {
             result.clone(),
             thought("more", vec![text("answer")]),
         ];
-        let provider = ChatProvider::new(ChatDialect::zai("k".into(), "http://zai.test".into()));
-        let body = provider.wire_body_for_test(&request);
-        let messages = body["messages"].as_array().unwrap();
-        let assistants: Vec<&serde_json::Value> = messages
-            .iter()
-            .filter(|message| message["role"] == "assistant")
-            .collect();
-        assert_eq!(assistants.len(), 3, "{messages:?}");
-        assert!(
-            assistants[0].get("reasoning_content").is_none(),
-            "an earlier turn's thinking went back: {}",
-            assistants[0]
-        );
-        assert_eq!(assistants[1]["reasoning_content"], "plan");
-        assert_eq!(assistants[1]["tool_calls"][0]["id"], "c1");
-        assert_eq!(assistants[2]["reasoning_content"], "more");
-        assert_eq!(assistants[2]["content"], "answer");
+        let dialect = || ChatDialect::zai("k".into(), "http://zai.test".into());
+        let assistants = |body: &serde_json::Value| -> Vec<serde_json::Value> {
+            body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|message| message["role"] == "assistant")
+                .cloned()
+                .collect()
+        };
 
-        // Two runs of thought in one message go back as paragraphs.
+        // The default: whole history.
+        let all = assistants(&ChatProvider::new(dialect()).wire_body_for_test(&request));
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0]["reasoning_content"], "old plan");
+        assert_eq!(all[1]["reasoning_content"], "plan");
+        assert_eq!(all[1]["tool_calls"][0]["id"], "c1");
+        assert_eq!(all[2]["reasoning_content"], "more");
+        assert_eq!(all[2]["content"], "answer");
+
+        // `turn`: the current turn only.
+        let turn = ChatProvider::new(dialect().with_replay_thinking(Some(ThinkingReplay::Turn)));
+        let turn = assistants(&turn.wire_body_for_test(&request));
+        assert!(
+            turn[0].get("reasoning_content").is_none(),
+            "an earlier turn's thinking went back under `turn`: {}",
+            turn[0]
+        );
+        assert_eq!(turn[1]["reasoning_content"], "plan");
+        assert_eq!(turn[2]["reasoning_content"], "more");
+
+        // `off`: none, however the log reads.
+        let off = ChatProvider::new(dialect().with_replay_thinking(Some(ThinkingReplay::Off)));
+        let off = off.wire_body_for_test(&request);
+        assert!(
+            !off["messages"].to_string().contains("reasoning"),
+            "{}",
+            off["messages"]
+        );
+
+        // Two runs of thought in one message go back as paragraphs, and
+        // the whole request speaks the newest spelling in the log.
         request.messages[5] = ChatMessage {
             role: Role::Assistant,
             content: vec![
                 ContentBlock::Thinking {
                     text: "more".into(),
+                    field: Some(crate::session::ReasoningField::Reasoning),
                 },
                 text("between"),
                 ContentBlock::Thinking {
                     text: "still more".into(),
+                    field: Some(crate::session::ReasoningField::Reasoning),
                 },
                 text("answer"),
             ],
         };
+        let provider = ChatProvider::new(dialect());
         let body = provider.wire_body_for_test(&request);
         let last = body["messages"].as_array().unwrap().last().unwrap().clone();
-        assert_eq!(last["reasoning_content"], "more\n\nstill more");
-
-        // A configured server that refuses the field as input: the
-        // entry says so, and nothing goes back however the log reads.
-        let refusing = ChatProvider::new(
-            ChatDialect::zai("k".into(), "http://zai.test".into())
-                .with_replay_thinking(Some(false)),
-        );
-        let body = refusing.wire_body_for_test(&request);
-        assert!(
-            !body["messages"].to_string().contains("reasoning_content"),
-            "{}",
-            body["messages"]
-        );
+        assert_eq!(last["reasoning"], "more\n\nstill more");
+        assert!(last.get("reasoning_content").is_none(), "{last}");
+        let first = &body["messages"].as_array().unwrap()[1];
+        assert_eq!(first["role"], "assistant");
+        assert_eq!(first["reasoning"], "old plan", "{first}");
 
         // The same conversation with the thinking already made local —
         // what a model that takes none back persists — sends none.
@@ -1120,7 +1251,7 @@ mod tests {
                 .content
                 .iter()
                 .map(|block| match block {
-                    ContentBlock::Thinking { text } => ContentBlock::Diagnostic {
+                    ContentBlock::Thinking { text, .. } => ContentBlock::Diagnostic {
                         text: text.clone(),
                         kind: crate::session::DiagnosticKind::Local,
                     },

@@ -844,9 +844,11 @@ async fn multi_turn_tool_conversation_end_to_end() {
     ));
     let assistant1 = &transcript[1];
     assert_eq!(assistant1.content.len(), 5);
-    // GLM takes its thinking back inside a turn, so the log keeps it as
-    // thinking rather than as a local diagnostic.
-    assert!(matches!(&assistant1.content[0], ContentBlock::Thinking { text } if text == "plan"));
+    // GLM takes its thinking back, so the log keeps it as thinking
+    // rather than as a local diagnostic.
+    assert!(
+        matches!(&assistant1.content[0], ContentBlock::Thinking { text, .. } if text == "plan")
+    );
     assert!(matches!(&assistant1.content[1], ContentBlock::Text { text } if text == "checking"));
     assert!(matches!(&assistant1.content[2], ContentBlock::ToolCall { id, .. } if id == "t1"));
     assert!(matches!(&assistant1.content[3], ContentBlock::Text { text } if text == "after first"));
@@ -976,14 +978,14 @@ async fn multiple_thinking_runs_preserve_order() {
     let transcript = store.load(&session_id).unwrap().transcript();
     let content = &transcript[1].content;
     // Each closed run is persisted as its own block, in the order it
-    // was streamed — as thinking, since GLM takes it back inside a turn.
+    // was streamed — as thinking, since GLM takes it back.
     assert!(
-        matches!(&content[0], ContentBlock::Thinking { text } if text == "first thought"),
+        matches!(&content[0], ContentBlock::Thinking { text, .. } if text == "first thought"),
         "{content:?}"
     );
     assert!(matches!(&content[1], ContentBlock::Text { text } if text == "between"));
     assert!(
-        matches!(&content[2], ContentBlock::Thinking { text } if text == "second thought"),
+        matches!(&content[2], ContentBlock::Thinking { text, .. } if text == "second thought"),
         "{content:?}"
     );
     assert!(matches!(&content[3], ContentBlock::Text { text } if text == "answer"));

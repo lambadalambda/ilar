@@ -24,6 +24,7 @@ as a `{"type":"notice"}` event under `ilar exec --json`.
 | --- | --- | --- |
 | `general.model` | `zai/glm-4.7` | Default `provider/model-id`. |
 | `general.reasoning` | provider default | Default reasoning variant for new sessions (for example `low`, `high`, or `max`; model-specific). Set `default` in a higher config layer to clear an inherited value. It must be valid for `general.model`; a launch that runs some other model (`--model`, or an agent's own `model:`) drops it with a startup line rather than refusing to start. |
+| `general.replay_thinking` | `all` | How much of a chat-wire model's thinking goes back to it: `all`, `turn` or `off`. See [thinking on the wire](#thinking-on-the-wire); a `[models.*]` or `[endpoints.*]` entry can override it for its own server. |
 | `general.theme` | `carbon` | See [themes](interface.md#themes). F3 opens the picker. |
 | `general.project_instructions` | `true` | Whether the working directory's `AGENTS.md`/`CLAUDE.md` is part of the system prompt. See [Project instructions](#project-instructions). User-scoped. |
 | `general.resume_offer` | `true` | Whether a bare `ilar` offers this directory's last session — its tail shown ghosted, Enter resumes it. See [Starting](interface.md#starting). |
@@ -122,7 +123,7 @@ by the `models` tool.
 | `api_key` | no | none | Sent as `Authorization: Bearer …`. With no key, **no Authorization header is sent at all** — which is what a local server wants. There is no environment-variable fallback for these entries. |
 | `output` | no | a quarter of `context` | Tokens reserved for the reply. A local server's window is one budget shared by prompt and reply, so some of it is held back. |
 | `vision` | no | `false` | Whether the model accepts images. When false, images in the session are replaced with `[image omitted: this model cannot view images]` rather than refused. |
-| `replay_thinking` | no | `true` | Whether the model's thinking goes back to it as `reasoning_content` inside a turn (see [thinking on the wire](#thinking-on-the-wire)). Set `false` for a server that streams reasoning but refuses the field as input. |
+| `replay_thinking` | no | `[general]`'s, else `all` | How much of the model's thinking goes back to it: `all`, `turn` or `off` (see [thinking on the wire](#thinking-on-the-wire)). `off` is for a server that streams reasoning but refuses the field as input. |
 | `display_name` | no | the section name | Name shown in the picker and the models tool. |
 | `options` | no | none | A table of extra body fields merged into every request to this model. |
 
@@ -221,7 +222,7 @@ context = 65536          # for models whose listing does not say
 | `context` | no | `32768` | The window for a model whose listing does not state one. |
 | `output` | no | a quarter of the window | Tokens reserved for the reply. |
 | `vision` | no | `false` | For models whose listing does not say. |
-| `replay_thinking` | no | `true` | As for `[models.*]`: thinking goes back inside a turn unless the server refuses it. |
+| `replay_thinking` | no | `[general]`'s, else `all` | As for `[models.*]`: `all`, `turn` or `off`. |
 | `models` | no | all | Only these ids. |
 | `options` | no | none | Body fields merged into every request. |
 
@@ -273,21 +274,35 @@ subscription's dollars.
 
 ### Thinking on the wire
 
-On the chat wire a model's thinking goes back to it inside a turn: the
-assistant messages after your last message carry their `reasoning_content`,
-which is where the GLM, DeepSeek, Kimi, MiniMax and Qwen templates keep it
-so the model holds its own plan through a tool loop. Without it every step
+On the chat wire a model's thinking goes back to it. The GLM, DeepSeek,
+Kimi, MiniMax and Qwen families think *interleaved* with their tool calls,
+and their templates read `reasoning_content` off the assistant messages so
+the model holds its own plan through a tool loop. Without it every step
 started from an empty think block and the model made up what it had been
 thinking — a Qwen3.8 session produced eleven thoughts about a previous
-reply it never gave. Earlier turns' thinking is never sent; every vendor
-drops it there and one refuses it. The same holds for every model a
-discovered `[endpoints.<name>]` or `[models.<name>]` server serves: if it
-streamed thinking, it is offered back — llama.cpp, vLLM, LM Studio and
-Lemonade use it, a shim that ignores the field loses nothing, and a server
-that refuses it as input gets `replay_thinking = false` on its entry. The
-Responses wire has its own reasoning items, and OpenAI's chat wire hands no
-thinking back at all, so their thinking stays where it was, as a local note
-in the log.
+reply it never gave.
+
+How much goes back is `replay_thinking`, in `[general]` for every model and
+overridable per `[models.<name>]` or `[endpoints.<name>]` entry:
+
+- `all` (the default, and what OpenCode sends): every assistant message in
+  the conversation carries its thinking. Costly in context, but if the model
+  was trained with its whole history of thought in front of it, the
+  alternative starves it.
+- `turn`: only the assistant messages after your last message — the
+  vendors' documented minimum, where the Qwen and GLM templates keep it and
+  DeepSeek's own docs say to drop the rest.
+- `off`: none, for a server that streams reasoning but refuses the field as
+  input; an OpenAI-strict validator rejects unknown assistant fields.
+
+A thought goes back under the name it arrived as: `reasoning_content` for
+most, `reasoning` for the OpenRouter-style servers behind OpenCode Zen. The
+same holds for every model a discovered `[endpoints.<name>]` or
+`[models.<name>]` server serves: if it streamed thinking, it is offered back
+— llama.cpp, vLLM, LM Studio and Lemonade use it, and a shim that ignores
+the field loses nothing. The Responses wire has its own reasoning items, and
+OpenAI's chat wire hands no thinking back at all, so their thinking stays
+where it was, as a local note in the log.
 
 ## Compacting while the cache is warm
 
