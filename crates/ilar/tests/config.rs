@@ -306,6 +306,18 @@ fn memory_is_on_by_default_and_can_be_turned_off() {
     let off = Loader::no_env().config_dir(user).resolve().unwrap();
     assert!(!off.general.memory);
     assert!(off.warnings.is_empty(), "{:?}", off.warnings);
+    // A project may say so too: what a checkout remembers is the
+    // checkout's business, like the resume offer.
+    let (_project_guard, project) = tempdir();
+    write(&project.join("ilar.toml"), "[general]\nmemory = false\n");
+    let (_other_user_guard, other_user) = tempdir();
+    let by_project = Loader::no_env()
+        .config_dir(other_user)
+        .project_dir(project)
+        .resolve()
+        .unwrap();
+    assert!(!by_project.general.memory);
+    assert!(by_project.warnings.is_empty(), "{:?}", by_project.warnings);
 }
 
 #[test]

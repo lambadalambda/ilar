@@ -1510,12 +1510,14 @@ async fn main() -> Result<()> {
         let model_for_session = plan.model.clone();
         let skill_inventory = plan.skills.clone();
         let command_inventory = plan.commands.clone();
-        let system_prompt = plan.system_prompt.clone();
         let runtime = plan.start(&config)?;
+        // The runtime's, not the plan's: the core memory joins the
+        // prompt at start.
         let ilar::runtime::SessionRuntime {
             store: _,
             session_id,
             reasoning: reasoning_for_session,
+            system_prompt,
             registry,
             spawner,
             services,

@@ -1,7 +1,7 @@
 //! Which session a chat is, and which chat was last heard from.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use anyhow::Context;
@@ -126,20 +126,9 @@ impl RouteStore {
     }
 }
 
-/// Write through a rename. The temporary name is unique per write, so
-/// two writers racing on one file both land — the later one wins —
-/// instead of one failing on a name the other just renamed away.
-pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
-    static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let serial = SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let tmp = path.with_extension(format!("tmp.{}.{serial}", std::process::id()));
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
-}
+/// Write through a rename; the core's, shared by every file the
+/// gateway keeps under its home.
+pub(crate) use ilar::memory::write_atomically;
 
 #[cfg(test)]
 mod tests {

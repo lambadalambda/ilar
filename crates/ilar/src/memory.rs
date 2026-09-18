@@ -44,12 +44,18 @@ pub fn dir_for(state_dir: &Path, cwd: &Path) -> PathBuf {
     state_dir.join("memory").join(slug(&canonical))
 }
 
+/// How much of the path the slug keeps, from its end — the part a
+/// person recognises — so a deep launch directory still fits a file
+/// name; the hash carries the rest of the identity.
+const SLUG_CHARS: usize = 100;
+
 /// A path as one file name: separators and anything outside
-/// `[A-Za-z0-9._-]` become `-`, then a short hash of the whole path is
-/// appended so `a/b` and `a-b` cannot land in one directory.
+/// `[A-Za-z0-9._-]` become `-`, the last [`SLUG_CHARS`] of that are
+/// kept, and a short hash of the whole path is appended so `a/b` and
+/// `a-b` cannot land in one directory.
 fn slug(path: &Path) -> String {
     let text = path.to_string_lossy();
-    let mut name: String = text
+    let flat: String = text
         .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
@@ -59,21 +65,24 @@ fn slug(path: &Path) -> String {
             }
         })
         .collect();
-    while name.starts_with('-') {
-        name.remove(0);
-    }
+    let start = flat.len().saturating_sub(SLUG_CHARS);
+    let name = flat[start..].trim_matches('-');
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in text.as_bytes() {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x0100_0000_01b3);
     }
-    format!("{name}-{:08x}", hash as u32)
+    if name.is_empty() {
+        format!("{:08x}", hash as u32)
+    } else {
+        format!("{name}-{:08x}", hash as u32)
+    }
 }
 
 /// Write through a rename. The temporary name is unique per write, so
 /// two writers racing on one file both land — the later one wins —
 /// instead of one failing on a name the other just renamed away.
-fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
+pub fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
     static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -887,6 +896,12 @@ mod tests {
         assert_ne!(plain, dir_for(&state, &other));
         // Nothing on disk until something is written.
         assert!(!state.exists());
+        // A deep path keeps its tail and fits a file name; the root
+        // keeps nothing but its hash.
+        let deep = slug(Path::new(&format!("/{}", "abcdefghij/".repeat(40))));
+        assert!(deep.len() <= SLUG_CHARS + 9, "{deep}");
+        assert!(deep.starts_with("abcdefghij-"), "{deep}");
+        assert!(!slug(Path::new("/")).starts_with('-'));
     }
 
     #[tokio::test]

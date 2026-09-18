@@ -2215,6 +2215,20 @@ fn the_allowlist_is_derived_from_what_the_constructors_register() {
         ),
         [ChildTool::SERVICE.name()]
     );
+    assert_eq!(
+        installed(
+            ToolRegistry::builtin()
+                .with_memory(Arc::new(ilar::memory::MemoryStore::new(
+                    dir.path().join("memory")
+                )))
+                .unwrap()
+        ),
+        [
+            ChildTool::MEMORY.name(),
+            ChildTool::MEMORY_SEARCH.name(),
+            ChildTool::MEMORY_GET.name()
+        ]
+    );
     // task/tasks need a live spawner; their registration is checked by
     // the assertion inside `with_child_tool`, which every subagent test
     // exercises.

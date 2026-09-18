@@ -566,6 +566,7 @@ const GLYPHS = {
   tasks: "❖",
   service: "⚙",
   history: "↺",
+  memory: "✦",
   models: "⇄",
   question: "?",
   webfetch: "◍",
