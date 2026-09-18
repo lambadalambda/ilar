@@ -2242,6 +2242,67 @@ fn two_turn_session(store: &SessionStore) -> String {
     id
 }
 
+/// A marker that cuts past the stream is a damaged line, not a no-op:
+/// `truncate` used to keep everything, so the history the marker was
+/// meant to abandon came back to life without a word. Both replays
+/// refuse it and say which line.
+#[test]
+fn a_rewind_marker_past_the_stream_is_refused_by_name() {
+    let (store, _dir) = temp_store();
+    let id = two_turn_session(&store);
+    let path = store.session_path(&id).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let damaged = serde_json::to_string(&SessionEvent::Rewind {
+        id: new_id(),
+        to: 99,
+        tree_restored: None,
+        tree_saved: None,
+        ts: Utc::now(),
+    })
+    .unwrap();
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    writeln!(file, "{damaged}").unwrap();
+    drop(file);
+
+    let error = store.load(&id).err().expect("a refused replay");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    // Meta, two turns of two events, the marker: line 6.
+    assert!(error.to_string().contains("line 6"), "{error}");
+    assert!(error.to_string().contains("event 99"), "{error}");
+    // The audit log is the raw file and keeps showing the marker: a
+    // reader of the damage has to be able to see it.
+    assert!(matches!(
+        store.audit_events(&id).unwrap().last(),
+        Some(SessionEvent::Rewind { to: 99, .. })
+    ));
+    assert_eq!(
+        std::fs::read(&path).unwrap()[..before.len()],
+        before[..],
+        "refusing a replay rewrites nothing"
+    );
+
+    // A marker at exactly the stream's end is the empty cut, and legal.
+    std::fs::write(&path, &before).unwrap();
+    let edge = serde_json::to_string(&SessionEvent::Rewind {
+        id: new_id(),
+        to: 5,
+        tree_restored: None,
+        tree_saved: None,
+        ts: Utc::now(),
+    })
+    .unwrap();
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    writeln!(file, "{edge}").unwrap();
+    drop(file);
+    assert_eq!(store.load(&id).unwrap().events().len(), 5);
+}
+
 #[test]
 fn rewind_folds_replay_to_the_cut_and_keeps_the_audit_log() {
     let (store, dir) = temp_store();

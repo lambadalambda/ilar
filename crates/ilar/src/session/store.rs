@@ -1188,6 +1188,21 @@ pub(super) fn parse_event_bytes(
     id: &str,
     line_offset: usize,
 ) -> std::io::Result<Vec<SessionEvent>> {
+    Ok(parse_event_lines(bytes, id, line_offset)?
+        .into_iter()
+        .map(|(_, event)| event)
+        .collect())
+}
+
+/// [`parse_event_bytes`] keeping each event's physical line number, for
+/// a diagnostic that has to name the line — a rewind marker that cuts
+/// past the stream is a damaged line, and the reader deserves to know
+/// which.
+pub(super) fn parse_event_lines(
+    bytes: &[u8],
+    id: &str,
+    line_offset: usize,
+) -> std::io::Result<Vec<(usize, SessionEvent)>> {
     let mut events = Vec::new();
     for (index, line) in bytes.split(|byte| *byte == b'\n').enumerate() {
         if line.iter().all(u8::is_ascii_whitespace) {
@@ -1214,7 +1229,7 @@ pub(super) fn parse_event_bytes(
             };
             std::io::Error::new(std::io::ErrorKind::InvalidData, message)
         })?;
-        events.push(event);
+        events.push((line_number, event));
     }
     Ok(events)
 }
@@ -1256,7 +1271,7 @@ fn read_events(
     // this is what a later tail-parse diagnostic offsets its line numbers
     // by, and the reader counts lines in the file, not surviving events.
     let physical_line_count = committed_line_count(committed);
-    let events = fold_rewinds(parse_event_bytes(committed, id, 0)?);
+    let events = fold_rewinds(parse_event_lines(committed, id, 0)?, id)?;
     if events.is_empty() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -1320,23 +1335,50 @@ fn replay_state(
 /// Fold rewind markers out of a canonical event stream. Each marker
 /// truncates the stream back to its `to` index — a position in the
 /// already-folded stream, since markers are appended against the folded
-/// view — and disappears itself. `truncate` tolerates an out-of-range
-/// `to` from a damaged file by keeping everything.
-pub(super) fn fold_rewinds(events: Vec<SessionEvent>) -> Vec<SessionEvent> {
-    if !events
-        .iter()
-        .any(|event| matches!(event, SessionEvent::Rewind { .. }))
-    {
-        return events;
-    }
+/// view — and disappears itself. A marker that cuts past the stream is
+/// a damaged file and refuses the replay: `truncate` would have
+/// shrugged and kept everything, and the history the marker was meant
+/// to abandon would have come back to life without a word.
+pub(super) fn fold_rewinds(
+    events: Vec<(usize, SessionEvent)>,
+    id: &str,
+) -> std::io::Result<Vec<SessionEvent>> {
     let mut folded = Vec::with_capacity(events.len());
-    for event in events {
+    for (line, event) in events {
         match event {
-            SessionEvent::Rewind { to, .. } => folded.truncate(to),
+            SessionEvent::Rewind { to, .. } => apply_rewind(&mut folded, to, id, line)?,
             event => folded.push(event),
         }
     }
-    folded
+    Ok(folded)
+}
+
+/// One rewind marker against a folded stream, the same check for the
+/// full replay and the incremental tail: `to` may cut anywhere up to the
+/// stream's end, and not past it.
+pub(super) fn apply_rewind(
+    folded: &mut Vec<SessionEvent>,
+    to: usize,
+    id: &str,
+    line: usize,
+) -> std::io::Result<()> {
+    check_rewind(folded.len(), to, id, line)?;
+    folded.truncate(to);
+    Ok(())
+}
+
+/// The check alone, for a reader that wants to refuse a whole slab
+/// before applying any of it.
+pub(super) fn check_rewind(len: usize, to: usize, id: &str, line: usize) -> std::io::Result<()> {
+    if to > len {
+        return invalid_replay(
+            id,
+            format!(
+                "rewind marker on line {line} cuts to event {to}, but only {len} events precede it"
+            ),
+        );
+    }
+    Ok(())
 }
 
 fn active_replay_window(events: &[SessionEvent]) -> (Vec<SessionEvent>, usize) {

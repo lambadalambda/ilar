@@ -18,7 +18,10 @@ use std::path::{Path, PathBuf};
 
 use super::event::SessionEvent;
 use super::replay_index::committed_line_count;
-use super::store::{SessionStore, committed_len, fold_rewinds, parse_event_bytes};
+use super::store::{
+    SessionStore, apply_rewind, check_rewind, committed_len, fold_rewinds, parse_event_bytes,
+    parse_event_lines,
+};
 
 /// One committed line, as the reader saw it.
 // The event-carrying variant is the overwhelmingly common one, and
@@ -161,6 +164,20 @@ impl SessionTail {
                 parsed.push((line, event));
             }
         }
+        // Every marker checked against the stream it will cut before
+        // anything is applied: a marker past the end is a damaged line,
+        // refused the way a malformed one is, and never a half-consumed
+        // slab.
+        let mut length = self.events.len();
+        for (line, event) in &parsed {
+            match event {
+                SessionEvent::Rewind { to, .. } => {
+                    check_rewind(length, *to, &self.id, *line)?;
+                    length = *to;
+                }
+                _ => length += 1,
+            }
+        }
         let mut updates = Vec::with_capacity(parsed.len());
         for (line, event) in parsed {
             match event {
@@ -168,7 +185,7 @@ impl SessionTail {
                 // the folded stream, so applying markers as they arrive
                 // is the same fold a full replay performs.
                 SessionEvent::Rewind { to, .. } => {
-                    self.events.truncate(to);
+                    apply_rewind(&mut self.events, to, &self.id, line)?;
                     updates.push(TailUpdate::Rewound { line, to, event });
                 }
                 event => {
@@ -201,7 +218,7 @@ impl SessionTail {
             })?,
         };
         let prefix = &bytes[..end];
-        self.events = fold_rewinds(parse_event_bytes(prefix, &self.id, 0)?);
+        self.events = fold_rewinds(parse_event_lines(prefix, &self.id, 0)?, &self.id)?;
         self.line = committed_line_count(prefix);
         self.offset = end as u64;
         Ok(())
@@ -473,6 +490,49 @@ mod tests {
         assert_eq!(tail.line(), 6, "the marker is a physical line");
         assert_eq!(tail.events().len(), 3);
         assert_eq!(tail.events(), store.load(&id).unwrap().events());
+    }
+
+    /// A marker past the view is refused before anything in its slab
+    /// is applied, on both paths: the incremental poll and the full
+    /// replay a fresh reader performs.
+    #[test]
+    fn a_rewind_marker_past_the_view_is_refused_without_moving() {
+        let (store, _dir) = temp_store();
+        let (id, mut session) = start(&store);
+        session.append(user("one")).unwrap();
+        session.append(assistant("did one")).unwrap();
+        drop(session);
+        let path = store.session_path(&id).unwrap();
+
+        let mut tail = SessionTail::open(&store, &id).unwrap();
+        assert_eq!(lines_of(&tail.poll().unwrap()), [1, 2, 3]);
+        let before = tail.events().to_vec();
+
+        // A good line ahead of the bad marker, committed together: the
+        // good one must not land either.
+        let good = format!("{}\n", serde_json::to_string(&user("good")).unwrap());
+        let damaged = serde_json::to_string(&SessionEvent::Rewind {
+            id: new_id(),
+            to: 99,
+            tree_restored: None,
+            tree_saved: None,
+            ts: chrono::Utc::now(),
+        })
+        .unwrap();
+        append_raw(&path, format!("{good}{damaged}\n").as_bytes());
+
+        let error = tail.poll().unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("line 5"), "{error}");
+        assert_eq!(tail.line(), 3, "no half-consumed slab");
+        assert_eq!(tail.events(), before);
+
+        // The full replay refuses the same line the same way.
+        let error = SessionTail::open(&store, &id)
+            .and_then(|mut fresh| fresh.poll())
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("line 5"), "{error}");
     }
 
     /// The subtle claim: `to` indexes the *folded* stream, so a second
