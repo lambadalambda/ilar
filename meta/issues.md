@@ -120,6 +120,12 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 (all complete — see issues_archive.md)
 
+## Milestone 23 — Memory, the write side
+
+- [ ] [Notes can be amended and forgotten](issues/notes-can-be-amended-and-forgotten.md)
+- [ ] [Worktrees share one memory](issues/worktrees-share-one-memory.md)
+- [ ] [Memory says when to write, and what a recall is](issues/memory-says-when-to-write-and-what-a-recall-is.md)
+
 ## Review follow-ups
 
 - [ ] [Every started turn publishes its ending](issues/every-started-turn-publishes-its-ending.md)
