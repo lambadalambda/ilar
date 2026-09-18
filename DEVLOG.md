@@ -1,5 +1,51 @@
 # DEVLOG
 
+## 2026-09-19 — Seven small ones
+
+The backlog's small correctness items, one commit each on one branch.
+
+**A bare provider answers the catalog's limits.** The resolver trait's
+`None` defaults did not mean "unknown" downstream, they meant "never
+compact": a surface that embedded a provider one type parameter short
+of the configured resolver grew its session until the provider refused
+it. The blanket impl and `FixedProviderResolver` answer the catalog row
+now, which exists for every model a configuration can route.
+
+**A delivering row's footer is settled.** The focus view's seed already
+knew a delivery streams nothing; the footer's "running" flag was set
+from the roster alone, and no `TurnDone` was ever going to arrive to
+take it back.
+
+**A rewind marker past the stream refuses the replay.** `truncate`
+shrugged at an out-of-range marker and kept everything, so the history
+the marker had abandoned came back silently. Both replays refuse it
+naming the line; the tail checks every marker in a slab before it
+applies any, so the "never a half-consumed slab" promise holds.
+
+**Scratch repositories never sign.** Every fixture sets
+`commit.gpgsign=false` before its first commit. Verified on tenco with
+a global config that forces signing through `/bin/false`.
+
+**Ignored project tables cannot refuse startup.** `[providers]`,
+`[models]` and friends in a cloned repository are documented as
+ignored, yet they passed through validation before being thrown away,
+so one bad line a project was told means nothing kept ilar from
+opening. The project layer sheds them off the raw TOML before it is
+even deserialised, and the warnings are read off the same table — so a
+table whose contents would not parse as ours is still named.
+
+**Base URLs are structural.** One rule for providers, models and
+endpoints: http(s), a host, no query, no fragment, and the trailing
+slash that used to become `//chat/completions` on the wire is gone
+from the stored form.
+
+**The skill scan runs once and a load reads one body.** Startup listed
+every skill twice, reading every body both times, and the tool read
+every body again for every load and every unknown name. The listing
+keeps names and descriptions; a body is read when its skill is asked
+for, on a blocking thread, never past 256 KiB. A skill added
+mid-session shows up at the next start; an edited body is read fresh.
+
 ## 2026-09-18 — Thinking goes back whole, and under its own name
 
 This morning's replay sent thinking back for the current turn only,

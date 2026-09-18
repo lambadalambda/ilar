@@ -152,10 +152,9 @@ fn builtin_worktree_isolation_skill_present() {
     let user = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
     let store = store(user.path(), project.path());
-    let skills = store.list().unwrap();
-    let wt = skills
-        .iter()
-        .find(|s| s.name == "worktree-isolation")
+    let wt = store
+        .load("worktree-isolation")
+        .unwrap()
         .expect("builtin worktree-isolation skill");
     assert!(wt.body.contains("git worktree"), "{}", wt.body);
     assert!(wt.body.contains("task"), "should reference the task tool");
@@ -233,10 +232,17 @@ fn yaml_skill_directories_load() {
         "---\nname: repo-issues\ndescription: Manage repository-local issues.\ncompatibility: opencode\nmetadata:\n  category: workflow\n  scope: repository\n---\n# Repo issues\n\nBody text.\n",
     );
 
-    let skills = store(user.path(), project.path()).list().unwrap();
-    let skill = skills
-        .iter()
-        .find(|s| s.name == "repo-issues")
+    let store = store(user.path(), project.path());
+    assert!(
+        store
+            .list()
+            .unwrap()
+            .iter()
+            .any(|s| s.name == "repo-issues")
+    );
+    let skill = store
+        .load("repo-issues")
+        .unwrap()
         .expect("yaml skill directory loads");
     assert_eq!(skill.description, "Manage repository-local issues.");
     assert!(skill.body.contains("Body text."), "{}", skill.body);
@@ -374,7 +380,12 @@ fn verbatim_opencode_skill_files_load() {
         .find(|s| s.name == "agent-browser")
         .expect("long single-line skill loads");
     assert!(browser.description.contains("Prefer agent-browser over"));
-    assert!(browser.body.contains("agent-browser"), "body preserved");
+    let body = store(&fixtures, project.path())
+        .load("agent-browser")
+        .unwrap()
+        .expect("long single-line skill loads")
+        .body;
+    assert!(body.contains("agent-browser"), "body preserved");
 }
 
 #[test]
@@ -390,4 +401,65 @@ fn an_own_only_store_lists_the_user_dir_and_nothing_else() {
     // The ordinary store on the same dir has the built-ins too.
     let with_builtins = store(user.path(), user.path()).list().unwrap();
     assert!(with_builtins.iter().any(|s| s.name == "worktree-isolation"));
+}
+
+/// The scan happens once and keeps only names: a body is read when
+/// its skill is asked for, and no other body is read with it. Proven
+/// by breaking a sibling's file after the listing — a load of the
+/// other skill, an unknown name, and a second listing all still work,
+/// and only a load of the broken one fails.
+#[test]
+fn the_listing_scans_once_and_a_load_reads_one_body() {
+    let user = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let a = user.path().join("skills/alpha.md");
+    let b = user.path().join("skills/beta.md");
+    write(&a, "---\ndescription = \"A\"\n---\nALPHA BODY\n");
+    write(&b, "---\ndescription = \"B\"\n---\nBETA BODY\n");
+    let store = store(user.path(), project.path());
+    let names: Vec<String> = store.list().unwrap().into_iter().map(|s| s.name).collect();
+    assert!(names.contains(&"alpha".to_string()) && names.contains(&"beta".to_string()));
+
+    std::fs::write(&b, "---\nnot = [valid\n---\n").unwrap();
+    let alpha = store.load("alpha").unwrap().expect("alpha loads");
+    assert_eq!(alpha.body, "ALPHA BODY");
+    assert!(store.load("nonexistent").unwrap().is_none());
+    assert!(store.list().unwrap().iter().any(|s| s.name == "beta"));
+    assert!(store.listing_prompt().unwrap().contains("beta"));
+    let error = store
+        .load("beta")
+        .expect_err("beta's body is read on demand");
+    assert!(error.to_string().contains("beta.md"), "{error}");
+
+    // A body edited after the scan is read fresh.
+    std::fs::write(&a, "---\ndescription = \"A\"\n---\nALPHA REVISED\n").unwrap();
+    assert_eq!(store.load("alpha").unwrap().unwrap().body, "ALPHA REVISED");
+
+    // A skill written after the scan loads at once: the miss costs a
+    // directory listing and one read, and beta's broken file — already
+    // in the inventory — is not read again for it.
+    write(
+        &user.path().join("skills/gamma.md"),
+        "---\ndescription = \"G\"\n---\nGAMMA BODY\n",
+    );
+    assert_eq!(store.load("gamma").unwrap().unwrap().body, "GAMMA BODY");
+    assert!(store.list().unwrap().iter().any(|s| s.name == "gamma"));
+}
+
+/// A skill past the limit is refused by name and size, at the scan.
+#[test]
+fn an_oversized_skill_definition_is_refused_by_name() {
+    let user = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let huge = format!(
+        "---\ndescription = \"too much\"\n---\n{}",
+        "x".repeat(ilar::skill::MAX_SKILL_BYTES as usize + 1)
+    );
+    write(&user.path().join("skills/huge.md"), &huge);
+    let error = store(user.path(), project.path())
+        .list()
+        .expect_err("an oversized skill is refused");
+    let message = error.to_string();
+    assert!(message.contains("huge.md"), "{message}");
+    assert!(message.contains("256 KiB"), "{message}");
 }

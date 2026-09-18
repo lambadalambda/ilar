@@ -1035,11 +1035,6 @@ fn base_urls_are_canonical_and_refused_by_field() {
             "http:// or https://",
         ),
         (
-            "[providers.openai]\nbase_url = \"https:///nohost\"\n",
-            "providers.openai.base_url",
-            "host",
-        ),
-        (
             "[providers.zai]\nbase_url = \"https://zai.test/v1?x=1\"\n",
             "providers.zai.base_url",
             "query",

@@ -389,8 +389,11 @@ static PROVIDERS: &[ProviderKind] = &[
 /// 404 four calls in.
 fn canonical_base_url(value: &str) -> Result<String, &'static str> {
     let url = url::Url::parse(value).map_err(|_| "must be an http:// or https:// URL")?;
-    if !matches!(url.scheme(), "http" | "https") || !url.has_host() {
-        return Err("must be an http:// or https:// URL with a host");
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err("must be an http:// or https:// URL");
+    }
+    if !url.has_host() {
+        return Err("must have a host");
     }
     if url.query().is_some() || url.fragment().is_some() {
         return Err("must not carry a query or a fragment");

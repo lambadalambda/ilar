@@ -1,6 +1,8 @@
 //! Skills: markdown + frontmatter, discovered in the user config dir and
 //! the project `.ilar/skills/`, loaded on demand via the `skill` tool.
-//! Ships the worktree-isolation built-in. ~200 lines, kept dumb.
+//! The scan happens once per store and keeps names and descriptions;
+//! a body is read when it is asked for, and never past
+//! [`MAX_SKILL_BYTES`]. Ships the worktree-isolation built-in.
 
 use std::path::PathBuf;
 
@@ -16,6 +18,27 @@ pub struct Skill {
     pub triggers: Vec<String>,
     pub body: String,
 }
+
+/// What the listing knows about a skill without holding its body: the
+/// prompt line, and where the body is when it is asked for.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SkillMeta {
+    pub name: String,
+    pub description: String,
+    pub triggers: Vec<String>,
+    source: SkillSource,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum SkillSource {
+    Builtin(&'static str),
+    File(PathBuf),
+}
+
+/// The most a skill definition may be. A skill is a page of
+/// instructions; a file past this is a mistake — a binary, a dump — and
+/// would otherwise land in the model's context whole.
+pub const MAX_SKILL_BYTES: u64 = 256 * 1024;
 
 /// The built-in worktree-isolation skill: run a subagent in a git worktree.
 const WORKTREE_ISOLATION: &str = r#"---
@@ -130,6 +153,15 @@ pub struct SkillStore {
     /// `None` for a store that reads the user dir alone.
     project_dir: Option<PathBuf>,
     builtins: bool,
+    /// The scan, remembered: the listing is asked for at startup for
+    /// the prompt and again for the picker, and the tool asks again for
+    /// every load and every unknown name. Each of those used to read
+    /// and parse every body. A name the inventory does not know is
+    /// looked for again before it is refused — the assistant writes
+    /// skills mid-session and loads them at once — but that refresh
+    /// reads only files the inventory has not seen; a body is read
+    /// fresh whenever its skill is loaded.
+    inventory: std::sync::Mutex<Option<Vec<SkillMeta>>>,
 }
 
 impl SkillStore {
@@ -138,6 +170,7 @@ impl SkillStore {
             user_dir,
             project_dir: Some(project_dir),
             builtins: true,
+            inventory: std::sync::Mutex::new(None),
         }
     }
 
@@ -148,33 +181,74 @@ impl SkillStore {
             user_dir,
             project_dir: None,
             builtins: false,
+            inventory: std::sync::Mutex::new(None),
         }
     }
 
     /// All available skills: built-ins, user dir, project .ilar/skills
-    /// (later wins by name).
-    pub fn list(&self) -> anyhow::Result<Vec<Skill>> {
-        let mut skills = if self.builtins {
-            vec![
-                parse_skill_md("worktree-isolation", WORKTREE_ISOLATION)
-                    .expect("builtin skill parses"),
-                parse_skill_md("mcp-via-cli", MCP_VIA_CLI).expect("builtin skill parses"),
-            ]
-        } else {
-            Vec::new()
-        };
+    /// (later wins by name). Names and descriptions, not bodies; the
+    /// scan runs once and is remembered.
+    pub fn list(&self) -> anyhow::Result<Vec<SkillMeta>> {
+        if let Some(inventory) = self.inventory.lock().unwrap().as_ref() {
+            return Ok(inventory.clone());
+        }
+        self.refresh()
+    }
+
+    /// Scan again, reusing what the inventory already read: only a file
+    /// it has not seen costs a read.
+    fn refresh(&self) -> anyhow::Result<Vec<SkillMeta>> {
+        let known = self.inventory.lock().unwrap().clone().unwrap_or_default();
+        let scanned = self.scan(&known)?;
+        *self.inventory.lock().unwrap() = Some(scanned.clone());
+        Ok(scanned)
+    }
+
+    fn scan(&self, known: &[SkillMeta]) -> anyhow::Result<Vec<SkillMeta>> {
+        let mut skills: Vec<SkillMeta> = Vec::new();
+        if self.builtins {
+            for (name, text) in [
+                ("worktree-isolation", WORKTREE_ISOLATION),
+                ("mcp-via-cli", MCP_VIA_CLI),
+            ] {
+                let skill = parse_skill_md(name, text).expect("builtin skill parses");
+                skills.push(SkillMeta {
+                    name: skill.name,
+                    description: skill.description,
+                    triggers: skill.triggers,
+                    source: SkillSource::Builtin(text),
+                });
+            }
+        }
         let mut dirs = vec![self.user_dir.join("skills")];
         if let Some(project) = &self.project_dir {
             dirs.push(project.join(".ilar/skills"));
         }
         for dir in dirs {
             for (name, path) in skill_files(&dir)? {
-                let text = std::fs::read_to_string(&path)
-                    .with_context(|| format!("reading skill definition {}", path.display()))?;
-                let skill = parse_skill_md(&name, &text)
-                    .with_context(|| format!("parsing skill definition {}", path.display()))?;
-                skills.retain(|existing| existing.name != skill.name);
-                skills.push(skill);
+                let meta = match known
+                    .iter()
+                    .find(|meta| meta.source == SkillSource::File(path.clone()))
+                {
+                    Some(meta) => meta.clone(),
+                    None => {
+                        // Read once, here, for the frontmatter; the
+                        // body is read again only when the skill is
+                        // asked for.
+                        let skill =
+                            parse_skill_md(&name, &read_skill(&path)?).with_context(|| {
+                                format!("parsing skill definition {}", path.display())
+                            })?;
+                        SkillMeta {
+                            name: skill.name,
+                            description: skill.description,
+                            triggers: skill.triggers,
+                            source: SkillSource::File(path),
+                        }
+                    }
+                };
+                skills.retain(|existing| existing.name != meta.name);
+                skills.push(meta);
             }
         }
         skills.sort_by(|a, b| a.name.cmp(&b.name));
@@ -210,9 +284,44 @@ impl SkillStore {
         ))
     }
 
+    /// One skill, body and all: the built-in text, or the one file the
+    /// scan found for that name — no other body is read.
     pub fn load(&self, name: &str) -> anyhow::Result<Option<Skill>> {
-        Ok(self.list()?.into_iter().find(|s| s.name == name))
+        let found = |metas: Vec<SkillMeta>| metas.into_iter().find(|s| s.name == name);
+        // Unknown to the inventory is not yet unknown: a skill written
+        // since the scan is found by the one directory listing a
+        // refresh costs.
+        let meta = match found(self.list()?) {
+            Some(meta) => meta,
+            None => match found(self.refresh()?) {
+                Some(meta) => meta,
+                None => return Ok(None),
+            },
+        };
+        let skill = match &meta.source {
+            SkillSource::Builtin(text) => {
+                parse_skill_md(&meta.name, text).expect("builtin skill parses")
+            }
+            SkillSource::File(path) => parse_skill_md(&meta.name, &read_skill(path)?)
+                .with_context(|| format!("parsing skill definition {}", path.display()))?,
+        };
+        Ok(Some(skill))
     }
+}
+
+/// A skill file within [`MAX_SKILL_BYTES`], or the reason it is not.
+fn read_skill(path: &std::path::Path) -> anyhow::Result<String> {
+    let size = std::fs::metadata(path)
+        .with_context(|| format!("reading skill definition {}", path.display()))?
+        .len();
+    anyhow::ensure!(
+        size <= MAX_SKILL_BYTES,
+        "skill definition {} is {size} bytes; the limit is {} KiB",
+        path.display(),
+        MAX_SKILL_BYTES / 1024
+    );
+    std::fs::read_to_string(path)
+        .with_context(|| format!("reading skill definition {}", path.display()))
 }
 
 /// The `skill` tool: loads a skill body on invocation.
@@ -264,7 +373,22 @@ impl crate::tools::Tool for SkillTool {
                 Ok(v) => v,
                 Err(error) => return error,
             };
-            match store.load(&input.name) {
+            // A file read, however small, is not the async runtime's
+            // to wait on: it goes to a blocking thread like any other.
+            let loaded = {
+                let store = store.clone();
+                let name = input.name.clone();
+                tokio::task::spawn_blocking(move || store.load(&name)).await
+            };
+            let loaded = match loaded {
+                Ok(loaded) => loaded,
+                Err(error) => {
+                    return crate::tools::ToolOutput::error(format!(
+                        "skill: loading skills: {error}"
+                    ));
+                }
+            };
+            match loaded {
                 Ok(Some(skill)) => crate::tools::ToolOutput::text(format!(
                     "# Skill: {} — {}\n\n{}",
                     skill.name, skill.description, skill.body
