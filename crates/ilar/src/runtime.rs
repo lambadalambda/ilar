@@ -572,13 +572,18 @@ impl RuntimePlan {
 
     /// The prompt as the session sends it: what `resolve` assembled,
     /// plus — read now, not at resolve, so a driver's own additions
-    /// come first — the core memory, frozen for the session. Nothing
-    /// when there is no store or it is still empty.
+    /// come first — the memory: the standing section on when to write
+    /// it, present from the first session so an empty store gets
+    /// written, and the core block, frozen for the session, once
+    /// there is one. Nothing when there is no store.
     fn system_prompt_at_start(&self) -> Result<String> {
         let mut prompt = self.system_prompt.clone();
-        if let Some(store) = &self.memory
-            && let Some(block) = store.core_block().context("reading the core memory")?
-        {
+        let Some(store) = &self.memory else {
+            return Ok(prompt);
+        };
+        prompt.push_str("\n\n");
+        prompt.push_str(&crate::memory::PROMPT_SECTION);
+        if let Some(block) = store.core_block().context("reading the core memory")? {
             prompt.push_str("\n\n");
             prompt.push_str(&block);
         }
@@ -1317,6 +1322,9 @@ mod tests {
         for tool in ["memory", "memory_search", "memory_get"] {
             assert!(preview.registry.tool_names().contains(&tool), "{tool}");
         }
+        // Told about memory before there is any, so it gets written;
+        // no core block until it is.
+        assert!(preview.system_prompt.contains("# Remembering"));
         assert!(!preview.system_prompt.contains("# Memory"));
         assert!(!config.state_dir().join("memory").exists());
 
@@ -1332,6 +1340,7 @@ mod tests {
         let preview = preview_with(None);
         assert!(!preview.registry.tool_names().contains(&"memory"));
         assert!(!preview.system_prompt.contains("# Memory"));
+        assert!(!preview.system_prompt.contains("# Remembering"));
     }
 
     #[test]

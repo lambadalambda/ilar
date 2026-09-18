@@ -84,22 +84,30 @@ impl Episode {
     }
 }
 
-/// The instruction appended after the conversation.
-pub const PROMPT: &str = "Review this conversation since your last review, as yourself. Is there \
+/// The instruction appended after the conversation. Carries the same
+/// summary rule the `memory` tool states, so a note written here is
+/// found the same way as one the model wrote itself.
+pub static PROMPT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!(
+        "Review this conversation since your last review, as yourself. Is there \
 anything durable in it — a preference or correction from the person, a fact about your world \
 that will still be true next week, a decision, a workflow that worked or a dead end to avoid? \
 Most conversations have nothing durable; then answer with exactly the word nothing. Otherwise \
-answer with one JSON object and nothing else: {\"memory\": [{\"file\": \"user\" or \"memory\", \
+answer with one JSON object and nothing else: {{\"memory\": [{{\"file\": \"user\" or \"memory\", \
 \"action\": \"add\" or \"replace\" or \"remove\", \"text\": \"…\", \"old\": \"…\", \"new\": \
-\"…\"}], \"notes\": [{\"kind\": \"decision\"|\"solution\"|\"preference\"|\"event\"|\"task\"|\
-\"risk\", \"title\": \"…\", \"summary\": \"one line\", \"body\": \"the fact in full\"}]}. \
+\"…\"}}], \"notes\": [{{\"kind\": \"decision\"|\"solution\"|\"preference\"|\"event\"|\"task\"|\
+\"risk\", \"title\": \"…\", \"summary\": \"one line\", \"body\": \"the fact in full\"}}]}}. \
+{} \
 Memory entries are one short line each and the files are small: prefer replace over add \
 when an entry is already about the same thing. A workflow worth repeating is a skill, not a \
-memory entry: add \"skills\": [{\"action\": \"create\" or \"patch\", \"name\": \"lowercase-with-\
+memory entry: add \"skills\": [{{\"action\": \"create\" or \"patch\", \"name\": \"lowercase-with-\
 dashes\", \"description\": \"…\", \"triggers\": [\"…\"], \"body\": \"…\", \"old\": \"…\", \
-\"new\": \"…\"}] — a distilled rule with its reason, never the story of what happened, and \
+\"new\": \"…\"}}] — a distilled rule with its reason, never the story of what happened, and \
 patch a skill that exists before creating one. Never store secrets, paths that change, or \
-what is easily looked up.";
+what is easily looked up.",
+        ilar::memory::SUMMARY_RULE
+    )
+});
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct Plan {

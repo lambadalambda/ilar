@@ -1151,7 +1151,11 @@ impl Gateway {
         if !episode.worth_reviewing(self.settings.review.min_tool_calls) {
             return;
         }
-        let answer = match self.driver.aside(seat, crate::review::PROMPT).await {
+        let answer = match self
+            .driver
+            .aside(seat, crate::review::PROMPT.as_str())
+            .await
+        {
             Ok(Some(answer)) => answer,
             Ok(None) => return,
             Err(error) => {

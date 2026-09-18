@@ -149,6 +149,19 @@ is ever injected: `memory_search` returns an index, best first with
 recent notes ranking higher, and `memory_get` reads the chosen notes in
 full. The three tools are the root session's; a subagent has none.
 
+Nobody reviews a terminal session after the fact, so the model writes
+memory itself, during the turn. Every session with a memory opens with
+a standing section, "Remembering", present before anything has been
+written — an empty memory nobody mentions never gets written. It says
+what to keep (a preference or correction, a decision and its reason, a
+convention no file states), what to skip (what the repository, the log
+or a search already records; today's paths and errors), and one rule
+for a note's summary: search matches on words, not meaning, so the
+summary carries the words a future question would use — ticket ids,
+hostnames, error strings, file names. The `memory` tool's description
+and the assistant's after-turn review say the same rule, so a note is
+found the same way whoever wrote it.
+
 ## Rewind and fork
 
 When the working directory is a git repository, ilar snapshots the

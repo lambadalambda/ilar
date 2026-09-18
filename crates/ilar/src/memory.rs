@@ -19,7 +19,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
@@ -32,6 +32,33 @@ use crate::tools::{
 /// Hermes's caps, which keep the core under a thousand tokens.
 pub const MEMORY_CHARS: usize = 2200;
 pub const USER_CHARS: usize = 1375;
+
+/// How a note's summary is written, said wherever a note gets written:
+/// in the `memory` tool's description, in the standing prompt section,
+/// and in the gateway's after-turn review. The index matches words,
+/// so the summary has to carry the words a future question will.
+pub const SUMMARY_RULE: &str = "A note's summary is the one line search matches on, by its \
+words and not their meaning: put in it the words a future question would use — ticket ids, \
+hostnames, error strings, file names.";
+
+/// The standing section a session with a memory opens with, present
+/// whether or not anything has been written yet — an empty memory
+/// nobody mentions never gets written. Says what memory is for, what
+/// to skip, the two places, and that a write reaches the next session.
+pub static PROMPT_SECTION: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "# Remembering\n\n\
+         You have a memory that outlives this session, edited with the `memory` tool; it is \
+         empty until you write it. Keep what the next session would otherwise have to be told \
+         again: a preference or correction from the person, a decision and its reason, a \
+         convention of this project that no file states. Skip what the repository, the \
+         session log or a search already records, and today's paths and errors. A core entry \
+         (add, replace, remove) is one line injected into every future session under a hard \
+         cap — consolidate rather than overflow. A note (note) is one fact in the archive, \
+         found later by search. {SUMMARY_RULE} What you write changes the next session's \
+         prompt, not this one's."
+    )
+});
 
 /// Where a terminal session launched from `cwd` keeps its memory:
 /// `<state dir>/memory/<slug>/`, the slug being the canonical launch
@@ -569,13 +596,19 @@ impl Tool for MemoryTool {
     }
 
     fn description(&self) -> &'static str {
-        "Remember across sessions. add / replace / remove change a core file (file: memory for \
-         the world, user for the person) that is injected into every future session and has a \
-         hard cap — an overflow is an error, so consolidate; show prints both files as they \
-         are. note files one durable fact in the \
-         archive (kind: decision, solution, preference, event, task, risk; title; a one-line \
-         summary; body), found later with memory_search. Save preferences, corrections, \
-         decisions and conventions; skip the trivial, the searchable, and today's paths."
+        static DESCRIPTION: LazyLock<String> = LazyLock::new(|| {
+            format!(
+                "Remember across sessions. add / replace / remove change a core file (file: \
+                 memory for the world, user for the person) that is injected into every future \
+                 session and has a hard cap — an overflow is an error, so consolidate; show \
+                 prints both files as they are. note files one durable fact in the archive \
+                 (kind: decision, solution, preference, event, task, risk; title; a one-line \
+                 summary; body), found later with memory_search. {SUMMARY_RULE} Save \
+                 preferences, corrections, decisions and conventions; skip the trivial, the \
+                 searchable, and today's paths."
+            )
+        });
+        DESCRIPTION.as_str()
     }
 
     fn concurrency(&self) -> ToolConcurrency {
