@@ -409,3 +409,6 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [A killed task reads as finished](issues/a-killed-task-reads-as-finished.md) — a `TurnEnded` event on the child log; the listing says cancelled/failed/stalled/aborted
 - [x] [A finished task's answer is nowhere to be read](issues/a-finished-tasks-answer-is-nowhere-to-be-read.md) — the listing reads the outbox and carries an undelivered result
 - [x] [Read-only says what it takes away](issues/read-only-says-what-it-takes-away.md) — wording landed 2026-09-17 (a50a78c); `read_only` stays the four-tool set, for the lease; a `review` agent is filed
+- [x] [A locked store fails a sudo that wants no password](issues/a-locked-store-fails-a-sudo-that-wants-no-password.md) — the lock is no stored password and the probe decides; headless, the approval names the lock
+- [x] [A resealed store costs one refusal](issues/a-resealed-store-costs-one-refusal.md) — one read gates the unlock; any lock error asks
+- [x] [A locked store scrubs nothing and says nothing](issues/a-locked-store-scrubs-nothing-and-says-nothing.md) — the first tool result admits it, once per runtime; no prompt on that account

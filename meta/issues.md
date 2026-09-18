@@ -121,12 +121,6 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 - [ ] [A review agent that may run things](issues/a-review-agent-that-may-run-things.md)
 
-## Secrets follow-ups
-
-- [ ] [A locked store fails a sudo that wants no password](issues/a-locked-store-fails-a-sudo-that-wants-no-password.md)
-- [ ] [A locked store scrubs nothing and says nothing](issues/a-locked-store-scrubs-nothing-and-says-nothing.md)
-- [ ] [A resealed store costs one refusal](issues/a-resealed-store-costs-one-refusal.md)
-
 ## Review follow-ups
 
 - [ ] [Every started turn publishes its ending](issues/every-started-turn-publishes-its-ending.md)
