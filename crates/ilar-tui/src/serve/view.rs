@@ -255,6 +255,15 @@ pub(crate) fn project_event_with(
             "kept_from": kept_from,
             "ts": ts,
         }),
+        SessionEvent::TurnEnded {
+            id, ending, detail, ..
+        } => json!({
+            "type": "turn_ended",
+            "id": id,
+            "ending": ending.verb(),
+            "detail": detail,
+            "ts": ts,
+        }),
         SessionEvent::Topic { id, text, .. } => json!({
             "type": "topic",
             "id": id,

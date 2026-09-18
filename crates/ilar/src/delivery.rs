@@ -47,7 +47,7 @@ pub fn is_delivered(store: &SessionStore, session_id: &str, text: &str) -> bool 
 }
 
 /// [`is_delivered`] against an event slice.
-fn delivered_in(events: &[SessionEvent], text: &str) -> bool {
+pub(crate) fn delivered_in(events: &[SessionEvent], text: &str) -> bool {
     events.iter().any(|event| match event {
         SessionEvent::UserMessage { text: appended, .. } => appended.contains(text),
         _ => false,

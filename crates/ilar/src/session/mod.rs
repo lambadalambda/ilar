@@ -9,7 +9,7 @@ mod store;
 mod summary_cache;
 mod tail;
 
-pub use event::{SessionEvent, SessionMeta, SessionState, new_id};
+pub use event::{SessionEvent, SessionMeta, SessionState, TurnEnding, new_id};
 pub use live::{
     LIVE_SUFFIX, LiveDelta, LiveScratch, SCRATCH_HEARTBEAT, live_path, parse_scratch,
     sweep_live_scratches,

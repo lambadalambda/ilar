@@ -164,6 +164,46 @@ pub enum SessionEvent {
         tree_saved: Option<String>,
         ts: DateTime<Utc>,
     },
+    /// A turn that did not finish, and how. Written for a task's turn
+    /// by the spawner: without it a child killed by its parent's abort
+    /// has a log that simply stops, and nothing can tell it from one
+    /// that answered. Session state, never conversation — it does not
+    /// reach the model.
+    TurnEnded {
+        id: String,
+        ending: TurnEnding,
+        /// The one-sentence headline the parent was told.
+        detail: String,
+        ts: DateTime<Utc>,
+    },
+}
+
+/// The verb set for a turn that did not finish — the same one the task
+/// notifications use, so a listing and a notification agree on what
+/// happened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnEnding {
+    /// The turn gave up on its own token: its caller's turn ended.
+    Aborted,
+    /// A stop someone asked for.
+    Cancelled,
+    /// Anything the turn did to itself, its iteration limit included.
+    Failed,
+    /// The stall watchdog stopped it.
+    Stalled,
+}
+
+impl TurnEnding {
+    /// The word a listing uses for it.
+    pub fn verb(self) -> &'static str {
+        match self {
+            Self::Aborted => "aborted",
+            Self::Cancelled => "cancelled",
+            Self::Failed => "failed",
+            Self::Stalled => "stalled",
+        }
+    }
 }
 
 impl SessionEvent {
@@ -179,7 +219,8 @@ impl SessionEvent {
             | SessionEvent::Compaction { ts, .. }
             | SessionEvent::Topic { ts, .. }
             | SessionEvent::ImageCutoff { ts, .. }
-            | SessionEvent::Rewind { ts, .. } => *ts,
+            | SessionEvent::Rewind { ts, .. }
+            | SessionEvent::TurnEnded { ts, .. } => *ts,
         }
     }
 }

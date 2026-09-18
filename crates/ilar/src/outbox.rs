@@ -218,21 +218,7 @@ pub fn pending(store: &SessionStore, dir: &Path, root_session_id: &str) -> Vec<N
             .filter_map(|line| serde_json::from_str(line).ok())
             .collect();
         let recorded_len = recorded.len();
-        let retired = retired_texts(dir, &parent_id);
-        // Delivery check: `crate::delivery::is_delivered`, the one
-        // definition every driver shares — substring, because a
-        // delivering prompt can carry queued steers ahead of the
-        // notification, and over the whole log, because a delivery
-        // the session has since compacted away is still a delivery.
-        // A retired entry counts as delivered too: its salvage into a
-        // transcript was the delivery of last resort.
-        let kept: Vec<Notification> = recorded
-            .into_iter()
-            .filter(|notification| {
-                !retired.contains(&notification.text)
-                    && !crate::delivery::is_delivered(store, &parent_id, &notification.text)
-            })
-            .collect();
+        let kept = still_undelivered(store, dir, &parent_id, recorded);
         if kept.is_empty() {
             let _ = std::fs::remove_file(&path);
             let _ = std::fs::remove_file(retired_path(dir, &parent_id));
@@ -248,6 +234,49 @@ pub fn pending(store: &SessionStore, dir: &Path, root_session_id: &str) -> Vec<N
         }
     }
     undelivered
+}
+
+/// What one parent has been sent and has not yet heard: held by the
+/// driver, queued behind a running turn, or in flight — anything
+/// recorded whose text is not yet a prompt in the parent's log. Read
+/// only: the `tasks` listing asks this on every call, and a listing must
+/// not compact or rewrite anything. Empty when nothing was recorded.
+pub fn undelivered(store: &SessionStore, dir: &Path, parent_session_id: &str) -> Vec<Notification> {
+    let _guard = lock(dir);
+    let Ok(text) = std::fs::read_to_string(entry_path(dir, parent_session_id)) else {
+        return Vec::new();
+    };
+    let recorded = text
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    still_undelivered(store, dir, parent_session_id, recorded)
+}
+
+/// The recorded entries the parent has not heard. Delivery check:
+/// `crate::delivery::is_delivered`, the one definition every driver
+/// shares — substring, because a delivering prompt can carry queued
+/// steers ahead of the notification, and over the whole log, because a
+/// delivery the session has since compacted away is still a delivery.
+/// A retired entry counts as delivered too: its salvage into a
+/// transcript was the delivery of last resort.
+fn still_undelivered(
+    store: &SessionStore,
+    dir: &Path,
+    parent_session_id: &str,
+    recorded: Vec<Notification>,
+) -> Vec<Notification> {
+    let retired = retired_texts(dir, parent_session_id);
+    // The parent's log once, not once per entry: an unreadable log
+    // reads as nothing delivered, as `is_delivered` has it.
+    let delivered = store.audit_events(parent_session_id).unwrap_or_default();
+    recorded
+        .into_iter()
+        .filter(|notification| {
+            !retired.contains(&notification.text)
+                && !crate::delivery::delivered_in(&delivered, &notification.text)
+        })
+        .collect()
 }
 
 /// Whether `session_id`'s parent chain reaches `root_session_id` —

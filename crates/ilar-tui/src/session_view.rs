@@ -679,6 +679,11 @@ fn restored_session_invocation_view(
                     .unwrap_or_else(|| model.clone());
                 lines.push(Line_::System(format!("switched to {selection}")));
             }
+            // The one line that keeps a killed child's transcript from
+            // simply stopping.
+            ilar::session::SessionEvent::TurnEnded { detail, .. } => {
+                lines.push(Line_::System(detail.clone()));
+            }
             ilar::session::SessionEvent::Compaction { .. } => {}
         }
     }

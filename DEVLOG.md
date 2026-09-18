@@ -1,5 +1,52 @@
 # DEVLOG
 
+## 2026-09-18 — A listing that tells a killed task from one that answered
+
+The `tasks` listing had two words for a task: `running` while a handle
+lived in the registry, `finished` after. Cancelled, crashed, stalled,
+answered — all `finished`, with the task's last assistant text under
+`last:`. A real session on 2026-09-16 showed what that costs: Esc
+aborted a parent turn, the detached review child died with it mid tool
+call, and twenty minutes later the listing told the parent `finished ·
+22m ago` over a plausible-looking mid-flight thought. The parent
+resumed the task to collect findings that were never produced.
+
+The root of it was that nothing anywhere recorded how a task ended. The
+notification said so, once, to whoever was listening — and after an
+abort that notification is *held* until the next user message, so for
+the length of the hold the ending existed nowhere the model could read
+it. The child's own log simply stopped.
+
+So the ending is now written where it can be read back: one session
+event, `TurnEnded`, appended to the child's log by the spawner on every
+non-clean ending, with the same headline sentence the parent's
+notification carries. It is session state in the way `Topic` is —
+never sent to the model — and the transcript view shows it as one line
+where the chain used to break. The listing reads it and says
+`cancelled`, `failed`, `stalled` or `aborted`, the verb set the
+notifications already used; a stopped task's last words are labelled
+`partial:`, and only a finished one has a `result:`. Logs written
+before today have no such event, so an assistant message the stream
+left `aborted` stands in as the one trace there is.
+
+The second half was the same session's other failure. A finished task's
+result reaches the parent exactly once, and a held notification can
+wait a long time; meanwhile the listing said `finished` and showed a
+200-character snippet, so the parent resumed the task to ask for the
+result again — a second full run — and then received both copies. The
+outbox already knew the truth: every completion is recorded on disk
+before it is sent, and delivery is proven from the parent's log. The
+listing now asks it, read-only, and a finished task whose result has
+not landed says `result not delivered to you yet` and carries the
+result in full, up to eight thousand characters. Matching a recorded
+result to its row goes by the `task_id:` the completion text names —
+a field on the notification would have been cleaner and would have
+touched forty test literals for the same answer.
+
+TDD note: the two tests were written first, but the red run was the
+compiler refusing an event variant that did not exist yet; cargo does
+not run on this Mac, so the first green was also the first execution.
+
 ## 2026-09-18 — The lock is a prompt, not a notice
 
 The lazy unlock shipped with a standing line on the notice row — "secret

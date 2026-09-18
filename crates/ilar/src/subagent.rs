@@ -9,7 +9,7 @@ use crate::agent::{
 };
 use crate::config::{AgentDefinition, AgentWorkspaceMode, ProjectInstructions, system_prompt_for};
 use crate::provider::ProviderResolver;
-use crate::session::{ContentBlock, SessionMeta, SessionStore, new_id};
+use crate::session::{ContentBlock, SessionMeta, SessionStore, TurnEnding, new_id};
 use crate::tools::{
     Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, ToolRegistry, ToolStartObserver,
     WorkspaceAccess,
@@ -713,6 +713,17 @@ impl SubagentSpawner {
         let _ = futures::future::join_all(tasks).await;
     }
 
+    /// The task results published to `session_id` that its log does not
+    /// yet carry as a prompt: held by the driver, queued behind a turn,
+    /// or in flight. Empty without an outbox — there is nothing durable
+    /// to ask, and the listing then says nothing about delivery.
+    pub fn undelivered_results(&self, session_id: &str) -> Vec<Notification> {
+        match self.outbox_dir.as_deref() {
+            Some(dir) => crate::outbox::undelivered(&self.store, dir, session_id),
+            None => Vec::new(),
+        }
+    }
+
     /// Number of live detached background tasks.
     pub fn running_background(&self) -> usize {
         self.live_background_tasks().tasks.len()
@@ -1317,19 +1328,24 @@ impl SubagentSpawner {
                 let lease = match acquired {
                     LeaseOutcome::Acquired(lease) => lease,
                     LeaseOutcome::Cancelled => {
-                        reserved.send(cancelled_task_notification(
+                        reserved.send(TaskOutcome::Cancelled.before_running(
+                            &spawner.store,
+                            &session_id,
                             &parent_session_id,
                             &description,
                         ));
                         return;
                     }
                     LeaseOutcome::Failed(failure) => {
-                        reserved.send(task_notification(
-                            &parent_session_id,
-                            &description,
-                            &format!("Task \"{description}\" failed: {}", failure.message()),
-                            true,
-                        ));
+                        reserved.send(
+                            TaskOutcome::Failed(anyhow::anyhow!("{}", failure.message()))
+                                .before_running(
+                                    &spawner.store,
+                                    &session_id,
+                                    &parent_session_id,
+                                    &description,
+                                ),
+                        );
                         return;
                     }
                 };
@@ -1430,10 +1446,15 @@ impl SubagentSpawner {
                 // clean finish is this branch's own, because it carries
                 // the child's text and its resumable id.
                 let notification = match outcome.headline(&description, stall_timeout) {
-                    Some(body) => task_notification(&parent_session_id, &description, &body, true),
+                    Some(body) => {
+                        outcome.record(&spawner.store, &session_id, &body);
+                        task_notification(&parent_session_id, &description, &body, true)
+                    }
                     None => {
                         let text = final_assistant_text(&spawner.store, &session_id)
                             .unwrap_or_else(|| "(finished with no text)".into());
+                        // The listing finds an undelivered result by the
+                        // `task_id:` this names.
                         task_notification(
                             &parent_session_id,
                             &description,
@@ -1550,7 +1571,10 @@ task's scope yourself; continue only clearly disjoint work."
         // ending. Only the clean finish differs, and only because the
         // caller wants the child's words, not a report about them.
         let output = match outcome.headline(&input.description, self.stall_timeout) {
-            Some(body) => ToolOutput::error(body),
+            Some(body) => {
+                outcome.record(&self.store, &session_id, &body);
+                ToolOutput::error(body)
+            }
             None => {
                 let text = final_assistant_text(&self.store, &session_id)
                     .unwrap_or_else(|| "(finished with no text)".into());
@@ -2688,6 +2712,54 @@ impl TaskOutcome {
         })
     }
 
+    /// The ending the child's own log records, in the listing's verb
+    /// set. `None` for a clean finish, whose record is the answer.
+    fn ending(&self) -> Option<TurnEnding> {
+        Some(match self {
+            Self::Completed => return None,
+            Self::Aborted => TurnEnding::Aborted,
+            Self::Cancelled => TurnEnding::Cancelled,
+            Self::MaxIterations | Self::Failed(_) => TurnEnding::Failed,
+            Self::Stalled => TurnEnding::Stalled,
+        })
+    }
+
+    /// Write this ending into the task's log under the headline its
+    /// parent was told. Whether the run got as far as appending its
+    /// prompt matters: see [`record_ending`].
+    fn record(&self, store: &SessionStore, session_id: &str, headline: &str) {
+        if let Some(ending) = self.ending() {
+            record_ending(
+                store,
+                session_id,
+                ending,
+                headline,
+                !self.turn_never_started(),
+            );
+        }
+    }
+
+    /// The notification for a run that never got as far as its turn —
+    /// the lease wait was cancelled or refused — with the ending put on
+    /// the log first. No run means no watchdog, so the stall timeout is
+    /// unused; and it is the same headline the post-turn ending would
+    /// have had, because it asks the same function.
+    fn before_running(
+        &self,
+        store: &SessionStore,
+        session_id: &str,
+        parent_session_id: &str,
+        description: &str,
+    ) -> Notification {
+        let body = self
+            .headline(description, std::time::Duration::ZERO)
+            .expect("a run that never started did not finish");
+        if let Some(ending) = self.ending() {
+            record_ending(store, session_id, ending, &body, false);
+        }
+        task_notification(parent_session_id, description, &body, true)
+    }
+
     /// What the terminal activity event carries: anything that is not a
     /// clean finish or an iteration limit reads as an abort.
     fn activity(&self) -> TurnOutcome {
@@ -2760,6 +2832,47 @@ fn task_notification(
     }
 }
 
+/// Put a task's ending on its own log, so the transcript does not simply
+/// stop where the parent's abort took it down and the `tasks` listing
+/// can name the ending later. Best-effort: the notification is the
+/// ending's report of record, and a log that cannot take the line is
+/// no reason to withhold it.
+///
+/// A run that never `started` — cancelled or refused before its prompt
+/// was appended — touched the log with nothing. On a fresh task that
+/// still deserves the line, or the listing reads a Meta-only log as
+/// `finished`; on a *resumed* task it must not have one, because the
+/// log's last run is a real one, answer and all, and stamping this
+/// ending after it would present that answer as the partial words of a
+/// cancelled run. The log itself says which case this is.
+fn record_ending(
+    store: &SessionStore,
+    session_id: &str,
+    ending: TurnEnding,
+    detail: &str,
+    started: bool,
+) {
+    let Ok(writer) = store.acquire_writer(session_id) else {
+        return;
+    };
+    let Ok(mut session) = writer.load() else {
+        return;
+    };
+    let has_a_run = session
+        .events()
+        .iter()
+        .any(|event| matches!(event, crate::session::SessionEvent::UserMessage { .. }));
+    if !started && has_a_run {
+        return;
+    }
+    let _ = session.append(crate::session::SessionEvent::TurnEnded {
+        id: new_id(),
+        ending,
+        detail: detail.to_string(),
+        ts: chrono::Utc::now(),
+    });
+}
+
 /// The one way a background task reports that it was stopped — it is
 /// reachable from the lease wait, the revalidation and the run itself.
 /// How a delivery got hold of the session it is for.
@@ -2803,17 +2916,6 @@ fn nested_hop_ending(
             true,
         )),
     }
-}
-
-/// A task stopped before its turn ever started — no lease, no run, so
-/// no `TaskOutcome` was ever computed. It is still the same ending, so
-/// it borrows the same headline rather than writing a second one.
-fn cancelled_task_notification(parent_session_id: &str, description: &str) -> Notification {
-    let body = TaskOutcome::Cancelled
-        // No run means no watchdog: the stall timeout is unused here.
-        .headline(description, std::time::Duration::ZERO)
-        .expect("a cancellation always has a headline");
-    task_notification(parent_session_id, description, &body, true)
 }
 
 /// Undo a session that was created moments ago but could not be
@@ -2955,44 +3057,75 @@ pub fn final_assistant_text_for_test(store: &SessionStore, session_id: &str) -> 
     final_assistant_text(store, session_id)
 }
 
-fn final_assistant_text(store: &SessionStore, session_id: &str) -> Option<String> {
-    store.load(session_id).ok().and_then(|session| {
-        // The anchor is the last user message OR the last compaction
-        // cut, whichever is later. A long child that compacted mid-turn
-        // loads a window whose task prompt is gone — the compaction
-        // summary stands in for it, and the assistant text after the
-        // cut is the turn's answer. Anchoring on user messages alone
-        // reported a finished 13KB research report as "(finished with
-        // no text)".
-        let boundary = session.events().iter().rposition(|event| {
+/// The events of a task's last run: everything after the last user
+/// message OR the last compaction cut, whichever is later. A long child
+/// that compacted mid-turn loads a window whose task prompt is gone —
+/// the compaction summary stands in for it, and what follows the cut is
+/// the turn's. Anchoring on user messages alone reported a finished
+/// 13KB research report as "(finished with no text)". A log with
+/// neither — a task stopped before its prompt was ever appended — is
+/// all tail.
+fn last_run(events: &[crate::session::SessionEvent]) -> &[crate::session::SessionEvent] {
+    let boundary = events
+        .iter()
+        .rposition(|event| {
             matches!(
                 event,
                 crate::session::SessionEvent::UserMessage { .. }
                     | crate::session::SessionEvent::Compaction { .. }
             )
-        })?;
-        session
-            .events()
-            .iter()
-            .skip(boundary + 1)
-            .rev()
-            .find_map(|event| match event {
-                crate::session::SessionEvent::AssistantMessage { content, .. } => {
-                    let text = content
-                        .iter()
-                        .filter_map(|block| match block {
-                            ContentBlock::Text { text } => Some(text.as_str()),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                        .trim()
-                        .to_string();
-                    (!text.is_empty()).then_some(text)
+        })
+        .map_or(0, |boundary| boundary + 1);
+    &events[boundary..]
+}
+
+/// How a run ended, when it did not finish. The ending its log records
+/// first; for a log from before endings were written, an assistant
+/// message the stream left `aborted` is the one trace there is. `None`
+/// is a clean finish.
+fn ending_of(run: &[crate::session::SessionEvent]) -> Option<TurnEnding> {
+    run.iter()
+        .rev()
+        .find_map(|event| match event {
+            crate::session::SessionEvent::TurnEnded { ending, .. } => Some(*ending),
+            _ => None,
+        })
+        .or_else(|| {
+            run.iter().rev().find_map(|event| match event {
+                crate::session::SessionEvent::AssistantMessage { stop_reason, .. } => {
+                    (stop_reason == "aborted").then_some(TurnEnding::Aborted)
                 }
                 _ => None,
             })
+        })
+}
+
+/// The last thing the assistant said in a run: its answer, or where it
+/// got to.
+fn final_text_of(run: &[crate::session::SessionEvent]) -> Option<String> {
+    run.iter().rev().find_map(|event| match event {
+        crate::session::SessionEvent::AssistantMessage { content, .. } => {
+            let text = content
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+                .trim()
+                .to_string();
+            (!text.is_empty()).then_some(text)
+        }
+        _ => None,
     })
+}
+
+fn final_assistant_text(store: &SessionStore, session_id: &str) -> Option<String> {
+    store
+        .load(session_id)
+        .ok()
+        .and_then(|session| final_text_of(last_run(session.events())))
 }
 
 fn discarded_event_sender() -> LoopEventSender {
@@ -3433,6 +3566,25 @@ const TASK_LISTING_LIMIT: usize = 20;
 const TASK_MESSAGE_LABEL_CHARS: usize = 40;
 /// Display width of a task's last reply in the listing.
 const TASK_SNIPPET_CHARS: usize = 200;
+/// How much of a result the parent has not received yet the listing
+/// carries whole — the notification still brings the rest.
+const TASK_RESULT_CHARS: usize = 8_000;
+
+/// A result as written, up to `limit` characters, and a note about the
+/// rest: unlike [`snippet`] this keeps the text's own lines, because it
+/// is being read as the answer rather than glanced at.
+fn whole_or_cut(text: &str, limit: usize) -> String {
+    let total = text.chars().count();
+    if total <= limit {
+        return text.to_string();
+    }
+    let mut cut: String = text.chars().take(limit).collect();
+    cut.push_str(&format!(
+        "\n  … ({} more characters; the notification carries the whole result)",
+        total - limit
+    ));
+    cut
+}
 
 fn snippet(text: &str, limit: usize) -> String {
     let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -3478,9 +3630,15 @@ impl Tool for TasksTool {
 
     fn description(&self) -> &'static str {
         "List the subagent tasks this session has spawned: id, agent, \
-         model, whether one is still running, how many of your messages \
-         it has not read yet (pending), and a snippet of what it last \
-         said. Pass an id to task_message to talk to one — a running \
+         model, how it stands, how many of your messages it has not read \
+         yet (pending), and what it said. A task is running, finished, \
+         cancelled, failed, stalled or aborted; only a finished one has \
+         an answer, shown as `result:` — a stopped task's last words are \
+         shown as `partial:` and are not findings. A finished task's \
+         result reaches you once, as a notification; `result not \
+         delivered to you yet` means it is on its way and the listing \
+         carries it (up to 8000 characters), so do not resume the task \
+         to ask for it again. Pass an id to task_message to talk to one — a running \
          task is steered at its next step, a finished one is resumed \
          with its context intact — or back as the task tool's task_id to \
          give a finished task a fresh scope."
@@ -3506,6 +3664,12 @@ impl Tool for TasksTool {
                 return ToolOutput::text("no tasks spawned from this session yet");
             }
             let total = children.len();
+            // Results this session has been sent and not yet heard —
+            // held by the driver, queued behind this very turn. A
+            // completion names its task (`(task_id: …)`), which is how
+            // one is matched to its row; a bare id would also match a
+            // sibling's result that merely mentions this task.
+            let undelivered = spawner.undelivered_results(&ctx.session_id);
             let mut lines = children
                 .into_iter()
                 .take(TASK_LISTING_LIMIT)
@@ -3515,12 +3679,26 @@ impl Tool for TasksTool {
                         .running_tasks()
                         .iter()
                         .any(|task| task.delivering && task.session_id == child.id);
+                    let session = spawner.store.load(&child.id).ok();
+                    let run = session
+                        .as_ref()
+                        .map_or(&[][..], |session| last_run(session.events()));
+                    let ending = if running { None } else { ending_of(run) };
+                    let marker = format!("(task_id: {})", child.id);
+                    let result_waiting = ending.is_none()
+                        && undelivered.iter().any(|notification| {
+                            !notification.is_error && notification.text.contains(&marker)
+                        });
                     let status = if delivering {
                         // Active, but not on the model's behalf: a
                         // background result is being delivered to it.
                         "running (receiving a task result)"
                     } else if running {
                         "running"
+                    } else if let Some(ending) = ending {
+                        ending.verb()
+                    } else if result_waiting {
+                        "finished · result not delivered to you yet"
                     } else {
                         "finished"
                     };
@@ -3529,9 +3707,20 @@ impl Tool for TasksTool {
                         // Its final text is not final yet.
                         String::new()
                     } else {
-                        match final_assistant_text(&spawner.store, &child.id) {
+                        match final_text_of(run) {
+                            // A stopped task's last words are where it
+                            // got to, not what it found.
+                            Some(text) if ending.is_some() => {
+                                format!("\n  partial: {}", snippet(&text, TASK_SNIPPET_CHARS))
+                            }
+                            // An answer the parent has not received is
+                            // carried whole: the alternative is a second
+                            // run of the task to ask for it again.
+                            Some(text) if result_waiting => {
+                                format!("\n  result: {}", whole_or_cut(&text, TASK_RESULT_CHARS))
+                            }
                             Some(text) => {
-                                format!("\n  last: {}", snippet(&text, TASK_SNIPPET_CHARS))
+                                format!("\n  result: {}", snippet(&text, TASK_SNIPPET_CHARS))
                             }
                             None => String::new(),
                         }
@@ -3622,14 +3811,58 @@ mod tests {
             headline(TaskOutcome::Stalled).as_deref(),
             Some("Task \"survey the API\" stalled: no progress for 600s. It has been stopped.")
         );
+    }
 
-        // The pre-turn cancellation says the same thing as the
-        // post-turn one, because it asks the same function.
+    /// A run stopped before its turn says the same thing the post-turn
+    /// ending would, and puts it on the log — unless the log already
+    /// holds a real run. A resumed task whose resume was cancelled while
+    /// it waited for the lease keeps its clean answer as its last run:
+    /// an ending stamped after it would present that answer as the
+    /// partial words of a cancelled one.
+    #[test]
+    fn an_ending_before_the_turn_never_overwrites_a_real_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf());
+        let fresh = new_id();
+        let resumed = new_id();
+        for id in [&fresh, &resumed] {
+            store
+                .create(SessionMeta {
+                    session_id: id.clone(),
+                    parent_id: Some("parent".into()),
+                    agent: "explore".into(),
+                    model: "zai/glm-4.7".into(),
+                    workspace: None,
+                    cwd: None,
+                })
+                .unwrap();
+        }
+        let mut session = store.acquire_writer(&resumed).unwrap().load().unwrap();
+        session
+            .append(crate::session::SessionEvent::UserMessage {
+                id: new_id(),
+                text: "survey the API".into(),
+                images: Vec::new(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        drop(session);
+
+        let recorded = |id: &str| ending_of(last_run(store.load(id).unwrap().events()));
+
+        let notification =
+            TaskOutcome::Cancelled.before_running(&store, &fresh, "parent", "survey the API");
         assert!(
-            cancelled_task_notification("parent", "survey the API")
+            notification
                 .text
-                .contains("Task \"survey the API\" was cancelled.")
+                .contains("Task \"survey the API\" was cancelled."),
+            "{}",
+            notification.text
         );
+        assert_eq!(recorded(&fresh), Some(TurnEnding::Cancelled));
+
+        TaskOutcome::Cancelled.before_running(&store, &resumed, "parent", "survey the API");
+        assert_eq!(recorded(&resumed), None, "the real run stands");
     }
 
     /// A nested hop whose parent turn the user stopped is a

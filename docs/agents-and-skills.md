@@ -77,9 +77,20 @@ resumes that subagent with its context intact — a follow-up question costs a
 sentence instead of re-explaining the scope to a fresh agent. Resuming is
 guarded: the persisted agent, parent session and workspace must match, and a
 task that is still running refuses a second driver. The read-only `tasks` tool
-lists the current session's tasks (id, agent, model, running or finished, age,
-opening prompt, a snippet of the last reply, and any messages still waiting
-for it) so the agent can find the one worth resuming.
+lists the current session's tasks (id, agent, model, how it stands, age,
+opening prompt, what it said, and any messages still waiting for it) so the
+agent can find the one worth resuming. How it stands is one of `running`,
+`finished`, `cancelled`, `failed`, `stalled` or `aborted` — the same verbs
+the task's notification used — and only a finished task has a `result:`; a
+stopped one shows its last words as `partial:`, so a task killed with its
+parent's turn is never mistaken for one that answered. A finished task's
+result reaches its parent once, as a notification that may be held for a
+while (an aborted turn holds its children's results until the next message);
+until it lands, the listing says `result not delivered to you yet` and
+carries the result itself (up to 8000 characters), so no second run is
+needed to read it. The
+ending is written to the task's own log as well, where the transcript shows
+it as one line instead of simply stopping.
 
 `task_message` talks to a task by id — one verb whether it is running or
 finished, and the sender never needs to know which. A running background task

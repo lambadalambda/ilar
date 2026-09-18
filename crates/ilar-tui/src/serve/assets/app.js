@@ -992,6 +992,9 @@ function eventRows(events, sessionId, cwd, offset, live) {
       case "rewind":
         rows.push(html`<div class="divider" key=${key}>rewound to event ${event.to}</div>`);
         break;
+      case "turn_ended":
+        rows.push(html`<div class="divider" key=${key}>${event.detail}</div>`);
+        break;
       default:
         // meta, checkpoint, topic, subagent_invocation: state, not
         // transcript. They keep their index and render nothing.

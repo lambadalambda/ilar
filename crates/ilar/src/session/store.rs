@@ -1424,7 +1424,8 @@ fn validate_replay(events: &[SessionEvent], id: &str) -> std::io::Result<Vec<Str
             | SessionEvent::Compaction { id, .. }
             | SessionEvent::Topic { id, .. }
             | SessionEvent::ImageCutoff { id, .. }
-            | SessionEvent::Rewind { id, .. } => Some(id),
+            | SessionEvent::Rewind { id, .. }
+            | SessionEvent::TurnEnded { id, .. } => Some(id),
         };
         if let Some(event_id) = event_id
             && !event_ids.insert(event_id)
@@ -2038,7 +2039,8 @@ pub fn transcript_of(events: &[SessionEvent]) -> Vec<ChatMessage> {
             | SessionEvent::Checkpoint { .. }
             | SessionEvent::Topic { .. }
             | SessionEvent::ImageCutoff { .. }
-            | SessionEvent::Rewind { .. } => {}
+            | SessionEvent::Rewind { .. }
+            | SessionEvent::TurnEnded { .. } => {}
             SessionEvent::UserMessage { text, images, .. } => {
                 if !pending_results.is_empty() {
                     push_user_blocks(&mut messages, std::mem::take(&mut pending_results));

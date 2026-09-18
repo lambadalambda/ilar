@@ -1930,6 +1930,186 @@ async fn one_background_task_can_be_cancelled_by_its_session() {
     assert!(!spawner.cancel_task(&child_id));
 }
 
+/// The listing had two words for a task — `running` while a handle
+/// lived, `finished` after — so a task killed mid-flight read as one
+/// that answered, with its last thought presented as the answer. A
+/// cancelled task says *cancelled*, its last words are labelled as
+/// partial, and its own log records the ending instead of stopping.
+#[tokio::test]
+async fn a_cancelled_task_lists_as_cancelled_and_its_log_says_so() {
+    let (store, session_id) = temp_store();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let spawner = patient_spawner(
+        Arc::new(NotifyingPartialText {
+            started: started.clone(),
+        }),
+        &store,
+    );
+    let mut notifications = spawner.subscribe();
+    let registry = ToolRegistry::builtin()
+        .with_subagents(spawner.clone())
+        .unwrap();
+    let ctx = background_tool_context(
+        session_id.clone(),
+        spawner.clone(),
+        std::env::temp_dir().as_ref(),
+    );
+    let out = registry
+        .get("task")
+        .unwrap()
+        .run(
+            serde_json::json!({
+                "description": "survey the API",
+                "prompt": "work",
+                "subagent_type": "explore",
+                "background": true,
+            }),
+            ctx,
+        )
+        .await;
+    assert!(!out.is_error, "{}", out.content);
+    let child_id = out.child_session_id().unwrap().to_string();
+    started.notified().await;
+    assert!(spawner.cancel_task(&child_id));
+    let _ = tokio::time::timeout(Duration::from_secs(5), notifications.recv())
+        .await
+        .expect("cancellation notification");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while spawner.running_background() > 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the cancelled task leaves the registry");
+
+    let listing = registry
+        .get("tasks")
+        .unwrap()
+        .run(
+            serde_json::json!({}),
+            background_tool_context(
+                session_id.clone(),
+                spawner.clone(),
+                std::env::temp_dir().as_ref(),
+            ),
+        )
+        .await;
+    assert!(listing.content.contains("cancelled"), "{}", listing.content);
+    assert!(!listing.content.contains("finished"), "{}", listing.content);
+    assert!(
+        listing.content.contains("partial: partial answer"),
+        "{}",
+        listing.content
+    );
+    assert!(!listing.content.contains("result:"), "{}", listing.content);
+
+    let child = store.load(&child_id).unwrap();
+    let ending = child
+        .events()
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            SessionEvent::TurnEnded { ending, detail, .. } => Some((*ending, detail.clone())),
+            _ => None,
+        })
+        .expect("the child's log records its ending");
+    assert_eq!(ending.0, ilar::session::TurnEnding::Cancelled);
+    assert!(ending.1.contains("was cancelled"), "{}", ending.1);
+}
+
+/// A finished task's result reaches its parent once, as a notification
+/// that may be held for a while. Meanwhile the listing said `finished`
+/// and showed the answer as a mere `last:` snippet — so a parent that
+/// checked resumed the task to ask for the result again, and got it
+/// twice. The listing says the result has not been delivered yet, and
+/// carries it whole so no second run is needed to read it.
+#[tokio::test]
+async fn a_finished_task_says_whether_its_result_has_arrived() {
+    let (store, session_id) = temp_store();
+    let outbox = tempfile::tempdir().unwrap();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let spawner = Arc::new(
+        unwatched_spawner(
+            Arc::new(NotifyingDelayedText {
+                started: started.clone(),
+            }),
+            &store,
+            AgentWorkspaceMode::Mutable,
+            std::env::temp_dir(),
+        )
+        .with_stall_timeout(Duration::from_secs(60))
+        .with_outbox_dir(outbox.path().to_path_buf()),
+    );
+    let mut notifications = spawner.subscribe();
+    let registry = ToolRegistry::builtin()
+        .with_subagents(spawner.clone())
+        .unwrap();
+    let out = registry
+        .get("task")
+        .unwrap()
+        .run(
+            serde_json::json!({
+                "description": "survey the API",
+                "prompt": "work",
+                "subagent_type": "explore",
+                "background": true,
+            }),
+            background_tool_context(
+                session_id.clone(),
+                spawner.clone(),
+                std::env::temp_dir().as_ref(),
+            ),
+        )
+        .await;
+    assert!(!out.is_error, "{}", out.content);
+    let notification = tokio::time::timeout(Duration::from_secs(5), notifications.recv())
+        .await
+        .expect("completion notification")
+        .expect("present");
+    assert!(!notification.is_error, "{}", notification.text);
+
+    // Published, not delivered: the parent has not heard it yet.
+    let list = || async {
+        registry
+            .get("tasks")
+            .unwrap()
+            .run(
+                serde_json::json!({}),
+                background_tool_context(
+                    session_id.clone(),
+                    spawner.clone(),
+                    std::env::temp_dir().as_ref(),
+                ),
+            )
+            .await
+            .content
+    };
+    let waiting = list().await;
+    assert!(
+        waiting.contains("finished · result not delivered to you yet"),
+        "{waiting}"
+    );
+    assert!(waiting.contains("result: finished"), "{waiting}");
+
+    // Delivered the way every driver delivers: the notification's text
+    // appended to the parent's log as a prompt.
+    store
+        .acquire_writer(&session_id)
+        .unwrap()
+        .load()
+        .unwrap()
+        .append(SessionEvent::UserMessage {
+            id: new_id(),
+            text: notification.text.clone(),
+            images: Vec::new(),
+            ts: chrono::Utc::now(),
+        })
+        .unwrap();
+    let delivered = list().await;
+    assert!(!delivered.contains("not delivered"), "{delivered}");
+    assert!(delivered.contains("result: finished"), "{delivered}");
+}
+
 /// A long child that compacted mid-turn loads a window whose task
 /// prompt is gone. Its final report sits after the cut, and the
 /// completion must carry it — anchoring on user messages alone
