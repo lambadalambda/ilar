@@ -1,5 +1,58 @@
 # DEVLOG
 
+## 2026-09-18 — A password asked of everyone, for the sake of a few
+
+The master password was the first thing a sealed store's owner saw,
+every run, whether or not the session ever went near a secret — and
+most do not. Worse, `ilar exec` asked it too: the driver that builds
+its runtime with `questions: false, grants: false` *because nobody is
+there to answer*, stopping on a password prompt before the first token.
+A piped prompt or a cron line simply hung.
+
+The fix reads as obvious once written: the password is a question like
+the other two the store asks, so it goes on the channel they already
+use and arrives when a call actually needs it. `Ask::Unlock` beside
+`Ask::Grant` and `Ask::Password`; one masked modal for the two
+passwords, told apart by a `Wants`. exec gets no prompt channel at all,
+so the same code that makes it ask nothing about a grant makes it ask
+nothing about the store — the guarantee falls out of the wiring rather
+than being asserted anywhere, which is why there is now a test that
+pins it.
+
+Two things the review caught that the design had glossed over.
+
+The first was a live regression: the one start prompt that has to
+survive — a provider key kept in the store is read when the
+configuration is resolved, long before a tool call could ask — keyed on
+`general.model`, and the TUI takes `--model`. Launch with a `--model`
+whose key is sealed and the process died on `plan.start` before the
+screen came up, with no prompt and no way to one. It now asks about the
+model the launch is actually opening with. The same gate then wanted a
+second condition: a model id nobody can *route* is a typo, not a locked
+store, and deserves its own error rather than a password prompt first.
+
+The second was an ordering mistake of exactly the kind this change was
+meant to remove. sudo asked for root approval first and unlocked
+afterwards — but a standing "always" for root lives *in the store*, so
+a locked one reads as "not granted" and a person who had already said
+always got two prompts where they had agreed to none. The unlock
+belongs ahead of the question whose answer is in the store. That is the
+same reasoning that put it at the top of `resolve`.
+
+And a smaller one, worth keeping: watching whether the store is still
+shut does not need the file. Inside one process the file cannot stop
+being sealed; only this process gaining the password can change what
+the notice row should say. So the row watches `has_master()`, a map
+lookup, instead of re-reading and re-parsing `secrets.json` on a timer.
+The throttle that existed to make the polling affordable went with it.
+
+Still open, and a deliberate choice rather than an oversight: a cancel
+is per call, not per session. Esc refuses the call that asked, and the
+next call that wants a secret asks again — the same shape as a denied
+grant. It means a model in a retry loop can put the prompt up
+repeatedly; the alternative, remembering the no, needs a way to change
+one's mind that the TUI does not have yet.
+
 ## 2026-09-16 — Two ways in that named nothing
 
 Both of the day's security follow-ups were the same shape: a guard

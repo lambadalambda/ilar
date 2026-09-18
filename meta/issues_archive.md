@@ -404,3 +404,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [A reopened session kept its thinking](issues/a-reopened-session-kept-its-thinking.md)
 - [x] [A credential flag is not a name](issues/a-credential-flag-is-not-a-name.md)
 - [x] [A withheld path survives a walk](issues/a-withheld-path-survives-a-walk.md) — the walkers and the session store; the `bash` case stays with the sandbox issue
+- [x] [The master password is asked for when it is needed](issues/the-master-password-is-asked-for-when-it-is-needed.md) — `ilar exec` never asks; the TUI asks on the first call that needs the store

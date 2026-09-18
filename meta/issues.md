@@ -123,10 +123,6 @@ milestones 15–17 stay filed — they come back when the feature does.*
 - [ ] [A finished task's answer is nowhere to be read](issues/a-finished-tasks-answer-is-nowhere-to-be-read.md)
 - [ ] [Read-only says what it takes away](issues/read-only-says-what-it-takes-away.md)
 
-## Secrets
-
-- [ ] [The master password is asked for when it is needed](issues/the-master-password-is-asked-for-when-it-is-needed.md)
-
 ## Review follow-ups
 
 - [ ] [Every started turn publishes its ending](issues/every-started-turn-publishes-its-ending.md)
