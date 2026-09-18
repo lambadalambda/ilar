@@ -415,3 +415,10 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [A review agent that may run things](issues/a-review-agent-that-may-run-things.md) — built in; foreground by default rather than background, since its findings are waited on
 - [x] [Interleaved thinking goes back on the wire](issues/interleaved-thinking-goes-back-on-the-wire.md) — chat-wire rows and endpoints replay `reasoning_content` inside a turn; `replay_thinking = false` opts a server out; probed live on five families
 - [x] [Thinking goes back whole, and under its own name](issues/thinking-goes-back-whole-and-under-its-own-name.md) — `replay_thinking = all | turn | off`, `all` the default; one spelling per request, the newest in the log
+- [x] [Limits are not optional](issues/limits-are-not-optional.md) — a bare provider answers the catalog's limits; the resolver trait's defaults do too
+- [x] [A delivering child is already settled](issues/a-delivering-child-is-already-settled.md) — the footer follows the seed's streaming predicate
+- [x] [Damaged rewinds fail closed](issues/damaged-rewinds-fail-closed.md) — both replay paths refuse an out-of-range marker by line; the tail checks a slab before applying any of it
+- [x] [Test repositories never sign](issues/test-repositories-never-sign.md) — every fixture sets commit.gpgsign=false; shadow checkpoints never sign anywhere
+- [x] [Ignored routing tables cannot refuse startup](issues/ignored-routing-tables-cannot-refuse-startup.md) — the project layer sheds the user-scoped tables off the raw TOML before validation
+- [x] [Provider URLs are structural](issues/provider-urls-are-structural.md) — one canonical form for providers, models and endpoints, refused by field
+- [x] [Skills load one body once](issues/skills-load-one-body-once.md) — one scan per store, one body per load, 256 KiB cap; a miss refreshes cheaply

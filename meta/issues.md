@@ -91,7 +91,6 @@ milestones 15–17 stay filed — they come back when the feature does.*
 - [ ] [The big files find their seams](issues/the-big-files-find-their-seams.md)
 - [ ] [Engines retire when idle](issues/engines-retire-when-idle.md)
 - [ ] [Serve folds once and caches](issues/serve-folds-once-and-caches.md) — *parked with serve*
-- [ ] [Limits are not optional](issues/limits-are-not-optional.md)
 
 ## Milestone 18 — Sweep: responsiveness & memory
 
@@ -120,12 +119,6 @@ milestones 15–17 stay filed — they come back when the feature does.*
 ## Review follow-ups
 
 - [ ] [Every started turn publishes its ending](issues/every-started-turn-publishes-its-ending.md)
-- [ ] [A delivering child is already settled](issues/a-delivering-child-is-already-settled.md)
 - [ ] [Obsolete replays stop working](issues/obsolete-replays-stop-working.md)
-- [ ] [Ignored routing tables cannot refuse startup](issues/ignored-routing-tables-cannot-refuse-startup.md)
 - [ ] [History searches without blocking or flooding](issues/history-searches-without-blocking-or-flooding.md)
-- [ ] [Skills load one body once](issues/skills-load-one-body-once.md)
-- [ ] [Damaged rewinds fail closed](issues/damaged-rewinds-fail-closed.md)
-- [ ] [Test repositories never sign](issues/test-repositories-never-sign.md)
-- [ ] [Provider URLs are structural](issues/provider-urls-are-structural.md)
 
