@@ -547,6 +547,9 @@ fn repository_with_worktree() -> (tempfile::TempDir, std::path::PathBuf, std::pa
     git(&root, &["init", "-q"]);
     git(&root, &["config", "user.name", "ilar tests"]);
     git(&root, &["config", "user.email", "ilar@example.invalid"]);
+    // Hermetic: a developer machine that signs commits would otherwise
+    // hand these fixtures to its real signer.
+    git(&root, &["config", "commit.gpgsign", "false"]);
     std::fs::write(root.join("README.md"), "test\n").unwrap();
     git(&root, &["add", "README.md"]);
     git(&root, &["commit", "-qm", "initial"]);
@@ -572,6 +575,9 @@ async fn mutable_tasks_in_distinct_validated_worktrees_may_overlap() {
     git(&root, &["init", "-q"]);
     git(&root, &["config", "user.name", "ilar tests"]);
     git(&root, &["config", "user.email", "ilar@example.invalid"]);
+    // Hermetic: a developer machine that signs commits would otherwise
+    // hand these fixtures to its real signer.
+    git(&root, &["config", "commit.gpgsign", "false"]);
     std::fs::write(root.join("README.md"), "test\n").unwrap();
     git(&root, &["add", "README.md"]);
     git(&root, &["commit", "-qm", "initial"]);

@@ -30,6 +30,9 @@ fn repository() -> (tempfile::TempDir, std::path::PathBuf) {
     git(&root, &["init", "-q"]);
     git(&root, &["config", "user.name", "ilar tests"]);
     git(&root, &["config", "user.email", "ilar@example.invalid"]);
+    // Hermetic: a developer machine that signs commits would otherwise
+    // hand these fixtures to its real signer.
+    git(&root, &["config", "commit.gpgsign", "false"]);
     std::fs::write(root.join("code.txt"), "v1\n").unwrap();
     git(&root, &["add", "."]);
     git(&root, &["commit", "-qm", "initial"]);
