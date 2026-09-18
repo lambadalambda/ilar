@@ -2,7 +2,7 @@
 //! stops calling tools. Pure state machine — persists via the session
 //! store, publishes to the event channel, never touches a UI.
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
