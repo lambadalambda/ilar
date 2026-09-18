@@ -23,7 +23,16 @@ Built-in subagents are `build` (mutable, serialized per checkout) and `explore`
 a toolset, not a promise of good behaviour: the agent gets `read`, `glob`,
 `grep` and `webfetch` and nothing else — no shell, so no tests, no builds, no
 git, no scripts. Delegate anything that must *run* something to `build`, which
-is serialized per checkout precisely because running things collides. Tasks can
+is serialized per checkout precisely because running things collides. That is
+a decision, not an accident of history: `read_only` means this list of four
+tools, not "everything except what writes". A read-only agent takes a shared
+read lease on the checkout, which is what lets several of them run at once;
+hand them a shell and four parallel reviewers would run four `cargo test`s
+over one target directory. Tools that read "read-only" as "no edits" (Claude
+Code's reviewer runs `git diff`; Codex sandboxes effects, not commands) have
+no lease to protect. A reviewer that must run things is a serialized agent by
+construction — `build` today, a `review` agent that may run but not edit later.
+Tasks can
 override the child's model per invocation (`model` and `reasoning` on the task
 tool — e.g. a cheap flash model for mechanical sweeps); omitted, the child uses
 the agent definition's model or inherits the parent's model and reasoning. The

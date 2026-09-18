@@ -119,7 +119,7 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 ## Session forensics 2026-09-17
 
-- [ ] [Read-only says what it takes away](issues/read-only-says-what-it-takes-away.md)
+- [ ] [A review agent that may run things](issues/a-review-agent-that-may-run-things.md)
 
 ## Secrets follow-ups
 

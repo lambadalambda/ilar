@@ -408,3 +408,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [The lock is a prompt, not a notice](issues/the-lock-is-a-prompt-not-a-notice.md)
 - [x] [A killed task reads as finished](issues/a-killed-task-reads-as-finished.md) — a `TurnEnded` event on the child log; the listing says cancelled/failed/stalled/aborted
 - [x] [A finished task's answer is nowhere to be read](issues/a-finished-tasks-answer-is-nowhere-to-be-read.md) — the listing reads the outbox and carries an undelivered result
+- [x] [Read-only says what it takes away](issues/read-only-says-what-it-takes-away.md) — wording landed 2026-09-17 (a50a78c); `read_only` stays the four-tool set, for the lease; a `review` agent is filed

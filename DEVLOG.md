@@ -1,5 +1,26 @@
 # DEVLOG
 
+## 2026-09-18 — Read-only means these four tools
+
+The forty-minute `explore` child from the 2026-09-16 session already
+had its fix — `a50a78c`, the day after: the description names the
+toolset, the prompt says to refuse and name the missing tool. What the
+issue still wanted was a decision: does `read_only` keep meaning
+"read, glob, grep, webfetch", or come to mean "everything that does
+not write", the way Claude Code's reviewer runs `git diff` and Codex
+sandboxes effects rather than commands?
+
+It keeps meaning the four tools, and the reason is the lease. A
+read-only agent takes a *shared* read lease on the checkout, which is
+what lets several run at once; a shell under a shared lease is four
+parallel reviewers running four `cargo test`s over one target
+directory. The other tools have no lease to protect. So the honest
+shape is two agents, not one wider one: `explore`, shell-less and
+parallel, and a `review` that may run anything and edit nothing —
+serialized like `build` because running things collides. The second is
+filed; `build` wearing a "don't edit" note covers it until then. The
+docs now say all of this where `read_only` is defined.
+
 ## 2026-09-18 — A listing that tells a killed task from one that answered
 
 The `tasks` listing had two words for a task: `running` while a handle
