@@ -116,6 +116,12 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 - [ ] [The assistant — index](issues/the-assistant-index.md) — index
 
+## Milestone 22 — Memory in every directory
+
+- [ ] [The memory store moves into the core](issues/the-memory-store-moves-into-the-core.md)
+- [ ] [The TUI remembers on its own](issues/the-tui-remembers-on-its-own.md)
+- [ ] [Recall comes to the turn](issues/recall-comes-to-the-turn.md)
+
 ## Review follow-ups
 
 - [ ] [Every started turn publishes its ending](issues/every-started-turn-publishes-its-ending.md)
