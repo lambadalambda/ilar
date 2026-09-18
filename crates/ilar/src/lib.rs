@@ -13,6 +13,7 @@ pub mod compaction;
 pub mod config;
 pub mod delivery;
 pub mod image;
+pub mod memory;
 pub mod model;
 pub mod outbox;
 pub mod provider;

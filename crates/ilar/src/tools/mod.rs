@@ -1143,6 +1143,9 @@ impl ChildTool {
     pub const SERVICE: Self = Self("service");
     pub const MODELS: Self = Self("models");
     pub const HISTORY: Self = Self("history");
+    pub const MEMORY: Self = Self("memory");
+    pub const MEMORY_SEARCH: Self = Self("memory_search");
+    pub const MEMORY_GET: Self = Self("memory_get");
     pub const IMAGE_GEN: Self = Self("image_gen");
     pub const SECRETS: Self = Self("secrets");
     pub const SUDO: Self = Self("sudo");
@@ -1155,6 +1158,9 @@ impl ChildTool {
         Self::SERVICE,
         Self::MODELS,
         Self::HISTORY,
+        Self::MEMORY,
+        Self::MEMORY_SEARCH,
+        Self::MEMORY_GET,
         Self::IMAGE_GEN,
         Self::SECRETS,
         Self::SUDO,
@@ -1338,6 +1344,22 @@ impl ToolRegistry {
             ChildTool::HISTORY,
             std::sync::Arc::new(history::HistoryTool::new(store)),
         )
+    }
+
+    /// Registry that remembers across sessions: the core files and the
+    /// archive under one store, three tools. Root sessions only, like
+    /// history — a subagent's memory would be its parent's.
+    pub fn with_memory(
+        self,
+        store: Arc<crate::memory::MemoryStore>,
+    ) -> Result<Self, DuplicateToolError> {
+        use crate::memory::{MemoryGetTool, MemorySearchTool, MemoryTool};
+        self.with_child_tool(ChildTool::MEMORY, MemoryTool::new(store.clone()))?
+            .with_child_tool(
+                ChildTool::MEMORY_SEARCH,
+                MemorySearchTool::new(store.clone()),
+            )?
+            .with_child_tool(ChildTool::MEMORY_GET, MemoryGetTool::new(store))
     }
 
     /// Registry with image generation attached — installed when the

@@ -27,6 +27,11 @@ pub struct GeneralConfig {
     /// (the default), `turn`, or `off`. A `[models.*]` or
     /// `[endpoints.*]` entry can override it for its own server.
     pub replay_thinking: Option<crate::provider::chat::ThinkingReplay>,
+    /// Whether a terminal session remembers across sessions: the
+    /// memory tools and the core block, per launch directory. On
+    /// unless said otherwise; `false` leaves the store on disk alone
+    /// and the model without the tools.
+    pub memory: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -589,6 +594,9 @@ pub struct GeneralConfigResolved {
     /// that replays it; see docs/configuration.md ("Thinking on the
     /// wire").
     pub replay_thinking: crate::provider::chat::ThinkingReplay,
+    /// Whether a terminal session has a memory; see docs/sessions.md
+    /// ("Memory that outlives a session").
+    pub memory: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -869,6 +877,11 @@ impl Config {
                     .as_ref()
                     .and_then(|general| general.replay_thinking)
                     .unwrap_or_default(),
+                memory: merged
+                    .general
+                    .as_ref()
+                    .and_then(|general| general.memory)
+                    .unwrap_or(true),
             },
             providers,
             models,
@@ -1148,6 +1161,7 @@ impl Config {
                 project_instructions: true,
                 resume_offer: true,
                 replay_thinking: Default::default(),
+                memory: true,
             },
             agent: AgentConfig::default(),
             providers,
@@ -1450,6 +1464,7 @@ fn merge_file(
             project_instructions,
             resume_offer,
             replay_thinking,
+            memory,
         );
     }
     if parsed.gateway.is_some() {

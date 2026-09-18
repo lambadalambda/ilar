@@ -289,6 +289,25 @@ fn the_resume_offer_is_on_by_default_and_can_be_turned_off() {
     assert!(by_project.warnings.is_empty(), "{:?}", by_project.warnings);
 }
 
+/// Memory is on unless said otherwise, and either layer can say so.
+#[test]
+fn memory_is_on_by_default_and_can_be_turned_off() {
+    let (_g, empty) = tempdir();
+    assert!(
+        Loader::no_env()
+            .config_dir(empty)
+            .resolve()
+            .unwrap()
+            .general
+            .memory
+    );
+    let (_user_guard, user) = tempdir();
+    write(&user.join("ilar.toml"), "[general]\nmemory = false\n");
+    let off = Loader::no_env().config_dir(user).resolve().unwrap();
+    assert!(!off.general.memory);
+    assert!(off.warnings.is_empty(), "{:?}", off.warnings);
+}
+
 #[test]
 fn project_instructions_must_be_a_boolean() {
     let (_g, dir) = tempdir();

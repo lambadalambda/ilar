@@ -16,6 +16,7 @@ use ilar::agent::{
 };
 use ilar::config::Config;
 use ilar::delivery::{Disposition, Parcel, disposition};
+use ilar::memory::MemoryStore;
 use ilar::provider::ProviderResolver;
 use ilar::runtime::{RuntimeOptions, RuntimePlan, SessionRuntime};
 use ilar::session::{ImageContent, SessionStore};
@@ -26,7 +27,6 @@ use tokio_util::sync::CancellationToken;
 use crate::bus::Outbound;
 use crate::config::GatewayConfig;
 use crate::cron::{CronStore, CronTool};
-use crate::memory::{MemoryGetTool, MemorySearchTool, MemoryStore, MemoryTool};
 use crate::message::MessageTool;
 use crate::routes::RouteStore;
 
@@ -397,24 +397,9 @@ impl Driver {
             status: self.wiring.status.clone(),
         });
         registry.add(tool)?;
-        // A room's seat has no memory: the core block is withheld from
-        // it, and reading or writing the person's memory aloud there
-        // would be the same leak by another door.
-        if self.gateway.memory.enabled && private {
-            let memory = self.wiring.memory.clone();
-            for (name, tool) in [
-                (
-                    "memory",
-                    MemoryTool::new(memory.clone()) as Arc<dyn ilar::tools::Tool>,
-                ),
-                ("memory_search", MemorySearchTool::new(memory.clone())),
-                ("memory_get", MemoryGetTool::new(memory)),
-            ] {
-                if self.gateway.tools.admits(name) {
-                    registry.add(tool)?;
-                }
-            }
-        }
+        // The memory tools are not added here: they come in with the
+        // core's registry, under the plan's `memory`, and a room's seat
+        // has none (see `plan`).
         if self.gateway.tools.admits("skill_manage") {
             registry.add(crate::skills::SkillManageTool::new(
                 self.wiring.skills.clone(),
@@ -830,7 +815,7 @@ fn default_model(config: &Config, gateway: &GatewayConfig) -> String {
 pub fn plan(
     config: &Config,
     gateway: &GatewayConfig,
-    memory: &MemoryStore,
+    memory: &Arc<MemoryStore>,
     resume: Option<String>,
     private: bool,
     grants: bool,
@@ -871,11 +856,18 @@ pub fn plan(
             // hand it over.
             unlock_hint: Some(crate::commands::UNLOCK_HINT.to_string()),
             withheld_paths: withheld.clone(),
+            // The core memory rides in the system prompt, frozen for
+            // the session, and the three tools in the registry — and
+            // never into a group: what the assistant knows about its
+            // person is not for a room, and reading or writing it
+            // aloud there would be the same leak by another door.
+            memory: (private && gateway.memory.enabled).then(|| memory.clone()),
         },
     )?;
     // Where it is: reached over a chat, with a home, wakeable from a
     // script — and, in a room, without the directions to the memory it
-    // cannot read anyway. Before the memory, which is about the person.
+    // cannot read anyway. Before the memory, which is about the person
+    // and which the core appends at start.
     plan.system_prompt.push_str("\n\n");
     plan.system_prompt.push_str(&crate::situation::block(
         &home,
@@ -900,16 +892,6 @@ pub fn plan(
             agent.tools = policy.narrow(agent.tools.as_deref(), nameable.iter().copied());
         }
         plan.agent.tools = policy.narrow(plan.agent.tools.as_deref(), nameable.iter().copied());
-    }
-    // The core memory rides in the system prompt, frozen for the
-    // session, and never into a group: what the assistant knows
-    // about its person is not for a room.
-    if private
-        && gateway.memory.enabled
-        && let Some(block) = memory.core_block()?
-    {
-        plan.system_prompt.push_str("\n\n");
-        plan.system_prompt.push_str(&block);
     }
     Ok(plan)
 }

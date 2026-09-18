@@ -1169,6 +1169,7 @@ async fn run_exec(config: &ilar::config::Config, args: ExecArgs) -> Result<i32> 
             // process can reach, and withholding one from them would be
             // theatre.
             withheld_paths: Vec::new(),
+            memory: directory_memory(config, &cwd),
         },
     )?;
     let mut plan_notices = std::mem::take(&mut plan.notices);
@@ -1247,6 +1248,20 @@ fn cli_project_instructions(include: bool, skip: bool) -> Option<bool> {
         (true, false) => Some(true),
         (false, false) => None,
     }
+}
+
+/// The memory a session launched in `cwd` carries: this directory's
+/// store under the state directory, unless `[general] memory = false`.
+fn directory_memory(
+    config: &ilar::config::Config,
+    cwd: &std::path::Path,
+) -> Option<Arc<ilar::memory::MemoryStore>> {
+    config.general.memory.then(|| {
+        Arc::new(ilar::memory::MemoryStore::new(ilar::memory::dir_for(
+            config.state_dir(),
+            cwd,
+        )))
+    })
 }
 
 /// The line a session opens with when the project put instructions in
@@ -1483,6 +1498,7 @@ async fn main() -> Result<()> {
                 // The terminal withholds nothing: see the `exec` launch
                 // above.
                 withheld_paths: Vec::new(),
+                memory: directory_memory(&config, &cwd),
             },
         )?;
         if args.print_prompt {

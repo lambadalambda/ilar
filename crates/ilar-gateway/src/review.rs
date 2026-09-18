@@ -15,9 +15,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use ilar::agent::LoopEvent;
+use ilar::memory::{CoreFile, MemoryStore, NoteKind};
 use serde::{Deserialize, Serialize};
-
-use crate::memory::{CoreFile, MemoryStore, NoteKind};
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]

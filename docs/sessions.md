@@ -122,6 +122,33 @@ A summary that answers the conversation instead of summarizing it — an
 apology, a refusal — is reported as an error and the session is left
 untouched, rather than replacing real history with something useless.
 
+## Memory that outlives a session
+
+Compaction carries a conversation forward; memory carries what was
+learned into the next one. A terminal session keeps one memory per
+launch directory, under `<state dir>/memory/<slug>/` where the slug is
+the canonical launch directory spelled as one name — two spellings of a
+directory share a memory, a subdirectory of a checkout is another
+directory, as for sessions — and nothing is created there until
+something is written. `general.memory = false` turns the whole thing
+off. The assistant ([ilar-gateway](gateway.md#memory-that-outlives-a-session))
+keeps one memory under its home instead, with a few rules of its own.
+
+Two tiers. The core is two small files with hard caps, `MEMORY.md`
+(about the world, 2,200 characters) and `USER.md` (about the person,
+1,375), which the `memory` tool edits with add, replace and remove; an
+overflow is an error the model resolves by consolidating. The core is
+injected into the system prompt once, when a session opens, and stays
+frozen for that session: a write changes the next session's prompt,
+not this one's, so the cached prefix never moves mid-session.
+
+The archive is one fact per file under `notes/`, typed as a decision,
+solution, preference, event, task or risk, written with the same tool's
+`note` action, plus daily notes under `daily/`. Nothing in the archive
+is ever injected: `memory_search` returns an index, best first with
+recent notes ranking higher, and `memory_get` reads the chosen notes in
+full. The three tools are the root session's; a subagent has none.
+
 ## Rewind and fork
 
 When the working directory is a git repository, ilar snapshots the

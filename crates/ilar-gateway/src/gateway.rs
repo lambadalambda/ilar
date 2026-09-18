@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use ilar::config::Config;
+use ilar::memory::MemoryStore;
 use ilar::provider::ProviderResolver;
 use ilar::session::ImageContent;
 use tokio::sync::mpsc;
@@ -19,7 +20,6 @@ use crate::config::GatewayConfig;
 use crate::cron::CronStore;
 use crate::driver::{Driver, FollowUp, ModelSwitch, TurnError, TurnReport, Wiring, log};
 use crate::inbox::{self, RateLimit};
-use crate::memory::MemoryStore;
 use crate::routes::RouteStore;
 
 pub struct Gateway {

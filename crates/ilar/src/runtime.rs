@@ -71,6 +71,13 @@ pub struct RuntimeOptions {
     /// owns every path the process can reach anyway; a driver that
     /// serves somebody else's session is the one that has to think.
     pub withheld_paths: Vec<PathBuf>,
+    /// What this session remembers across sessions, if anything: the
+    /// three memory tools go into the root registry, and the core
+    /// block into the system prompt once, at start. A terminal session
+    /// hands over its directory's store ([`crate::memory::dir_for`]);
+    /// an assistant its own; a seat that must not know the person,
+    /// none.
+    pub memory: Option<Arc<crate::memory::MemoryStore>>,
 }
 
 /// The session a driver is about to run, before anything is written.
@@ -102,6 +109,7 @@ pub struct RuntimePlan {
     unlock_hint: Option<String>,
     withheld_paths: Vec<PathBuf>,
     project_instructions: ProjectInstructions,
+    memory: Option<Arc<crate::memory::MemoryStore>>,
 }
 
 /// A session, its tools, and the channels a driver listens on.
@@ -558,7 +566,23 @@ impl RuntimePlan {
             unlock_hint: options.unlock_hint.clone(),
             withheld_paths: options.withheld_paths.clone(),
             project_instructions,
+            memory: options.memory.clone(),
         })
+    }
+
+    /// The prompt as the session sends it: what `resolve` assembled,
+    /// plus — read now, not at resolve, so a driver's own additions
+    /// come first — the core memory, frozen for the session. Nothing
+    /// when there is no store or it is still empty.
+    fn system_prompt_at_start(&self) -> Result<String> {
+        let mut prompt = self.system_prompt.clone();
+        if let Some(store) = &self.memory
+            && let Some(block) = store.core_block().context("reading the core memory")?
+        {
+            prompt.push_str("\n\n");
+            prompt.push_str(&block);
+        }
+        Ok(prompt)
     }
 
     /// Create or resume the session and build its tools.
@@ -646,6 +670,7 @@ impl RuntimePlan {
             questions,
             grants,
         } = self.tooling(config, resolver.clone(), &store)?;
+        let system_prompt = self.system_prompt_at_start()?;
 
         Ok(SessionRuntime {
             store,
@@ -653,7 +678,7 @@ impl RuntimePlan {
             model: self.model,
             reasoning: self.reasoning,
             agent: self.agent,
-            system_prompt: self.system_prompt,
+            system_prompt,
             registry,
             spawner,
             services,
@@ -682,7 +707,7 @@ impl RuntimePlan {
             reasoning: self.reasoning.clone(),
             options: crate::model::variant_options(&self.model, self.reasoning.as_deref())?,
             agent: self.agent.name.clone(),
-            system_prompt: self.system_prompt.clone(),
+            system_prompt: self.system_prompt_at_start()?,
             registry: tooling.registry,
         })
     }
@@ -763,6 +788,10 @@ impl RuntimePlan {
             .with_skills(self.skill_store.clone())?;
         let registry = match image_gen_backend(config) {
             Some(backend) => registry.with_image_gen(backend)?,
+            None => registry,
+        };
+        let registry = match &self.memory {
+            Some(store) => registry.with_memory(store.clone())?,
             None => registry,
         };
         // The listing costs a tool; a machine that has never stored a
@@ -1253,6 +1282,56 @@ mod tests {
         assert!(text.contains("\"properties\""), "{text}");
         assert!(text.contains("\n--- question\n"), "{text}");
         assert!(session_store(&config).list().is_empty());
+    }
+
+    /// A directory's memory: the tools are there before anything is
+    /// written and nothing is on disk; once written, the next session
+    /// from the same directory — spelled any way — opens with the core
+    /// in its prompt. No store, no tools, no block.
+    #[test]
+    fn a_directory_s_memory_reaches_the_tools_at_once_and_the_prompt_once_written() {
+        use crate::memory::{CoreFile, MemoryStore, dir_for};
+        let guard = tempfile::tempdir().unwrap();
+        let cwd = guard.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let config = crate::config::Loader::with_env(vec![("ILAR_ZAI_API_KEY", "zk".to_string())])
+            .config_dir(guard.path().join("config"))
+            .state_dir(guard.path().join("state"))
+            .resolve()
+            .unwrap();
+        let preview_with = |memory: Option<Arc<MemoryStore>>| {
+            RuntimePlan::resolve(
+                &config,
+                &RuntimeOptions {
+                    cwd: cwd.clone(),
+                    memory,
+                    ..RuntimeOptions::default()
+                },
+            )
+            .unwrap()
+            .preview(&config)
+            .unwrap()
+        };
+        let store = Arc::new(MemoryStore::new(dir_for(config.state_dir(), &cwd)));
+        let preview = preview_with(Some(store.clone()));
+        for tool in ["memory", "memory_search", "memory_get"] {
+            assert!(preview.registry.tool_names().contains(&tool), "{tool}");
+        }
+        assert!(!preview.system_prompt.contains("# Memory"));
+        assert!(!config.state_dir().join("memory").exists());
+
+        store.add(CoreFile::User, "Likes tea").unwrap();
+        let respelled = cwd.join(".").join("..").join("project");
+        let again = Arc::new(MemoryStore::new(dir_for(config.state_dir(), &respelled)));
+        let prompt = preview_with(Some(again)).system_prompt;
+        assert!(
+            prompt.contains("# Memory") && prompt.contains("Likes tea"),
+            "{prompt}"
+        );
+
+        let preview = preview_with(None);
+        assert!(!preview.registry.tool_names().contains(&"memory"));
+        assert!(!preview.system_prompt.contains("# Memory"));
     }
 
     #[test]

@@ -1,15 +1,21 @@
-//! Memory that outlives a session.
+//! Memory that outlives a session — see
+//! meta/issues/the-memory-store-moves-into-the-core.md.
 //!
 //! Two tiers, as every lightweight system converged on (DEVLOG,
-//! 2026-09-08). A small core — `MEMORY.md`, the assistant's notes on
-//! its world, and `USER.md`, on the person — with hard caps, injected
-//! into the system prompt once per session and never in a group. And
-//! an archive of one fact per file plus daily notes, never injected,
-//! searched through tools with an index first and full notes on
-//! request. Retrieval is ranking over a few hundred small files, so
-//! it is done here rather than in a database: BM25 over words, with
-//! recency decay so an old well-worded note does not beat yesterday's
-//! update.
+//! 2026-09-08). A small core — `MEMORY.md`, the model's notes on its
+//! world, and `USER.md`, on the person — with hard caps, injected into
+//! the system prompt once per session. And an archive of one fact per
+//! file plus daily notes, never injected, searched through tools with
+//! an index first and full notes on request. Retrieval is ranking over
+//! a few hundred small files, so it is done here rather than in a
+//! database: BM25 over words, with recency decay so an old well-worded
+//! note does not beat yesterday's update.
+//!
+//! A store is a directory and nothing else, so who remembers is who
+//! owns the directory: the gateway keeps one under its home, and a
+//! terminal session keeps one per launch directory under the state
+//! directory ([`dir_for`]), the way its last-session pointer and its
+//! project instructions are already per directory.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -17,16 +23,67 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
-use ilar::tools::{
-    Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, WorkspaceAccess, parse_input,
-};
 use serde::Deserialize;
 
-use crate::routes::write_atomically;
+use crate::tools::{
+    Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, WorkspaceAccess, parse_input,
+};
 
 /// Hermes's caps, which keep the core under a thousand tokens.
 pub const MEMORY_CHARS: usize = 2200;
 pub const USER_CHARS: usize = 1375;
+
+/// Where a terminal session launched from `cwd` keeps its memory:
+/// `<state dir>/memory/<slug>/`, the slug being the canonical launch
+/// directory spelled as one path component. Two spellings of one
+/// directory share a memory; a subdirectory of a checkout is another
+/// directory, as it is for sessions. Nothing is created here — the
+/// first write makes the directory.
+pub fn dir_for(state_dir: &Path, cwd: &Path) -> PathBuf {
+    let canonical = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    state_dir.join("memory").join(slug(&canonical))
+}
+
+/// A path as one file name: separators and anything outside
+/// `[A-Za-z0-9._-]` become `-`, then a short hash of the whole path is
+/// appended so `a/b` and `a-b` cannot land in one directory.
+fn slug(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    let mut name: String = text
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    while name.starts_with('-') {
+        name.remove(0);
+    }
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in text.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{name}-{:08x}", hash as u32)
+}
+
+/// Write through a rename. The temporary name is unique per write, so
+/// two writers racing on one file both land — the later one wins —
+/// instead of one failing on a name the other just renamed away.
+fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
+    static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let serial = SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_extension(format!("tmp.{}.{serial}", std::process::id()));
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -100,6 +157,7 @@ pub struct Hit {
     pub score: f64,
 }
 
+#[derive(Debug)]
 pub struct MemoryStore {
     dir: PathBuf,
     /// Every change is a read-modify-write of a whole file, and chats
@@ -255,7 +313,7 @@ impl MemoryStore {
         let id = format!(
             "{}-{}",
             when.format("%Y%m%d"),
-            &ilar::session::new_id()[..8]
+            &crate::session::new_id()[..8]
         );
         let text = format!(
             "---\nid: {id}\nkind: {}\ntitle: {}\nsummary: {}\nwhen: {}\n---\n\n{}\n",
@@ -804,7 +862,32 @@ impl Tool for MemoryGetTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ilar::tools::Tool;
+
+    #[test]
+    fn a_directory_s_memory_is_one_slug_however_it_is_spelled() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let project = dir.path().join("repos").join("x");
+        std::fs::create_dir_all(&project).unwrap();
+        let plain = dir_for(&state, &project);
+        let dotted = dir_for(&state, &project.join(".").join("..").join("x"));
+        assert_eq!(plain, dotted);
+        assert!(
+            plain.starts_with(state.join("memory")),
+            "{}",
+            plain.display()
+        );
+        let name = plain.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.contains("repos-x-"), "{name}");
+        assert!(!name.starts_with('-'), "{name}");
+        // A sibling that would flatten to the same letters does not
+        // share the directory.
+        let other = dir.path().join("repos-x");
+        std::fs::create_dir_all(&other).unwrap();
+        assert_ne!(plain, dir_for(&state, &other));
+        // Nothing on disk until something is written.
+        assert!(!state.exists());
+    }
 
     #[tokio::test]
     async fn show_lists_the_core_and_get_names_unknown_ids() {

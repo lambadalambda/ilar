@@ -241,18 +241,18 @@ policy for a bot you do not want changing the machine.
 
 ## Memory that outlives a session
 
-Two tiers, under `<home>/memory/`. The core is two small
-files with hard caps, `MEMORY.md` (about the world, 2,200 characters)
-and `USER.md` (about the person, 1,375), which the `memory` tool edits
-with add, replace and remove; an overflow is an error the model
-resolves by consolidating. The core is injected into the system
-prompt once, when a chat's session opens, and stays frozen for that
-session; it is never injected into a group chat. A room's seat has no
-memory tools either — no `memory`, `memory_search` or `memory_get` —
-and, since withholding the tools still left `read` and `bash` pointed
-at the same files, no tool call from a room's seat may name the memory
-directory at all: the call is refused before it runs, and the refusal
-does not repeat the path.
+The same two tiers a terminal session has — see
+[sessions](sessions.md#memory-that-outlives-a-session) for the core
+files, their caps and the archive tools — kept under `<home>/memory/`
+rather than per directory: the assistant is one and its home is where
+it lives. `gateway.memory.enabled` is its own switch. The core is
+injected into the system prompt once, when a chat's session opens, and
+stays frozen for that session; it is never injected into a group chat.
+A room's seat has no memory tools either — no `memory`, `memory_search`
+or `memory_get` — and, since withholding the tools still left `read`
+and `bash` pointed at the same files, no tool call from a room's seat
+may name the memory directory at all: the call is refused before it
+runs, and the refusal does not repeat the path.
 
 That last part is a guard rail, not a boundary. It stops a model that
 goes looking; it cannot stop a shell command that arrives at the files
@@ -260,12 +260,10 @@ by another spelling, and nothing inside one process can. An external
 sandbox is still the security boundary — see the warning in the
 [README](../README.md#safety).
 
-The archive is one fact per file under `notes/`, typed as a decision,
-solution, preference, event, task or risk, written with the same
-tool's `note` action, plus daily notes under `daily/` that receive
-every compaction handover. Nothing in the archive is ever injected:
-`memory_search` returns an index, best first with recent notes
-ranking higher, and `memory_get` reads the chosen notes in full.
+What the assistant adds to the archive: the daily notes under `daily/`
+receive every compaction handover, the review after a turn writes notes
+and core entries on its own, and the weekly review promotes what
+recurs.
 
 ## Skills it writes itself
 
