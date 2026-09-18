@@ -59,9 +59,10 @@ pub struct RuntimeOptions {
     /// Skills from `user_dir` alone: no built-ins, no project
     /// `.ilar/skills`. For an assistant that keeps its own.
     pub own_skills_only: bool,
-    /// What this driver's user does to unlock a sealed secret store —
-    /// "restart ilar and …", "/unlock <master password>" — put into
-    /// every refusal the lock causes. See
+    /// What this driver's user does about a secret store still sealed
+    /// after the prompt had its turn — "/unlock <master password>",
+    /// "ilar exec never asks" — put into every refusal the lock
+    /// causes. See
     /// [`crate::secrets::Secrets::with_unlock_hint`].
     pub unlock_hint: Option<String>,
     /// Paths no tool call in this session may name. See

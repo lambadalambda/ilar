@@ -23,7 +23,8 @@ variable names (`[A-Za-z_][A-Za-z0-9_]*`, up to 64 characters); values
 are at least four characters. The store is `<state dir>/secrets.json`,
 mode 0600, written whole under a lock. In the clear, the file is as
 safe as your user account; [a master password](#a-master-password)
-seals it, at the cost of typing that password once per session.
+seals it, at the cost of typing that password once in every session
+that actually uses a secret.
 
 ## Using one
 
@@ -185,27 +186,45 @@ from the password with Argon2id, the JSON is XChaCha20-Poly1305 under a
 fresh nonce every write. Nothing about the secrets, not even their
 names, is readable without the password.
 
-The password is asked for once per process. The TUI and `ilar exec`
-ask on the plain terminal at start, before the screen is taken over. A
-wrong password is asked again, three tries in all; Enter without a
-password, three typos, or no terminal to ask on at all (cron, systemd,
-a pipe) leaves the store locked for that session, said once on stderr.
-The TUI then keeps a line on the notice row while it runs, and every
-use of a secret is refused with the way out: restart and type the
-password at the start prompt. `ilar secret …` asks when it needs to,
-once, and a wrong password is an error there. The gateway cannot ask:
-it logs that the store is locked, and `/unlock <master password>` from
-a chat opens it for the life of the process. That message carries the
-master password into the chat's history on every device it syncs to,
-right password or wrong: the adapter takes it back out where the
-channel allows it — Delta Chat only deletes the bot's own messages for
-everyone, so a `/unlock` goes at least from the gateway's database —
-and the reply says whether there is still one for you to delete. The
-gateway reads provider keys at start, when a sealed store is still
-locked, so a provider key kept there is never seen by it: on a box that
-runs the gateway keep provider keys in `ilar.toml`, and weigh whether
-sealing buys anything there at all, since the password has to be typed
-after every restart.
+The password is typed once per process and held for the rest of it, and
+it is asked for by the first call that needs what is in the store — a
+`secrets` listing, a `bash` or `service` naming a stored secret, a
+`sudo` — not before. Most sessions never touch a secret, and those are
+never asked at all. In the TUI the prompt is a modal like the grant and
+sudo ones, titled with the tool it is holding up; a wrong password is
+asked again, three tries in all, and Esc leaves the store sealed and
+refuses that one call, the way a denied grant refuses one call. The
+next call that wants a secret asks again. While the store is sealed and
+unopened, the notice row says so.
+
+`ilar exec` never asks. It is the headless driver — it takes no
+questions and no grants, because nobody is there to answer — so a
+sealed store stays sealed for the whole run and every use of a stored
+secret is refused. Standing grants (`ilar secret grant …`) still work
+against an *unsealed* store, which is the combination a cron line
+wants. `ilar secret …` asks when it needs to, once, and a wrong
+password is an error there.
+
+The gateway does not put the master password to a chat, since a reply
+is an ordinary message and stays in the room's history: a call that
+wants a sealed store says so in the room and is refused, and `/unlock
+<master password>` opens the store for the life of the process. That
+message carries the master password into the chat's history on every
+device it syncs to, right password or wrong: the adapter takes it back
+out where the channel allows it — Delta Chat only deletes the bot's own
+messages for everyone, so a `/unlock` goes at least from the gateway's
+database — and the reply says whether there is still one for you to
+delete.
+
+One thing is read before any of this: provider keys. The configuration
+is resolved at start, while a sealed store is still shut, so a provider
+key kept in the store is not seen by the gateway or by `ilar exec` —
+keep provider keys in `ilar.toml` on those boxes. The TUI is the
+exception, and only just: if the model it is opening with — `--model`,
+or what the configuration names — cannot be reached without the store,
+it asks on the plain terminal at start the way every session used to,
+because the session would die before any call could ask. A model id
+nobody can route gets its own error instead of a password prompt.
 
 A second process that reseals the store under another password locks
 this one out: the password it holds no longer opens the file, so it

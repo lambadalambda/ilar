@@ -38,6 +38,19 @@ impl Tool for SecretsTool {
             let Some(secrets) = ctx.secrets.as_ref() else {
                 return ToolOutput::error("secrets: no store is attached to this session");
             };
+            // A sealed store has no names to list either, so this is a
+            // use like any other: the master password is asked for here
+            // rather than at the start of every session.
+            secrets
+                .unlock_if_locked(&crate::secrets::Request {
+                    tool: "secrets",
+                    names: &[],
+                    detail: "listing what you have stored",
+                    session_id: &ctx.session_id,
+                    tool_call_id: ctx.call_id.as_deref(),
+                    cancel: &ctx.cancel,
+                })
+                .await;
             match secrets.listing() {
                 Ok(text) => ToolOutput::text(text),
                 Err(error) => ToolOutput::error(format!("secrets: {error:#}")),

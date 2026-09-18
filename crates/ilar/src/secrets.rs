@@ -8,8 +8,9 @@
 //! [`AskSender`] when a use is not yet granted. The protocol is shaped
 //! like the question protocol: a prompt over a channel with a one-shot
 //! reply, so any driver with somebody to ask can answer it. One channel
-//! carries both asks ([`Ask`]): the approval question, and the sudo
-//! password question that may follow a yes.
+//! carries all three asks ([`Ask`]): the master password a sealed store
+//! wants before anything can be read, the approval question, and the
+//! sudo password question that may follow a yes.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -366,7 +367,15 @@ impl SecretStore {
 
     /// Sealed, and this process has not been given the password.
     pub fn is_locked(&self) -> bool {
-        self.is_sealed() && !MASTERS.lock().unwrap().contains_key(&self.path)
+        self.is_sealed() && !self.has_master()
+    }
+
+    /// Whether this process holds a password for the store. The half of
+    /// [`Self::is_locked`] that can change while one process runs, and
+    /// the only half that costs nothing to ask: watching a lock is
+    /// watching this, not re-reading the file every second.
+    pub fn has_master(&self) -> bool {
+        MASTERS.lock().unwrap().contains_key(&self.path)
     }
 
     /// Give this process the master password: verified against the
@@ -636,13 +645,38 @@ pub struct PasswordPrompt {
     pub reply: oneshot::Sender<Option<String>>,
 }
 
-/// What one channel carries: the approval question, and the password
-/// question that may follow a yes. One channel, so a driver keeps one
-/// watch loop and the two can never be answered out of order.
+/// A sealed store this process has no password for, and a call that
+/// needs what is in it. Asked at that moment and not before: most
+/// sessions never touch a secret, and a password asked for at start is
+/// asked of everyone for the sake of the few. `None` in the reply
+/// leaves the store locked and fails that one call, the way a denied
+/// grant does.
+#[derive(Debug)]
+pub struct UnlockPrompt {
+    pub session_id: String,
+    /// The subagent whose tool is waiting, as in [`GrantPrompt`].
+    pub agent: Option<String>,
+    pub tool_call_id: Option<String>,
+    /// The tool whose call is waiting on the store.
+    pub tool: String,
+    /// What it is about to do, verbatim: the same line the grant prompt
+    /// shows, since this is the same call held up one step earlier.
+    pub detail: String,
+    /// The password given last did not open the store: a re-ask.
+    pub refused: bool,
+    pub reply: oneshot::Sender<Option<String>>,
+}
+
+/// What one channel carries: the approval question, the password
+/// question that may follow a yes, and the master password a sealed
+/// store wants before either can be answered at all. One channel, so a
+/// driver keeps one watch loop and they can never be answered out of
+/// order.
 #[derive(Debug)]
 pub enum Ask {
     Grant(GrantPrompt),
     Password(PasswordPrompt),
+    Unlock(UnlockPrompt),
 }
 
 impl Ask {
@@ -652,6 +686,7 @@ impl Ask {
         match self {
             Ask::Grant(prompt) => &prompt.session_id,
             Ask::Password(prompt) => &prompt.session_id,
+            Ask::Unlock(prompt) => &prompt.session_id,
         }
     }
 }
@@ -732,6 +767,10 @@ pub struct Secrets {
     /// [`Self::take_notes`]; a call that never came back to collect
     /// its note loses it to [`MAX_NOTES`].
     notes: Arc<Notes>,
+    /// One unlock ask at a time, across the session and every child:
+    /// two calls that find the store locked together would otherwise
+    /// put up two prompts for the same password.
+    unlocking: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Notes waiting to be collected, each with the tool call it belongs to.
@@ -743,6 +782,10 @@ const MAX_NOTES: usize = 8;
 
 /// What a driver that never said how to unlock the store falls back to.
 const UNLOCK_HINT: &str = "the user unlocks it with the master password";
+
+/// Tries at the door before a call gives up on a sealed store: the same
+/// patience the start prompt had.
+const UNLOCK_TRIES: usize = 3;
 
 /// The CLI line a call without a grant and without anyone to ask
 /// points at.
@@ -801,6 +844,7 @@ impl Secrets {
             unlock_hint: None,
             sudo: false,
             notes: Arc::new(Mutex::new(Vec::new())),
+            unlocking: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -848,10 +892,12 @@ impl Secrets {
         notes.push((call_id.map(str::to_string), note));
     }
 
-    /// What the driver's user does to unlock a sealed store: "restart
-    /// ilar and enter the master password at the start prompt" for the
-    /// TUI, "/unlock <master password>" for the gateway. It goes into
-    /// every refusal the lock caused.
+    /// What the driver's user does about a store still sealed after
+    /// [`Self::unlock_if_locked`] had its turn: "the prompt comes up
+    /// again the next time a tool needs the store" for the TUI,
+    /// "/unlock <master password>" for the gateway, and for `ilar exec`
+    /// that it never asks at all. It goes into every refusal the lock
+    /// caused.
     pub fn with_unlock_hint(mut self, hint: impl Into<String>) -> Self {
         self.unlock_hint = Some(hint.into());
         self
@@ -986,6 +1032,10 @@ impl Secrets {
     /// failure ends the whole call: a command that expected three
     /// variables and got two is not the command the person read.
     pub async fn resolve(&self, request: Request<'_>) -> Result<Vec<Granted>, String> {
+        // Nothing here can be answered while the store is sealed — not
+        // even whether a name exists — so the master password is the
+        // first thing this call asks for, when it has to.
+        self.unlock_if_locked(&request).await;
         // Every name looked up before anyone is asked: a call that
         // names one unknown secret fails without a question.
         let file = self.store.load().map_err(|error| self.store_error(error))?;
@@ -1013,12 +1063,80 @@ impl Secrets {
         Ok(granted)
     }
 
+    /// Open a sealed store this process has no password for, at the
+    /// moment a call needs what is in it. Nothing sealed, or nobody to
+    /// ask, and this does nothing at all: the caller's own read then
+    /// fails with the locked message, which is exactly what a driver
+    /// without a prompt did before there was an ask for this. A wrong
+    /// password is asked again, [`UNLOCK_TRIES`] in all; an empty
+    /// answer or a cancel leaves it locked and lets the call fail.
+    ///
+    /// Infallible on purpose: whether the store opened is not this
+    /// function's news to report — the read that wanted it reports it,
+    /// in the words it already had.
+    pub async fn unlock_if_locked(&self, request: &Request<'_>) {
+        let Some(sender) = &self.prompts else {
+            return;
+        };
+        if !self.store.is_locked() {
+            return;
+        }
+        // One prompt at a time. Waiting for the turn is not worth
+        // outliving the call: a cancelled one leaves rather than queues.
+        let _one_at_a_time = tokio::select! {
+            turn = self.unlocking.lock() => turn,
+            _ = request.cancel.cancelled() => return,
+        };
+        for asked in 0..UNLOCK_TRIES {
+            // Re-read every round: the call that held the lock before
+            // this one may have opened it already.
+            if !self.store.is_locked() {
+                return;
+            }
+            let (reply, receive) = oneshot::channel();
+            let ask = Ask::Unlock(UnlockPrompt {
+                session_id: request.session_id.to_string(),
+                agent: self.agent.clone(),
+                tool_call_id: request.tool_call_id.map(str::to_string),
+                tool: request.tool.to_string(),
+                detail: request.detail.to_string(),
+                refused: asked > 0,
+                reply,
+            });
+            let Ok(Some(password)) = deliver(sender, ask, receive, request.cancel).await else {
+                return;
+            };
+            if password.is_empty() {
+                return;
+            }
+            // Argon2id at its defaults is tens of milliseconds of pure
+            // CPU, and this runs on the runtime that is drawing the
+            // screen: it goes to a blocking thread like any other.
+            let store = self.store.clone();
+            let opened = tokio::task::spawn_blocking(move || store.unlock(&password))
+                .await
+                .is_ok_and(|unlocked| unlocked.is_ok());
+            if opened {
+                return;
+            }
+        }
+    }
+
     /// Approval to run `request.detail` as root, for the sudo tool:
     /// standing, given this session, or asked for now. `reason` is
     /// what the model said it is for. Approval only — whether sudo
     /// wants a password is the tool's business, after the yes.
     pub async fn approve_root(&self, request: Request<'_>, reason: &str) -> Result<(), String> {
-        if self.store.root_granted(request.tool) || self.session_granted(ROOT, request.tool) {
+        if self.session_granted(ROOT, request.tool) {
+            return Ok(());
+        }
+        // A standing yes lives in the store, and so does the password
+        // that may be wanted after it, so a sealed one is opened before
+        // either is looked for: unlocking after the approval would ask
+        // a person who had already said "always" two questions where
+        // they had agreed to none.
+        self.unlock_if_locked(&request).await;
+        if self.store.root_granted(request.tool) {
             return Ok(());
         }
         self.ask(&request, ROOT, reason).await
@@ -1494,6 +1612,120 @@ mod tests {
         );
     }
 
+    /// A driver with somebody to ask is asked for the master password
+    /// by the call that needs it, not before it: a wrong one is asked
+    /// again, the right one opens the store, and the call carries on to
+    /// the grant it would have asked for anyway.
+    #[tokio::test]
+    async fn a_locked_store_asks_for_the_master_password_at_the_first_use() {
+        let (_dir, store) = store();
+        store.set("KEY", "for gh", "value-one").unwrap();
+        store.encrypt("open sesame").unwrap();
+        MASTERS.lock().unwrap().remove(store.path());
+        let (tx, mut rx) = ask_channel(1);
+        let secrets = Secrets::new(store.clone()).with_prompts(tx);
+        let cancel = cancel();
+        let names = ["KEY".to_string()];
+        let (outcome, asked) = tokio::join!(secrets.resolve(request(&names, &cancel)), async {
+            let wrong = answer_unlock(&mut rx, Some("hunter22")).await;
+            let right = answer_unlock(&mut rx, Some("open sesame")).await;
+            answer(&mut rx, Some(Grant::Once)).await;
+            (wrong, right)
+        });
+        let granted = outcome.expect("the store opened");
+        assert_eq!(granted[0].value(), "value-one");
+        assert!(!store.is_locked());
+        let (wrong, right) = asked;
+        assert_eq!(wrong.tool, "bash");
+        assert_eq!(wrong.detail, "gh pr list");
+        assert_eq!(wrong.tool_call_id.as_deref(), Some("c1"));
+        assert!(!wrong.refused, "the first ask has nothing to say");
+        assert!(right.refused, "the second says the first did not open it");
+
+        // And once open, nothing is asked about it again.
+        let (outcome, _) = tokio::join!(
+            secrets.resolve(request(&names, &cancel)),
+            answer(&mut rx, Some(Grant::Once))
+        );
+        assert!(outcome.is_ok());
+    }
+
+    /// A driver with nobody to ask — `ilar exec`, a scheduled turn —
+    /// asks nothing and waits for nothing: it is what keeps a password
+    /// prompt out of a piped or scheduled run entirely.
+    #[tokio::test]
+    async fn a_driver_with_nobody_to_ask_never_asks_to_unlock() {
+        let (_dir, store) = store();
+        store.set("KEY", "", "value-one").unwrap();
+        store.encrypt("open sesame").unwrap();
+        MASTERS.lock().unwrap().remove(store.path());
+        let secrets = Secrets::new(store.clone());
+        let cancel = cancel();
+        let names = ["KEY".to_string()];
+        let request = request(&names, &cancel);
+        secrets.unlock_if_locked(&request).await;
+        assert!(store.is_locked());
+        assert!(secrets.resolve(request).await.is_err());
+    }
+
+    /// Two calls that find the store sealed at once put up one prompt
+    /// between them: the second waits for the first, finds the store
+    /// open, and asks nothing.
+    #[tokio::test]
+    async fn two_calls_on_a_sealed_store_share_one_prompt() {
+        let (_dir, store) = store();
+        store.set("KEY", "", "value-one").unwrap();
+        store.encrypt("open sesame").unwrap();
+        MASTERS.lock().unwrap().remove(store.path());
+        let (tx, mut rx) = ask_channel(1);
+        let secrets = Secrets::new(store.clone()).with_prompts(tx);
+        let cancel = cancel();
+        let names = ["KEY".to_string()];
+        let service = Request {
+            tool: "service",
+            ..request(&names, &cancel)
+        };
+        let (first, second, _) = tokio::join!(
+            secrets.resolve(request(&names, &cancel)),
+            secrets.resolve(service),
+            async {
+                answer_unlock(&mut rx, Some("open sesame")).await;
+                // Whichever of the two got there first; the other must
+                // find the store open rather than ask again.
+                answer(&mut rx, Some(Grant::Session)).await;
+                answer(&mut rx, Some(Grant::Session)).await;
+            }
+        );
+        assert!(first.is_ok() && second.is_ok(), "{first:?} {second:?}");
+        assert!(rx.try_recv().is_err(), "a second unlock was asked for");
+    }
+
+    /// Enter on the prompt leaves the store locked, and the call fails
+    /// the way it does for a driver that never had a prompt.
+    #[tokio::test]
+    async fn an_unanswered_unlock_leaves_the_store_locked() {
+        let (_dir, store) = store();
+        store.set("KEY", "", "value-one").unwrap();
+        store.encrypt("open sesame").unwrap();
+        MASTERS.lock().unwrap().remove(store.path());
+        let (tx, mut rx) = ask_channel(1);
+        let secrets = Secrets::new(store.clone())
+            .with_prompts(tx)
+            .with_unlock_hint("restart ilar");
+        let cancel = cancel();
+        let names = ["KEY".to_string()];
+        let (outcome, asked) = tokio::join!(
+            secrets.resolve(request(&names, &cancel)),
+            answer_unlock(&mut rx, None)
+        );
+        let error = outcome.unwrap_err();
+        assert!(error.contains("sealed and locked"), "{error}");
+        assert!(error.contains("restart ilar"), "{error}");
+        assert!(!asked.refused);
+        assert!(store.is_locked());
+        assert!(rx.try_recv().is_err(), "a cancel was asked again");
+    }
+
     /// A second process reseals the file under another password: the
     /// one this process holds is dropped, the store reads as locked
     /// again, and the refusal says what happened.
@@ -1823,9 +2055,21 @@ mod tests {
         assert_eq!(format!("{granted:?}"), "[Granted(KEY)]");
     }
 
+    /// The next ask, or a named failure. Every test here answers one
+    /// ask while the call that made it runs in the same `join!`, so a
+    /// regression that stops the call asking would leave the answering
+    /// half pending for ever and hang the whole test binary silently.
+    /// The wait has an end instead.
+    async fn next_ask(rx: &mut AskReceiver) -> Ask {
+        tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
+            .await
+            .expect("an ask within ten seconds")
+            .expect("the ask channel closed")
+    }
+
     /// Answer the next grant ask, returning what it asked.
     async fn answer(rx: &mut AskReceiver, grant: Option<Grant>) -> GrantPrompt {
-        let Ask::Grant(prompt) = rx.recv().await.unwrap() else {
+        let Ask::Grant(prompt) = next_ask(rx).await else {
             panic!("a password ask where a grant ask was expected");
         };
         let (dead, _) = oneshot::channel();
@@ -1843,9 +2087,28 @@ mod tests {
         echo
     }
 
+    /// Answer the next unlock ask, returning what it asked.
+    async fn answer_unlock(rx: &mut AskReceiver, password: Option<&str>) -> UnlockPrompt {
+        let Ask::Unlock(prompt) = next_ask(rx).await else {
+            panic!("another ask where an unlock ask was expected");
+        };
+        let (dead, _) = oneshot::channel();
+        let echo = UnlockPrompt {
+            session_id: prompt.session_id.clone(),
+            agent: prompt.agent.clone(),
+            tool_call_id: prompt.tool_call_id.clone(),
+            tool: prompt.tool.clone(),
+            detail: prompt.detail.clone(),
+            refused: prompt.refused,
+            reply: dead,
+        };
+        prompt.reply.send(password.map(str::to_string)).unwrap();
+        echo
+    }
+
     /// Answer the next password ask, returning what it asked.
     async fn answer_password(rx: &mut AskReceiver, password: Option<&str>) -> PasswordPrompt {
-        let Ask::Password(prompt) = rx.recv().await.unwrap() else {
+        let Ask::Password(prompt) = next_ask(rx).await else {
             panic!("a grant ask where a password ask was expected");
         };
         let (dead, _) = oneshot::channel();

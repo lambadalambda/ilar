@@ -9,7 +9,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use ilar::secrets::{Ask, AskReceiver, Grant, GrantPrompt, PasswordPrompt};
+use ilar::secrets::{Ask, AskReceiver, Grant, GrantPrompt, PasswordPrompt, UnlockPrompt};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
@@ -68,6 +68,16 @@ impl Asker {
     pub fn of_password(prompt: &PasswordPrompt, session_id: &str) -> Self {
         Self::named(
             "sudo",
+            prompt.session_id == session_id,
+            prompt.agent.as_deref(),
+        )
+    }
+
+    /// The same for the unlock ask, which names the tool held up by the
+    /// sealed store.
+    pub fn of_unlock(prompt: &UnlockPrompt, session_id: &str) -> Self {
+        Self::named(
+            &prompt.tool,
             prompt.session_id == session_id,
             prompt.agent.as_deref(),
         )
@@ -233,6 +243,22 @@ pub fn ask_text(prompt: &GrantPrompt, asker: &Asker) -> String {
     )
 }
 
+/// The message the chat gets when a call wants a store that is sealed.
+/// Not a question: the master password belongs in `/unlock`, which the
+/// adapter takes back out of the room's history where it can, and a
+/// reply to a prompt is an ordinary message that stays there. So the
+/// ask goes unanswered — the store stays shut, as it was before there
+/// was an ask at all — and the room is told what opens it.
+pub fn unlock_ask_text(prompt: &UnlockPrompt, asker: &Asker) -> String {
+    format!(
+        "🔒 {} wants a stored secret and the store is sealed:\n\n{}\n{} to open it for as long as \
+         this gateway runs. Until then the call is refused.",
+        asker.shown,
+        shown_command(&prompt.detail),
+        crate::commands::UNLOCK_HINT
+    )
+}
+
 /// The message the chat gets when sudo wants a password for a command
 /// it has already been allowed to run.
 pub fn password_ask_text(prompt: &PasswordPrompt, asker: &Asker) -> String {
@@ -342,7 +368,7 @@ pub async fn watch(
                     .await;
             }
         };
-        // Either ask, told apart once: the chat's text, what the slot
+        // Each ask, told apart once: the chat's text, what the slot
         // says it takes, and where the answer goes.
         let (text, pending_secret, password, asker, mut reply) = match ask {
             Ask::Grant(prompt) => {
@@ -364,6 +390,14 @@ pub async fn watch(
                     asker,
                     Reply::Password(prompt.reply),
                 )
+            }
+            // The one ask this chat does not answer: see
+            // [`unlock_ask_text`]. Saying so is the whole handling, and
+            // the ask is dropped, which leaves the store shut.
+            Ask::Unlock(prompt) => {
+                let asker = Asker::of_unlock(&prompt, &session_id);
+                post(unlock_ask_text(&prompt, &asker)).await;
+                continue;
             }
         };
         post(text).await;
@@ -433,6 +467,18 @@ mod tests {
         }
     }
 
+    fn unlock_prompt(reply: oneshot::Sender<Option<String>>) -> UnlockPrompt {
+        UnlockPrompt {
+            session_id: "s".into(),
+            agent: None,
+            tool_call_id: None,
+            tool: "bash".into(),
+            detail: "gh pr list".into(),
+            refused: false,
+            reply,
+        }
+    }
+
     struct Harness {
         prompts: mpsc::Sender<Ask>,
         slot: PendingSlot,
@@ -479,6 +525,37 @@ mod tests {
             outbound,
             cancel,
         }
+    }
+
+    /// The sealed store is the ask this chat does not take: the room is
+    /// told what wants it and what opens it, nothing goes in the slot
+    /// for `/grant` or `/password` to answer, and the call is left
+    /// refused — the password belongs in `/unlock`, which the adapter
+    /// can take back out of the history.
+    #[tokio::test]
+    async fn the_unlock_ask_points_at_the_command_and_answers_nothing() {
+        let mut h = harness(GRANT_TIMEOUT);
+        let (reply, receive) = oneshot::channel();
+        h.prompts
+            .send(Ask::Unlock(unlock_prompt(reply)))
+            .await
+            .unwrap();
+        let posted = h.outbound.recv().await.unwrap();
+        assert!(
+            posted.text.contains("the store is sealed"),
+            "{}",
+            posted.text
+        );
+        assert!(posted.text.contains("gh pr list"), "{}", posted.text);
+        assert!(posted.text.contains("/unlock"), "{}", posted.text);
+        assert!(!posted.text.contains("/grant"), "{}", posted.text);
+        assert!(receive.await.is_err(), "the chat answered an unlock ask");
+        assert!(h.slot.lock().unwrap().is_none(), "it took the ask slot");
+        // And the next ask is served as usual: nothing was left behind.
+        let (reply, _receive) = oneshot::channel();
+        h.prompts.send(Ask::Grant(prompt(reply))).await.unwrap();
+        assert!(h.asked().await.text.contains("/grant"));
+        h.cancel.cancel();
     }
 
     #[tokio::test]

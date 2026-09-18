@@ -105,19 +105,40 @@ const ROOT_STALL_WARN_AFTER: std::time::Duration = std::time::Duration::from_sec
 /// for resume — never a silent disappearance.
 const ROOT_STALL_ABORT_AFTER: std::time::Duration = std::time::Duration::from_secs(600);
 
-/// What a person at the terminal does about a store left locked: the
-/// password is asked for once, before the screen is taken over, and
-/// held for the life of the process. Every refusal the lock causes ends
-/// with this.
-const UNLOCK_HINT: &str = "restart ilar and type the master password at the start prompt";
+/// What a person at the terminal does about a store still locked: the
+/// prompt comes up by itself on the call that wants a stored secret, so
+/// there is nothing to do but answer it. Every refusal the lock causes
+/// ends with this.
+const UNLOCK_HINT: &str =
+    "the master password prompt comes up again the next time a tool needs the store";
 
-/// A sealed secret store is unlocked once, on the plain terminal,
-/// before anything else runs; an empty answer leaves it locked for the
-/// session. The configuration is resolved again afterwards, since a
-/// provider key may live in the store.
-fn unlock_secrets(config: ilar::config::Config) -> Result<ilar::config::Config> {
+/// What `ilar exec` says instead: it has nobody to prompt, by design,
+/// and the store stays sealed for the whole run.
+const EXEC_UNLOCK_HINT: &str = "ilar exec never asks for the master password; run ilar at a \
+                                terminal, or unseal the store with: ilar secret decrypt";
+
+/// The master password is asked for by the call that first needs it, in
+/// a prompt of its own — see [`ilar::secrets::Secrets::unlock_if_locked`]
+/// — so nothing is asked at start, of the many sessions that never touch
+/// a secret least of all.
+///
+/// One session cannot wait that long. A provider key kept in the store
+/// is read when the configuration is resolved, long before any tool
+/// call could put a prompt up; if `model` — this launch's `--model`, or
+/// what the configuration names — cannot be reached without it, the
+/// session would die on `plan.start` and there would be no first call
+/// to ask on. That one is asked here, on the plain terminal, the way
+/// every session used to be, and the configuration is resolved again
+/// afterwards so the key is seen.
+///
+/// A model id nobody can route is not a locked store's fault: it gets
+/// its own error further down rather than a password prompt first.
+fn unlock_secrets(config: ilar::config::Config, model: &str) -> Result<ilar::config::Config> {
     let store = ilar::secrets::SecretStore::open(config.state_dir());
-    if !store.is_locked() {
+    if !store.is_locked()
+        || config.ensure_model_known(model).is_err()
+        || config.provider_result(model).is_ok()
+    {
         return Ok(config);
     }
     let unlocked = secret_cli::unlock_if_sealed(
@@ -129,11 +150,13 @@ fn unlock_secrets(config: ilar::config::Config) -> Result<ilar::config::Config> 
     match unlocked {
         Ok(true) => Loader::new().resolve().context("loading config"),
         // Enter, or the last of three typos: a locked store is a
-        // session with no stored secrets, not a reason to refuse to run.
+        // session whose model may well be unreachable, not a reason to
+        // refuse to run — and the prompt comes back on the first call
+        // that wants a secret, which is more than this one had.
         Ok(false) => {
             eprintln!(
-                "The secret store stays locked this session: no stored secret can be used. \
-                 Restart ilar to type the master password again."
+                "The secret store stays locked: {model} cannot be reached without it, so this \
+                 session may have no model to talk to."
             );
             Ok(config)
         }
@@ -1141,7 +1164,7 @@ async fn run_exec(config: &ilar::config::Config, args: ExecArgs) -> Result<i32> 
             context_files: None,
             user_dir: None,
             own_skills_only: false,
-            unlock_hint: Some(UNLOCK_HINT.to_string()),
+            unlock_hint: Some(EXEC_UNLOCK_HINT.to_string()),
             // Nothing: the person who started this owns every path the
             // process can reach, and withholding one from them would be
             // theatre.
@@ -1316,7 +1339,10 @@ async fn main() -> Result<()> {
     }
     let config = Loader::new().resolve().context("loading config")?;
     if let Some(Command::Exec(exec_args)) = args.command {
-        let config = unlock_secrets(config)?;
+        // No unlock: exec is the driver with nobody to answer anything,
+        // which is why it takes neither questions nor grants. A prompt
+        // here stops a piped prompt or a cron line dead before the first
+        // token, and a sealed store it cannot open is the lesser loss.
         let code = run_exec(&config, exec_args).await?;
         std::process::exit(code);
     }
@@ -1364,10 +1390,15 @@ async fn main() -> Result<()> {
     if let Some(id) = args.view.as_deref() {
         return watch::run(&config, id, configured_theme).await;
     }
-    // Before the terminal is taken over: the master password is typed
-    // on the plain terminal, once, and the configuration is read again
-    // so a provider key kept in the store is seen.
-    let config = unlock_secrets(config)?;
+    // The one session that cannot wait for a tool call to ask: the
+    // model it is about to open with — `--model` included, since that
+    // is the one `plan.start` will build — may need a key the sealed
+    // store holds.
+    let opening_model = args
+        .model
+        .clone()
+        .unwrap_or_else(|| config.general.model.clone());
+    let config = unlock_secrets(config, &opening_model)?;
     let mut active_theme = configured_theme;
     // Settings that parsed but were not honoured. Shown once, on the
     // first session: they are a property of the config, not the session.
@@ -1499,9 +1530,14 @@ async fn main() -> Result<()> {
         app.available_models = model_choices.iter().map(|model| model.full_id()).collect();
         app.session_id = session_id.clone();
         app.todos = todos;
-        // Said once on stderr before the screen came up; from here on it
-        // is the notice row's job to remember it.
-        app.secrets_locked = ilar::secrets::SecretStore::open(config.state_dir()).is_locked();
+        // The notice row's job from here on — and its own, since a tool
+        // call that wants a stored secret puts up the prompt that opens
+        // the store, and the row has to notice that too.
+        let secret_store = ilar::secrets::SecretStore::open(config.state_dir());
+        app.secrets_locked = secret_store.is_locked();
+        // Watched only where there is something to watch: a file that
+        // is not sealed cannot become locked while this process runs.
+        app.secret_store = secret_store.is_sealed().then_some(secret_store);
         // The reader in hand answers the pending-question check;
         // run_app takes the answer instead of re-reading the log for
         // it. A fresh session cannot have one.
@@ -3553,6 +3589,7 @@ async fn run_app(
         // channel is this runtime's alone, a subagent's bash needs the
         // same yes, and dropping it would be a silent refusal. The
         // modal names the asker instead.
+        app.watch_secret_lock();
         if app.grant_modal.is_none()
             && app.password_modal.is_none()
             && let Ok(ask) = ask_rx.try_recv()
@@ -3568,6 +3605,12 @@ async fn run_app(
                     app.password_modal = Some(grants::PasswordModal::new(&prompt, from_subagent));
                     password_reply = Some(prompt.reply);
                     app.status = "waiting for the sudo password".into();
+                }
+                ilar::secrets::Ask::Unlock(prompt) => {
+                    app.password_modal =
+                        Some(grants::PasswordModal::unlock(&prompt, from_subagent));
+                    password_reply = Some(prompt.reply);
+                    app.status = "waiting for the master password".into();
                 }
             }
             app.set_activity(Activity::Paused);
@@ -4103,14 +4146,9 @@ async fn run_app(
                             let modal = app.password_modal.as_mut().expect("password modal");
                             if let PasswordAction::Answer(answer) = modal.handle_key(key) {
                                 let line = modal.outcome_line(answer.is_some());
+                                let status = modal.next_status();
                                 app.password_modal = None;
-                                deliver_answer(
-                                    app,
-                                    &mut password_reply,
-                                    answer,
-                                    line,
-                                    "running sudo",
-                                );
+                                deliver_answer(app, &mut password_reply, answer, line, status);
                             }
                         }
                         Modal::Grant => {

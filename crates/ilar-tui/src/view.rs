@@ -145,7 +145,8 @@ impl App {
                 theme::PRIMARY,
             ),
             None if self.secrets_locked => (
-                "secret store locked — stored secrets are unavailable this session".to_string(),
+                "secret store sealed — the master password is asked for when one is needed"
+                    .to_string(),
                 theme::WAITING,
             ),
             None => return None,

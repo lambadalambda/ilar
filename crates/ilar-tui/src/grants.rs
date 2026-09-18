@@ -1,10 +1,12 @@
 //! The grant prompt: a tool named a stored secret, and the person
 //! decides whether the command it is about to run may have it. It is
-//! approval only; the [`PasswordModal`] below is the separate prompt
-//! sudo's password comes in, after a yes and only where sudo wants one.
+//! approval only. The [`PasswordModal`] below is the masked field the
+//! other two secret questions come in: sudo's password, after a yes and
+//! only where sudo wants one, and the master password of a sealed
+//! store, on the first call that needs what is in it.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use ilar::secrets::{Grant, GrantPrompt, PasswordPrompt};
+use ilar::secrets::{Grant, GrantPrompt, PasswordPrompt, UnlockPrompt};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -259,21 +261,37 @@ const PASSWORD_FOOTER: &str = " type or paste it · Enter send · Esc cancel ";
 /// needs none" and the command could never run; here it is nothing,
 /// said in place, and the prompt stays up.
 const PASSWORD_EMPTY: &str = "sudo needs a password on this system";
+/// The same, for a store that will not open on nothing.
+const UNLOCK_EMPTY: &str = "the store opens on its master password or not at all";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PasswordAction {
     Stay,
-    /// What was typed; `None` cancels, and the sudo call fails.
+    /// What was typed; `None` cancels, and the call waiting on it —
+    /// sudo's, or whichever wanted the sealed store — fails.
     Answer(Option<String>),
 }
 
-/// The prompt sudo's password comes in: the command it is for, a masked
-/// field, and nothing else to decide — the approval was given already.
+/// Which password the field is for. One prompt, two things behind it:
+/// they are typed the same way and answered the same way, and only the
+/// words around the field differ.
+enum Wants {
+    /// sudo's password for a command already approved.
+    Sudo,
+    /// The master password of a sealed store, wanted by the named tool
+    /// before its call can go on.
+    Unlock { tool: String },
+}
+
+/// The prompt a password comes in: what it is for, a masked field, and
+/// nothing else to decide — the approval, where one was needed, was
+/// given already.
 pub(crate) struct PasswordModal {
+    wants: Wants,
     detail: String,
     from_subagent: bool,
     agent: Option<String>,
-    /// sudo refused the last one, so this is a re-ask.
+    /// The last one was refused, so this is a re-ask.
     refused: bool,
     password: String,
     /// Enter came on an empty field: said in place.
@@ -282,11 +300,42 @@ pub(crate) struct PasswordModal {
 
 impl PasswordModal {
     pub(crate) fn new(prompt: &PasswordPrompt, from_subagent: bool) -> Self {
-        Self {
-            detail: prompt.detail.clone(),
+        Self::of(
+            Wants::Sudo,
+            &prompt.detail,
             from_subagent,
-            agent: prompt.agent.clone(),
-            refused: prompt.refused,
+            prompt.agent.as_deref(),
+            prompt.refused,
+        )
+    }
+
+    /// The master password of a sealed store, asked for by the call
+    /// that first needs what is in it.
+    pub(crate) fn unlock(prompt: &UnlockPrompt, from_subagent: bool) -> Self {
+        Self::of(
+            Wants::Unlock {
+                tool: prompt.tool.clone(),
+            },
+            &prompt.detail,
+            from_subagent,
+            prompt.agent.as_deref(),
+            prompt.refused,
+        )
+    }
+
+    fn of(
+        wants: Wants,
+        detail: &str,
+        from_subagent: bool,
+        agent: Option<&str>,
+        refused: bool,
+    ) -> Self {
+        Self {
+            wants,
+            detail: detail.to_string(),
+            from_subagent,
+            agent: agent.map(str::to_string),
+            refused,
             password: String::new(),
             empty: false,
         }
@@ -332,10 +381,15 @@ impl PasswordModal {
         PasswordAction::Stay
     }
 
-    /// The title: whose sudo is waiting, named where the name is known.
+    /// What the prompt calls itself, and whose tool is waiting where
+    /// the name is known.
     fn title(&self) -> String {
+        let what = match &self.wants {
+            Wants::Sudo => "sudo password".to_string(),
+            Wants::Unlock { tool } => format!("secret store password — {tool} is waiting"),
+        };
         format!(
-            " sudo password{} ",
+            " {what}{} ",
             subagent_mark(self.from_subagent, self.agent.as_deref())
         )
     }
@@ -343,16 +397,43 @@ impl PasswordModal {
     /// The transcript's record of a prompt nobody is waiting on any
     /// more: the turn ended or was aborted under the modal.
     pub(crate) fn withdrawn_line(&self) -> String {
-        "sudo password prompt withdrawn — the tool stopped waiting".to_string()
+        match self.wants {
+            Wants::Sudo => "sudo password prompt withdrawn — the tool stopped waiting",
+            Wants::Unlock { .. } => {
+                "secret store password prompt withdrawn — the tool stopped waiting"
+            }
+        }
+        .to_string()
     }
 
     /// The transcript's one-line record of the answer. The password
     /// itself never goes in, of course.
     pub(crate) fn outcome_line(&self, given: bool) -> String {
-        if given {
-            "sudo password given".to_string()
-        } else {
-            "sudo password prompt cancelled — the command does not run".to_string()
+        match (&self.wants, given) {
+            (Wants::Sudo, true) => "sudo password given",
+            (Wants::Sudo, false) => "sudo password prompt cancelled — the command does not run",
+            (Wants::Unlock { .. }, true) => "secret store password given",
+            (Wants::Unlock { .. }, false) => {
+                "the secret store stays locked — the call that needed it is refused"
+            }
+        }
+        .to_string()
+    }
+
+    /// What the session goes back to doing once the field is answered.
+    pub(crate) fn next_status(&self) -> &'static str {
+        match self.wants {
+            Wants::Sudo => "running sudo",
+            Wants::Unlock { .. } => "opening the secret store",
+        }
+    }
+
+    /// What a wrong password means, in the words of the thing that
+    /// refused it.
+    fn refusal(&self) -> &'static str {
+        match self.wants {
+            Wants::Sudo => "(sudo refused the last one)",
+            Wants::Unlock { .. } => "(that did not open the store)",
         }
     }
 
@@ -360,7 +441,7 @@ impl PasswordModal {
         let mut lines = Vec::new();
         if self.refused {
             lines.push(Line::styled(
-                "(sudo refused the last one)",
+                self.refusal(),
                 Style::default().fg(theme::ERROR),
             ));
         }
@@ -377,10 +458,11 @@ impl PasswordModal {
     fn field_lines(&self, width: usize) -> Vec<Line<'static>> {
         let mut lines = vec![masked_line("Password: ", &self.password, width)];
         if self.empty {
-            lines.push(Line::styled(
-                PASSWORD_EMPTY,
-                Style::default().fg(theme::ERROR),
-            ));
+            let said = match self.wants {
+                Wants::Sudo => PASSWORD_EMPTY,
+                Wants::Unlock { .. } => UNLOCK_EMPTY,
+            };
+            lines.push(Line::styled(said, Style::default().fg(theme::ERROR)));
         }
         lines
     }
@@ -709,6 +791,50 @@ mod tests {
             "the mask fills the row between the leader and the cursor: {row}"
         );
         assert!(masked > 4, "a window worth showing: {masked}");
+    }
+
+    /// The master password prompt is the same field with the store's
+    /// words: it names the tool held up, a wrong one says the store did
+    /// not open, and a cancel says the store stays locked rather than
+    /// promising a command will not run.
+    #[test]
+    fn the_unlock_prompt_speaks_for_the_store_not_for_sudo() {
+        let (reply, _rx) = tokio::sync::oneshot::channel();
+        let prompt = ilar::secrets::UnlockPrompt {
+            session_id: "s1".into(),
+            agent: None,
+            tool_call_id: Some("call-1".into()),
+            tool: "bash".into(),
+            detail: "gh pr list".into(),
+            refused: false,
+            reply,
+        };
+        let modal = PasswordModal::unlock(&prompt, false);
+        let shown = password_screen(&modal, 80, 24);
+        assert!(shown.contains("secret store"), "{shown}");
+        assert!(shown.contains("bash"), "{shown}");
+        assert!(shown.contains("gh pr list"), "{shown}");
+        assert!(!shown.contains("sudo"), "{shown}");
+        assert!(
+            modal.outcome_line(false).contains("stays locked"),
+            "{}",
+            modal.outcome_line(false)
+        );
+        assert!(!modal.withdrawn_line().contains("sudo"));
+
+        let (reply, _rx) = tokio::sync::oneshot::channel();
+        let again = PasswordModal::unlock(
+            &ilar::secrets::UnlockPrompt {
+                refused: true,
+                agent: Some("reviewer".into()),
+                reply,
+                ..prompt
+            },
+            true,
+        );
+        let shown = password_screen(&again, 80, 24);
+        assert!(shown.contains("did not open"), "{shown}");
+        assert!(shown.contains("(reviewer subagent)"), "{shown}");
     }
 
     /// A long command keeps the field on screen and says what it hid.
