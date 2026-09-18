@@ -108,7 +108,7 @@ impl CustomModel {
     /// provider.
     fn dialect(&self, name: &str) -> crate::provider::chat::ChatDialect {
         let dialect = crate::provider::chat::ChatDialect::custom(
-            self.base_url.trim_end_matches('/').to_string(),
+            self.base_url.clone(),
             self.model.clone().unwrap_or_else(|| name.to_string()),
             self.api_key.clone(),
             self.vision,
@@ -379,6 +379,24 @@ static PROVIDERS: &[ProviderKind] = &[
         build: opencode_go_provider,
     },
 ];
+
+/// A base URL in its one canonical form, or why it is not one: an
+/// `http://` or `https://` URL with a host, no query, no fragment,
+/// and no trailing slash — so `{base}/chat/completions` joins with
+/// exactly one separator wherever a wire does it. Checked when the
+/// configuration is read and stored this way, so a mistake is the
+/// file's to report at startup rather than a turn's to discover as a
+/// 404 four calls in.
+fn canonical_base_url(value: &str) -> Result<String, &'static str> {
+    let url = url::Url::parse(value).map_err(|_| "must be an http:// or https:// URL")?;
+    if !matches!(url.scheme(), "http" | "https") || !url.has_host() {
+        return Err("must be an http:// or https:// URL with a host");
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err("must not carry a query or a fragment");
+    }
+    Ok(url.to_string().trim_end_matches('/').to_string())
+}
 
 fn provider_kind<'a>(name: &str, kinds: &'a [ProviderKind]) -> Option<&'a ProviderKind> {
     kinds.iter().find(|kind| kind.name == name)
@@ -764,6 +782,24 @@ impl Config {
                     ));
                 }
                 merged = merge_file(merged, &text, &path, Layer::Project)?;
+            }
+        }
+
+        // One canonical base form for every configured endpoint, the
+        // same rule the provider table gets: validated per file above,
+        // stored without the trailing slash here.
+        if let Some(models) = merged.models.as_mut() {
+            for entry in models.values_mut() {
+                if let Ok(url) = canonical_base_url(&entry.base_url) {
+                    entry.base_url = url;
+                }
+            }
+        }
+        if let Some(endpoints) = merged.endpoints.as_mut() {
+            for entry in endpoints.values_mut() {
+                if let Ok(url) = canonical_base_url(&entry.base_url) {
+                    entry.base_url = url;
+                }
             }
         }
 
@@ -1174,7 +1210,10 @@ fn resolve_providers(
             (
                 kind.name.to_string(),
                 ProviderConfigResolved {
-                    base_url: field(|config| config.base_url.clone()),
+                    // Validated already; stored canonical, so every wire
+                    // joins its path onto the same shape.
+                    base_url: field(|config| config.base_url.clone())
+                        .map(|url| canonical_base_url(&url).unwrap_or(url)),
                     api_key: field(|config| config.api_key.clone())
                         .or_else(|| env.env_lookup(kind.api_key_env))
                         .or_else(|| stored(kind.api_key_env)),
@@ -1643,12 +1682,9 @@ fn validate_endpoints(
             "{}: endpoint name {name:?} must not be a provider name",
             origin.display()
         );
-        anyhow::ensure!(
-            url::Url::parse(&entry.base_url)
-                .is_ok_and(|url| url.has_host() && matches!(url.scheme(), "http" | "https")),
-            "{}: endpoints.{name}.base_url must be an http:// or https:// URL",
-            origin.display()
-        );
+        canonical_base_url(&entry.base_url).map_err(|why| {
+            anyhow::anyhow!("{}: endpoints.{name}.base_url {why}", origin.display())
+        })?;
         anyhow::ensure!(
             entry.context != Some(0) && entry.output != Some(0),
             "{}: endpoints.{name}: context and output must be at least 1",
@@ -1692,12 +1728,8 @@ fn validate_models(
         // The scheme is checked too: a URL reqwest cannot post to is the
         // same kind of mistake as a malformed one, and finding out
         // mid-turn is the thing this function exists to prevent.
-        anyhow::ensure!(
-            url::Url::parse(&entry.base_url)
-                .is_ok_and(|url| url.has_host() && matches!(url.scheme(), "http" | "https")),
-            "{}: models.{name}.base_url must be an http:// or https:// URL",
-            origin.display()
-        );
+        canonical_base_url(&entry.base_url)
+            .map_err(|why| anyhow::anyhow!("{}: models.{name}.base_url {why}", origin.display()))?;
         anyhow::ensure!(
             entry.context > 0,
             "{}: models.{name}.context must be at least 1",
@@ -1750,6 +1782,15 @@ fn validate_providers(
         let Some(kind) = provider_kind(name, kinds) else {
             anyhow::bail!("{}: unsupported provider {name:?}", origin.display());
         };
+        if let Some(url) = &provider.base_url {
+            canonical_base_url(url).map_err(|why| {
+                anyhow::anyhow!(
+                    "{}: providers.{}.base_url {why}",
+                    origin.display(),
+                    kind.name
+                )
+            })?;
+        }
         validate_provider_value(origin, kind.name, "auth", &provider.auth, kind.auth_values)?;
         if provider.image_gen.is_some() && kind.name != "openai" {
             anyhow::bail!(

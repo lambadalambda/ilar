@@ -1004,6 +1004,69 @@ fn ignored_project_routing_tables_cannot_refuse_startup() {
     assert!(error.contains("ilar.toml"), "{error}");
 }
 
+/// Base URLs are structural, not strings: parsed when the file is
+/// read, refused by field when they are not an http(s) URL with a host
+/// or carry a query or fragment, and stored without the trailing slash
+/// that used to become `//chat/completions` on the wire.
+#[test]
+fn base_urls_are_canonical_and_refused_by_field() {
+    let (_g, dir) = tempdir();
+    write(
+        &dir.join("ilar.toml"),
+        "[providers.zai]\napi_key = \"k\"\nbase_url = \"https://zai.test/api/v1/\"\n\n\
+         [models.local]\nbase_url = \"http://127.0.0.1:8080/v1/\"\ncontext = 8192\n\n\
+         [endpoints.lemon]\nbase_url = \"http://127.0.0.1:13305/api/v1/\"\n",
+    );
+    let config = Loader::no_env().config_dir(dir.clone()).resolve().unwrap();
+    assert_eq!(
+        config.providers["zai"].base_url.as_deref(),
+        Some("https://zai.test/api/v1")
+    );
+    assert_eq!(config.models["local"].base_url, "http://127.0.0.1:8080/v1");
+    assert_eq!(
+        config.endpoints["lemon"].base_url,
+        "http://127.0.0.1:13305/api/v1"
+    );
+
+    for (body, field, why) in [
+        (
+            "[providers.zai]\nbase_url = \"ftp://zai.test\"\n",
+            "providers.zai.base_url",
+            "http:// or https://",
+        ),
+        (
+            "[providers.openai]\nbase_url = \"https:///nohost\"\n",
+            "providers.openai.base_url",
+            "host",
+        ),
+        (
+            "[providers.zai]\nbase_url = \"https://zai.test/v1?x=1\"\n",
+            "providers.zai.base_url",
+            "query",
+        ),
+        (
+            "[models.local]\nbase_url = \"http://h/v1#frag\"\ncontext = 8192\n",
+            "models.local.base_url",
+            "fragment",
+        ),
+        (
+            "[endpoints.lemon]\nbase_url = \"not a url\"\n",
+            "endpoints.lemon.base_url",
+            "http:// or https://",
+        ),
+    ] {
+        write(&dir.join("ilar.toml"), body);
+        let error = Loader::no_env()
+            .config_dir(dir.clone())
+            .resolve()
+            .expect_err(body)
+            .to_string();
+        assert!(error.contains(field), "{body}: {error}");
+        assert!(error.contains(why), "{body}: {error}");
+        assert!(error.contains("ilar.toml"), "{body}: {error}");
+    }
+}
+
 #[test]
 fn config_read_errors_include_the_file_path() {
     let (_g, dir) = tempdir();

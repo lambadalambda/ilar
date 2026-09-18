@@ -65,7 +65,7 @@ impl Endpoint {
         vision: bool,
     ) -> crate::provider::chat::ChatDialect {
         let dialect = crate::provider::chat::ChatDialect::custom(
-            self.base_url.trim_end_matches('/').to_string(),
+            self.base_url.clone(),
             model_id.to_string(),
             self.api_key.clone(),
             vision,
