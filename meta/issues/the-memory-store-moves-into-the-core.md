@@ -37,14 +37,18 @@ one per launch directory.
   `history`.
 - No shared crate for the gateway's reviewer: it keeps calling the
   store through the moved API.
+- `[general] memory = false` (default `true`) leaves a terminal
+  session without the tools and the block; the gateway keeps
+  `gateway.memory.enabled`. Pulled forward from the next issue at the
+  user's request, 2026-09-18.
 
 ## Acceptance Criteria
 
 - Every existing gateway memory test passes unchanged in meaning,
   whether it moves with the code or stays behind.
-- A core test opens a store at a per-directory root, writes through
-  the `memory` tool, reopens it at the same directory spelled
-  differently and reads the same core block.
+- A core test opens a store at a per-directory root, writes to it,
+  reopens it at the same directory spelled differently and reads the
+  same core block in the next plan's prompt.
 - A TUI session in a directory with no memory yet has the tools and
   an empty store; nothing is created on disk until something is
   written.

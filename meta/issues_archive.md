@@ -422,3 +422,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Ignored routing tables cannot refuse startup](issues/ignored-routing-tables-cannot-refuse-startup.md) — the project layer sheds the user-scoped tables off the raw TOML before validation
 - [x] [Provider URLs are structural](issues/provider-urls-are-structural.md) — one canonical form for providers, models and endpoints, refused by field
 - [x] [Skills load one body once](issues/skills-load-one-body-once.md) — one scan per store, one body per load, 256 KiB cap; a miss refreshes cheaply
+- [x] [The memory store moves into the core](issues/the-memory-store-moves-into-the-core.md) — `ilar::memory`, one store per launch directory under the state dir, `[general] memory` switch; the gateway keeps its home and its rules

@@ -1,6 +1,39 @@
 # DEVLOG
 
-## 2026-09-19 — Seven small ones
+## 2026-09-18 — Memory in every directory
+
+Reading a write-up of Claude Code's auto-memory next to ilar's own: the
+same two tiers, the same one-line summaries, and one difference that
+mattered — theirs is per project directory and ours was the gateway's
+alone. A terminal session had no memory at all, and could not see what
+the assistant on the same machine had kept.
+
+**The store moves into the core.** `ilar::memory` is the gateway's
+module, unchanged: the two capped core files, the note archive, BM25
+with recency decay, the three tools. A store is a directory and
+nothing else, so who remembers is who owns the directory. The gateway
+keeps `<home>/memory/`; a terminal session gets
+`<state dir>/memory/<slug>/`, the slug being the canonical launch
+directory as one file name plus a short hash so `a/b` and `a-b` stay
+apart. Nothing is created until the first write. `[general] memory =
+false` turns it off for terminal sessions; the gateway has its own
+flag as before.
+
+**The plan carries it.** `RuntimeOptions.memory` puts the three tools
+into the root registry — a subagent's memory would be its parent's —
+and the core block into the system prompt. The block is appended at
+start, not at resolve, so a driver's own additions come first: the
+gateway's "where you are" still precedes the memory, and a room's seat,
+which passes no store, gets neither tools nor block. The gateway's
+hand-added tools and hand-appended block are gone; its tool policy
+filters the core registry as it always did.
+
+What stayed behind is what makes memory an assistant's: the review
+after a turn, the weekly promotion, the daily notes at handover, and
+the room-seat guard on the memory directory. A terminal session has
+the tools and a present user; when to write is the next issue.
+
+## 2026-09-18 — Seven small ones
 
 The backlog's small correctness items, one commit each on one branch.
 

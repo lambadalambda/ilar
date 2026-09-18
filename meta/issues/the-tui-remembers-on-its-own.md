@@ -28,8 +28,9 @@ worth keeping. The TUI takes the same approach.
 - The core block's "frozen for this session" note stays; a write
   during the session changes the next session's prompt, not this
   one's.
-- Off switch: `[general] memory = false` (or the existing gateway
-  flag's core counterpart) removes the tools and the prompt section.
+- The off switch, `[general] memory = false`, landed with the store
+  (it removes the tools and the core block); it removes the prompt
+  section too.
 
 ## Acceptance Criteria
 
