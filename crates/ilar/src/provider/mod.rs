@@ -70,6 +70,9 @@ impl ProviderHandle<'_> {
 pub trait ProviderResolver: Send + Sync {
     fn resolve_provider(&self, model: &str) -> anyhow::Result<ProviderHandle<'_>>;
 
+    /// The model's whole window. `None` means the session never
+    /// compacts, so an implementation without a better source answers
+    /// the catalog's row rather than nothing — see the blanket impl.
     fn context_limit(&self, _model: &str) -> Option<u64> {
         None
     }
@@ -88,10 +91,42 @@ pub trait ProviderResolver: Send + Sync {
     }
 }
 
+/// The limits a bare provider answers with: the catalog's, since it
+/// has a row for every model a configuration can route — including
+/// the discovered and custom ones, registered at load. The trait's
+/// defaults answer `None`, and `None` is not "unknown" downstream, it
+/// is "never compact": a surface that embedded a provider one type
+/// parameter short of the configured resolver grew its session until
+/// the provider rejected it. Only a model in no row at all stays
+/// limitless, and such a model cannot be reached through configuration.
+fn catalog_context_limit(model: &str) -> Option<u64> {
+    crate::model::find(model).map(|row| row.context_limit)
+}
+
+fn catalog_input_limit(model: &str) -> Option<u64> {
+    crate::model::find(model).map(|row| row.input_limit)
+}
+
+fn catalog_compaction_limit(model: &str) -> Option<u64> {
+    crate::model::find(model).map(crate::model::compaction_limit)
+}
+
 impl<T: Provider> ProviderResolver for T {
     fn resolve_provider(&self, model: &str) -> anyhow::Result<ProviderHandle<'_>> {
         ensure_provider_matches(self, model)?;
         Ok(ProviderHandle::Borrowed(self))
+    }
+
+    fn context_limit(&self, model: &str) -> Option<u64> {
+        catalog_context_limit(model)
+    }
+
+    fn input_limit(&self, model: &str) -> Option<u64> {
+        catalog_input_limit(model)
+    }
+
+    fn compaction_limit(&self, model: &str) -> Option<u64> {
+        catalog_compaction_limit(model)
     }
 }
 
@@ -110,6 +145,18 @@ impl ProviderResolver for FixedProviderResolver {
     fn resolve_provider(&self, model: &str) -> anyhow::Result<ProviderHandle<'_>> {
         ensure_provider_matches(self.provider.as_ref(), model)?;
         Ok(ProviderHandle::Borrowed(self.provider.as_ref()))
+    }
+
+    fn context_limit(&self, model: &str) -> Option<u64> {
+        catalog_context_limit(model)
+    }
+
+    fn input_limit(&self, model: &str) -> Option<u64> {
+        catalog_input_limit(model)
+    }
+
+    fn compaction_limit(&self, model: &str) -> Option<u64> {
+        catalog_compaction_limit(model)
     }
 }
 

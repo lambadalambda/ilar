@@ -194,3 +194,27 @@ async fn thinking_events_stream_and_complete() {
     assert_eq!(events.len(), 5);
     assert!(matches!(&events[2], ProviderEvent::ThinkingCompleted));
 }
+
+/// A bare provider used as its own resolver answers the catalog's
+/// limits. The trait's `None` defaults meant "never compact", and a
+/// surface one type parameter short of the configured resolver grew
+/// its session until the provider refused it.
+#[test]
+fn a_bare_provider_answers_the_catalog_s_limits() {
+    use ilar::provider::{FixedProviderResolver, ProviderResolver};
+    let provider = MockProvider::new(vec![]);
+    let row = ilar::model::find("zai/glm-4.7").expect("a catalog row");
+    assert_eq!(
+        provider.context_limit("zai/glm-4.7"),
+        Some(row.context_limit)
+    );
+    assert_eq!(
+        provider.compaction_limit("zai/glm-4.7"),
+        Some(ilar::model::compaction_limit(row))
+    );
+    let fixed = FixedProviderResolver::new(std::sync::Arc::new(MockProvider::new(vec![])));
+    assert_eq!(fixed.context_limit("zai/glm-4.7"), Some(row.context_limit));
+    // A model in no row is the one case that stays limitless.
+    assert_eq!(provider.context_limit("nowhere/nothing"), None);
+    assert_eq!(fixed.compaction_limit("nowhere/nothing"), None);
+}
