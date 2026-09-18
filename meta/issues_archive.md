@@ -414,3 +414,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [A locked store scrubs nothing and says nothing](issues/a-locked-store-scrubs-nothing-and-says-nothing.md) — the first tool result admits it, once per runtime; no prompt on that account
 - [x] [A review agent that may run things](issues/a-review-agent-that-may-run-things.md) — built in; foreground by default rather than background, since its findings are waited on
 - [x] [Interleaved thinking goes back on the wire](issues/interleaved-thinking-goes-back-on-the-wire.md) — chat-wire rows and endpoints replay `reasoning_content` inside a turn; `replay_thinking = false` opts a server out; probed live on five families
+- [x] [Thinking goes back whole, and under its own name](issues/thinking-goes-back-whole-and-under-its-own-name.md) — `replay_thinking = all | turn | off`, `all` the default; one spelling per request, the newest in the log

@@ -102,7 +102,6 @@ milestones 15–17 stay filed — they come back when the feature does.*
 ## Milestone 19 — More doors
 
 - [ ] [MiniMax thinks out loud](issues/minimax-thinks-out-loud.md)
-- [ ] [Thinking goes back whole, and under its own name](issues/thinking-goes-back-whole-and-under-its-own-name.md)
 
 ## Milestone 20 — Sweep: the user's eye
 
