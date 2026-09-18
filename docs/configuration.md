@@ -117,7 +117,7 @@ by the `models` tool.
 
 | Field | Required | Default | Description |
 | --- | --- | --- | --- |
-| `base_url` | yes | — | Everything up to `/chat/completions`, e.g. `http://127.0.0.1:8080/v1`. Must be an `http://` or `https://` URL with a host. |
+| `base_url` | yes | — | Everything up to `/chat/completions`, e.g. `http://127.0.0.1:8080/v1`. Must be an `http://` or `https://` URL with a host and no query or fragment; a trailing slash is dropped. The same rule applies to every provider's `base_url`. |
 | `context` | yes | — | The window the endpoint serves, in tokens. There is no catalog row behind a custom model, so this number is the only thing input budgeting and compaction have; see below. |
 | `model` | no | the section name | The id to put on the wire, when the server calls the model something else (`llama3.3:70b`). |
 | `api_key` | no | none | Sent as `Authorization: Bearer …`. With no key, **no Authorization header is sent at all** — which is what a local server wants. There is no environment-variable fallback for these entries. |
@@ -217,7 +217,7 @@ context = 65536          # for models whose listing does not say
 
 | Field | Required | Default | Description |
 | --- | --- | --- | --- |
-| `base_url` | yes | — | Everything up to `/models` and `/chat/completions`. |
+| `base_url` | yes | — | Everything up to `/models` and `/chat/completions`; the same rule as a model's. |
 | `api_key` | no | none | Sent as `Authorization: Bearer …` on the listing and every request. |
 | `context` | no | `32768` | The window for a model whose listing does not state one. |
 | `output` | no | a quarter of the window | Tokens reserved for the reply. |

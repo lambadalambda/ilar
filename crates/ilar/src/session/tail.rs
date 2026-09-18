@@ -527,10 +527,10 @@ mod tests {
         assert_eq!(tail.line(), 3, "no half-consumed slab");
         assert_eq!(tail.events(), before);
 
-        // The full replay refuses the same line the same way.
-        let error = SessionTail::open(&store, &id)
-            .and_then(|mut fresh| fresh.poll())
-            .unwrap_err();
+        // The full replay refuses the same line the same way: a reader
+        // resuming past it folds the file from byte 0 and meets the
+        // marker in `fold_rewinds`, not in `consume`.
+        let error = SessionTail::open_at(&store, &id, 5).expect_err("a refused replay");
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
         assert!(error.to_string().contains("line 5"), "{error}");
     }

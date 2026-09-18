@@ -2989,6 +2989,9 @@ fn scratch_repo() -> (tempfile::TempDir, std::path::PathBuf) {
         assert!(output.status.success(), "git {args:?} failed");
     };
     git(&["init", "-q"]);
+    // Hermetic: a developer machine that signs commits would otherwise
+    // hand this fixture to its real signer.
+    git(&["config", "commit.gpgsign", "false"]);
     std::fs::write(root.join("main.rs"), "fn main() {}\n").unwrap();
     (temp, root)
 }

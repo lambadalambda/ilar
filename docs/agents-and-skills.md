@@ -135,9 +135,12 @@ Skills are Markdown files in `${ILAR_CONFIG_DIR:-~/.config/ilar}/skills/` and
 `./.ilar/skills/`. Project skills override user and built-in skills with the
 same parsed name. Skill frontmatter supports `name`, `description`, and
 `triggers`; root sessions list skill names and descriptions in the system
-prompt and load full bodies on demand through the `skill` tool. Trigger cue
-phrases are included in the system-prompt listing so the model invokes the
-skill when they match the task. In the TUI, typing `/` shows inline completion
+prompt and load full bodies on demand through the `skill` tool. The
+directories are scanned once per start for names and descriptions; a body
+is read when its skill is loaded, so an edit lands on the next load, and a
+skill written mid-session loads by name at once. A skill file may be at most
+256 KiB. Trigger cue phrases are included in the system-prompt listing so
+the model invokes the skill when they match the task. In the TUI, typing `/` shows inline completion
 for skills and built-in commands (Tab completes, Enter submits a fully typed
 name); `/<skill-name> [arguments]` invokes a skill directly, and the palette's
 "Invoke skill…" entry opens a picker.

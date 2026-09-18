@@ -678,7 +678,21 @@ async fn small_transcript_skips_compaction() {
 
 #[tokio::test]
 async fn no_context_limit_disables_compaction() {
-    let (store, session_id) = temp_session();
+    // A model in no catalog row: the one case a bare provider still
+    // answers no limit for, now that it answers the catalog's.
+    let dir = std::env::temp_dir().join(format!("ilar-compaction-test-{}", new_id()));
+    let store = SessionStore::new(dir);
+    let session_id = new_id();
+    store
+        .create(SessionMeta {
+            session_id: session_id.clone(),
+            parent_id: None,
+            agent: "build".into(),
+            model: "nowhere/nothing".into(),
+            workspace: None,
+            cwd: None,
+        })
+        .unwrap();
     let provider = MockProvider::new(vec![text_turn("answer")]);
     let registry = ToolRegistry::builtin();
 
@@ -974,6 +988,17 @@ async fn turn_boundary_compaction_keeps_the_checkpoint_with_its_message() {
             .arg("-C")
             .arg(&root)
             .args(["init", "-q"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    // Hermetic: a developer machine that signs commits would otherwise
+    // hand this fixture to its real signer.
+    assert!(
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["config", "commit.gpgsign", "false"])
             .status()
             .unwrap()
             .success()

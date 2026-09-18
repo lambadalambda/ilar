@@ -204,7 +204,7 @@ pub(crate) fn discover(
 /// loads synchronously, sometimes inside an async runtime, and a request
 /// needs one of its own either way.
 fn fetch_listing(base_url: &str, api_key: Option<&str>) -> anyhow::Result<String> {
-    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    let url = format!("{base_url}/models");
     let api_key = api_key.map(str::to_string);
     let worker = std::thread::spawn(move || -> anyhow::Result<String> {
         let runtime = tokio::runtime::Builder::new_current_thread()

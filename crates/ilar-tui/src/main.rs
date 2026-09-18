@@ -2693,7 +2693,6 @@ fn open_agent_focus(app: &mut App, store: &SessionStore, session_id: &str) -> Op
     // the footer's "running" is the same judgement, since no `TurnDone`
     // is ever going to arrive to take it back either.
     let streaming = roster.is_some_and(|row| !row.delivering);
-    let running = streaming;
     // What Enter may do here, judged now: the roster row is gone the
     // moment the agent finishes, and a refusal that depends on whose
     // child it is must not go with it. Without a row the log says whose
@@ -2734,7 +2733,7 @@ fn open_agent_focus(app: &mut App, store: &SessionStore, session_id: &str) -> Op
             vec![crate::transcript::Line_::System(
                 "loading transcript…".into(),
             )],
-            running,
+            streaming,
         )
     });
     Some(streaming)

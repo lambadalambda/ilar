@@ -401,6 +401,28 @@ fn canonical_base_url(value: &str) -> Result<String, &'static str> {
     Ok(url.to_string().trim_end_matches('/').to_string())
 }
 
+/// Every `base_url` a layer carries, in its canonical form. Called after
+/// validation, which is what makes the fallback unreachable.
+fn canonical_base_urls(mut parsed: FileConfig) -> FileConfig {
+    let canonical = |url: &str| canonical_base_url(url).unwrap_or_else(|_| url.to_string());
+    if let Some(providers) = parsed.providers.as_mut() {
+        for provider in providers.values_mut() {
+            provider.base_url = provider.base_url.as_deref().map(canonical);
+        }
+    }
+    if let Some(models) = parsed.models.as_mut() {
+        for entry in models.values_mut() {
+            entry.base_url = canonical(&entry.base_url);
+        }
+    }
+    if let Some(endpoints) = parsed.endpoints.as_mut() {
+        for entry in endpoints.values_mut() {
+            entry.base_url = canonical(&entry.base_url);
+        }
+    }
+    parsed
+}
+
 fn provider_kind<'a>(name: &str, kinds: &'a [ProviderKind]) -> Option<&'a ProviderKind> {
     kinds.iter().find(|kind| kind.name == name)
 }
@@ -785,24 +807,6 @@ impl Config {
                     ));
                 }
                 merged = merge_file(merged, &text, &path, Layer::Project)?;
-            }
-        }
-
-        // One canonical base form for every configured endpoint, the
-        // same rule the provider table gets: validated per file above,
-        // stored without the trailing slash here.
-        if let Some(models) = merged.models.as_mut() {
-            for entry in models.values_mut() {
-                if let Ok(url) = canonical_base_url(&entry.base_url) {
-                    entry.base_url = url;
-                }
-            }
-        }
-        if let Some(endpoints) = merged.endpoints.as_mut() {
-            for entry in endpoints.values_mut() {
-                if let Ok(url) = canonical_base_url(&entry.base_url) {
-                    entry.base_url = url;
-                }
             }
         }
 
@@ -1213,10 +1217,7 @@ fn resolve_providers(
             (
                 kind.name.to_string(),
                 ProviderConfigResolved {
-                    // Validated already; stored canonical, so every wire
-                    // joins its path onto the same shape.
-                    base_url: field(|config| config.base_url.clone())
-                        .map(|url| canonical_base_url(&url).unwrap_or(url)),
+                    base_url: field(|config| config.base_url.clone()),
                     api_key: field(|config| config.api_key.clone())
                         .or_else(|| env.env_lookup(kind.api_key_env))
                         .or_else(|| stored(kind.api_key_env)),
@@ -1385,7 +1386,6 @@ fn declared_user_scoped_tables(text: &str) -> Vec<&'static str> {
 /// Whose file a layer is. The project layer sheds the user-scoped
 /// tables before validation: they are ignored, and an ignored table
 /// must not be able to refuse startup.
-#[derive(Clone, Copy, PartialEq, Eq)]
 enum Layer {
     User,
     Project,
@@ -1435,6 +1435,10 @@ fn merge_file(
         }
     };
     validate_file(&parsed, origin)?;
+    // Validated, so every base URL canonicalises; stored that way, so
+    // every wire joins its path onto one shape. Only the user layer
+    // carries these tables by now.
+    let parsed = canonical_base_urls(parsed);
     let mut merged = base;
     if let Some(general) = parsed.general {
         overlay!(

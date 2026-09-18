@@ -141,12 +141,18 @@ const NO_ENV: &[(&str, &str)] = &[];
 
 /// A fixed identity for shadow commits: `commit-tree` must not depend
 /// on (or leak) the user's configured identity, and must work when
-/// none is configured.
+/// none is configured. Nor may it sign: `commit-tree` honours
+/// `commit.gpgsign`, and a checkpoint under a signing user's global
+/// config would otherwise call their signer on every turn. The
+/// override rides the environment, so nothing of theirs is touched.
 const IDENTITY_ENV: &[(&str, &str)] = &[
     ("GIT_AUTHOR_NAME", "ilar"),
     ("GIT_AUTHOR_EMAIL", "checkpoint@ilar.invalid"),
     ("GIT_COMMITTER_NAME", "ilar"),
     ("GIT_COMMITTER_EMAIL", "checkpoint@ilar.invalid"),
+    ("GIT_CONFIG_COUNT", "1"),
+    ("GIT_CONFIG_KEY_0", "commit.gpgsign"),
+    ("GIT_CONFIG_VALUE_0", "false"),
 ];
 
 /// A throwaway index file, removed on drop.
