@@ -952,6 +952,58 @@ fn project_cannot_reset_chatgpt_auth_or_inject_a_key() {
     );
 }
 
+/// An ignored table may not refuse startup: a cloned repository's
+/// `[providers]` and `[models]` are documented as ignored, yet they used
+/// to pass through validation before being thrown away, so one bad
+/// line a project was told means nothing kept ilar from opening. The
+/// same lines in the user's own file still fail by name.
+#[test]
+fn ignored_project_routing_tables_cannot_refuse_startup() {
+    let (_gu, user) = tempdir();
+    write(
+        &user.join("ilar.toml"),
+        "[general]\nmodel = \"zai/glm-4.7\"\n",
+    );
+    let (_gp, project) = tempdir();
+    let bad = "[providers.nonesuch]\nauth = \"magic\"\nsurprise = 1\n\n\
+               [models.broken]\nbase_url = \"not a url\"\ncontext = 0\n\n\
+               [endpoints.zai]\nbase_url = \"ftp://nowhere\"\n\n\
+               [agent]\nmax_iterations = 7\n";
+    write(&project.join("ilar.toml"), bad);
+
+    let config = Loader::no_env()
+        .config_dir(user.clone())
+        .project_dir(project)
+        .resolve()
+        .expect("ignored tables must not block startup");
+    assert_eq!(config.general.model, "zai/glm-4.7");
+    assert_eq!(
+        config.agent.max_iterations, 7,
+        "project-scoped settings still apply"
+    );
+    assert!(config.models.is_empty() && config.endpoints.is_empty());
+    assert!(!config.providers.contains_key("nonesuch"));
+    let warned: Vec<&str> = config
+        .warnings
+        .iter()
+        .map(String::as_str)
+        .filter(|w| w.contains("ignored in project config"))
+        .collect();
+    assert_eq!(warned.len(), 3, "{:?}", config.warnings);
+    for table in ["[providers]", "[models]", "[endpoints]"] {
+        assert!(warned.iter().any(|w| w.contains(table)), "{warned:?}");
+    }
+
+    // The user's own file is validated as before, naming the field.
+    write(&user.join("ilar.toml"), bad);
+    let error = Loader::no_env()
+        .config_dir(user)
+        .resolve()
+        .expect_err("the user's own bad provider still refuses")
+        .to_string();
+    assert!(error.contains("ilar.toml"), "{error}");
+}
+
 #[test]
 fn config_read_errors_include_the_file_path() {
     let (_g, dir) = tempdir();

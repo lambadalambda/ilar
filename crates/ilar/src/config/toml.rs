@@ -725,7 +725,7 @@ impl Config {
         let mut merged = FileConfig::default();
         let user_path = user_dir.join("ilar.toml");
         if let Some(text) = read_config_file(&user_path)? {
-            merged = merge_file(merged, &text, &user_path)?;
+            merged = merge_file(merged, &text, &user_path, Layer::User)?;
         }
         let user_theme = merged
             .general
@@ -742,16 +742,10 @@ impl Config {
         // endpoint it chose. For `[providers.*]` every field is such a
         // lever: base_url re-routes requests carrying the user's key,
         // api_key substitutes the repository's, auth flips OAuth mode.
-        let user_models = merged.models.clone();
-        let user_endpoints = merged.endpoints.clone();
-        let mut project_declared_endpoints = false;
-        let user_providers = merged.providers.clone();
-        let user_cache_compact = merged.cache_compact.clone();
-        let user_gateway = merged.gateway.clone();
-        let user_channels = merged.channels.clone();
-        let mut project_declared_models = false;
-        let mut project_declared_providers = false;
-        let mut project_declared_cache_compact = false;
+        // The project layer sheds those tables before it is even
+        // validated (`Layer::Project`): an ignored table may not refuse
+        // startup either, or a cloned repository could still keep ilar
+        // from opening with one bad line it was told is ignored.
         for path in [
             project_dir.join("ilar.toml"),
             project_dir.join(".ilar/ilar.toml"),
@@ -763,67 +757,15 @@ impl Config {
                         path.display()
                     ));
                 }
-                if declares_entries(&text, |file| file.models) {
-                    project_declared_models = true;
+                for table in declared_user_scoped_tables(&text) {
                     warnings.push(format!(
-                        "{}: [models] is user configuration and is ignored in project config",
+                        "{}: [{table}] is user configuration and is ignored in project config",
                         path.display()
                     ));
                 }
-                if declares_entries(&text, |file| file.endpoints) {
-                    project_declared_endpoints = true;
-                    warnings.push(format!(
-                        "{}: [endpoints] is user configuration and is ignored in project config",
-                        path.display()
-                    ));
-                }
-                if declares_entries(&text, |file| file.providers) {
-                    project_declared_providers = true;
-                    warnings.push(format!(
-                        "{}: [providers] is user configuration and is ignored in project config",
-                        path.display()
-                    ));
-                }
-                // It fires unattended provider requests: the user's
-                // call, never a repository's.
-                if declares_cache_compact(&text) {
-                    project_declared_cache_compact = true;
-                    warnings.push(format!(
-                        "{}: [cache_compact] is user configuration and is ignored in project config",
-                        path.display()
-                    ));
-                }
-                // The assistant answers to whoever can message it; which
-                // channels it listens on is nobody's business but the
-                // user's.
-                for (table, declared) in [
-                    ("[gateway]", declares_table(&text, |file| file.gateway)),
-                    ("[channels]", declares_table(&text, |file| file.channels)),
-                ] {
-                    if declared {
-                        warnings.push(format!(
-                            "{}: {table} is user configuration and is ignored in project config",
-                            path.display()
-                        ));
-                    }
-                }
-                merged = merge_file(merged, &text, &path)?;
+                merged = merge_file(merged, &text, &path, Layer::Project)?;
             }
         }
-        if project_declared_models {
-            merged.models = user_models;
-        }
-        if project_declared_endpoints {
-            merged.endpoints = user_endpoints;
-        }
-        if project_declared_providers {
-            merged.providers = user_providers;
-        }
-        if project_declared_cache_compact {
-            merged.cache_compact = user_cache_compact;
-        }
-        merged.gateway = user_gateway;
-        merged.channels = user_channels;
 
         let secrets = crate::secrets::SecretStore::open(&state_dir);
         let providers = resolve_providers(&merged, env, Some(&secrets), PROVIDERS);
@@ -1361,27 +1303,50 @@ fn user_scoped_general_keys(text: &str) -> Vec<&'static str> {
     .collect()
 }
 
-/// Whether a config layer declares entries in one of the user-scoped
-/// tables (`[models.*]`, `[providers.*]`) at all.
-fn declares_cache_compact(text: &str) -> bool {
-    toml::from_str::<FileConfig>(text)
-        .ok()
-        .and_then(|file| file.cache_compact)
-        .is_some()
+/// The tables only the user's own file may set, in the order the
+/// warnings name them. `[models]`, `[endpoints]` and `[providers]` route
+/// the conversation; `[cache_compact]` fires unattended provider
+/// requests; `[gateway]` and `[channels]` decide who may message the
+/// assistant.
+const USER_SCOPED_TABLES: &[&str] = &[
+    "models",
+    "endpoints",
+    "providers",
+    "cache_compact",
+    "gateway",
+    "channels",
+];
+
+/// Which user-scoped tables a project layer declares — read off the raw
+/// TOML, so a table whose *contents* would not even parse as ours is
+/// still reported as the ignored table it is. An empty `[models]` says
+/// nothing and is not reported; the others are reported when present.
+fn declared_user_scoped_tables(text: &str) -> Vec<&'static str> {
+    let Ok(table) = toml::from_str::<toml::Table>(text) else {
+        return Vec::new();
+    };
+    USER_SCOPED_TABLES
+        .iter()
+        .copied()
+        .filter(|name| match table.get(*name) {
+            Some(toml::Value::Table(entries))
+                if matches!(*name, "models" | "endpoints" | "providers") =>
+            {
+                !entries.is_empty()
+            }
+            Some(_) => true,
+            None => false,
+        })
+        .collect()
 }
 
-fn declares_table(text: &str, pick: fn(FileConfig) -> Option<toml::Table>) -> bool {
-    toml::from_str::<FileConfig>(text)
-        .ok()
-        .and_then(pick)
-        .is_some()
-}
-
-fn declares_entries<T>(text: &str, pick: fn(FileConfig) -> Option<HashMap<String, T>>) -> bool {
-    toml::from_str::<FileConfig>(text)
-        .ok()
-        .and_then(pick)
-        .is_some_and(|entries| !entries.is_empty())
+/// Whose file a layer is. The project layer sheds the user-scoped
+/// tables before validation: they are ignored, and an ignored table
+/// must not be able to refuse startup.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Layer {
+    User,
+    Project,
 }
 
 fn read_config_file(path: &Path) -> anyhow::Result<Option<String>> {
@@ -1406,9 +1371,27 @@ macro_rules! overlay {
     }};
 }
 
-fn merge_file(base: FileConfig, text: &str, origin: &Path) -> anyhow::Result<FileConfig> {
-    let parsed: FileConfig =
-        toml::from_str(text).with_context(|| format!("parsing config {}", origin.display()))?;
+fn merge_file(
+    base: FileConfig,
+    text: &str,
+    origin: &Path,
+    layer: Layer,
+) -> anyhow::Result<FileConfig> {
+    let parsed: FileConfig = match layer {
+        Layer::User => {
+            toml::from_str(text).with_context(|| format!("parsing config {}", origin.display()))?
+        }
+        Layer::Project => {
+            let mut table: toml::Table = toml::from_str(text)
+                .with_context(|| format!("parsing config {}", origin.display()))?;
+            for name in USER_SCOPED_TABLES {
+                table.remove(*name);
+            }
+            table
+                .try_into()
+                .with_context(|| format!("parsing config {}", origin.display()))?
+        }
+    };
     validate_file(&parsed, origin)?;
     let mut merged = base;
     if let Some(general) = parsed.general {
@@ -1526,10 +1509,10 @@ pub fn persist_general_theme(path: &Path, theme: &str) -> anyhow::Result<ThemePe
     for _ in 0..3 {
         let source = read_config_file(path)?.unwrap_or_default();
         if !source.is_empty() {
-            merge_file(FileConfig::default(), &source, path)?;
+            merge_file(FileConfig::default(), &source, path, Layer::User)?;
         }
         let updated = set_general_theme(&source, theme)?;
-        let parsed = merge_file(FileConfig::default(), &updated, path)?;
+        let parsed = merge_file(FileConfig::default(), &updated, path, Layer::User)?;
         anyhow::ensure!(
             parsed.general.and_then(|general| general.theme).as_deref() == Some(theme),
             "theme update did not produce the requested value"
