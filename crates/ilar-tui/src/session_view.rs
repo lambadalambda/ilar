@@ -591,18 +591,17 @@ fn restored_session_invocation_view(
                             text,
                             kind: ilar::session::DiagnosticKind::TurnError,
                         } => lines.push(Line_::System(text.clone())),
-                        // Raw thinking, kept as a local diagnostic
-                        // because no provider will take it back — and
-                        // for a model that hands back no reasoning
-                        // item, the only account of why the turn did
-                        // what it did. It was dropped here, so a
-                        // session showed thoughts while it ran and none
-                        // once it was reread; `--view` is always a
-                        // reread, which made the assistant look like it
-                        // never thought at all. Same collapsed row the
-                        // summary two arms up gets. `Thinking` itself
-                        // only reaches a log written before the
-                        // diagnostic split, and means the same thing.
+                        // Raw thinking: a local diagnostic where the
+                        // provider will not take it back, `Thinking`
+                        // where it does (the chat-wire families replay
+                        // it inside a turn). Either way the only
+                        // account of why the turn did what it did. It
+                        // was dropped here once, so a session showed
+                        // thoughts while it ran and none once it was
+                        // reread; `--view` is always a reread, which
+                        // made the assistant look like it never thought
+                        // at all. Same collapsed row the summary two
+                        // arms up gets.
                         ilar::session::ContentBlock::Diagnostic {
                             text,
                             kind: ilar::session::DiagnosticKind::Local,

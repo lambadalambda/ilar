@@ -94,7 +94,15 @@ pub fn entries(events: &[SessionEvent]) -> Vec<Entry> {
                     match block {
                         ContentBlock::Text { text } => push(Speaker::Assistant, text),
                         ContentBlock::Image { .. } => {}
-                        ContentBlock::Thinking { text, .. } => push(Speaker::Thinking, text),
+                        // A thought is a thought whether the wire gets
+                        // it back or the log keeps it as a local note;
+                        // the `thinking` speaker is what a reader asks
+                        // for, and the split had left half of it out.
+                        ContentBlock::Thinking { text, .. }
+                        | ContentBlock::Diagnostic {
+                            text,
+                            kind: crate::session::DiagnosticKind::Local,
+                        } => push(Speaker::Thinking, text),
                         ContentBlock::ToolCall { name, input, .. } => {
                             push(Speaker::ToolCall, &format!("{name} {input}"));
                         }
@@ -485,6 +493,20 @@ mod tests {
                     ContentBlock::Reasoning {
                         item: serde_json::json!({"encrypted_content": "SECRET"}),
                     },
+                    // A thought the wire gets back, and one the log
+                    // only keeps: both are what "thinking" means to a
+                    // reader. Why a turn died is not a thought.
+                    ContentBlock::Thinking {
+                        text: "the table must be near the header".into(),
+                    },
+                    ContentBlock::Diagnostic {
+                        text: "or after the checksum".into(),
+                        kind: crate::session::DiagnosticKind::Local,
+                    },
+                    ContentBlock::Diagnostic {
+                        text: "TURNDIED".into(),
+                        kind: crate::session::DiagnosticKind::TurnError,
+                    },
                 ],
                 usage: Default::default(),
                 stop_reason: "tool_use".into(),
@@ -503,6 +525,16 @@ mod tests {
             !text.contains("SECRET"),
             "provider reasoning leaked: {text}"
         );
+        let thoughts: Vec<&str> = entries
+            .iter()
+            .filter(|entry| entry.speaker == Speaker::Thinking)
+            .map(|entry| entry.text.as_str())
+            .collect();
+        assert_eq!(
+            thoughts,
+            ["the table must be near the header", "or after the checksum"]
+        );
+        assert!(!text.contains("TURNDIED"), "{text}");
         // Entries carry the event they came from, so a hit is addressable.
         assert_eq!(entries.last().unwrap().event, 2);
         assert_eq!(entries[0].speaker, Speaker::User);

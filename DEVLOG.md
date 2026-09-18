@@ -1,5 +1,59 @@
 # DEVLOG
 
+## 2026-09-18 — The model gets its thinking back
+
+A charachat session on Qwen3.8 flash — local llama.cpp and the
+halogen cloud both — had thinking blocks that made no sense: eleven of
+them claimed the previous reply had been "Understood. I will follow
+these instructions.", which was never said, and one described a
+working directory from the model's training data. The actions that
+followed were right every time. The model was reconstructing a prior
+thought it did not have.
+
+It did not have it because ilar never sent it. Every thinking block
+was persisted as a local diagnostic and the chat wire dropped it when
+rebuilding the conversation. That was the right call for the Responses
+wire, which has its own reasoning items, and for OpenAI's chat wire,
+which hands no thinking back — but the chat-completions families think
+*interleaved* with their tool calls: Qwen3's template, and GLM's,
+Kimi's, MiniMax's, DeepSeek's, keep `reasoning_content` on the
+assistant messages after the last user message precisely so the model
+carries its plan through a tool loop. Without it, every step inside a
+turn starts from an empty think block.
+
+So: a per-model flag, keyed on the wire the row is served on — every
+chat-wire row and every discovered endpoint replays, nothing else
+does. The turn loop persists thinking as thinking for those models
+and as a diagnostic for the rest, so the log says what the wire does
+with it; the chat wire sends `reasoning_content` on the assistant
+messages after the last real prompt and on none from an earlier turn,
+where every vendor drops it and one refuses it. A tool result rides a
+user-role message on the neutral side and is not a prompt — counting
+it would strip the thinking of the very step that made the call.
+
+The review would not take "the templates keep it" on faith for the
+OpenCode rows, which proxy to upstreams nobody can read from here, and
+it was right to ask: a configured server that streams reasoning and
+refuses it as input would 400 on step two of every turn. So the wire
+consults the model itself, not only the persist step, and a
+`[models.*]` or `[endpoints.*]` entry can say `replay_thinking =
+false`. Then a live probe, now an ignored smoke test: one real tool
+step, then the model's own thought and call echoed back with a
+result, for qwen3.8-flash, minimax-m3, kimi-k2.6 and deepseek-v4-flash
+on Go and kimi-k3 on Zen. All five answered. DeepSeek's answer failed
+in *our* mapper — it spells every absent field as `null` on every
+delta, and `"tool_calls":null` read as a malformed list. Null is
+absence now. Recall also gained the thinking it had been missing: a
+local diagnostic is a thought too, and the `thinking` speaker had
+only ever seen half of them.
+
+The same session's three turns that ended on "Writing the card
+tests:" with no tool call are plausibly the same gap — the plan lived
+in thinking the model never got back — but that half is not proven.
+One stall of the same shape happened before the switch too. If it
+persists after this, a one-shot nudge on a dangling stop is the next
+thing to try, and it is a heuristic, which is why it is not in here.
+
 ## 2026-09-18 — A reviewer that may run things
 
 The other half of this morning's read-only decision. `explore` stays

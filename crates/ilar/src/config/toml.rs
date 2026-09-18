@@ -61,6 +61,11 @@ pub struct CustomModel {
     /// Whether the model accepts image input.
     #[serde(default)]
     pub vision: bool,
+    /// Whether the model's thinking goes back to it as
+    /// `reasoning_content` inside a turn. Unstated, it does whenever
+    /// the server streamed any; `false` for a server that streams
+    /// reasoning and refuses it as input.
+    pub replay_thinking: Option<bool>,
     /// Name shown in the picker and the models tool; the section name
     /// when unstated.
     pub display_name: Option<String>,
@@ -102,7 +107,8 @@ impl CustomModel {
             self.model.clone().unwrap_or_else(|| name.to_string()),
             self.api_key.clone(),
             self.vision,
-        );
+        )
+        .with_replay_thinking(self.replay_thinking);
         match &self.options {
             Some(options) => dialect.with_options(options.clone()),
             None => dialect,

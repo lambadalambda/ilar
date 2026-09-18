@@ -824,6 +824,29 @@ impl ModelInfo {
         self.vision
     }
 
+    /// Whether the model's thinking goes back to it on the wire, inside
+    /// a turn. The chat-completions families — GLM, DeepSeek, Kimi,
+    /// MiniMax, Qwen, and whatever a discovered endpoint serves —
+    /// interleave thinking with tool calls, and their templates keep
+    /// `reasoning_content` on the assistant messages after the last
+    /// user message so the model carries its own plan through a tool
+    /// loop; without it every step starts from an empty think block
+    /// and the model fills the gap. The Responses wire has its own
+    /// reasoning items, and OpenAI's chat wire hands no thinking back
+    /// to begin with — so in practice this is "served on the chat
+    /// wire", and the `false` arm is what a mock provider exercises. A
+    /// configured server can override it: [`crate::config::CustomModel`]
+    /// and [`crate::config::endpoints::Endpoint`] take `replay_thinking`.
+    pub fn replays_thinking(&self) -> bool {
+        match self.access {
+            ModelAccess::ZaiCodingPlan
+            | ModelAccess::ZaiBoth
+            | ModelAccess::OpenCodeChat
+            | ModelAccess::Custom => true,
+            ModelAccess::OpenAi | ModelAccess::OpenAiBoth | ModelAccess::OpenCodeResponses => false,
+        }
+    }
+
     pub fn variants(&self) -> &'static [ModelVariant] {
         self.variants
     }
@@ -1937,6 +1960,12 @@ pub fn supports_vision(full_id: &str) -> bool {
     find(full_id).is_some_and(ModelInfo::supports_vision)
 }
 
+/// [`ModelInfo::replays_thinking`] by full id; an unknown model keeps
+/// its thinking local.
+pub fn replays_thinking(full_id: &str) -> bool {
+    find(full_id).is_some_and(ModelInfo::replays_thinking)
+}
+
 /// `options` with the wire's output cap added, spelled the way the
 /// model's access wants it — `max_output_tokens` on the Responses API,
 /// `max_tokens` on chat completions — unless the options already name
@@ -2043,6 +2072,18 @@ mod tests {
     }
 
     use super::*;
+
+    /// Thinking goes back on the chat wire and nowhere else: every
+    /// chat-completions row replays it, no Responses-wire or OpenAI row
+    /// does, and a model nobody can find keeps its thinking local.
+    #[test]
+    fn thinking_is_replayed_on_the_chat_wire_only() {
+        assert!(replays_thinking("zai/glm-4.7"));
+        assert!(replays_thinking("opencode-go/kimi-k2.6"));
+        assert!(!replays_thinking("openai/gpt-5.6-sol"));
+        assert!(!replays_thinking("opencode-go/gpt-5.3-codex"));
+        assert!(!replays_thinking("nowhere/nothing"));
+    }
 
     #[test]
     fn vision_is_every_openai_model_and_only_the_v_series_on_zai() {

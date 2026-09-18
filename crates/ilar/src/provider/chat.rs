@@ -45,6 +45,12 @@ pub struct ChatDialect {
     wire_model: Option<String>,
     /// Image support, where the catalog is not the source of it.
     vision: Option<bool>,
+    /// Whether the model's thinking goes back as `reasoning_content`,
+    /// where the configuration says rather than the catalog: a
+    /// `[models.*]` or `[endpoints.*]` entry can point at a server that
+    /// streams reasoning under one spelling and refuses it as input —
+    /// an OpenAI-strict validator rejects unknown assistant fields.
+    replay_thinking: Option<bool>,
     /// Body fields merged into every request for this endpoint
     /// (sampling: temperature, top_p …). Null when there are none.
     options: serde_json::Value,
@@ -75,6 +81,7 @@ impl ChatDialect {
             api_key: Some(api_key),
             wire_model: None,
             vision: None,
+            replay_thinking: None,
             options: serde_json::Value::Null,
             tool_stream,
             affinity,
@@ -108,10 +115,19 @@ impl ChatDialect {
             api_key,
             wire_model: Some(wire_model),
             vision: Some(vision),
+            replay_thinking: None,
             options: serde_json::Value::Null,
             tool_stream: false,
             affinity: Affinity::None,
         }
+    }
+
+    /// Whether to send thinking back, when the configuration says;
+    /// `None` leaves it to the catalog row, which for a configured
+    /// server is "yes, if it streamed any".
+    pub fn with_replay_thinking(mut self, replay: Option<bool>) -> Self {
+        self.replay_thinking = replay;
+        self
     }
 
     /// The same wire under another prefix: a discovered endpoint's
@@ -182,10 +198,28 @@ impl ChatProvider {
             .dialect
             .vision
             .unwrap_or_else(|| crate::model::supports_vision(&req.model));
+        // Thinking goes back only for a model that takes it, and only
+        // inside the current turn: the assistant messages after the
+        // last real prompt, which is where every template that takes
+        // `reasoning_content` keeps it and where one vendor refuses it
+        // anywhere else. A tool result rides a user-role message here
+        // and is not a prompt. The model check is the wire's own, not
+        // only the persist step's: a log written before the split, or
+        // under another model, may carry thinking this one must not
+        // see.
+        let replays = self
+            .dialect
+            .replay_thinking
+            .unwrap_or_else(|| crate::model::replays_thinking(&req.model));
+        let last_prompt = req.messages.iter().rposition(is_prompt);
         messages.extend(
             req.messages
                 .iter()
-                .flat_map(|message| openai_message(message, vision)),
+                .enumerate()
+                .flat_map(|(index, message)| {
+                    let replay = replays && last_prompt.is_some_and(|last| index > last);
+                    openai_message(message, vision, replay)
+                }),
         );
         body.insert("messages".into(), serde_json::json!(messages));
         body.insert(
@@ -297,14 +331,31 @@ fn content_value(text: &str, image_parts: Vec<serde_json::Value>) -> serde_json:
     }
 }
 
+/// A message the person (or a steer) sent, as opposed to a tool result,
+/// which rides a user-role message on the neutral side.
+fn is_prompt(msg: &ChatMessage) -> bool {
+    msg.role == Role::User
+        && msg
+            .content
+            .iter()
+            .any(|block| !matches!(block, ContentBlock::ToolResult { .. }))
+}
+
 /// Neutral -> OpenAI chat-completions wire. Tool results expand into
-/// separate `role: "tool"` messages (the wire format requires it).
-fn openai_message(msg: &ChatMessage, vision: bool) -> Vec<serde_json::Value> {
+/// separate `role: "tool"` messages (the wire format requires it). With
+/// `replay_thinking`, an assistant message's thinking goes along as
+/// `reasoning_content` — only inside the current turn, see the caller.
+fn openai_message(
+    msg: &ChatMessage,
+    vision: bool,
+    replay_thinking: bool,
+) -> Vec<serde_json::Value> {
     let role = match msg.role {
         Role::User => "user",
         Role::Assistant => "assistant",
     };
     let mut content_text = String::new();
+    let mut thinking = String::new();
     let mut image_parts = Vec::new();
     let mut tool_calls = Vec::new();
     let mut tool_results = Vec::new();
@@ -315,6 +366,17 @@ fn openai_message(msg: &ChatMessage, vision: bool) -> Vec<serde_json::Value> {
             // session with images usable on a text-only model.
             ContentBlock::Image { image } if vision => image_parts.push(image_part(image)),
             ContentBlock::Image { .. } => push_image_gap(&mut content_text),
+            // Persisted as thinking only where the model takes it back
+            // (`StepAccumulator::content_blocks`); a local diagnostic
+            // is the thinking of a model that does not.
+            ContentBlock::Thinking { text } if replay_thinking => {
+                // One run of thought per block; several go back as
+                // paragraphs rather than glued into one word.
+                if !thinking.is_empty() {
+                    thinking.push_str("\n\n");
+                }
+                thinking.push_str(text);
+            }
             ContentBlock::Thinking { .. }
             | ContentBlock::ReasoningSummary { .. }
             | ContentBlock::Reasoning { .. }
@@ -365,6 +427,12 @@ fn openai_message(msg: &ChatMessage, vision: bool) -> Vec<serde_json::Value> {
             }
         }
     }
+    let with_thinking = |mut value: serde_json::Map<String, serde_json::Value>| {
+        if !thinking.is_empty() {
+            value.insert("reasoning_content".into(), serde_json::json!(thinking));
+        }
+        serde_json::Value::Object(value)
+    };
     if !tool_results.is_empty() {
         let mut messages = Vec::new();
         if !tool_calls.is_empty() {
@@ -372,7 +440,7 @@ fn openai_message(msg: &ChatMessage, vision: bool) -> Vec<serde_json::Value> {
             value.insert("role".into(), serde_json::json!(role));
             value.insert("content".into(), serde_json::Value::Null);
             value.insert("tool_calls".into(), serde_json::json!(tool_calls));
-            messages.push(serde_json::Value::Object(value));
+            messages.push(with_thinking(value));
         }
         messages.extend(tool_results);
         if !content_text.is_empty() || !image_parts.is_empty() {
@@ -392,7 +460,7 @@ fn openai_message(msg: &ChatMessage, vision: bool) -> Vec<serde_json::Value> {
     if !tool_calls.is_empty() {
         value.insert("tool_calls".into(), serde_json::json!(tool_calls));
     }
-    vec![serde_json::Value::Object(value)]
+    vec![with_thinking(value)]
 }
 
 /// The neutral stop reason for a chat-completions `finish_reason`.
@@ -419,7 +487,9 @@ fn carries_payload(delta: &serde_json::Value) -> bool {
     non_empty("reasoning_content")
         || non_empty("reasoning")
         || non_empty("content")
-        || delta.get("tool_calls").is_some()
+        || delta
+            .get("tool_calls")
+            .is_some_and(|calls| !calls.is_null())
 }
 
 const MAX_TOOL_ARGUMENT_BYTES: usize = 1024 * 1024;
@@ -571,7 +641,10 @@ impl TransportEventMapper for OpenAiMapper {
                 self.close_thinking(&mut events);
                 events.push(ProviderEvent::TextDelta(text.into()));
             }
-            if delta.get("tool_calls").is_some() && !delta["tool_calls"].is_array() {
+            // DeepSeek spells an absent field as `null` on every delta
+            // (`"reasoning_content":null,"tool_calls":null` around a
+            // content fragment); null is absence, not a malformed list.
+            if !delta["tool_calls"].is_null() && !delta["tool_calls"].is_array() {
                 return Err("OpenAI-compatible tool_calls must be an array".into());
             }
             if let Some(calls) = delta["tool_calls"].as_array() {
@@ -780,7 +853,7 @@ mod tests {
     #[test]
     fn vision_models_get_real_image_parts_and_text_models_a_named_gap() {
         // Vision: one message, text + image_url parts.
-        let wire = openai_message(&image_message(), true);
+        let wire = openai_message(&image_message(), true, false);
         assert_eq!(wire.len(), 1);
         let content = wire[0]["content"].as_array().unwrap();
         assert_eq!(content[0]["type"], "text");
@@ -791,12 +864,12 @@ mod tests {
         );
 
         // No vision: plain string with the named gap.
-        let wire = openai_message(&image_message(), false);
+        let wire = openai_message(&image_message(), false, false);
         let content = wire[0]["content"].as_str().unwrap();
         assert!(content.contains("[image omitted"), "{content}");
 
         // Text-only stays the plain string it always was.
-        let wire = openai_message(&ChatMessage::user_text("hi"), true);
+        let wire = openai_message(&ChatMessage::user_text("hi"), true, false);
         assert_eq!(wire[0]["content"], "hi");
     }
 
@@ -931,5 +1004,136 @@ mod tests {
         for key in ["messages", "tools", "stream", "stream_options"] {
             assert_eq!(zai_body[key], custom_body[key], "{key}");
         }
+    }
+
+    /// DeepSeek spells every absent field as `null` on every delta.
+    /// Seen live on deepseek-v4-flash behind OpenCode Go, 2026-09-18:
+    /// the mapper read `"tool_calls":null` as a malformed list and
+    /// failed a turn the model had answered.
+    #[test]
+    fn a_null_tool_calls_field_is_an_absent_one() {
+        let chunk = r#"{"choices":[{"index":0,"finish_reason":null,"delta":{"role":null,"content":"Done.","reasoning_content":null,"tool_calls":null}}]}"#;
+        let done = r#"{"choices":[{"index":0,"finish_reason":"stop","delta":{}}]}"#;
+        let events = openai_stream(&[chunk, done]).expect("a content delta");
+        assert!(
+            matches!(&events[0], ProviderEvent::TextDelta(text) if text == "Done."),
+            "{events:?}"
+        );
+        // A trailer that spells absence the same way is still a bare
+        // trailer, not a violation.
+        let trailer = r#"{"choices":[{"index":0,"finish_reason":"stop","delta":{"content":null,"reasoning_content":null,"tool_calls":null}}]}"#;
+        openai_stream(&[chunk, trailer]).expect("a null-spelled trailer");
+    }
+
+    /// Thinking goes back as `reasoning_content` on the assistant
+    /// messages of the current turn — after the last real prompt — and
+    /// on none from an earlier turn. A tool result is not a prompt: it
+    /// rides a user-role message here, and counting it would strip the
+    /// thinking of the very step that produced the call.
+    #[test]
+    fn thinking_is_replayed_inside_the_current_turn_only() {
+        let thought = |text: &str, rest: Vec<ContentBlock>| ChatMessage {
+            role: Role::Assistant,
+            content: std::iter::once(ContentBlock::Thinking { text: text.into() })
+                .chain(rest)
+                .collect(),
+        };
+        let call = ContentBlock::ToolCall {
+            id: "c1".into(),
+            name: "read".into(),
+            input: serde_json::json!({"path": "x"}),
+            item_id: None,
+        };
+        let result = ChatMessage {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "c1".into(),
+                content: "the file".into(),
+                is_error: false,
+                images: Vec::new(),
+            }],
+        };
+        let text = |text: &str| ContentBlock::Text { text: text.into() };
+        let mut request = Request::with_model("zai/glm-4.7");
+        request.messages = vec![
+            ChatMessage::user_text("earlier"),
+            thought("old plan", vec![text("done earlier")]),
+            ChatMessage::user_text("now"),
+            thought("plan", vec![call.clone()]),
+            result.clone(),
+            thought("more", vec![text("answer")]),
+        ];
+        let provider = ChatProvider::new(ChatDialect::zai("k".into(), "http://zai.test".into()));
+        let body = provider.wire_body_for_test(&request);
+        let messages = body["messages"].as_array().unwrap();
+        let assistants: Vec<&serde_json::Value> = messages
+            .iter()
+            .filter(|message| message["role"] == "assistant")
+            .collect();
+        assert_eq!(assistants.len(), 3, "{messages:?}");
+        assert!(
+            assistants[0].get("reasoning_content").is_none(),
+            "an earlier turn's thinking went back: {}",
+            assistants[0]
+        );
+        assert_eq!(assistants[1]["reasoning_content"], "plan");
+        assert_eq!(assistants[1]["tool_calls"][0]["id"], "c1");
+        assert_eq!(assistants[2]["reasoning_content"], "more");
+        assert_eq!(assistants[2]["content"], "answer");
+
+        // Two runs of thought in one message go back as paragraphs.
+        request.messages[5] = ChatMessage {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    text: "more".into(),
+                },
+                text("between"),
+                ContentBlock::Thinking {
+                    text: "still more".into(),
+                },
+                text("answer"),
+            ],
+        };
+        let body = provider.wire_body_for_test(&request);
+        let last = body["messages"].as_array().unwrap().last().unwrap().clone();
+        assert_eq!(last["reasoning_content"], "more\n\nstill more");
+
+        // A configured server that refuses the field as input: the
+        // entry says so, and nothing goes back however the log reads.
+        let refusing = ChatProvider::new(
+            ChatDialect::zai("k".into(), "http://zai.test".into())
+                .with_replay_thinking(Some(false)),
+        );
+        let body = refusing.wire_body_for_test(&request);
+        assert!(
+            !body["messages"].to_string().contains("reasoning_content"),
+            "{}",
+            body["messages"]
+        );
+
+        // The same conversation with the thinking already made local —
+        // what a model that takes none back persists — sends none.
+        let local = |message: &ChatMessage| ChatMessage {
+            role: message.role,
+            content: message
+                .content
+                .iter()
+                .map(|block| match block {
+                    ContentBlock::Thinking { text } => ContentBlock::Diagnostic {
+                        text: text.clone(),
+                        kind: crate::session::DiagnosticKind::Local,
+                    },
+                    block => block.clone(),
+                })
+                .collect(),
+        };
+        request.messages = request.messages.iter().map(local).collect();
+        let body = provider.wire_body_for_test(&request);
+        assert!(
+            !body["messages"].to_string().contains("reasoning_content"),
+            "{}",
+            body["messages"]
+        );
     }
 }

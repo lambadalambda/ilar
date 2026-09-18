@@ -271,19 +271,34 @@ struct StepAccumulator {
     published_arguments: std::collections::HashMap<String, String>,
     usage: Usage,
     stop_reason: Option<StopReason>,
+    /// Whether this model's thinking goes back to it on the wire
+    /// ([`crate::model::replays_thinking`]). It decides what the log
+    /// keeps: thinking that will be replayed is persisted as thinking,
+    /// thinking that never leaves the process as a local diagnostic —
+    /// so the log says what the wire does with it.
+    replay_thinking: bool,
 }
 
 impl StepAccumulator {
+    fn for_model(model: &str) -> Self {
+        Self {
+            replay_thinking: crate::model::replays_thinking(model),
+            ..Self::default()
+        }
+    }
+
     fn content_blocks(&self) -> Vec<ContentBlock> {
         self.content
             .iter()
             .filter_map(|block| match block {
-                // Thinking is never replayed to a provider, so it is
-                // persisted as what it is to a reader: a diagnostic.
-                ContentBlock::Thinking { text } => Some(ContentBlock::Diagnostic {
-                    text: text.clone(),
-                    kind: DiagnosticKind::Local,
-                }),
+                // Thinking a provider will not take back is persisted
+                // as what it is to a reader: a diagnostic.
+                ContentBlock::Thinking { text } if !self.replay_thinking => {
+                    Some(ContentBlock::Diagnostic {
+                        text: text.clone(),
+                        kind: DiagnosticKind::Local,
+                    })
+                }
                 ContentBlock::ReasoningSummary {
                     completed: false, ..
                 } => None,
@@ -1742,7 +1757,7 @@ async fn run_turn_inner(
         let mut rate_limit_retries = 0;
         let (acc, aborted, errored, retryable_error, rate_limited, received_response) = loop {
             let mut stream = provider.as_provider().stream(request.clone())?;
-            let mut acc = StepAccumulator::default();
+            let mut acc = StepAccumulator::for_model(&request.model);
             let mut aborted = false;
             let mut errored: Option<String> = None;
             let mut retryable_error = false;

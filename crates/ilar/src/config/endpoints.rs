@@ -43,6 +43,11 @@ pub struct Endpoint {
     /// label does).
     #[serde(default)]
     pub vision: bool,
+    /// Whether a model's thinking goes back to it as
+    /// `reasoning_content` inside a turn. Unstated, it does whenever
+    /// the server streamed any; `false` for a server that streams
+    /// reasoning and refuses it as input.
+    pub replay_thinking: Option<bool>,
     /// Only these ids, when set. Otherwise every chat model listed.
     pub models: Option<Vec<String>>,
     /// Body fields merged into every request to this endpoint.
@@ -64,7 +69,8 @@ impl Endpoint {
             self.api_key.clone(),
             vision,
         )
-        .with_prefix(prefix);
+        .with_prefix(prefix)
+        .with_replay_thinking(self.replay_thinking);
         match &self.options {
             Some(options) => dialect.with_options(options.clone()),
             None => dialect,
@@ -236,6 +242,7 @@ mod tests {
             context: Some(65_536),
             output: None,
             vision: false,
+            replay_thinking: None,
             models: None,
             options: None,
         }

@@ -71,10 +71,12 @@ pub enum ContentBlock {
     Image {
         image: ImageContent,
     },
-    /// Extended-thinking block. No cataloged provider signs or replays
-    /// these, so the block is the thought and nothing else; sessions
-    /// written when one did carry a `signature` field, which serde
-    /// ignores on load.
+    /// Raw thinking. Persisted only for a model whose chat wire takes
+    /// it back inside a turn as `reasoning_content`; for every other
+    /// model the same thought lands in [`ContentBlock::Diagnostic`] as
+    /// a local note. Nobody signs these, so the block is the thought
+    /// and nothing else; sessions written when one did carry a
+    /// `signature` field, which serde ignores on load.
     Thinking {
         text: String,
     },
