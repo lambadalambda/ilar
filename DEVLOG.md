@@ -49,6 +49,23 @@ the rule is stated once (`SUMMARY_RULE`) and said in three places: the
 tool's description, the prompt section, and the gateway's after-turn
 review, so a note is found the same way whoever wrote it.
 
+**Recall comes to the turn.** The archive was pull-only, and the
+harness study of 2026-09-17 measured how often a model pulls: well
+under once a task. Claude Code pushes instead, a sidecar model picking
+files per prompt. ilar has the index already, so it pushes without
+the sidecar: every root prompt is run through BM25, and notes that
+share two words with it, or one that fewer than half the notes
+contain, go after the user message as index lines — never bodies —
+under the framing Claude Code uses, with a reminder to verify when a
+note is older than a day. It is a session event of its own,
+`MemoryRecall`, folded into the user message on the wire, so the
+transcript, the web view and a resumed session see it, and nothing
+before it is ever rewritten. A note surfaces once per session, until
+a compaction folds the earlier copy away; after 16 KiB of recall the
+session gets no more. Beside the core block at session open, the
+newest notes' index lines say what the archive holds. Stopwords left
+the index on the way: a note surfaced on "the" is not a match.
+
 ## 2026-09-18 — Seven small ones
 
 The backlog's small correctness items, one commit each on one branch.

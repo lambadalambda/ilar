@@ -424,3 +424,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Skills load one body once](issues/skills-load-one-body-once.md) — one scan per store, one body per load, 256 KiB cap; a miss refreshes cheaply
 - [x] [The memory store moves into the core](issues/the-memory-store-moves-into-the-core.md) — `ilar::memory`, one store per launch directory under the state dir, `[general] memory` switch; the gateway keeps its home and its rules
 - [x] [The TUI remembers on its own](issues/the-tui-remembers-on-its-own.md) — a standing "Remembering" section from the first session; one summary rule in the tool, the section and the reviewer
+- [x] [Recall comes to the turn](issues/recall-comes-to-the-turn.md) — every root prompt surfaces the notes it matches, as index lines after the message; the newest notes open the session; both switchable

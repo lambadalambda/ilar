@@ -118,7 +118,7 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 ## Milestone 22 — Memory in every directory
 
-- [ ] [Recall comes to the turn](issues/recall-comes-to-the-turn.md)
+(all complete — see issues_archive.md)
 
 ## Review follow-ups
 
