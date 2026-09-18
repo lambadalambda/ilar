@@ -123,6 +123,12 @@ milestones 15–17 stay filed — they come back when the feature does.*
 - [ ] [A finished task's answer is nowhere to be read](issues/a-finished-tasks-answer-is-nowhere-to-be-read.md)
 - [ ] [Read-only says what it takes away](issues/read-only-says-what-it-takes-away.md)
 
+## Secrets follow-ups
+
+- [ ] [A locked store fails a sudo that wants no password](issues/a-locked-store-fails-a-sudo-that-wants-no-password.md)
+- [ ] [A locked store scrubs nothing and says nothing](issues/a-locked-store-scrubs-nothing-and-says-nothing.md)
+- [ ] [A resealed store costs one refusal](issues/a-resealed-store-costs-one-refusal.md)
+
 ## Review follow-ups
 
 - [ ] [Every started turn publishes its ending](issues/every-started-turn-publishes-its-ending.md)
