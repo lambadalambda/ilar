@@ -44,6 +44,10 @@ worth keeping. The TUI takes the same approach.
 
 ## Notes
 
+The section is the terminal session's (`RuntimeOptions.memory_prompt`);
+the gateway leaves it off, since its review after a turn writes for
+it, and the review's prompt carries the summary rule instead.
+
 Sub-issue 2 of 3, after [the-memory-store-moves-into-the-core].
 Whether the TUI ever gets a reviewer of its own is a separate
 question; nothing here rules it out.

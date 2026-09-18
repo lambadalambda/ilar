@@ -30,8 +30,24 @@ filters the core registry as it always did.
 
 What stayed behind is what makes memory an assistant's: the review
 after a turn, the weekly promotion, the daily notes at handover, and
-the room-seat guard on the memory directory. A terminal session has
-the tools and a present user; when to write is the next issue.
+the room-seat guard on the memory directory.
+
+**The session is told when to write.** Nobody reviews a terminal
+session after the fact, so the model writes memory itself, the way
+Claude Code does it: a standing "Remembering" section opens every
+session that has a store, before anything has been written — an empty
+memory nobody mentions never gets written. What to keep, what to skip,
+the two places, and that a write reaches the next session's prompt and
+not this one's. A wire test pins the last part: a `memory` write
+mid-session and every request of the session carries the same prompt.
+
+**One rule for a note's summary.** The write-up of Claude Code's
+recall made the point that the description is the only thing the
+selector ever sees, so it has to carry the tokens a future prompt
+will. ilar's index is BM25, which matches on exactly those tokens, so
+the rule is stated once (`SUMMARY_RULE`) and said in three places: the
+tool's description, the prompt section, and the gateway's after-turn
+review, so a note is found the same way whoever wrote it.
 
 ## 2026-09-18 — Seven small ones
 

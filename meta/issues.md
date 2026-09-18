@@ -118,7 +118,6 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 ## Milestone 22 — Memory in every directory
 
-- [ ] [The TUI remembers on its own](issues/the-tui-remembers-on-its-own.md)
 - [ ] [Recall comes to the turn](issues/recall-comes-to-the-turn.md)
 
 ## Review follow-ups
