@@ -2686,12 +2686,14 @@ fn open_agent_focus(app: &mut App, store: &SessionStore, session_id: &str) -> Op
         Some(row) => format!("{} · {}", row.agent, row.description),
         None => session_name(store, session_id),
     };
-    let running = roster.is_some();
     // A delivering row is a routed completion being handed to a
     // session, not a turn streaming into this process: it publishes no
     // activity at all, so a row the seed left open would spin forever.
-    // Only an agent whose events will actually arrive gets that.
+    // Only an agent whose events will actually arrive gets that — and
+    // the footer's "running" is the same judgement, since no `TurnDone`
+    // is ever going to arrive to take it back either.
     let streaming = roster.is_some_and(|row| !row.delivering);
+    let running = streaming;
     // What Enter may do here, judged now: the roster row is gone the
     // moment the agent finishes, and a refusal that depends on whose
     // child it is must not go with it. Without a row the log says whose
@@ -6283,6 +6285,23 @@ mod tests {
                 .any(|line| matches!(line, Line_::Assistant(text) if text.contains("replayed child reply"))),
             "{:?}",
             focus.lines
+        );
+
+        // On the roster as a delivery: a completion being handed to the
+        // session, which publishes no activity. The footer must not
+        // say running, because nothing will ever arrive to end it.
+        app.agents_view[0].delivering = true;
+        app.close_focus();
+        let streaming = open_agent_focus(&mut app, &store, &session_id).expect("a fresh focus");
+        assert!(!streaming, "a delivery streams nothing");
+        land_agent_focus(
+            &mut app,
+            &session_id,
+            seed_agent_focus(&store, &session_id, streaming),
+        );
+        assert!(
+            app.focus.as_ref().is_some_and(|focus| !focus.running),
+            "a delivering row's footer claims a running turn"
         );
 
         // Off the roster — finished, or a foreign tree pruned away —
