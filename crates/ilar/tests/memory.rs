@@ -314,27 +314,20 @@ async fn a_prompt_surfaces_the_notes_it_matches_once_until_a_compaction() {
     )
     .await;
     t.turn(question, config()).await;
-    let recalls = memory_recalls(&t.store, &t.id);
-    let shape: Vec<String> = t
+    // The loaded session is the window past the compaction: the first
+    // recall is folded away, the second stands. The raw log has both.
+    assert_eq!(
+        memory_recalls(&t.store, &t.id),
+        vec![vec![deploy.id.clone()]]
+    );
+    let in_the_log = t
         .store
-        .load(&t.id)
+        .audit_events(&t.id)
         .unwrap()
-        .events()
         .iter()
-        .map(|event| match event {
-            SessionEvent::UserMessage { text, .. } => format!("user({text})"),
-            SessionEvent::AssistantMessage { .. } => "assistant".into(),
-            SessionEvent::Compaction { kept_from, .. } => format!("compaction(from {kept_from})"),
-            SessionEvent::MemoryRecall { .. } => "recall".into(),
-            other => format!("{other:?}")
-                .split_whitespace()
-                .next()
-                .unwrap()
-                .to_string(),
-        })
-        .collect();
-    assert_eq!(recalls.len(), 2, "{recalls:?}; the log: {shape:?}");
-    assert_eq!(recalls[1], vec![deploy.id.clone()]);
+        .filter(|event| matches!(event, SessionEvent::MemoryRecall { .. }))
+        .count();
+    assert_eq!(in_the_log, 2);
     let texts = last_user_texts(t.provider.requests().last().unwrap());
     assert_eq!(texts.len(), 2, "{texts:?}");
 }
