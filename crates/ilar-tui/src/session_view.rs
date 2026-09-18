@@ -100,6 +100,15 @@ pub(crate) fn accrue_usage(
     }
 }
 
+/// The line standing for a memory recall: how many notes the model was
+/// handed after the prompt.
+pub(crate) fn memory_recall_display(count: usize) -> String {
+    match count {
+        1 => "memory: 1 note recalled for this prompt".to_string(),
+        n => format!("memory: {n} notes recalled for this prompt"),
+    }
+}
+
 pub(crate) fn task_notification_display(text: &str) -> Option<String> {
     notification_display(text, "task-notification", normalize_task_notification)
 }
@@ -682,6 +691,11 @@ fn restored_session_invocation_view(
             // simply stopping.
             ilar::session::SessionEvent::TurnEnded { detail, .. } => {
                 lines.push(Line_::System(detail.clone()));
+            }
+            // What the model was handed from memory, by count; the
+            // lines themselves are in the log.
+            ilar::session::SessionEvent::MemoryRecall { ids, .. } => {
+                lines.push(Line_::System(memory_recall_display(ids.len())));
             }
             ilar::session::SessionEvent::Compaction { .. } => {}
         }

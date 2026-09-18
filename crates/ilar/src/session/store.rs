@@ -1466,6 +1466,7 @@ fn validate_replay(events: &[SessionEvent], id: &str) -> std::io::Result<Vec<Str
             | SessionEvent::Compaction { id, .. }
             | SessionEvent::Topic { id, .. }
             | SessionEvent::ImageCutoff { id, .. }
+            | SessionEvent::MemoryRecall { id, .. }
             | SessionEvent::Rewind { id, .. }
             | SessionEvent::TurnEnded { id, .. } => Some(id),
         };
@@ -2083,6 +2084,17 @@ pub fn transcript_of(events: &[SessionEvent]) -> Vec<ChatMessage> {
             | SessionEvent::ImageCutoff { .. }
             | SessionEvent::Rewind { .. }
             | SessionEvent::TurnEnded { .. } => {}
+            // After the user message it was surfaced for, as one more
+            // block of that message.
+            SessionEvent::MemoryRecall { text, .. } => {
+                if !pending_results.is_empty() {
+                    push_user_blocks(&mut messages, std::mem::take(&mut pending_results));
+                }
+                push_user_blocks(
+                    &mut messages,
+                    vec![ContentBlock::Text { text: text.clone() }],
+                );
+            }
             SessionEvent::UserMessage { text, images, .. } => {
                 if !pending_results.is_empty() {
                     push_user_blocks(&mut messages, std::mem::take(&mut pending_results));

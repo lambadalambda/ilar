@@ -156,6 +156,7 @@ pub(super) fn id_records(events: &[SessionEvent]) -> Vec<IdRecord> {
             | SessionEvent::Compaction { id, .. }
             | SessionEvent::Topic { id, .. }
             | SessionEvent::ImageCutoff { id, .. }
+            | SessionEvent::MemoryRecall { id, .. }
             | SessionEvent::Rewind { id, .. }
             | SessionEvent::TurnEnded { id, .. } => Some(id.as_str()),
         };

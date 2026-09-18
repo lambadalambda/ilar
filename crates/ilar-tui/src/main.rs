@@ -1170,7 +1170,6 @@ async fn run_exec(config: &ilar::config::Config, args: ExecArgs) -> Result<i32> 
             // theatre.
             withheld_paths: Vec::new(),
             memory: directory_memory(config, &cwd),
-            memory_prompt: true,
         },
     )?;
     let mut plan_notices = std::mem::take(&mut plan.notices);
@@ -1253,15 +1252,20 @@ fn cli_project_instructions(include: bool, skip: bool) -> Option<bool> {
 
 /// The memory a session launched in `cwd` carries: this directory's
 /// store under the state directory, unless `[general] memory = false`.
+/// Nobody reviews a terminal session afterwards, so the model is told
+/// when to write; recall and the opening index have their own switches.
 fn directory_memory(
     config: &ilar::config::Config,
     cwd: &std::path::Path,
-) -> Option<Arc<ilar::memory::MemoryStore>> {
-    config.general.memory.then(|| {
-        Arc::new(ilar::memory::MemoryStore::new(ilar::memory::dir_for(
+) -> Option<ilar::runtime::MemoryOptions> {
+    config.general.memory.then(|| ilar::runtime::MemoryOptions {
+        store: Arc::new(ilar::memory::MemoryStore::new(ilar::memory::dir_for(
             config.state_dir(),
             cwd,
-        )))
+        ))),
+        standing_prompt: true,
+        opening_index: config.general.memory_index,
+        recall: config.general.memory_recall,
     })
 }
 
@@ -1500,9 +1504,6 @@ async fn main() -> Result<()> {
                 // above.
                 withheld_paths: Vec::new(),
                 memory: directory_memory(&config, &cwd),
-                // Nobody reviews a terminal session afterwards: the
-                // model is told when to write.
-                memory_prompt: true,
             },
         )?;
         if args.print_prompt {

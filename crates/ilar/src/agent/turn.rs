@@ -197,6 +197,9 @@ pub struct LoopConfig {
     /// cap; `None` sends none. A looping model otherwise generates
     /// until the context fills.
     pub max_output_tokens: Option<u64>,
+    /// Surface memory notes for each prompt, from this store. Root
+    /// sessions only; a child's copy of the config carries `None`.
+    pub recall: Option<crate::memory::RecallConfig>,
 }
 
 /// `base` doubled `retries` times, capped — the exponential backoff both
@@ -240,6 +243,7 @@ impl Default for LoopConfig {
             force_compaction: false,
             live_heartbeat: crate::session::SCRATCH_HEARTBEAT,
             max_output_tokens: None,
+            recall: None,
         }
     }
 }
@@ -1529,6 +1533,24 @@ async fn run_turn_inner(
                     ts: Utc::now(),
                 })
                 .map_err(|error| TurnNeverStarted::mark(error.into()))?;
+            // What memory has to say about this prompt goes right
+            // after it, as its own event: index lines the model can
+            // follow up with memory_get, never bodies, never anything
+            // it was handed already this side of a compaction. Root
+            // sessions only — a child's memory would be its parent's.
+            if tool_ctx.depth == 0
+                && let Some(recall) = &config.recall
+                && let Some((ids, text)) = recall
+                    .recall(user_input, session.events(), Utc::now())
+                    .context("recalling memory for the prompt")?
+            {
+                session.append(SessionEvent::MemoryRecall {
+                    id: new_id(),
+                    ids,
+                    text,
+                    ts: Utc::now(),
+                })?;
+            }
         }
         TurnStart::Continue => {
             if tool_ctx.depth != 0 {

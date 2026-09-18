@@ -65,6 +65,8 @@ declares them is warned about and ignored.
 | `gateway.heartbeat.chats` | `[]` | Session keys to beat on, e.g. `deltachat:12`. |
 | `gateway.scheduler_tick_secs` | `30` | How often due jobs and heartbeats are looked for. |
 | `gateway.memory.enabled` | `true` | Core memory in the prompt, the archive behind the tools, a daily note at each compaction. |
+| `gateway.memory.recall` | `true` | Each prompt surfaces the notes it matches, after the message; see [sessions](sessions.md#memory-that-outlives-a-session). |
+| `gateway.memory.index` | `true` | A chat opens with the newest notes' index lines beside the core. |
 | `gateway.review.enabled` | `true` | The review after a turn; see below. |
 | `gateway.review.min_tool_calls` | `5` | An episode with fewer, and no error, is not reviewed. |
 | `gateway.review.after_idle_secs` | just before the cache closes | Quiet time before the review runs. |
@@ -265,7 +267,10 @@ receive every compaction handover, the review after a turn writes notes
 and core entries on its own, and the weekly review promotes what
 recurs. Because the review writes for it, the assistant is not shown
 the standing "Remembering" section a terminal session opens with; the
-review's prompt carries the same rule for a note's summary.
+review's prompt carries the same rule for a note's summary. The
+opening index and the per-prompt recall reach a private chat as they
+do a terminal session, under `gateway.memory.index` and
+`gateway.memory.recall`; a room gets neither.
 
 ## Skills it writes itself
 

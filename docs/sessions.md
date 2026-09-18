@@ -163,6 +163,24 @@ names. The `memory` tool's description and the assistant's after-turn
 review say the same rule, so a note is found the same way whoever
 wrote it.
 
+Memory also comes to the model unasked, in two places, both
+cache-safe. At session open, beside the core block, the newest notes'
+index lines (at most twenty, under 4 KiB) say what the archive holds;
+frozen with the rest of the prompt. And on every prompt, the index is
+run over the prompt's words: notes that share two words with it, or
+one that fewer than half the notes contain, are surfaced — at most
+five, as index lines and never bodies — in a `<memory-recall>` block
+appended after the user message, framed as retrieved for possible
+relevance and, when a note is older than a day, with a reminder to
+verify before asserting. The block is a session event of its own, so
+the transcript, the web view and a resumed session all show it; the
+TUI shows a count. A note is not surfaced twice in one session — until
+a compaction folds the earlier copy away, when it may come back — and
+after 16 KiB of recall the session gets no more. Nothing here rewrites
+an earlier message: the prefix a provider cached stays put.
+`general.memory_recall = false` and `general.memory_index = false`
+switch the two off separately.
+
 ## Rewind and fork
 
 When the working directory is a git repository, ilar snapshots the

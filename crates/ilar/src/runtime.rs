@@ -71,18 +71,29 @@ pub struct RuntimeOptions {
     /// owns every path the process can reach anyway; a driver that
     /// serves somebody else's session is the one that has to think.
     pub withheld_paths: Vec<PathBuf>,
-    /// What this session remembers across sessions, if anything: the
-    /// three memory tools go into the root registry, and the core
-    /// block into the system prompt once, at start. A terminal session
-    /// hands over its directory's store ([`crate::memory::dir_for`]);
-    /// an assistant its own; a seat that must not know the person,
-    /// none.
-    pub memory: Option<Arc<crate::memory::MemoryStore>>,
+    /// What this session remembers across sessions, if anything. A
+    /// terminal session hands over its directory's store
+    /// ([`crate::memory::dir_for`]); an assistant its own; a seat that
+    /// must not know the person, none.
+    pub memory: Option<MemoryOptions>,
+}
+
+/// A memory and how much of it a session is given: the three tools go
+/// into the root registry and the core block into the system prompt
+/// once, at start, always; the rest is the driver's choice.
+#[derive(Debug, Clone)]
+pub struct MemoryOptions {
+    pub store: Arc<crate::memory::MemoryStore>,
     /// Tell the model when to write its memory, in a standing prompt
     /// section: for a session nobody reviews afterwards, so the model
     /// is the one who writes. An assistant with a review after each
-    /// turn leaves it off. Nothing without `memory`.
-    pub memory_prompt: bool,
+    /// turn leaves it off.
+    pub standing_prompt: bool,
+    /// Open with the newest notes' index lines beside the core block,
+    /// so the session knows what the archive holds.
+    pub opening_index: bool,
+    /// Surface the notes each prompt matches, after the message.
+    pub recall: bool,
 }
 
 /// The session a driver is about to run, before anything is written.
@@ -114,8 +125,7 @@ pub struct RuntimePlan {
     unlock_hint: Option<String>,
     withheld_paths: Vec<PathBuf>,
     project_instructions: ProjectInstructions,
-    memory: Option<Arc<crate::memory::MemoryStore>>,
-    memory_prompt: bool,
+    memory: Option<MemoryOptions>,
 }
 
 /// A session, its tools, and the channels a driver listens on.
@@ -573,7 +583,6 @@ impl RuntimePlan {
             withheld_paths: options.withheld_paths.clone(),
             project_instructions,
             memory: options.memory.clone(),
-            memory_prompt: options.memory_prompt,
         })
     }
 
@@ -581,21 +590,39 @@ impl RuntimePlan {
     /// plus — read now, not at resolve, so a driver's own additions
     /// come first — the memory: the standing section on when to write
     /// it, where the driver asked for one, present from the first
-    /// session so an empty store gets written; and the core block,
-    /// frozen for the session, once there is one. Nothing when there
-    /// is no store.
+    /// session so an empty store gets written; the core block, frozen
+    /// for the session, once there is one; and the newest notes'
+    /// index, where asked for, so the session knows what the archive
+    /// holds. Nothing when there is no store.
     fn system_prompt_at_start(&self) -> Result<String> {
         let mut prompt = self.system_prompt.clone();
-        let Some(store) = &self.memory else {
+        let Some(memory) = &self.memory else {
             return Ok(prompt);
         };
-        if self.memory_prompt {
+        if memory.standing_prompt {
             prompt.push_str("\n\n");
             prompt.push_str(&crate::memory::PROMPT_SECTION);
         }
-        if let Some(block) = store.core_block().context("reading the core memory")? {
+        if let Some(block) = memory
+            .store
+            .core_block()
+            .context("reading the core memory")?
+        {
             prompt.push_str("\n\n");
             prompt.push_str(&block);
+        }
+        if memory.opening_index
+            && let Some(index) = memory
+                .store
+                .opening_index(
+                    crate::memory::INDEX_NOTES,
+                    crate::memory::INDEX_BYTES,
+                    chrono::Utc::now(),
+                )
+                .context("reading the memory archive")?
+        {
+            prompt.push_str("\n\n");
+            prompt.push_str(&index);
         }
         Ok(prompt)
     }
@@ -806,8 +833,18 @@ impl RuntimePlan {
             None => registry,
         };
         let registry = match &self.memory {
-            Some(store) => registry.with_memory(store.clone())?,
+            Some(memory) => registry.with_memory(memory.store.clone())?,
             None => registry,
+        };
+        // Recall is the root's: the children got their copy of the
+        // config above, before this was set.
+        let loop_config = LoopConfig {
+            recall: self
+                .memory
+                .as_ref()
+                .filter(|memory| memory.recall)
+                .map(|memory| crate::memory::RecallConfig::new(memory.store.clone())),
+            ..loop_config
         };
         // The listing costs a tool; a machine that has never stored a
         // secret does not pay it. A store file that exists does install
@@ -1319,8 +1356,12 @@ mod tests {
                 &config,
                 &RuntimeOptions {
                     cwd: cwd.clone(),
-                    memory,
-                    memory_prompt: true,
+                    memory: memory.map(|store| MemoryOptions {
+                        store,
+                        standing_prompt: true,
+                        opening_index: true,
+                        recall: true,
+                    }),
                     ..RuntimeOptions::default()
                 },
             )
@@ -1340,6 +1381,15 @@ mod tests {
         assert!(!config.state_dir().join("memory").exists());
 
         store.add(CoreFile::User, "Likes tea").unwrap();
+        store
+            .note(
+                crate::memory::NoteKind::Decision,
+                "Postgres",
+                "the app database is postgres 17 on tenco",
+                "Chosen for jsonb.",
+                chrono::Utc::now(),
+            )
+            .unwrap();
         let respelled = cwd.join(".").join("..").join("project");
         let again = Arc::new(MemoryStore::new(dir_for(config.state_dir(), &respelled)));
         let prompt = preview_with(Some(again)).system_prompt;
@@ -1347,6 +1397,14 @@ mod tests {
             prompt.contains("# Memory") && prompt.contains("Likes tea"),
             "{prompt}"
         );
+        // The archive's newest lines open the session too: the index
+        // line, not the body.
+        assert!(prompt.contains("## Newest notes (1 of 1"), "{prompt}");
+        assert!(
+            prompt.contains("[decision] today — Postgres: the app database"),
+            "{prompt}"
+        );
+        assert!(!prompt.contains("Chosen for jsonb"), "{prompt}");
 
         let preview = preview_with(None);
         assert!(!preview.registry.tool_names().contains(&"memory"));

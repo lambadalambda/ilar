@@ -80,6 +80,12 @@ pub struct Memory {
     /// daily note at every compaction. On unless said otherwise.
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Each prompt surfaces the notes it matches, after the message.
+    #[serde(default = "default_true")]
+    pub recall: bool,
+    /// A chat opens with the newest notes' index beside the core.
+    #[serde(default = "default_true")]
+    pub index: bool,
 }
 
 impl Default for GatewayConfig {
@@ -106,7 +112,11 @@ impl Default for GatewayConfig {
 
 impl Default for Memory {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            recall: true,
+            index: true,
+        }
     }
 }
 

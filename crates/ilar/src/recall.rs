@@ -121,6 +121,7 @@ pub fn entries(events: &[SessionEvent]) -> Vec<Entry> {
             | SessionEvent::Checkpoint { .. }
             | SessionEvent::ModelChange { .. }
             | SessionEvent::ImageCutoff { .. }
+            | SessionEvent::MemoryRecall { .. }
             | SessionEvent::Rewind { .. }
             | SessionEvent::TurnEnded { .. } => {}
         }

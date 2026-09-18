@@ -28,6 +28,8 @@ as a `{"type":"notice"}` event under `ilar exec --json`.
 | `general.theme` | `carbon` | See [themes](interface.md#themes). F3 opens the picker. |
 | `general.project_instructions` | `true` | Whether the working directory's `AGENTS.md`/`CLAUDE.md` is part of the system prompt. See [Project instructions](#project-instructions). User-scoped. |
 | `general.memory` | `true` | Whether a terminal session remembers across sessions, one store per launch directory under `<state dir>/memory/`. `false` leaves the model without the `memory` tools and the prompt without the core block and the "Remembering" section; nothing on disk is touched. See [memory](sessions.md#memory-that-outlives-a-session). |
+| `general.memory_recall` | `true` | Whether each prompt surfaces the notes it matches, after the message, as index lines. See [memory](sessions.md#memory-that-outlives-a-session). |
+| `general.memory_index` | `true` | Whether a session opens with the newest notes' index lines beside the core block. |
 | `general.resume_offer` | `true` | Whether a bare `ilar` offers this directory's last session — its tail shown ghosted, Enter resumes it. See [Starting](interface.md#starting). |
 | `providers.openai.base_url` | API or ChatGPT endpoint | Override the Responses API base URL selected by `auth`. |
 | `providers.openai.api_key` | `ILAR_OPENAI_API_KEY` | OpenAI API key. |

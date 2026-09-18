@@ -858,10 +858,14 @@ pub fn plan(
             // never into a group: what the assistant knows about its
             // person is not for a room, and reading or writing it
             // aloud there would be the same leak by another door.
-            memory: (private && gateway.memory.enabled).then(|| memory.clone()),
-            // The review after a turn writes for it; the standing
-            // "when to write" section is a terminal session's.
-            memory_prompt: false,
+            memory: (private && gateway.memory.enabled).then(|| ilar::runtime::MemoryOptions {
+                store: memory.clone(),
+                // The review after a turn writes for it; the standing
+                // "when to write" section is a terminal session's.
+                standing_prompt: false,
+                opening_index: gateway.memory.index,
+                recall: gateway.memory.recall,
+            }),
         },
     )?;
     // Where it is: reached over a chat, with a home, wakeable from a

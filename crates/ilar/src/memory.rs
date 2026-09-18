@@ -190,6 +190,142 @@ pub struct Hit {
     pub summary: String,
     pub when: DateTime<Utc>,
     pub score: f64,
+    /// Distinct query words the note contains.
+    pub matched: usize,
+    /// Whether one of them is a word fewer than half the notes share:
+    /// a match on something, not on a word every note has.
+    pub rare: bool,
+}
+
+impl Hit {
+    /// The bar a note clears to be surfaced unasked: two words in
+    /// common with the prompt, or one that singles it out. A search the
+    /// model asked for shows everything that matched at all.
+    pub fn relevant(&self) -> bool {
+        self.matched >= 2 || self.rare
+    }
+
+    /// The index line: `<id> [kind] <age> — title: summary`.
+    pub fn line(&self, now: DateTime<Utc>) -> String {
+        index_line(
+            &self.id,
+            &self.kind,
+            self.when,
+            &self.title,
+            &self.summary,
+            now,
+        )
+    }
+}
+
+fn index_line(
+    id: &str,
+    kind: &str,
+    when: DateTime<Utc>,
+    title: &str,
+    summary: &str,
+    now: DateTime<Utc>,
+) -> String {
+    format!("{id} [{kind}] {} — {title}: {summary}", age(now, when))
+}
+
+/// How many notes a prompt may surface, and how much recall one
+/// session may carry in all: after the cap, recall stops for the
+/// session.
+pub const RECALL_NOTES: usize = 5;
+pub const RECALL_SESSION_BYTES: usize = 16 * 1024;
+/// The opening index: the newest notes' lines, once, at session open.
+pub const INDEX_NOTES: usize = 20;
+pub const INDEX_BYTES: usize = 4096;
+
+/// What the turn loop needs to surface notes for a prompt.
+#[derive(Debug, Clone)]
+pub struct RecallConfig {
+    pub store: Arc<MemoryStore>,
+    /// At most this many notes per prompt.
+    pub notes: usize,
+    /// At most this many bytes of recall per session.
+    pub session_bytes: usize,
+}
+
+impl RecallConfig {
+    pub fn new(store: Arc<MemoryStore>) -> Self {
+        Self {
+            store,
+            notes: RECALL_NOTES,
+            session_bytes: RECALL_SESSION_BYTES,
+        }
+    }
+
+    /// The notes to surface for `prompt`, given the session so far:
+    /// nothing already surfaced since the last compaction — the model
+    /// lost the earlier copy with it — and nothing once the session's
+    /// recall budget is spent. `None` when there is nothing to say.
+    pub fn recall(
+        &self,
+        prompt: &str,
+        events: &[crate::session::SessionEvent],
+        now: DateTime<Utc>,
+    ) -> Result<Option<(Vec<String>, String)>> {
+        if recall_bytes(events) >= self.session_bytes {
+            return Ok(None);
+        }
+        let seen = recalled_ids(events);
+        let hits: Vec<Hit> = rank(&self.store.notes()?, prompt, now)
+            .into_iter()
+            .filter(|hit| hit.relevant() && !seen.contains(&hit.id))
+            .take(self.notes)
+            .collect();
+        if hits.is_empty() {
+            return Ok(None);
+        }
+        let ids = hits.iter().map(|hit| hit.id.clone()).collect();
+        Ok(Some((ids, recall_block(&hits, now))))
+    }
+}
+
+/// The block that goes after the user message: the framing Claude
+/// Code's recall uses, the lines, and — when any note is older than a
+/// day — the reminder to check before asserting.
+pub fn recall_block(hits: &[Hit], now: DateTime<Utc>) -> String {
+    let mut text = String::from(
+        "<memory-recall>\nFrom memory, for possible relevance — use only if it actually \
+         applies to what was asked; memory_get reads one in full.\n",
+    );
+    for hit in hits {
+        text.push_str(&hit.line(now));
+        text.push('\n');
+    }
+    if hits.iter().any(|hit| (now - hit.when).num_days() >= 1) {
+        text.push_str("A note older than a day may be out of date: verify before asserting.\n");
+    }
+    text.push_str("</memory-recall>");
+    text
+}
+
+/// Note ids surfaced since the last compaction.
+pub fn recalled_ids(events: &[crate::session::SessionEvent]) -> std::collections::HashSet<String> {
+    let cut = crate::session::compaction_cut(events);
+    events[cut.min(events.len())..]
+        .iter()
+        .filter_map(|event| match event {
+            crate::session::SessionEvent::MemoryRecall { ids, .. } => Some(ids),
+            _ => None,
+        })
+        .flatten()
+        .cloned()
+        .collect()
+}
+
+/// Bytes of recall the session has carried, compaction or not.
+pub fn recall_bytes(events: &[crate::session::SessionEvent]) -> usize {
+    events
+        .iter()
+        .map(|event| match event {
+            crate::session::SessionEvent::MemoryRecall { text, .. } => text.len(),
+            _ => 0,
+        })
+        .sum()
 }
 
 #[derive(Debug)]
@@ -430,6 +566,42 @@ impl MemoryStore {
             .take(limit)
             .collect())
     }
+
+    /// The newest notes' index lines, for a session to open with so it
+    /// knows what the archive holds: at most `notes` of them and
+    /// `bytes` in all. `None` for an empty archive.
+    pub fn opening_index(
+        &self,
+        notes: usize,
+        bytes: usize,
+        now: DateTime<Utc>,
+    ) -> Result<Option<String>> {
+        let all = self.notes()?;
+        if all.is_empty() {
+            return Ok(None);
+        }
+        let mut lines = String::new();
+        for note in all.iter().take(notes) {
+            let line = index_line(
+                &note.id,
+                &note.kind,
+                note.when,
+                &note.title,
+                &note.summary,
+                now,
+            );
+            if lines.len() + line.len() + 1 > bytes {
+                break;
+            }
+            lines.push_str(&line);
+            lines.push('\n');
+        }
+        Ok(Some(format!(
+            "## Newest notes ({} of {} in the archive; memory_search finds the rest)\n\n{lines}",
+            lines.lines().count(),
+            all.len()
+        )))
+    }
 }
 
 fn entries(text: &str) -> impl Iterator<Item = &str> {
@@ -465,10 +637,23 @@ fn parse_note(text: &str) -> Option<Note> {
     })
 }
 
+/// Words that say nothing about what a note is about, left out of the
+/// index and the query both — so a note surfaced for a prompt shares a
+/// word that means something, not "the".
+const STOPWORDS: &[&str] = &[
+    "a", "an", "the", "and", "or", "of", "to", "in", "on", "at", "for", "is", "are", "was", "were",
+    "be", "been", "it", "its", "this", "that", "these", "those", "with", "as", "by", "from", "i",
+    "you", "we", "they", "he", "she", "me", "my", "your", "our", "their", "do", "does", "did",
+    "not", "no", "so", "if", "but", "can", "could", "will", "would", "should", "what", "how",
+    "when", "where", "which", "who", "why", "there", "here", "have", "has", "had", "into", "than",
+    "then", "them", "about", "just", "also", "all", "any", "some", "one", "up", "out", "like",
+    "get", "got", "let", "please", "ok", "yes", "now", "still",
+];
+
 fn words(text: &str) -> Vec<String> {
     text.to_lowercase()
         .split(|c: char| !c.is_alphanumeric())
-        .filter(|word| word.len() > 1)
+        .filter(|word| word.len() > 1 && !STOPWORDS.contains(word))
         .map(str::to_string)
         .collect()
 }
@@ -485,7 +670,9 @@ fn half_life_days(kind: &str) -> f64 {
 /// BM25 with the usual constants, times a recency multiplier; notes
 /// that match nothing are left out.
 pub fn rank(notes: &[Note], query: &str, now: DateTime<Utc>) -> Vec<Hit> {
-    let terms = words(query);
+    let mut terms = words(query);
+    terms.sort_unstable();
+    terms.dedup();
     if terms.is_empty() || notes.is_empty() {
         return Vec::new();
     }
@@ -516,11 +703,17 @@ pub fn rank(notes: &[Note], query: &str, now: DateTime<Utc>) -> Vec<Hit> {
         .zip(&documents)
         .filter_map(|(note, document)| {
             let mut score = 0.0;
+            let mut matched = 0;
+            let mut rare = false;
             for term in &terms {
                 let frequency = document.iter().filter(|word| *word == term).count() as f64;
                 if frequency == 0.0 {
                     continue;
                 }
+                matched += 1;
+                // idf passes ln 2 exactly where fewer than half the
+                // notes contain the word.
+                rare |= idf[term.as_str()] > std::f64::consts::LN_2;
                 let length = document.len() as f64;
                 score += idf[term.as_str()] * (frequency * (k1 + 1.0))
                     / (frequency + k1 * (1.0 - b + b * length / average.max(1.0)));
@@ -537,6 +730,8 @@ pub fn rank(notes: &[Note], query: &str, now: DateTime<Utc>) -> Vec<Hit> {
                 summary: note.summary.clone(),
                 when: note.when,
                 score: score * decay,
+                matched,
+                rare,
             })
         })
         .collect();
@@ -783,16 +978,7 @@ impl Tool for MemorySearchTool {
                 Ok(hits) if hits.is_empty() => ToolOutput::text("(no matching notes)"),
                 Ok(hits) => ToolOutput::text(
                     hits.iter()
-                        .map(|hit| {
-                            format!(
-                                "{} [{}] {} — {}: {}",
-                                hit.id,
-                                hit.kind,
-                                age(now, hit.when),
-                                hit.title,
-                                hit.summary
-                            )
-                        })
+                        .map(|hit| hit.line(now))
                         .collect::<Vec<_>>()
                         .join("\n"),
                 ),

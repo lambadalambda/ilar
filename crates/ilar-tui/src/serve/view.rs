@@ -282,6 +282,13 @@ pub(crate) fn project_event_with(
             "before": before,
             "ts": ts,
         }),
+        SessionEvent::MemoryRecall { id, ids, text, .. } => json!({
+            "type": "memory_recall",
+            "id": id,
+            "ids": ids,
+            "text": text,
+            "ts": ts,
+        }),
     }
 }
 

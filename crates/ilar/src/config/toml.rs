@@ -32,6 +32,12 @@ pub struct GeneralConfig {
     /// unless said otherwise; `false` leaves the store on disk alone
     /// and the model without the tools.
     pub memory: Option<bool>,
+    /// Whether each prompt surfaces the notes it matches, after the
+    /// message. On unless said otherwise; nothing without `memory`.
+    pub memory_recall: Option<bool>,
+    /// Whether a session opens with the newest notes' index lines
+    /// beside the core block. On unless said otherwise.
+    pub memory_index: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -597,6 +603,10 @@ pub struct GeneralConfigResolved {
     /// Whether a terminal session has a memory; see docs/sessions.md
     /// ("Memory that outlives a session").
     pub memory: bool,
+    /// Whether each prompt surfaces the notes it matches.
+    pub memory_recall: bool,
+    /// Whether a session opens with the newest notes' index.
+    pub memory_index: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -882,6 +892,16 @@ impl Config {
                     .as_ref()
                     .and_then(|general| general.memory)
                     .unwrap_or(true),
+                memory_recall: merged
+                    .general
+                    .as_ref()
+                    .and_then(|general| general.memory_recall)
+                    .unwrap_or(true),
+                memory_index: merged
+                    .general
+                    .as_ref()
+                    .and_then(|general| general.memory_index)
+                    .unwrap_or(true),
             },
             providers,
             models,
@@ -1162,6 +1182,8 @@ impl Config {
                 resume_offer: true,
                 replay_thinking: Default::default(),
                 memory: true,
+                memory_recall: true,
+                memory_index: true,
             },
             agent: AgentConfig::default(),
             providers,
@@ -1465,6 +1487,8 @@ fn merge_file(
             resume_offer,
             replay_thinking,
             memory,
+            memory_recall,
+            memory_index,
         );
     }
     if parsed.gateway.is_some() {

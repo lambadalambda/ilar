@@ -996,6 +996,9 @@ function eventRows(events, sessionId, cwd, offset, live) {
       case "turn_ended":
         rows.push(html`<div class="divider" key=${key}>${event.detail}</div>`);
         break;
+      case "memory_recall":
+        rows.push(html`<${ThinkingRow} key=${key} label=${"recalled " + event.ids.length + " from memory"} text=${event.text} />`);
+        break;
       default:
         // meta, checkpoint, topic, subagent_invocation: state, not
         // transcript. They keep their index and render nothing.

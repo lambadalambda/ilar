@@ -147,6 +147,17 @@ pub enum SessionEvent {
         before: usize,
         ts: DateTime<Utc>,
     },
+    /// Notes the memory index surfaced for the user message just
+    /// before this: their ids, and the block the model is sent after
+    /// that message — index lines, never bodies. Written by the turn
+    /// loop, at most one per prompt; a compaction that folds it away
+    /// lets the same notes come back, since the model lost them too.
+    MemoryRecall {
+        id: String,
+        ids: Vec<String>,
+        text: String,
+        ts: DateTime<Utc>,
+    },
     /// Rewind boundary: replay behaves as if the log ended just before
     /// canonical event `to` (a `UserMessage`, which becomes unsent).
     /// The log stays append-only — the discarded tail and this marker
@@ -219,6 +230,7 @@ impl SessionEvent {
             | SessionEvent::Compaction { ts, .. }
             | SessionEvent::Topic { ts, .. }
             | SessionEvent::ImageCutoff { ts, .. }
+            | SessionEvent::MemoryRecall { ts, .. }
             | SessionEvent::Rewind { ts, .. }
             | SessionEvent::TurnEnded { ts, .. } => *ts,
         }
