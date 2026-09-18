@@ -1,5 +1,19 @@
 # DEVLOG
 
+## 2026-09-18 — The lock is a prompt, not a notice
+
+The lazy unlock shipped with a standing line on the notice row — "secret
+store sealed — the master password is asked for when one is needed" —
+so the first prompt would not come as a surprise. In use it read as a
+warning that never went away, in sessions that never touched a secret.
+A sealed store is its normal state, not a fault; the prompt that opens
+it already names the tool waiting and why. The line is gone, and with
+it the store handle the app kept and the per-frame `has_master()`
+lookup that only existed to take the line down again. The entry below
+about watching the lock cheaply is now about code that no longer
+exists; kept as written, since the reasoning still holds if the row
+ever comes back.
+
 ## 2026-09-18 — A password asked of everyone, for the sake of a few
 
 The master password was the first thing a sealed store's owner saw,

@@ -128,6 +128,7 @@ milestones 15–17 stay filed — they come back when the feature does.*
 - [ ] [A locked store fails a sudo that wants no password](issues/a-locked-store-fails-a-sudo-that-wants-no-password.md)
 - [ ] [A locked store scrubs nothing and says nothing](issues/a-locked-store-scrubs-nothing-and-says-nothing.md)
 - [ ] [A resealed store costs one refusal](issues/a-resealed-store-costs-one-refusal.md)
+- [ ] [The lock is a prompt, not a notice](issues/the-lock-is-a-prompt-not-a-notice.md)
 
 ## Review follow-ups
 

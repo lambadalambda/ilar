@@ -1530,14 +1530,6 @@ async fn main() -> Result<()> {
         app.available_models = model_choices.iter().map(|model| model.full_id()).collect();
         app.session_id = session_id.clone();
         app.todos = todos;
-        // The notice row's job from here on — and its own, since a tool
-        // call that wants a stored secret puts up the prompt that opens
-        // the store, and the row has to notice that too.
-        let secret_store = ilar::secrets::SecretStore::open(config.state_dir());
-        app.secrets_locked = secret_store.is_locked();
-        // Watched only where there is something to watch: a file that
-        // is not sealed cannot become locked while this process runs.
-        app.secret_store = secret_store.is_sealed().then_some(secret_store);
         // The reader in hand answers the pending-question check;
         // run_app takes the answer instead of re-reading the log for
         // it. A fresh session cannot have one.
@@ -3589,7 +3581,6 @@ async fn run_app(
         // channel is this runtime's alone, a subagent's bash needs the
         // same yes, and dropping it would be a silent refusal. The
         // modal names the asker instead.
-        app.watch_secret_lock();
         if app.grant_modal.is_none()
             && app.password_modal.is_none()
             && let Ok(ask) = ask_rx.try_recv()

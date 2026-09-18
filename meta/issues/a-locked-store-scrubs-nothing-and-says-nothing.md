@@ -33,7 +33,8 @@ redacted. What is avoidable is doing it quietly.
 
 - A command whose output was not scrubbed because the store is sealed
   says so — in the tool result, where the model and the person can both
-  see it, not only on the notice row.
+  see it. (There is no standing notice for a sealed store any more, by
+  request, so the tool result is the only place this can go.)
 - Decide whether that is enough or whether a session with a sealed
   store should be offered the prompt before the first command runs
   rather than the first *secret* — and say which in docs/secrets.md.

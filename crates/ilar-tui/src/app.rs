@@ -617,17 +617,6 @@ pub(crate) struct App {
     /// offer to deliver them.
     pub(crate) held_results: Vec<String>,
     pub(crate) notifications_paused: bool,
-    /// The secret store is sealed and this process has no password for
-    /// it: a standing line on the notice row, since nothing else in the
-    /// session would say why a stored secret is going to ask first.
-    /// Set at start and then watched — a prompt inside a tool call may
-    /// open the store at any point, and the row must stop saying it.
-    pub(crate) secrets_locked: bool,
-    /// The store behind that line, set only when the file was sealed at
-    /// start: that is the one case the line can be about, and the only
-    /// thing that changes afterwards is whether this process has the
-    /// password. See [`Self::watch_secret_lock`].
-    pub(crate) secret_store: Option<ilar::secrets::SecretStore>,
     /// `[cache_compact]` as configured; `enabled` is false by default.
     pub(crate) cache_compact: ilar::config::CacheCompactConfig,
     /// When the last provider request of this session ended, for the
@@ -830,8 +819,6 @@ impl App {
             deliveries_in_flight: 0,
             held_results: Vec::new(),
             notifications_paused: false,
-            secrets_locked: false,
-            secret_store: None,
             status_activity: Activity::Ready,
             status_seen: "ready".into(),
             cache_compact: ilar::config::CacheCompactConfig::default(),
@@ -2882,17 +2869,6 @@ impl App {
             .is_some_and(|notice| !notice.persistent)
         {
             self.notice = None;
-        }
-    }
-
-    /// Whether the sealed store is still shut. A prompt inside a tool
-    /// call may have opened it since the last look, and the notice row
-    /// must not go on saying it is not. Only what this process holds
-    /// can change — the file does not stop being sealed while ilar runs
-    /// — so this is a lookup, not a read, and it can run every frame.
-    pub(crate) fn watch_secret_lock(&mut self) {
-        if let Some(store) = self.secret_store.as_ref() {
-            self.secrets_locked = !store.has_master();
         }
     }
 
@@ -6042,44 +6018,6 @@ mod tests {
         assert!(UnicodeWidthStr::width(narrow.as_str()) <= 48);
         let narrow_notice = rendered_text(&app.notice_line(48).expect("a notice"));
         assert!(UnicodeWidthStr::width(narrow_notice.as_str()) <= 48);
-    }
-
-    /// A sealed store nobody has opened yet has to keep saying so: the
-    /// notice row carries it whenever nothing more urgent does, and a
-    /// transient notice only borrows the row. The line goes the moment
-    /// a prompt inside a tool call opens the store.
-    #[test]
-    fn a_locked_secret_store_stands_on_the_notice_row() {
-        let mut app = App::new();
-        assert!(app.notice_line(80).is_none());
-        app.secrets_locked = true;
-        let notice = rendered_text(&app.notice_line(80).expect("a notice"));
-        assert!(notice.contains("secret store sealed"), "{notice}");
-        app.set_notice("copied to clipboard", NoticeLevel::Info);
-        let borrowed = rendered_text(&app.notice_line(80).expect("a notice"));
-        assert!(borrowed.contains("copied"), "{borrowed}");
-        app.clear_transient_notice();
-        let back = rendered_text(&app.notice_line(80).expect("a notice"));
-        assert!(back.contains("secret store sealed"), "{back}");
-
-        // Watched, not remembered: a sealed store this process has no
-        // password for keeps the line, and the prompt that opens it
-        // mid-session takes the line away.
-        let dir = tempfile::tempdir().unwrap();
-        let store = ilar::secrets::SecretStore::open(dir.path());
-        store.set("KEY", "", "value-one").unwrap();
-        store.encrypt("open sesame").unwrap();
-        ilar::secrets::forget_master(&store);
-        app.secret_store = Some(store.clone());
-        app.watch_secret_lock();
-        assert!(app.secrets_locked);
-        assert!(
-            rendered_text(&app.notice_line(80).expect("a notice")).contains("secret store sealed")
-        );
-        store.unlock("open sesame").unwrap();
-        app.watch_secret_lock();
-        assert!(!app.secrets_locked);
-        assert!(app.notice_line(80).is_none());
     }
 
     #[test]

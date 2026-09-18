@@ -194,8 +194,9 @@ never asked at all. In the TUI the prompt is a modal like the grant and
 sudo ones, titled with the tool it is holding up; a wrong password is
 asked again, three tries in all, and Esc leaves the store sealed and
 refuses that one call, the way a denied grant refuses one call. The
-next call that wants a secret asks again. While the store is sealed and
-unopened, the notice row says so.
+next call that wants a secret asks again. That prompt is the only place
+a sealed store shows up: there is no standing notice for it, because a
+sealed store is not a problem until something needs what is in it.
 
 `ilar exec` never asks. It is the headless driver — it takes no
 questions and no grants, because nobody is there to answer — so a
