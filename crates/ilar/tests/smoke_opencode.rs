@@ -114,39 +114,98 @@ async fn live_go_minimax_on_the_chat_wire_calls_a_tool() {
     assert_eq!(stop, Some(StopReason::ToolUse));
 }
 
-/// Drives one turn and keeps everything the next request needs: the
-/// thinking as streamed, and the first tool call as the model made it.
-async fn first_step(
-    provider: &OpenCodeProvider,
-    model: &str,
-) -> (String, Option<(String, String, serde_json::Value)>) {
-    let mut stream = provider.stream(tool_request(model)).unwrap();
-    let mut thinking = String::new();
-    let mut call = None;
+/// One provider step over an arbitrary conversation: what it thought,
+/// the first tool call it made, and what it said — everything the next
+/// request has to carry back.
+struct Step {
+    thinking: String,
+    call: Option<(String, String, serde_json::Value)>,
+    text: String,
+}
+
+async fn step(provider: &OpenCodeProvider, model: &str, request: Request) -> Step {
+    let mut stream = provider.stream(request).unwrap();
+    let mut step = Step {
+        thinking: String::new(),
+        call: None,
+        text: String::new(),
+    };
     while let Some(event) = stream.next().await {
         match event {
-            ProviderEvent::ThinkingDelta(t) => thinking.push_str(&t),
-            ProviderEvent::ToolCallCompleted { id, name, input } if call.is_none() => {
-                call = Some((id, name, input));
+            ProviderEvent::ThinkingDelta(t) => step.thinking.push_str(&t),
+            ProviderEvent::TextDelta(t) => step.text.push_str(&t),
+            ProviderEvent::ToolCallCompleted { id, name, input } if step.call.is_none() => {
+                step.call = Some((id, name, input));
             }
-            ProviderEvent::TurnComplete { .. } => break,
-            ProviderEvent::Error(e) => panic!("{model}: provider error: {e}"),
+            ProviderEvent::TurnComplete { stop_reason, .. } => {
+                println!(
+                    "{model}: stop={stop_reason:?} thinking_bytes={} call={:?} text={:?}",
+                    step.thinking.len(),
+                    step.call.as_ref().map(|(_, name, _)| name.as_str()),
+                    step.text.chars().take(60).collect::<String>()
+                );
+                break;
+            }
+            ProviderEvent::Error(e) => panic!("{model}: refused: {e}"),
             ProviderEvent::RetryableError(e) => panic!("{model}: retryable error: {e}"),
             _ => {}
         }
     }
-    (thinking, call)
+    step
+}
+
+/// The step's own thought and call, as the wire will carry them back,
+/// plus the result the tool "gave". A step that made no call is just
+/// its words.
+fn echo(step: Step, result: &str) -> Vec<ilar::session::ChatMessage> {
+    use ilar::session::{ChatMessage, ContentBlock, Role};
+    let mut content = Vec::new();
+    if !step.thinking.is_empty() {
+        content.push(ContentBlock::Thinking {
+            text: step.thinking,
+        });
+    }
+    if !step.text.is_empty() {
+        content.push(ContentBlock::Text { text: step.text });
+    }
+    let Some((id, name, input)) = step.call else {
+        return vec![ChatMessage {
+            role: Role::Assistant,
+            content,
+        }];
+    };
+    content.push(ContentBlock::ToolCall {
+        id: id.clone(),
+        name,
+        input,
+        item_id: None,
+    });
+    vec![
+        ChatMessage {
+            role: Role::Assistant,
+            content,
+        },
+        ChatMessage {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: id,
+                content: result.into(),
+                is_error: false,
+                images: Vec::new(),
+            }],
+        },
+    ]
 }
 
 /// The chat-wire rows are a proxy to upstreams nobody can read from
-/// here: the one way to know they take `reasoning_content` back on the
-/// assistant message inside a turn is to send it. Every family that
-/// streams thinking gets its own thought and its own tool call echoed
-/// with a result, and must answer rather than refuse.
+/// here: the one way to know they take `reasoning_content` back is to
+/// send it. Two turns, so both halves of the wire's rule are on the
+/// line — the current turn's steps carry their thinking, and the
+/// previous turn's, which the wire strips, must not be missed by a
+/// server that wants the field on every assistant message.
 #[tokio::test]
 #[ignore]
 async fn live_chat_rows_take_their_thinking_back() {
-    use ilar::session::{ChatMessage, ContentBlock, Role};
     let go = OpenCodeProvider::go(key(), None);
     let zen = OpenCodeProvider::zen(key(), None);
     let rows: [(&OpenCodeProvider, &str); 5] = [
@@ -157,54 +216,35 @@ async fn live_chat_rows_take_their_thinking_back() {
         (&zen, "opencode/kimi-k3"),
     ];
     for (provider, model) in rows {
-        let (thinking, call) = first_step(provider, model).await;
-        let Some((id, name, input)) = call else {
-            println!("{model}: no tool call on the first step; nothing to echo");
-            continue;
-        };
-        println!("{model}: thinking_bytes={} call={name}", thinking.len());
+        // Turn one: the call, then its thought and call echoed with a
+        // result, then the model's answer.
         let mut request = tool_request(model);
-        request.messages.push(ChatMessage {
-            role: Role::Assistant,
-            content: vec![
-                ContentBlock::Thinking {
-                    text: if thinking.is_empty() {
-                        "(the model streamed no thinking; echoing a stand-in)".into()
-                    } else {
-                        thinking
-                    },
-                },
-                ContentBlock::ToolCall {
-                    id: id.clone(),
-                    name,
-                    input,
-                    item_id: None,
-                },
-            ],
-        });
-        request.messages.push(ChatMessage {
-            role: Role::User,
-            content: vec![ContentBlock::ToolResult {
-                tool_use_id: id,
-                content: "wrote /tmp/probe.txt".into(),
-                is_error: false,
-                images: Vec::new(),
-            }],
-        });
-        let mut stream = provider.stream(request).unwrap();
-        let mut answered = false;
-        while let Some(event) = stream.next().await {
-            match event {
-                ProviderEvent::TurnComplete { stop_reason, .. } => {
-                    println!("{model}: second step stop={stop_reason:?}");
-                    answered = true;
-                    break;
-                }
-                ProviderEvent::Error(e) => panic!("{model}: refused the echoed thinking: {e}"),
-                ProviderEvent::RetryableError(e) => panic!("{model}: retryable error: {e}"),
-                _ => {}
-            }
-        }
-        assert!(answered, "{model}: no terminal event on the second step");
+        let first = step(provider, model, request.clone()).await;
+        assert!(
+            first.call.is_some(),
+            "{model}: no tool call on the first step"
+        );
+        request.messages.extend(echo(first, "wrote /tmp/probe.txt"));
+        let answer = step(provider, model, request.clone()).await;
+        request.messages.extend(echo(answer, ""));
+
+        // Turn two: a new prompt ahead of all of that, so turn one's
+        // thinking is stripped and turn two's is sent.
+        request.messages.push(ilar::session::ChatMessage::user_text(
+            "Now call the write tool once more to write ok2 to /tmp/probe2.txt, then stop.",
+        ));
+        let second = step(provider, model, request.clone()).await;
+        assert!(
+            second.call.is_some(),
+            "{model}: no tool call on the second turn"
+        );
+        request
+            .messages
+            .extend(echo(second, "wrote /tmp/probe2.txt"));
+        let done = step(provider, model, request).await;
+        assert!(
+            done.call.is_none() || !done.text.is_empty() || !done.thinking.is_empty(),
+            "{model}: the second turn did not end"
+        );
     }
 }
